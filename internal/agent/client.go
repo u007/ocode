@@ -140,6 +140,16 @@ type Message struct {
 	// transcript but NOT sent to the LLM. Used by tools that encounter
 	// recoverable problems worth surfacing (e.g. LSP server not installed).
 	Notice string `json:"notice,omitempty"`
+	// Suggestions carries the follow-up options the model proposed at the end
+	// of this reply (see suggestions.go). The raw block is stripped from
+	// Content before the message is persisted, so the transcript shows only the
+	// human-readable reply and the model never sees its own suggestions echoed
+	// back on the next turn.
+	//
+	// It is a UI-only field: the provider builders construct their payloads
+	// from Role/Content/ToolCalls explicitly, so it never reaches a provider
+	// request.
+	Suggestions []string `json:"suggestions,omitempty"`
 	// UserSeq is a durable, per-session, monotonic sequence assigned to each
 	// user-role message at the moment it is appended to the transcript. It is
 	// carried identically on the persisted message and the `user_message` SSE

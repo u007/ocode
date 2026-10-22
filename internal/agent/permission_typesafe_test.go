@@ -63,14 +63,31 @@ func typesafeChoiceReply(choice string, confidence float64) string {
 }
 
 func typesafeReplyWithConcern(choice string, confidence float64, concern string) string {
-	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}`
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.8},"enforced_concern":{"type":"choice","choice":"none","probabilities":{},"confidence":0.95}},"usage":{"input_tokens":10,"output_tokens":2}}`
 }
 
 // typesafeReplyWithConcernConf is typesafeReplyWithConcern with an explicit
 // confidence on the CONCERN answer, so a test can make the judge unsure about
 // the very category that unlocks a relaxed grant.
 func typesafeReplyWithConcernConf(choice string, confidence float64, concern string, concernConf float64) string {
-	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":` + jsonFloat(concernConf) + `}},"usage":{"input_tokens":10,"output_tokens":2}}`
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":` + jsonFloat(concernConf) + `},"enforced_concern":{"type":"choice","choice":"none","probabilities":{},"confidence":0.95}},"usage":{"input_tokens":10,"output_tokens":2}}`
+}
+
+// typesafeReplyEnforced is a reply whose enforced-only concern answer is
+// enforced ("" omits the answer, as a judge that skipped it would).
+func typesafeReplyEnforced(choice string, confidence float64, concern, enforced string) string {
+	return typesafeReplyEnforcedConf(choice, confidence, concern, enforced, 0.95)
+}
+
+// typesafeReplyEnforcedConf is typesafeReplyEnforced with an explicit
+// confidence on the enforced-only answer, so a test can make the judge unsure
+// about its "none".
+func typesafeReplyEnforcedConf(choice string, confidence float64, concern, enforced string, enforcedConf float64) string {
+	extra := ""
+	if enforced != "" {
+		extra = `,"enforced_concern":{"type":"choice","choice":"` + enforced + `","probabilities":{},"confidence":` + jsonFloat(enforcedConf) + `}`
+	}
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.9}` + extra + `},"usage":{"input_tokens":10,"output_tokens":2}}`
 }
 
 func jsonFloat(f float64) string {

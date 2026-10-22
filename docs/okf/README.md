@@ -68,6 +68,7 @@ implemented — derived skills are synced into the embed tree by
 | `webforms/` | 27 | **universal** (any repo; filling web forms with htrcli) |
 | `docx/` | 29 | `*.docx` / `*.doc` at repo root or ≤2 dirs deep |
 | `pptx/` | 27 | `*.pptx` / `*.ppt` at repo root or ≤2 dirs deep |
+| `filetools/` | 13 live tasks | **universal** (any repo; live probe only, see `filetools/probe/README.md`) |
 
 `react/` also carries a worked example scorecard + derived skill (illustrative).
 The others have corpora only — no evaluations run yet.

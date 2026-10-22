@@ -1,0 +1,34 @@
+{
+ "task": "reindent",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "git show HEAD:src/legacy-style.js > src/zz-head-tmp.js && echo \"HEAD version require result:\" && node -e \"console.log(JSON.stringify(require('./src/zz-head-tmp.js')))\" && echo \"current version require result:\" && node -e \"console.log(JSON.stringify(require('./src/legacy-style.js')))\" ; echo \"HEAD version via dynamic import:\" ; node --input-type=module -e \"const m = await import('./src/zz-head-tmp."
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd src && git diff --stat -- legacy-style.js && echo \"--- strip-leading-ws content comparison ---\" && git show HEAD:src/legacy-style.js | sed 's/^[[:space:]]*//' > /tmp/orig.txt && sed 's/^[[:space:]]*//' legacy-style.js > /tmp/new.txt && diff /tmp/orig.txt /tmp/new.txt && echo \"CONTENT_IDENTICAL\" && echo \"--- leading space counts (must be even) ---\" && awk '{ match($0,/^ */); n=RLENGTH; if (n%2!="
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "read",
+  "write",
+  "read",
+  "grep",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

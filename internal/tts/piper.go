@@ -181,7 +181,7 @@ func (p *piperInstaller) verifyRuntime(ctx context.Context, venv, dir string) (s
 		return paradeeVerifyRuntime(ctx, venv, dir)
 	}
 	if p.manifest.Engine == EngineKyutai {
-		return kyutaiVerifyRuntime(ctx, venv, dir)
+		return kyutaiVerifyRuntime(ctx, venv, p.manifest.Voices)
 	}
 	if p.manifest.Engine == EngineMelo {
 		scriptPath := filepath.Join(dir, "melo_import_check.py")

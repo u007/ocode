@@ -37,11 +37,23 @@ type advisorCheckpointState struct {
 	// pendingAsk records that this Step began while the client was showing an
 	// unanswered permission or question dialog. Both checkpoints stand down
 	// while it is set — see blockedByPendingAsk.
+	//
+	// It is the OR of two sources: the transcript scan (the sentinel is still
+	// in the slice the agent was handed) and the host-declared flag (the host
+	// strips the sentinel before Step — see SetPendingAsk).
 	pendingAsk bool
 }
 
-func (a *Agent) newAdvisorCheckpointState(userGoal string, pendingAsk bool) *advisorCheckpointState {
-	return &advisorCheckpointState{userGoal: userGoal, pendingAsk: pendingAsk}
+// newAdvisorCheckpointState builds the per-Step checkpoint bookkeeping.
+//
+// pendingAsk is the host-declared flag (Agent.PendingAsk) and scanPendingAsk
+// is the result of the transcript scan. Either one blocks the checkpoints;
+// see advisorBlockedByPendingAsk.
+func (a *Agent) newAdvisorCheckpointState(userGoal string, pendingAsk, scanPendingAsk bool) *advisorCheckpointState {
+	return &advisorCheckpointState{
+		userGoal:   userGoal,
+		pendingAsk: pendingAsk || scanPendingAsk,
+	}
 }
 
 // blockedByPendingAsk reports whether this Step must not consult the advisor
@@ -55,8 +67,11 @@ func (a *Agent) newAdvisorCheckpointState(userGoal string, pendingAsk bool) *adv
 // to 5), so blocking here would park the agent loop on a human — the same hang
 // class as pinning an HTTP connection for a turn. Skipping also leaves the turn
 // itself untouched: only the second-model review is deferred.
+//
+// The live host flag is checked HERE, not only at Step start, so a dialog
+// raised by THIS Step's own tool batch also stands the checkpoint down.
 func (a *Agent) blockedByPendingAsk(st *advisorCheckpointState, kind string) bool {
-	if !st.pendingAsk {
+	if !st.pendingAsk && !a.pendingAskSignal.pending.Load() {
 		return false
 	}
 	a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint skipped: a permission/question dialog is still unanswered, so the advisor waits for the user", kind))

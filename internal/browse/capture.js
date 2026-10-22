@@ -32,11 +32,32 @@
     }
   }
 
+  // The origin may be mounted under a path prefix (a remote project's browse
+  // origin is reached through the proxy at "/api/remote/<host>/browse"). The
+  // "/b/..." route tree then starts at that prefix, not at the origin root, so
+  // every anchor below is derived RELATIVE to the prefix.
+  //
+  // The stateKey is known (injected in __OCODE_BROWSE__), so the "/b/" marker
+  // is located by its exact position rather than by a greedy regex: the
+  // document path is {prefix}/b/{stateKey}/...
+  // The server writes the stateKey into the path unencoded (rewrite.go), so the
+  // pathname carries it raw (e.g. "side:chat:abc"). Encoding it here would make
+  // the already-routed check and the marker lookup miss, double-wrapping URLs.
+  function mountBase() {
+    var marker = "/b/" + stateKey;
+    var i = location.pathname.indexOf(marker);
+    if (i === -1) {
+      // Fall back to the last "/b/<something>" segment.
+      var m = location.pathname.match(/^(.*?)\/b\/[^/]+/);
+      return m ? m[1] : "";
+    }
+    return location.pathname.slice(0, i);
+  }
+
   // --- /b/ base of the current document, e.g. "/b/tab:abc" ---
   function browseBase() {
-    // location.pathname === /b/{stateKey}/{scheme}/{host}/{path...}
-    var m = location.pathname.match(/^\/b\/[^/]+/);
-    return m ? m[0] : "/b/" + encodeURIComponent(stateKey);
+    // location.pathname === {prefix}/b/{stateKey}/{scheme}/{host}/{path...}
+    return mountBase() + "/b/" + stateKey;
   }
 
   // Full route prefix of the current document, e.g. "/b/tab:abc/http/localhost:3000".
@@ -44,8 +65,10 @@
   // browser would otherwise resolve them against the browse origin ROOT and
   // drop out of the stateless route.
   function routeBase() {
-    var m = location.pathname.match(/^\/b\/[^/]+\/[^/]+\/[^/]+/);
-    return m ? m[0] : browseBase();
+    // {prefix}/b/{stateKey}/{scheme}/{host}
+    var rest = location.pathname.slice(mountBase().length);
+    var m = rest.match(/^(\/b\/[^/]+\/[^/]+\/[^/]+)/);
+    return m ? mountBase() + m[1] : browseBase();
   }
 
   // Map an absolute or root-relative URL to /b/{stateKey}/{scheme}/{host}/{path...}.
@@ -237,8 +260,12 @@
   // the address bar. originalURL() reconstructs the site URL from the /b/
   // route so the SPA can drop titles that don't match the current surface.
   function originalURL() {
-    // location.pathname === /b/{stateKey}/{scheme}/{host}/{path...}
-    var m = location.pathname.match(/^\/b\/[^/]+\/([^/]+)\/([^/]+)(\/.*)?$/);
+    // location.pathname === {prefix}/b/{stateKey}/{scheme}/{host}/{path...}
+    // The {prefix}/b/{stateKey} part is stripped so the scheme/host/path can
+    // be read back out; under a prefixed mount the leading "/b/..." anchor
+    // would not match and the title would be lost entirely.
+    var rest = location.pathname.slice(mountBase().length);
+    var m = rest.match(/^\/b\/[^/]+\/([^/]+)\/([^/]+)(\/.*)?$/);
     if (!m) return "";
     var scheme = m[1], host = m[2], path = m[3] || "/";
     if (scheme !== "http" && scheme !== "https") return "";

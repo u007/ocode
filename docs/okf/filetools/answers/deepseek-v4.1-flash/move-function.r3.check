@@ -1,0 +1,45 @@
+{
+ "task": "move-function",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "cat > src/date.js <<'EOF'\nexport function parseDate(s) {\n  const [y, m, d] = s.split(\"-\").map(Number);\n  if (!y || !m || !d) {\n    throw new Error(`bad date: ${s}`);\n  }\n  return new Date(Date.UTC(y, m - 1, d));\n}\nEOF\npython3 - <<'EOF'\nimport re, pathlib\np = pathlib.Path(\"src/utils.js\")\ns = p.read_text()\ns = s.replace('''export function parseDate(s) {\n  const [y, m, d] = s.split(\"-\").map(Number);\n"
+  },
+  {
+   "kind": "changed by something other than a file tool",
+   "path": "src/date.js"
+  },
+  {
+   "kind": "changed by something other than a file tool",
+   "path": "src/events.js"
+  },
+  {
+   "kind": "changed by something other than a file tool",
+   "path": "src/invoices.js"
+  },
+  {
+   "kind": "changed by something other than a file tool",
+   "path": "src/orders.js"
+  },
+  {
+   "kind": "changed by something other than a file tool",
+   "path": "src/utils.js"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=6 problems=0

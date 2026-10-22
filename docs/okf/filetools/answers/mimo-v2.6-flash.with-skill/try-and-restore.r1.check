@@ -1,0 +1,30 @@
+{
+ "task": "try-and-restore",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "glob",
+  "list",
+  "list",
+  "list",
+  "read",
+  "edit",
+  "undo_file_change",
+  "edit",
+  "edit",
+  "bash",
+  "undo_file_change",
+  "bash",
+  "read",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block appears 25935 times; must be unique or set replace_all=true"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

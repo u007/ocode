@@ -331,6 +331,7 @@ func excludeKaizen(in []Skill) []Skill {
 // into the base prompt is decided by catalogOnlyStacks, not here.
 var universalStacks = map[string]bool{
 	"conduct":       true,
+	"filetools":     true,
 	"hallucination": true,
 	"pdf":           true,
 	"webforms":      true,

@@ -1,0 +1,16 @@
+{
+ "task": "sort-dedupe",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "write",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

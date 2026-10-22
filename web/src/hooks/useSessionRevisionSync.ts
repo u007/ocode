@@ -3,6 +3,7 @@ import { useChatDispatch, useChatStateRef } from "../stores/chatStore";
 import { useProjectDispatch } from "../stores/projectStore";
 import { revalidateSession, type SessionEventRouter } from "../lib/sessionEvents";
 import { onWake } from "../lib/wakeSignal";
+import { periodicRemoteRead } from "../lib/remoteHostGate";
 
 /**
  * How often an open session is revalidated against its stored revision. Slow
@@ -61,7 +62,9 @@ export function useSessionRevisionSync(
       for (const sessionId of idsRef.current) {
         if (!sessionId || sessionId.startsWith("new-") || inFlight.has(sessionId)) continue;
         inFlight.add(sessionId);
-        void revalidateSession(sessionId, router)
+        void periodicRemoteRead(hostsRef.current?.get(sessionId), sessionId, () =>
+          revalidateSession(sessionId, router),
+        )
           .catch((err) => {
             console.warn(`session revision sync: revalidate failed for ${sessionId}`, err);
           })

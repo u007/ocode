@@ -1,0 +1,30 @@
+{
+ "task": "append-test",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "list",
+  "read",
+  "read",
+  "read",
+  "grep",
+  "read",
+  "read",
+  "read",
+  "grep",
+  "read",
+  "edit",
+  "undo_file_change",
+  "edit",
+  "read",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

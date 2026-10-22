@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,32 @@ import (
 
 	"github.com/u007/ocode/internal/shell/sandbox"
 )
+
+// makeOwnerWritable adds owner read/write/execute to every directory and owner
+// read/write to every regular file under root, so the tree can be removed. It
+// skips symlinks: chmod would follow them to targets outside the tree.
+func makeOwnerWritable(root string) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm() | 0o600
+		if d.IsDir() {
+			mode |= 0o700
+		}
+		if info.Mode().Perm() == mode {
+			return nil
+		}
+		return os.Chmod(p, mode)
+	})
+}
 
 // setHomeTree points every global-config root at one directory tree, so a test
 // that overrides HOME gets the isolation it asks for on macOS and Linux alike.
@@ -138,6 +165,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(dir)
 	if home != "" {
+		// Go's module cache is written read-only (dirs 0555, files 0444), so a
+		// test that ran a go command under this HOME leaves a tree that
+		// os.RemoveAll cannot unlink. Make it owner-writable first.
+		if err := makeOwnerWritable(home); err != nil {
+			fmt.Fprintf(os.Stderr, "agent tests: could not make test home %s writable: %v\n", home, err)
+		}
 		// Background workers left running by finished tests (model-registry
 		// refresh, session saves) can still be writing here, and a write that
 		// lands mid-walk fails RemoveAll with "directory not empty". Retry

@@ -98,7 +98,7 @@ describe("PulseAssistantWindow permission asks from write tools", () => {
 
     // Local-only: no host argument, even if a remote project were active.
     await waitFor(() =>
-      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "allow", undefined),
+      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "allow", undefined, undefined),
     );
   });
 
@@ -113,7 +113,7 @@ describe("PulseAssistantWindow permission asks from write tools", () => {
     fireEvent.click(within(dialog).getByText("Confirm"));
 
     await waitFor(() =>
-      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "always_tool", undefined),
+      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "always_tool", undefined, undefined),
     );
   });
 
@@ -126,7 +126,7 @@ describe("PulseAssistantWindow permission asks from write tools", () => {
     fireEvent.click(within(dialog).getByText("Deny"));
 
     await waitFor(() =>
-      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "deny", undefined),
+      expect(mockResolvePermission).toHaveBeenCalledWith("req_1", "pulse_abc", "deny", undefined, undefined),
     );
   });
 

@@ -1,0 +1,35 @@
+{
+ "task": "dup-anchor",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "git stash list; git status --short; node -e '\nconst { execSync } = require(\"child_process\");\n' ; git show HEAD:src/handlers.js > /tmp/handlers.orig.js 2>/dev/null || echo \"cannot export\"; diff <(git show HEAD:src/handlers.js) src/handlers.js; cat test/run.js | head -30"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "read",
+  "bash",
+  "bash",
+  "edit",
+  "undo_file_change",
+  "undo_file_change",
+  "edit",
+  "undo_file_change",
+  "read",
+  "replace_lines",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: snapshot: no snapshot for tool_call_id: no snapshot found for tool_call_id \"call_2625ba8df66043882a5a9ac\""
+ ]
+}
+PASS score=1.0 violations=0 problems=0

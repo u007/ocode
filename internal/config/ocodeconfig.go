@@ -950,6 +950,16 @@ type OcodeConfig struct {
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
 	DocPromptEnabled bool
+	// SuggestedResponsesEnabled toggles injection of the suggested-responses
+	// prompt fragment. When on, the agent ends its reply with a machine-readable
+	// block of up to five follow-up options the UI renders as one-click
+	// suggestions under the composer. Default ON: the suggestions are the
+	// difference between a dead-ended transcript and an obvious next step.
+	//
+	// Deliberately NOT part of ProfileDelta: it is a machine-level presentation
+	// preference, not a model/provider capability, so switching profiles must
+	// never silently turn the suggestions on or off.
+	SuggestedResponsesEnabled bool
 	// AutoShareOnStart starts the tailscale share exposure automatically when
 	// the desktop app boots, instead of waiting for the user to open the Share
 	// dialog. Default OFF: it publishes this instance to the tailnet, so it
@@ -1377,6 +1387,7 @@ type ocodeConfigFile struct {
 	Goal                       goalConfigFile              `json:"goal"`
 	MemoryEnabled              *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled           *bool                       `json:"doc_prompt_enabled,omitempty"`
+	SuggestedResponsesEnabled  *bool                       `json:"suggested_responses_enabled,omitempty"`
 	AutoShareOnStart           *bool                       `json:"auto_share_on_start,omitempty"`
 	ProfileDebug               *bool                       `json:"profile_debug,omitempty"`
 	TerminalScrollbackLines    *int                        `json:"terminal_scrollback_lines,omitempty"`
@@ -1468,18 +1479,19 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:              defaultCompactConfig(),
-		Advisor:              defaultAdvisorConfig(),
-		Permissions:          defaultPermissionConfig(),
-		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
-		TTS:                  TTSConfig{Engine: "browser-native", Mode: "manual"},
-		ChatVerbosity:        defaultChatVerbosityConfig(),
-		QuickActions:         SeedQuickActions(),
-		MemoryEnabled:        true,
-		SmallModelEnabled:    true,
-		RecapModelEnabled:    false,
-		ExplorerModelEnabled: false,
-		ContextModelEnabled:  false,
+		Compact:                   defaultCompactConfig(),
+		Advisor:                   defaultAdvisorConfig(),
+		Permissions:               defaultPermissionConfig(),
+		Browser:                   BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
+		TTS:                       TTSConfig{Engine: "browser-native", Mode: "manual"},
+		ChatVerbosity:             defaultChatVerbosityConfig(),
+		QuickActions:              SeedQuickActions(),
+		MemoryEnabled:             true,
+		SuggestedResponsesEnabled: true,
+		SmallModelEnabled:         true,
+		RecapModelEnabled:         false,
+		ExplorerModelEnabled:      false,
+		ContextModelEnabled:       false,
 		// Summarising before speech is the DEFAULT experience (listen instead of
 		// reading a wall of code); every sibling gate above defaults false.
 		SpeechSummaryEnabled:    true,
@@ -2121,6 +2133,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "doc_prompt_enabled")
 	}
 
+	if _, ok := raw["suggested_responses_enabled"]; ok {
+		if file.SuggestedResponsesEnabled != nil {
+			cfg.SuggestedResponsesEnabled = *file.SuggestedResponsesEnabled
+		}
+		delete(raw, "suggested_responses_enabled")
+	}
+
 	if _, ok := raw["auto_share_on_start"]; ok {
 		if file.AutoShareOnStart != nil {
 			cfg.AutoShareOnStart = *file.AutoShareOnStart
@@ -2280,6 +2299,17 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	for k, v := range raw {
 		cfg.Extra[k] = v
 	}
+
+	// Repair the "db" section from the separate template map. The map is
+	// the authoritative copy: it survives a save from an ocode binary that
+	// predates the env_template field, while the in-section field does not.
+	// A connection whose template was stripped by such a binary is restored
+	// here.
+	templates, err := dbEnvTemplates(cfg.Extra)
+	if err != nil {
+		log.Printf("config: ignoring malformed db connection templates on disk, keeping the raw value: %v", err)
+	}
+	reconcileDBEnvTemplates(cfg.DB.Connections, templates)
 
 	return nil
 }
@@ -2772,6 +2802,15 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if len(cfg.DB.Connections) > 0 {
 		payload["db"] = cfg.DB
 	}
+	// The environment templates are ALSO written under their own top-level
+	// key, which an ocode binary that predates the env_template field does
+	// not recognise and therefore writes back verbatim. Without this copy, a
+	// save from such a binary would silently destroy the user's
+	// environment-backed connection.
+	//
+	// This assignment happens AFTER the Extra loop below, so the canonical
+	// value always wins over a stale copy in Extra.
+	dbEnvTemplatesCanonical := dbConnectionTemplates(cfg.DB.Connections)
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
 		deduped := cfg.ExtraAllowedPaths[:0:0]
@@ -2851,6 +2890,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
+	payload["suggested_responses_enabled"] = cfg.SuggestedResponsesEnabled
 	payload["auto_share_on_start"] = cfg.AutoShareOnStart
 	payload["profile_debug"] = cfg.ProfileDebug
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
@@ -2896,6 +2936,24 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			continue
 		}
 		payload[k] = v
+	}
+	// The canonical template map wins over a stale copy in Extra (which the
+	// loop above just wrote). Written after the loop, on purpose.
+	if len(dbEnvTemplatesCanonical) > 0 {
+		raw, err := json.Marshal(dbEnvTemplatesCanonical)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", DBEnvTemplatesKey, err)
+		}
+		payload[DBEnvTemplatesKey] = json.RawMessage(raw)
+	} else if _, err := dbEnvTemplates(cfg.Extra); err != nil {
+		// The stored map is unreadable, so it cannot be proven stale. Keep it
+		// verbatim (the Extra loop above already wrote it) rather than delete
+		// it on a parse failure.
+		log.Printf("config: keeping unreadable db connection templates on save: %v", err)
+	} else {
+		// No template connections left: drop the key so a stale map cannot
+		// resurrect one.
+		delete(payload, DBEnvTemplatesKey)
 	}
 	// Canonical backend_url/sync_url setters run AFTER the Extra loop so a
 	// valid normalized value always wins over a preserved raw value from
@@ -4438,11 +4496,18 @@ func SaveOcodeHTRConfig(enabled bool, extensionPath, cliPath string, port int, r
 	})
 }
 
-// SaveOcodeFeatures persists the memory/doc-prompt feature toggles.
-func SaveOcodeFeatures(memoryEnabled, docPromptEnabled bool) error {
+// SaveOcodeFeatures persists the memory/doc-prompt/suggested-responses feature toggles.
+//
+// The three toggles share one endpoint and one saver on purpose: they are all
+// "inject this into the agent's prompt / prompt-adjacent behaviour" switches
+// that the web/desktop Settings form edits together. SaveOcodeFeatures is a
+// targeted load-modify-write under the config lock (never a whole-snapshot
+// save), so a concurrent writer cannot clobber unrelated keys.
+func SaveOcodeFeatures(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled bool) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.MemoryEnabled = memoryEnabled
 		c.DocPromptEnabled = docPromptEnabled
+		c.SuggestedResponsesEnabled = suggestedResponsesEnabled
 		return nil
 	})
 }

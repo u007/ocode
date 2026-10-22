@@ -16,6 +16,10 @@ const apiFake = vi.hoisted(() => ({
   calls: [] as Array<{ project?: string; host?: string }>,
   status: null as GitStatus | null,
   failNext: false,
+  // When holdAll is set, requests stay pending until release() — a stand-in
+  // for an unreachable remote host holding its request for the ssh timeout.
+  holdAll: false,
+  held: [] as Array<() => void>,
 }));
 
 vi.mock("../api/client", () => ({
@@ -25,6 +29,22 @@ vi.mock("../api/client", () => ({
       if (apiFake.failNext) {
         apiFake.failNext = false;
         return Promise.reject(new Error("git status unavailable"));
+      }
+      if (apiFake.holdAll) {
+        return new Promise((resolve) => {
+          apiFake.held.push(() =>
+            resolve({
+              branch: "main",
+              staged_files: [],
+              changed_files: [],
+              has_changes: false,
+              is_repo: true,
+              ahead: 0,
+              behind: 0,
+              has_upstream: false,
+            }),
+          );
+        });
       }
       return Promise.resolve(
         apiFake.status ?? {
@@ -94,6 +114,8 @@ beforeEach(() => {
   apiFake.calls.length = 0;
   apiFake.status = null;
   apiFake.failNext = false;
+  apiFake.holdAll = false;
+  apiFake.held.length = 0;
   busFake.handlers.clear();
   __resetProjectGitCountsForTests();
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -256,6 +278,58 @@ describe("useProjectGitCounts", () => {
     expect(apiFake.calls.length).toBe(2);
     // The bus subscription is released with the last row too.
     expect(busFake.handlers.get("git_status")?.size ?? 0).toBe(0);
+  });
+
+  it("asks a remote host for one project at a time, not every project at once", async () => {
+    apiFake.holdAll = true;
+    for (const p of ["/a", "/b", "/c", "/d"]) renderHook(() => useProjectGitCounts(p, "devbox"));
+    await flush();
+    expect(apiFake.calls.length).toBe(1);
+  });
+
+  // The queue must not starve the projects that did not win the first slot.
+  // A mutex-style gate (drop whoever asks while another read is in flight)
+  // always lets the first-registered project win every tick, so the others'
+  // badges freeze forever on a perfectly healthy host.
+  it("serves every project on a host eventually, not just the first one", async () => {
+    vi.useFakeTimers();
+    apiFake.holdAll = true;
+    for (const p of ["/a", "/b", "/c"]) renderHook(() => useProjectGitCounts(p, "devbox"));
+    await flush();
+    // One read is in flight; the others are queued behind it.
+    expect(apiFake.calls.length).toBe(1);
+
+    // Let the held reads settle, one after the other.
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        for (const release of apiFake.held.splice(0)) release();
+        vi.advanceTimersByTime(GIT_COUNTS_POLL_MS);
+      });
+      await flush();
+    }
+
+    const asked = new Set(apiFake.calls.map((c) => c.project));
+    expect([...asked].sort()).toEqual(["/a", "/b", "/c"]);
+  });
+
+  it("leaves a remote host that failed alone for the retry window, then asks again", async () => {
+    vi.useFakeTimers();
+    apiFake.failNext = true;
+    renderHook(() => useProjectGitCounts("/a", "devbox"));
+    await flush();
+    expect(apiFake.calls.length).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(GIT_COUNTS_POLL_MS);
+    });
+    await flush();
+    expect(apiFake.calls.length).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(GIT_COUNTS_POLL_MS);
+    });
+    await flush();
+    expect(apiFake.calls.length).toBe(2);
   });
 
   it("re-probes a directory that is not a repo only every 5 minutes", async () => {

@@ -1,0 +1,31 @@
+{
+ "task": "try-and-restore",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cp src/engine.js /tmp/engine.js.orig && shasum -a 256 src/engine.js /tmp/engine.js.orig"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "read",
+  "bash",
+  "bash",
+  "edit",
+  "read",
+  "undo_file_change",
+  "bash",
+  "multiedit",
+  "read",
+  "bash",
+  "undo_file_change",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

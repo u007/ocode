@@ -87,6 +87,8 @@ type permissionJudgeRecord struct {
 	Probabilities    map[string]float64 `json:"probabilities,omitempty"`
 	Concern          string             `json:"concern,omitempty"`
 	ConcernConf      float64            `json:"concern_confidence"`
+	EnforcedConcern  string             `json:"enforced_concern,omitempty"`
+	EnforcedConf     float64            `json:"enforced_concern_confidence"`
 	Floor            float64            `json:"floor"`
 	Outcome          judgeOutcome       `json:"outcome"`
 	Reason           string             `json:"reason,omitempty"`
@@ -217,6 +219,12 @@ func (a *Agent) newJudgeRecord(toolName, model string, args json.RawMessage,
 		}
 		if part.ConcernConf != 0 {
 			rec.ConcernConf = part.ConcernConf
+		}
+		if part.EnforcedConcern != "" {
+			rec.EnforcedConcern = part.EnforcedConcern
+		}
+		if part.EnforcedConf != 0 {
+			rec.EnforcedConf = part.EnforcedConf
 		}
 		if part.Floor != 0 {
 			rec.Floor = part.Floor

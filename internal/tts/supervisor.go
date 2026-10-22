@@ -298,7 +298,7 @@ func synthText(ctx context.Context, sup *tool.ProcessSupervisor, root string, m 
 	case EngineParadee:
 		return paradeeSynth(ctx, sup, root, m, id, text, outPath)
 	case EngineKyutai:
-		return kyutaiSynth(ctx, sup, root, m, id, text, outPath, voice)
+		return kyutaiSynth(ctx, sup, root, m, text, outPath, voice)
 	case EngineMelo:
 		return meloSynth(ctx, sup, root, m, id, text, outPath, voice)
 	default:

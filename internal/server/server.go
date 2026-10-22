@@ -324,6 +324,8 @@ func (s *Server) registerRoutes() {
 	// model id rides in the JSON body because "provider/model" ids contain "/".
 	s.mux.HandleFunc("PUT /api/models/favorite", s.authMiddleware(s.handler.HandleAddFavoriteModel))
 	s.mux.HandleFunc("DELETE /api/models/favorite", s.authMiddleware(s.handler.HandleRemoveFavoriteModel))
+	// Remove a model from the Recently Used list (web/desktop context menu).
+	s.mux.HandleFunc("DELETE /api/models/recent", s.authMiddleware(s.handler.HandleRemoveRecentModel))
 	// Password vault. Unlock state is per client-supplied "surface" (granted on
 	// init/unlock, dropped by a surface-scoped lock, or by handleBrowseRevoke
 	// when a browse panel closes). Vault request bodies are never logged.
@@ -455,6 +457,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/speech-summary", s.authMiddleware(s.handleSessionSpeechSummary))
+	// Ask-dialog "Explain this tool call": a plain-prose digest of a PENDING
+	// tool call's parameters. Not a judge — it cannot approve or deny anything.
+	s.mux.HandleFunc("POST /api/sessions/{id}/tool-call-digest", s.authMiddleware(s.handleToolCallDigest))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("GET /api/sessions/{id}/discovery", s.authMiddleware(s.handleSessionDiscovery))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
@@ -1169,6 +1174,14 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	var bOpts browse.Options
 	if opts != nil {
 		htr, htrNotice := resolveManagedHTROptions(browserConfigFromBrowseOptions(opts))
+		if srv.remoteMode {
+			// An SSH remote reaches the client's htrcli daemon through the
+			// ephemeral `ssh -R <port>` forward (StartHTRReverseForward). A
+			// daemon spawned here would claim that same loopback port first and
+			// make the forward fail with "remote port forwarding failed".
+			htr.Enabled = false
+			htrNotice = ""
+		}
 		bOpts = browse.Options{
 			ChromePath:        opts.ChromePath,
 			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
@@ -2061,6 +2074,12 @@ func (s *Server) Serve(ln net.Listener) error {
 	defer close(stop)
 	go s.handler.evictIdleLoop(stop)
 	go s.handler.portMapWatchdogLoop(stop)
+	// Open the persisted, enabled port forwards of every saved remote project.
+	// Without this sweep a forward was only ever opened by the first list
+	// request for its project, and the web UI issues that request for the
+	// ACTIVE project only — so a saved project that was not active at launch
+	// came up with its tunnels down until the user clicked it.
+	s.handler.portMapAutoStartAll()
 	// Forward new debug-log entries onto the unified event bus exactly once,
 	// process-wide (never per SSE connection).
 	go s.handler.logBusForwardLoop(stop)
@@ -2472,6 +2491,9 @@ func (s *Server) handleGenerateSessionTitle(w http.ResponseWriter, r *http.Reque
 }
 func (s *Server) handleSessionSpeechSummary(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionSpeechSummary(w, r, r.PathValue("id"))
+}
+func (s *Server) handleToolCallDigest(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleToolCallDigest(w, r, r.PathValue("id"))
 }
 func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionContext(w, r, r.PathValue("id"))

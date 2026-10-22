@@ -199,11 +199,15 @@ trusts a name only when **every** token that writes it on the line is exactly
 - `hasOpaqueVariableWriter` fails the **whole line** closed on forms the scan
   cannot enumerate: `((…))` / `$((…))`, an assignment inside an expansion
   (`hasEmbeddedAssignment`, e.g. `${p:=…}`), or an `opaqueVariableWriterForms`
-  command (`eval`, `read`, `printf`, `echo`, `let`, `declare`, `typeset`,
-  `export`, `readonly`, `getopts`, `mapfile`, `readarray`, `unset`, `coproc` —
-  matched at a word boundary via `isWordPrefix`, so `readonly` is not mistaken
-  for `read`). One unseeable write voids every proof on the line rather than
-  guessing which name it hit.
+  command (`eval`, `read`, `let`, `declare`, `typeset`, `export`, `readonly`,
+  `getopts`, `mapfile`, `readarray`, `unset`, `coproc` — matched at a word
+  boundary via `isWordPrefix`, so `readonly` is not mistaken for `read`). One
+  unseeable write voids every proof on the line rather than guessing which name
+  it hit. `echo` is not listed: it cannot write a variable. `printf` is not
+  listed either; only `printf -v` writes one, caught by `isPrintfVarWrite`
+  (quoting stripped by `stripShellQuoting`, so `'printf' -v`, `p\rintf -v`
+  still match). A plain `printf`/`echo` in a port sweep no longer voids the
+  for-loop proof.
 - A `for p in 8080` header may now only **FILL** a name the write-scan never
   saw written — it can never overwrite one. Bypass B dies because the body's
   `p=1@evil.com` already marked `p` seen (and poisoned).

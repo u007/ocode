@@ -311,6 +311,45 @@ func TestLoadModelContext_ExactBeatsWildcardInSameDir(t *testing.T) {
 	}
 }
 
+// TestLoadModelContext_ExactStemDoesNotLeakToSiblings pins the boundary that
+// the minimax-m3 rename turned on: an EXACT stem is a whole-string match, so
+// "minimax-m3" must NOT serve "minimax-m3.1-flash-free" (a prefix match would)
+// and must NOT serve the "minimax-m2.x" family either. The repo's
+// minimax-m3.OCODE.md was the wildcard "minimax-m*.OCODE.md" until 2026-10-21;
+// a sibling that needs the same policy needs its own file.
+func TestLoadModelContext_ExactStemDoesNotLeakToSiblings(t *testing.T) {
+	isolateHome(t)
+	gitInit(t, map[string]string{
+		"minimax-m3.OCODE.md": "M3_BODY\n",
+	})
+	// The exact model (and its provider-qualified / tier-suffixed forms) hit it.
+	for _, m := range []string{
+		"minimax-m3",
+		"opencode-go/minimax-m3",
+		"opencode/minimax-m3-free",
+	} {
+		got := LoadModelContext(m)
+		if !strings.Contains(got, "M3_BODY") {
+			t.Fatalf("exact stem failed to match model %q: got %q", m, got)
+		}
+	}
+	// Siblings that the old wildcard served must now get NOTHING — no
+	// fallback to the m3 file, and no bundled fallback either.
+	for _, m := range []string{
+		"minimax-m3.1-flash-free",
+		"opencode-go/minimax-m3.1-flash-free",
+		"minimax-m3.1-flash",
+		"minimax-m2",
+		"minimax-m2.5",
+		"minimax-m2.7",
+	} {
+		got := LoadModelContext(m)
+		if got != "" {
+			t.Fatalf("exact stem minimax-m3 must not match sibling %q, got %q", m, got)
+		}
+	}
+}
+
 func TestLoadModelContext_BundledFallbackReturnsContent(t *testing.T) {
 	isolateHome(t)
 	gitInit(t, map[string]string{})

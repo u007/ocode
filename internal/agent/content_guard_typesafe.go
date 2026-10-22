@@ -78,7 +78,7 @@ const contentGuardChunkConcurrency = 4
 // contentGuardMinSuspicionDefault is the confidence a `clean` verdict must
 // clear to be trusted silently.
 //
-// This is deliberately NOT networkGuardMinConfidenceDefault (0.9). That floor
+// This is deliberately NOT networkGuardMinConfidenceDefault (0.8). That floor
 // governs the last gate before bytes leave the machine, where the cost of a
 // wrong "allow" is a silent leak. Here the cost asymmetry is different and the
 // failure mode is asymmetric in BOTH directions:

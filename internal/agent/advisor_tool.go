@@ -324,6 +324,11 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
 	advisorAgent.toolBatchDelay = 0
 	advisorAgent.SetRecapPromptEnabled(false)
+	// The advisor's advice is injected into the PARENT's context as a
+	// user-role message, so a raw <ocode:suggestions> block would land in the
+	// parent's prompt and could prompt the model to emit another one. Opt out,
+	// like the recap fragment above.
+	advisorAgent.SetSuggestedResponsesEnabled(false)
 	advisorAgent.SetParentAdvisorInFlight(t.mainAgent.advisorGuard())
 	// This agent is used for one synchronous advisor call and must not retain
 	// its maintenance workers or background shell processes after Step returns.

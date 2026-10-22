@@ -11,6 +11,7 @@ import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { tabLoadKey, type TabLoadingSnapshot } from "@/hooks/useKeyedLoad";
 import { useRemoteHostStatus } from "@/hooks/useRemoteHostStatus";
+import { periodicRemoteRead } from "@/lib/remoteHostGate";
 import { TabLoadingIndicator } from "@/components/common/TabLoadingIndicator";
 
 interface Props {
@@ -120,8 +121,25 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
       }
       inFlight = true;
       try {
-        const status = await api.getGitStatus(activeProjectPath, activeProjectHost);
+        const read = await periodicRemoteRead(activeProjectHost, activeProjectPath, () =>
+          api.getGitStatus(activeProjectPath, activeProjectHost),
+        );
+        if (read === null) {
+          // The host is in its retry window. Keep the last good counts; with
+          // none yet, show the unreachable state rather than another project's.
+          if (!cancelled && !loaded) {
+            setGitStaged(0);
+            setGitUnstaged(0);
+            setGitConflicted(0);
+            setGitAhead(0);
+            setGitBehind(0);
+            setGitHasUpstream(false);
+            setGitStatusError("remote host unreachable");
+          }
+          return;
+        }
         if (cancelled) return;
+        const status = read.value;
         setGitStaged(status.staged_files?.length ?? 0);
         setGitUnstaged(status.changed_files?.length ?? 0);
         // A conflicted path is no longer in either list, so add it here or

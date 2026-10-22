@@ -451,3 +451,74 @@ func containsString(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestHandleSetSkillEnabledGlobalScopeWritesTheGlobalLayer pins that the
+// Settings → Skills form can actually reach the GLOBAL layer.
+//
+// WHY THIS NEEDS AN EXPLICIT SCOPE: the form is a machine-wide control ("a
+// skill switched off here is disabled in every NEW chat on this machine"), but
+// it cannot reach the global layer by OMITTING its params. skillPrefsRoot
+// falls back to h.workDir, and h.workDir is never empty in a real server
+// (NewHandler sets it to os.Getwd(), SetWorkDir overwrites it, and the
+// desktop boot sets it to the last-used project). So an un-scoped request
+// wrote the PROJECT layer of whatever project the server last used, and the
+// form's promise was false.
+//
+// `?scope=global` is the explicit, unambiguous selector.
+func TestHandleSetSkillEnabledGlobalScopeWritesTheGlobalLayer(t *testing.T) {
+	h, root := skillTestHandler(t)
+	writeServerSkill(t, root, "alpha")
+	skill.InvalidateSkillCache()
+
+	// Disable with the explicit global scope.
+	req := httptest.NewRequest(http.MethodPut, "/api/skills/alpha/disable?scope=global", nil)
+	rec := httptest.NewRecorder()
+	h.HandleSetSkillEnabled(rec, req, "alpha", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ProjectRoot string `json:"project_root"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal %s: %v", rec.Body.String(), err)
+	}
+	if resp.ProjectRoot != "" {
+		t.Fatalf("project_root = %q, want \"\" (the global layer has no project root)", resp.ProjectRoot)
+	}
+
+	// The GLOBAL layer must hold the entry, and the PROJECT layer must NOT.
+	//
+	// EffectiveDisabledSkills("") resolves the global layer alone (an empty
+	// root means "no project layer"); EffectiveDisabledSkills(root) is the
+	// combined view a real chat would use.
+	globalOnly, err := config.EffectiveDisabledSkills("")
+	if err != nil {
+		t.Fatalf("resolve global layer: %v", err)
+	}
+	if !globalOnly["alpha"] {
+		t.Errorf("the global layer does not hold the disabled entry: %v", globalOnly)
+	}
+	// The PROJECT layer must be untouched. The project-scoped view is the union
+	// of both layers, so it cannot tell them apart on its own — compare the
+	// project layer by reading it back through the effective set with a
+	// DISABLED global entry: if the project layer had also been written, the
+	// project's own settings file would carry the name.
+	projectSettings := config.ProjectSettingsPathForRoot(root)
+	data, readErr := os.ReadFile(projectSettings)
+	if readErr == nil && strings.Contains(string(data), "alpha") {
+		t.Errorf("the global toggle leaked into the PROJECT layer: %s", string(data))
+	}
+}
+
+// TestSkillPrefsRootRejectsUnknownScope pins that a typo'd scope is a 400,
+// not a silent fall-through to the project layer.
+func TestSkillPrefsRootRejectsUnknownScope(t *testing.T) {
+	h, _ := skillTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/api/skills/alpha/disable?scope=globl", nil)
+	rec := httptest.NewRecorder()
+	h.HandleSetSkillEnabled(rec, req, "alpha", false)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (an unknown scope must be rejected): %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}

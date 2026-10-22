@@ -2838,21 +2838,42 @@ func TestModelSupportsThinkingUsesModelsDevReasoningFlag(t *testing.T) {
 
 // withRegistryState replaces registry.data and registry.fetchedAt for the
 // duration of the test, restoring the prior values via t.Cleanup.
+//
+// It also waits for any background refresh this test started BEFORE restoring
+// the state, so a detached refresh cannot publish into another test's
+// registry. The wait lives INSIDE the same cleanup function as the restore
+// (not as a sibling t.Cleanup) so the ordering is explicit rather than
+// depending on t.Cleanup's LIFO order relative to cleanups registered later by
+// the caller — e.g. withFetchRemoteServer's, which restores the HTTP client
+// the refresh reads.
+//
+// registry.refreshing is saved and restored too: it is the flag that collapses
+// concurrent stale readers into one fetch, so leaving it true would silently
+// disable the background refresh for every later test in the process.
 func withRegistryState(t *testing.T, data map[string]providerEntry, fetchedAt time.Time) {
 	t.Helper()
 	registry.mu.Lock()
 	prevData := registry.data
 	prevFetchedAt := registry.fetchedAt
 	prevAttempt := registry.lastFetchAttempt
+	prevRefreshing := registry.refreshing
+	prevBackgroundAttempt := registry.lastBackgroundAttempt
 	registry.data = data
 	registry.fetchedAt = fetchedAt
 	registry.lastFetchAttempt = time.Time{}
+	registry.lastBackgroundAttempt = time.Time{}
+	registry.refreshing = false
 	registry.mu.Unlock()
 	t.Cleanup(func() {
+		// Let this test's background refresh finish first, so it cannot
+		// publish into the state we are about to restore.
+		registryRefreshes.Wait()
 		registry.mu.Lock()
 		registry.data = prevData
 		registry.fetchedAt = prevFetchedAt
 		registry.lastFetchAttempt = prevAttempt
+		registry.lastBackgroundAttempt = prevBackgroundAttempt
+		registry.refreshing = prevRefreshing
 		registry.mu.Unlock()
 	})
 }
@@ -2991,11 +3012,20 @@ func keysOf[V any](m map[string]V) []string {
 
 // withFetchRemoteClient replaces the package-level fetchRemoteClient for the
 // duration of the test, restoring the prior client via t.Cleanup.
+//
+// It waits for any in-flight background registry refresh BEFORE restoring the
+// client: a detached refresh that is still running would otherwise read the
+// restored (real-network) client, and the write of the global would race
+// with that read. The wait is inside the same cleanup function as the
+// restore so the ordering is explicit.
 func withFetchRemoteClient(t *testing.T, c *http.Client) {
 	t.Helper()
 	prev := fetchRemoteClient
 	fetchRemoteClient = c
-	t.Cleanup(func() { fetchRemoteClient = prev })
+	t.Cleanup(func() {
+		registryRefreshes.Wait()
+		fetchRemoteClient = prev
+	})
 }
 
 // withFetchRemoteServer wires fetchRemoteClient to a httptest server that

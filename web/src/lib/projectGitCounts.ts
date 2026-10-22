@@ -2,6 +2,10 @@ import { useCallback, useSyncExternalStore } from "react";
 import { api } from "../api/client";
 import type { GitStatus } from "../api/types";
 import { eventBus, type BusEnvelope } from "./eventBus";
+import {
+  __resetRemoteReadGatesForTests,
+  withRemoteRead,
+} from "./remoteHostGate";
 
 /**
  * projectGitCounts — per-project git changed-file counts for the project list.
@@ -135,18 +139,30 @@ function snapshot(entry: Entry | undefined): ProjectGitCounts {
 function refresh(entry: Entry): Promise<void> {
   if (!entry.enabled || entry.inFlight) return Promise.resolve();
   entry.inFlight = true;
-  return api
-    .getGitStatus(entry.project, entry.host)
-    .then((status) => {
+
+  const read = async (): Promise<boolean> => {
+    try {
+      const status = await api.getGitStatus(entry.project, entry.host);
       const next = countsOf(status);
       entry.lastOkAt = Date.now();
-      if (sameCounts(next, entry.counts)) return;
-      entry.counts = next;
-      notify(entry);
-    })
-    .catch((err) => {
+      if (!sameCounts(next, entry.counts)) {
+        entry.counts = next;
+        notify(entry);
+      }
+      return true;
+    } catch (err) {
       console.error(`project git counts for ${entry.project} failed:`, err);
-    })
+      return false;
+    }
+  };
+
+  // A remote host's reads are queued (see remoteHostGate.ts): one at a time
+  // per host, and a failed host is left alone for the retry window. A local
+  // project is not gated — it never leaves this machine.
+  const run = entry.host === undefined ? read() : withRemoteRead(entry.host, entry.project, read);
+  return run
+    .catch(() => false)
+    .then(() => undefined)
     .finally(() => {
       entry.inFlight = false;
     });
@@ -268,6 +284,7 @@ export function useProjectGitCounts(
 export function __resetProjectGitCountsForTests(): void {
   for (const entry of entries.values()) stopTimer(entry);
   entries.clear();
+  __resetRemoteReadGatesForTests();
   if (offGitStatus) {
     offGitStatus();
     offGitStatus = null;

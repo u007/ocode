@@ -1,0 +1,29 @@
+{
+ "task": "mf-rename",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "list",
+  "grep",
+  "grep",
+  "rgrep",
+  "glob",
+  "read",
+  "grep",
+  "read",
+  "read",
+  "multi_file_edit",
+  "rgrep",
+  "rgrep",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import ChatInput from "./ChatInput";
-import { VOICE_NOTHING_HEARD_MESSAGE, VOICE_UNAVAILABLE_MESSAGE } from "./useVoiceRecorder";
+import { VOICE_NOTHING_HEARD_MESSAGE, VOICE_UNAVAILABLE_MESSAGE, VOICE_HOLD_THRESHOLD_MS } from "./useVoiceRecorder";
 import { FakeMediaRecorder, installVoiceEnv, removeVoiceEnv } from "./voiceTestUtils";
 import { api } from "@/api/client";
 import { clearDraft } from "../../lib/tabDrafts";
@@ -14,6 +14,7 @@ vi.mock("../../hooks/useChat", () => ({
     stop: vi.fn(),
     isStreaming: false,
     pendingPermission: null,
+    suggestions: [],
   }),
 }));
 vi.mock("../../stores/projectStore", () => ({
@@ -34,13 +35,17 @@ function textarea() {
   return screen.getByPlaceholderText(/Type a message/i) as HTMLTextAreaElement;
 }
 
-/** One click to start, one to stop; the transcript resolves on its own. */
+/** One click to start, one to stop; the transcript resolves on its own.
+ *  Real browsers fire mousedown→mouseup on a click, so we mirror that here
+ *  (fireEvent.click alone would not reach the press/release handlers). */
 async function recordOnce() {
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+    fireEvent.mouseDown(micButton());
+    fireEvent.mouseUp(micButton());
   });
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+    fireEvent.mouseDown(micButton());
+    fireEvent.mouseUp(micButton());
   });
   await flush();
 }
@@ -99,13 +104,15 @@ describe("ChatInput voice input", () => {
     render(<ChatInput sessionTabId={TAB} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
     });
     expect(screen.getByText("Recording… click to stop")).toBeDefined();
     expect(micButton().getAttribute("aria-pressed")).toBe("true");
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
     });
     expect(screen.getByText("Transcribing…")).toBeDefined();
 
@@ -136,6 +143,20 @@ describe("ChatInput voice input", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("lets the user dismiss a failed-transcription notice without recording again", async () => {
+    vi.spyOn(api, "transcribeSpeech").mockRejectedValue(new Error("STT worker crashed"));
+    render(<ChatInput sessionTabId={TAB} />);
+
+    await recordOnce();
+    expect(screen.getByRole("alert").textContent).toContain("STT worker crashed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss voice error" }));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    // Dismissing must not disturb the send path: the failure still sent nothing.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it("disables the mic with an explanatory tooltip when the browser cannot record", () => {
     removeVoiceEnv();
     render(<ChatInput sessionTabId={TAB} />);
@@ -156,7 +177,8 @@ describe("ChatInput voice input", () => {
     render(<ChatInput sessionTabId={TAB} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
     });
     act(() => FakeMediaRecorder.instances[0].pushChunk(10));
     await act(async () => {
@@ -167,7 +189,8 @@ describe("ChatInput voice input", () => {
     expect(textarea().value).toBe("");
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
     });
     expect(screen.queryByText("almost there")).toBeNull();
     await flush();
@@ -181,7 +204,8 @@ describe("ChatInput voice input", () => {
     render(<ChatInput sessionTabId={TAB} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
     });
     expect(screen.getByText("Recording… click to stop")).toBeDefined();
 
@@ -192,6 +216,51 @@ describe("ChatInput voice input", () => {
     expect(transcribe).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
     expect(textarea().value).toBe("");
+  });
+
+  it("holding past the threshold locks continuous recording; release does not stop, click stop sends", async () => {
+    const transcribe = vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "keep talking", model: "m" });
+    render(<ChatInput sessionTabId={TAB} />);
+
+    // Press and hold past the threshold: locks continuous mode.
+    await act(async () => {
+      fireEvent.mouseDown(micButton());
+      await vi.advanceTimersByTimeAsync(VOICE_HOLD_THRESHOLD_MS);
+    });
+    expect(screen.getByText("Recording… click to stop")).toBeDefined();
+
+    // Releasing the hold does NOT stop continuous recording.
+    fireEvent.mouseUp(micButton());
+    expect(screen.getByText("Recording… click to stop")).toBeDefined();
+
+    // A deliberate click stop transcribes & sends.
+    await act(async () => {
+      fireEvent.mouseDown(micButton());
+      fireEvent.mouseUp(micButton());
+    });
+    await flush();
+    expect(sendMessage).toHaveBeenCalledWith("keep talking");
+    expect(transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("keyboard Space activation starts one recording and the native click does not stop it", async () => {
+    const getUserMedia = vi.spyOn(navigator.mediaDevices, "getUserMedia");
+    render(<ChatInput sessionTabId={TAB} />);
+    micButton().focus();
+
+    await act(async () => {
+      fireEvent.keyDown(micButton(), { key: " " });
+      fireEvent.keyUp(micButton(), { key: " " });
+      // A browser fires the native click after Space keyup; jsdom does not, so mirror it.
+      fireEvent.click(micButton());
+      // Let the permission promise resolve so the recorder is created.
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+    expect(FakeMediaRecorder.instances[0].stop).not.toHaveBeenCalled();
+    expect(screen.getByText("Recording… click to stop")).toBeDefined();
   });
 
   it("Enter still sends typed text while the mic is available", async () => {

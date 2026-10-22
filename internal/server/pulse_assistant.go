@@ -600,12 +600,47 @@ Rules:
 - Cite session ids when you refer to a session. Say when a tool result was truncated.
 - Be concise and factual. If you do not know, say so and name the tool call that would find out.`
 
-// pulseSystemPrompt returns the configured prompt verbatim when set, else the
-// built-in one with its tool list filled from the registered tools.
+// pulseCustomPromptHeader introduces the operator's own instructions, which
+// are appended to the built-in prompt. It is a header, not a replacement: the
+// built-in prompt carries the contracts the assistant needs (the tool list, the
+// per-line stop-report format, the activation-gate protocol), and an operator
+// instruction like "answer in at most two sentences" must REFINE that prompt,
+// not delete it.
+const pulseCustomPromptHeader = "Operator instructions (set in Settings; they refine the behaviour above):"
+
+// pulseCustomPromptTail is the last line of the appended section. It keeps ONE
+// invariant that the built-in prompt states for a cross-session reason: a
+// write tool acts on the operator's OTHER work, so it must be requested by the
+// operator's CURRENT message. Everything else about how the assistant answers
+// (length, tone, format) is the operator's to change.
+const pulseCustomPromptTail = "These refine how you answer. The rule that write tools act only on the operator's CURRENT explicit request still holds."
+
+// pulseSystemPrompt returns the built-in prompt with its tool list filled from
+// the registered tools, and the operator's custom instructions appended as a
+// final section.
+//
+// The custom text is APPENDED, never substituted. It used to REPLACE the whole
+// prompt, which silently deleted every contract the built-in one carries (the
+// tool list, the "<project>/<session>: waiting for <kind>" report format, the
+// "N stops this round, nothing needs me." rule, the activation-gate protocol) —
+// a 90-character style instruction wiped all of them.
+//
+// With no custom text the result is byte-identical to the built-in prompt, so
+// the cached system prefix is unaffected for a session that never customised
+// it (see CLAUDE.md "Prompt Cache Stability").
 func pulseSystemPrompt(custom string, tools []*pulseTool) string {
-	if strings.TrimSpace(custom) != "" {
-		return custom
+	base := pulseBaseSystemPrompt(tools)
+	custom = strings.TrimSpace(custom)
+	if custom == "" {
+		return base
 	}
+	return base + "\n\n" + pulseCustomPromptHeader + "\n" + custom + "\n\n" + pulseCustomPromptTail
+}
+
+// pulseBaseSystemPrompt is the built-in prompt with its {{TOOLS}} placeholder
+// replaced by the registered tool names and descriptions, so the prompt can
+// never list a tool that is not installed (or miss one that is).
+func pulseBaseSystemPrompt(tools []*pulseTool) string {
 	names := make([]string, 0, len(tools))
 	byName := make(map[string]string, len(tools))
 	for _, t := range tools {
@@ -763,12 +798,21 @@ func pulseOneLine(s string, budget int) string {
 }
 
 // HandleGetPulseSystemPrompt serves GET /api/config/pulse-system-prompt:
-// {"prompt": "<configured or empty>", "default": "<built-in prompt with its tool
-// list rendered>"}.
+// {"prompt": "<the operator's own instructions or empty>", "default": "<the
+// built-in prompt with its tool list rendered>", "effective": "<exactly what
+// the assistant's system prompt will be>"}.
+//
+// "effective" is the built-in prompt with "prompt" APPENDED, so the operator
+// can confirm what the model actually receives without reading the server
+// source. It is a read-only convenience: the live assistant is built from
+// pulseSystemPrompt, which produces the same text.
 func (h *Handler) HandleGetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	custom := h.pulseSystemPromptSlot()
+	tools := h.pulseTools()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"prompt":  h.pulseSystemPromptSlot(),
-		"default": pulseSystemPrompt("", h.pulseTools()),
+		"prompt":    custom,
+		"default":   pulseBaseSystemPrompt(tools),
+		"effective": pulseSystemPrompt(custom, tools),
 	})
 }
 

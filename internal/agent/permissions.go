@@ -90,13 +90,20 @@ const (
 )
 
 type PermissionRequest struct {
-	ToolName   string          `json:"tool_name"`
-	Args       json.RawMessage `json:"args,omitempty"`
-	Command    string          `json:"command,omitempty"`
-	Prefix     string          `json:"prefix,omitempty"`
-	Scope      PermissionScope `json:"scope"`
-	Rule       string          `json:"rule"`
-	DenyReason string          `json:"deny_reason,omitempty"`
+	ToolName string          `json:"tool_name"`
+	Args     json.RawMessage `json:"args,omitempty"`
+	Command  string          `json:"command,omitempty"`
+	Prefix   string          `json:"prefix,omitempty"`
+	// PrefixCandidates lists the bash word-prefix rules that can be persisted
+	// for Command, narrowest first (e.g. ["npm run build", "npm run", "npm"]).
+	// Empty for non-bash asks, synthetic scopes, and commands with no safe
+	// literal prefix. The stored rule never carries a "*": a candidate means
+	// "commands whose first N words are these words", which the dialogs render
+	// with a trailing " *".
+	PrefixCandidates []string        `json:"prefix_candidates,omitempty"`
+	Scope            PermissionScope `json:"scope"`
+	Rule             string          `json:"rule"`
+	DenyReason       string          `json:"deny_reason,omitempty"`
 	// ModelUnavailable is set instead of DenyReason when the auto-permission
 	// model was never actually consulted (none configured, local server not
 	// healthy, client/transport failure). The human prompt surfaces it as a
@@ -1682,6 +1689,11 @@ var ShellControlKeywords = map[string]bool{
 // ask path; harmful git already cannot persist. Shell control-flow keywords
 // (if, else, while, …) are also excluded: they are not real commands and an
 // always-allow prefix for them is meaningless.
+//
+// A bash ask with no real command prefix (parse failure, a sensitive-path or
+// content gate) has no rule worth persisting: offering "always this rule"
+// there used to fall through to a tool-level `permissions.tools.bash = allow`,
+// which blanket-approves every future shell command. Such asks are one-shot.
 func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
 	// A content ask has no rule to persist: approving it means "deliver THIS
 	// result", and there is no rule that would make the next remote result safe.
@@ -1690,7 +1702,24 @@ func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
 	if req.Scope == PermissionScopeContent {
 		return false
 	}
-	if req.ToolName == "bash" && req.Scope == PermissionScopeBashPrefix {
+	if req.ToolName == "bash" {
+		// Out-of-workspace path asks persist the PATH ROOT, not a bash rule.
+		if IsOutOfScopePathRequest(req) {
+			return OutOfScopePathRoot(req) != ""
+		}
+		// Interpreter asks persist an exact script grant (file hash + command +
+		// cwd), which is a real rule even though the prefix is synthetic.
+		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+			return true
+		}
+		if req.Scope != PermissionScopeBashPrefix || req.Prefix == "" {
+			return false
+		}
+		// "sandbox.sensitive", "permission.escalation", … name a gate, not a
+		// command: a persisted allow for one of them can never match.
+		if IsSyntheticBashPrefix(req.Prefix) {
+			return false
+		}
 		if strings.HasPrefix(req.Prefix, "git ") || req.Prefix == "git" {
 			return false
 		}
@@ -1699,6 +1728,33 @@ func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
 		}
 	}
 	return true
+}
+
+// ResolveBashPrefixChoice returns the bash prefix rule to persist for an
+// always_rule decision. requested is the rule the dialog submitted; empty means
+// "use the narrowest derived rule" (req.Prefix), which keeps older clients and
+// the RC bridge working. A non-empty choice must be one the ask offered: its
+// default prefix or one of the candidates carried on the request. Nothing is
+// re-derived from the live command, so a hand-crafted resolve cannot persist a
+// rule the dialog deliberately withheld.
+func ResolveBashPrefixChoice(req PermissionRequest, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if req.ToolName != "bash" || req.Scope != PermissionScopeBashPrefix {
+		if requested != "" {
+			return "", fmt.Errorf("prefix %q cannot be persisted for this request", requested)
+		}
+		return "", nil
+	}
+	if requested == "" {
+		return req.Prefix, nil
+	}
+	if requested == req.Prefix || slices.Contains(req.PrefixCandidates, requested) {
+		return requested, nil
+	}
+	if len(req.PrefixCandidates) == 0 {
+		return "", fmt.Errorf("prefix %q cannot be persisted for this request", requested)
+	}
+	return "", fmt.Errorf("prefix %q was not offered for this request", requested)
 }
 
 // AlwaysToolChoiceAvailable reports whether the "always allow this tool"
@@ -1870,7 +1926,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			for i := range parsed {
 				if reason := dangerousRmReasonIn(pm, parsed, i); reason != "" {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm")}
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm", BashPrefixCandidates(command))}
 				}
 			}
 		}
@@ -1882,7 +1938,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// permission-defining targets resolve to Ask → routed through the
 		// auto-permission judge when auto is on, else a human prompt.
 		if pm.isPermissionEscalation(command) {
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "permission.escalation")}
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "permission.escalation", nil)}
 		}
 		if pm.mode == PermissionModeYOLO {
 			pm.emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
@@ -1955,22 +2011,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					// from IsHarmfulBashCommand and still auto-allow below.
 					if isExfiltrationRiskBashWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", sub))
-						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk", nil)}
 					}
 					if isHarmfulBashCommandWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", sub))
-						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git", nil)}
 					}
 					// "$g stash" / "$(which git) stash": the binary is a
 					// shell expansion the static gates cannot see through,
 					// so it must not ride the OS-wrapped auto-allow.
 					if isOpaqueCommandHead(c.cmdWords) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox opaque command): tool=bash command=%q", sub))
-						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.opaque_command")}
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.opaque_command", nil)}
 					}
 					if isHarmfulForceCommand(sub) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", sub))
-						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force", nil)}
 					}
 				}
 			} else {
@@ -1979,15 +2035,15 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				// starts with git.
 				if isHarmfulForceCommand(command) {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force", nil)}
 				}
 				if isExfiltrationRiskBash(command) {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk", nil)}
 				}
 				if IsHarmfulBashCommand(command) {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git", nil)}
 				}
 			}
 			if sd := pm.sensitiveSandboxDecision(command, args); sd != nil {
@@ -2006,7 +2062,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if ie, ok := classifyInterpreterExecution(command); ok &&
 			(ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" || ie.SourceMode == "script_file" || ie.SourceMode == "stdin_pipe") {
 			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (interpreter): lang=%s mode=%s", ie.Language, ie.SourceMode))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "bash.interpreter."+ie.Language)}
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "bash.interpreter."+ie.Language, nil)}
 		}
 
 		// Parse the compound command. Strip heredoc bodies first so their
@@ -2021,7 +2077,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// Parsing error (unbalanced quotes, etc.): fallback to asking for safety
 			level := pm.Check(toolName)
 			if level == PermissionAsk {
-				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "")}
+				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "", nil)}
 			}
 			if level == PermissionDeny {
 				return PermissionDecision{Level: level, DenyReason: "permissions.tools.bash = deny"}
@@ -2265,7 +2321,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	return PermissionDecision{Level: level}
 }
 
-func bashPermissionRequest(args json.RawMessage, command, prefix string) *PermissionRequest {
+// bashPermissionRequest builds an Ask for a bash command. candidates is
+// BashPrefixCandidates(command), supplied by callers that already derived it;
+// synthetic gates and interpreter runs pass nil.
+func bashPermissionRequest(args json.RawMessage, command, prefix string, candidates []string) *PermissionRequest {
 	scope := PermissionScopeTool
 	rule := "tool.bash"
 	if prefix != "" {
@@ -2276,7 +2335,14 @@ func bashPermissionRequest(args json.RawMessage, command, prefix string) *Permis
 			rule = "bash.prefix." + prefix
 		}
 	}
-	return &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
+	req := &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
+	// A real command prefix can be persisted at several granularities; carry
+	// them so the dialog can offer the choice. Synthetic gates and interpreter
+	// runs persist something else entirely, so they carry no candidates.
+	if scope == PermissionScopeBashPrefix && !IsSyntheticBashPrefix(prefix) {
+		req.PrefixCandidates = candidates
+	}
+	return req
 }
 
 // bashPathPermissionRequest builds an Ask request for a bash command that
@@ -3397,7 +3463,7 @@ func (pm *PermissionManager) sensitiveSandboxDecision(command string, args json.
 			pm.emitDebug("perm", fmt.Sprintf("sandbox sensitive ASK: command=%q", command))
 			return &PermissionDecision{
 				Level:   PermissionAsk,
-				Request: bashPermissionRequest(args, command, "sandbox.sensitive"),
+				Request: bashPermissionRequest(args, command, "sandbox.sensitive", nil),
 			}
 		}
 	}
@@ -5123,10 +5189,17 @@ func (pm *PermissionManager) matchBashPrefixRule(cmdWords []string, level Permis
 }
 
 func (pm *PermissionManager) matchBashPrefixRuleWords(cmdWords []string, level PermissionLevel) (string, bool) {
+	return matchBashPrefixRuleWordsIn(pm.bashPrefixSnapshot(), cmdWords, level)
+}
+
+// matchBashPrefixRuleWordsIn is matchBashPrefixRuleWords against an explicit
+// snapshot, so a caller that already holds one (decideSingleCommand) applies
+// the same rule set to its deny and allow lookups even if config changes
+// mid-decision.
+func matchBashPrefixRuleWordsIn(snapshot map[string]PermissionLevel, cmdWords []string, level PermissionLevel) (string, bool) {
 	if len(cmdWords) == 0 {
 		return "", false
 	}
-	snapshot := pm.bashPrefixSnapshot()
 	keys := make([]string, 0, len(snapshot))
 	for prefix, prefixLevel := range snapshot {
 		if prefixLevel != level {
@@ -6947,14 +7020,18 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	prefix := cmd.cmdWords[0]
 
 	// rulePrefix is the granularity at which an "always allow" rule is offered
-	// and matched. For git it is the two-word subcommand prefix (e.g. "git push")
-	// so a rule can be persisted without blanket-allowing every git subcommand —
-	// a blanket "git" allow is deliberately rejected by SetBashPrefixRule, which
-	// would otherwise leave the permission dialog looping forever.
-	// Transparent to `git -c` / `--no-pager` wrappers: the prefix is the
-	// underlying subcommand, not the wrapper flag.
+	// and matched. It is the NARROWEST prefix the command itself supports
+	// ("npm run build" rather than "npm"), so the default rule is never broader
+	// than what the user approved. The full candidate list rides on the ask so
+	// the dialog can offer broader alternatives. Git stays at two words — a bare
+	// "git" allow is rejected by ValidateBashPrefixRule and would leave the
+	// dialog looping forever. When no candidate is derivable (compound fragment,
+	// wrapper, control keyword) it falls back to the first word.
 	rulePrefix := prefix
-	if prefix == "git" {
+	candidates := BashPrefixCandidates(command)
+	if len(candidates) > 0 {
+		rulePrefix = candidates[0]
+	} else if prefix == "git" {
 		if idx := gitSubcommandIndex(cmd.cmdWords); idx != -1 {
 			rulePrefix = "git " + cmd.cmdWords[idx]
 		} else if len(cmd.cmdWords) >= 2 {
@@ -6978,7 +7055,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// "git push" rule must not auto-approve "git push --force").
 	if isHarmfulBashCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
-		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix, candidates)}
 	}
 
 	// Claude ask/allow are evaluated after harmful (so force-push stays ask)
@@ -6986,7 +7063,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// permission like "Bash(git push *)" is honoured without prompting.
 	if pm.claudeIsAsk(command) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (claude ask): command=%q", command))
-		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix, candidates)}
 	}
 	if pm.claudeIsAllowed(command) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (claude allow): command=%q", command))
@@ -7046,7 +7123,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			rulePrefix == "git stash" && isReadOnlyGitStashForm(cmd.cmdWords[2:])) {
 			if level == PermissionAsk {
 				pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
-				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix, candidates)}
 			}
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
 			if level == PermissionDeny {
@@ -7054,6 +7131,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			}
 			return PermissionDecision{Level: level}
 		}
+	}
+	// A broader allow chosen from the candidate list (e.g. "npm run" for
+	// "npm run build") must be honoured here, not only the exact rulePrefix key:
+	// rulePrefix is recomputed per invocation, so an exact-key-only lookup would
+	// re-ask every time and make the dialog loop.
+	if _, ok := matchBashPrefixRuleWordsIn(rules, cmd.cmdWords, PermissionAllow); ok {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (broader prefix rule): tool=bash command=%q", command))
+		return PermissionDecision{Level: PermissionAllow}
 	}
 	// A path-qualified binary in a trusted location inherits its bare-name
 	// allow rule (./node_modules/.bin/vp under a "vp" rule).
@@ -7066,7 +7151,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if rulePrefix != prefix {
 		if level, exists := rules[prefix]; exists && level == PermissionAsk {
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (broad prefix rule): prefix=%s", prefix))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix, candidates)}
 		}
 	}
 
@@ -7081,7 +7166,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (out-of-scope path): prefix=%s path=%s", prefix, outPath))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPathPermissionRequest(args, command, outPath)}
 		}
-		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix, candidates)}
 	}
 
 	// 4. Argless commands
@@ -7100,7 +7185,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	level := pm.Check("bash")
 	if level == PermissionAsk {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", rulePrefix))
-		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix, candidates)}
 	}
 	pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
 	if level == PermissionDeny {

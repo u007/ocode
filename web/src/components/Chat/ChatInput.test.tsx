@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import ChatInput from "./ChatInput";
 import { pushQueued, getQueue, clearQueue, dispatchQueueChanged } from "../../lib/tabQueue";
+import { clearDraft } from "../../lib/tabDrafts";
 
 // Controllable stand-in for the real useChat hook so we can assert exactly how
 // many times a message is submitted (the double-send bug under test).
@@ -201,6 +202,84 @@ describe("ChatInput submission", () => {
     });
     expect(getQueue("s1")).toHaveLength(1);
     clearQueue("s1");
+  });
+
+  // --- Clicking a queued row restores it and everything after it ---
+
+  it("clicking the first queued item restores the whole queue, keeping the draft below", async () => {
+    render(<ChatInput sessionTabId="q1" />);
+    const ta = getTextarea();
+    fireEvent.change(ta, { target: { value: "my draft" } });
+    pushQueued("q1", { kind: "message", text: "first" });
+    pushQueued("q1", { kind: "message", text: "second" });
+    pushQueued("q1", { kind: "message", text: "third" });
+    await act(async () => {
+      dispatchQueueChanged("q1");
+    });
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /restore queued item 1 of 3/i }),
+      );
+    });
+
+    expect(ta.value).toBe("first\nsecond\nthird\nmy draft");
+    expect(getQueue("q1")).toEqual([]);
+    // The caret sits at the start of the user's own draft, not at the top.
+    expect(ta.selectionStart).toBe("first\nsecond\nthird\n".length);
+    clearQueue("q1");
+    clearDraft("q1");
+  });
+
+  it("clicking a middle queued item restores only it and the later ones", async () => {
+    render(<ChatInput sessionTabId="q2" />);
+    pushQueued("q2", { kind: "message", text: "first" });
+    pushQueued("q2", { kind: "message", text: "second" });
+    pushQueued("q2", { kind: "message", text: "third" });
+    await act(async () => {
+      dispatchQueueChanged("q2");
+    });
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /restore queued item 2 of 3/i }),
+      );
+    });
+
+    expect(getTextarea().value).toBe("second\nthird");
+    expect(getQueue("q2")).toEqual([{ kind: "message", text: "first" }]);
+    clearQueue("q2");
+    clearDraft("q2");
+  });
+
+  it("never inlines a queued command into the composer", async () => {
+    render(<ChatInput sessionTabId="q3" />);
+    pushQueued("q3", { kind: "command", text: "/compact" });
+    pushQueued("q3", { kind: "message", text: "after compact" });
+    await act(async () => {
+      dispatchQueueChanged("q3");
+    });
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /restore queued item 1 of 2/i }),
+      );
+    });
+
+    // The message is restored; the command stays queued so it still executes.
+    expect(getTextarea().value).toBe("after compact");
+    expect(getQueue("q3")).toEqual([{ kind: "command", text: "/compact" }]);
+
+    // Clicking a command row whose suffix has no messages is a safe no-op.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /restore queued item 1 of 1/i }),
+      );
+    });
+    expect(getTextarea().value).toBe("after compact");
+    expect(getQueue("q3")).toEqual([{ kind: "command", text: "/compact" }]);
+    clearQueue("q3");
+    clearDraft("q3");
   });
 
   // --- Context file pill removal (sticky exclusion, event-based reinjection) ---

@@ -555,6 +555,21 @@ type agentSession struct {
 	// a turn was running still lands (the mid-turn rebuild is deferred, exactly
 	// like an MCP toggle). Nil/empty means "nothing disabled".
 	disabledSkills map[string]bool
+	// suggestedResponses snapshots the suggested-responses setting this agent
+	// was BUILT WITH. The prompt fragment is baked into the cached system
+	// prompt at construction, so a toggle must rebuild the agent to take
+	// effect.
+	//
+	// It is a POINTER so "not recorded" is distinguishable from "recorded as
+	// false". A session built by buildAgentSession always records it. A
+	// session assembled by hand (a test, or a helper that injects its own
+	// agent) records nothing, and for such a session the flag is UNKNOWN — the
+	// agent was not built from the server's config, so comparing it against
+	// the config is meaningless and would report "changed" on every turn,
+	// forcing a rebuild that can fail (a 500 on a chat that had nothing to do
+	// with suggestions). reconcileProfileAgent treats an unset snapshot as "no
+	// change".
+	suggestedResponses *bool
 	// liveAppend mirrors a mid-turn transcript row into the in-flight
 	// live-persist view (set by wireLivePersist for headless turns). Without it,
 	// rows appended directly to messages — the auto-continue notice and resume
@@ -562,7 +577,10 @@ type agentSession struct {
 	// sees a non-prefix suffix and duplicates/reorders rows. Nil for bridged
 	// turns, where the TUI persists its own transcript.
 	liveAppend func(agent.Message)
-	mu         sync.Mutex
+	// liveReset replaces the live-persist view after a between-step compaction
+	// rewrote the transcript (set alongside liveAppend).
+	liveReset func([]agent.Message)
+	mu        sync.Mutex
 	// childAsks is the registry of sub-agent permission asks parked on this
 	// session. It deliberately lives OUTSIDE as.mu (own mutex, never takes
 	// as.mu): runTurn holds as.mu for the whole turn and a synchronous sub-agent
@@ -1000,6 +1018,18 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 					},
 				})
 			}
+		}
+		// Suggested responses: the follow-up options the agent proposed at the
+		// end of its reply. The agent already stripped the raw block from the
+		// message content (see agent.ExtractSuggestions), so this carries the
+		// parsed options only. Published only when there ARE options: an empty
+		// list would clear the row the client is already showing.
+		if m.Role == "assistant" && len(m.Suggestions) > 0 {
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessionID,
+				Event:     "suggestions",
+				Data:      SuggestionsEvent{Suggestions: m.Suggestions},
+			})
 		}
 		if m.Role == "tool" {
 			// Flush whatever the call buffered below the thresholds and release

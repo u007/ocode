@@ -57,6 +57,12 @@ type PermissionEvent struct {
 	// "always tool").
 	Scope  string `json:"scope,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
+	// PrefixCandidates lists the bash word-prefix rules this ask can persist,
+	// narrowest first (e.g. ["npm run build", "npm run", "npm"]). The dialog
+	// lets the user pick one; the chosen value is echoed back in the resolve
+	// body's `prefix` and validated server-side against this list. omitempty, so
+	// every non-bash frame stays byte-identical to before.
+	PrefixCandidates []string `json:"prefix_candidates,omitempty"`
 	// OutOfScopePath mirrors PermissionRequest.OutOfScopePath: an "always"
 	// answer persists this path root to extra_allowed_paths instead of any
 	// bash-prefix/tool rule.
@@ -102,6 +108,7 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		ModelUnavailable: req.ModelUnavailable,
 		Scope:            scope,
 		Prefix:           req.Prefix,
+		PrefixCandidates: req.PrefixCandidates,
 		OutOfScopePath:   req.OutOfScopePath,
 		UntrustedContent: req.UntrustedContent,
 		UntrustedSource:  req.UntrustedSource,
@@ -169,6 +176,10 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		SessionID string `json:"session_id,omitempty"`
 		Approved  *bool  `json:"approved,omitempty"`
 		Decision  string `json:"decision,omitempty"`
+		// Prefix is the bash prefix rule the user picked for an always_rule
+		// decision. Empty means "use the ask's narrowest derived rule" (older
+		// clients and the RC bridge). Validated against the ask's candidates.
+		Prefix string `json:"prefix,omitempty"`
 	}
 	if err := readBodyJSON(r, &bodyReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -230,7 +241,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// The branch is also far simpler than the main-agent path below: there is no
 	// sentinel to rewrite and no continuation to dispatch. The decision goes
 	// straight into the channel the child is already blocked on.
-	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision) {
+	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision, bodyReq.Prefix) {
 		return
 	}
 
@@ -290,7 +301,19 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 				"cannot always allow this operation — it is considered harmful and always requires human approval")
 			return
 		}
-		h.persistAlwaysAllow(decision, permReq, as.agent.Permissions())
+		// Only always_rule persists a bash prefix; a prefix sent with always_tool is
+		// irrelevant to that decision and is not validated.
+		var chosenPrefix string
+		if decision == PermDecisionAlwaysRule {
+			resolved, prefixErr := agent.ResolveBashPrefixChoice(permReq, bodyReq.Prefix)
+			if prefixErr != nil {
+				as.mu.Unlock()
+				writeError(w, http.StatusConflict, prefixErr.Error())
+				return
+			}
+			chosenPrefix = resolved
+		}
+		h.persistAlwaysAllow(decision, chosenPrefix, permReq, as.agent.Permissions())
 	}
 
 	working := append([]agent.Message(nil), as.messages...)
@@ -493,7 +516,7 @@ func executeApprovedWithTempPath(ag *agent.Agent, toolName string, args json.Raw
 // that is exactly the blanket grant the out-of-scope guard exists to prevent.
 // The TUI sends those flags because it persists through its own dialog path and
 // answers out-of-scope asks separately; here persistAlwaysAllow is that path.
-func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision string) bool {
+func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision, requestedPrefix string) bool {
 	as, ask := h.findChildPermAsk(sessionID, requestID)
 	if ask == nil {
 		// The id left the registry without this request owning it: already
@@ -525,6 +548,7 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	// Same always-allow guards as the main-agent path, in the same order. Nothing
 	// has been removed from the registry yet, so a 409 here leaves the ask live
 	// and the dialog still answerable.
+	var chosenPrefix string
 	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
 		if decision == PermDecisionAlwaysRule && !agent.AlwaysRuleChoiceAvailable(ask.req) {
 			writeError(w, http.StatusConflict,
@@ -542,6 +566,14 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 				"cannot always allow this operation — it is considered harmful and always requires human approval")
 			return true
 		}
+		if decision == PermDecisionAlwaysRule {
+			resolvedPrefix, prefixErr := agent.ResolveBashPrefixChoice(ask.req, requestedPrefix)
+			if prefixErr != nil {
+				writeError(w, http.StatusConflict, prefixErr.Error())
+				return true
+			}
+			chosenPrefix = resolvedPrefix
+		}
 	}
 
 	// Commit: take() is the single point of removal, so a concurrent second
@@ -552,7 +584,7 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	}
 	as.childAsks.markResolved(requestID)
 	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
-		h.persistAlwaysAllow(decision, ask.req, as.agent.Permissions())
+		h.persistAlwaysAllow(decision, chosenPrefix, ask.req, as.agent.Permissions())
 	}
 
 	// Dismiss every watcher's dialog NOW, before the child's tool call runs —
@@ -599,13 +631,18 @@ func (h *Handler) sessionIDForChildPerm(requestID string) string {
 //     extra_allowed_paths (never a blanket bash-prefix/tool rule);
 //   - webfetch-domain asks update the session domain cache (in-memory by
 //     design — domain grants are session-scoped);
-//   - bash-prefix asks persist a prefix rule;
+//   - bash-prefix asks persist a prefix rule (chosenPrefix — the rule the
+//     dialog picked from the ask's candidates, already validated);
 //   - always_tool (and any other tool-level ask) persists a user-confirmed
 //     tool rule.
 //
+// A bash ask cannot reach the tool-rule branch: AlwaysRuleChoiceAvailable
+// refuses it, and the branch below refuses again so a future caller cannot
+// silently reintroduce a blanket `permissions.tools.bash = allow`.
+//
 // Config write failures are logged and do not fail the resolution: the
 // in-memory rule already governs this session, matching TUI behaviour.
-func (h *Handler) persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
+func (h *Handler) persistAlwaysAllow(decision, chosenPrefix string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
 	if pm == nil {
 		return
 	}
@@ -653,12 +690,20 @@ func (h *Handler) persistAlwaysAllow(decision string, permReq agent.PermissionRe
 		if err := pm.PersistInterpreterScriptGrant(permReq.Command, config.SaveAutoGrant); err != nil {
 			log.Printf("serve: interpreter always-allow not saved for %q: %v", permReq.Command, err)
 		}
-	case decision == PermDecisionAlwaysRule && permReq.Scope == agent.PermissionScopeBashPrefix && permReq.Prefix != "":
-		pm.SetBashPrefixRule(permReq.Prefix, agent.PermissionAllow)
-		if err := config.SaveSingleBashPrefixRule(permReq.Prefix, string(agent.PermissionAllow)); err != nil {
-			log.Printf("serve: failed to save bash prefix rule %q: %v", permReq.Prefix, err)
+	case decision == PermDecisionAlwaysRule && permReq.Scope == agent.PermissionScopeBashPrefix && chosenPrefix != "":
+		pm.SetBashPrefixRule(chosenPrefix, agent.PermissionAllow)
+		if err := config.SaveSingleBashPrefixRule(chosenPrefix, string(agent.PermissionAllow)); err != nil {
+			log.Printf("serve: failed to save bash prefix rule %q: %v", chosenPrefix, err)
 		}
 	default:
+		// A tool-level bash allow blanket-approves every future shell command,
+		// which is never what a single approval means. Unreachable through the
+		// resolve endpoint (AlwaysRuleChoiceAvailable refuses it); kept as a
+		// guard against a new caller.
+		if permReq.ToolName == "bash" {
+			log.Printf("serve: refusing tool-level bash allow (no command prefix): rule=%s", permReq.Rule)
+			return
+		}
 		// always_tool, and always_rule on a plain tool-level ask (where both
 		// choices persist the same tool-level rule).
 		pm.SetUserConfirmedRule(permReq.ToolName, agent.PermissionAllow)

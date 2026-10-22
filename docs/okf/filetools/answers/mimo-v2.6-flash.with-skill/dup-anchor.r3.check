@@ -1,0 +1,27 @@
+{
+ "task": "dup-anchor",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "glob",
+  "grep",
+  "bash",
+  "bash",
+  "read",
+  "bash",
+  "edit",
+  "multi_file_edit",
+  "read",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"export function getInvoices(req, res) {\\n  if (req.user == null) {\\n    res.status(403);\\n    return res.send(\\"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

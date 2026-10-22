@@ -731,6 +731,121 @@ describe("chatStore permission dialog lifecycle", () => {
     expect(p?.untrusted_source).toBe("MCP github_create_issue");
     expect(p?.untrusted_summary).toBe("instruction_override, confidence 0.95");
   });
+
+  it("PERMISSION_HIDE sets and PERMISSION_SHOW clears the local hide", () => {
+    const p = { ...ask, request_id: "call-hide" };
+    let state = chatReducer(initial(), {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p,
+    });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "call-hide" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-hide");
+    // The ask is still pending — hiding never resolves it.
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-hide");
+
+    state = chatReducer(state, { type: "PERMISSION_SHOW", sessionId: "a", requestId: "call-hide" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+  });
+
+  it("PERMISSION_REQUEST preserves a same-request hide and clears it for a new request", () => {
+    const p1 = { ...ask, request_id: "call-p1" };
+    const p2 = { ...ask, tool: "delete", request_id: "call-p2" };
+    let state = chatReducer(initial(), {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p1,
+    });
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "call-p1" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p1");
+
+    // Replay of the same request while hidden must stay hidden.
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p1,
+    });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p1");
+
+    // A genuinely new request is not covered by the old local hide.
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p2,
+    });
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-p2");
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+  });
+
+  it("guards hide, show, and resolve against stale request ids", () => {
+    const p1 = { ...ask, request_id: "call-p1" };
+    const p2 = { ...ask, tool: "delete", request_id: "call-p2" };
+    let state = chatReducer(initial(), {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p1,
+    });
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: p2,
+    });
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "call-p2" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p2");
+
+    // Hide for a different/superseded request is a no-op.
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "call-p1" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p2");
+
+    // Show for a different request is a no-op.
+    state = chatReducer(state, { type: "PERMISSION_SHOW", sessionId: "a", requestId: "call-p1" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p2");
+
+    // Resolve for a stale request must not clear the current hide.
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-p1",
+    });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBe("call-p2");
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-p2");
+
+    state = chatReducer(state, {
+      type: "PERMISSION_RESOLVED",
+      sessionId: "a",
+      requestId: "call-p2",
+    });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+  });
+
+  it("clears hidden state on matching resolve, interrupt, reset, and rekey", () => {
+    const perm = (requestId: string) => ({ ...ask, request_id: requestId });
+    let state = initial();
+
+    state = chatReducer(state, { type: "PERMISSION_REQUEST", sessionId: "a", permission: perm("resolve") });
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "resolve" });
+    state = chatReducer(state, { type: "PERMISSION_RESOLVED", sessionId: "a", requestId: "resolve" });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+
+    state = chatReducer(state, { type: "PERMISSION_REQUEST", sessionId: "a", permission: perm("interrupt") });
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "interrupt" });
+    state = chatReducer(state, { type: "INTERRUPT", sessionId: "a" });
+    expect(getSessionSlice(state, "a").hiddenPermissionRequestId).toBeNull();
+
+    state = chatReducer(state, { type: "PERMISSION_REQUEST", sessionId: "a", permission: perm("rekey") });
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "a", requestId: "rekey" });
+    state = chatReducer(state, { type: "REKEY_SESSION", oldId: "a", newId: "b" });
+    expect(getSessionSlice(state, "b").pendingPermission?.request_id).toBe("rekey");
+    expect(getSessionSlice(state, "b").hiddenPermissionRequestId).toBeNull();
+
+    state = chatReducer(state, { type: "PERMISSION_HIDE", sessionId: "b", requestId: "rekey" });
+    state = chatReducer(state, { type: "RESET", sessionId: "b" });
+    expect(getSessionSlice(state, "b").hiddenPermissionRequestId).toBeNull();
+  });
 });
 
 describe("chatStore reload rehydration from transcript snapshot", () => {

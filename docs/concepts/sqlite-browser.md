@@ -14,11 +14,15 @@ tags:
   - server
   - security
 timestamp: 2026-10-07T05:55:15Z
-resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
+resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteResultGrid.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
 ---
 # SQLite Browser / DB IDE (preview pane)
 
 The web/desktop preview pane renders `.sqlite` / `.sqlite3` / `.db` / `.db3` files with an interactive browser (Data / Query / Schema tabs) that can page, filter, sort, run confirmed SQL, edit rows, and view/download/replace BLOB cells. This page records **why** each choice was made and **which invariants must not regress**. The step-by-step implementation checklist lives in `skills/ocode-web/SKILL.md` item 64 — read that for the mechanical "where is the code" detail; this page is the rationale.
+
+## Environment templates for SQLite paths
+
+A SQLite file path may contain ${NAME} or $NAME references (docs/concepts/db-environment-templates.md). The path is expanded by dbExpandPath (handler_db.go:191) before resolution and containment: dbconnect.IsTemplate checks whether the value must expand (expand.go:151), then ExpandEnv substitutes it against the session project (dbconnect_env.go:27 dbEnvLookup). The expanded path then goes through the same resolveDBPath containment gate (handler_db.go:91) — expansion is never a bypass: an expanded path pointing outside allowed roots is refused exactly like a literal one (handler_db.go:89). A bare $NAME never makes a path a template, so a file named we$ird.db stays literal. A braced ${DB_FILE} is expanded, and a missing one produces an error naming the variable. See the new doc for the full mechanism.
 
 ## 1. The engine is server-side, never WASM
 

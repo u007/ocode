@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRemoteHostStatus, __resetRemoteHostStatusForTests } from "./useRemoteHostStatus";
+import { REMOTE_HOST_RETRY_MS } from "../lib/remoteHostGate";
 
 const mockStatus = vi.fn();
 const mockConnect = vi.fn();
@@ -53,6 +54,43 @@ describe("useRemoteHostStatus", () => {
     await waitFor(() => expect(mockStatus).toHaveBeenCalledTimes(1));
     act(() => reconnectHandlers.forEach((h) => h()));
     await waitFor(() => expect(mockStatus).toHaveBeenCalledTimes(2));
+  });
+
+  // The periodic poll goes through the shared per-host queue. After a failed
+  // poll the host is left alone for the retry window, so the poll must not ask
+  // again until the window expires.
+  it("stops polling a host that failed until the retry window expires", async () => {
+    vi.useFakeTimers();
+    try {
+      // A 502 is how the proxy reports an unreachable host; only that opens the window.
+      mockStatus.mockRejectedValueOnce(Object.assign(new Error("remote connect failed"), { status: 502 }));
+      mockStatus.mockResolvedValue(base);
+      renderHook(() => useRemoteHostStatus("h", true));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mockStatus).toHaveBeenCalledTimes(1);
+
+      // A poll inside the retry window must not reach the host.
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mockStatus).toHaveBeenCalledTimes(1);
+
+      // Once the window expires, the poll asks again. Advancing by the whole
+      // window crosses two 30s poll ticks, so the host is asked twice more.
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_HOST_RETRY_MS);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mockStatus.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restart transitions busy through restarting back to idle with the new status", async () => {

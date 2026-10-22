@@ -1,0 +1,40 @@
+{
+ "task": "try-and-restore",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "cp -p /tmp/engine.js.orig.91885 src/engine.js && shasum -a 256 src/engine.js && git status --porcelain src/engine.js && echo \"--- re-run after restore ---\" && node test/run.js; echo \"EXIT=$?\""
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cp -p src/engine.js /tmp/engine.js.orig.$$ && echo \"backup: /tmp/engine.js.orig.$$\" && grep -n \"computeTax\" -A8 src/engine.js | head -30"
+  },
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "rm -f /tmp/engine.js.orig.91885 && sed -n '1,5p' src/engine.js && git diff --stat src/engine.js; echo \"clean-check-done\""
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "read",
+  "bash",
+  "bash",
+  "read",
+  "bash",
+  "edit",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

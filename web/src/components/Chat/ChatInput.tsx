@@ -1,13 +1,14 @@
 import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useMemo, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
-import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
+import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, restoreQueuedFrom, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
 import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
+import SuggestedResponses from "./SuggestedResponses";
 import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import ConfirmDialog from "@/components/common/ConfirmDialog";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError, STTInstallRequiredError } from "@/api/client";
@@ -151,10 +152,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // is dropped — while a later, DISTINCT message (different tick, after the
   // previous send resolved and busy flipped) is never blocked.
   const submittingRef = useRef(false);
+  // True when the current click was already handled by onMouseDown/onMouseUp
+  // (real browsers fire both). onClick uses it to avoid double-handling, while
+  // still acting as a fallback for assistive-tech paths that fire only `click`.
+  const clickHandledRef = useRef(false);
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs, suggestions: rawSuggestions } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -163,6 +168,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
+  // The follow-up options the agent proposed. Defaulted to an empty array:
+  // the composer must render even when the hook does not supply the field
+  // (a stubbed hook in a test, or a client talking to an older server), and
+  // a missing array must never crash the composer.
+  const suggestions = rawSuggestions ?? [];
   // Input-history navigation (↑/↓). A ref rather than state: it only matters
   // inside the keydown handler, and putting it in state would re-render the
   // composer on every step. `historyIndex` is -1 when not navigating; entering
@@ -741,6 +751,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
+  // A suggested response fills the composer, exactly like a "fill" quick
+  // action. It never auto-sends: the suggestion is a starting point the user
+  // may want to edit, and a one-click send of model-authored text is a
+  // surprising way to start a turn.
+  const runSuggestedResponse = (suggestion: string) => {
+    updateDraft(suggestion);
+    textareaRef.current?.focus();
+  };
+
   const cancelPendingRewind = () => {
     if (!pendingRewind || !sessionTabId || pendingRewindBusyRef.current) return;
     pendingRewindBusyRef.current = true;
@@ -969,7 +988,36 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
-      if (wasInterrupted || compacting || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+      if (wasInterrupted) {
+        // The user stopped the previous turn, and is now submitting a new
+        // message. That message IS their intent to continue, so release the
+        // interrupt barrier and send it (TUI parity: after Esc the TUI's
+        // streaming flag is false, so the next Enter starts a new turn
+        // immediately — internal/tui/model.go's send path only queues while
+        // `m.streaming`).
+        //
+        // Without this the message sat in the client queue forever: the drain
+        // effect is gated on `wasInterrupted` (see the effect above), and
+        // nothing but the explicit "Resume" button ever cleared the barrier.
+        // The server has no problem running a message after a Stop — the
+        // cancelled turn unwinds, pendingCancel is consumed by that turn's own
+        // job, and the next dispatch starts a fresh turn.
+        //
+        // Queue the new message BEHIND anything already queued, then release
+        // the barrier. `resume()` clears the barrier locally (it does NOT
+        // contact the server; the cancel already happened on Stop), which
+        // fires the drain effect: it sends the queue in the order typed, once
+        // the turn is idle, and re-queues an item at the head if a submit is
+        // rejected. Sending the new message directly here raced that drain —
+        // both reached the server at once (duplicate rows, a transcript
+        // conflict) and the pre-Stop queue was left stale.
+        pushQueued(sessionTabId, { kind: "message", text: finalMessage });
+        setQueuedItems([...getQueue(sessionTabId)]);
+        resume();
+        return;
+      }
+
+      if (compacting || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
         // Local barriers: queue without injecting into a paused/compacting
         // session or overtaking the command currently owned by the drain.
         pushQueued(sessionTabId, { kind: "message", text: finalMessage });
@@ -1096,6 +1144,27 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     return true;
   };
 
+  // Clicking a queued row pulls that item and everything queued after it back
+  // into the composer, keeping the user's own draft below the restored block.
+  // Addressed by the item reference (not its row index) so a queue drain
+  // between render and click is a no-op instead of restoring the wrong suffix.
+  // Commands stay queued — inlining a `/compact` into prose would silently turn
+  // it into a chat message — so a click on a command row restores the messages
+  // that follow it and leaves the command to auto-drain.
+  const restoreQueuedItem = (item: QueuedItem) => {
+    const merged = restoreQueuedFrom(sessionTabId, item, getDraft(sessionTabId));
+    if (!merged) return;
+    setQueuedItems([...getQueue(sessionTabId)]);
+    // Put the caret at the start of the user's original draft (the end of the
+    // restored block when there was none), so they can keep typing there.
+    pendingCaretRef.current = {
+      start: merged.draftStart,
+      end: merged.draftStart,
+      shift: 0,
+    };
+    updateDraft(merged.value);
+  };
+
   const handleSlashSelect = (command: string) => {
     updateDraft(command + " ");
     setShowSlashMenu(false);
@@ -1193,7 +1262,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
 
   return (
     <div
-      className={`border-t border-border p-4 relative transition-colors ${
+      className={`border-t border-border p-3 sm:p-4 relative transition-colors ${
         isDragging ? "bg-blue-500/10 border-blue-500" : ""
       }`}
       onDragEnter={handleDragEnter}
@@ -1290,15 +1359,33 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       <CompactionStatus sessionId={sessionTabId} host={projectHost} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
-          <div>{queueCount} queued — press ↑ in an empty box to edit the last one</div>
-          {/* Show each queued item's full text (no truncation) so the user can
-              see exactly what will be sent, mirroring the TUI's queue row. The
+          <div id="queued-restore-hint">
+            {queueCount} queued — click an item to restore it and everything after it
+            (commands stay queued), or press ↑ in an empty box to edit the last one
+          </div>
+          {/* Each row is a button: clicking restores that item plus everything
+              queued after it (FIFO order is preserved; commands stay queued).
+              Show each item's full text (no truncation) so the user can see
+              exactly what will be sent, mirroring the TUI's queue row. The
               list scrolls once it gets tall, so it can't swallow the transcript. */}
           <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto pr-1">
             {queuedItems.map((item, idx) => (
-              <li key={`${idx}:${item.text}`} className="flex gap-1.5">
-                <span className="shrink-0 text-muted-foreground/60">{idx + 1}.</span>
-                <span className="whitespace-pre-wrap break-words text-foreground/90">{item.text}</span>
+              <li key={`${idx}:${item.text}`}>
+                <button
+                  type="button"
+                  onClick={() => restoreQueuedItem(item)}
+                  aria-label={`Restore queued item ${idx + 1} of ${queueCount}: ${item.text}`}
+                  aria-describedby="queued-restore-hint"
+                  title={
+                    item.kind === "command"
+                      ? "Restores the messages queued after this command; the command stays queued"
+                      : "Restore this and everything queued after it into the message box"
+                  }
+                  className="flex w-full gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <span className="shrink-0 text-muted-foreground/60">{idx + 1}.</span>
+                  <span className="whitespace-pre-wrap break-words text-foreground/90">{item.text}</span>
+                </button>
               </li>
             ))}
           </ul>
@@ -1334,8 +1421,21 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         </div>
       )}
       {pendingRewindError && (
-        <div role="alert" className="mb-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {pendingRewindError}
+        <div
+          role="alert"
+          className="mb-2 flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{pendingRewindError}</span>
+          {/* Sticky failure text needs an exit: the restore never happened, so
+              nothing else in the composer will clear this row. */}
+          <button
+            type="button"
+            onClick={() => setPendingRewindError(null)}
+            aria-label="Dismiss restore error"
+            className="shrink-0 rounded p-0.5 text-destructive/80 transition-colors hover:text-destructive focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
       {voice.state !== "idle" && (
@@ -1371,8 +1471,22 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         onCancel={() => answerVoiceInstall(false)}
       />
       {voice.error && (
-        <div role="alert" className="mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {voice.error}
+        <div
+          role="alert"
+          className="mb-2 flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
+          <span className="max-h-48 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-words">{voice.error}</span>
+          {/* A failed transcription/mic permission error has no other clearing
+              path: only starting a NEW recording reset it, so a user who gave up
+              on voice was left with a banner they could not close. */}
+          <button
+            type="button"
+            onClick={voice.dismissError}
+            aria-label="Dismiss voice error"
+            className="shrink-0 rounded p-0.5 text-destructive/80 transition-colors hover:text-destructive focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
       <input
@@ -1400,10 +1514,62 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         </button>
         <button
           type="button"
-          onClick={voice.toggle}
+          // Press-and-hold: a quick press starts recording (traditional), holding
+          // past VOICE_HOLD_THRESHOLD_MS locks continuous mode where release
+          // won't stop it — only an explicit stop click does. Mouse events are
+          // used (jsdom has no PointerEvent); browsers synthesize mouse from
+          // touch so touchscreens are covered too.
+          onMouseDown={(e) => {
+            e.preventDefault();
+            voice.press();
+          }}
+          onMouseUp={() => {
+            voice.release();
+            clickHandledRef.current = true;
+          }}
+          onMouseLeave={voice.cancelPress}
+          onClick={() => {
+            if (clickHandledRef.current) {
+              clickHandledRef.current = false;
+              return;
+            }
+            // Fallback for assistive-tech / browser paths that fire only
+            // `click` (no mousedown/mouseup): the same quick press/release.
+            voice.press();
+            voice.release();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              // IGNORE auto-repeat. A held key produces a stream of keydown
+              // events with repeat=true, and every one of them called
+              // press(), arming a new hold timer and orphaning the previous
+              // one. The orphan fired later and started a second recording
+              // with no user action, and it wiped a legitimate stop-intent so
+              // the recording was never transcribed. The FIRST keydown is the
+              // press; the repeats are noise.
+              if (e.repeat) return;
+              voice.press();
+            }
+          }}
+          onKeyUp={(e) => {
+            // Space activates a button on keyup, so the browser fires a native
+            // click right after it. Mark that click handled, as onMouseUp does,
+            // or onClick runs a second press/release and stops the recording.
+            // Enter is not flagged: its click is suppressed by the keydown
+            // preventDefault above, and a stale flag would swallow the next click.
+            if (e.key === " ") clickHandledRef.current = true;
+            if (e.key === "Enter" || e.key === " ") voice.release();
+          }}
           disabled={!voice.supported || voiceTranscribing}
-          aria-pressed={voiceRecording}
-          aria-label={voiceRecording ? "Stop recording" : "Start voice input"}
+          aria-pressed={voiceRecording || voice.holding}
+          aria-label={
+            voiceRecording
+              ? "Stop recording"
+              : voice.holding
+                ? "Hold to record continuously"
+                : "Start voice input"
+          }
           title={
             !voice.supported
               ? VOICE_UNAVAILABLE_MESSAGE
@@ -1411,12 +1577,16 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
                 ? "Stop recording and send"
                 : voiceTranscribing
                   ? "Transcribing…"
+                : voice.holding
+                  ? "Hold to record continuously"
                   : "Voice input"
           }
           className={`composer-control flex w-8 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 ${
-            voiceRecording
-              ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            voice.holding
+              ? "ring-destructive bg-destructive/10 text-destructive-foreground"
+              : voiceRecording
+                ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           }`}
         >
           {voiceTranscribing ? (
@@ -1534,6 +1704,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
+      {/* Suggested responses: the follow-up options the agent proposed at the
+          end of its last reply. Rendered ABOVE the quick-action strip, inside
+          the same padded container, so the two read as one block of
+          "what you can do next" affordances. Hidden while a turn is
+          streaming: the options belong to the reply that just finished, and
+          the next reply will propose a fresh set. */}
+      {!isStreaming && suggestions.length > 0 && (
+        <SuggestedResponses suggestions={suggestions} onSelect={runSuggestedResponse} />
+      )}
       {showQuickActions && quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}

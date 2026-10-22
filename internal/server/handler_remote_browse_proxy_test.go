@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/remote"
 )
 
@@ -223,5 +224,59 @@ func TestBrowseProxyGateCountsDownstreamAuthFailures(t *testing.T) {
 	}
 	if last != http.StatusTooManyRequests {
 		t.Fatalf("after repeated forged grants status = %d, want 429", last)
+	}
+}
+
+// TestRemoteBrowseProxySendsBasePathHeader pins the mechanism that fixes the
+// remote-project blank browser panel: the proxy must tell the origin under
+// which path prefix it is mounted.
+//
+// The origin runs on the host and emits ROOT-RELATIVE absolute paths (the
+// grant-redemption redirect, the cookie path, the rewritten HTML/CSS URLs, the
+// capture script). Without this header those paths resolve against the
+// PROXY's root, so the browser lands on this machine's browse origin instead
+// of the host's and the panel 401s forever.
+func TestRemoteBrowseProxySendsBasePathHeader(t *testing.T) {
+	const wantPrefix = "/api/remote/user@realhost/browse"
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(browse.BasePathHeader)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	ws := &browseProxyTestWorkspace{
+		fakeTestWorkspace: fakeTestWorkspace{state: remote.ServeState{BrowsePort: 1}},
+		browseURL:         upstream.URL,
+	}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	connectTestHost(t, h, "user@realhost", "/home/user/project")
+	s := &Server{handler: h, rl: newRateLimiter()}
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer proxyLn.Close()
+	proxyPort := proxyLn.Addr().(*net.TCPAddr).Port
+	proxyMux := http.NewServeMux()
+	proxyMux.HandleFunc("/api/remote/{host}/browse/{rest...}", s.browseProxyGate(func(w http.ResponseWriter, r *http.Request) {
+		s.handleRemoteBrowseProxy(w, r, r.PathValue("host"))
+	}))
+	proxyHS := &http.Server{Handler: proxyMux}
+	go func() { _ = proxyHS.Serve(proxyLn) }()
+	defer proxyHS.Close()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/remote/user@realhost/browse/b/tab:x/https/example.com/?__grant=abc", proxyPort)
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got != wantPrefix {
+		t.Fatalf("origin got base path %q, want %q", got, wantPrefix)
 	}
 }

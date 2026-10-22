@@ -56,6 +56,9 @@ func (m *model) startQuestionPrompt(toolCallID string, prompts []tool.QuestionPr
 		m.questionSelected[i] = map[int]bool{}
 	}
 	m.questionInput.Reset()
+	// A question dialog is now on screen: the agent must stand its advisor
+	// checkpoints down for as long as it stays up.
+	m.syncPendingAskFlag()
 	m.layout() // shrink the transcript viewport to make room for the dialog
 }
 
@@ -104,6 +107,9 @@ func (m *model) enqueueQuestionAsk(q queuedQuestionAsk) {
 	log.Printf("[question] prompt dialog busy; queued tool_call_id=%s headers=%d (depth=%d)",
 		q.toolCallID, len(q.prompts), len(m.questionAskQueue)+1)
 	m.questionAskQueue = append(m.questionAskQueue, q)
+	// A queued prompt is still a question the user owes an answer: the agent
+	// must stand its advisor checkpoints down for it too.
+	m.syncPendingAskFlag()
 }
 
 // promoteNextQuestionAsk moves the oldest queued prompt into the dialog slot,
@@ -515,6 +521,9 @@ func (m *model) clearQuestionPrompt() {
 	m.questionTextActive = false
 	m.questionInput.Reset()
 	m.input.Focus()
+	// The dialog is closed, but the round may still have queued prompts —
+	// re-sync rather than clearing blindly.
+	m.syncPendingAskFlag()
 	m.layout() // restore viewport height shrunk while the dialog was open
 }
 

@@ -531,6 +531,11 @@ type Agent struct {
 	// flipped at runtime per session (e.g. from the web sidebar) WITHOUT
 	// persisting to global config.
 	autoContinueEnabled atomic.Bool
+	// pendingAskSignal is the host-declared "an unanswered permission or
+	// question dialog is on screen" flag. The TUI strips the ask sentinel
+	// before handing the transcript to Step, so the agent's own scan cannot
+	// see it — the host states it explicitly instead. See advisor_pending_ask.go.
+	pendingAskSignal pendingAskSignal
 	// advisorConfig is this SESSION's advisor configuration (model, Claude Code
 	// backend, trigger set) — see advisor_config.go. Seeded from cfg at
 	// construction, then replaced by the handler with the session's own pinned
@@ -811,10 +816,14 @@ type Agent struct {
 	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
 	// Shutdown waits on it before resetting shared state (snapshotStore,
 	// changes registry) so an abandoned goroutine can't race that reset.
-	orphanRecoveryWG           sync.WaitGroup
-	memoryEnabled              bool   // whether memory prompt injection is active
-	docPromptEnabled           bool   // whether doc-first development prompt is injected
-	recapPromptEnabled         bool   // whether the recap system-prompt fragment is injected
+	orphanRecoveryWG   sync.WaitGroup
+	memoryEnabled      bool // whether memory prompt injection is active
+	docPromptEnabled   bool // whether doc-first development prompt is injected
+	recapPromptEnabled bool // whether the recap system-prompt fragment is injected
+	// suggestedResponsesEnabled gates the suggested-responses prompt fragment.
+	// Read once at construction (like the other prompt gates) so the cached
+	// system prefix stays byte-stable within a session.
+	suggestedResponsesEnabled  bool
 	preloadedModelContext      string // cached result of LoadModelContext, set once lazily
 	preloadedModelContextKind  string // "file" | "embedded" | "" — source of preloadedModelContext
 	preloadedModelContextPath  string // absolute file path (Kind=="file") or embedded filename (Kind=="embedded")
@@ -1117,11 +1126,21 @@ func (a *Agent) RecordSideUsageFromMessages(msgs []Message) {
 // subagent.go) never inherit a stale callback.
 // stopCh, when provided, is used to derive a cancellable context so that
 // Escape / Cancel interrupts in-flight HTTP requests immediately.
-func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDefs []map[string]interface{}) (*Message, error) {
+//
+// filter, when non-nil, wraps the delta stream so the suggestions block never
+// reaches the transcript. It is applied at the source (the provider client),
+// so every consumer of the stream — the web live buffer and the TUI alike —
+// sees the cleaned text.
+func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDefs []map[string]interface{}, filter *suggestionsStreamFilter) (*Message, error) {
 	gc, ok := a.client.(*GenericClient)
 	if ok {
 		if a.OnDelta != nil {
-			gc.SetOnDelta(a.OnDelta)
+			emit := a.OnDelta
+			if filter != nil {
+				filter.onDelta = emit
+				emit = filter.delta
+			}
+			gc.SetOnDelta(emit)
 			defer gc.SetOnDelta(nil)
 		}
 		if a.OnUsage != nil {
@@ -1209,6 +1228,20 @@ func (a *Agent) SetDocPromptEnabled(enabled bool) {
 // DocPromptEnabled reports whether the doc-first development prompt is active.
 func (a *Agent) DocPromptEnabled() bool {
 	return a.docPromptEnabled
+}
+
+// SetSuggestedResponsesEnabled toggles injection of the suggested-responses
+// prompt fragment. The fragment tells the model to end its reply with a
+// machine-readable block of up to five follow-up options the UI renders as
+// one-click suggestions under the composer.
+func (a *Agent) SetSuggestedResponsesEnabled(enabled bool) {
+	a.suggestedResponsesEnabled = enabled
+}
+
+// SuggestedResponsesEnabled reports whether the suggested-responses prompt
+// fragment is active.
+func (a *Agent) SuggestedResponsesEnabled() bool {
+	return a.suggestedResponsesEnabled
 }
 
 // SetRecapPromptEnabled toggles injection of the recap system-prompt fragment.
@@ -1389,6 +1422,10 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.memoryEnabled = cfg == nil || cfg.Ocode.MemoryEnabled
 	a.docPromptEnabled = cfg != nil && cfg.Ocode.DocPromptEnabled
+	// The suggested-responses fragment defaults ON, like the recap fragment and
+	// unlike the doc-prompt fragment: it is a presentation affordance the user
+	// asked for, and a nil config means "no explicit preference", not "off".
+	a.suggestedResponsesEnabled = cfg == nil || cfg.Ocode.SuggestedResponsesEnabled
 	// The recap fragment is on by default and is NOT config-derived: it is a
 	// static const, so it is fixed at construction time and never varies per
 	// turn (prompt-cache stability, see append_stable.go). Helper agents
@@ -1583,7 +1620,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// "plan" and "done" each fire at most once per user turn.
 	// Pass the pre-injection user goal explicitly — the tail may contain
 	// user-role discovery content that would mask the real request.
-	ckpt := a.newAdvisorCheckpointState(userGoal, messagesHavePendingAsk(messages))
+	//
+	// The pending-ask gate has TWO sources: the transcript scan (the ask
+	// sentinel is still in the slice) and the host-declared flag (the host
+	// strips the sentinel before Step — the TUI does exactly that, so without
+	// the flag the scan sees nothing and the advisor starts underneath an
+	// open permission dialog).
+	ckpt := a.newAdvisorCheckpointState(userGoal, a.pendingAskSignal.pending.Load(), messagesHavePendingAsk(messages))
 
 	for i := 0; ; i++ {
 		if isCancelled() {
@@ -1633,7 +1676,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			newMsgs = append(newMsgs, summarizeMsg)
 			messages = append(messages, summarizeMsg)
-			resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
+			resp, err := a.chatWithDelta(stopCh, messages, toolDefs, nil)
 			if err != nil {
 				// Hand back the rounds that already completed: the caller
 				// persists them alongside the error (see the mid-loop error
@@ -1655,7 +1698,32 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 		a.emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
-		resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
+		// The suggestions filter is installed for the whole turn, not just the
+		// final round: the model may emit the block in a round that turns out
+		// to be followed by tool calls, and the filter's flush policy decides
+		// per round whether the held text is a real block or ordinary prose.
+		var streamFilter *suggestionsStreamFilter
+		if a.suggestedResponsesEnabled && a.OnDelta != nil {
+			streamFilter = &suggestionsStreamFilter{}
+		}
+		// flushFilter releases whatever the suggestions filter held back. Every
+		// exit path of this round must call it, or the held text is never
+		// emitted and the visible reply is truncated: the filter holds up to
+		// len(SuggestionsBlockOpen)-1 bytes of a possible marker prefix, and
+		// once it has seen the marker it holds EVERYTHING after it.
+		//
+		// The explicit flush below (final vs. continue round) is the normal
+		// path; these two calls cover the error and cancellation returns, which
+		// used to strand the held text. flushAll releases whatever was held
+		// (with any closed suggestions block removed, as in the persisted
+		// message), and it is idempotent — the explicit flush clears `pending`
+		// first.
+		flushFilter := func() {
+			if streamFilter != nil {
+				streamFilter.flushAll()
+			}
+		}
+		resp, err := a.chatWithDelta(stopCh, messages, toolDefs, streamFilter)
 		a.activity.setLLMRunning(false)
 		if err != nil {
 			if isCancelled() || errors.Is(err, context.Canceled) {
@@ -1673,9 +1741,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			// the filesystem — dropping it makes a mid-turn provider failure
 			// erase a turn the user watched happen. Callers that only care
 			// about success keep ignoring the slice when err != nil.
+			flushFilter()
 			return newMsgs, err
 		}
 		if isCancelled() {
+			flushFilter()
 			return newMsgs, nil
 		}
 		if resp.Usage != nil {
@@ -1696,8 +1766,42 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 		}
 
+		// Suggested responses: strip the block from the reply and carry the
+		// parsed options on the message. This is the single choke point: every
+		// downstream consumer (persistence, the SSE/bus frames, the TUI) sees
+		// the CLEANED content, so the raw JSON never reaches the transcript and
+		// the model never sees its own suggestions echoed back on the next turn.
+		//
+		// The block is stripped from EVERY round, not only the final one. The
+		// model routinely emits it in a round that ALSO makes tool calls (it
+		// writes the reply, then calls a tool), and only the FINAL round
+		// (no tool calls) is the actual answer. Stripping only the final round
+		// left the raw block in the persisted message (newMsgs is a VALUE copy
+		// of resp, so cleaning resp afterwards would not help either) and in
+		// the live LLM context (messages), which is how the model ends up
+		// echoing its own suggestions back on the next turn.
+		//
+		// This runs BEFORE the message is copied into newMsgs: newMsgs holds a
+		// VALUE copy of the message, so cleaning resp afterwards would leave the
+		// copy carrying the raw block — which is what the caller persists.
+		if a.suggestedResponsesEnabled {
+			cleaned, suggestions := ExtractSuggestions(resp.Content)
+			resp.Content = cleaned
+			// Only the final round carries the options: a round that ends with
+			// tool calls is not the reply, it is a step towards one.
+			if len(resp.ToolCalls) == 0 {
+				resp.Suggestions = suggestions
+			}
+		}
 		newMsgs = append(newMsgs, *resp)
 		messages = append(messages, *resp)
+		// Flush the stream filter for this round. It runs the held text through
+		// the same ExtractSuggestions as the persisted message above, so the
+		// live stream drops exactly the block the saved message drops, whether
+		// or not the round ends with tool calls.
+		if streamFilter != nil {
+			streamFilter.flushAll()
+		}
 		// Notes emit: if the child is in a group, parse
 		// <oc-note> and <oc-resolve> tags out of the
 		// assistant message and append stamped entries to
@@ -2387,6 +2491,46 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 		return false
 	}
 	return a.startCompactAsync(messages, rt, "", fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold), false)
+}
+
+// MaybeCompactSync is MaybeCompactAsync run inline: when the context is over
+// the configured threshold it compacts on the calling goroutine and returns the
+// result WITHOUT invoking OnCompact, so the caller splices it itself. It exists
+// for a caller that holds the lock OnCompact needs (the server's runTurn holds
+// the session lock for the whole auto-continue chain, so an async result could
+// never land until the chain ended). started is false when nothing ran:
+// disabled, latched off after a failure, below threshold, no client, or another
+// pass in flight. OnCompactStart still fires; the caller owns the matching
+// terminal lifecycle event.
+func (a *Agent) MaybeCompactSync(messages []Message) (res CompactResult, started bool) {
+	rt := a.resolveCompactRuntime(false)
+	if !rt.Enabled || a.compactFailed.Load() {
+		return CompactResult{}, false
+	}
+	need, used := shouldCompact(messages, rt)
+	if !need {
+		return CompactResult{}, false
+	}
+	if a.compactSummaryClient() == nil {
+		a.emitDebug("COMPACT", "skipped: no LLM client connected")
+		return CompactResult{}, false
+	}
+	if !a.compactMu.TryLock() {
+		a.emitDebug("COMPACT", "skipped: another compaction in flight")
+		return CompactResult{}, false
+	}
+	defer a.compactMu.Unlock()
+	snapshot := make([]Message, len(messages))
+	copy(snapshot, messages)
+	a.emitDebug("COMPACT", fmt.Sprintf("triggered between steps: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
+	ctx, release := a.beginCompactPass()
+	defer release()
+	if a.OnCompactStart != nil {
+		a.OnCompactStart()
+	}
+	res = a.runCompactWithCtx(ctx, snapshot, rt, "", false)
+	a.recordCompactOutcome(res)
+	return res, true
 }
 
 // CompactAsync runs a manual compaction in a goroutine, bypassing the token
@@ -3832,7 +3976,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 				case name == "bash":
 					// Reuse the bash builder so the dialog shows the command and
 					// its prefix, not a thinner args-only summary.
-					req = *bashPermissionRequest(args, bashCommand(args), "")
+					req = *bashPermissionRequest(args, bashCommand(args), "", nil)
 				case name == "webfetch":
 					// This is the cached-always-allow case, where Decide returned a
 					// bare PermissionAllow and so built no request. Falling
@@ -3850,6 +3994,17 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 				decision = PermissionDecision{Level: PermissionAsk, Request: &req}
 				a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_gate tool=%s rule=%s", name, req.Rule))
 			}
+		}
+
+		// Sandbox auto-allows bash because the OS wraps it, but when a decision
+		// judge (Jev) is configured every bash call still goes through it,
+		// whatever allowed it (allowlist, prefix rule or the sandbox itself):
+		// turn the Allow into an Ask so the auto-judge branch below renders the
+		// verdict. A denial or judge failure falls through to the human ask.
+		if name == "bash" && decision.Level == PermissionAllow && !guardEscalated && autoEnabled &&
+			a.permissions.Mode() == PermissionModeSandbox && isDecisionModel(a.autoPermissionModelName()) {
+			decision = PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, bashCommand(args), "sandbox.judge", nil)}
+			a.emitDebug("PERMISSION", "tier=sandbox_judge_gate tool=bash")
 		}
 
 		if decision.Level == PermissionDeny {
@@ -3929,7 +4084,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 					if decision.Request == nil && name == "bash" {
 						// Reuse the bash builder so the deny dialog shows the
 						// command/prefix, not a thinner args-only summary.
-						req = *bashPermissionRequest(args, bashCommand(args), "")
+						req = *bashPermissionRequest(args, bashCommand(args), "", nil)
 					}
 					if consulted {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))

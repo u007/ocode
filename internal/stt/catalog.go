@@ -48,9 +48,9 @@ var catalog = []spec{
 		Engine:      EngineLocal,
 		Upstream:    "nemo-parakeet-tdt-0.6b-v3",
 		Repo:        "istupakov/parakeet-tdt-0.6b-v3-onnx",
-		Languages:   "25 European languages",
-		SizeMB:      478,
-		Description: "Offline and fast on CPU. Recommended default.",
+		Languages:   "English",
+		SizeMB:      671,
+		Description: "Offline, fast on CPU, English-only. Recommended default for English dictation.",
 	},
 	{
 		ID:          "parakeet-tdt-0.6b-v2",
@@ -59,7 +59,7 @@ var catalog = []spec{
 		Upstream:    "nemo-parakeet-tdt-0.6b-v2",
 		Repo:        "istupakov/parakeet-tdt-0.6b-v2-onnx",
 		Languages:   "English",
-		SizeMB:      473,
+		SizeMB:      661,
 		Description: "Offline English-only model. Slightly better English accuracy than v3.",
 	},
 	{
@@ -70,6 +70,7 @@ var catalog = []spec{
 		Repo:        "bobNight/parakeet-unified-en-0.6b-onnx",
 		Extra:       []string{"sentencepiece"},
 		Languages:   "English",
+		SizeMB:      663,
 		Description: "NVIDIA Parakeet Unified EN (RNNT), ONNX conversion by bobNight (CC-BY-4.0). Offline, English only.",
 	},
 	{

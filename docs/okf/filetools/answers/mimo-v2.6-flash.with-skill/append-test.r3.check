@@ -1,0 +1,32 @@
+{
+ "task": "append-test",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "read",
+  "grep",
+  "bash",
+  "bash",
+  "edit",
+  "undo_file_change",
+  "bash",
+  "edit",
+  "edit",
+  "edit",
+  "bash",
+  "replace_lines",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block appears 21406 times; must be unique or set replace_all=true",
+  "Error: search block appears 21406 times; must be unique or set replace_all=true",
+  "Error: search block appears 21406 times; must be unique or set replace_all=true"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

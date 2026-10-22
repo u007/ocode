@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"log"
+	"sync/atomic"
 
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
@@ -36,6 +37,32 @@ func localHTRPort(browser config.BrowserConfig) (port int, ok bool) {
 	}
 	info := cdp.HTRDaemonStatus(port, socket, token)
 	return info.Port, info.Running
+}
+
+// htrReverseForwardFn is the shape of the reverse-forward opener.
+type htrReverseForwardFn func(fm *remote.ForwardManager, persisted []projects.PortMap) error
+
+// startHTRReverseForward is the seam the tests replace, so a test can observe
+// whether the reverse forward was even ASKED for — which the real
+// implementation cannot show when the local htrcli daemon is not running (it
+// is then a no-op for reasons unrelated to the caller).
+//
+// It is an atomic pointer, not a plain var: the opener runs on a BACKGROUND
+// goroutine (the auto-start), and a test that installs and restores the seam
+// would otherwise race with that goroutine's read.
+var startHTRReverseForward atomic.Pointer[htrReverseForwardFn]
+
+func init() {
+	fn := htrReverseForwardFn(StartHTRReverseForward)
+	startHTRReverseForward.Store(&fn)
+}
+
+// htrReverseForwardOpener returns the currently installed opener.
+func htrReverseForwardOpener() htrReverseForwardFn {
+	if fn := startHTRReverseForward.Load(); fn != nil {
+		return *fn
+	}
+	return StartHTRReverseForward
 }
 
 // StartHTRReverseForward opens `ssh -R <port>:127.0.0.1:<port>` so htrcli on an

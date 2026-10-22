@@ -1,0 +1,21 @@
+{
+ "task": "ml-rewrite",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "rgrep",
+  "read",
+  "edit",
+  "edit",
+  "edit",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

@@ -91,6 +91,11 @@ var sessionScopedEvents = map[string]bool{
 	// like agent_activity, so it is NOT in liveFrameEvents: replaying a buffered
 	// plan into a mid-turn reload would show one the session already moved past.
 	"todo_updated": true,
+	// The follow-up options the agent proposed at the end of its reply. It
+	// arrives WITH the assistant message, so it is replayable state (unlike
+	// agent_activity): a client that reconnects mid-session must still see the
+	// suggestions for the last reply.
+	"suggestions": true,
 }
 
 // EventBus is the single server-side broadcaster. Every published event is

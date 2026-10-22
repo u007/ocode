@@ -1,0 +1,38 @@
+{
+ "task": "move-function",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "glob",
+  "grep",
+  "read",
+  "read",
+  "read",
+  "read",
+  "write",
+  "edit",
+  "edit",
+  "edit",
+  "read",
+  "edit",
+  "multi_file_edit",
+  "undo_file_change",
+  "read",
+  "edit",
+  "undo_file_change",
+  "read",
+  "edit",
+  "bash",
+  "grep",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"\\n\". Re-issue this call once, with a single value for \"replace\"",
+  "Error: search block not found in file"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

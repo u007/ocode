@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ScopedDialog,
@@ -14,7 +14,10 @@ import {
   Check,
   X,
   ShieldCheck,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
+import { api } from "@/api/client";
 import type { PermissionDecision } from "@/api/types";
 import type { AskContext } from "@/stores/chatStore";
 import type { ContentGuardScore } from "@/stores/chatStore";
@@ -49,6 +52,13 @@ interface Props {
   scope?: string;
   /** Bash prefix for bash_prefix-scope asks (e.g. "rm"). */
   prefix?: string;
+  /**
+   * Bash word-prefix rules this ask may persist, narrowest first (e.g.
+   * ["npm run build", "npm run", "npm"]). Each is rendered as `<prefix> *`;
+   * the picked one is submitted as the resolve body's `prefix`. Empty/absent
+   * for non-bash asks and for asks with no safe prefix.
+   */
+  prefixCandidates?: string[];
   /** Out-of-workspace target path for path-scope asks. */
   outOfScopePath?: string;
   /** Content-guardrail ask (scope "content"): the flagged result text. */
@@ -66,8 +76,21 @@ interface Props {
   agentName?: string;
   /** Assistant message (prose + reasoning) that led to this ask. */
   context?: AskContext | null;
+  /** Session the ask belongs to. Required for the "Explain this tool call"
+   *  action; without it the button is not rendered. */
+  sessionId?: string;
+  /** Remote project host, so the digest runs on the server that owns the ask
+   *  instead of this machine (a remote session does not exist locally). */
+  host?: string;
   requestId: string;
-  onDecide: (requestId: string, decision: PermissionDecision) => Promise<PermissionDecideResult>;
+  /** Locally hide the pending ask without resolving it server-side. */
+  onHide?: (requestId: string) => void;
+  onDecide: (
+    requestId: string,
+    decision: PermissionDecision,
+    /** Chosen bash prefix rule, only for always_rule on a bash-prefix ask. */
+    prefix?: string,
+  ) => Promise<PermissionDecideResult>;
 }
 
 /** Outcome of a decision submit. `ok: false` carries the message the dialog
@@ -83,13 +106,31 @@ function alwaysRuleAvailable(
   tool: string,
   scope?: string,
   prefix?: string,
+  rule?: string,
+  outOfScopePath?: string,
+  prefixCandidates?: string[],
 ): boolean {
   if (scope === "content") return false;
-  if (tool === "bash" && scope === "bash_prefix") {
+  if (tool === "bash") {
+    // An out-of-workspace ask persists the PATH ROOT, not a bash rule, so it is
+    // only offered when that root is present (the server 409s without it).
+    if (outOfScopePath || /\.(out_of_scope|path_pattern)$/.test(rule ?? "")) {
+      return Boolean(outOfScopePath);
+    }
+    // An interpreter ask persists an exact script grant (file hash + command +
+    // cwd), which is a real rule even though its prefix is synthetic.
+    if ((prefix ?? "").startsWith("bash.interpreter.")) return true;
+    // A bash ask with no real command prefix has no rule worth persisting;
+    // offering one used to fall through to a blanket `tools.bash = allow`.
+    if (scope !== "bash_prefix") return false;
     const p = (prefix ?? "").trim();
     if (!p) return false;
+    if (p.startsWith("sandbox.") || p.startsWith("permission.")) return false;
     if (p.startsWith("git ") || p === "git") return false;
     if (SHELL_CONTROL_KEYWORDS.has(p)) return false;
+    // The always-rule confirmation persists one of the server-offered candidates;
+    // with none offered there is no rule to pick, so the choice is not shown.
+    if (!prefixCandidates || prefixCandidates.length === 0) return false;
   }
   return true;
 }
@@ -114,6 +155,7 @@ export default function PermissionDialog({
   modelUnavailable,
   scope,
   prefix,
+  prefixCandidates,
   outOfScopePath,
   untrustedContent,
   untrustedSource,
@@ -122,8 +164,11 @@ export default function PermissionDialog({
   untrustedFailure,
   agentName,
   context,
+  sessionId,
+  host,
   requestId,
   onDecide,
+  onHide,
 }: Props) {
   // A content-guardrail ask is about an ALREADY-EXECUTED result, not a pending
   // command, so neither always-allow choice is offered — mirroring
@@ -139,16 +184,38 @@ export default function PermissionDialog({
   // Which always-allow choice is pending confirmation ("a"/"t" step in the
   // TUI); empty when the main button row is shown.
   const [confirming, setConfirming] = useState<"always_rule" | "always_tool" | null>(null);
+  // Which bash prefix rule the user picked in the always-rule confirmation.
+  // Empty means "not chosen yet" -> the narrowest candidate is the default.
+  const [chosenPrefix, setChosenPrefix] = useState("");
   // Why the last decision did not go through — shown inline so a failed
   // submit is never silent (the store's per-session error is not rendered in
   // the chat view). Cleared on the next attempt or a new request.
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // On-demand explanation of the pending call. Kept per request (reset below)
+  // and aborted on a new ask/unmount so a slow reply cannot land on a different
+  // ask's dialog.
+  const [digest, setDigest] = useState<{ summary: string; model: string } | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
+  const [digestError, setDigestError] = useState<string | null>(null);
+  const digestAbort = useRef<AbortController | null>(null);
 
   const canAlwaysRule = useMemo(
-    () => alwaysRuleAvailable(tool, scope, prefix),
-    [tool, scope, prefix],
+    () => alwaysRuleAvailable(tool, scope, prefix, rule, outOfScopePath, prefixCandidates),
+    [tool, scope, prefix, rule, outOfScopePath, prefixCandidates],
   );
   const canAlwaysTool = useMemo(() => alwaysToolAvailable(tool, scope), [tool, scope]);
+
+  // The rule granularities the user can persist. The server always sends the
+  // list for a real bash-prefix ask; without it no prefix choice is offered.
+  // Interpreter asks persist an exact script grant, not a prefix, so they keep
+  // the untitled single-choice flow.
+  const bashPrefixChoices = useMemo(() => {
+    if (tool !== "bash" || scope !== "bash_prefix" || !prefix) return [];
+    if (prefix.startsWith("bash.interpreter.")) return [];
+    if (!prefixCandidates) return [];
+    return prefixCandidates.filter((c) => c.trim() !== "");
+  }, [tool, scope, prefix, prefixCandidates]);
+  const effectivePrefix = chosenPrefix || bashPrefixChoices[0] || "";
 
   // When a new permission request arrives while the dialog is still mounted
   // (the queue resurfaces the next ask after the previous one resolves), the
@@ -157,14 +224,34 @@ export default function PermissionDialog({
   useEffect(() => {
     setLoading(false);
     setConfirming(null);
+    setChosenPrefix("");
     setSubmitError(null);
+    digestAbort.current?.abort();
+    digestAbort.current = null;
+    setDigest(null);
+    setDigestLoading(false);
+    setDigestError(null);
   }, [requestId, open]);
+
+  // A dialog torn down mid-request (ask resolved elsewhere, tab closed) must not
+  // leave the provider call running.
+  useEffect(() => () => digestAbort.current?.abort(), []);
 
   const handleResponse = async (decision: PermissionDecision) => {
     setLoading(true);
     setSubmitError(null);
     try {
-      const result = await onDecide(requestId, decision);
+      // Only an always-rule on a bash ask carries a prefix; sending one for any
+      // other decision is rejected by the server as unpersistable.
+      const prefixChoice =
+        decision === "always_rule" && effectivePrefix ? effectivePrefix : undefined;
+      // Call through with two arguments when there is no prefix choice. The
+      // third argument is meaningful only for a bash always-rule, and keeping
+      // the arity stable means every existing caller/test that asserts on
+      // (requestId, decision) keeps working.
+      const result = prefixChoice
+        ? await onDecide(requestId, decision, prefixChoice)
+        : await onDecide(requestId, decision);
       if (!result.ok) {
         setSubmitError(result.error);
         setLoading(false);
@@ -180,6 +267,37 @@ export default function PermissionDialog({
 
   const toolIcon =
     tool === "bash" || tool === "bash_output" ? Terminal : FileCode;
+
+  // Ask the small model (main-model fallback) what this call will do. The
+  // request_id doubles as the authoritative key: while the ask is live the
+  // server explains ITS copy of the parameters, not this component's props.
+  const handleExplain = async () => {
+    if (!sessionId || digestLoading) return;
+    digestAbort.current?.abort();
+    const controller = new AbortController();
+    digestAbort.current = controller;
+    setDigestLoading(true);
+    setDigestError(null);
+    try {
+      const res = await api.explainToolCall(
+        sessionId,
+        { request_id: requestId, tool, command, args, rule, scope },
+        host,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setDigest(res);
+    } catch (err) {
+      // A superseded/aborted click is not a failure to report.
+      if (controller.signal.aborted) return;
+      setDigestError(err instanceof Error ? err.message : "the explanation failed");
+    } finally {
+      if (digestAbort.current === controller) {
+        digestAbort.current = null;
+        setDigestLoading(false);
+      }
+    }
+  };
 
   // Describes exactly what confirming will persist — mirrors the TUI's
   // renderPermConfirmBody so both surfaces describe the same write.
@@ -225,8 +343,8 @@ export default function PermissionDialog({
       return (
         <>
           Persist a bash-prefix rule: always allow{" "}
-          <span className="font-mono">{prefix} ...</span> (all commands starting
-          with <span className="font-mono">{prefix}</span>).
+          <span className="font-mono">{effectivePrefix || prefix} ...</span> (all commands starting
+          with <span className="font-mono">{effectivePrefix || prefix}</span>).
         </>
       );
     }
@@ -245,7 +363,11 @@ export default function PermissionDialog({
       onOpenChange={(isOpen) => {
         if (!isOpen && !loading) {
           setConfirming(null);
-          void handleResponse("deny");
+          // X / Escape / overlay-close: hide locally when the caller supplied an
+          // onHide (the server still holds the pending ask and the turn stays
+          // paused). Otherwise fall back to the previous deny behavior — Pulse
+          // and any other caller that doesn't pass onHide keep the old contract.
+          void (onHide ? onHide(requestId) : handleResponse("deny"));
         }
       }}
     >
@@ -421,6 +543,58 @@ export default function PermissionDialog({
                   )}
                 </div>
               </div>
+              {/* No digest for a content ask: that tool already ran, so there is
+                  no pending call to explain (the flagged result has its own
+                  review UI below). */}
+              {!isContentAsk && sessionId && (
+                <section aria-label="AI explanation" className="min-w-0 max-w-full space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleExplain()}
+                      disabled={digestLoading || loading}
+                    >
+                      {digestLoading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4 mr-2" />
+                      )}
+                      {digestLoading
+                        ? "Asking the small model…"
+                        : digest
+                          ? "Explain again"
+                          : "Explain this tool call"}
+                    </Button>
+                    <span className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      Sends this call's parameters to your small model (or the main model when
+                      the small model is off).
+                    </span>
+                  </div>
+                  {digest && (
+                    <div
+                      role="status"
+                      className="max-w-full rounded-lg border border-blue-900/60 bg-blue-950/30 p-3 text-sm text-blue-100"
+                    >
+                      <div className="mb-1 text-xs font-medium tracking-wide text-blue-300 uppercase">
+                        AI summary{digest.model ? ` · ${digest.model}` : ""} · not a safety verdict
+                      </div>
+                      <p className="break-words [overflow-wrap:anywhere]">{digest.summary}</p>
+                    </div>
+                  )}
+                  {digestError && (
+                    <div
+                      role="alert"
+                      className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200"
+                    >
+                      <div className="font-medium">Could not explain this call:</div>
+                      <div className="mt-1 break-words [overflow-wrap:anywhere]">{digestError}</div>
+                    </div>
+                  )}
+                </section>
+              )}
+
               {parameters !== undefined && (
                 <section aria-label="Tool execution parameters" className="min-w-0 max-w-full">
                   <div className="mb-2 text-sm font-medium text-foreground">Tool execution parameters</div>
@@ -436,6 +610,45 @@ export default function PermissionDialog({
             <div className="max-w-full rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-sm break-words text-foreground [overflow-wrap:anywhere]">
               {confirmExplanation}
             </div>
+          )}
+
+          {confirming === "always_rule" && bashPrefixChoices.length > 1 && (
+            <fieldset
+              aria-label="Bash prefix rule"
+              className="min-w-0 max-w-full space-y-2 rounded-lg border border-border bg-muted/50 p-3"
+            >
+              <legend className="px-1 text-sm font-medium text-foreground">
+                Choose how broad the rule is
+              </legend>
+              {bashPrefixChoices.map((cand, idx) => (
+                <label
+                  key={cand}
+                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-muted"
+                >
+                  <input
+                    type="radio"
+                    name={`bash-prefix-${requestId}`}
+                    value={cand}
+                    checked={effectivePrefix === cand}
+                    onChange={() => setChosenPrefix(cand)}
+                    disabled={loading}
+                  />
+                  <span className="font-mono text-sm break-words [overflow-wrap:anywhere]">
+                    {cand} *
+                  </span>
+                  {idx === 0 && (
+                    <span className="text-xs text-muted-foreground">narrowest</span>
+                  )}
+                  {idx === bashPrefixChoices.length - 1 && idx > 0 && (
+                    <span className="text-xs text-muted-foreground">broadest</span>
+                  )}
+                </label>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                Any command whose first words match the rule is auto-approved. A
+                narrower rule approves less.
+              </p>
+            </fieldset>
           )}
 
           {submitError && (
@@ -472,6 +685,16 @@ export default function PermissionDialog({
             <div className="flex flex-wrap justify-end gap-3">
               <Button
                 type="button"
+                variant="outline"
+                onClick={() => void onHide?.(requestId)}
+                disabled={loading}
+                title="Hide the dialog and keep the turn paused; reopen it later from the tool card"
+              >
+                <X className="w-4 h-4 mr-2" />
+                Hide
+              </Button>
+              <Button
+                type="button"
                 variant="destructive"
                 onClick={() => void handleResponse("deny")}
                 disabled={loading}
@@ -483,7 +706,10 @@ export default function PermissionDialog({
                 <Button
                   type="button"
                   variant="secondary"
-                  onClick={() => setConfirming("always_rule")}
+                  onClick={() => {
+                    setChosenPrefix(bashPrefixChoices[0] ?? "");
+                    setConfirming("always_rule");
+                  }}
                   disabled={loading}
                   title="Persist a rule so this exact request is auto-approved in future"
                 >

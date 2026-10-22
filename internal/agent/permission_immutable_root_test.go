@@ -79,6 +79,10 @@ func TestLanguageDepRoots_DefaultHomePaths(t *testing.T) {
 	t.Setenv("PIP_CACHE_DIR", "")
 	t.Setenv("GRADLE_USER_HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
+	// `go test` exports GOROOT (the toolchain root). A set GOROOT replaces the
+	// /usr/local/go and /usr/lib/go fallbacks this test asserts.
+	t.Setenv("GOROOT", "")
+	t.Setenv("COMPOSER_HOME", "")
 
 	roots := languageDepRoots()
 
@@ -222,6 +226,9 @@ func TestIsImmutableReadRoot_LanguageDeps(t *testing.T) {
 	t.Setenv("CARGO_HOME", "")
 	t.Setenv("PIP_CACHE_DIR", "")
 	t.Setenv("GRADLE_USER_HOME", "")
+	// `go test` exports GOROOT; a set value replaces the /usr/local/go and
+	// /usr/lib/go fallbacks the GOROOT cases below depend on.
+	t.Setenv("GOROOT", "")
 
 	cases := []struct {
 		path string

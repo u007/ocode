@@ -8,6 +8,17 @@ import (
 	"github.com/u007/ocode/internal/config"
 )
 
+// keylessEnv makes a test see no TypeSafe credential regardless of the host
+// shell: an empty TYPESAFE_API_KEY reads as absent, OPENCODE_AUTH_TOKEN (a
+// global override that credentials every provider) is cleared, and the home
+// is a private empty tree so no stored credential is read.
+func keylessEnv(t *testing.T) {
+	t.Helper()
+	setHomeTree(t, t.TempDir())
+	t.Setenv("TYPESAFE_API_KEY", "")
+	t.Setenv("OPENCODE_AUTH_TOKEN", "")
+}
+
 // captureAgentDebug redirects the AGENT debug sink for one test and returns a
 // getter for the collected lines. t.Cleanup restores the previous sink, so a
 // failing assertion cannot leak a global into another test.
@@ -43,6 +54,7 @@ func captureAgentDebug(t *testing.T) func() []string {
 // would pin "no credential" for the life of the session. So this asserts the log
 // is quiet on the SOURCE, not that the caller avoided calling.
 func TestDiscoveryJudgeClient_KeylessDoesNotSpamDebug(t *testing.T) {
+	keylessEnv(t)
 	warnedNoAPIKey.Range(func(k, _ any) bool {
 		warnedNoAPIKey.Delete(k)
 		return true
@@ -77,6 +89,7 @@ func TestDiscoveryJudgeClient_KeylessDoesNotSpamDebug(t *testing.T) {
 // /discovery toggle or a restart. A keyless call must leave nothing behind that a
 // later credentialed call could read.
 func TestDiscoveryJudgeClient_NilIsNotCached(t *testing.T) {
+	keylessEnv(t)
 	warnedNoAPIKey.Range(func(k, _ any) bool {
 		warnedNoAPIKey.Delete(k)
 		return true

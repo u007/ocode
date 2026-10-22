@@ -56,9 +56,13 @@ type portMapEntry struct {
 	// entry created by newPortMapRegistry.
 	policy *portMapPolicy
 	// autoStartOnce runs the persisted-enabled forwards exactly once per
-	// project per process, on the first list (the panel's mount probe). Any
-	// later edits go through the explicit add/enable handlers.
+	// project per process, on the boot sweep or the first list, whichever
+	// comes first. Any later edits go through the explicit add/enable handlers.
 	autoStartOnce sync.Once
+	// htrOnce runs the ephemeral htrcli reverse forward exactly once per
+	// project per process. It has its own guard so the boot sweep, which never
+	// opens that forward, cannot consume the list request's one attempt.
+	htrOnce sync.Once
 }
 
 func newPortMapRegistry(sup *tool.ProcessSupervisor) *portMapRegistry {
@@ -173,32 +177,133 @@ func (h *Handler) autoStartPortMaps(ref projects.ProjectRef, fm *remote.ForwardM
 			log.Printf("port forwards: auto-start remote:%d for %s:%s: %v", m.RemotePort, ref.Host, ref.Path, err)
 		}
 	}
-	if err := StartHTRReverseForward(fm, maps); err != nil {
+}
+
+// openHTRReverseForward opens the ephemeral htrcli reverse forward for ref.
+//
+// It is deliberately NOT opened by the boot sweep: that forward is a relay for
+// the project the user is actually working in, so opening it for every saved
+// remote project at boot would open one extra reverse ssh child per project
+// (each of which exposes a local port to the remote host's loopback). Only the
+// list request, which means the user is looking at this project, calls it.
+func (h *Handler) openHTRReverseForward(ref projects.ProjectRef, fm *remote.ForwardManager) {
+	maps, err := h.projects.PortMaps(ref)
+	if err != nil {
+		log.Printf("port forwards: load %s:%s for htr reverse forward: %v", ref.Host, ref.Path, err)
+		return
+	}
+	if err := htrReverseForwardOpener()(fm, maps); err != nil {
 		log.Printf("port forwards: %s:%s: %v", ref.Host, ref.Path, err)
 	}
 }
 
+// portMapAutoStartOnce runs the persisted-enabled forwards exactly once per
+// project per process. Both triggers go through it — the boot sweep and the
+// first list request — so the two can never open a second ssh child for the
+// same port.
+//
+// withHTR also runs the ephemeral htrcli reverse forward, under its own guard
+// (htrOnce). The boot sweep passes false and leaves that forward alone; the
+// list request passes true. The guards are separate, so a boot sweep that has
+// already consumed autoStartOnce does not stop the list from opening it.
+//
+// The open runs in the background: a forward that cannot come up spends ~5s in
+// ForwardManager.Start's readiness probe, and the caller must not block on it.
+// The list handler answers from persisted state immediately (the row reports
+// live=false until the open lands, which is exactly how a disabled or
+// not-yet-opened forward already renders).
+func (h *Handler) portMapAutoStartOnce(entry *portMapEntry, ref projects.ProjectRef, withHTR bool) {
+	entry.autoStartOnce.Do(func() {
+		remote.RunAsync(fmt.Sprintf("auto-start for %s:%s", ref.Host, ref.Path), func() {
+			h.autoStartPortMaps(ref, entry.fm)
+		})
+	})
+	if withHTR {
+		entry.htrOnce.Do(func() {
+			remote.RunAsync(fmt.Sprintf("htr reverse forward for %s:%s", ref.Host, ref.Path), func() {
+				h.openHTRReverseForward(ref, entry.fm)
+			})
+		})
+	}
+}
+
+// portMapAutoStartAll opens the persisted, enabled forwards of EVERY saved
+// remote project, at boot.
+//
+// Without it, a forward was only ever opened by the first list request for its
+// project — and the web UI issues that request for the ACTIVE project only. A
+// saved remote project that was not the active one at launch therefore came up
+// with its rows persisted and its tunnels down, and the user had to click the
+// project to make it connect.
+//
+// It also creates the registry entries, so the watchdog can monitor these
+// forwards from the start: the watchdog only visits projects already in the
+// registry, so without the sweep it could not restart a forward that died
+// before the project was ever opened.
+//
+// Only SSH targets are swept. A local project has no forwards, and a WSL
+// project is refused for the same reason the list handler refuses it: WSL2
+// shares the Windows loopback, so an extra forward would be a no-op.
+//
+// Best-effort and non-blocking: each project's open runs on its own goroutine
+// (remote.RunAsync), because a forward that cannot come up spends ~5s in
+// ForwardManager.Start's readiness probe.
+func (h *Handler) portMapAutoStartAll() {
+	if h.portMaps == nil || h.projects == nil {
+		return
+	}
+	for _, p := range h.projects.List() {
+		if p.Host == "" {
+			continue // local project
+		}
+		target, err := remote.ParseTarget(p.Host)
+		if err != nil {
+			log.Printf("port forwards: boot sweep: parse host %q for %s: %v", p.Host, p.Path, err)
+			continue
+		}
+		if target.Kind != remote.KindSSH {
+			continue // WSL shares the Windows loopback; no forward needed
+		}
+		// A saved entry may carry an explicit SSH port, and Target.String() is
+		// port-free, so the port has to be carried across explicitly — the
+		// same rule remoteWorkFor applies when it resolves a request's host.
+		// Without it the forward would dial port 22 on a host that only
+		// answers on its saved port.
+		if target.Port == 0 && p.RemotePort > 0 {
+			target.Port = p.RemotePort
+		}
+		// A project with no persisted forwards has nothing to open, and it must
+		// not get a registry entry: the watchdog visits every entry on each
+		// tick, so an entry for a forward-less project would be pure overhead.
+		if len(p.PortMaps) == 0 {
+			continue
+		}
+		// The registry keys on the same identity the store keys PortMaps on,
+		// so the sweep and a later list request share one manager (and one
+		// autoStartOnce).
+		ref := projects.ProjectRef{Host: target.String(), Path: p.Path}
+		entry := h.portMaps.entry(target, p.Path)
+		h.portMapAutoStartOnce(entry, ref, false)
+	}
+}
+
 // HandleListPortMaps serves GET /api/portmaps?host=&project=. The first list
-// for a project is also the auto-start trigger, so persisted forwards come
+// for a project also triggers the auto-start, so persisted forwards come
 // back when the panel mounts after a server restart.
 //
 // The auto-start runs in the background: a forward that cannot come up spends
 // ~5s in ForwardManager.Start's readiness probe, and the list can answer that
 // from persisted state immediately (the row reports live=false until the open
 // lands, which is exactly how a disabled or not-yet-opened forward already
-// renders). autoStartOnce still guards duplicates — Do returns as soon as the
-// goroutine is spawned, so only one auto-start ever runs per project.
+// renders). The boot sweep (portMapAutoStartAll) shares the same
+// autoStartOnce guard, so a project already swept at boot is not opened twice.
 func (h *Handler) HandleListPortMaps(w http.ResponseWriter, r *http.Request) {
 	rw, entry, ok := h.portMapTarget(w, r)
 	if !ok {
 		return
 	}
 	ref := portMapRef(rw)
-	entry.autoStartOnce.Do(func() {
-		remote.RunAsync(fmt.Sprintf("auto-start for %s:%s", ref.Host, ref.Path), func() {
-			h.autoStartPortMaps(ref, entry.fm)
-		})
-	})
+	h.portMapAutoStartOnce(entry, ref, true)
 	writeJSON(w, http.StatusOK, h.portMapViews(ref, entry.fm))
 }
 

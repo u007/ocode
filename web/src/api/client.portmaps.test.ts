@@ -96,6 +96,54 @@ describe("port-forward client routing", () => {
   });
 });
 
+/** The direction is part of the add request body, not a separate endpoint:
+ *  `"reverse": true` asks the server for an `ssh -R` forward (the remote
+ *  reaches this machine's port) instead of the default `ssh -L` (this machine
+ *  reaches the remote's port). The field is always sent, so a stale caller
+ *  cannot accidentally create a reverse forward by omitting it. */
+describe("port-forward add direction", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** The parsed JSON body of the add request. */
+  function addBody(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    return JSON.parse(String(init.body)) as Record<string, unknown>;
+  }
+
+  it("sends reverse:false for a default (forward) add", async () => {
+    const fetchMock = stubFetch();
+    await api.addPortMap(3510, 3510, TARGET);
+
+    expect(addBody(fetchMock)).toEqual({
+      remote_port: 3510,
+      local_port: 3510,
+      reverse: false,
+    });
+  });
+
+  it("sends reverse:true for a reverse add", async () => {
+    const fetchMock = stubFetch();
+    await api.addPortMap(9222, 9333, TARGET, true);
+
+    expect(addBody(fetchMock)).toEqual({
+      remote_port: 9222,
+      local_port: 9333,
+      reverse: true,
+    });
+  });
+
+  it("keeps the target query on a reverse add", async () => {
+    const fetchMock = stubFetch();
+    await api.addPortMap(9222, 9222, TARGET, true);
+
+    const url = requestedUrl(fetchMock);
+    expect(url.startsWith("/api/portmaps?")).toBe(true);
+    expect(queryParams(url)).toEqual({ host: TARGET.host, project: TARGET.path });
+  });
+});
+
 /** The Ports button is gated on this probe. It gates on "did the server give me
  *  a list?", so anything that is not a list must read as unavailable — otherwise
  *  the button renders and every action behind it fails. The 404/400 cases were

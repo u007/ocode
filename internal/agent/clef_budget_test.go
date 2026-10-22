@@ -108,6 +108,27 @@ func TestJudgePayloadBudgets(t *testing.T) {
 	permissionState := a.buildTypesafePermissionState("write", oversizedArgs, nil)
 	permissionQuestions := a.typesafePermissionQuestions()
 
+	// --- permission with opt-outs: the worst case, where all three questions are
+	// emitted (verdict, concern, and the enforced-only concern).
+	relaxedAgent := newTestAgent(nil, nil, &config.Config{}, nil)
+	setTestAutoPermissionConfig(relaxedAgent, func(cfg *config.AutoPermissionConfig) {
+		cfg.RelaxedConcerns = []string{"secrets"}
+	})
+	relaxedState := relaxedAgent.buildTypesafePermissionState("write", oversizedArgs, nil)
+	relaxedQuestions := relaxedAgent.typesafePermissionQuestions()
+	if len(relaxedQuestions) != 3 {
+		t.Fatalf("relaxed permission request emits %d questions, want 3 (verdict, concern, enforced_concern)", len(relaxedQuestions))
+	}
+	// The allow/deny rubric is sent with the verdict and with the concern question.
+	// The enforced-only question names concern categories and must not add a third copy.
+	rawQuestions, err := json.Marshal(relaxedQuestions)
+	if err != nil {
+		t.Fatalf("marshal relaxed questions: %v", err)
+	}
+	if n := strings.Count(string(rawQuestions), "You are a permission gatekeeper"); n != 2 {
+		t.Errorf("allow/deny rubric is sent %d times with relaxed concerns, want 2", n)
+	}
+
 	// --- content guard: a maximum chunk.
 	contentState := a.buildContentGuardState(&contentGuardSource{
 		Tool:  "bash",
@@ -135,6 +156,7 @@ func TestJudgePayloadBudgets(t *testing.T) {
 		{"code-search-relevance", searchState, searchQuestions, true, false},
 		{"doc-search-relevance", docSearchState, docSearchQuestions, true, false},
 		{"permission-oversized-write", permissionState, permissionQuestions, false, true},
+		{"permission-relaxed-oversized-write", relaxedState, relaxedQuestions, false, true},
 		{"content-guard-max-chunk", contentState, contentQuestions, false, false},
 		{"network-guard-long-url", networkState, networkQuestions, false, false},
 	}

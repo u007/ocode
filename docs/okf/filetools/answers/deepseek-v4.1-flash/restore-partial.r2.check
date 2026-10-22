@@ -1,0 +1,29 @@
+{
+ "task": "restore-partial",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 2,
+   "command": "set -e\ngit show HEAD:docs/api.md > /tmp/orig_api.md\ncmp /tmp/orig_api.md docs/api.md && echo \"docs/api.md byte-identical to HEAD\"\nrm /tmp/orig_api.md\necho \"--- status ---\"\ngit status --short\necho \"--- docs in diff? ---\"\nif git diff --name-only | rg '^docs/api\\.md$'; then echo \"UNEXPECTED: docs still modified\"; exit 1; else echo \"docs/api.md not modified relative to HEAD\"; fi\necho \"--- rename still"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "multi_file_edit",
+  "bash",
+  "bash",
+  "bash",
+  "edit",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

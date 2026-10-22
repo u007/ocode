@@ -1078,9 +1078,12 @@ func shellAssignmentWrite(tok string) (name, value string, ok bool) {
 
 // opaqueVariableWriterForms are commands that can write a variable without
 // looking like "name=value", so the allowlist above cannot see the write. A line
-// containing any of them loses every numeric proof it carries.
+// containing any of them loses every numeric proof it carries. printf is not
+// listed: it writes a variable only as `printf -v`, see isPrintfVarWrite. echo
+// is not listed either: it has no way to write a variable (an assignment inside
+// its argument is caught by hasEmbeddedAssignment and the `$((` check).
 var opaqueVariableWriterForms = []string{
-	"eval", "read", "printf", "echo", "let", "declare", "typeset",
+	"eval", "read", "let", "declare", "typeset",
 	"export", "readonly", "getopts", "mapfile", "readarray", "unset", "coproc",
 }
 
@@ -1091,7 +1094,10 @@ var opaqueVariableWriterForms = []string{
 // trying to decide which variable was affected.
 func hasOpaqueVariableWriter(tokens, envVars []string) bool {
 	for _, group := range [][]string{tokens, envVars} {
-		for _, tok := range group {
+		for i, tok := range group {
+			if isPrintfVarWrite(group, i) {
+				return true
+			}
 			// Arithmetic contexts: ((p=8080)) and $((p=8080)).
 			if strings.HasPrefix(tok, "((") || strings.Contains(tok, "$((") {
 				return true
@@ -1116,6 +1122,22 @@ func hasOpaqueVariableWriter(tokens, envVars []string) bool {
 		}
 	}
 	return false
+}
+
+// isPrintfVarWrite reports whether group[i] is a printf whose next word is the
+// -v option, which assigns the formatted output to a variable. A plain printf
+// (`printf "port %s: " "$p"`) writes only to stdout.
+func isPrintfVarWrite(group []string, i int) bool {
+	if i+1 >= len(group) || stripShellQuoting(group[i]) != "printf" {
+		return false
+	}
+	return strings.HasPrefix(stripShellQuoting(group[i+1]), "-v")
+}
+
+// stripShellQuoting drops the quote and backslash characters bash removes from
+// a word, so 'printf', "printf" and p\rintf all compare equal to printf.
+func stripShellQuoting(tok string) string {
+	return strings.NewReplacer(`'`, "", `"`, "", `\`, "").Replace(tok)
 }
 
 // compoundAssignOps are the bash operators that mutate a variable in place:

@@ -9,6 +9,7 @@ import {
   popLastQueued,
   unshiftQueued,
   rekeyQueue,
+  restoreQueuedFrom,
   clearQueue,
   QUEUE_CHANGED_EVENT,
   dispatchQueueChanged,
@@ -179,5 +180,83 @@ describe("tabQueue", () => {
     } finally {
       window.removeEventListener(QUEUE_CHANGED_EVENT, handler);
     }
+  });
+
+  // --- restoreQueuedFrom (click-to-restore in the composer queue strip) ---
+
+  it("restores the first queued item and everything after it", () => {
+    const first = msg("first");
+    pushQueued("r1", first);
+    pushQueued("r1", msg("second"));
+    pushQueued("r1", msg("third"));
+    expect(restoreQueuedFrom("r1", first, "")).toEqual({
+      value: "first\nsecond\nthird",
+      draftStart: "first\nsecond\nthird".length,
+    });
+    expect(getQueue("r1")).toEqual([]);
+    clearQueue("r1");
+  });
+
+  it("restores from a middle item and leaves the earlier items queued", () => {
+    const first = msg("first");
+    const second = msg("second");
+    pushQueued("r2", first);
+    pushQueued("r2", second);
+    pushQueued("r2", msg("third"));
+    // A non-empty draft stays a suffix so nothing the user typed is clobbered.
+    const merged = restoreQueuedFrom("r2", second, "my draft");
+    expect(merged?.value).toBe("second\nthird\nmy draft");
+    expect(merged?.draftStart).toBe("second\nthird".length + 1);
+    expect(getQueue("r2")).toEqual([first]);
+    clearQueue("r2");
+  });
+
+  it("restores only the last item when it is clicked", () => {
+    const first = msg("first");
+    const last = msg("last");
+    pushQueued("r3", first);
+    pushQueued("r3", last);
+    expect(restoreQueuedFrom("r3", last, "")?.value).toBe("last");
+    expect(getQueue("r3")).toEqual([first]);
+    clearQueue("r3");
+  });
+
+  it("leaves commands queued instead of inlining them into prose", () => {
+    const first = msg("before");
+    const compact = cmd("/compact");
+    const last = msg("after");
+    pushQueued("r4", first);
+    pushQueued("r4", compact);
+    pushQueued("r4", last);
+    // Restoring from the first message pulls back the messages but keeps the
+    // command queued so it still auto-drains as a command.
+    expect(restoreQueuedFrom("r4", first, "")?.value).toBe("before\nafter");
+    expect(getQueue("r4")).toEqual([compact]);
+    clearQueue("r4");
+  });
+
+  it("does nothing when the clicked suffix has no messages", () => {
+    const compact = cmd("/compact");
+    pushQueued("r5", compact);
+    expect(restoreQueuedFrom("r5", compact, "draft")).toBeNull();
+    expect(getQueue("r5")).toEqual([compact]);
+    clearQueue("r5");
+  });
+
+  it("is a no-op for an item that is no longer queued (stale click)", () => {
+    const stale = msg("already drained");
+    const live = msg("still queued");
+    pushQueued("r6", live);
+    expect(restoreQueuedFrom("r6", stale, "")).toBeNull();
+    expect(getQueue("r6")).toEqual([live]);
+    clearQueue("r6");
+  });
+
+  it("restores dispatched messages, matching the up-arrow recall", () => {
+    const live = { kind: "message" as const, text: "in flight", dispatched: true };
+    pushQueued("r7", live);
+    expect(restoreQueuedFrom("r7", live, "")?.value).toBe("in flight");
+    expect(getQueue("r7")).toEqual([]);
+    clearQueue("r7");
   });
 });

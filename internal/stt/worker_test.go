@@ -258,13 +258,40 @@ func TestWorkerIdleTimeoutStopsWorker(t *testing.T) {
 	}
 	// Pretend the worker has been idle well past the timeout.
 	w.touch()
-	w.mu.Lock()
-	w.lastUse = time.Now().Add(-2 * workerIdleTimeout)
-	w.mu.Unlock()
+	w.lastUse.Store(time.Now().Add(-2 * workerIdleTimeout).UnixNano())
 	releaseWorker(w)
 
 	if workerPID() != 0 {
 		t.Fatal("an idle worker was kept alive past the timeout")
+	}
+}
+
+// TestWorkerIdleTimerUnloadsWithoutFurtherRequests proves an unused worker is
+// unloaded by the timer, not only when a later request is released.
+func TestWorkerIdleTimerUnloadsWithoutFurtherRequests(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls.log")
+	py := fakeWorkerPython(t, log, fakeWorkerOptions{})
+	stopActiveWorker()
+	t.Cleanup(stopActiveWorker)
+
+	key := workerKey{upstream: "m", repo: "r", modelDir: t.TempDir(), provider: workerProvider}
+	w, err := acquireWorker(context.Background(), key, []string{py})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Idle for all but 50 ms of the timeout, then released: the timer must fire.
+	w.lastUse.Store(time.Now().Add(-workerIdleTimeout + 50*time.Millisecond).UnixNano())
+	releaseWorker(w)
+	if workerPID() == 0 {
+		t.Fatal("worker stopped before the idle timeout elapsed")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for workerPID() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("idle timer never unloaded the worker")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -444,5 +471,54 @@ func TestWorkerWorkingDirectoryIsNeverTheCallersDirectory(t *testing.T) {
 	defer releaseWorker(w)
 	if w.cmd.Dir != modelDir {
 		t.Fatalf("working directory = %q, want the model directory %q", w.cmd.Dir, modelDir)
+	}
+}
+
+// TestIdleTimerDoesNotMakePreviewBusy proves the idle timer never takes the
+// request lock. An idle worker must answer every live preview: a timer that
+// briefly held the lock made recognizeIfIdle return ErrWorkerBusy while the
+// worker was idle.
+func TestIdleTimerDoesNotMakePreviewBusy(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls.log")
+	py := fakeWorkerPython(t, log, fakeWorkerOptions{})
+	stopActiveWorker()
+	t.Cleanup(stopActiveWorker)
+
+	key := workerKey{upstream: "m", repo: "r", modelDir: t.TempDir(), provider: workerProvider}
+	w, err := acquireWorker(context.Background(), key, []string{py})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	releaseWorker(w)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				unloadIfIdle(w)
+				time.Sleep(50 * time.Microsecond)
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if _, err := w.recognizeIfIdle(context.Background(), "/tmp/clip.wav"); errors.Is(err, ErrWorkerBusy) {
+			close(stop)
+			<-done
+			t.Fatalf("preview %d refused as busy while the worker was idle", i)
+		} else if err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("preview %d: %v", i, err)
+		}
+	}
+	close(stop)
+	<-done
+	if workerPID() == 0 {
+		t.Fatal("worker was unloaded by the timer although it was not idle for the timeout")
 	}
 }

@@ -31,6 +31,11 @@ const hoisted = vi.hoisted(() => {
         ? ["anthropic/claude-a", "openai/gpt-b", m]
         : ["anthropic/claude-a"],
     })),
+    removeModelRecent: vi.fn(async (m: string) => ({
+      model: m,
+      recent: false,
+      recents: [],
+    })),
     setConfigModel: vi.fn(async () => ({})),
     setSmallModel: vi.fn(async () => ({})),
     setAdvisorFull: vi.fn(async () => ({})),
@@ -723,5 +728,44 @@ describe("ModelDialog all-providers toggle", () => {
     );
     expect(screen.getByLabelText("Show all providers")).not.toBeChecked();
     expect(screen.queryByText("only-unconfigured")).toBeNull();
+  });
+});
+
+describe("ModelDialog recents context menu", () => {
+  it("removes a recently used model via right-click → Remove from recently used", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    // Right-click the recents row to open the context menu.
+    const row = document.querySelector<HTMLElement>('[data-list-nav-id="recents:anthropic/claude-a"]');
+    expect(row).not.toBeNull();
+    fireEvent.contextMenu(row!);
+
+    const menuItem = screen.getByRole("menuitem", { name: "Remove from recently used" });
+    expect(menuItem).toBeInTheDocument();
+    fireEvent.click(menuItem);
+
+    await waitFor(() =>
+      expect(hoisted.api.removeModelRecent).toHaveBeenCalledWith("anthropic/claude-a"),
+    );
+
+    // The optimistic removal drops the row from the section immediately; the
+    // resync from the endpoint confirms it.
+    await waitFor(() => expect(screen.queryByText("Recently Used")).toBeNull());
+    expect(screen.getByText("★ Favorites")).toBeInTheDocument();
+    expect(screen.getByText("anthropic/claude-a")).toBeInTheDocument();
+  });
+
+  it("does not offer Remove from recently used on non-recents rows", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    // gpt-c lives in the openai provider group, not recents.
+    const row = document.querySelector<HTMLElement>('[data-list-nav-id="openai:openai/gpt-c"]');
+    expect(row).not.toBeNull();
+    fireEvent.contextMenu(row!);
+
+    expect(screen.queryByRole("menuitem", { name: "Remove from recently used" })).toBeNull();
+    expect(hoisted.api.removeModelRecent).not.toHaveBeenCalled();
   });
 });

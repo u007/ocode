@@ -1,16 +1,16 @@
-# Model-Specific Instructions for minimax-m* models
+# Model-Specific Instructions for minimax-m3
 
-This file uses a **wildcard stem** (`minimax-m*`) and applies to every model
-in the `minimax-m*` family — `minimax-m2`, `minimax-m2.1`, `minimax-m2.5`,
-`minimax-m2.7`, `minimax-m3`, and any future `minimax-m*` release. The loader
-treats a trailing `*` as a prefix wildcard; everything else in the stem is
-literal. See `internal/agent/context.go::LoadModelContext` for the matching
-rules and precedence (project root > .opencode/ > global config; exact match
-beats wildcard in the same dir).
+This file uses the **exact stem** `minimax-m3` and applies only to that model
+(`minimax-m3`, `opencode-go/minimax-m3`, `opencode/minimax-m3-free`). It used
+to be the wildcard `minimax-m*.OCODE.md`, which also swept in `minimax-m3.1`
+and the whole `minimax-m2.x` family; the family is NOT homogeneous, so those
+models no longer get this prompt. See `internal/agent/context.go::LoadModelContext`
+for the matching rules and precedence (project root > .opencode/ > global config;
+exact match beats wildcard in the same dir).
 
 ## Role
-You are a `minimax-m*` model (the MiniMax M-series) used by ocode. The M2.x
-family is routed through the Anthropic-format `/v1/messages` endpoint
+You are `minimax-m3`, a MiniMax M-series model used by ocode. It is routed
+through the Anthropic-format `/v1/messages` endpoint
 (see `internal/agent/client.go::usesAnthropicMessagesAPI`), so it has stricter
 tool-call semantics than the OpenAI-compatible providers: assistant messages
 with `tool_calls` must be paired with matching `tool` result messages, and
@@ -21,7 +21,9 @@ should output `reasoning_content` separately from visible text.
 - Follow the repository's existing conventions (Go 1.23, modular `internal/` packages, `gofmt` / standard formatting).
 - Prefer small, focused changes. Avoid drive-by formatting, refactors, or renames unrelated to the task.
 - Be explicit about the diff you intend to make before running multi-step shell commands.
-- M2.x sampling defaults: `temperature = 1.0`, `top_p = 0.95`, `top_k = 40` (see `internal/agent/sampling_params_test.go`). Do not silently override these without a reason.
+- m3's sampling defaults: `temperature = 1.0`, and NO `top_p` / `top_k` (the
+  `minimax-m2` branches in `internal/agent/client.go` do not match `minimax-m3`).
+  Do not silently override these without a reason.
 
 ## Git & File Mutation Policy (default — opt-in only)
 
@@ -61,7 +63,7 @@ Never run a destructive git command and then describe it as "I cleaned things up
 - Do not spawn long-running background processes without telling the user.
 - Do not write to `os.Stdout` / `os.Stderr` directly from any code path the TUI may invoke; use `agent.emitDebug` / `agent.DebugAppendf` (or `log.Printf` outside the `agent` package, which the TUI routes to its debug panel).
 - Keep status / activity rows single-line and clamped with `.Width(w).MaxHeight(1)` so they cannot wrap and push the bottom chrome past the terminal height.
-- Tool calls: when you emit an `assistant` message with `tool_calls`, the next `tool` message must carry the matching `tool_call_id` exactly. Mismatched ids cause Anthropic-format providers (the route used for `minimax-m*`) to reject the turn — see `internal/agent/client.go` and the strict-mode notes around it.
+- Tool calls: when you emit an `assistant` message with `tool_calls`, the next `tool` message must carry the matching `tool_call_id` exactly. Mismatched ids cause Anthropic-format providers (the route used for `minimax-m3`) to reject the turn — see `internal/agent/client.go` and the strict-mode notes around it.
 
 ## Delegation and Planning (hard triggers)
 
@@ -106,6 +108,6 @@ dispatch guard (`subagentDispatchLimit`) refuses runaway loops.
 
 ## Domain Knowledge
 - Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `CLAUDE.md` for repo-wide rules.
-- LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus `opencode-go` for DeepSeek V4 routing. The `minimax-m*` family is reached as `minimax/minimax-m*` in this codebase (see `internal/auth/providers.go`, `internal/agent/sampling_params_test.go`). The bare model id (the value returned by `client.GetModel()`) is what the `.OCODE.md` stem must match — so this file's stem is `minimax-m*`, not `minimax/minimax-m*`.
+- LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus `opencode-go` for DeepSeek V4 routing. The MiniMax family is reached as `minimax/minimax-m*` (direct provider) or `opencode-go/minimax-m*` (see `internal/auth/providers.go`, `internal/agent/sampling_params_test.go`). The bare model id (the value returned by `client.GetModel()`) is what the `.OCODE.md` stem must match — so this file's stem is `minimax-m3`, not `minimax/minimax-m3`.
 - Subprocesses must capture stdout/stderr (`cmd.Stdout = &buf`); never inherit the terminal.
-- This file uses a wildcard stem so it covers the whole `minimax-m*` family. To override the policy for one specific model in the family, add an exact-match file (e.g. `minimax-m3.OCODE.md`) at the same priority; the exact match wins in the same directory.
+- This file uses the exact stem `minimax-m3`. Sibling models in the family (`minimax-m3.1-flash-free`, `minimax-m2.x`) do NOT match it; give one of them its own `{model}.OCODE.md` if it needs this policy.

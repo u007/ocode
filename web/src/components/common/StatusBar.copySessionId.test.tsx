@@ -1,6 +1,21 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import StatusBar from "./StatusBar";
+
+// jsdom ships no matchMedia and StatusBar now reads the mobile breakpoint via
+// useIsMobile; default to the desktop answer (matches: false).
+beforeAll(() => {
+  window.matchMedia = ((media: string) => ({
+    matches: false,
+    media,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+});
 
 const copyTextToClipboard = vi.hoisted(() => vi.fn(async (_text: string) => true));
 vi.mock("../../lib/clipboard", () => ({ copyTextToClipboard }));

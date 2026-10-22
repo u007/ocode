@@ -11,13 +11,24 @@
 // It is evaluated with an indirect eval in the jsdom realm (vitest's jsdom
 // does not run appended <script> nodes, and the hooks must land on the same
 // window/document the test drives).
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import captureBundle from "../../../../internal/browse/capture.js?raw";
 
 const DOC_PATH = "/b/side:chat:abc/https/www.yahoo.com/";
 
 interface BrowseConfig {
   __OCODE_BROWSE__?: { stateKey: string; spaOrigin: string };
+}
+
+// The bundle wraps these prototype slots on every evaluation. A real page runs
+// it once per document, but this file evaluates it once per case in the same
+// jsdom realm, so the hooks would stack and reroute an already-routed URL a
+// second time. Capture the pristine slots here and restore them after each case.
+const scriptSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, "src");
+const linkHrefDesc = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, "href");
+const originalSetAttribute = Element.prototype.setAttribute;
+if (!scriptSrcDesc || !linkHrefDesc) {
+  throw new Error("jsdom is missing HTMLScriptElement.src or HTMLLinkElement.href");
 }
 
 function installCapture() {
@@ -34,6 +45,12 @@ describe("browse capture runtime URL hooks", () => {
     window.history.replaceState({}, "", "/");
     document.head.innerHTML = "";
     delete (window as unknown as BrowseConfig).__OCODE_BROWSE__;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(HTMLScriptElement.prototype, "src", scriptSrcDesc);
+    Object.defineProperty(HTMLLinkElement.prototype, "href", linkHrefDesc);
+    Element.prototype.setAttribute = originalSetAttribute;
   });
 
   it("reroutes a webpack-style runtime script.src chunk onto the /b/ route", () => {

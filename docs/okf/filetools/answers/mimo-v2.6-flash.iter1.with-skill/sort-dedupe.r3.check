@@ -1,0 +1,22 @@
+{
+ "task": "sort-dedupe",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "edit",
+  "bash",
+  "bash",
+  "replace_lines",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block appears 231 times; must be unique or set replace_all=true"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

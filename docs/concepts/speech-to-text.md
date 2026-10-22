@@ -9,9 +9,11 @@ is sent as the next message automatically. The model is chosen once in Settings
 `internal/stt/catalog.go` is the single list. It follows Handy's approach
 (github.com/cjpais/Handy): a fixed set of offline models, a default, and a
 per-model size and language note. Handy's own docs list Parakeet V3 as the
-default (about 478 MB, 25 European languages) and Parakeet V2 as the English-only
-option (about 473 MB). The catalog also carries two hosted OpenAI models, which
-need no local install.
+default (about 478 MB) and Parakeet V2 as the English-only
+option (about 473 MB). Parakeet V3 is English-only in practice despite upstream
+claims of multilingual support; if you need non-English dictation, use a hosted
+model (`gpt-4o-transcribe` or `whisper-1`) instead. The catalog also carries two
+hosted OpenAI models, which need no local install.
 
 | id | engine | runs on | needs |
 | --- | --- | --- | --- |
@@ -110,9 +112,16 @@ Rules:
 ## Capture
 
 - **Browser (web and desktop)**: `MediaRecorder` on `getUserMedia`. The blob is
-  uploaded to `POST /api/stt/transcribe`. The macOS `.app` needs
-  `NSMicrophoneUsageDescription` in the `Info.plist` written by
-  `scripts/bundle-macos.sh`; without it macOS denies the mic and `getUserMedia`
+  uploaded to `POST /api/stt/transcribe`. The mic button in the chat composer has
+  a dual interaction: a quick press-and-release starts recording (traditional click
+  to start, then click again to stop and send); holding the button past
+  `VOICE_HOLD_THRESHOLD_MS` (default 2000 ms) locks continuous mode, where release
+  does *not* stop the recording — the user clicks the button again (it reads as a
+  red stop square) to stop and submit the transcript. Keyboard users can press
+  Enter or Space the same way (keydown arms, keyup acts). The TUI keeps its
+  `ctrl+x v` toggle, since terminals do not reliably report key release.
+  The macOS `.app` needs `NSMicrophoneUsageDescription` in the `Info.plist` written
+  by `scripts/bundle-macos.sh`; without it macOS denies the mic and `getUserMedia`
   fails with `NotAllowedError` with no prompt. Wails v3 beta.12 has no darwin
   media-capture permission delegate (Linux does); if the prompt still does not
   appear after a rebuild, a `WKUIDelegate` handler is the next step (see TODO.md).
@@ -138,9 +147,12 @@ Config lives under the `stt` section of `ocodeconfig.json`
   (gated by `OCODE_STT_LIVE=<model dir>`) transcribe a spoken clip correctly.
   They are not run in CI because they need the models.
 - Parakeet Unified EN comes from `bobNight/parakeet-unified-en-0.6b-onnx`, a
-  third-party ONNX conversion of NVIDIA's model (CC-BY-4.0). The helper renames
-  its graph files, rebuilds its vocab from the SentencePiece tokenizer, and sets
-  the 128 mel-bin feature size, once per download (marked by `.ocode-ready`).
+  third-party ONNX conversion of NVIDIA's model (CC-BY-4.0). The shared
+  preparation in `internal/stt/stt_model_prep.py` renames its graph files,
+  rebuilds its vocab from the SentencePiece tokenizer, and sets the 128
+  mel-bin feature size, once per download (marked by `.ocode-ready`). It also
+  requires the int8 graph files and fails without them, so there is no fp32
+  fallback.
   The unified model is English-only and offline here; NVIDIA's streaming mode is
   not wired.
 - Remote (SSH/WSL) projects transcribe on whichever server the browser is

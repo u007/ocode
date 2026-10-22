@@ -1052,14 +1052,27 @@ func runBanCmd(m *model, args []string) tea.Cmd {
 	level := agent.PermissionDeny
 	msg := fmt.Sprintf("Banned bash command prefix %q.", prefix)
 	if action == "remove" {
-		level = agent.PermissionAsk
-		msg = fmt.Sprintf("Unbanned bash command prefix %q.", prefix)
+		// Unban is a DELETE, matching the Settings editor's Remove and
+		// config.DeleteBashPrefixRule. Downgrading to "ask" left an inert rule
+		// behind that outlived the ban and still appeared in /permissions.
+		pm.RemoveBashPrefixRule(prefix)
+		// A set queued earlier in this session for the same prefix is
+		// superseded; last write wins.
+		delete(m.permDirty.bashPrefixes, prefix)
+		if m.permDirty.bashPrefixRemovals == nil {
+			m.permDirty.bashPrefixRemovals = make(map[string]bool)
+		}
+		m.permDirty.bashPrefixRemovals[prefix] = true
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Removed bash rule for %q — it now follows the default policy.", prefix)})
+		return nil
 	}
 	if m.permDirty.bashPrefixes == nil {
 		m.permDirty.bashPrefixes = make(map[string]string)
 	}
 	pm.SetBashPrefixRule(prefix, level)
 	m.permDirty.bashPrefixes[prefix] = string(level)
+	delete(m.permDirty.bashPrefixRemovals, prefix)
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: msg})
 	return nil

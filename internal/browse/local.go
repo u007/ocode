@@ -91,7 +91,10 @@ func (s *Server) chooseLocalTransport(t target) *http.Transport {
 	return s.localTransport()
 }
 
-func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
+// basePath is the mount prefix the origin is served under ("" = root-mounted);
+// every root-relative path this handler emits (Location headers, rewritten
+// HTML/CSS URLs) is prefixed with it. See basepath.go.
+func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, basePath string) {
 	// Service workers are never allowed on the browse origin: a site-controlled
 	// worker would persist across restarts scoped to /b/.
 	if isServiceWorkerRequest(r) {
@@ -160,7 +163,7 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 						// guard/header stripping) instead of navigating the raw upstream
 						// URL directly. mapURL's /b/... output is an absolute-path
 						// reference, which Location accepts (RFC 9110 §10.2.2).
-						resp.Header.Set("Location", mapURL(resolved.String(), t, ""))
+						resp.Header.Set("Location", mapURL(resolved.String(), t, "", basePath))
 					}
 				}
 			}
@@ -189,7 +192,7 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 			// The terminal payload is decided after the body is read
 			// (dev-server HTML replaces the normal local event with an
 			// error-tagged one), so rewriteAndInjectResponse returns it.
-			term, err := s.rewriteAndInjectResponse(resp, t, isDocumentRequest(r))
+			term, err := s.rewriteAndInjectResponse(resp, t, isDocumentRequest(r), basePath)
 			if err != nil {
 				return err
 			}
@@ -254,7 +257,9 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target) {
 // devServerHTMLRe) — such pages cannot render through the proxy — and the
 // returned event carries DevServerNoticeError so the SPA can offer the
 // Chrome-mode fallback.
-func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc bool) (*NavEvent, error) {
+// basePath is the mount prefix the origin is served under ("" = root-mounted);
+// it is applied to every root-relative path this function emits. See basepath.go.
+func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc bool, basePath string) (*NavEvent, error) {
 	var reader io.Reader = resp.Body
 	gzipped := strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
 	if gzipped {
@@ -299,12 +304,12 @@ func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc b
 	}
 	// base "" = resolve relative URLs against the document target (see the
 	// rewriteHTML contract); the SPA origin is only for capture injection.
-	injected, rerr := rewriteHTML(raw, t, "")
+	injected, rerr := rewriteHTML(raw, t, "", basePath)
 	if rerr != nil {
 		s.log.Printf("browse local: rewriteHTML for %s: %v — serving unrewritten", resp.Request.URL, rerr)
 		injected = raw // fail open to raw HTML rather than blank page
 	}
-	injected = injectCapture(injected, t.StateKey, s.spaOriginFor(t.StateKey))
+	injected = injectCapture(injected, t.StateKey, s.spaOriginFor(t.StateKey), basePath)
 
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	// We always emit identity-encoded HTML after injection.

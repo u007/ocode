@@ -25,6 +25,9 @@ func TestRecapHeadroom_LowOccupancyUsesMainModel(t *testing.T) {
 // TestRecapHeadroom_HighOccupancyUsesRecapModel: near-full window with under 50k
 // headroom falls back to the configured recap model.
 func TestRecapHeadroom_HighOccupancyUsesRecapModel(t *testing.T) {
+	// The recap model is built through NewClient, which refuses to build a
+	// keyless client, so it needs a credential to exist.
+	t.Setenv("OPENAI_API_KEY", "test-openai-key")
 	main := &GenericClient{Provider: "openai", Model: "gpt-4o", APIKey: "k"}
 	cfg := &config.Config{Ocode: config.OcodeConfig{RecapModel: "openai/gpt-4o-mini"}}
 	a := &Agent{client: main, config: cfg}
@@ -45,6 +48,7 @@ func TestRecapHeadroom_HighOccupancyUsesRecapModel(t *testing.T) {
 // TestRecapHeadroom_UnknownWindowFallsBack: an unregistered model cannot prove
 // headroom, so the configured recap model is used.
 func TestRecapHeadroom_UnknownWindowFallsBack(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-openai-key")
 	main := &GenericClient{Provider: "openai", Model: "definitely-not-a-model", APIKey: "k"}
 	cfg := &config.Config{Ocode: config.OcodeConfig{RecapModel: "openai/gpt-4o-mini"}}
 	a := &Agent{client: main, config: cfg}

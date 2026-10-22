@@ -1,0 +1,44 @@
+{
+ "task": "try-and-restore",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "cp -p /tmp/engine.js.orig-backup src/engine.js && shasum -a 256 src/engine.js && echo \"--- expected ---\" && echo \"1dcd25e0a4ff05dcd22fc5f15e7969b5cf818f300c23c2a0e74406cb9cc97a10  original\" && echo \"--- git ---\" && git status --short && git diff --stat && cmp -s /tmp/engine.js.orig-backup src/engine.js && echo \"BYTE-IDENTICAL: yes\" && grep -n \"ROUNDING = \" src/engine.js"
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cp -p src/engine.js /tmp/engine.js.orig-backup && shasum -a 256 /tmp/engine.js.orig-backup src/engine.js"
+  },
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "node test/run.js; echo \"EXIT=$?\"; rm -f /tmp/engine.js.orig-backup; git status --short; echo \"clean-check-done\""
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "read",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "edit",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

@@ -96,7 +96,7 @@ Rules for any change that touches tools or the base prompt:
   (`runCompact`) clears the seen set because the injected blocks were never
   persisted and are gone with the splice.
 - **Per-model hard triggers belong in `{MODEL}.OCODE.md`, not in a shared
-  fragment.** A model-specific file (e.g. `minimax-m*.OCODE.md` in the project
+  fragment.** A model-specific file (e.g. `minimax-m3.OCODE.md` — renamed from the wildcard `minimax-m*.OCODE.md` on 2026-10-21; see the wildcard-vs-exact boundary note below) is injected as the `[ocode:model_context]` system message
   root) is injected as the `[ocode:model_context]` system message
   (`internal/agent/prompt.go`), so it sits in the cached prefix **for that
   model only** — it cannot change any other model's behaviour, and it does not

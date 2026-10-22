@@ -37,7 +37,7 @@ const mockAdd = vi.mocked(api.dbConnectAdd);
 const mockRows = vi.mocked(api.dbConnectRows);
 
 const SURFACE = "db-panel:session-1";
-const UNLOCKED = { connections: [{ name: "prod", driver: "postgres", unlocked: true }] };
+const UNLOCKED = { connections: [{ name: "prod", driver: "postgres", unlocked: true, fromEnv: false }] };
 
 // jsdom has no layout, so the panel's width is fed in through the observer it creates.
 type ResizeCallback = (entries: { contentRect: { width: number } }[]) => void;
@@ -90,7 +90,7 @@ describe("DBPanel", () => {
 
   it("keeps the master password out of the DOM after a successful unlock", async () => {
     mockList
-      .mockResolvedValueOnce({ connections: [{ name: "prod", driver: "postgres", unlocked: false }] })
+      .mockResolvedValueOnce({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] })
       .mockResolvedValueOnce(UNLOCKED);
     mockUnlock.mockResolvedValue({ unlocked: ["prod"] });
     mockTables.mockResolvedValue({ tables: ["users"], hasMore: false });
@@ -100,13 +100,13 @@ describe("DBPanel", () => {
     fireEvent.change(pw, { target: { value: "hunter2" } });
     fireEvent.click(screen.getByRole("button", { name: /Unlock/ }));
 
-    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(SURFACE, "hunter2"));
+    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(SURFACE, "hunter2", "session-1"));
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
     expect((screen.queryByLabelText("Master password") as HTMLInputElement | null)?.value ?? "").toBe("");
   });
 
   it("shows the server's unlock error verbatim and keeps the form", async () => {
-    mockList.mockResolvedValue({ connections: [{ name: "prod", driver: "postgres", unlocked: false }] });
+    mockList.mockResolvedValue({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] });
     mockUnlock.mockRejectedValue(new Error("master password does not open connection prod"));
 
     render(<DBPanel sessionId="session-1" />);
@@ -316,7 +316,7 @@ describe("DBPanel", () => {
   it("adds a connection with the password and selects it", async () => {
     mockList
       .mockResolvedValueOnce({ connections: [] })
-      .mockResolvedValueOnce({ connections: [{ name: "stage", driver: "postgres", unlocked: false }] });
+      .mockResolvedValueOnce({ connections: [{ name: "stage", driver: "postgres", unlocked: false, fromEnv: false }] });
     mockAdd.mockResolvedValue({ name: "stage" });
 
     render(<DBPanel sessionId="session-1" />);
@@ -329,7 +329,7 @@ describe("DBPanel", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
-    await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master"));
+    await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master", "session-1"));
     expect(await screen.findByLabelText("Master password")).toBeTruthy();
   });
 });

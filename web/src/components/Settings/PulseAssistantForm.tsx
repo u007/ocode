@@ -345,7 +345,7 @@ export default function PulseAssistantForm() {
 
       <div className="space-y-1.5">
         <label htmlFor="pulse-assistant-prompt" className="text-xs text-muted-foreground">
-          System prompt
+          Extra instructions
         </label>
         <textarea
           id="pulse-assistant-prompt"
@@ -359,6 +359,11 @@ export default function PulseAssistantForm() {
           placeholder="Empty uses the built-in prompt (see below)."
           className="min-h-[12lh] w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
+        <p className="text-xs text-muted-foreground">
+          These are appended to the built-in prompt, which keeps the tool list, the
+          per-line stop-report format and the activation-gate rules. Use them to
+          change how the assistant answers (length, tone), not to delete those rules.
+        </p>
         <div className="flex items-center gap-2">
           <Button size="sm" className="h-8 text-xs" disabled={busy || !dirty} onClick={() => void writePrompt(draft, "save")}>
             {pending === "save" ? "Saving…" : "Save"}
@@ -370,7 +375,7 @@ export default function PulseAssistantForm() {
             disabled={busy || (saved !== null && saved.prompt === "")}
             onClick={() => void writePrompt("", "reset")}
           >
-            {pending === "reset" ? "Resetting…" : "Reset to default"}
+            {pending === "reset" ? "Resetting…" : "Clear instructions"}
           </Button>
           {justSaved && (
             <span role="status" className="text-xs text-muted-foreground">
@@ -385,6 +390,17 @@ export default function PulseAssistantForm() {
             className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 font-mono text-xs text-foreground"
           >
             {saved ? saved.default : ""}
+          </pre>
+        </details>
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">
+            Show the full prompt the assistant receives
+          </summary>
+          <pre
+            data-testid="pulse-assistant-effective-prompt"
+            className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 font-mono text-xs text-foreground"
+          >
+            {saved ? saved.effective : ""}
           </pre>
         </details>
       </div>

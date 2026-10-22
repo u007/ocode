@@ -131,7 +131,7 @@ describe("PermissionDialog", () => {
   });
 
   it("hides always-tool for bash asks (TUI parity)", () => {
-    renderDialog({ scope: "bash_prefix", prefix: "rm" });
+    renderDialog({ scope: "bash_prefix", prefix: "rm", prefixCandidates: ["rm"] });
     expect(screen.queryByText("Always allow tool")).toBeNull();
     expect(screen.getByText("Always allow rule")).toBeTruthy();
   });
@@ -251,14 +251,34 @@ describe("PermissionDialog", () => {
 
   it("clears the always-allow confirm UI when requestId changes", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
+    // A bash ask only offers always-rule when it carries a real command prefix
+    // (a prefix-less bash ask would persist a blanket tool-level allow).
     const { rerender, unmount } = render(
-      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped
+        open={true}
+        tool="bash"
+        command="rm -rf build"
+        scope="bash_prefix"
+        prefix="rm"
+        prefixCandidates={["rm"]}
+        requestId="call-1"
+        onDecide={onDecide}
+      />,
     );
     fireEvent.click(screen.getByText("Always allow rule"));
     expect(screen.getByText("Confirm")).toBeTruthy();
     // Queue promotes the next permission — confirm state must clear.
     rerender(
-      <Scoped open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+      <Scoped
+        open={true}
+        tool="bash"
+        command="ls /tmp"
+        scope="bash_prefix"
+        prefix="ls"
+        prefixCandidates={["ls"]}
+        requestId="call-2"
+        onDecide={onDecide}
+      />,
     );
     expect(screen.queryByText("Confirm")).toBeNull();
     expect(screen.getByText("Allow once")).toBeTruthy();
@@ -347,7 +367,11 @@ describe("PermissionDialog", () => {
 
   it("keeps the confirmation explanation bounded and wrapped for long dynamic tokens", () => {
     const longPrefix = "very_long_command_name_with_no_spaces_".repeat(6);
-    const first = renderDialog({ scope: "bash_prefix", prefix: longPrefix });
+    const first = renderDialog({
+      scope: "bash_prefix",
+      prefix: longPrefix,
+      prefixCandidates: [longPrefix],
+    });
 
     // Always-rule confirmation step echoes the (unbreakable) bash prefix.
     fireEvent.click(screen.getByText("Always allow rule"));

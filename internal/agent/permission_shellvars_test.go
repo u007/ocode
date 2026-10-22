@@ -56,6 +56,27 @@ func TestExpandBashForJudgeResolvesGoEnvChain(t *testing.T) {
 	}
 }
 
+// $PWD in ocode's environment is the server's cwd, not the command's: it must
+// stay verbatim, never resolve to a path the command will not use.
+func TestExpandBashForJudgeLeavesPWDUnresolved(t *testing.T) {
+	stubJudgeExpansion(t, map[string]string{"PWD": "/srv/server-cwd", "OLDPWD": "/srv/old", "HOME": "/home/u"}, nil)
+	exp, ok := newExpansionAgent().expandBashForJudge(`cd sub && export L="-L$PWD/lib -L${OLDPWD}/x $HOME/y"`)
+	if !ok {
+		t.Fatal("expected HOME to expand")
+	}
+	if strings.Contains(exp.Command, "/srv/") {
+		t.Fatalf("PWD/OLDPWD resolved from the server environment: %s", exp.Command)
+	}
+	if !strings.Contains(exp.Command, "$PWD/lib") || !strings.Contains(exp.Command, "${OLDPWD}/x") || !strings.Contains(exp.Command, "/home/u/y") {
+		t.Fatalf("unexpected expansion: %s", exp.Command)
+	}
+	for _, v := range exp.Variables {
+		if v.Name == "PWD" || v.Name == "OLDPWD" {
+			t.Fatalf("PWD recorded as resolved: %+v", v)
+		}
+	}
+}
+
 // Only the fixed read-only allowlist ever runs; arbitrary substitutions,
 // including arbitrary python -c code, stay verbatim and unexecuted.
 func TestExpandBashForJudgeNeverRunsUnlistedSubstitutions(t *testing.T) {

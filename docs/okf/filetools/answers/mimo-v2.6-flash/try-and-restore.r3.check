@@ -1,0 +1,47 @@
+{
+ "task": "try-and-restore",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "cp /tmp/engine.js.orig.bak src/engine.js\nshasum -a 256 src/engine.js\ngit status --porcelain\ngit diff --stat\nnode test/run.js; echo \"EXIT=$?\"\ngrep -n \"export const ROUNDING\" src/engine.js"
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "shasum -a 256 src/engine.js; cp src/engine.js /tmp/engine.js.orig.bak; wc -c src/engine.js"
+  },
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "rm -f /tmp/engine.js.orig.bak; git status --porcelain && echo \"CLEAN\""
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "glob",
+  "glob",
+  "grep",
+  "read",
+  "list",
+  "bash",
+  "read",
+  "read",
+  "bash",
+  "bash",
+  "edit",
+  "edit",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"export const ROUNDING = 4;\". Re-issue this call once, with a single value for \"replace\""
+ ]
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

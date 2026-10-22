@@ -1,0 +1,20 @@
+{
+ "task": "reindent",
+ "score": 0.5,
+ "clean": true,
+ "outcome_ok": false,
+ "violations": [],
+ "warnings": [],
+ "problems": [
+  "legacy-style.js: not an exact 4->2 space re-indent"
+ ],
+ "tools": [
+  "read",
+  "write",
+  "bash",
+  "edit",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+WRONG-RESULT score=0.5 violations=0 problems=1

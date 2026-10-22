@@ -119,6 +119,8 @@ In `internal/tui`:
 5. Update the `lipgloss.Height(m.styles.Header.Render("◆ ocode  Foo"))` callsites — replace with `appHeaderHeight` (or add a `appHeaderHeight` alias for that tab) so a future header tweak still works.
 6. Add a foo sub-model with its own `View`, plus any click/selection fields.
 
+**Add an ACTION (not a decision) to the permission dialog:** the dialog's key handler funnels `y/n/a/t` into `permDialogInput`, and its **unknown-choice fallthrough answers the ask** — so an action key MUST be an explicit `case` before it (`case "e", "explain": return m.startPermDigest(), false`). Put the action's output in `m.permissionBodyText(width)` (the single body builder used by the viewport, the scroll indicator and the hit-test height) rather than rendering it under the button row, which would shift `buttonTopY` and break every click region. Register a clickable area in `updatePermButtonRegions`; prefer a one-line chip on the hint row (`buttonTopY+3`) over a fifth bordered button, which overflows narrow dialogs. `permButtonRegions` is generic, so a region with `choice: "e"` works for both click and hover. Async work goes in a `tea.Cmd` (never a bare goroutine) with a generation counter so a reply for a previous ask is dropped. Reset the action's state in `showPermAsk` (promotion), not on every incoming ask — a merely queued ask must not clear the current command's output. The digest feature is the worked example (`internal/tui/perm_digest_test.go`).
+
 **Add a new mouse-handled region:** follow the §5 selection recipe. Add a `selectionState` field, a `…ForClick(mouse)` and `…ContentTopY()` helper, and wire the press/motion/release paths in `handleMouseAction` / `handleMouseMotion` (and the `scrollbarDrag*` switch).
 
 **Add a new modal/popup:** use the component layer (`internal/tui/component_overlay.go`, `component_dialog.go`, `component_listbox.go`, `component_button.go`) as building blocks. Wire an adapter (e.g. `other_modals_adapter.go`, `picker_adapter.go`) and register with the `modalStack` (`modal_stack.go`). The `picker.go` and `slash_popup.go` follow this pattern.
@@ -138,7 +140,12 @@ In `internal/tui`:
 
 ### Tab sub-models
 - `internal/tui/files_model.go` — files tab View + click handlers.
-- `internal/tui/git_model.go` — git tab View + click handlers.
+- `internal/tui/git_model.go` — git tab View + click handlers. Pull/push/fetch report the
+  commit count on the status bar ("pulled 3 commits", "pushed 1 commit", "fetched 2
+  commits") or an explicit "nothing to pull" / "nothing to push" / "nothing fetched"
+  when nothing changed, computed from the ahead/behind delta before vs after the op;
+  errors keep the "<op> failed: …" label so they stay sticky and surface as OS
+  notifications.
 - `internal/tui/changes_model.go` — changes tab View + diff rendering.
 - `internal/tui/detail_view.go` — recursive agent/tool drill-in stack (`detailView`, `detailStack`, own `sel`).
 

@@ -1,0 +1,37 @@
+{
+ "task": "restore-partial",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "list",
+  "read",
+  "read",
+  "multi_file_edit",
+  "multi_file_edit",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "multi_file_edit",
+  "grep",
+  "grep",
+  "read",
+  "read",
+  "bash",
+  "bash",
+  "edit",
+  "bash",
+  "grep"
+ ],
+ "file_tool_errors": [
+  "Error: edit 1: missing required field(s); each edit needs path, search, replace \u2014 got oldString/newString, which is the multiedit shape (top-level file_path). Retry multi_file_edit with path/search/re",
+  "Error: search block not found in src/api/admin.js"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

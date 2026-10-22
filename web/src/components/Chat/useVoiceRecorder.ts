@@ -17,6 +17,9 @@ export const VOICE_NOTHING_HEARD_MESSAGE = "Nothing was heard. Try again.";
 export const VOICE_TIMESLICE_MS = 1000;
 /** How often a live partial transcript is requested while recording. */
 export const VOICE_PARTIAL_INTERVAL_MS = 3000;
+/** How long a press must be held before recording locks into continuous mode:
+ *  release won't stop it; the user clicks the stop button to stop & send. */
+export const VOICE_HOLD_THRESHOLD_MS = 2000;
 
 /** Preferred recording formats, first supported one wins. Anything else falls
  *  back to the browser default (no mimeType passed to MediaRecorder). */
@@ -92,14 +95,30 @@ export interface VoiceRecorder {
   state: VoiceState;
   /** Live preview of the recording so far. Display only: never sent, never put in the draft. */
   partialText: string;
+  /** True while the user is holding the button but the hold threshold hasn't
+   *  fired yet (visual "press to lock" cue). */
+  holding: boolean;
   error: string | null;
+  /** Starts when idle, stops when recording, does nothing while transcribing. */
   start: () => Promise<void>;
   /** Stops the recording and transcribes it. No-op unless recording. */
   stop: () => void;
   /** Stops the recording and discards the clip: no transcription, back to idle. */
   cancel: () => void;
-  /** Starts when idle, stops when recording, does nothing while transcribing. */
-  toggle: () => void;
+  /** Call on press (mousedown/keydown): arms the hold threshold when idle,
+   *  or records a stop-intent press when already recording. */
+  press: () => void;
+  /** Call on release (mouseup/keyup): a quick press starts recording; a held
+   *  press locks continuous mode (release does nothing); a press while
+   *  recording stops & sends. */
+  release: () => void;
+  /** Clears an armed hold timer without starting anything (pointer left the
+   *  button while holding). */
+  cancelPress: () => void;
+  /** Clears the last error notice. The composer renders it as a dismissible
+   *  banner, so a stale failure (mic denied, transcription failed, nothing
+   *  heard) can be closed without starting another recording. */
+  dismissError: () => void;
 }
 
 export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorder {
@@ -125,6 +144,17 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   // Bumped whenever a recording ends or restarts; a partial result that
   // captured an older epoch is dropped.
   const partialEpochRef = useRef(0);
+  // True while the user is holding the mic button but the hold threshold has
+  // not fired yet: used for a subtle visual "press to lock" cue.
+  const [holding, setHolding] = useState(false);
+  // Armed on press; fires start() after VOICE_HOLD_THRESHOLD_MS. Cleared on
+  // release (quick click) or if the pointer leaves the button.
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True when the user has pressed the button again since the current
+  // recording started. release() only stops when this is set, so the immediate
+  // release that ends a hold-press (which starts continuous mode) does not
+  // stop the recording — only a deliberate subsequent click does.
+  const pressSinceStartRef = useRef(false);
   // Set once canPreview confirms a local engine for the current recording.
   const partialAllowedRef = useRef(false);
   const canPreviewRef = useRef(options.canPreview);
@@ -151,6 +181,10 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   const report = useCallback((message: string | null) => {
     if (mountedRef.current) setError(message);
   }, []);
+
+  /** The composer's dismiss affordance. The hook owns the state, so the
+   *  component never needs a local copy that could outlive a newer failure. */
+  const dismissError = useCallback(() => report(null), [report]);
 
   const setPartial = useCallback((text: string) => {
     if (mountedRef.current) setPartialTextState(text);
@@ -245,6 +279,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       return;
     }
     streamRef.current = stream;
+    setHolding(false);
+    pressSinceStartRef.current = false; // fresh recording: no stop-intent press yet
 
     const mimeType = pickRecordingMimeType();
     let recorder: MediaRecorder;
@@ -320,6 +356,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
 
   const stop = useCallback(() => {
     if (stateRef.current !== "recording") return;
+    pressSinceStartRef.current = false; // stopped: no press pending for the next release
     stopPartials();
     const recorder = recorderRef.current;
     if (!recorder) {
@@ -347,15 +384,75 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     // The prewarm was only for this recording: stop a load still in progress
     // rather than leaving ~2 GB resident for a clip nobody will transcribe.
     void cancelPrewarmRef.current?.().catch(() => undefined);
+    pressSinceStartRef.current = false;
     setPartial("");
     setPhase("idle");
   }, [setPhase, stopPartials]);
 
+  /** Arms the hold timer: call on press (pointerdown/keydown) when idle. */
+  const press = useCallback(() => {
+    // A press while already recording is the user's stop gesture: remember it
+    // so the following release stops & sends (rather than being read as the
+    // release that ends a hold-press).
+    if (stateRef.current === "recording") {
+      pressSinceStartRef.current = true;
+      return;
+    }
+    if (stateRef.current !== "idle") return;
+    // CLEAR any previously armed timer before arming a new one.
+    //
+    // A browser repeats keydown while a key is held (keydown → keydown with
+    // repeat=true → …), and the keydown handler calls press() on EVERY
+    // keydown. Each call armed a NEW timer and overwrote the ref, so only the
+    // LAST timer could be cleared by release() — the earlier ones were
+    // orphaned and fired later, starting a SECOND recording with no user
+    // action. The orphan also reset pressSinceStartRef, wiping a legitimate
+    // stop-intent so the recording was never transcribed.
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    holdTimerRef.current = setTimeout(() => {
+      holdTimerRef.current = null;
+      // NOTE: the stop-intent is a USER signal. It is cleared by stop()/cancel()
+      // and by the start of a fresh recording, never by this timer — clearing
+      // it here would cancel a deliberate stop-press that arrived while the
+      // hold timer was running.
+      setHolding(false);
+      void start();
+    }, VOICE_HOLD_THRESHOLD_MS);
+    setHolding(true);
+  }, [start]);
 
-  const toggle = useCallback(() => {
-    if (stateRef.current === "idle") void start();
-    else if (stateRef.current === "recording") stop();
+  /** Call on release (pointerup/keyup). A quick release starts a normal
+   *  recording; a held press already started continuous mode, so release does
+   *  nothing. A release while recording (no timer armed) stops & sends. */
+  const release = useCallback(() => {
+    const timer = holdTimerRef.current;
+    if (timer) {
+      clearTimeout(timer);
+      holdTimerRef.current = null;
+      setHolding(false);
+      if (stateRef.current === "idle") {
+        void start();
+      }
+      return;
+    }
+    setHolding(false);
+    if (stateRef.current === "recording" && pressSinceStartRef.current) {
+      void stop();
+    }
   }, [start, stop]);
+
+  /** Clears an armed hold timer without starting anything (pointer left the
+   *  button while holding). */
+  const cancelPress = useCallback(() => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    setHolding(false);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -364,6 +461,17 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       mountedRef.current = false;
       discardRef.current = true;
       cancelStartRef.current = true;
+      // CLEAR the hold timer on unmount. Without this, a component that
+      // unmounted while the hold timer was armed (the user closed the tab,
+      // switched sessions, or the composer was unmounted mid-hold) still had
+      // the timer pending: it fired after the unmount and called start(),
+      // which asked for the microphone and started a recording with no UI and
+      // no way to stop it. The mic indicator stayed lit because nothing
+      // released the stream.
+      if (holdTimerRef.current) {
+        clearTimeout(holdTimerRef.current);
+        holdTimerRef.current = null;
+      }
       stopPartials();
       const recorder = recorderRef.current;
       recorderRef.current = null;
@@ -379,5 +487,5 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     };
   }, [releaseStream, stopPartials]);
 
-  return { supported, state, partialText, error, start, stop, cancel, toggle };
+  return { supported, state, partialText, error, holding, start, stop, cancel, press, release, cancelPress, dismissError };
 }

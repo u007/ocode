@@ -15,7 +15,7 @@ import {
   type DBTableSchema,
 } from "../../api/client";
 import { ConfirmDialog, RowEditorDialog } from "../Preview/SQLiteDialogs";
-import { ResultGrid } from "../Preview/SQLiteViewer";
+import { ResultGrid } from "../Preview/SQLiteResultGrid";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { pgInputToCell, toCell } from "./dbConnectCells";

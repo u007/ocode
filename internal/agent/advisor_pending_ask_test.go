@@ -124,7 +124,7 @@ func TestAdvisorCheckpointsFireOnceAsksResolved(t *testing.T) {
 func TestAdvisorCheckpointSkipsDoNotConsumeTheCheckpoint(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
-	st := a.newAdvisorCheckpointState("fix the build", true)
+	st := a.newAdvisorCheckpointState("fix the build", true, false)
 
 	resp := &Message{
 		Role:      "assistant",

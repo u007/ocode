@@ -54,13 +54,7 @@ func (h *Handler) dispatchAskContinuation(sessionID string, as *agentSession, fn
 		// in-flight count, release the shutdown join.
 		defer h.turnJobsWG.Done()
 		defer func() {
-			h.cancelMu.Lock()
-			if n := h.turnInFlight[sessionID] - 1; n <= 0 {
-				delete(h.turnInFlight, sessionID)
-			} else {
-				h.turnInFlight[sessionID] = n
-			}
-			h.cancelMu.Unlock()
+			h.releaseTurnInFlight(sessionID)
 		}()
 		defer func() {
 			if r := recover(); r != nil {

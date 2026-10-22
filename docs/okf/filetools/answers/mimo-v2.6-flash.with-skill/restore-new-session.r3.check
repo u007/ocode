@@ -1,0 +1,21 @@
+{
+ "task": "restore-new-session",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "multi_file_edit",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

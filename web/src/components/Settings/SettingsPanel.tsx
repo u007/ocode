@@ -33,6 +33,7 @@ import TTSForm from "./TTSForm";
 import SttForm from "./SttForm";
 import ChatDisplayForm from "./ChatDisplayForm";
 import QuickActionsForm from "./QuickActionsForm";
+import SkillsForm from "./SkillsForm";
 import ConnectorsForm from "./ConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
@@ -70,6 +71,7 @@ export type SettingsGroupId =
   | "features"
   | "auto-share"
   | "plugins"
+  | "skills"
   | "theme"
   | "opencode-mcp"
   | "opencode-plugins"
@@ -113,6 +115,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "features", label: "Features" },
   { id: "auto-share", label: "Auto Share" },
   { id: "plugins", label: "Plugins & Local Models" },
+  { id: "skills", label: "Skills" },
   { id: "theme", label: "Theme" },
 ];
 
@@ -195,6 +198,8 @@ function renderGroup(id: SettingsGroupId) {
       return <ImageGenForm />;
     case "plugins":
       return <OcodePluginsForm />;
+    case "skills":
+      return <SkillsForm />;
     case "theme":
       return <ThemeForm />;
     case "opencode-mcp":

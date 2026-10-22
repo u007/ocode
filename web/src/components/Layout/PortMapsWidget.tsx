@@ -49,6 +49,11 @@ export default function PortMapsWidget() {
   const [error, setError] = useState("");
   const [remotePort, setRemotePort] = useState("");
   const [localPort, setLocalPort] = useState("");
+  // Direction of the NEXT forward to add. false = -L (this machine reaches the
+  // remote's port); true = -R (the remote reaches this machine's port).
+  // The server owns the truth once a row exists (the row carries its own
+  // direction), so this only describes the row being composed.
+  const [reverse, setReverse] = useState(false);
   const [busy, setBusy] = useState(false);
   // Bounded re-fetch budget for the background auto-start; reset whenever the
   // dialog opens or the project changes, so each open gets a fresh budget.
@@ -115,10 +120,15 @@ export default function PortMapsWidget() {
     setBusy(true);
     setError("");
     try {
-      const updated = await api.addPortMap(rp, lp, targetRef.current);
+      const updated = await api.addPortMap(rp, lp, targetRef.current, reverse);
       setMaps(updated);
       setRemotePort("");
       setLocalPort("");
+      // Reset the direction too: a second forward is almost always the same
+      // shape as the first, but leaving a reverse box ticked would silently
+      // invert the next add, which is the one mistake here that can expose a
+      // local port to the remote host.
+      setReverse(false);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -174,33 +184,70 @@ export default function PortMapsWidget() {
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleAdd} className="flex items-end gap-2">
-            <div className="flex-1 space-y-1">
-              <label className="text-xs text-muted-foreground">Remote port</label>
-              <Input
-                type="number"
-                min={1}
-                max={65535}
-                value={remotePort}
-                onChange={(e) => setRemotePort(e.target.value)}
-                placeholder="3000"
-                autoFocus
-              />
+          <form onSubmit={handleAdd} className="space-y-2">
+            <div className="flex items-end gap-2">
+              <div className="flex-1 space-y-1">
+                <label className="text-xs text-muted-foreground">Remote port</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={remotePort}
+                  onChange={(e) => setRemotePort(e.target.value)}
+                  placeholder="3000"
+                  autoFocus
+                />
+              </div>
+              <div className="flex-1 space-y-1">
+                <label className="text-xs text-muted-foreground">Local port (optional)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={localPort}
+                  onChange={(e) => setLocalPort(e.target.value)}
+                  placeholder={remotePort || "same"}
+                />
+              </div>
+              <Button type="submit" disabled={busy || !remotePort} size="icon" title="Add">
+                <Plus className="w-4 h-4" />
+              </Button>
             </div>
-            <div className="flex-1 space-y-1">
-              <label className="text-xs text-muted-foreground">Local port (optional)</label>
-              <Input
-                type="number"
-                min={1}
-                max={65535}
-                value={localPort}
-                onChange={(e) => setLocalPort(e.target.value)}
-                placeholder={remotePort || "same"}
+
+            {/* Direction. The port NUMBERS keep their meaning in both
+                directions — "remote port" is always the port on the remote
+                host, "local port" always the port on this machine — so only
+                the arrow between them flips. */}
+            <label className="flex items-start gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={reverse}
+                onChange={(e) => setReverse(e.target.checked)}
+                data-testid="portmap-reverse-toggle"
               />
-            </div>
-            <Button type="submit" disabled={busy || !remotePort} size="icon" title="Add">
-              <Plus className="w-4 h-4" />
-            </Button>
+              <span>
+                Reverse
+                <span className="block mt-0.5 text-[11px] text-muted-foreground/80">
+                  {reverse
+                    ? "The remote host reaches this machine's local port (ssh -R). Leave off to reach the remote's port instead (ssh -L)."
+                    : "This machine reaches the remote host's port (ssh -L). Tick to expose a local port to the remote instead (ssh -R)."}
+                </span>
+              </span>
+            </label>
+
+            {reverse && (
+              <p
+                role="alert"
+                className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200"
+                data-testid="portmap-reverse-warning"
+              >
+                Anything that can reach the remote host's loopback can then reach
+                this machine's local port. A debugging port such as 9222 (Chrome
+                CDP) hands over full control of the browser — remove the forward
+                when you are done.
+              </p>
+            )}
           </form>
 
           {error && <p className="text-sm text-destructive">{error}</p>}
@@ -216,7 +263,7 @@ export default function PortMapsWidget() {
               >
                 <span className="flex-1 text-sm font-mono">
                   {m.reverse
-                    ? `remote:${m.remote_port} ← localhost:${m.local_port} (reverse)`
+                    ? `remote:${m.remote_port} → localhost:${m.local_port} (reverse)`
                     : `localhost:${m.local_port} → remote:${m.remote_port}`}
                 </span>
                 <span

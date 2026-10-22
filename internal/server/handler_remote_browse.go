@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/u007/ocode/internal/browse"
 )
 
 // handleRemoteBrowseConfig answers /api/browse/config?host=<remote> with the
@@ -109,12 +111,30 @@ func (s *Server) handleRemoteBrowseProxy(w http.ResponseWriter, r *http.Request,
 		if req.URL.RawPath != "" {
 			req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, prefix)
 		}
+		// Tell the origin under which path prefix it is mounted. The origin
+		// runs on the host and cannot know this local mount path, but it
+		// emits ROOT-RELATIVE absolute paths (the grant-redemption redirect,
+		// the cookie path, the rewritten HTML/CSS URLs, the capture script).
+		// Without this header those paths resolve against the PROXY's root and
+		// land on the wrong origin — this machine's browse origin instead of
+		// the host's — which fails the panel with a blank page and a
+		// permanent 401. See internal/browse/basepath.go.
+		req.Header.Set(browse.BasePathHeader, prefix)
 	}
+	// A host running an OLD ocode does not know its mount prefix, so it
+	// emits an unprefixed cookie Path ("/b/"). Rewrite it here as a
+	// compatibility net. A NEW host already emits the prefixed path, and
+	// this rewrite is a no-op for it (the prefix is not "Path=/b/").
+	//
+	// The Location header and the rewritten body paths are NOT fixed here:
+	// they are produced by the origin, and only the origin knows the prefix.
+	// An old host therefore keeps the broken redirect — the version banner
+	// prompts the user to update the remote server.
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		cookies := resp.Header.Values("Set-Cookie")
 		resp.Header.Del("Set-Cookie")
 		for _, c := range cookies {
-			c = strings.Replace(c, "Path=/b/", "Path=/api/remote/"+host+"/browse/b/", 1)
+			c = strings.Replace(c, "Path=/b/", "Path="+prefix+"/b/", 1)
 			resp.Header.Add("Set-Cookie", c)
 		}
 		return nil

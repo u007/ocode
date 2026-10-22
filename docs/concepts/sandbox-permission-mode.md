@@ -28,6 +28,10 @@ The `sandbox` permission mode is the fourth mode alongside `normal`, `yolo`, and
 - `locked` — read-only; all writes blocked
 - `sandbox` — no prompts, OS write confinement; auto-permission layer kept active
 
+## Jev judge gate on every bash call
+
+Sandbox's auto-allow does not skip the decision judge. In `handleToolCall` (`internal/agent/agent.go`, tier `sandbox_judge_gate`), any bash call `Decide` allowed in sandbox mode — allowlist, prefix rule, tool rule or the sandbox blanket allow alike — is converted to an Ask (`sandbox.judge`) when auto-permission is on and the judge model is a decision model (`isDecisionModel`: Jev/clef). The normal auto-judge branch then decides; a denial or judge failure falls through to the human ask. Hard denies stay denies. No decision model configured: unchanged auto-allow.
+
 ## Persistence (Decision 2 superseded)
 
 Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/model.go:15616`) clamped `sandbox` to `normal` on the persist path (Decision 2 in `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md`). This has been superseded: sandbox now persists like any other mode.

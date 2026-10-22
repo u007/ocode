@@ -1,0 +1,21 @@
+{
+ "task": "try-and-restore",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "multiedit",
+  "edit",
+  "bash",
+  "undo_file_change",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: file_path is required"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

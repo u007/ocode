@@ -23,6 +23,11 @@ const (
 	promptDocPromptMarker      = "[ocode:doc_prompt]"
 	promptRecapMarker          = "[ocode:recap]"
 	promptSystemOverrideMarker = "[ocode:system_override]"
+	// promptSuggestionsMarker labels the suggested-responses prompt fragment.
+	// It is distinct from the in-text block markers in suggestions.go
+	// (SuggestionsBlockOpen/Close): this one names the SYSTEM fragment, the
+	// other one delimits the model's OUTPUT block.
+	promptSuggestionsMarker = "[ocode:suggested_responses]"
 )
 
 // docPromptContent is the documentation-first development prompt injected
@@ -78,6 +83,36 @@ Sections, in this order:
 Rules: the point that matters most goes first. Say what it MEANS, not what happened. Report status honestly — a blocked or unvalidated item is stated as such, never smoothed over.
 
 Skip the block entirely for conversational turns, one-line answers, and turns that only ran tools. No recap about nothing.`
+
+// suggestedResponsesPromptContent teaches the agent to end its reply with a
+// machine-readable block of follow-up options the user can click.
+//
+// It is a static const on purpose: it sits in the cached system-role prefix,
+// so it must be a function of construction-time state only and never vary per
+// turn (see append_stable.go). Adding it re-caches the prefix once for
+// existing sessions, which is the accepted cost of a new system fragment —
+// the same cost the recap fragment carries.
+//
+// It applies to PRIMARY agents only. Sub-agents, ask helpers and the advisor
+// turn it off (see SetSuggestedResponsesEnabled): their output is a tool
+// result the model consumes, not a response shown to the user, so suggestions
+// there would be noise and would never be rendered.
+const suggestedResponsesPromptContent = `## Suggested responses
+
+After your final reply, end the message with a machine-readable block of up to FIVE short follow-up options the user could pick to continue. The client renders them as one-click suggestions under the composer, so they must read as something the user would SAY or DO next.
+
+Format — emit this block LAST, after all prose, exactly like this:
+
+<ocode:suggestions>
+["First option", "Second option", "Third option"]
+</ocode:suggestions>
+
+Rules:
+- At most five options. Fewer is fine; a bad option is worse than no option.
+- Each option is ONE short imperative line (a few words to a sentence). No numbering, no explanation, no trailing punctuation.
+- They must be specific to what you just did and what would naturally come next in this conversation. Never generic filler like "Ask a follow-up question".
+- The block is OPTIONAL. Skip it when nothing useful follows (a pure acknowledgement, a question the user must answer, a destructive action awaiting confirmation).
+- Never mention the block itself, and never repeat it in your prose.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
@@ -229,6 +264,11 @@ func (a *Agent) BasePromptMessages() []Message {
 	}
 	if a.DocPromptEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + docPromptContent})
+	}
+	// Suggested responses: the same static-fragment contract as the doc prompt
+	// above — a const in the cached prefix, gated on a construction-time flag.
+	if a.SuggestedResponsesEnabled() {
+		msgs = append(msgs, Message{Role: "system", Content: promptSuggestionsMarker + "\n" + suggestedResponsesPromptContent})
 	}
 	// Notes protocol fragment. Gate strictly on bus presence:
 	// a child not in a group has no bus, and the prompt must

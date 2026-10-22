@@ -118,3 +118,41 @@ func (h *Handler) isPendingCancel(id string) bool {
 	defer h.cancelMu.Unlock()
 	return h.pendingCancel[id]
 }
+
+// releaseTurnInFlight drops one in-flight count for a session and, when the
+// count reaches zero, clears any pendingCancel flag the session is still
+// carrying.
+//
+// WHY THIS EXISTS: pendingCancel is a hand-off between a Stop and the turn
+// job that observes it. It is only meaningful while a live turn or job can
+// still consume it. When the last in-flight unit finishes, that hand-off
+// window has closed — but the flag was NOT always cleared, and a flag left
+// behind swallows the NEXT user message: executeTurnJob consumes it at start
+// and publishes a cancelled turn_error WITHOUT running the message.
+//
+// The gap was real for the ask continuations (permission resolve / question
+// answer, dispatched through dispatchAskContinuation): they increment
+// turnInFlight but never run an executeTurnJob, so nothing ever consumed the
+// flag they recorded. A Stop during such a continuation therefore poisoned
+// the user's next message — the message was persisted but never turned, and
+// the conversation silently stalled until a second Stop cleared the flag.
+//
+// The async dispatch path had the same hole in a different shape: it
+// decremented turnInFlight without touching pendingCancel.
+//
+// Every caller that releases a turn's in-flight count goes through here, so
+// the flag's lifetime is exactly the window in which a Stop can still be
+// delivered to that turn.
+func (h *Handler) releaseTurnInFlight(id string) {
+	h.cancelMu.Lock()
+	defer h.cancelMu.Unlock()
+	if n := h.turnInFlight[id] - 1; n <= 0 {
+		delete(h.turnInFlight, id)
+		// The session has no live turn or job left, so no Stop can still be
+		// delivered to it. A surviving flag can only poison the next
+		// message, so drop it.
+		delete(h.pendingCancel, id)
+	} else {
+		h.turnInFlight[id] = n
+	}
+}

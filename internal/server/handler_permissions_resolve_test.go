@@ -470,6 +470,80 @@ func TestHandleResolvePermissionAlwaysToolPersistsUserConfirmedRule(t *testing.T
 	}
 }
 
+// A bash prefix is meaningful only for always_rule. An always_tool resolve that
+// carries one (a client that always sends the field) must still persist the
+// tool-level rule rather than 409 on a prefix the decision never uses.
+func TestHandleResolvePermissionAlwaysToolIgnoresStrayPrefix(t *testing.T) {
+	isolatedConfigHome(t)
+	h := NewHandler()
+	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
+	outPath := filepath.Join(t.TempDir(), "secret.txt")
+	askReq := agent.PermissionRequest{
+		ToolName: "delete",
+		Command:  outPath,
+		Args:     json.RawMessage(`{"path":"` + outPath + `"}`),
+		Scope:    agent.PermissionScopeTool,
+		Rule:     "tool.delete",
+	}
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "remove the file"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, askReq)},
+		},
+	}
+
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_tool","prefix":"rm"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	cfg, ok := savedOcodeConfig(t)
+	if !ok {
+		t.Fatalf("expected ocodeconfig.json to be written by always_tool persistence")
+	}
+	perms, _ := cfg["permissions"].(map[string]any)
+	tools, _ := perms["tools"].(map[string]any)
+	if tools == nil || tools["delete"] != "allow" {
+		t.Fatalf("expected permissions.tools.delete=allow, got %v", tools)
+	}
+}
+
+// An ask that carries no PrefixCandidates offered only its default prefix. A
+// resolve asking for a different prefix must be refused, not answered by
+// re-deriving rules from the live command.
+func TestHandleResolvePermissionRejectsPrefixNotOfferedWithoutCandidates(t *testing.T) {
+	isolatedConfigHome(t)
+	h := NewHandler()
+	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
+	askReq := agent.PermissionRequest{
+		ToolName: "bash",
+		Command:  "npm run build",
+		Args:     json.RawMessage(`{"command":"npm run build"}`),
+		Scope:    agent.PermissionScopeBashPrefix,
+		Prefix:   "npm run build",
+		Rule:     "bash.prefix.npm run build",
+	}
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "build it"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, askReq)},
+		},
+	}
+
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule","prefix":"npm"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := savedOcodeConfig(t); ok {
+		t.Fatalf("a prefix the ask never offered must not be persisted")
+	}
+}
+
 func TestHandleResolvePermissionAlwaysRefusedForHarmfulRequest(t *testing.T) {
 	isolatedConfigHome(t)
 	for _, decision := range []string{"always_rule", "always_tool"} {
@@ -723,7 +797,7 @@ func TestPersistAlwaysAllow_OutOfScopePathKeptInHandlerConfig(t *testing.T) {
 	h := &Handler{cfg: &config.Config{}}
 	req := agent.PermissionRequest{ToolName: "bash", Rule: "bash.path.out_of_scope", OutOfScopePath: root}
 
-	h.persistAlwaysAllow(PermDecisionAlwaysRule, req, agent.NewPermissionManager())
+	h.persistAlwaysAllow(PermDecisionAlwaysRule, "", req, agent.NewPermissionManager())
 
 	if got := h.cfg.Ocode.ExtraAllowedPaths; len(got) != 1 || got[0] != filepath.Clean(root) {
 		t.Fatalf("h.cfg extra_allowed_paths = %v, want [%s]", got, root)

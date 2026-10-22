@@ -1,0 +1,36 @@
+{
+ "task": "restore-own",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "git changes the working tree",
+   "turn": 2,
+   "command": "git restore src/config.js src/report.js; echo ---; git status --porcelain; echo ---; git diff --stat"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "multiedit",
+  "edit",
+  "edit",
+  "read",
+  "edit",
+  "read",
+  "bash",
+  "replace_lines",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block not found in file"
+ ]
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

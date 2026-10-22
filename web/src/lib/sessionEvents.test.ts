@@ -463,6 +463,34 @@ describe("routeBusEnvelope", () => {
     expect(getState().sessions["s1"].isStreaming).toBe(false);
   });
 
+  // A user cancellation (Stop / Esc) is the user's own action, not a failure.
+  // The server flags it explicitly (internal/server/run_states.go:
+  // ErrTurnCancelled). Painting it as a red error and offering the Retry
+  // affordance made a deliberate Stop look like a crash, and blocked the
+  // composer right when the user wants to type their next message.
+  it("turn_error for a cancellation clears the error instead of showing one", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: "cancelled", cancelled: true } }), router);
+    const slice = getState().sessions["s1"];
+    expect(slice.error).toBeNull();
+    // The turn state still unwinds — the cancelled turn IS over.
+    expect(slice.turnActive).toBe(false);
+    expect(slice.isStreaming).toBe(false);
+    // And the composer must NOT offer Retry: there is no failure to retry.
+    expect(slice.turnError).toBe(false);
+  });
+
+  // The negative control: a genuine failure still surfaces, and still offers
+  // Retry. Without this, a client that swallowed every turn_error would look
+  // correct on the cancellation case while hiding real errors.
+  it("turn_error for a genuine failure still surfaces and still offers Retry", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("turn_error", { data: { error: "provider exploded" } }), router);
+    const slice = getState().sessions["s1"];
+    expect(slice.error).toBe("provider exploded");
+    expect(slice.turnError).toBe(true);
+  });
+
   it("session_bootstrap records the stage", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("session_bootstrap", { data: { stage: "mcp" } }), router);

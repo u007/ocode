@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
 import type { Message, LivePart, TUIStatus, AgentActivityEvent, QuestionPrompt, QuestionAnswerPayload } from "../api/types";
+import { isRecentUserInput } from "../lib/recentInputs";
 
 // ── Rehydrate pending asks from persisted transcript ──────────────
 // The server persists a permission/question pause as a sentinel in the
@@ -26,7 +27,7 @@ function trailingToolRunStart(messages: Message[]): number {
   return i;
 }
 
-function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
+export function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
   if (msg.role !== "tool" || !msg.content.startsWith(SENTINEL_PERMISSION_ASK)) return null;
   const payload = msg.content.slice(SENTINEL_PERMISSION_ASK.length).trim();
   if (!payload) return null;
@@ -52,6 +53,9 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       request_id: toolCallId || (req["request_id"] as string) || "",
       scope: (req["scope"] as string) || undefined,
       prefix: (req["prefix"] as string) || undefined,
+      prefix_candidates: Array.isArray(req["prefix_candidates"])
+        ? (req["prefix_candidates"] as string[])
+        : undefined,
       out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
       untrusted_content: (req["untrusted_content"] as string) || undefined,
       untrusted_source: (req["untrusted_source"] as string) || undefined,
@@ -205,6 +209,8 @@ export interface PermissionRequest {
   scope?: string;
   /** Bash prefix for bash_prefix-scope asks (e.g. "rm"). */
   prefix?: string;
+  /** Bash word-prefix rules the user may persist, narrowest first. */
+  prefix_candidates?: string[];
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
   /** Content-guardrail ask (scope "content"): the flagged result text. */
@@ -248,6 +254,14 @@ export interface SessionSlice {
   messages: Message[];
   // In-progress turn, streamed live until the turn_done snapshot commits it.
   live: LivePart[];
+  // The follow-up options the agent proposed at the end of its last reply.
+  // Rendered as a clickable row under the composer; clicking one fills the
+  // composer. Replaced (not appended) on every new reply.
+  //
+  // The server sends them as a "suggestions" event AND persists them on the
+  // assistant message, so a reload restores the row from the transcript
+  // without waiting for a new turn.
+  suggestions: string[];
   isStreaming: boolean;
   error: string | null;
   // True when the LAST turn ended on an LLM-loop failure (SSE turn_error /
@@ -270,6 +284,12 @@ export interface SessionSlice {
    * explicitly dismissed with "Don't answer".
    */
   hiddenQuestionRequestId: string | null;
+  /**
+   * Request id the user intentionally hid from the permission dialog. This is
+   * local UI state only: the server-side ask remains pending until it is
+   * answered or explicitly dismissed.
+   */
+  hiddenPermissionRequestId: string | null;
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
   loadingMore: boolean; // currently fetching older messages
@@ -370,9 +390,37 @@ export interface SessionSlice {
   advisorCheckpoints?: string[];
 }
 
+/** The follow-up options belonging to the CURRENT reply: the last assistant
+ *  message, unless a user message comes after it. Options are per reply, so a
+ *  reply with none clears the row rather than inheriting an older reply's, and
+ *  a user message ends the search because the user has moved on.
+ *
+ *  Tool and system messages are skipped. Tool-call rounds never carry options
+ *  (the server attaches them to the final round only), so they yield none.
+ *
+ *  This is the reload path — the server persists the options on the assistant
+ *  message, so a page refresh restores the row from the transcript without
+ *  waiting for a new turn. */
+export function latestSuggestions(messages: Message[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    // A typed prompt starts a new turn, so an older reply's options are stale.
+    // Injected user-role notices ([ocode:event] etc., advisor checkpoints) are
+    // not the user answering, so they do not clear the row.
+    if (m.role === "user") {
+      if (isRecentUserInput(m)) return [];
+      continue;
+    }
+    if (m.role !== "assistant") continue;
+    return m.suggestions && m.suggestions.length > 0 ? m.suggestions : [];
+  }
+  return [];
+}
+
 export const emptySessionSlice: SessionSlice = {
   messages: [],
   live: [],
+  suggestions: [],
   isStreaming: false,
   error: null,
   turnError: false,
@@ -380,6 +428,7 @@ export const emptySessionSlice: SessionSlice = {
   permissionQueue: [],
   pendingQuestion: null,
   hiddenQuestionRequestId: null,
+  hiddenPermissionRequestId: null,
   totalMessages: 0,
   hasMore: false,
   loadingMore: false,
@@ -485,6 +534,9 @@ export type ChatAction =
   | { type: "SET_OCR_ENABLED"; enabled: boolean }
   | { type: "SET_OCR_BACKEND"; backend: string }
   | { type: "SET_STREAMING"; sessionId: string; isStreaming: boolean }
+  // The follow-up options the agent proposed at the end of its last reply.
+  // An empty array clears the row.
+  | { type: "SET_SUGGESTIONS"; sessionId: string; suggestions: string[] }
   | { type: "SET_ERROR"; sessionId: string; error: string | null }
   | { type: "APPEND_DELTA"; sessionId: string; delta: string }
   | { type: "LIVE_DELTA"; sessionId: string; kind: "thinking" | "text"; delta: string }
@@ -511,6 +563,8 @@ export type ChatAction =
   | { type: "QUESTION_HIDE"; sessionId: string; requestId: string }
   | { type: "QUESTION_SHOW"; sessionId: string; requestId: string }
   | { type: "QUESTION_RESOLVED"; sessionId: string; requestId?: string }
+  | { type: "PERMISSION_HIDE"; sessionId: string; requestId: string }
+  | { type: "PERMISSION_SHOW"; sessionId: string; requestId: string }
   | {
       type: "QUESTION_ANSWERED";
       sessionId: string;
@@ -685,6 +739,15 @@ function hiddenQuestionAfterHydration(
   return slice.hiddenQuestionRequestId;
 }
 
+/** Keep a local hide only when the recovered permission is the same request. */
+function hiddenPermissionAfterHydration(
+  slice: SessionSlice,
+  permission: PermissionRequest | null,
+): string | null {
+  if (!permission || slice.hiddenPermissionRequestId !== permission.request_id) return null;
+  return slice.hiddenPermissionRequestId;
+}
+
 /** Locate the live tool part a streamed chunk or result belongs to.
  *
  *  With a callId the match is exact, which is what keeps concurrent tool calls
@@ -721,6 +784,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           windowStartServerIndex:
             s.windowStartServerIndex >= 0 ? s.windowStartServerIndex + trimmed : -1,
           hasMore: capped.hasMore || s.hasMore,
+          // The turn-boundary "messages" event takes this path when the snapshot
+          // extends the transcript, so the row must be re-derived here too: a
+          // reply appended with no options has to clear the previous reply's.
+          suggestions: latestSuggestions(capped.messages),
         };
       });
     }
@@ -747,6 +814,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
           hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
+          // Restore the suggestions the last reply proposed. The transcript is
+          // the source of truth on a reload — the live "suggestions" event
+          // only fires when a reply ARRIVES.
+          suggestions: latestSuggestions(capped.messages),
         };
       });
     case "MARK_INITIALIZED":
@@ -803,6 +875,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         isStreaming: action.isStreaming,
+      }));
+    case "SET_SUGGESTIONS":
+      // Replaced, not appended: each reply proposes a fresh set. An empty
+      // array clears the row (the agent offered nothing worth showing).
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        suggestions: action.suggestions,
       }));
     case "SET_ERROR":
       // A null error clears the whole error surface — including the retryable
@@ -944,6 +1023,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...s,
           pendingPermission: action.permission,
           permissionQueue: [...s.permissionQueue, s.pendingPermission],
+          // Replays/recovery of the same request must respect a local hide. A
+          // different request is genuinely new and must open normally.
+          hiddenPermissionRequestId:
+            s.hiddenPermissionRequestId === action.permission.request_id
+              ? s.hiddenPermissionRequestId
+              : null,
         };
       });
     case "PERMISSION_RESOLVED":
@@ -963,7 +1048,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         }
         const queue = [...s.permissionQueue];
         const next = queue.pop();
-        return { ...s, pendingPermission: next ?? null, permissionQueue: queue };
+        return {
+          ...s,
+          pendingPermission: next ?? null,
+          permissionQueue: queue,
+          // Clearing the resolved ask also clears its local hide so a later
+          // re-derivation of pending_asks starts from a clean slate.
+          hiddenPermissionRequestId:
+            s.hiddenPermissionRequestId === action.requestId ? null : s.hiddenPermissionRequestId,
+        };
       });
     case "QUESTION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({
@@ -998,6 +1091,29 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           return s;
         }
         return { ...s, hiddenQuestionRequestId: null };
+      });
+    case "PERMISSION_HIDE":
+      return updateSession(state, action.sessionId, (s) => {
+        if (
+          !s.pendingPermission ||
+          s.pendingPermission.request_id !== action.requestId ||
+          (s.hiddenPermissionRequestId && s.hiddenPermissionRequestId !== action.requestId)
+        ) {
+          return s;
+        }
+        if (s.hiddenPermissionRequestId === action.requestId) return s;
+        return { ...s, hiddenPermissionRequestId: action.requestId };
+      });
+    case "PERMISSION_SHOW":
+      return updateSession(state, action.sessionId, (s) => {
+        if (
+          !s.pendingPermission ||
+          s.pendingPermission.request_id !== action.requestId ||
+          s.hiddenPermissionRequestId !== action.requestId
+        ) {
+          return s;
+        }
+        return { ...s, hiddenPermissionRequestId: null };
       });
     case "QUESTION_RESOLVED":
       return updateSession(state, action.sessionId, (s) => {
@@ -1101,7 +1217,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       delete sessions[action.oldId];
       // A hidden id is tied to the old session's UI lifecycle. Keep the
       // pending question/transcript, but let the rekeyed session show it.
-      sessions[action.newId] = { ...slice, hiddenQuestionRequestId: null };
+      sessions[action.newId] = {
+        ...slice,
+        hiddenQuestionRequestId: null,
+        hiddenPermissionRequestId: null,
+      };
       return { ...state, sessions };
     }
     case "TOGGLE_RUN_COLLAPSED":
@@ -1244,6 +1364,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         permissionQueue: [],
         pendingQuestion: null,
         hiddenQuestionRequestId: null,
+        hiddenPermissionRequestId: null,
         live: [],
       }));
     case "SET_TUI_STATUS_READY":
@@ -1340,6 +1461,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               s,
               s.pendingQuestion ?? pending.pendingQuestion,
             ),
+            hiddenPermissionRequestId: hiddenPermissionAfterHydration(
+              s,
+              s.pendingPermission ?? pending.pendingPermission,
+            ),
           };
         }
         const capped = capMessages(action.messages, action.total);
@@ -1358,6 +1483,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
           hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
+          // Restore the suggestions the last reply proposed. This is the
+          // RELOAD path: the live "suggestions" event only fires when a reply
+          // arrives, so without this a refreshed page would show no row until
+          // the next turn.
+          suggestions: latestSuggestions(capped.messages),
         };
       });
     case "TRUNCATE_MESSAGES":
@@ -1374,6 +1505,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: [],
           pendingQuestion: null,
           hiddenQuestionRequestId: null,
+          hiddenPermissionRequestId: null,
+          // The truncated tail may have carried the suggestions; re-derive
+          // from what is left so the row never shows options for a reply the
+          // user just discarded.
+          suggestions: latestSuggestions(s.messages.slice(0, keep)),
         };
       });
     default:

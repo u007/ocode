@@ -1,0 +1,27 @@
+{
+ "task": "generate-data",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "python3 -c \"\nimport json\nfrom zoneinfo import ZoneInfo, ZoneInfoNotFoundError\ndata = json.load(open('data/regions.json'))\nbad = []\nfor d in data:\n    try:\n        ZoneInfo(d['timezone'])\n    except (ZoneInfoNotFoundError, ValueError, KeyError):\n        bad.append(d['timezone'])\nprint('Invalid timezones:', bad if bad else 'none \u2014 all 12 valid IANA zones')\n\" && rm validate_regions.py && echo \"cleanu"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "write",
+  "write",
+  "bash",
+  "write",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

@@ -536,7 +536,12 @@ func (s *Server) Listen(addr string) (net.Listener, string, error) {
 // stub 200 for a valid target; Parts 03/06 replace the stub with real
 // external/local proxying.
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
-	stateKey, redirect, ok := s.auth.authenticate(w, r)
+	// The mount prefix under which this origin is reached ("" = root-mounted).
+	// A reverse proxy in front of the origin sets it; every absolute path the
+	// origin emits (redirect, cookie path, body rewrite, capture script) is
+	// prefixed with it. See basepath.go.
+	basePath := basePathFor(r)
+	stateKey, redirect, ok := s.auth.authenticate(w, r, basePath)
 	if !ok {
 		http.Error(w, "browse: unauthorized", http.StatusUnauthorized)
 		return
@@ -602,7 +607,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		s.auth.setLocalDoc(cookieVal, false)
 	}
 	if effectiveLocal {
-		s.handleLocal(w, r, t)
+		s.handleLocal(w, r, t, basePath)
 		return
 	}
 	// Non-local (chrome) mode: never proxy. The SPA switches to ChromeViewport

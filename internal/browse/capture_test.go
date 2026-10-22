@@ -9,7 +9,7 @@ import (
 
 func TestInjectCaptureInsertsBootstrapAndScript(t *testing.T) {
 	in := []byte(`<!doctype html><html><head><title>x</title></head><body>hi</body></html>`)
-	out := string(injectCapture(in, "tab:abc", "http://127.0.0.1:5000"))
+	out := string(injectCapture(in, "tab:abc", "http://127.0.0.1:5000", ""))
 
 	// Bootstrap must carry the exact stateKey + spaOrigin.
 	if !strings.Contains(out, `window.__OCODE_BROWSE__`) {
@@ -35,7 +35,7 @@ func TestInjectCaptureFallbackNoHead(t *testing.T) {
 	// A fragment without <head> should still receive the script (before </html>
 	// or appended), so capture never silently no-ops.
 	in := []byte(`<html><body>hi</body></html>`)
-	out := string(injectCapture(in, "tab:x", "http://o"))
+	out := string(injectCapture(in, "tab:x", "http://o", ""))
 	if !strings.Contains(out, `src="/__ocode_capture.js"`) {
 		t.Fatalf("fallback injection missing: %s", out)
 	}
@@ -68,8 +68,19 @@ func TestCaptureBundleRerouteRules(t *testing.T) {
 	if !strings.Contains(js, `location.origin + routeBase() + raw`) {
 		t.Error("capture.js lost the root-relative re-prefix in reroute()")
 	}
-	if !strings.Contains(js, `/^\/b\/[^/]+\/[^/]+\/[^/]+/`) {
-		t.Error("capture.js lost the 3-segment routeBase regex")
+	// The route base is derived RELATIVE to the mount prefix (a remote
+	// project's origin is mounted at "/api/remote/<host>/browse"), so the
+	// "/b/..." anchor must be matched against the path with the prefix
+	// stripped — an absolute "^/b/" anchor would never match under a
+	// prefixed mount and would silently break every re-prefixed URL.
+	if !strings.Contains(js, `location.pathname.slice(mountBase().length)`) {
+		t.Error("capture.js must derive the route base relative to the mount prefix")
+	}
+	if !strings.Contains(js, `function mountBase()`) {
+		t.Error("capture.js lost the mountBase() prefix derivation")
+	}
+	if !strings.Contains(js, `mountBase() + m[1]`) {
+		t.Error("capture.js must re-apply the mount prefix to the route base")
 	}
 	if !strings.Contains(js, `u.protocol === "wss:" ? "https" : "http"`) {
 		t.Error("capture.js WebSocket wrapper must map ws/wss to http/https route schemes")

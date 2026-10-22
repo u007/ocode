@@ -2,6 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { RemoteHostStatus } from "../api/types";
 import { eventBus } from "../lib/eventBus";
+import {
+  __resetRemoteReadGatesForTests,
+  isHostUnreachable,
+  noteRemoteHostReachable,
+  withRemoteRead,
+} from "../lib/remoteHostGate";
 
 export type RemoteHostBusy = "idle" | "connecting" | "restarting";
 
@@ -58,7 +64,7 @@ function notify(entry: RemoteHostEntry) {
   for (const listener of entry.listeners) listener();
 }
 
-function fetchStatus(entry: RemoteHostEntry, showLoading: boolean): Promise<void> {
+function fetchStatus(entry: RemoteHostEntry, showLoading: boolean): Promise<boolean> {
   if (showLoading) {
     entry.loading = true;
     notify(entry);
@@ -68,15 +74,35 @@ function fetchStatus(entry: RemoteHostEntry, showLoading: boolean): Promise<void
     .then((s) => {
       entry.status = s;
       entry.error = null;
+      return true;
     })
     .catch((err) => {
       console.error(`remote host status for ${entry.host} failed:`, err);
       entry.error = errorMessage(err);
+      // Only an unreachable host opens the retry window; the read itself
+      // answered for any other error.
+      return !isHostUnreachable(err);
     })
     .finally(() => {
       entry.loading = false;
       notify(entry);
     });
+}
+
+/**
+ * A periodic read of a remote host. It goes through the shared per-host queue
+ * (see remoteHostGate.ts) so an unreachable host is asked once at a time and
+ * then left alone for the retry window.
+ *
+ * The read's OWN outcome is what classifies it as ok/failed — never
+ * entry.error, which is shared state that a concurrent user action (a failed
+ * connect or restart) also writes, and which would then blacklist a host that
+ * just answered fine.
+ */
+function pollStatus(entry: RemoteHostEntry): Promise<void> {
+  return withRemoteRead(entry.host, "status", () => fetchStatus(entry, false)).then(
+    () => undefined,
+  );
 }
 
 function ensureEntry(host: string): RemoteHostEntry {
@@ -93,9 +119,22 @@ function ensureEntry(host: string): RemoteHostEntry {
     offReconnect: null,
   };
   entries.set(host, entry);
-  void fetchStatus(entry, true);
-  entry.timer = setInterval(() => void fetchStatus(entry, false), REMOTE_STATUS_POLL_MS);
-  entry.offReconnect = eventBus.onReconnect(() => void fetchStatus(entry, false));
+  // The first ask also goes through the queue: a host that is already known to
+  // be down (from a previous entry) must not be asked again on mount, and a
+  // first ask that FAILS must open the retry window — otherwise the 30s poll
+  // would re-ask a dead host every tick, which is exactly the connection-hold
+  // the queue exists to prevent.
+  void withRemoteRead(host, "status", () => fetchStatus(entry, true)).then(
+    () => undefined,
+  );
+  entry.timer = setInterval(() => {
+    void pollStatus(entry);
+  }, REMOTE_STATUS_POLL_MS);
+  // The bus reconnects on every SSE drop (and on a seq gap), which is not
+  // user-triggered: it goes through the same queue, or a down server would
+  // have the bus re-ask the host on every reconnect and hold its connection
+  // for the whole ssh timeout — the exact thing the queue exists to prevent.
+  entry.offReconnect = eventBus.onReconnect(() => void pollStatus(entry));
   return entry;
 }
 
@@ -141,6 +180,7 @@ function runAction(host: string, busy: RemoteHostBusy, call: (host: string) => P
     return call(host)
       .then((s) => {
         entry.status = s;
+        noteRemoteHostReachable(host);
       })
       .catch((err) => actionFailed(entry, err))
       .finally(() => {
@@ -162,6 +202,7 @@ export function __resetRemoteHostStatusForTests() {
     entry.offReconnect?.();
   }
   entries.clear();
+  __resetRemoteReadGatesForTests();
 }
 
 /**
@@ -192,7 +233,7 @@ export function useRemoteHostStatus(host: string | undefined, enabled: boolean):
   }, [host, enabled]);
 
   const refresh = useCallback(() => {
-    if (host) withEntry(host, (entry) => fetchStatus(entry, true));
+    if (host) withEntry(host, (entry) => fetchStatus(entry, true).then(() => undefined));
   }, [host]);
   const connect = useCallback(() => {
     if (host) runAction(host, "connecting", (h) => api.connectRemoteHost(h));

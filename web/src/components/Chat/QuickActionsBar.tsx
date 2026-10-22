@@ -46,7 +46,7 @@ export default function QuickActionsBar({ actions, onSelect }: Props) {
     <div
       role="toolbar"
       aria-label="Quick actions"
-      className="mt-2 flex flex-wrap items-center gap-1"
+      className="mt-2 flex flex-wrap items-center gap-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:scrollbar-hide"
     >
       {actions.map((action) => {
         const Icon = action.icon;

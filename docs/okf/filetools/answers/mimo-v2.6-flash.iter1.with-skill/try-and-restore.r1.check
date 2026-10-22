@@ -1,0 +1,22 @@
+{
+ "task": "try-and-restore",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "skill",
+  "read",
+  "edit",
+  "replace_lines",
+  "bash",
+  "undo_file_change",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"export const ROUNDING = 4;\". Re-issue this call once, with a single value for \"replace\""
+ ]
+}
+PASS score=1.0 violations=0 problems=0

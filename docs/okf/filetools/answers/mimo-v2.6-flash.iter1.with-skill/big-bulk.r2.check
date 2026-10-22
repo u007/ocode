@@ -1,0 +1,26 @@
+{
+ "task": "big-bulk",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "bash",
+  "grep",
+  "bash",
+  "bash",
+  "read",
+  "bash",
+  "edit",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

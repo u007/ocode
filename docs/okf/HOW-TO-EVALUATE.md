@@ -36,6 +36,12 @@ Two roles, **two separate agents/sessions**, strict information barrier:
 - The **exact** model id + version you're evaluating, **provider-stripped** (e.g.
   `tencent/hy3` @ `3.0`, not `novita/tencent/hy3`). Never a family name.
 
+**Live-probe-only stacks (`filetools`).** There is no `questions.yaml` or `_prompts/` sheet: the model does
+real tasks and `probe/check.py` scores them from the session's tool calls (Rule 0 does not apply; there is no
+answer key to leak). Run `probe/sweep.sh` per `filetools/probe/README.md`, write the scorecard from
+`probe/summarize.py`'s per-tag table, then derive and validate the skill exactly as below, with the with-skill
+run re-enabling the skill in the probe HOME instead of prepending it to a sheet.
+
 ## The two ways to run it
 
 ### A. Manual (you drive)

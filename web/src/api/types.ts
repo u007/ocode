@@ -15,6 +15,10 @@ export interface Message {
    *  Dedup identity for the snapshot-before-SSE race; absent/0 on legacy
    *  messages, which are never deduplicated. */
   user_seq?: number;
+  /** The follow-up options the agent proposed at the end of this reply.
+   *  The raw machine-readable block is stripped from `content` server-side, so
+   *  the transcript shows only the human-readable reply. */
+  suggestions?: string[];
 }
 
 export type PendingRewindStatus = "armed" | "committed" | "stale";
@@ -609,6 +613,13 @@ export interface SSEPermissionEvent {
   scope?: string;
   /** Bash prefix for bash_prefix-scope asks (e.g. "rm", "git push"). */
   prefix?: string;
+  /**
+   * Bash word-prefix rules this ask can persist, narrowest first (e.g.
+   * ["npm run build", "npm run", "npm"]). The dialog renders each as
+   * `<prefix> *`; the chosen value goes back in the resolve body's `prefix`.
+   * Empty/absent for non-bash asks and for asks with no safe prefix.
+   */
+  prefix_candidates?: string[];
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
   /** Name of the sub-agent that raised the ask; absent for a main-agent ask. */
@@ -1515,11 +1526,14 @@ export interface PulseChatPage {
   current: string;
 }
 
-/** GET /api/config/pulse-system-prompt. `prompt` is the override ("" when
- *  unset); `default` is the built-in prompt text the override replaces. */
+/** GET /api/config/pulse-system-prompt. `prompt` is the operator's own
+ *  instructions ("" when unset); `default` is the built-in prompt text;
+ *  `effective` is exactly what the assistant's system prompt will be — the
+ *  built-in prompt with `prompt` APPENDED as a final section. */
 export interface PulseSystemPrompt {
   prompt: string;
   default: string;
+  effective: string;
 }
 
 // Speech-to-text (voice input). Mirrors internal/stt's catalog JSON. `engine`

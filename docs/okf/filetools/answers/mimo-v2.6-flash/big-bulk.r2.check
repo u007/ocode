@@ -1,0 +1,55 @@
+{
+ "task": "big-bulk",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "sed -i",
+   "turn": 1,
+   "command": "cd . && LC_ALL=C sed -i '' 's/return x \\* 2;/return x * 3;/g' src/engine.js && grep -c \"return x \\* 3;\" src/engine.js; grep -c \"return x \\* 2;\" src/engine.js; echo \"remaining=$?\""
+  },
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "rm -f check_ctx.py; git status --short"
+  },
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "rm -f verify_change.mjs check_ctx.py; git status --short; echo \"--- final diff ---\"; git diff --numstat; echo \"--- tests ---\"; node test/run.js; echo \"--- grep final ---\"; grep -c \"return x \\* 3;\" src/engine.js; grep -c \"return x \\* 2;\" src/engine.js || true; ls"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "glob",
+  "bash",
+  "read",
+  "bash",
+  "bash",
+  "write",
+  "bash",
+  "bash",
+  "edit",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "write",
+  "write",
+  "bash",
+  "multiedit",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"true\" and then to \"return x * 3;\". Re-issue this call once, with a single value for \"replace\""
+ ]
+}
+SCRIPTED-WRITE score=0.0 violations=3 problems=0

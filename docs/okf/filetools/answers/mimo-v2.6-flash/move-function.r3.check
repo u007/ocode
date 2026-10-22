@@ -1,0 +1,33 @@
+{
+ "task": "move-function",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "glob",
+  "grep",
+  "read",
+  "read",
+  "read",
+  "read",
+  "grep",
+  "glob",
+  "glob",
+  "grep",
+  "read",
+  "glob",
+  "list",
+  "list",
+  "grep",
+  "read",
+  "apply_patch",
+  "bash",
+  "bash",
+  "grep"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

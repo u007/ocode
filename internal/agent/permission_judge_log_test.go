@@ -307,3 +307,24 @@ func TestPermissionJudgeRecord_WithholdsURLCredentials(t *testing.T) {
 			recs[0].Command, recs[0].CommandWithheld)
 	}
 }
+
+// The enforced-only concern and its confidence are durable: a deferral caused by
+// an enforced-only answer that was not confident enough must be explainable
+// from the record alone.
+func TestPermissionJudgeRecord_CarriesEnforcedConcernConfidence(t *testing.T) {
+	lines := captureDebug(t)
+	a := &Agent{permissions: NewPermissionManager()}
+	a.permissions.SetWorkDir(t.TempDir())
+
+	a.logPermissionJudge(a.newJudgeRecord("bash", "jev-latest",
+		json.RawMessage(`{"command":"ls"}`), nil,
+		permissionJudgeRecord{Outcome: outcomeJudgeDenied, Floor: 0.8, EnforcedConcern: "none", EnforcedConf: 0.42}))
+
+	recs := decodeRecords(t, lines())
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].EnforcedConcern != "none" || recs[0].EnforcedConf != 0.42 {
+		t.Errorf("enforced concern = %q at %v, want none at 0.42", recs[0].EnforcedConcern, recs[0].EnforcedConf)
+	}
+}

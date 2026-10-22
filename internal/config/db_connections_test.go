@@ -145,3 +145,83 @@ func TestRemoveDBConnection(t *testing.T) {
 		t.Fatal("removing an unknown name succeeded")
 	}
 }
+
+func TestAddDBConnectionPersistsAnEnvTemplate(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	path := writeDBTestConfig(t, home, `{"editor":"vim"}`)
+
+	if err := addDB(t, DBConnection{Name: "env", Driver: DBDriverPostgres, EnvTemplate: "${DATABASE_URL}"}); err != nil {
+		t.Fatalf("AddDBConnection: %v", err)
+	}
+
+	cfg, err := LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if len(cfg.DB.Connections) != 1 {
+		t.Fatalf("reloaded connections = %+v", cfg.DB.Connections)
+	}
+	c := cfg.DB.Connections[0]
+	if c.EnvTemplate != "${DATABASE_URL}" {
+		t.Errorf("EnvTemplate = %q, want ${DATABASE_URL}", c.EnvTemplate)
+	}
+	if c.EncryptedURL != "" {
+		t.Errorf("EncryptedURL = %q, want empty for a template connection", c.EncryptedURL)
+	}
+	if cfg.Editor != "vim" {
+		t.Errorf("editor = %q, want vim (save clobbered another key)", cfg.Editor)
+	}
+
+	// The template must survive the on-disk round trip, under its own key.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		DB struct {
+			Connections []struct {
+				URL         string `json:"url"`
+				EnvTemplate string `json:"env_template"`
+			} `json:"connections"`
+		} `json:"db"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse saved file: %v", err)
+	}
+	if len(raw.DB.Connections) != 1 {
+		t.Fatalf("saved db section = %+v", raw.DB)
+	}
+	if raw.DB.Connections[0].EnvTemplate != "${DATABASE_URL}" {
+		t.Errorf("saved env_template = %q, want ${DATABASE_URL}", raw.DB.Connections[0].EnvTemplate)
+	}
+	if raw.DB.Connections[0].URL != "" {
+		t.Errorf("saved url = %q, want empty for a template connection", raw.DB.Connections[0].URL)
+	}
+}
+
+func TestAddDBConnectionRejectsBothOrNeitherURLForm(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	writeDBTestConfig(t, home, `{}`)
+
+	// Neither form: nothing to open.
+	if err := addDB(t, DBConnection{Name: "none", Driver: DBDriverPostgres}); err == nil {
+		t.Error("AddDBConnection with no url: want an error, got nil")
+	}
+	// Both forms: ambiguous about which wins at unlock time.
+	if err := addDB(t, DBConnection{
+		Name: "both", Driver: DBDriverPostgres,
+		EncryptedURL: "ENCv1:argon2:a:b:c", EnvTemplate: "${DATABASE_URL}",
+	}); err == nil {
+		t.Error("AddDBConnection with both a url and a template: want an error, got nil")
+	}
+
+	cfg, err := LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 0 {
+		t.Errorf("connections = %+v, want none saved", cfg.DB.Connections)
+	}
+}

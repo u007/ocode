@@ -1,0 +1,34 @@
+{
+ "task": "restore-new-session",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "git diff -U0 -- src/engine.js > /tmp/engine.diff; wc -l /tmp/engine.diff; grep -E '^[+-]' /tmp/engine.diff | grep -vE '^(\\+\\+\\+|---)' | sed -E 's/^([+-])//' | sort | uniq -c | sort -rn | head -40"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "edit",
+  "bash",
+  "edit",
+  "edit",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

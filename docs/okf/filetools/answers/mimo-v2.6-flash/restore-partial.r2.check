@@ -1,0 +1,39 @@
+{
+ "task": "restore-partial",
+ "score": 0.5,
+ "clean": true,
+ "outcome_ok": false,
+ "violations": [],
+ "warnings": [],
+ "problems": [
+  "unexpected change: CHANGELOG.md"
+ ],
+ "tools": [
+  "grep",
+  "bash",
+  "read",
+  "read",
+  "read",
+  "grep",
+  "multi_file_edit",
+  "grep",
+  "read",
+  "edit",
+  "replace_lines",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "edit",
+  "replace_lines",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block appears 119 times; must be unique or set replace_all=true",
+  "Error: search block appears 85 times; must be unique or set replace_all=true"
+ ]
+}
+WRONG-RESULT score=0.5 violations=0 problems=1

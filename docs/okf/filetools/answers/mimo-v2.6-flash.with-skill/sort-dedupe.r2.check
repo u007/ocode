@@ -1,0 +1,18 @@
+{
+ "task": "sort-dedupe",
+ "score": 0.5,
+ "clean": true,
+ "outcome_ok": false,
+ "violations": [],
+ "warnings": [],
+ "problems": [
+  "constants.js: not sorted+deduped in the original format"
+ ],
+ "tools": [
+  "read",
+  "replace_lines",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+WRONG-RESULT score=0.5 violations=0 problems=1

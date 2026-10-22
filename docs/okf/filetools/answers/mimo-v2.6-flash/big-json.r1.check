@@ -1,0 +1,28 @@
+{
+ "task": "big-json",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd . && git diff -U0 -- data/settings.json > /tmp/d.txt; echo \"removed lines matching timeout_ms 3000:\"; grep -c '^-      \"timeout_ms\": 3000,' /tmp/d.txt; echo \"added lines matching timeout_ms 5000:\"; grep -c '^+      \"timeout_ms\": 5000,' /tmp/d.txt; echo \"total +/- content lines:\"; grep -cE '^[+-][^-+]' /tmp/d.txt; echo \"lines mentioning retry_timeout_ms in diff:\"; grep -c 'retry_timeout' /tmp/d."
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "grep",
+  "bash",
+  "bash",
+  "multi_file_edit",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

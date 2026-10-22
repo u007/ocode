@@ -1,0 +1,29 @@
+{
+ "task": "restore-deleted",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "grep",
+  "multiedit",
+  "multiedit",
+  "delete",
+  "read",
+  "grep",
+  "bash",
+  "undo_file_change",
+  "undo_file_change",
+  "read",
+  "read",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: file_path is required"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

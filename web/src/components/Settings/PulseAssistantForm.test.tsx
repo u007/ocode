@@ -47,11 +47,15 @@ vi.mock("../Layout/ModelDialog", () => ({
     ) : null,
 }));
 
-const prompt = () => screen.getByLabelText("System prompt") as HTMLTextAreaElement;
+const prompt = () => screen.getByLabelText("Extra instructions") as HTMLTextAreaElement;
 
 beforeEach(() => {
   for (const m of [mockGetPrompt, mockSetPrompt, mockGetModel, mockSetModel, mockGetAutoReceive, mockSetAutoReceive, mockGetAutoGapMs, mockSetAutoGapMs, mockGetAutoCompact, mockSetAutoCompact, mockGetCompactThresholds, mockSetCompactThresholds]) m.mockReset();
-  mockGetPrompt.mockResolvedValue({ prompt: "be terse", default: "BUILT-IN PROMPT" });
+  mockGetPrompt.mockResolvedValue({
+    prompt: "be terse",
+    default: "BUILT-IN PROMPT",
+    effective: "BUILT-IN PROMPT\n\nOperator instructions:\nbe terse",
+  });
   mockGetModel.mockResolvedValue({ model: "" });
   mockSetPrompt.mockResolvedValue({});
   mockSetModel.mockResolvedValue({});
@@ -71,6 +75,17 @@ describe("PulseAssistantForm", () => {
     expect(model.title).toBe("openrouter/vendor/model-x:free");
   });
 
+  it("shows the full prompt the assistant receives, so the append is visible", async () => {
+    render(<PulseAssistantForm />);
+    await waitFor(() => expect(prompt().value).toBe("be terse"));
+
+    // The effective prompt is the built-in one PLUS the operator's
+    // instructions — the built-in contracts must survive.
+    const effective = screen.getByTestId("pulse-assistant-effective-prompt");
+    expect(effective).toHaveTextContent("BUILT-IN PROMPT");
+    expect(effective).toHaveTextContent("be terse");
+  });
+
   it("says the default model applies when no slot is set", async () => {
     render(<PulseAssistantForm />);
     await waitFor(() => expect(prompt().value).toBe("be terse"));
@@ -87,7 +102,11 @@ describe("PulseAssistantForm", () => {
 
     fireEvent.change(prompt(), { target: { value: "be verbose" } });
     // The server normalises it; the form must show the server's value.
-    mockGetPrompt.mockResolvedValue({ prompt: "be verbose\n", default: "BUILT-IN PROMPT" });
+    mockGetPrompt.mockResolvedValue({
+      prompt: "be verbose\n",
+      default: "BUILT-IN PROMPT",
+      effective: "BUILT-IN PROMPT\n\nOperator instructions:\nbe verbose",
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(mockSetPrompt).toHaveBeenCalledWith("be verbose"));
@@ -99,12 +118,16 @@ describe("PulseAssistantForm", () => {
     render(<PulseAssistantForm />);
     await waitFor(() => expect(prompt().value).toBe("be terse"));
 
-    mockGetPrompt.mockResolvedValue({ prompt: "", default: "BUILT-IN PROMPT" });
-    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+    mockGetPrompt.mockResolvedValue({
+      prompt: "",
+      default: "BUILT-IN PROMPT",
+      effective: "BUILT-IN PROMPT",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Clear instructions" }));
 
     await waitFor(() => expect(mockSetPrompt).toHaveBeenCalledWith(""));
     await waitFor(() => expect(prompt().value).toBe(""));
-    expect(screen.getByRole("button", { name: "Reset to default" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Clear instructions" })).toBeDisabled();
   });
 
   it("shows a failed save and keeps the draft", async () => {

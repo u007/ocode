@@ -1,0 +1,31 @@
+{
+ "task": "big-edit",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "glob",
+  "grep",
+  "grep",
+  "read",
+  "edit",
+  "grep",
+  "bash",
+  "bash",
+  "grep",
+  "multiedit",
+  "bash",
+  "grep",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0
