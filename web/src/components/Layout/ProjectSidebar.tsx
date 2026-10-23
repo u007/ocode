@@ -3,6 +3,9 @@ import { useProjectState } from "../../stores/projectStore";
 import { useChatSelector, type ChatState } from "../../stores/chatStore";
 import { useTerminalState } from "../../stores/terminalStore";
 import { prefetchSession } from "../../lib/sessionPrefetch";
+import { api } from "../../api/client";
+import { eventBus } from "../../lib/eventBus";
+import { reportActionErrorMessage } from "../../lib/actionErrors";
 import type { Project, ProjectGroup } from "../../api/types";
 import {
   DndContext,
@@ -46,6 +49,7 @@ import {
   RotateCw,
   GitBranch,
   Copy,
+  UserCog,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -64,6 +68,24 @@ import { buttonVariants } from "../ui/button";
 import { cn } from "@/lib/utils";
 
 type SessionStatus = "none" | "idle" | "running";
+
+/** Applies a profile binding chosen from a project's context menu. Returns
+ *  false when the server rejects it (unknown profile, remote failure) so the
+ *  menu stays open, and surfaces the reason through the app-wide action-error
+ *  toast — a binding failure must not look like a successful no-op. */
+async function applyProjectProfile(
+  onSetProfile: (profile: string) => Promise<void>,
+  profile: string,
+): Promise<boolean> {
+  try {
+    await onSetProfile(profile);
+    return true;
+  } catch (err) {
+    const reason = err instanceof Error && err.message ? `: ${err.message}` : ".";
+    reportActionErrorMessage(`Could not change the project profile${reason}`);
+    return false;
+  }
+}
 
 type ProjectIndicators = {
   sessionCount: number;
@@ -406,7 +428,9 @@ interface SortableProjectRowProps {
   onCreateGroup: (name: string) => Promise<void>;
   onAddToGroup: (group: string) => Promise<void>;
   onRemoveFromGroup: () => Promise<void>;
+  onSetProfile: (profile: string) => Promise<void>;
   groups: ProjectGroup[];
+  profiles: string[];
 }
 
 function SortableProjectRow({
@@ -421,7 +445,9 @@ function SortableProjectRow({
   onCreateGroup,
   onAddToGroup,
   onRemoveFromGroup,
+  onSetProfile,
   groups,
+  profiles,
 }: SortableProjectRowProps) {
   const indicators = useProjectIndicators(project.path, project.host);
   const status = indicators.status;
@@ -494,8 +520,34 @@ function SortableProjectRow({
       }
     }
 
+    // Offered when profiles exist OR this project has a binding, so a stale
+    // binding (profile renamed/deleted elsewhere) stays clearable even when no
+    // profiles are defined.
+    if (profiles.length > 0 || project.profile) {
+      const missing = !!project.profile && !profiles.includes(project.profile);
+      items.push({ separator: true, label: "", onClick: () => {} });
+      items.push({
+        label: project.profile
+          ? missing
+            ? `Profile: ${project.profile} (missing)`
+            : `Profile: ${project.profile}`
+          : "Profile: window default",
+        icon: <UserCog className="w-3.5 h-3.5" />,
+        onClick: () => {},
+        disabled: true,
+      });
+      for (const name of ["", ...profiles]) {
+        if (name === (project.profile ?? "")) continue;
+        items.push({
+          label: name ? `Use profile "${name}"` : "Use window profile",
+          icon: <UserCog className="w-3.5 h-3.5" />,
+          onClick: () => applyProjectProfile(onSetProfile, name),
+        });
+      }
+    }
+
     return items;
-  }, [groups, project.group, project.host, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup, onEdit, onDuplicate, hostStatus.restart]);
+  }, [groups, project.group, project.host, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup, onEdit, onDuplicate, hostStatus.restart, project.profile, profiles, onSetProfile]);
 
   const {
     attributes,
@@ -542,7 +594,7 @@ function SortableProjectRow({
           ) : (
             <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground" />
           )}
-          <div className="flex-1 min-w-[5rem] text-left">
+          <div data-testid="project-label" className="flex-1 min-w-[5rem] text-left">
             {rename.editing ? (
               <>
                 <Input
@@ -564,8 +616,16 @@ function SortableProjectRow({
               </>
             ) : (
               <>
-                <div className="truncate font-medium text-foreground">
-                  {project.name}
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="truncate font-medium text-foreground">{project.name}</span>
+                  {project.profile && (
+                    <span
+                      className="shrink-0 max-w-[6rem] truncate rounded-full border bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground"
+                      title={`Profile ${project.profile}`}
+                    >
+                      {project.profile}
+                    </span>
+                  )}
                 </div>
                 {project.host ? (
                   <div className="flex items-center gap-1 truncate text-xs text-sky-600 dark:text-sky-400">
@@ -971,7 +1031,9 @@ function CollapsedProjectButton({
   onRemove,
   onAddToGroup,
   onRemoveFromGroup,
+  onSetProfile,
   groups,
+  profiles,
 }: {
   project: Project;
   isActive: boolean;
@@ -982,7 +1044,9 @@ function CollapsedProjectButton({
   onRemove: () => void;
   onAddToGroup: (group: string) => void;
   onRemoveFromGroup: () => void;
+  onSetProfile: (profile: string) => Promise<void>;
   groups: ProjectGroup[];
+  profiles: string[];
 }) {
   const indicators = useProjectIndicators(project.path, project.host);
   // Same hover-warming as the expanded row, with the same cold-connect guard:
@@ -1077,8 +1141,34 @@ function CollapsedProjectButton({
         onClick: onRemoveFromGroup,
       });
     }
+    // Offered when profiles exist OR this project has a binding, so a stale
+    // binding (profile renamed/deleted elsewhere) stays clearable even when no
+    // profiles are defined.
+    if (profiles.length > 0 || project.profile) {
+      const missing = !!project.profile && !profiles.includes(project.profile);
+      items.push({ separator: true, label: "", onClick: () => {} });
+      items.push({
+        label: project.profile
+          ? missing
+            ? `Profile: ${project.profile} (missing)`
+            : `Profile: ${project.profile}`
+          : "Profile: window default",
+        icon: <UserCog className="w-3.5 h-3.5" />,
+        onClick: () => {},
+        disabled: true,
+      });
+      for (const name of ["", ...profiles]) {
+        if (name === (project.profile ?? "")) continue;
+        items.push({
+          label: name ? `Use profile "${name}"` : "Use window profile",
+          icon: <UserCog className="w-3.5 h-3.5" />,
+          onClick: () => applyProjectProfile(onSetProfile, name),
+        });
+      }
+    }
+
     return items;
-  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand, onEdit, onDuplicate]);
+  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand, onEdit, onDuplicate, project.profile, profiles, onSetProfile]);
 
   return (
     <ContextMenu items={contextItems}>
@@ -1130,6 +1220,9 @@ function CollapsedProjectButton({
       <TooltipContent side="right">
         <div className="text-xs">
           <div className="font-medium">{project.name}</div>
+          {project.profile && (
+            <div className="text-xs text-muted-foreground">Profile: {project.profile}</div>
+          )}
           {project.host && <div className="text-sky-600 dark:text-sky-400 flex items-center gap-1"><Globe className="w-3 h-3" />{project.host}:{project.path}</div>}
           {tooltipLine && <div className="text-muted-foreground">{tooltipLine}</div>}
         </div>
@@ -1173,12 +1266,25 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
     renameProject,
     reorderProjects,
     setProjectGroup,
+    setProjectProfile,
     createGroup,
     deleteGroup,
     renameGroup,
     reorderGroups,
     setGroupCollapsed,
   } = useProjectState();
+  // Profile names offered by each project row's "Use profile" menu items.
+  const [profileNames, setProfileNames] = useState<string[]>([]);
+  useEffect(() => {
+    const refresh = () => {
+      api
+        .listProfiles()
+        .then((d) => setProfileNames(d.profiles.map((p) => p.name).sort()))
+        .catch((err) => console.error("Failed to load profiles", err));
+    };
+    refresh();
+    return eventBus.on("profile.changed", refresh);
+  }, []);
   const [adding, setAdding] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -1474,7 +1580,9 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
                     onRemove={() => setPendingRemove(p)}
                     onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
                     onRemoveFromGroup={() => setProjectGroup(p.path, "", p.host)}
+                    onSetProfile={(profile) => setProjectProfile(p.path, profile, p.host)}
                     groups={state.groups}
+                    profiles={profileNames}
                   />
                 ))}
               </div>
@@ -1589,7 +1697,9 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
                       }}
                       onAddToGroup={(group) => setProjectGroup(project.path, group, project.host)}
                       onRemoveFromGroup={() => setProjectGroup(project.path, "", project.host)}
+                      onSetProfile={(profile) => setProjectProfile(project.path, profile, project.host)}
                       groups={state.groups}
+                      profiles={profileNames}
                     />
                   );
                 })}

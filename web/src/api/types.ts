@@ -1124,6 +1124,8 @@ export interface Project {
   last_used_at: string;
   order: number;
   group: string;
+  /** Config profile bound to this local project; empty = use the window's profile. */
+  profile?: string;
   /** Optional remote host for ocode Remote SSH/WSL projects. Empty for local projects. */
   host?: string;
   remote_kind?: "ssh" | "wsl";

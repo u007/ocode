@@ -498,7 +498,8 @@ func runSyncStage(progress *Progress, transport Transport, hostKey, ver string, 
 		}
 	}
 
-	frame, err := EncodeFrame(ver, payload)
+	gated, sentCreds := gateCredentialFiles(payload, CachedCredentialHashes(hostKey), force)
+	frame, err := EncodeFrame(ver, gated)
 	if err != nil {
 		progress.Warn("encode payload failed: " + err.Error())
 		return err
@@ -516,6 +517,10 @@ func runSyncStage(progress *Progress, transport Transport, hostKey, ver string, 
 		return err
 	}
 
+	if err := RecordCredentialHashes(hostKey, sentCreds); err != nil {
+		// Non-fatal: worst case the credentials are re-pushed next sync.
+		progress.Warn("record credential hashes failed: " + err.Error())
+	}
 	if err := SetCachedHash(hostKey, hash); err != nil {
 		// Non-fatal: the sync itself succeeded, only the local cache write
 		// failed — next connect just re-syncs unnecessarily.

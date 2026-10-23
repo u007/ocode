@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -261,5 +263,163 @@ func TestRemoteProxyForwardsWindowActiveProfile(t *testing.T) {
 	}
 	if got := forged.Get(remoteProfileAuthoritativeHeader); got != "" {
 		t.Fatalf("forged authoritative marker leaked through: %q", got)
+	}
+}
+
+// A profile bound to the remote project beats the window's profile, and a
+// path-less request (Retry/continuations) falls back to the window's profile so
+// it can neither inherit nor clobber the project binding.
+func TestRemoteProxyForwardsProjectBoundProfile(t *testing.T) {
+	var mu sync.Mutex
+	var last http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		last = r.Header.Clone()
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+
+	ws := &fakeTestWorkspace{apiURL: srv.URL, token: "remote-tok"}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	h.windowProfilesMu.Lock()
+	h.windowProfiles["win-p"] = "windowProf"
+	h.windowProfilesMu.Unlock()
+	if err := h.projects.SetProfileRef(projects.ProjectRef{Host: "user@realhost", Path: "/home/user/project"}, "projProf"); err != nil {
+		t.Fatal(err)
+	}
+
+	do := func(withProject bool) http.Header {
+		t.Helper()
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/sessions?token=local", nil)
+		if withProject {
+			r.Header.Set("X-Ocode-Project", "/home/user/project")
+		}
+		r.Header.Set("X-Window-Id", "win-p")
+		setPathValues(r, map[string]string{"host": "user@realhost", "rest": "sessions"})
+		h.HandleRemoteProxy(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("proxy status = %d; body: %s", w.Code, w.Body.String())
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	}
+
+	if got := do(true).Get(remoteActiveProfileHeader); got != "projProf" {
+		t.Fatalf("forwarded profile = %q, want projProf", got)
+	}
+	// A path-less request (Retry/permission continuations) re-stamps the
+	// window's profile: inheriting the previous project binding would run
+	// another project's turn on these credentials.
+	pathless := do(false)
+	if got := pathless.Get(remoteActiveProfileHeader); got != "windowProf" {
+		t.Fatalf("path-less forwarded profile = %q, want windowProf", got)
+	}
+	if got := pathless.Get(remoteProfileAuthoritativeHeader); got != "1" {
+		t.Fatalf("path-less authoritative marker = %q, want 1", got)
+	}
+}
+
+// TestRemoteProxyPrefersEnvProfileOverBinding: OCODE_PROFILE is documented as
+// winning everywhere, and resolveSessionProfile checks it first. The proxy must
+// mirror that order or a project bound to a profile would run on different
+// credentials remotely than locally under the same operator override.
+func TestRemoteProxyPrefersEnvProfileOverBinding(t *testing.T) {
+	t.Setenv("OCODE_PROFILE", "envProf")
+
+	var mu sync.Mutex
+	var last http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		last = r.Header.Clone()
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+
+	ws := &fakeTestWorkspace{apiURL: srv.URL, token: "remote-tok"}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	h.windowProfilesMu.Lock()
+	h.windowProfiles["win-p"] = "windowProf"
+	h.windowProfilesMu.Unlock()
+	if err := h.projects.SetProfileRef(projects.ProjectRef{Host: "user@realhost", Path: "/home/user/project"}, "projProf"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/sessions?token=local", nil)
+	r.Header.Set("X-Ocode-Project", "/home/user/project")
+	r.Header.Set("X-Window-Id", "win-p")
+	setPathValues(r, map[string]string{"host": "user@realhost", "rest": "sessions"})
+	h.HandleRemoteProxy(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("proxy status = %d; body: %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := last.Get(remoteActiveProfileHeader); got != "envProf" {
+		t.Fatalf("forwarded profile = %q, want envProf", got)
+	}
+}
+
+// The send path is the one that carries X-Ocode-Project through the proxy, so
+// the pair admission and the ensureRemoteProject registration that a pathful
+// request triggers are exercised end to end (the GET coverage never posts a
+// message). A regression here denies real sends with 403 only in production.
+func TestRemoteProxySendCarriesProjectAdmission(t *testing.T) {
+	var mu sync.Mutex
+	var last http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		last = r.Header.Clone()
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+
+	ws := &fakeTestWorkspace{apiURL: srv.URL, token: "remote-tok"}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	h.windowProfilesMu.Lock()
+	h.windowProfiles["win-send"] = "windowProf"
+	h.windowProfilesMu.Unlock()
+	if err := h.projects.SetProfileRef(projects.ProjectRef{Host: "user@realhost", Path: "/home/user/project"}, "projProf"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A path-bearing POST is admitted, registered, and forwards the bound
+	// profile.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/remote/user@realhost/api/sessions/s1/message?token=local", strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("X-Ocode-Project", "/home/user/project")
+	req.Header.Set("X-Window-Id", "win-send")
+	setPathValues(req, map[string]string{"host": "user@realhost", "rest": "sessions/s1/message"})
+	h.HandleRemoteProxy(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	got := last.Get(remoteActiveProfileHeader)
+	mu.Unlock()
+	if got != "projProf" {
+		t.Fatalf("send forwarded profile = %q, want projProf", got)
+	}
+
+	// A path that is not a saved project is refused before any proxying.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/api/remote/user@realhost/api/sessions/s1/message?token=local", strings.NewReader(`{"content":"hi"}`))
+	req.Header.Set("X-Ocode-Project", "/home/user/other")
+	req.Header.Set("X-Window-Id", "win-send")
+	setPathValues(req, map[string]string{"host": "user@realhost", "rest": "sessions/s1/message"})
+	h.HandleRemoteProxy(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unregistered path = %d, want 403; body: %s", rec.Code, rec.Body.String())
 	}
 }

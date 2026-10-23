@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -102,6 +103,15 @@ func (h *Handler) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.windowProfilesMu.RUnlock()
+	// A project binding must not outlive its profile: resolveSessionProfile
+	// would keep returning the dead name, LoadEffectiveForProfile would fail
+	// silently and the project would quietly run on the base credentials.
+	if h.projects != nil {
+		if n := h.projects.ProfileBindingCount(name); n > 0 {
+			writeError(w, http.StatusConflict, fmt.Sprintf("profile is bound to %d project(s); set those projects to another profile first", n))
+			return
+		}
+	}
 	if err := config.DeleteProfile(name); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -146,6 +156,11 @@ func (h *Handler) handleRenameProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = auth.RenameProfileCredentials(name, req.NewName)
 	_ = config.RenameWindowStateProfile(name, req.NewName)
+	if h.projects != nil {
+		if n, err := h.projects.RenameProfileRefs(name, req.NewName); err != nil {
+			log.Printf("profiles: rewrite %d project binding(s) %s -> %s: %v", n, name, req.NewName, err)
+		}
+	}
 	h.windowProfilesMu.Lock()
 	for win, active := range h.windowProfiles {
 		if active == name {

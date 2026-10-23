@@ -11,6 +11,7 @@ const projectApi = vi.hoisted(() => ({
   renameProject: vi.fn(),
   reorderProjects: vi.fn(),
   setProjectGroup: vi.fn(),
+  setProjectProfile: vi.fn(),
   removeProject: vi.fn(),
   deleteGroup: vi.fn(),
   removeRemoteProject: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../api/client", () => ({
     renameProject: projectApi.renameProject,
     reorderProjects: projectApi.reorderProjects,
     setProjectGroup: projectApi.setProjectGroup,
+    setProjectProfile: projectApi.setProjectProfile,
     removeProject: projectApi.removeProject,
     deleteGroup: projectApi.deleteGroup,
     removeRemoteProject: projectApi.removeRemoteProject,
@@ -74,6 +76,7 @@ beforeEach(() => {
   projectApi.renameProject.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.reorderProjects.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.setProjectGroup.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.setProjectProfile.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.removeRemoteProject.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.getTabs.mockReset().mockResolvedValue({ projects: {} });
   projectApi.setTabs.mockReset().mockResolvedValue({ status: "ok" });
@@ -1142,5 +1145,48 @@ describe("projectStore keeps one tab per session across projects", () => {
     // must not keep an active id.
     expect(result.current.state.tabsByProject["/proj-b"]).toBeUndefined();
     expect(result.current.state.activeTabByProject["/proj-b"]).toBeUndefined();
+  });
+});
+
+describe("projectStore profile binding sync", () => {
+  it("refreshes projects on a project_bound event but not on profile CRUD events", async () => {
+    setup();
+    await waitFor(() => expect(projectApi.listProjects).toHaveBeenCalled());
+    projectApi.listProjects.mockClear();
+
+    // Creating/renaming/deleting a profile does not change any project row.
+    await act(async () => {
+      busHandlers.get("profile.changed")?.({
+        event: "profile.changed",
+        seq: 2,
+        data: { action: "created", name: "work" },
+      });
+    });
+    expect(projectApi.listProjects).not.toHaveBeenCalled();
+
+    // A binding changed in another window must land here.
+    await act(async () => {
+      busHandlers.get("profile.changed")?.({
+        event: "profile.changed",
+        seq: 3,
+        data: { action: "project_bound", path: "/proj-a", host: "", profile: "work" },
+      });
+    });
+    await waitFor(() => expect(projectApi.listProjects).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("projectStore profile binding writes", () => {
+  it("surfaces a rejected binding instead of resolving like a no-op", async () => {
+    projectApi.setProjectProfile.mockRejectedValueOnce(new Error("profile not found"));
+    const { result } = setup();
+    await waitFor(() => expect(projectApi.listProjects).toHaveBeenCalled());
+    const calls = projectApi.listProjects.mock.calls.length;
+
+    await expect(result.current.setProjectProfile("/proj-a", "ghost")).rejects.toThrow(
+      "profile not found",
+    );
+    // A failed write must not look like a successful refresh.
+    expect(projectApi.listProjects.mock.calls.length).toBe(calls);
   });
 });

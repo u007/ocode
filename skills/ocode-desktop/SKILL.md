@@ -67,7 +67,7 @@ The desktop app is **not a separate frontend**. It's a thin native wrapper (Wail
 
 | Command | What it does |
 |---------|-------------|
-| `make desktop` | `cd web && npm install && npm run build` then `make bundle-desktop-assets` (copies `skills/` → `cmd/ocode-desktop/embedded-assets/`) then `go build -o bin/ocode-desktop ./cmd/ocode-desktop` |
+| `make desktop` | `cd web && pnpm install && pnpm run build` then `make bundle-desktop-assets` (copies `skills/` → `cmd/ocode-desktop/embedded-assets/`) then `go build -o bin/ocode-desktop ./cmd/ocode-desktop` |
 | `make desktop-app` | Same as `desktop` + `scripts/bundle-macos.sh` to produce `bin/ocode.app` |
 | `make bundle-desktop-assets` | Refresh the gitignored embedded `skills/`/plugins/model prompts before building |
 | `go build -o bin/ocode-desktop ./cmd/ocode-desktop` | Build the bare binary (faster iteration; embedded assets stay stale unless `bundle-desktop-assets` ran) |

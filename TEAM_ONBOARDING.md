@@ -119,7 +119,7 @@ go build -o ocode .
 ```bash
 make build        # runs: web-build
 # or manually:
-cd web && npm install && npm run build
+cd web && pnpm install && pnpm run build
 ```
 
 ### Run

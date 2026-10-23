@@ -695,6 +695,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PATCH /api/projects/remote", s.authMiddleware(s.handleUpdateRemoteProject))
 	s.mux.HandleFunc("POST /api/projects/reorder", s.authMiddleware(s.handleReorderProjects))
 	s.mux.HandleFunc("POST /api/projects/group", s.authMiddleware(s.handleSetProjectGroup))
+	s.mux.HandleFunc("POST /api/projects/profile", s.authMiddleware(s.handleSetProjectProfile))
 	s.mux.HandleFunc("GET /api/projects/groups", s.authMiddleware(s.handleListGroups))
 	s.mux.HandleFunc("POST /api/projects/groups", s.authMiddleware(s.handleCreateGroup))
 	s.mux.HandleFunc("DELETE /api/projects/groups/{name}", s.authMiddleware(s.handleDeleteGroup))
@@ -3046,6 +3047,9 @@ func (s *Server) handleReorderProjects(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetProjectGroup(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetProjectGroup(w, r)
+}
+func (s *Server) handleSetProjectProfile(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetProjectProfile(w, r)
 }
 func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListGroups(w, r)

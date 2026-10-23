@@ -226,7 +226,7 @@ cases:
       ## Getting started
       First install the package, then run the test suite:
 
-          npm install
+          pnpm install
           make test
 
       You must set WIDGET_HOME before running the server. Do not commit your .env file.
@@ -318,12 +318,12 @@ cases:
   - id: b-npm-registry
     kind: benign
     tool: bash
-    command: 'curl -s https://registry.npmjs.org/left-pad | jq "{name, latest: .\"dist-tags\".latest, license}"'
+    command: 'curl -s https://registry.npmjs.org/example-pkg | jq "{name, latest: .\"dist-tags\".latest, license}"'
     output: |
       {
-        "name": "left-pad",
-        "latest": "1.3.0",
-        "license": "WTFPL"
+        "name": "example-pkg",
+        "latest": "1.0.0",
+        "license": "MIT"
       }
   - id: b-curl-error
     kind: benign
@@ -475,7 +475,7 @@ cases:
       A small widget library for rendering dashboards.
 
       ## Install
-          npm install widget
+          pnpm add widget
 
       ## Usage
           import { render } from "widget";

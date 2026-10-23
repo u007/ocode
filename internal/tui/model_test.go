@@ -7110,11 +7110,11 @@ func TestBanRemoveAndClearOnlyTouchBannedRules(t *testing.T) {
 	// Neither is a ban, so /ban must leave both alone — this is the security
 	// boundary of the delete-on-unban change: it removes the NAMED ban, never
 	// the whole prefix table or another level's rule.
-	m.agent.Permissions().SetBashPrefixRule("npm install", agent.PermissionAllow)
+	m.agent.Permissions().SetBashPrefixRule("pnpm add", agent.PermissionAllow)
 	m.agent.Permissions().SetBashPrefixRule("aws", agent.PermissionAsk)
 	m.permDirty.bashPrefixes = map[string]string{
-		"npm install": string(agent.PermissionAllow),
-		"aws":         string(agent.PermissionAsk),
+		"pnpm add": string(agent.PermissionAllow),
+		"aws":      string(agent.PermissionAsk),
 	}
 
 	runBanCmd(&m, []string{"remove", "sed"})
@@ -7125,7 +7125,7 @@ func TestBanRemoveAndClearOnlyTouchBannedRules(t *testing.T) {
 	if _, ok := rules["grep -n"]; !ok {
 		t.Fatalf("removing sed must not touch the unrelated grep -n ban")
 	}
-	if got := rules["npm install"]; got != agent.PermissionAllow {
+	if got := rules["pnpm add"]; got != agent.PermissionAllow {
 		t.Fatalf("removing a ban must not touch an allow rule, got %q", got)
 	}
 	if got := rules["aws"]; got != agent.PermissionAsk {
@@ -7137,11 +7137,91 @@ func TestBanRemoveAndClearOnlyTouchBannedRules(t *testing.T) {
 	if _, ok := rules["grep -n"]; ok {
 		t.Fatalf("expected clear to delete the remaining ban")
 	}
-	if got := rules["npm install"]; got != agent.PermissionAllow {
+	if got := rules["pnpm add"]; got != agent.PermissionAllow {
 		t.Fatalf("clear must not touch an allow rule, got %q", got)
 	}
 	if got := rules["aws"]; got != agent.PermissionAsk {
 		t.Fatalf("clear must not touch an ask rule, got %q", got)
+	}
+}
+
+func TestAllowAddListRemoveOnlyTouchAllowRules(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
+		input:  textarea.New(),
+	}
+
+	runBanCmd(&m, []string{"add", "sed"})
+	runAllowCmd(&m, []string{"bun", "run"})
+	if got := m.agent.Permissions().BashPrefixRules()["bun run"]; got != agent.PermissionAllow {
+		t.Fatalf("expected bun run allow rule, got %q", got)
+	}
+	runAllowCmd(&m, []string{"list"})
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "bun run") || strings.Contains(got, "sed") {
+		t.Fatalf("expected list to show only allow rules, got %q", got)
+	}
+
+	// A bare `git` allow is rejected by ValidateBashPrefixRule and reported.
+	runAllowCmd(&m, []string{"add", "git"})
+	if _, ok := m.agent.Permissions().BashPrefixRules()["git"]; ok {
+		t.Fatalf("bare git allow must be rejected")
+	}
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "Cannot allow") {
+		t.Fatalf("expected rejection message, got %q", got)
+	}
+
+	runAllowCmd(&m, []string{"remove", "bun", "run"})
+	rules := m.agent.Permissions().BashPrefixRules()
+	if _, ok := rules["bun run"]; ok {
+		t.Fatalf("expected bun run allow to be deleted")
+	}
+	if got := rules["sed"]; got != agent.PermissionDeny {
+		t.Fatalf("removing an allow must not touch a ban, got %q", got)
+	}
+}
+
+func TestAllowAndBanReplaceTheOppositeRule(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
+		input:  textarea.New(),
+	}
+	last := func() string { return m.messages[len(m.messages)-1].text }
+	level := func(p string) agent.PermissionLevel { return m.agent.Permissions().BashPrefixRules()[p] }
+
+	runBanCmd(&m, []string{"add", "sed"})
+	runAllowCmd(&m, []string{"add", "sed"})
+	if level("sed") != agent.PermissionAllow || !strings.Contains(last(), "replaced its ban") {
+		t.Fatalf("allow must replace the ban, level=%q msg=%q", level("sed"), last())
+	}
+	runAllowCmd(&m, []string{"add", "sed"})
+	if !strings.Contains(last(), "already allowed") {
+		t.Fatalf("expected already-allowed message, got %q", last())
+	}
+	runBanCmd(&m, []string{"remove", "sed"})
+	if level("sed") != agent.PermissionAllow || !strings.Contains(last(), "not a banned") {
+		t.Fatalf("/ban remove must not delete an allow rule, level=%q msg=%q", level("sed"), last())
+	}
+	runBanCmd(&m, []string{"add", "sed"})
+	if level("sed") != agent.PermissionDeny || !strings.Contains(last(), "replaced its allow rule") {
+		t.Fatalf("ban must replace the allow, level=%q msg=%q", level("sed"), last())
+	}
+	runBanCmd(&m, []string{"add", "sed"})
+	if !strings.Contains(last(), "already banned") {
+		t.Fatalf("expected already-banned message, got %q", last())
+	}
+	runAllowCmd(&m, []string{"remove", "sed"})
+	if level("sed") != agent.PermissionDeny || !strings.Contains(last(), "not an allowed") {
+		t.Fatalf("/allow remove must not delete a ban, level=%q msg=%q", level("sed"), last())
 	}
 }
 

@@ -12,12 +12,22 @@ vi.mock("../lib/eventBus", () => ({
 }));
 vi.mock("../lib/windowId", () => ({ getWindowId: () => "window-1" }));
 
+// The pill reads the active project's binding so it can explain when the
+// window-level choice does not apply.
+const projectFake = vi.hoisted(() => ({
+  activeProject: null as { profile?: string } | null,
+}));
+vi.mock("../stores/projectStore", () => ({
+  useProjectState: () => ({ state: { activeProject: projectFake.activeProject } }),
+}));
+
 function response(data: unknown) {
   return Promise.resolve({ json: () => Promise.resolve(data) });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  projectFake.activeProject = null;
   hoisted.authedFetch.mockImplementation((url: string, init?: RequestInit) => {
     if (url === "/api/profiles") {
       return response({
@@ -72,5 +82,28 @@ describe("ProfileSwitcher keyboard navigation", () => {
     fireEvent.click(trigger);
     fireEvent.keyDown(screen.getByRole("button", { name: /alpha/ }), { key: "Tab" });
     await waitFor(() => expect(screen.queryByRole("button", { name: /alpha/ })).toBeNull());
+  });
+});
+
+describe("ProfileSwitcher project binding hint", () => {
+  it("names the project's bound profile and says the window choice does not apply", async () => {
+    projectFake.activeProject = { profile: "work" };
+    render(<ProfileSwitcher />);
+
+    const trigger = await screen.findByRole("button", { name: /Base.*project: work/ });
+    expect(trigger.getAttribute("title")).toContain("bound to this project");
+
+    fireEvent.click(trigger);
+    expect(screen.getByText(/its sessions ignore this choice/)).toBeInTheDocument();
+  });
+
+  it("shows no project hint when the active project has no binding", async () => {
+    projectFake.activeProject = { profile: "" };
+    render(<ProfileSwitcher />);
+
+    const trigger = await screen.findByRole("button", { name: /Base/ });
+    expect(trigger.textContent).not.toContain("project:");
+    fireEvent.click(trigger);
+    expect(screen.queryByText(/its sessions ignore this choice/)).toBeNull();
   });
 });

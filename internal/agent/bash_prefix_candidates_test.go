@@ -158,16 +158,16 @@ func TestBashPermissionRequestCarriesCandidates(t *testing.T) {
 // carry the full candidate list for the dialog.
 func TestDecideOffersNarrowestBashPrefix(t *testing.T) {
 	pm := NewPermissionManager()
-	// `npm run` is on the built-in subcommand allowlist, so use a subcommand that
-	// genuinely asks: `npm install`.
-	d := pm.Decide("bash", json.RawMessage(`{"command":"npm install left-pad"}`))
+	// `pnpm run` is on the built-in subcommand allowlist, so use a subcommand
+	// that genuinely asks: `pnpm add`.
+	d := pm.Decide("bash", json.RawMessage(`{"command":"pnpm add example-pkg"}`))
 	if d.Level != PermissionAsk || d.Request == nil {
-		t.Fatalf("Decide(npm install left-pad) = %v, want ask with a request", d.Level)
+		t.Fatalf("Decide(pnpm add example-pkg) = %v, want ask with a request", d.Level)
 	}
-	if d.Request.Prefix != "npm install left-pad" {
+	if d.Request.Prefix != "pnpm add example-pkg" {
 		t.Fatalf("ask prefix = %q, want the narrowest derived rule", d.Request.Prefix)
 	}
-	if strings.Join(d.Request.PrefixCandidates, "|") != "npm install left-pad|npm install|npm" {
+	if strings.Join(d.Request.PrefixCandidates, "|") != "pnpm add example-pkg|pnpm add|pnpm" {
 		t.Fatalf("ask candidates = %q", d.Request.PrefixCandidates)
 	}
 }
@@ -177,13 +177,13 @@ func TestDecideOffersNarrowestBashPrefix(t *testing.T) {
 // rulePrefix is recomputed from each command.
 func TestPersistedPrefixAllowsNarrowerInvocations(t *testing.T) {
 	pm := NewPermissionManager()
-	pm.SetBashPrefixRule("npm install", PermissionAllow)
+	pm.SetBashPrefixRule("pnpm add", PermissionAllow)
 
-	if d := pm.Decide("bash", json.RawMessage(`{"command":"npm install left-pad"}`)); d.Level != PermissionAllow {
-		t.Fatalf("npm install left-pad with rule 'npm install' = %v, want allow", d.Level)
+	if d := pm.Decide("bash", json.RawMessage(`{"command":"pnpm add example-pkg"}`)); d.Level != PermissionAllow {
+		t.Fatalf("pnpm add example-pkg with rule 'pnpm add' = %v, want allow", d.Level)
 	}
-	if d := pm.Decide("bash", json.RawMessage(`{"command":"npm publish"}`)); d.Level != PermissionAsk {
-		t.Fatalf("npm publish with rule 'npm install' = %v, want ask", d.Level)
+	if d := pm.Decide("bash", json.RawMessage(`{"command":"pnpm publish"}`)); d.Level != PermissionAsk {
+		t.Fatalf("pnpm publish with rule 'pnpm add' = %v, want ask", d.Level)
 	}
 }
 

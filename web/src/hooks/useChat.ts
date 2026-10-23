@@ -205,7 +205,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       const permissionMode = draftSlice.permissionMode;
       const rewindToken = isRealSession ? armedRewindToken(projectHost, sessionId) : undefined;
       const submitPromise = isRealSession
-        ? api.sendMessage(sessionId, content, projectHost, rewindToken)
+        ? api.sendMessage(sessionId, content, projectHost, rewindToken, projectPath)
         : api.chat(content, undefined, model, sessionId, projectPath, projectHost, permissionMode);
 
       // The send endpoints resolve as soon as the server has *dispatched* the
@@ -336,7 +336,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     dispatch({ type: "SET_ERROR", sessionId, error: null });
     dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
     try {
-      const response = await api.retrySession(sessionId, projectHost);
+      const response = await api.retrySession(sessionId, projectHost, projectPath);
       const model = dispatchedModel(response);
       if (model) {
         dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });

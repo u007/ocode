@@ -103,6 +103,30 @@ func StartHTRReverseForward(fm *remote.ForwardManager, persisted []projects.Port
 // seconds.
 const htrAutoRetryInterval = 15 * time.Second
 
+// htrAutoRetryMax caps the backoff so a persistently-busy remote port is
+// retried at most every htrAutoRetryMax rather than hammered every 15s.
+const htrAutoRetryMax = 15 * time.Minute
+
+// htrAutoMaxFails caps the failure count used to compute the backoff. The
+// ladder doubles from htrAutoRetryInterval (15s, 30s, 1m, 2m, 4m, 8m), so this
+// value is the first that reaches htrAutoRetryMax; larger counts are clamped by
+// htrBackoff and never occur.
+const htrAutoMaxFails = 7
+
+// htrBackoff returns the wait before attempt number `failures` (1 = first
+// failure). It mirrors portMapPolicy.backoff so a persistently-busy remote
+// port is backed off exponentially instead of hammered every 15s.
+func htrBackoff(failures int) time.Duration {
+	d := htrAutoRetryInterval
+	for i := 1; i < failures; i++ {
+		d *= 2
+		if d >= htrAutoRetryMax {
+			return htrAutoRetryMax
+		}
+	}
+	return d
+}
+
 var errHTROpening = errors.New("htrcli reverse forward is already being opened")
 
 // htrHost is the htrcli reverse-forward state of one SSH host, shared by every
@@ -111,19 +135,64 @@ type htrHost struct {
 	fm      *remote.ForwardManager
 	opening atomic.Bool
 
+	// now is injectable so the backoff timing is testable.
+	now func() time.Time
+
 	mu          sync.Mutex
 	lastErr     string
 	lastAttempt time.Time
+	// failures counts consecutive failed opens; nextTry is the earliest time a
+	// new attempt is allowed; lastPort is the remote port last attempted, so a
+	// config change (htr_port) resets the backoff and retries the new port.
+	failures int
+	nextTry  time.Time
+	lastPort int
 }
 
-func (hh *htrHost) record(err error) {
+func (hh *htrHost) record(port int, err error) {
 	hh.mu.Lock()
 	defer hh.mu.Unlock()
-	hh.lastAttempt = time.Now()
+	hh.lastAttempt = hh.now()
 	hh.lastErr = ""
 	if err != nil {
 		hh.lastErr = err.Error()
+		if port != hh.lastPort {
+			// A new remote port (e.g. the user re-configured htr_port) starts
+			// with a clean failure count.
+			hh.lastPort = port
+			hh.failures = 0
+		}
+		if hh.failures < htrAutoMaxFails {
+			hh.failures++
+		}
+	} else {
+		hh.failures = 0
+		hh.lastPort = port
 	}
+	// Every attempt — success or failure — schedules the next one. A success
+	// on a port that is still not live (htr not running) gets the base 15s
+	// cooldown, matching the original fixed-throttle behaviour; a failure
+	// backs off exponentially.
+	hh.nextTry = hh.lastAttempt.Add(htrBackoff(hh.failures))
+}
+
+// shouldRetry reports whether a new reverse-forward attempt may be made now for
+// port. It enforces the backoff after failures and resets the backoff when the
+// configured remote port changes (a new port gets a fresh attempt).
+func (hh *htrHost) shouldRetry(port int) bool {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	if port != hh.lastPort {
+		// Not the port this host is tracking backoff for (a fresh port, or a
+		// different port queried before a real attempt). Returning true here is
+		// harmless: autoStartHTRReverse only ever gates the configured port, and
+		// record() owns all port-state mutations on the actual attempt path.
+		return true
+	}
+	if !hh.nextTry.IsZero() && hh.now().Before(hh.nextTry) {
+		return false
+	}
+	return true
 }
 
 func (hh *htrHost) snapshot() (lastErr string, lastAttempt time.Time) {
@@ -139,14 +208,14 @@ func (reg *portMapRegistry) htrHost(target remote.Target) *htrHost {
 	if hh, ok := reg.htr[key]; ok {
 		return hh
 	}
-	hh := &htrHost{fm: remote.NewForwardManager(reg.sup, target)}
+	hh := &htrHost{fm: remote.NewForwardManager(reg.sup, target), now: time.Now}
 	reg.htr[key] = hh
 	return hh
 }
 
 // openHTRReverse opens the host's reverse forward. A concurrent open returns
 // errHTROpening instead of queueing a second ssh child.
-func (h *Handler) openHTRReverse(ref projects.ProjectRef, target remote.Target) error {
+func (h *Handler) openHTRReverse(ref projects.ProjectRef, target remote.Target, port int) error {
 	hh := h.portMaps.htrHost(target)
 	if !hh.opening.CompareAndSwap(false, true) {
 		return errHTROpening
@@ -155,11 +224,11 @@ func (h *Handler) openHTRReverse(ref projects.ProjectRef, target remote.Target) 
 	maps, err := h.projects.PortMaps(ref)
 	if err != nil {
 		err = fmt.Errorf("load port forwards for %s:%s: %w", ref.Host, ref.Path, err)
-		hh.record(err)
+		hh.record(port, err)
 		return err
 	}
 	err = htrReverseForwardOpener()(hh.fm, maps)
-	hh.record(err)
+	hh.record(port, err)
 	return err
 }
 
@@ -176,13 +245,17 @@ func (h *Handler) autoStartHTRReverse(ref projects.ProjectRef, target remote.Tar
 		return
 	}
 	hh := h.portMaps.htrHost(target)
-	if port, ok := localHTRPort(cfg.Browser); ok && hh.fm.IsLive(port) {
+	port, ok := localHTRPort(cfg.Browser)
+	// Only skip when htr is running AND the forward is already live. When htr
+	// is not running (!ok) we still attempt: StartHTRReverseForward is a no-op
+	// then, but the attempt is the observable that marks this host as tried.
+	if ok && hh.fm.IsLive(port) {
 		return
 	}
-	if _, last := hh.snapshot(); !last.IsZero() && time.Since(last) < htrAutoRetryInterval {
+	if !hh.shouldRetry(port) {
 		return
 	}
-	if err := h.openHTRReverse(ref, target); err != nil && !errors.Is(err, errHTROpening) {
+	if err := h.openHTRReverse(ref, target, port); err != nil && !errors.Is(err, errHTROpening) {
 		log.Printf("port forwards: %s:%s: %v", ref.Host, ref.Path, err)
 	}
 }
@@ -246,7 +319,7 @@ func (h *Handler) HandleHTRStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "local htrcli daemon is not running, so there is nothing to map")
 		return
 	}
-	if err := h.openHTRReverse(portMapRef(rw), rw.Target); err != nil {
+	if err := h.openHTRReverse(portMapRef(rw), rw.Target, st.Port); err != nil {
 		code := http.StatusBadGateway
 		if errors.Is(err, errHTROpening) {
 			code = http.StatusConflict

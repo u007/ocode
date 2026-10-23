@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -142,6 +143,8 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.maybeSyncRemoteHostsLazily()
+
 	// Get the cached proxy.
 	proxy, ok := h.remoteHosts.proxyFor(host, remotePort)
 	if !ok || proxy == nil {
@@ -157,7 +160,7 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	// chat agent on the same credentials/config. The remote has no
 	// window-state.json (see applyProxiedActiveProfile), so without this a
 	// remote turn falls back to the base credentials.
-	h.injectProxiedActiveProfile(r)
+	h.injectProxiedActiveProfile(r, host, originalPath)
 
 	// Serve via the cached proxy. The Director strips the local ?token= and
 	// injects the remote bearer token.
@@ -178,13 +181,22 @@ func proxiedRemoteWindowID(r *http.Request) string {
 	return strings.TrimSpace(r.URL.Query().Get("window_id"))
 }
 
-// injectProxiedActiveProfile stamps the originating desktop window's effective
-// profile onto the request. Any client-supplied profile headers are stripped
-// first so a browser cannot forge a profile (the remote only trusts the
-// authoritative marker this function sets). The empty/Default case uses an
+// injectProxiedActiveProfile stamps the effective profile onto the request: the
+// profile bound to the request's remote project when there is one, else the
+// originating desktop window's. Any client-supplied profile headers are
+// stripped first so a browser cannot forge a profile (the remote only trusts
+// the authoritative marker this function sets). The empty/Default case uses an
 // explicit reset header instead of an empty X-Ocode-Active-Profile value so no
 // transport layer can silently drop the "back to base" signal.
-func (h *Handler) injectProxiedActiveProfile(r *http.Request) {
+//
+// A request without a project path (session-scoped endpoints such as Retry and
+// the permission/question continuations) falls back to the window's profile
+// rather than stamping nothing. The remote keeps ONE profile per window, so
+// omitting the marker would leave whichever project last stamped it in place —
+// and a path-less Retry rebuilds the resident agent, which would run that
+// session on another project's credentials. The chat send paths carry the
+// project (X-Ocode-Project) and still prefer their binding.
+func (h *Handler) injectProxiedActiveProfile(r *http.Request, host, projectPath string) {
 	r.Header.Del(remoteActiveProfileHeader)
 	r.Header.Del(remoteProfileAuthoritativeHeader)
 	r.Header.Del(remoteProfileResetHeader)
@@ -193,7 +205,18 @@ func (h *Handler) injectProxiedActiveProfile(r *http.Request) {
 	if windowID == "" {
 		return
 	}
-	if profile := h.getEffectiveWindowProfile(windowID); profile != "" {
+	// Mirror resolveSessionProfile's order exactly: OCODE_PROFILE wins
+	// everywhere, then the project binding, then the window's profile. Checking
+	// the binding first would make a remote turn ignore an operator's env
+	// override while the same project runs on it locally.
+	profile := strings.TrimSpace(os.Getenv("OCODE_PROFILE"))
+	if profile == "" && projectPath != "" && h.projects != nil {
+		profile = h.projects.ProfileFor(projects.ProjectRef{Host: host, Path: projectPath})
+	}
+	if profile == "" {
+		profile = h.getEffectiveWindowProfile(windowID)
+	}
+	if profile != "" {
 		r.Header.Set(remoteActiveProfileHeader, profile)
 		r.Header.Set(remoteProfileAuthoritativeHeader, "1")
 		return

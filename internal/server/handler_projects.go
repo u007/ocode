@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/session"
@@ -529,6 +530,54 @@ func (h *Handler) HandleSetProjectGroup(w http.ResponseWriter, r *http.Request) 
 	if err := h.projects.SetGroupRef(projects.ProjectRef{Path: body.Path, Host: body.Host}, body.Group); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("set group: %v", err))
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleSetProjectProfile binds a project (local, or remote when host is set) to a config profile ("" clears).
+func (h *Handler) HandleSetProjectProfile(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+	var body struct {
+		Path    string `json:"path"`
+		Host    string `json:"host"`
+		Profile string `json:"profile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	profile := strings.TrimSpace(body.Profile)
+	if profile != "" {
+		if err := config.ValidateProfileName(profile); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if _, ok := config.GetProfile(profile); !ok {
+			writeError(w, http.StatusNotFound, "profile not found")
+			return
+		}
+	}
+	if err := h.projects.SetProfileRef(projects.ProjectRef{Path: body.Path, Host: body.Host}, profile); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("set profile: %v", err))
+		return
+	}
+	if h.bus != nil {
+		// Reuse the existing `profile.changed` channel: the SPA already
+		// subscribes to it, and `action` distinguishes a project binding from a
+		// profile CRUD event. A dedicated name would have no subscriber.
+		h.bus.Publish("profile.changed", "", "", map[string]string{
+			"action":  "project_bound",
+			"path":    body.Path,
+			"host":    body.Host,
+			"profile": profile,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

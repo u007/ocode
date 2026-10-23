@@ -103,7 +103,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "hello", "devbox", undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "hello", "devbox", undefined, "/srv/app");
   });
 
   // A brand-new draft tab (no registered tab) sends chat with the active
@@ -186,7 +186,7 @@ describe("useChat remote host routing", () => {
     });
 
     // Tab is still registered under /srv/app → host = devbox
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "still remote", "devbox", undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "still remote", "devbox", undefined, "/srv/app");
   });
 
   // A tab bound to a local project sends no host.
@@ -206,7 +206,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-local", "hello", undefined, undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-local", "hello", undefined, undefined, "/local/app");
   });
 
   // An ambiguous path (saved both local and remote) sends no host.
@@ -228,7 +228,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-shared", "hello", undefined, undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-shared", "hello", undefined, undefined, "/shared/app");
   });
 
   // cancelSession also receives the host.
@@ -269,7 +269,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.retryLastTurn();
     });
 
-    expect(mockRetrySession).toHaveBeenCalledWith("sess-remote", "devbox");
+    expect(mockRetrySession).toHaveBeenCalledWith("sess-remote", "devbox", "/srv/app");
   });
 });
 

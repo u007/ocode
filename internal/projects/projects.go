@@ -42,6 +42,9 @@ type Project struct {
 	LastUsedAt time.Time `json:"last_used_at"`
 	Order      int       `json:"order"` // manual sort position (lower = higher)
 	Group      string    `json:"group"` // group name, "" = ungrouped
+	// Profile is the config profile sessions in this project run under.
+	// Empty means "no project binding": the window's active profile applies.
+	Profile string `json:"profile,omitempty"`
 	// Host identifies the ocode Remote target this project lives on
 	// (Target.String() — "[user@]host" or "wsl:<distro>"). Empty means a
 	// local project. Local (Add/Remove/Touch/Rename/Reorder/SetGroup) and
@@ -723,6 +726,80 @@ func (s *Store) SetGroupRef(ref ProjectRef, group string) error {
 		return fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
 	}
 	return fmt.Errorf("project %q not found", ref.Path)
+}
+
+// SetProfileRef binds the project identified by ref to a config profile, or
+// clears the binding if profile is "". Scoped like SetGroupRef.
+func (s *Store) SetProfileRef(ref ProjectRef, profile string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.cache {
+		if matchRef(s.cache[i], ref) {
+			s.cache[i].Profile = profile
+			return s.save()
+		}
+	}
+	if ref.Host != "" {
+		return fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
+	}
+	return fmt.Errorf("project %q not found", ref.Path)
+}
+
+// ProfileFor returns the profile bound to the project identified by ref, or ""
+// when the project is unknown or unbound.
+func (s *Store) ProfileFor(ref ProjectRef) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, p := range s.cache {
+		if matchRef(p, ref) {
+			return p.Profile
+		}
+	}
+	return ""
+}
+
+// ProfileBindingCount reports how many projects are bound to profile. Used to
+// refuse deleting a profile that projects still depend on.
+func (s *Store) ProfileBindingCount(profile string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if profile == "" {
+		return 0
+	}
+	n := 0
+	for _, p := range s.cache {
+		if p.Profile == profile {
+			n++
+		}
+	}
+	return n
+}
+
+// RenameProfileRefs rewrites every project binding from oldName to newName,
+// returning how many changed. A profile rename must move its bindings too, or
+// they silently resolve to a profile that no longer exists and the project
+// falls back to the base credentials.
+func (s *Store) RenameProfileRefs(oldName, newName string) (int, error) {
+	if oldName == "" || oldName == newName {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	changed := 0
+	for i := range s.cache {
+		if s.cache[i].Profile == oldName {
+			s.cache[i].Profile = newName
+			changed++
+		}
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	return changed, s.save()
 }
 
 // ── GroupStore ─────────────────────────────────────────────────────────────

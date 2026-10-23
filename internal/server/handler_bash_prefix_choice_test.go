@@ -8,19 +8,19 @@ import (
 	"github.com/u007/ocode/internal/agent"
 )
 
-// bashAskWithCandidates is a pending "npm install left-pad" bash ask carrying
-// the rule granularities the dialog may offer. `npm install` is deliberately
-// NOT on the built-in subcommand allowlist (unlike `npm run`), so the derived
+// bashAskWithCandidates is a pending "pnpm add example-pkg" bash ask carrying
+// the rule granularities the dialog may offer. `pnpm add` is deliberately
+// NOT on the built-in subcommand allowlist (unlike `pnpm run`), so the derived
 // rules are actually load-bearing.
 func bashAskWithCandidates() agent.PermissionRequest {
 	return agent.PermissionRequest{
 		ToolName:         "bash",
-		Command:          "npm install left-pad",
-		Args:             json.RawMessage(`{"command":"npm install left-pad"}`),
+		Command:          "pnpm add example-pkg",
+		Args:             json.RawMessage(`{"command":"pnpm add example-pkg"}`),
 		Scope:            agent.PermissionScopeBashPrefix,
-		Prefix:           "npm install left-pad",
-		PrefixCandidates: []string{"npm install left-pad", "npm install", "npm"},
-		Rule:             "bash.prefix.npm install left-pad",
+		Prefix:           "pnpm add example-pkg",
+		PrefixCandidates: []string{"pnpm add example-pkg", "pnpm add", "pnpm"},
+		Rule:             "bash.prefix.pnpm add example-pkg",
 	}
 }
 
@@ -59,27 +59,27 @@ func TestHandleResolvePermissionPersistsChosenBashPrefix(t *testing.T) {
 	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
 	as := bashAskSession(t, ag, bashAskWithCandidates())
 
-	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule","prefix":"npm install"}`)
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule","prefix":"pnpm add"}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	prefixes := savedBashPrefixes(t)
-	if prefixes == nil || prefixes["npm install"] != "allow" {
-		t.Fatalf("expected permissions.bash.prefixes[npm install]=allow, got %v", prefixes)
+	if prefixes == nil || prefixes["pnpm add"] != "allow" {
+		t.Fatalf("expected permissions.bash.prefixes[pnpm add]=allow, got %v", prefixes)
 	}
-	if _, ok := prefixes["npm"]; ok {
+	if _, ok := prefixes["pnpm"]; ok {
 		t.Fatalf("a broader rule than the user chose was persisted: %v", prefixes)
 	}
 
 	// A sibling invocation under the chosen prefix is now allowed without
 	// asking. This is the lookup the exact-key-only path would miss.
-	if d := ag.Permissions().Decide("bash", json.RawMessage(`{"command":"npm install some-pkg"}`)); d.Level != agent.PermissionAllow {
-		t.Fatalf("npm install some-pkg after choosing 'npm install' = %v, want allow", d.Level)
+	if d := ag.Permissions().Decide("bash", json.RawMessage(`{"command":"pnpm add some-pkg"}`)); d.Level != agent.PermissionAllow {
+		t.Fatalf("pnpm add some-pkg after choosing 'pnpm add' = %v, want allow", d.Level)
 	}
-	// ...while a different npm subcommand still asks.
-	if d := ag.Permissions().Decide("bash", json.RawMessage(`{"command":"npm publish"}`)); d.Level != agent.PermissionAsk {
-		t.Fatalf("npm publish after choosing 'npm install' = %v, want ask", d.Level)
+	// ...while a different pnpm subcommand still asks.
+	if d := ag.Permissions().Decide("bash", json.RawMessage(`{"command":"pnpm publish"}`)); d.Level != agent.PermissionAsk {
+		t.Fatalf("pnpm publish after choosing 'pnpm add' = %v, want ask", d.Level)
 	}
 }
 
@@ -96,10 +96,10 @@ func TestHandleResolvePermissionDefaultsToNarrowestBashPrefix(t *testing.T) {
 		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 	prefixes := savedBashPrefixes(t)
-	if prefixes == nil || prefixes["npm install left-pad"] != "allow" {
-		t.Fatalf("expected permissions.bash.prefixes[npm install left-pad]=allow, got %v", prefixes)
+	if prefixes == nil || prefixes["pnpm add example-pkg"] != "allow" {
+		t.Fatalf("expected permissions.bash.prefixes[pnpm add example-pkg]=allow, got %v", prefixes)
 	}
-	if _, ok := prefixes["npm"]; ok {
+	if _, ok := prefixes["pnpm"]; ok {
 		t.Fatalf("default persisted a broader rule than the ask offered: %v", prefixes)
 	}
 }
@@ -111,7 +111,7 @@ func TestHandleResolvePermissionRejectsUnsubmittedBashPrefix(t *testing.T) {
 	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
 	as := bashAskSession(t, ag, bashAskWithCandidates())
 
-	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule","prefix":"npm publish"}`)
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule","prefix":"pnpm publish"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -159,7 +159,7 @@ func TestHandleResolvePermissionRefusesToolLevelBashAllow(t *testing.T) {
 // The SSE frame must carry the candidates, or the dialog has nothing to offer.
 func TestPermissionEventCarriesPrefixCandidates(t *testing.T) {
 	ev := newPermissionEvent("call-1", bashAskWithCandidates())
-	if len(ev.PrefixCandidates) != 3 || ev.PrefixCandidates[0] != "npm install left-pad" {
+	if len(ev.PrefixCandidates) != 3 || ev.PrefixCandidates[0] != "pnpm add example-pkg" {
 		t.Fatalf("PrefixCandidates = %q", ev.PrefixCandidates)
 	}
 	wire, err := json.Marshal(ev)

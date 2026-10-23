@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
@@ -673,11 +674,17 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 // resolveSessionProfile computes the effective profile a session should run
 // under, given its registry entry. Order: OCODE_PROFILE env (ephemeral, wins
-// everywhere) > the window's active profile (when the session is bound to a
-// window) > the v1 global fallback (most-recent window / env).
+// everywhere) > the profile bound to the session's project > the window's
+// active profile (when the session is bound to a window) > the v1 global
+// fallback (most-recent window / env).
 func (h *Handler) resolveSessionProfile(entry *sessionEntry) string {
 	if v := os.Getenv("OCODE_PROFILE"); v != "" {
 		return v
+	}
+	if h.projects != nil && entry.ProjectRoot != "" {
+		if p := h.projects.ProfileFor(projects.ProjectRef{Path: entry.ProjectRoot}); p != "" {
+			return p
+		}
 	}
 	if entry.WindowID != "" {
 		return h.getWindowProfile(entry.WindowID)
@@ -693,7 +700,9 @@ func (h *Handler) resolveSessionProfile(entry *sessionEntry) string {
 //
 // It is a no-op (returns as unchanged) when:
 //   - as is nil (the caller's normal bootstrap path handles it),
-//   - the session is not window-bound,
+//   - the session has no window and no project profile to apply (a windowless
+//     session with neither is left on the v1 global fallback unless it already
+//     carries a profile),
 //   - a turn is currently active (the in-flight turn finishes on the old
 //     profile, per the design), or
 //   - the profile hasn't changed.
@@ -727,7 +736,15 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// read unconditionally rather than only on the window-bound path.
 	curCredVersion := auth.CredentialVersion()
 	cur := as.profile
-	if entry.WindowID != "" {
+	// Re-resolve whenever a window or a project could supply a profile. For a
+	// windowless session the project half must not test only "is a binding
+	// present": removing a binding is exactly the case that needs the rebuild,
+	// so a session already carrying a profile re-resolves too. A session with
+	// neither skips, keeping the v1 most-recent-window fallback from churning
+	// an unrelated agent (cron/pulse) on every profile switch elsewhere.
+	if entry.WindowID != "" ||
+		(h.projects != nil && entry.ProjectRoot != "" &&
+			(as.profile != "" || h.projects.ProfileFor(projects.ProjectRef{Path: entry.ProjectRoot}) != "")) {
 		cur = h.resolveSessionProfile(entry)
 	}
 	// A sidebar skill toggle changes the injected catalog, corpus, digest and

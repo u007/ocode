@@ -1081,7 +1081,13 @@ function HomeApp() {
         }
       } else {
         const host = resolveSessionHost(projectState, sessionId);
-        const result = await api.sendMessage(sessionId, content, host);
+        const result = await api.sendMessage(
+          sessionId,
+          content,
+          host,
+          undefined,
+          findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path,
+        );
         const dispatchedModel = typeof result?.model === "string" ? result.model.trim() : "";
         if (dispatchedModel) {
           dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model: dispatchedModel });

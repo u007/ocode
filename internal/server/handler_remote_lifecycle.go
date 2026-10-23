@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/projects"
@@ -159,4 +160,24 @@ func (h *Handler) SyncConnectedRemoteHosts() {
 			h.remoteSyncMu.Unlock()
 		}
 	})
+}
+
+// remoteLazySyncInterval is the minimum gap between lazy remote re-sync kicks.
+const remoteLazySyncInterval = 10 * time.Second
+
+// maybeSyncRemoteHostsLazily re-pushes local settings, skills, agents and
+// CLAUDE.md/AGENTS.md to connected remote hosts when they changed. It is driven
+// by remote proxy traffic (no background poll) and at most every
+// remoteLazySyncInterval; the sync itself is hash-gated (PayloadHash), so an
+// unchanged payload costs one local read and no ssh round trip.
+func (h *Handler) maybeSyncRemoteHostsLazily() {
+	now := time.Now().UnixNano()
+	last := h.remoteSyncLastLazy.Load()
+	if last != 0 && time.Duration(now-last) < remoteLazySyncInterval {
+		return
+	}
+	if !h.remoteSyncLastLazy.CompareAndSwap(last, now) {
+		return
+	}
+	h.SyncConnectedRemoteHosts()
 }

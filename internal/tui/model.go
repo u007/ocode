@@ -9279,7 +9279,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/sync-logout" ||
 		cmd == "/new" || cmd == "/clear" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
-		cmd == "/ban" ||
+		cmd == "/ban" || cmd == "/allow" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
 		cmd == "/sandbox" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||

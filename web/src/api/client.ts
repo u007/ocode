@@ -2905,6 +2905,8 @@ export const api = {
     content: string,
     host?: string,
     rewindToken?: string,
+    // Remote sends carry the project so the proxy can apply its bound profile.
+    projectPath?: string,
   ) => {
     // Must be the same window id the ProfileSwitcher wrote its active profile
     // to (see getWindowId); re-deriving it here is what let the two diverge.
@@ -2922,6 +2924,7 @@ export const api = {
         }),
       },
       host,
+      projectPath,
     );
   },
   chat: (
@@ -3066,6 +3069,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(host ? { path, host, group } : { path, group }),
     }),
+  setProjectProfile: (path: string, profile: string, host?: string) =>
+    fetchJSON<{ status: string }>("/api/projects/profile", {
+      method: "POST",
+      body: JSON.stringify(host ? { path, host, profile } : { path, profile }),
+    }),
+  listProfiles: () =>
+    fetchJSON<{ profiles: { name: string }[] }>("/api/profiles"),
   listGroups: () => fetchJSON<ProjectGroup[]>("/api/projects/groups"),
   /** Every project's open-session tabs, server-side so every window/origin
    *  sees the same tab bar. */
@@ -4251,7 +4261,7 @@ export const api = {
    *  LLM-loop error). Unlike sendMessage, the server does NOT append a new user
    *  row — it re-steps the existing transcript tail — so the user's message is
    *  not duplicated. `host` routes remote (SSH/WSL) sessions to their server. */
-  retrySession: (sessionId: string, host?: string) =>
+  retrySession: (sessionId: string, host?: string, projectPath?: string) =>
     fetchJSON<ChatResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/retry`,
       {
@@ -4259,6 +4269,7 @@ export const api = {
         headers: { "X-Window-Id": getWindowId() },
       },
       host,
+      projectPath,
     ),
   /** Terminate the backend for a closed session (web/desktop tab close):
    *  cancels in-flight work AND releases the resident agent. Fire-and-forget

@@ -203,9 +203,9 @@ func TestDetectDoesNotReadPATHExecutables(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("expected no custom script for git status, got %v", got)
 	}
-	got = a.detectExecutedCustomScripts("npm install")
+	got = a.detectExecutedCustomScripts("pnpm install")
 	if len(got) != 0 {
-		t.Fatalf("expected no custom script for npm install, got %v", got)
+		t.Fatalf("expected no custom script for pnpm install, got %v", got)
 	}
 }
 

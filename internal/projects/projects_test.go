@@ -462,3 +462,112 @@ func TestDuplicateAsRemoteValidatesTarget(t *testing.T) {
 		t.Fatal("expected WSL port validation error")
 	}
 }
+
+func TestSetProfileRefScopedByHost(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.Add("/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetProfileRef(ProjectRef{Path: "/home/user/app"}, "work"); err != nil {
+		t.Fatalf("SetProfileRef: %v", err)
+	}
+	if got := store.ProfileFor(ProjectRef{Path: "/home/user/app"}); got != "work" {
+		t.Errorf("LocalProfile = %q, want work", got)
+	}
+	for _, p := range store.List() {
+		if p.Host != "" && p.Profile != "" {
+			t.Errorf("remote entry %+v must not inherit the local binding", p)
+		}
+	}
+	if err := store.SetProfileRef(ProjectRef{Host: "devbox", Path: "/home/user/app"}, "remoteWork"); err != nil {
+		t.Fatalf("SetProfileRef remote: %v", err)
+	}
+	if got := store.ProfileFor(ProjectRef{Host: "devbox", Path: "/home/user/app"}); got != "remoteWork" {
+		t.Errorf("remote ProfileFor = %q, want remoteWork", got)
+	}
+	if got := store.ProfileFor(ProjectRef{Path: "/home/user/app"}); got != "work" {
+		t.Errorf("local binding changed by remote set: %q", got)
+	}
+	if err := store.SetProfileRef(ProjectRef{Host: "devbox", Path: "/home/user/app"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetProfileRef(ProjectRef{Path: "/home/user/app"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.ProfileFor(ProjectRef{Path: "/home/user/app"}); got != "" {
+		t.Errorf("LocalProfile after clear = %q, want empty", got)
+	}
+	if err := store.SetProfileRef(ProjectRef{Path: "/nope"}, "x"); err == nil {
+		t.Error("expected error for unknown project")
+	}
+}
+
+func TestProfileRefsFollowProfileRename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projects.json")
+	store, err := NewStoreAt(path)
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.Add("/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []ProjectRef{
+		{Path: "/home/user/app"},
+		{Host: "devbox", Path: "/home/user/app"},
+	} {
+		if err := store.SetProfileRef(ref, "work"); err != nil {
+			t.Fatalf("SetProfileRef(%+v): %v", ref, err)
+		}
+	}
+	if got := store.ProfileBindingCount("work"); got != 2 {
+		t.Fatalf("ProfileBindingCount(work) = %d, want 2", got)
+	}
+
+	n, err := store.RenameProfileRefs("work", "office")
+	if err != nil {
+		t.Fatalf("RenameProfileRefs: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("RenameProfileRefs changed %d bindings, want 2", n)
+	}
+	if got := store.ProfileBindingCount("work"); got != 0 {
+		t.Errorf("old profile still bound to %d project(s)", got)
+	}
+	if got := store.ProfileBindingCount("office"); got != 2 {
+		t.Errorf("new profile bound to %d project(s), want 2", got)
+	}
+	for _, ref := range []ProjectRef{
+		{Path: "/home/user/app"},
+		{Host: "devbox", Path: "/home/user/app"},
+	} {
+		if got := store.ProfileFor(ref); got != "office" {
+			t.Errorf("ProfileFor(%+v) = %q, want office", ref, got)
+		}
+	}
+
+	// The rewrite is persisted, not just cached.
+	reloaded, err := NewStoreAt(path)
+	if err != nil {
+		t.Fatalf("reload NewStoreAt: %v", err)
+	}
+	if got := reloaded.ProfileFor(ProjectRef{Path: "/home/user/app"}); got != "office" {
+		t.Errorf("reloaded local binding = %q, want office", got)
+	}
+	if got := reloaded.ProfileFor(ProjectRef{Host: "devbox", Path: "/home/user/app"}); got != "office" {
+		t.Errorf("reloaded remote binding = %q, want office", got)
+	}
+
+	// An unbound name is a no-op, not an error.
+	if n, err := store.RenameProfileRefs("absent", "other"); err != nil || n != 0 {
+		t.Errorf("RenameProfileRefs(absent) = %d, %v; want 0, nil", n, err)
+	}
+}

@@ -18,8 +18,10 @@ import (
 type SyncFileDir string
 
 const (
-	SyncDirOcodeData SyncFileDir = "ocode-data" // remote paths.OcodeGlobalDataDir()
-	SyncDirConfig    SyncFileDir = "config"     // remote config.GlobalConfigDir()
+	SyncDirOcodeData    SyncFileDir = "ocode-data"    // remote paths.OcodeGlobalDataDir()
+	SyncDirConfig       SyncFileDir = "config"        // remote config.GlobalConfigDir()
+	SyncDirOpencodeData SyncFileDir = "opencode-data" // remote paths.GlobalDataDir() (auth.json, mcp-auth.json)
+	SyncDirHome         SyncFileDir = "home"          // remote $HOME; Name is an allowlisted relative path (sync_home.go)
 )
 
 // SyncFile is one file carried in a sync payload.
@@ -27,6 +29,9 @@ type SyncFile struct {
 	Dir     SyncFileDir `json:"dir"`
 	Name    string      `json:"name"`
 	Content []byte      `json:"content"`
+	// Mode carries the source permission bits for SyncDirHome entries only (the
+	// owner-exec bit is preserved); other dirs always write 0600.
+	Mode uint32 `json:"mode,omitempty"`
 }
 
 // SyncPayload is the credential/config bundle pushed to a remote on
@@ -35,6 +40,11 @@ type SyncFile struct {
 // output — never argv, never a log line.
 type SyncPayload struct {
 	Files []SyncFile `json:"files"`
+	// KeepHome lists SyncDirHome paths that exist locally but were left out of
+	// Files because they are credential files unchanged since the last push
+	// (see gateCredentialFiles). The remote counts them as still managed so the
+	// stale-file sweep does not delete them.
+	KeepHome []string `json:"keep_home,omitempty"`
 }
 
 // syncFrame is the wire format piped to `remote-receive-config` on stdin:
@@ -65,6 +75,16 @@ func BuildSyncPayload() (SyncPayload, error) {
 		}
 	}
 
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		for _, name := range []string{"auth.json", "mcp-auth.json"} {
+			if f, ok, err := readSyncFile(SyncDirOpencodeData, filepath.Join(dataDir, name)); err != nil {
+				return SyncPayload{}, err
+			} else if ok {
+				p.Files = append(p.Files, f)
+			}
+		}
+	}
+
 	if cfgDir, err := config.GlobalConfigDir(); err == nil {
 		for _, name := range []string{"opencode.json", "ocodeconfig.json"} {
 			if f, ok, err := readSyncFile(SyncDirConfig, filepath.Join(cfgDir, name)); err != nil {
@@ -74,6 +94,14 @@ func BuildSyncPayload() (SyncPayload, error) {
 				p.Files = append(p.Files, f)
 			}
 		}
+	}
+
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		files, err := collectHomeSyncFiles(home)
+		if err != nil {
+			return SyncPayload{}, err
+		}
+		p.Files = append(p.Files, files...)
 	}
 
 	return p, nil
@@ -198,19 +226,26 @@ func DecodeAndVerifyFrame(data []byte) (ver string, payload SyncPayload, err err
 // internal/auth/profile_store.go's writeProfileStoreLocked.
 func WritePayload(p SyncPayload) error {
 	for _, f := range p.Files {
+		if f.Dir == SyncDirHome && !allowedHomeSyncPath(f.Name) {
+			return fmt.Errorf("refusing to write %q under $HOME: not in the sync allowlist", f.Name)
+		}
 		destDir, err := resolveSyncDir(f.Dir)
 		if err != nil {
 			return fmt.Errorf("resolve dest dir for %s: %w", f.Name, err)
 		}
-		if err := os.MkdirAll(destDir, 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", destDir, err)
+		destPath := filepath.Join(destDir, filepath.FromSlash(f.Name))
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o700); err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Dir(destPath), err)
 		}
-		destPath := filepath.Join(destDir, f.Name)
-		if err := writeFile0600(destPath, f.Content); err != nil {
+		mode := os.FileMode(0o600)
+		if f.Dir == SyncDirHome {
+			mode = homeFileMode(f.Mode)
+		}
+		if err := writeFileMode(destPath, f.Content, mode); err != nil {
 			return fmt.Errorf("write %s: %w", destPath, err)
 		}
 	}
-	return nil
+	return applyHomeSyncManifest(p)
 }
 
 // resolveSyncDirFn is a package var (not a plain function) so tests can
@@ -226,8 +261,12 @@ func defaultResolveSyncDir(d SyncFileDir) (string, error) {
 	switch d {
 	case SyncDirOcodeData:
 		return paths.OcodeGlobalDataDir()
+	case SyncDirOpencodeData:
+		return paths.GlobalDataDir()
 	case SyncDirConfig:
 		return config.GlobalConfigDir()
+	case SyncDirHome:
+		return os.UserHomeDir()
 	default:
 		return "", fmt.Errorf("unknown sync file dir %q", d)
 	}
@@ -237,6 +276,11 @@ func defaultResolveSyncDir(d SyncFileDir) (string, error) {
 // then enforces 0600 — a partial write (crash mid-write, disk full) leaves
 // either the old file or nothing, never a half-written destination.
 func writeFile0600(path string, data []byte) error {
+	return writeFileMode(path, data, 0o600)
+}
+
+// writeFileMode is writeFile0600 with an explicit final mode (0600 or 0700).
+func writeFileMode(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -259,7 +303,7 @@ func writeFile0600(path string, data []byte) error {
 		cleanup()
 		return err
 	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		cleanup()
 		return err
 	}

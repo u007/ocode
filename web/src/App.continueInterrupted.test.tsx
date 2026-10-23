@@ -144,6 +144,6 @@ describe("App Continue wiring", () => {
     expect(panel.onContinue).toBeTypeOf("function");
     fireEvent.click(screen.getByTestId("continue"));
 
-    await waitFor(() => expect(appApi.sendMessage).toHaveBeenCalledWith("ses_continue-test", "continue", undefined));
+    await waitFor(() => expect(appApi.sendMessage).toHaveBeenCalledWith("ses_continue-test", "continue", undefined, undefined, "/proj"));
   });
 });

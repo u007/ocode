@@ -16,7 +16,7 @@ A dense map of the ocode React SPA so you don't re-discover it from scratch.
 | `cd web && npm run build` | `bun check . && vite build` → `web/dist/` |
 | `cd web && npm run test` | Vitest test suite |
 | `cd web && npm run typecheck` | `bun check .` |
-| `make web-build` | `cd web && npm install && npm run build` |
+| `make web-build` | `cd web && pnpm install && pnpm run build` |
 | `make web-dev` | `cd web && npm run dev` (background) |
 | `make dev` | Go backend + Vite together |
 | `make production` | Full Go binary with embedded `web/dist/` |

@@ -238,6 +238,15 @@ type PermissionManager struct {
 	// guarded by tempAllowMu. See temporaryAllow.
 	tempAllowMu sync.Mutex
 	tempAllows  map[string]*temporaryAllow
+
+	// File-sourced rules (see permission_filerules.go): the generations of the
+	// shared global/project rule files this manager last applied, and the rule
+	// set it applied, guarded by fileRulesMu.
+	fileRulesMu          sync.Mutex
+	fileRulesApplied     *fileRuleSet
+	fileRulesGlobalGen   uint64
+	fileRulesProjectGen  uint64
+	fileRulesProjectPath string
 }
 
 // temporaryAllow is the saved pre-allow state for one tool plus the number of
@@ -2062,6 +2071,7 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 }
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
+	pm.refreshFileRules()
 	pm.emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
 	if toolName == "read" {
 		path := extractPathFromArgs(toolName, args)

@@ -100,7 +100,7 @@ describe("useChat durable rewind send", () => {
     });
 
     expect(accepted).toBe(true);
-    expect(mocks.sendMessage).toHaveBeenCalledWith("sess-remote", "edited", "devbox", "tok");
+    expect(mocks.sendMessage).toHaveBeenCalledWith("sess-remote", "edited", "devbox", "tok", "/srv/app");
     expect(mocks.clearPendingRewind).toHaveBeenCalledWith("devbox", "sess-remote");
   });
 
@@ -111,7 +111,7 @@ describe("useChat durable rewind send", () => {
       await result.current.chat.sendMessage("plain");
     });
 
-    expect(mocks.sendMessage).toHaveBeenCalledWith("sess-remote", "plain", "devbox", undefined);
+    expect(mocks.sendMessage).toHaveBeenCalledWith("sess-remote", "plain", "devbox", undefined, "/srv/app");
     expect(mocks.clearPendingRewind).not.toHaveBeenCalled();
   });
 

@@ -3,6 +3,7 @@ import { useListNavigation } from "../hooks/useListNavigation"
 import { authedFetch } from "@/api/client"
 import { eventBus } from "@/lib/eventBus"
 import { getWindowId } from "@/lib/windowId"
+import { useProjectState } from "../stores/projectStore"
 
 type Profile = { name: string; displayName: string; overrideCount: number; credentialCount: number }
 type ProfileOption = { id: string; profile: string; label: string }
@@ -21,6 +22,9 @@ export function ProfileSwitcher() {
   const [active, setActive] = useState<string>("")
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  // A project bound to a profile ignores this window-level choice, so the pill
+  // must say so instead of looking like a control that took effect.
+  const projectProfile = useProjectState().state.activeProject?.profile ?? ""
 
   useEffect(() => {
     const refresh = () => {
@@ -95,6 +99,12 @@ export function ProfileSwitcher() {
   }
 
   const label = active ? `${active} •${profiles.find(p => p.name === active)?.overrideCount ?? 0}` : "Base"
+  const projectHint = projectProfile ? `project: ${projectProfile}` : ""
+  const title = projectProfile
+    ? `Profile ${projectProfile} is bound to this project, so its sessions use it instead of the window profile (${active || "Default"}).`
+    : active
+      ? `Profile ${active}`
+      : `Default (base config)`
   return (
     <div className="relative inline-flex">
       <button
@@ -104,9 +114,10 @@ export function ProfileSwitcher() {
         aria-expanded={open}
         onClick={() => setOpen(!open)}
         className="rounded-full border bg-muted px-3 py-1 text-xs hover:bg-accent hover:text-accent-foreground"
-        title={active ? `Profile ${active}` : `Default (base config)`}
+        title={title}
       >
-        {label} ▾
+        {label}
+        {projectHint && <span className="ml-1 text-muted-foreground">· {projectHint}</span>} ▾
       </button>
       {open && (
         <div
@@ -114,6 +125,11 @@ export function ProfileSwitcher() {
           onKeyDown={handleListKeyDown}
         >
           <div className="mb-1 text-xs text-muted-foreground">Active profile for this window</div>
+          {projectProfile && (
+            <div className="mb-1 text-xs text-amber-600 dark:text-amber-400">
+              This project is bound to {projectProfile}; its sessions ignore this choice.
+            </div>
+          )}
           {profileOptions.map((option, index) => {
             const selected = active === option.profile
             return (

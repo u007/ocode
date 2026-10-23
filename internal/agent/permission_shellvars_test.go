@@ -86,7 +86,7 @@ func TestExpandBashForJudgeNeverRunsUnlistedSubstitutions(t *testing.T) {
 		`X=$(python3 -c 'import os; os.system("rm -rf ~")'); echo "$X"`,
 		`X=$(go env GOMODCACHE; rm -rf /); echo "$X"`,
 		"X=`go env GOMODCACHE`; echo \"$X\"",
-		`X=$(npm install left-pad); echo "$X"`,
+		`X=$(pnpm add example-pkg); echo "$X"`,
 	} {
 		if exp, ok := newExpansionAgent().expandBashForJudge(cmd); ok {
 			t.Errorf("%s: expected no expansion, got %+v", cmd, exp)

@@ -518,6 +518,32 @@ Permissions live in `ocodeconfig.json` (ocode-only overrides), loaded from:
 
 Project config overrides global. The `opencode.json` `permission` field is a separate, simpler format.
 
+### 9.1 Live file rules (`permission_filerules.go`)
+
+The `permissions.tools` and `permissions.bash.{prefixes,auto_allow_prefixes,prefix_modes}`
+rules are re-read lazily from two files: the global `ocodeconfig.json` and the project's
+`.ocode/settings.json` (same `permissions` block; `mode` and `auto` are NOT read from it).
+
+- One shared `ruleFile` per path per process (`sharedRuleFile`), so every session of every
+  project reuses the same parsed copy. `Decide` calls `refreshFileRules`; each file is
+  checked at most every `fileRulesCheckInterval` (10s), no background poll.
+- Change detection is md5 of the contents (a missing file hashes as empty), not mtime.
+- A file that fails to parse keeps the last good rules and logs once per distinct content;
+  it never degrades to "no rules" (that would lift every ban).
+- Precedence: project overrides global, but a `deny` from either file always wins.
+- **Project overrides global, including grants** (user decision): a project `allow`, `auto_allow_prefixes`
+  or `prefix_modes` entry replaces the global one. A global `deny` still wins. Because the file is
+  repo-controlled, a cloned untrusted repo can pre-approve commands; a per-file-hash trust prompt
+  is the known mitigation, not implemented. `auto_allow_prefixes` is validated like prefixes
+  (no bare `git`, never a denied prefix).
+- Agent writes to either file already hit the self-escalation guard (`isPermissionEscalation`).
+- A reload applies only the keys the files changed; a rule dropped from a file is removed
+  only if the manager still holds the value the file gave it, so session-only rules and
+  in-session overrides survive.
+- Separate processes (two TUIs, a remote `ocode serve`) share only through the files.
+- Sandbox mode is unaffected: an allowed bash call still goes through the judge
+  (`agent.go` `sandbox.judge` gate).
+
 ## 10. TUI commands
 
 | Command | Action |
@@ -526,9 +552,12 @@ Project config overrides global. The `opencode.json` `permission` field is a sep
 | `/permissions bash:git allow` | Set a bash prefix rule |
 | `/permissions bash:rm deny` | Deny a bash prefix |
 | `/ban [list]` | List banned prefixes |
-| `/ban add <prefix…>` | Deny a prefix (bare `/ban <cmd>` is shorthand for add) |
-| `/ban remove <prefix…>` | Delete the rule (falls back to the default policy) |
+| `/ban add <prefix…>` | Deny a prefix, replacing an allow rule on the same prefix (bare `/ban <cmd>` is shorthand for add) |
+| `/ban remove <prefix…>` | Delete a ban only; an allow rule is left alone (falls back to the default policy) |
 | `/ban clear` | Confirm-gated: delete every banned prefix rule |
+| `/allow [list]` | List allowed bash prefixes |
+| `/allow add <prefix…>` | Allow a prefix, replacing a ban on the same prefix (bare `/allow <cmd>` is shorthand for add; a bare `git` allow is rejected) |
+| `/allow remove <prefix…>` | Delete an allow rule only; a ban is left alone (falls back to the default policy) |
 | `/yolo` or `/yolo status` | Show YOLO mode status |
 | `/yolo on` | Enable YOLO mode |
 | `/yolo off` | Disable YOLO mode |

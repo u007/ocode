@@ -363,7 +363,10 @@ type Handler struct {
 	// remoteSyncMu guards the single-flight state of SyncConnectedRemoteHosts.
 	remoteSyncMu      sync.Mutex
 	remoteSyncRunning bool
-	remoteSyncPending bool
+	// remoteSyncLastLazy is the unix-nano time of the last lazy remote re-sync
+	// kick (see maybeSyncRemoteHostsLazily).
+	remoteSyncLastLazy atomic.Int64
+	remoteSyncPending  bool
 }
 
 // SetTerminalAccessPolicy configures the security boundary for the terminal

@@ -204,6 +204,28 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 - `BuildSyncPayload` (`sync.go:57`) ships `auth.profiles.json` + `opencode.json`
   + `ocodeconfig.json`, but **not** `window-state.json` — which is why the
   profile must travel per-request rather than as synced state.
+- `BuildSyncPayload` also mirrors an ALLOWLIST under the local `$HOME` into the remote `$HOME`
+  (`sync_home.go`, `SyncDirHome`): `~/.claude/{CLAUDE.md,settings.json}`,
+  `~/.config/opencode/{AGENTS.md,CLAUDE.md}` and the `skills`/`agents` trees under `~/.claude`,
+  `~/.config/opencode`, `~/.agents/skills`. `settings.json` keeps only `permissions`, `model`,
+  `enabledPlugins` (no `env`/helpers/hooks). Symlinked files and dirs are followed and hashed by
+  target content; links resolving outside `$HOME` or into `.ssh`/`.aws`/`.gnupg`/`.kube`/
+  `.docker`/`.config/gcloud`/`.config/gh` are skipped. `.env*`, key files, `.git`, `node_modules`,
+  files over 1 MiB are skipped; over 16 MiB total is an error. `WritePayload` re-checks the
+  allowlist on the remote, so a crafted frame cannot write elsewhere. Local always wins, deletions
+  included: the remote records what it wrote in `home-sync-manifest.json` (ocode data dir) and
+  removes only manifest paths the next payload no longer carries (re-checked against the allowlist),
+  pruning dirs left empty inside a tree. Hand-made remote files are never touched.
+- Credential files ride the same sync: `auth.json` and `mcp-auth.json` (opencode data dir,
+  `SyncDirOpencodeData`), `auth.profiles.json`, and `~/.config/opencode/antigravity-accounts.json`.
+  Also allowlisted: `~/.config/opencode/commands/` and `auto-permission-prompt{,.local}.md`.
+  Credential files are **gated per file** (`gateCredentialFiles`, `sync_creds.go`): pushed only when
+  their own content hash differs from the last successful push to that host
+  (`remote-sync-creds.json`), because OAuth refresh tokens rotate and a blind re-push would
+  overwrite a token the remote just refreshed. `force` pushes all. A held-back home credential is
+  listed in `SyncPayload.KeepHome` so the stale-file sweep does not delete it.
+- Re-push is lazy: remote proxy traffic calls `maybeSyncRemoteHostsLazily` (at most every 10 s);
+  `PayloadHash` gates the ssh round trip, so an unchanged payload costs only a local read.
 - Remote and local projects must be prevented from sharing config: a
   `web/src/api/client.ts` helper with an optional trailing `host` **must** be
   given the session's remote host, or it silently writes the local server's

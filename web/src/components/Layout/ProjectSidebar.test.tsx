@@ -108,6 +108,7 @@ const actionsFake = vi.hoisted(() => ({
   duplicateProjectAsRemote: vi.fn(),
   reorderProjects: vi.fn(),
   setProjectGroup: vi.fn(),
+  setProjectProfile: vi.fn(),
   createGroup: vi.fn(),
   deleteGroup: vi.fn(),
   renameGroup: vi.fn(),
@@ -115,6 +116,36 @@ const actionsFake = vi.hoisted(() => ({
   setGroupCollapsed: vi.fn(),
   prefetchProjectSessions: vi.fn(),
 }));
+
+const apiFake = vi.hoisted(() => ({
+  listProfiles: vi.fn(),
+}));
+
+// The sidebar loads the profile names on mount and subscribes for renames.
+// Unmocked, every test in this suite would attempt a real network call and log
+// an ERR_INVALID_URL (jsdom has no base URL) — and the subscription would start
+// a stream from a component suite that is otherwise pure.
+vi.mock("../../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api/client")>();
+  return { ...actual, api: { ...actual.api, listProfiles: apiFake.listProfiles } };
+});
+// Default for every test: the profile-name fetch never settles, so the mount
+// effect cannot push a state update after a test finished (jsdom would log an
+// act warning for every one of them).
+apiFake.listProfiles.mockReturnValue(new Promise(() => {}));
+
+vi.mock("../../lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    onReconnect: () => () => {},
+  },
+}));
+
+const actionErrorsFake = vi.hoisted(() => ({ report: vi.fn() }));
+vi.mock("../../lib/actionErrors", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/actionErrors")>();
+  return { ...actual, reportActionErrorMessage: actionErrorsFake.report };
+});
 
 vi.mock("../../stores/projectStore", () => ({
   // resolveSessionHost (useSessionHost.ts) imports this directly, so the
@@ -419,6 +450,12 @@ describe("ProjectSidebar project indicators", () => {
     expect(screen.queryByTitle(/beep/)).toBeNull();
   });
 
+  it("shows a tag with the project's profile only when one is bound", () => {
+    stateFake.projects = [{ ...stateFake.projects[0], profile: "work" }];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(screen.getByTitle("Profile work")).toHaveTextContent("work");
+  });
+
   it("wraps the badge cluster below a narrow row instead of squeezing the label", () => {
     // jsdom has no layout engine, so this cannot assert geometry. It pins the
     // CSS contract that produces the wrap: the row is a wrapping flex line
@@ -432,7 +469,7 @@ describe("ProjectSidebar project indicators", () => {
 
     const nameEl = screen.getByText("proj");
     const row = nameEl.closest('[role="button"]') as HTMLElement;
-    const labelBlock = nameEl.parentElement as HTMLElement;
+    const labelBlock = nameEl.closest('[data-testid="project-label"]') as HTMLElement;
     const badgeCluster = screen.getByTitle("2 sessions open").parentElement as HTMLElement;
 
     expect(row.className).toContain("flex-wrap");
@@ -1106,5 +1143,76 @@ describe("Pulse dashboard entry", () => {
     // does nothing when clicked.
     const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
     expect(container.querySelector('[data-testid="open-dashboard"]')).toBeNull();
+  });
+});
+
+describe("ProjectSidebar project profile binding", () => {
+  beforeEach(() => {
+    stateFake.projects = [project("/proj", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    actionsFake.setProjectProfile.mockClear();
+    actionsFake.setProjectProfile.mockResolvedValue(undefined);
+    apiFake.listProfiles.mockReturnValue(new Promise(() => {}));
+  });
+
+  it("offers the defined profiles and binds the chosen one", async () => {
+    apiFake.listProfiles.mockResolvedValue({ profiles: [{ name: "work" }, { name: "home" }] });
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(await screen.findByText('Use profile "work"'));
+
+    await waitFor(() =>
+      expect(actionsFake.setProjectProfile).toHaveBeenCalledWith("/proj", "work", undefined),
+    );
+  });
+
+  it("hands the project host to the binding call for a remote row", async () => {
+    apiFake.listProfiles.mockResolvedValue({ profiles: [{ name: "work" }] });
+    stateFake.projects = [remoteProject("/home/user/app", "devbox")];
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    fireEvent.contextMenu(
+      container.querySelector(".group.relative .truncate.font-medium")!,
+    );
+    fireEvent.click(await screen.findByText('Use profile "work"'));
+
+    await waitFor(() =>
+      expect(actionsFake.setProjectProfile).toHaveBeenCalledWith("/home/user/app", "work", "devbox"),
+    );
+  });
+
+  it("reports a rejected binding and keeps the menu open", async () => {
+    apiFake.listProfiles.mockResolvedValue({ profiles: [{ name: "work" }] });
+    actionsFake.setProjectProfile.mockRejectedValue(new Error("profile not found"));
+    actionErrorsFake.report.mockClear();
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(await screen.findByText('Use profile "work"'));
+
+    await waitFor(() =>
+      expect(actionErrorsFake.report).toHaveBeenCalledWith(
+        expect.stringContaining("profile not found"),
+      ),
+    );
+    // Closing on failure would make a rejected binding look like a success.
+    expect(screen.getByText('Use profile "work"')).toBeDefined();
+  });
+
+  it("keeps a stale binding clearable when no profiles are defined", async () => {
+    stateFake.projects = [{ ...project("/proj", ""), profile: "gone" }];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    expect(screen.getByTitle("Profile gone")).toHaveTextContent("gone");
+    fireEvent.contextMenu(screen.getByText("proj"));
+    expect(await screen.findByText("Profile: gone (missing)")).toBeDefined();
+
+    fireEvent.click(screen.getByText("Use window profile"));
+    await waitFor(() =>
+      expect(actionsFake.setProjectProfile).toHaveBeenCalledWith("/proj", "", undefined),
+    );
   });
 });

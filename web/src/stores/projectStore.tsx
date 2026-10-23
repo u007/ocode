@@ -660,6 +660,7 @@ interface ProjectContextType {
   renameProject: (path: string, name: string, host?: string) => Promise<void>;
   reorderProjects: (refs: Array<{ path: string; host?: string }>) => Promise<void>;
   setProjectGroup: (path: string, group: string, host?: string) => Promise<void>;
+  setProjectProfile: (path: string, profile: string, host?: string) => Promise<void>;
   createGroup: (name: string) => Promise<void>;
   deleteGroup: (name: string) => Promise<void>;
   renameGroup: (oldName: string, newName: string) => Promise<void>;
@@ -826,6 +827,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "SET_PROJECTS_ERROR" });
     }
   }, [dispatch]);
+
+  // A project's bound profile is server state shared by every window, so a
+  // binding changed elsewhere must refresh this client's project list (the
+  // sidebar tag and picker read `project.profile`).
+  useEffect(() => {
+    return eventBus.on("profile.changed", (env) => {
+      const data = env.data as { action?: string } | undefined;
+      if (data?.action !== "project_bound") return;
+      void refreshProjects();
+    });
+  }, [refreshProjects]);
 
   const refreshGroups = useCallback(async () => {
     try {
@@ -1132,6 +1144,19 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
+  const setProjectProfile = useCallback(async (path: string, profile: string, host?: string) => {
+    try {
+      await api.setProjectProfile(path, profile, host);
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to set project profile:", err);
+      // Re-thrown for the same reason as renameProject: the menu must be able
+      // to report a rejected binding (unknown profile, remote failure) instead
+      // of closing as if it succeeded.
+      throw err;
+    }
+  }, [refreshProjects]);
+
   const createGroup = useCallback(async (name: string) => {
     try {
       await api.createGroup(name);
@@ -1318,6 +1343,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           renameProject,
           reorderProjects,
           setProjectGroup,
+          setProjectProfile,
           createGroup,
           deleteGroup,
           renameGroup,

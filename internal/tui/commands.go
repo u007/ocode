@@ -144,6 +144,7 @@ func init() {
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
 		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; no prefixes are banned by default; /ban clear confirms before wiping them", handler: runBanCmd},
+		{name: "/allow", usage: "/allow [list|add <command...>|remove <command...>]", help: "List or manage allowed bash command prefixes, including multi-word prefixes; a bare /allow <cmd> is shorthand for add", handler: runAllowCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/auto-share", usage: "/auto-share [on|off|status]", help: "Auto share on start: share this session's web UI over Tailscale at launch instead of opening the Share dialog (tailnet-only, never public). Takes effect on the next launch", handler: runAutoShareCmd},
 		{name: "/sandbox", usage: "/sandbox [on|off|status]", help: "Sandbox: runs shell commands without prompts, but the OS blocks writes outside the workspace/allowed dirs, and touching secrets (auth.json, ~/.ssh, .env) or config still asks. Network stays open — write protection, not full containment", handler: runSandboxCmd},
@@ -1051,6 +1052,20 @@ func runBanCmd(m *model, args []string) tea.Cmd {
 
 	level := agent.PermissionDeny
 	msg := fmt.Sprintf("Banned bash command prefix %q.", prefix)
+	existing, found := pm.BashPrefixRules()[prefix]
+	if action == "remove" && (!found || existing != agent.PermissionDeny) {
+		// Only a ban is removable here; an allow rule on the same prefix
+		// belongs to /allow and the Settings editor.
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%q is not a banned bash prefix.", prefix)})
+		return nil
+	}
+	if action == "add" && found && existing == agent.PermissionDeny {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Bash command prefix %q is already banned.", prefix)})
+		return nil
+	}
+	if action == "add" && found && existing == agent.PermissionAllow {
+		msg = fmt.Sprintf("Banned bash command prefix %q (replaced its allow rule).", prefix)
+	}
 	if action == "remove" {
 		// Unban is a DELETE, matching the Settings editor's Remove and
 		// config.DeleteBashPrefixRule. Downgrading to "ask" left an inert rule
@@ -1074,6 +1089,90 @@ func runBanCmd(m *model, args []string) tea.Cmd {
 	m.permDirty.bashPrefixes[prefix] = string(level)
 	delete(m.permDirty.bashPrefixRemovals, prefix)
 	m.persistPermissions()
+	m.messages = append(m.messages, message{role: roleAssistant, text: msg})
+	return nil
+}
+
+func runAllowCmd(m *model, args []string) tea.Cmd {
+	usage := "Usage: /allow [list|add <command...>|remove <command...>]"
+	if m.agent == nil || m.agent.Permissions() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
+		return nil
+	}
+	pm := m.agent.Permissions()
+	if len(args) == 0 || strings.EqualFold(strings.TrimSpace(args[0]), "list") {
+		allowed := pm.BashAllowedPrefixes()
+		var b strings.Builder
+		b.WriteString("Allowed bash command prefixes:\n")
+		if len(allowed) == 0 {
+			b.WriteString("  (none)\n")
+		} else {
+			for _, prefix := range allowed {
+				b.WriteString(fmt.Sprintf("  %s\n", prefix))
+			}
+		}
+		b.WriteString("\n" + usage)
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+
+	action := strings.ToLower(strings.TrimSpace(args[0]))
+	prefix := ""
+	switch action {
+	case "add", "remove":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+			return nil
+		}
+		prefix = strings.TrimSpace(strings.Join(args[1:], " "))
+	default:
+		prefix = strings.TrimSpace(strings.Join(args, " "))
+		action = "add"
+	}
+	if prefix == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+		return nil
+	}
+
+	existing, found := pm.BashPrefixRules()[prefix]
+	if action == "remove" {
+		// Only an allow rule is removable here; a ban or ask rule on the same
+		// prefix belongs to /ban and the Settings editor.
+		if !found || existing != agent.PermissionAllow {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%q is not an allowed bash prefix.", prefix)})
+			return nil
+		}
+		pm.RemoveBashPrefixRule(prefix)
+		delete(m.permDirty.bashPrefixes, prefix)
+		if m.permDirty.bashPrefixRemovals == nil {
+			m.permDirty.bashPrefixRemovals = make(map[string]bool)
+		}
+		m.permDirty.bashPrefixRemovals[prefix] = true
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Removed bash rule for %q — it now follows the default policy.", prefix)})
+		return nil
+	}
+	if found && existing == agent.PermissionAllow {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Bash command prefix %q is already allowed.", prefix)})
+		return nil
+	}
+	// SetBashPrefixRule silently discards an invalid rule (bare `git` allow),
+	// so validate first and report the reason.
+	if err := agent.ValidateBashPrefixRule(prefix, agent.PermissionAllow); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot allow %q: %v", prefix, err)})
+		return nil
+	}
+	if m.permDirty.bashPrefixes == nil {
+		m.permDirty.bashPrefixes = make(map[string]string)
+	}
+	pm.SetBashPrefixRule(prefix, agent.PermissionAllow)
+	m.permDirty.bashPrefixes[prefix] = string(agent.PermissionAllow)
+	delete(m.permDirty.bashPrefixRemovals, prefix)
+	m.persistPermissions()
+	msg := fmt.Sprintf("Allowed bash command prefix %q.", prefix)
+	if found && existing == agent.PermissionDeny {
+		msg = fmt.Sprintf("Allowed bash command prefix %q (replaced its ban).", prefix)
+	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: msg})
 	return nil
 }

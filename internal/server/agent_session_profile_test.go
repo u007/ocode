@@ -1,8 +1,10 @@
 package server
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -161,5 +163,97 @@ func TestResolveSessionProfileOrdering(t *testing.T) {
 	t.Setenv("OCODE_PROFILE", "envProfile")
 	if got := h.resolveSessionProfile(entry); got != "envProfile" {
 		t.Fatalf("expected envProfile, got %q", got)
+	}
+}
+
+// TestResolveSessionProfileProjectBeatsWindow: a profile bound to the session's
+// project overrides the window's active profile; env still beats both.
+func TestResolveSessionProfileProjectBeatsWindow(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(proj); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = store
+	id := session.NewSessionID()
+	windowID := "win-proj"
+	h.sessions.RegisterWithWindow(id, proj, windowID)
+	h.windowProfilesMu.Lock()
+	h.windowProfiles[windowID] = "windowProfile"
+	h.windowProfilesMu.Unlock()
+	entry := h.sessions.Lookup(id)
+
+	if err := store.SetProfileRef(projects.ProjectRef{Path: proj}, "projProfile"); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.resolveSessionProfile(entry); got != "projProfile" {
+		t.Fatalf("expected projProfile, got %q", got)
+	}
+	if err := store.SetProfileRef(projects.ProjectRef{Path: proj}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.resolveSessionProfile(entry); got != "windowProfile" {
+		t.Fatalf("cleared binding should fall back to window, got %q", got)
+	}
+	if err := store.SetProfileRef(projects.ProjectRef{Path: proj}, "projProfile"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCODE_PROFILE", "envProfile")
+	if got := h.resolveSessionProfile(entry); got != "envProfile" {
+		t.Fatalf("env must win, got %q", got)
+	}
+}
+
+// TestReconcileProfileAgentRebuildsWhenProjectBindingCleared: removing a
+// project binding must reach a resident agent even for a session with no
+// window (pulse/cron/headless). A presence-only check looks for a binding and
+// therefore never notices one being removed, leaving the session on the
+// unbound profile until restart.
+func TestReconcileProfileAgentRebuildsWhenProjectBindingCleared(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj) // no window id
+
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.Add(proj); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = store
+
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+
+	as, stage, err := h.buildAgentSession(id, "opencode-go/deepseek-v4-flash", nil, proj)
+	if err != nil {
+		t.Fatalf("build agent: %v (stage %s)", err, stage)
+	}
+	defer as.agent.Shutdown()
+	// Simulate an agent built while the project was bound to "work" and the
+	// binding has since been cleared.
+	as.profile = "work"
+	h.replaceAgentSession(id, as)
+
+	reb, err := h.reconcileProfileAgent(id, h.lookupAgentSession(id), as.model)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if reb == as {
+		t.Fatal("expected a rebuild after the project binding was cleared")
+	}
+	if reb.profile != "" {
+		t.Fatalf("rebuilt profile = %q, want the empty base profile", reb.profile)
+	}
+	if got := h.lookupAgentSession(id); got != reb {
+		t.Fatal("registry should hold the rebuilt agent")
 	}
 }
