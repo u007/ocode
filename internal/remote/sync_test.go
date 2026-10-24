@@ -239,3 +239,34 @@ func TestStripMachineLocalConfigSurvivesBadJSON(t *testing.T) {
 		t.Fatalf("empty content rewritten: %q", got)
 	}
 }
+
+func TestWritePayloadReplacesDanglingSymlinkParent(t *testing.T) {
+	home := t.TempDir()
+	restore := overrideSyncDirsForTest(t, t.TempDir(), t.TempDir())
+	defer restore()
+	prev := resolveSyncDirFn
+	resolveSyncDirFn = func(d SyncFileDir) (string, error) {
+		if d == SyncDirHome {
+			return home, nil
+		}
+		return prev(d)
+	}
+
+	skills := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(skills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/Users/nobody/missing", filepath.Join(skills, "aims-api")); err != nil {
+		t.Fatal(err)
+	}
+	p := SyncPayload{Files: []SyncFile{
+		{Dir: SyncDirHome, Name: ".claude/skills/aims-api/SKILL.md", Content: []byte("x"), Mode: 0o600},
+	}}
+	if err := WritePayload(p); err != nil {
+		t.Fatalf("WritePayload: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(skills, "aims-api", "SKILL.md"))
+	if err != nil || string(got) != "x" {
+		t.Fatalf("read synced file: %q, %v", got, err)
+	}
+}

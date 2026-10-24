@@ -744,6 +744,8 @@
     because one test never returned, which is also why the job reported zero test
     failures while timing out. Raising the number would have hidden that, not
     fixed it. That is why the value is unchanged in this pass.
+- **Remote sync no longer fails when a parent dir in `$HOME` is a symlink.** `WritePayload` ships file content under the link's path, so a stale/dangling symlink (e.g. one pointing at the sender's own path) made `MkdirAll` fail with "file exists". `removeLinkedParents` now walks the destination path and removes any symlinked directory (only the link, never its target) before creating dirs. Covered by `TestWritePayloadReplacesDanglingSymlinkParent`. (`internal/remote/sync.go`, `internal/remote/sync_test.go`)
+- **A Stop that cancels an in-flight LLM stream is now a clean cancel, not a failure.** `runTurn` previously passed the raw `context.Canceled` from `Agent.Step` to `publishTurnError`, so `IsTurnCancelled` returned false and the client painted a red error banner + Retry button for the dominant Stop-while-streaming case. `runTurn` now converts `context.Canceled`/cancelled-agent to `ErrTurnCancelled` before publishing `turn_error` with `cancelled:true`. Covered by `TestRunTurnCancelledStreamPublishesCancelledTurnError`. (`internal/server/agent_session.go`, `internal/server/agent_session_turn_test.go`)
 
 ## 2026-10-07 — Auto-permission: `rm -rf "$tmp"` of a same-line `mktemp -d` is no longer refused
 

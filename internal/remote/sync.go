@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
@@ -234,6 +235,11 @@ func WritePayload(p SyncPayload) error {
 			return fmt.Errorf("resolve dest dir for %s: %w", f.Name, err)
 		}
 		destPath := filepath.Join(destDir, filepath.FromSlash(f.Name))
+		if f.Dir == SyncDirHome {
+			if err := removeLinkedParents(destDir, destPath); err != nil {
+				return fmt.Errorf("replace symlink under %s: %w", destDir, err)
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(destPath), 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Dir(destPath), err)
 		}
@@ -246,6 +252,39 @@ func WritePayload(p SyncPayload) error {
 		}
 	}
 	return applyHomeSyncManifest(p)
+}
+
+// removeLinkedParents removes any symlink among the directories between root
+// and destPath. The sender follows links and ships the target's content under
+// the link's path, so the real directory supersedes the link; a stale or
+// dangling link (e.g. one pointing at the sender's /Users/... path) would
+// otherwise make MkdirAll fail with "file exists". Only the link is removed,
+// never its target.
+func removeLinkedParents(root, destPath string) error {
+	rel, err := filepath.Rel(root, filepath.Dir(destPath))
+	if err != nil {
+		return err
+	}
+	cur := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "." || part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(cur); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // resolveSyncDirFn is a package var (not a plain function) so tests can

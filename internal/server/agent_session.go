@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -1286,6 +1287,13 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		resp, err := as.agent.Step(messages)
 		if err != nil {
 			log.Printf("serve error: agent step: %v", err)
+			// A user cancellation (Stop while the model streams) surfaces as
+			// context.Canceled from Step. Publish it as ErrTurnCancelled so the
+			// client treats it as a clean cancel (cancelled:true) rather than a
+			// failure (red banner + Retry affordance).
+			if as.agent.Cancelled() || errors.Is(err, context.Canceled) {
+				err = ErrTurnCancelled
+			}
 			// Keep whatever the turn produced before it failed. Step returns the
 			// completed rounds alongside the error, and those were already streamed
 			// to the browser — discarding them here is what made a failed turn

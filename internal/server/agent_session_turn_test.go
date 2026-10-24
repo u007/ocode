@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -548,6 +549,50 @@ func TestTurnErrorIncludesTookMs(t *testing.T) {
 		if diff := int64(tookMs) - spanMs; diff < -1 || diff > 1 {
 			t.Fatalf("turn_error took_ms=%v does not match timestamp span %dms", tookMs, spanMs)
 		}
+	}
+}
+
+// cancelClient returns context.Canceled from Chat, simulating an LLM stream
+// cancelled mid-flight (Stop while the model streams).
+type cancelClient struct{}
+
+func (cancelClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	return nil, context.Canceled
+}
+func (cancelClient) GetProvider() string { return "fake" }
+func (cancelClient) GetModel() string    { return "fake-model" }
+
+// TestRunTurnCancelledStreamPublishesCancelledTurnError verifies that when an
+// in-flight LLM stream is cancelled (the DOMINANT Stop-while-streaming case),
+// runTurn publishes turn_error flagged cancelled:true instead of a plain error.
+// Before the fix, runTurn's err != nil branch passed the raw context.Canceled to
+// publishTurnError, so IsTurnCancelled returned false and the client painted a
+// red error banner + Retry affordance instead of treating it as a clean cancel.
+func TestRunTurnCancelledStreamPublishesCancelledTurnError(t *testing.T) {
+	h := NewHandler()
+	h.turnHeartbeatInterval = time.Hour
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	newTestSession(h, id, cancelClient{})
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := h.runTurn(id, h.lookupAgentSession(id), "boom", turnOptions{}); err == nil {
+		t.Fatal("expected runTurn error for cancelled stream")
+	}
+
+	data, ok := waitForEnvelopeData(t, sub, id, "turn_error")
+	if !ok {
+		t.Fatal("turn_error not observed")
+	}
+	if data["cancelled"] != true {
+		t.Fatalf("turn_error cancelled = %v, want true (data=%v)", data["cancelled"], data)
+	}
+	if data["error"] != "cancelled" {
+		t.Fatalf("turn_error error = %q, want %q", data["error"], "cancelled")
 	}
 }
 
