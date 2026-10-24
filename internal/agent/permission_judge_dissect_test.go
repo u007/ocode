@@ -64,6 +64,11 @@ func TestPermissionJudgeDissect(t *testing.T) {
 	a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
 	a.SetWorkDir(wd)
 	a.permissions.SetMode(mode)
+	for _, p := range strings.Split(os.Getenv("OCODE_JEV_DISSECT_ALLOW"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			a.permissions.SetBashPrefixRule(p, PermissionAllow)
+		}
+	}
 
 	floor := autoJudgeMinConfidenceDefault
 	segs := dissectSplitSegments(cmd)

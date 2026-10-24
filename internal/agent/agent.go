@@ -4010,8 +4010,21 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 		// verdict. A denial or judge failure falls through to the human ask.
 		if name == "bash" && decision.Level == PermissionAllow && !guardEscalated && autoEnabled &&
 			a.permissions.Mode() == PermissionModeSandbox && isDecisionModel(a.autoPermissionModelName()) {
-			decision = PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, bashCommand(args), "sandbox.judge", nil)}
-			a.emitDebug("PERMISSION", "tier=sandbox_judge_gate tool=bash")
+			judgeReq := bashPermissionRequest(args, bashCommand(args), "sandbox.judge", nil)
+			// A line the user allow-listed end to end stays allowed: the
+			// judge exists to second-guess the sandbox's blanket allow, not an
+			// explicit rule. The deterministic guards still run.
+			if a.permissions.userAllowListCoversLine(bashCommand(args)) {
+				if ok, vreason := a.verifyAutoGrant(name, args, judgeReq); ok {
+					a.emitDebug("PERMISSION", "tier=sandbox_judge_gate_skipped_user_allowlist tool=bash")
+				} else {
+					a.emitDebug("PERMISSION", "tier=sandbox_judge_gate user_allowlist_vetoed reason="+vreason)
+					decision = PermissionDecision{Level: PermissionAsk, Request: judgeReq}
+				}
+			} else {
+				decision = PermissionDecision{Level: PermissionAsk, Request: judgeReq}
+				a.emitDebug("PERMISSION", "tier=sandbox_judge_gate tool=bash")
+			}
 		}
 
 		if decision.Level == PermissionDeny {
@@ -4665,8 +4678,25 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 		// path must never be auto-granted on the model's word alone — scope
 		// expansion requires explicit human approval (mirrors the path-confined
 		// file-tool check below).
-		if req != nil && req.OutOfScopePath != "" {
+		// Toolchain cache env vars (GOCACHE=/x) are the exception: the judge
+		// decides those (see JudgeEligible).
+		if req != nil && req.OutOfScopePath != "" && !req.JudgeEligible {
 			return false, "command targets path outside allowed roots: " + req.OutOfScopePath
+		}
+		if req != nil && req.JudgeEligible {
+			if reason := pm.outOfScopeVetoReason(bashCommand(args)); reason != "" {
+				return false, reason
+			}
+		}
+		// Env-var paths are checked across every segment, not just the ask's
+		// own: Decide keeps only the first Ask, so a judge-eligible ask must not
+		// hide a sensitive or non-exempt assignment elsewhere in the command.
+		// req.Command omits the NAME=value assignments, so scan the full command.
+		if reason := pm.envPathVetoReason(bashCommand(args)); reason != "" {
+			return false, reason
+		}
+		if reason := pm.redirectionVetoReason(bashCommand(args)); reason != "" {
+			return false, reason
 		}
 		// A dangerous rm (force/recursive, targeting outside the allowed scope)
 		// carries its own contract: dangerousRmReason exists so that it "should

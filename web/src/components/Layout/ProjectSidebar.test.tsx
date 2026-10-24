@@ -953,7 +953,7 @@ describe("ProjectSidebar mobile drawer", () => {
   it("keeps the inline collapsed rail on desktop (no mobile prop)", () => {
     const { container } = render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
     expect(container.querySelector(".fixed.inset-y-0.left-0")).toBeNull();
-    expect(container.querySelector(".w-10")).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-collapsed-rail"]')).not.toBeNull();
   });
 });
 

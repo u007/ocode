@@ -217,6 +217,7 @@ Rules:
 - replaced_files_backup is a fact ocode verified about the project files this command overwrites; use it for those overwrites only. all_saved_first: every project file ocode saw this command replace was first copied or moved to a temp root by this same command (file_backups lists each file and where it was saved), so nothing is lost. This is a baseline check: put the staged or committed version in place (git show :path > path, or cp of a temp copy), move a file aside into a temp root, run a build or test. It is in-scope, not destructive, the restore may be a later command, and it is ALLOWED without hesitation. The fact covers only the overwrites of the files listed in file_backups and never overrides your own reading of the rest of the line: every other command is still judged by the other rules, and anything else that is destructive, out of scope or banned must still be denied. not_saved: the command overwrites an existing project file with git show output without saving it first; this discards uncommitted work and must be DENIED.
 - The temp roots are scratch space: /tmp, /private/tmp, /var/tmp, the per-user OS temp directory ($TMPDIR, /var/folders/.../T; on Windows %TEMP%, %TMP%, $env:TEMP, C:\Users\<name>\AppData\Local\Temp), a directory returned by mktemp, and every path in temp_root_aliases. Reading, writing, creating, overwriting, moving and deleting files and directories under a temp root are allowed, including recursive forced deletion of a path under one (rm -rf; on Windows rmdir /s /q, rd /s /q, del /f /s /q, Remove-Item -Recurse -Force), even when allow_destructive is false. Building a binary into a temp root and running it is allowed. This covers only paths that resolve under a temp root: a path elsewhere that merely has "tmp" in its name, a ".." path that leaves the temp root, and copying from a temp root to a destination outside allowed_roots are judged by the other rules. Copying a credential-bearing file INTO a temp root is NOT covered by this paragraph — see the credential rule above.
 - scratch_dir_vars and scratch_dir_note appear only when ocode verified that this command binds a shell variable to a fresh mktemp -d directory; follow scratch_dir_note. On Windows PowerShell the equivalents (New-TemporaryFile, Join-Path $env:TEMP, [IO.Path]::GetTempPath()) are temp roots by the rule above and are never listed there.
+- user_allowed_segments lists the exact commands in this call that the user has explicitly allow-listed (matched by ocode against the user's allowed_command_prefixes, after any ban check). Each listed command is already user-approved: weigh it as allowed and judge the rest of the call, and the way the parts combine, by the other rules. The list is a fact about those commands only; it never approves an unlisted command, a redirection to a sensitive path, or a pipe into an unlisted command.
 - Running a local development or test server is allowed: starting the project's own binary or dev server (or one the command just built) on localhost or a local port, running it in the background, sending requests to localhost or 127.0.0.1, and stopping it again with kill or pkill by its name, pattern or PID. Not covered: killing system or unrelated processes (PID 1, killall of applications or daemons), sudo, exposing a server beyond localhost (tunnels, reverse port forwards, binding 0.0.0.0 to serve files).
 Choose "allow" only when the call is clearly within policy; otherwise choose "deny" so a human is asked.`
 
@@ -666,6 +667,11 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 					sort.Strings(names)
 					state["scratch_dir_vars"] = names
 					state["scratch_dir_note"] = scratchDirNote
+				}
+				if a.permissions != nil {
+					if allowed := a.permissions.userAllowedSegments(parsed); len(allowed) > 0 {
+						state["user_allowed_segments"] = allowed
+					}
 				}
 			}
 		}

@@ -64,7 +64,6 @@ import { useRemoteHostStatus } from "../../hooks/useRemoteHostStatus";
 import { useProjectGitCounts } from "../../lib/projectGitCounts";
 import { projectTerminalsKey } from "../Terminal/terminalPersistence";
 import { computeProjectDrag, projectDragKey } from "../../lib/projectDrag";
-import { buttonVariants } from "../ui/button";
 import { cn } from "@/lib/utils";
 
 type SessionStatus = "none" | "idle" | "running";
@@ -245,10 +244,10 @@ function SessionDot({ status }: { status: SessionStatus }) {
   if (status === "none") return null;
   return (
     <span
-      className={`shrink-0 h-2 w-2 rounded-full ${
+      className={`shrink-0 h-1.5 w-1.5 rounded-full ${
         status === "running"
           ? "bg-blue-500 animate-pulse"
-          : "bg-muted-foreground/30"
+          : "bg-muted-foreground/25"
       }`}
     />
   );
@@ -290,7 +289,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
     <span className="flex items-center gap-1 shrink-0">
       {hasAttention && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400 border border-red-500/30"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-red-500/15 px-1.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400"
           title={`${attentionTotal} need attention (${attentionTitle})`}
         >
           <Bell className="w-2.5 h-2.5" />
@@ -300,7 +299,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
       {/* # sessions open */}
       {sessionCount > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-foreground/[0.06] px-1.5 text-[10px] font-medium leading-none text-muted-foreground"
           title={`${sessionCount} session${sessionCount === 1 ? "" : "s"} open`}
         >
           <MessageSquare className="w-2.5 h-2.5" />
@@ -310,7 +309,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
       {/* streaming count */}
       {streamingCount > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-600 dark:text-blue-400 border border-blue-500/20"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-blue-500/15 px-1.5 text-[10px] font-medium leading-none text-blue-600 dark:text-blue-400"
           title={`${streamingCount} streaming`}
         >
           <Loader2 className="w-2.5 h-2.5 animate-spin" />
@@ -320,7 +319,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
       {/* chat streaming stopped / stalled */}
       {stalledCount > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400 border border-amber-500/30"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-amber-500/15 px-1.5 text-[10px] font-medium leading-none text-amber-600 dark:text-amber-400"
           title={`${stalledCount} stalled (streaming stopped)`}
         >
           <Pause className="w-2.5 h-2.5" />
@@ -331,7 +330,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
       {/* pending permission / question */}
       {pendingCount > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-300 border border-amber-500/40"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-amber-500/20 px-1.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-300"
           title={`${pendingCount} pending permission`}
         >
           <ShieldAlert className="w-2.5 h-2.5" />
@@ -341,7 +340,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
       {/* terminal beep / bell */}
       {terminalAlertCount > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400 border border-red-500/30"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-red-500/15 px-1.5 text-[10px] font-medium leading-none text-red-600 dark:text-red-400"
           title={`${terminalAlertCount} terminal beep`}
         >
           <Bell className="w-2.5 h-2.5" />
@@ -352,7 +351,7 @@ function ProjectBadges({ indicators }: { indicators: ProjectIndicators }) {
           attention signal, so it never joins the Bell total above */}
       {gitChanged > 0 && (
         <span
-          className="inline-flex items-center gap-0.5 rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-violet-600 dark:text-violet-400 border border-violet-500/30"
+          className="inline-flex h-[18px] items-center gap-1 rounded-md bg-violet-500/15 px-1.5 text-[10px] font-medium leading-none text-violet-600 dark:text-violet-400"
           title={`${gitChanged} changed file${gitChanged === 1 ? "" : "s"} (${gitStaged} staged · ${gitUnstaged} unstaged)`}
           aria-label={`${gitChanged} git changed files`}
         >
@@ -565,34 +564,38 @@ function SortableProjectRow({
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="group relative px-1">
+    <div ref={setNodeRef} style={style} className="group relative py-0.5">
       <ContextMenu items={contextItems}>
         <div
           className={cn(
-            buttonVariants({ variant: "ghost" }),
-            `w-full justify-start flex-wrap gap-x-2 gap-y-1 px-2 h-auto py-2 text-sm ${
-              isActive
-                ? "bg-primary/15 text-foreground border-l-2 border-primary"
-                : "text-muted-foreground border-l-2 border-transparent"
-            }`
+            "flex w-full flex-wrap items-start gap-x-2 gap-y-1 rounded-lg px-2 py-[7px] text-left cursor-pointer select-none transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            isActive
+              ? "bg-foreground/[0.08] text-foreground"
+              : "text-muted-foreground hover:bg-foreground/[0.04]"
           )}
           onClick={onSelect}
           onMouseEnter={prefetchProjectActiveTab}
           onFocus={prefetchProjectActiveTab}
           role="button"
           tabIndex={0}
+          aria-current={isActive ? "true" : undefined}
         >
           <span
-            className="shrink-0 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-60 hover:!opacity-100 touch-none"
+            className="-ml-1 mt-[3px] shrink-0 cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-40 hover:!opacity-100 touch-none"
             {...attributes}
             {...listeners}
           >
             <GripVertical className="w-3.5 h-3.5" />
           </span>
           {project.host ? (
-            <Server className="w-4 h-4 shrink-0 text-sky-600 dark:text-sky-400" />
+            <Server className="mt-[1px] w-4 h-4 shrink-0 text-sky-600/90 dark:text-sky-400/90" />
           ) : (
-            <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground" />
+            <FolderGit2
+              className={cn(
+                "mt-[1px] w-4 h-4 shrink-0",
+                isActive ? "text-foreground/80" : "text-muted-foreground/70",
+              )}
+            />
           )}
           <div data-testid="project-label" className="flex-1 min-w-[5rem] text-left">
             {rename.editing ? (
@@ -616,35 +619,33 @@ function SortableProjectRow({
               </>
             ) : (
               <>
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="truncate font-medium text-foreground">{project.name}</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-5 text-foreground">{project.name}</span>
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
+                    <ProjectBadges indicators={indicators} />
+                    <SessionDot status={status} />
+                  </span>
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                  <span
+                    className="min-w-0 flex-1 truncate text-[11px] leading-4 text-muted-foreground"
+                    title={project.host ? `${project.host}:${project.path}` : project.path}
+                  >
+                    {project.host ? project.host : project.path}
+                  </span>
                   {project.profile && (
                     <span
-                      className="shrink-0 max-w-[6rem] truncate rounded-full border bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground"
+                      className="shrink-0 max-w-[6rem] truncate rounded bg-foreground/[0.07] px-1.5 text-[10px] font-medium leading-4 text-muted-foreground"
                       title={`Profile ${project.profile}`}
                     >
                       {project.profile}
                     </span>
                   )}
                 </div>
-                {project.host ? (
-                  <div className="flex items-center gap-1 truncate text-xs text-sky-600 dark:text-sky-400">
-                    <Globe className="w-3 h-3 shrink-0" />
-                    <span className="truncate">{project.host}:{project.path}</span>
-                  </div>
-                ) : (
-                  <div className="truncate text-xs text-muted-foreground">
-                    {project.path}
-                  </div>
-                )}
               </>
             )}
             {project.host && <RemoteProjectStatus project={project} statusState={hostStatus} onRevealTab={onRevealTab} />}
           </div>
-          <span className="flex flex-wrap items-center gap-1 shrink-0 max-w-full">
-            <ProjectBadges indicators={indicators} />
-            <SessionDot status={status} />
-          </span>
         </div>
       </ContextMenu>
     </div>
@@ -695,9 +696,9 @@ function SortableGroupHeader({
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="group/header px-1 pt-2">
+    <div ref={setNodeRef} style={style} className="group/header pt-1.5">
       <ContextMenu items={contextItems}>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors hover:bg-foreground/[0.04]">
           <span
             className="shrink-0 cursor-grab active:cursor-grabbing opacity-0 group-hover/header:opacity-60 hover:!opacity-100 touch-none"
             {...attributes}
@@ -708,13 +709,13 @@ function SortableGroupHeader({
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 px-1 py-0 text-xs font-semibold text-muted-foreground hover:text-foreground gap-1"
+            className="h-6 px-1 py-0 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/80 hover:bg-transparent hover:text-foreground gap-1"
             onClick={onToggle}
           >
             {group.collapsed ? (
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="w-3.5 h-3.5 opacity-70" />
             ) : (
-              <ChevronDown className="w-3 h-3" />
+              <ChevronDown className="w-3.5 h-3.5 opacity-70" />
             )}
             {rename.editing ? (
               <>
@@ -736,9 +737,9 @@ function SortableGroupHeader({
                 )}
               </>
             ) : (
-              <span className="uppercase tracking-wider">{group.name}</span>
+              <span>{group.name}</span>
             )}
-            <span className="text-muted-foreground font-normal">({projectCount})</span>
+            <span className="font-normal text-muted-foreground/60">({projectCount})</span>
           </Button>
         </div>
       </ContextMenu>
@@ -1178,8 +1179,10 @@ function CollapsedProjectButton({
           variant="ghost"
           size="sm"
           aria-label={project.host ? `${project.host}:${project.path}` : project.name}
-          className={`relative p-2 h-9 w-9 ${
-            isActive ? "bg-primary/15 text-primary" : "text-muted-foreground"
+          className={`relative p-2 h-9 w-9 rounded-lg transition-colors ${
+            isActive
+              ? "bg-foreground/[0.08] text-foreground"
+              : "text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
           }`}
           onClick={onSelect}
           onMouseEnter={prefetchProjectActiveTab}
@@ -1537,7 +1540,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
           <div className="fixed inset-0 z-40 bg-black/50" onClick={onToggle} aria-hidden="true" />
         )}
         <div
-          className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border bg-background transition-transform duration-200 ${
+          className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border bg-card transition-transform duration-200 ${
             isOpen ? "translate-x-0" : "-translate-x-full"
           }`}
         >
@@ -1551,23 +1554,31 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
   if (!isOpen) {
     return (
       <TooltipProvider delayDuration={300}>
-        <div className="flex flex-col items-center py-2 w-10 border-r border-border bg-background">
+        <div
+          className="flex flex-col items-center py-2.5 w-12 shrink-0 border-r border-border bg-card"
+          data-testid="sidebar-collapsed-rail"
+        >
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="ghost" size="sm" className="p-2 h-9 w-9" onClick={onToggle}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="p-2 h-9 w-9 rounded-lg text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+                onClick={onToggle}
+              >
                 <ChevronLeft className="w-4 h-4 rotate-180" />
               </Button>
             </TooltipTrigger>
             <TooltipContent side="right">Show project sidebar</TooltipContent>
           </Tooltip>
-          <Separator className="my-2 w-6" />
+          <Separator className="my-1.5 w-6" />
           {railProjects.length > 0 && (
             // Scroll instead of capping, so every project in the expanded list
             // is reachable from the rail. ScrollArea's overlay scrollbar keeps
             // a classic one from eating the 40px column. `min-h-0` lets the
             // flex child shrink below its content height so it scrolls.
-            <ScrollArea className="flex-1 min-h-0 w-full">
-              <div className="flex flex-col items-center gap-1 py-1">
+            <ScrollArea className="flex-1 min-h-0 w-full [&_[data-radix-scroll-area-viewport]>div]:w-full [&_[data-radix-scroll-area-viewport]>div]:table-fixed">
+              <div className="flex flex-col items-center gap-2 py-1">
                 {railProjects.map((p) => (
                   <CollapsedProjectButton
                     key={projectDragKey(p.path, p.host)}
@@ -1610,8 +1621,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       <>
 
       {/* Header */}
-      <div className="flex items-center gap-1 px-3 h-12 border-b border-border">
-        <h2 className="flex-1 min-w-0 text-sm font-semibold text-foreground truncate">Projects</h2>
+      <div className="flex items-center gap-1 px-2.5 h-12 shrink-0 border-b border-border/60">
+        <h2 className="flex-1 min-w-0 px-1 text-[13px] font-semibold tracking-tight text-foreground truncate">Projects</h2>
         {onOpenDashboard && (
           // The Pulse dashboard is GLOBAL — it spans every project — so it is a
           // sibling of the project list, not an action inside it. A hamburger
@@ -1624,7 +1635,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8 w-8 p-0 shrink-0"
+                className="h-7 w-7 p-0 shrink-0 rounded-md text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
                 onClick={onOpenDashboard}
                 data-testid="open-dashboard"
                 aria-label="Open dashboard"
@@ -1635,27 +1646,33 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
             <TooltipContent side="bottom">Dashboard — all projects</TooltipContent>
           </Tooltip>
         )}
-        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={onToggle}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0 shrink-0 rounded-md text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+          onClick={onToggle}
+          aria-label="Collapse project sidebar"
+        >
           <ChevronLeft className="w-4 h-4" />
         </Button>
       </div>
 
       {/* Project list */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 [&_[data-radix-scroll-area-viewport]>div]:w-full [&_[data-radix-scroll-area-viewport]>div]:table-fixed">
         {state.loading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
           </div>
         ) : state.projects.length === 0 ? (
-          <div className="px-4 py-12 text-center text-xs text-muted-foreground">
-            <FolderOpen className="w-8 h-8 mx-auto mb-2 text-muted-foreground/60" />
-            <p>No projects yet</p>
-            <p className="mt-1">Add a project root below</p>
+          <div className="px-4 py-10 text-center text-[12px] text-muted-foreground">
+            <FolderOpen className="w-7 h-7 mx-auto mb-2.5 text-muted-foreground/40" />
+            <p className="font-medium text-foreground/80">No projects yet</p>
+            <p className="mt-1 text-muted-foreground/70">Add a project root below</p>
           </div>
         ) : (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
-              <div className="py-1">
+              <div className="px-1.5 py-1.5">
                 {sortedItems.map((item) => {
                   if (item.type === "group") {
                     const group = item.data as ProjectGroup;
@@ -1710,7 +1727,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       </ScrollArea>
 
       {/* Add project */}
-      <div className="border-t border-border p-3">
+      <div className="border-t border-border/60 p-2">
         {adding ? (
           <div className="flex flex-col gap-2">
             <div className="flex gap-2">
@@ -1746,34 +1763,34 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
             </div>
           </div>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col gap-0.5">
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-start gap-2 h-8 text-xs text-muted-foreground"
+              className="w-full justify-start gap-2 h-8 px-2 rounded-md text-[12px] font-normal text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
               onClick={() => setAdding(true)}
             >
-              <Plus className="w-3.5 h-3.5" />
-              Add project
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span className="min-w-0 truncate">Add project</span>
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              className="w-full justify-start gap-2 h-8 text-xs text-sky-600 dark:text-sky-400"
+              className="w-full justify-start gap-2 h-8 px-2 rounded-md text-[12px] font-normal text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
               onClick={() => setAddingRemote(true)}
             >
-              <Server className="w-3.5 h-3.5" />
-              Add remote (SSH / WSL)
+              <Server className="w-3.5 h-3.5 shrink-0 text-sky-600/80 dark:text-sky-400/80" />
+              <span className="min-w-0 truncate">Add remote (SSH / WSL)</span>
             </Button>
             {state.projects.length > 0 && (
               <Button
                 variant="ghost"
                 size="sm"
-                className="w-full justify-start gap-2 h-8 text-xs text-muted-foreground"
+                className="w-full justify-start gap-2 h-8 px-2 rounded-md text-[12px] font-normal text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
                 onClick={() => setCreatingGroup(true)}
               >
-                <FolderTree className="w-3.5 h-3.5" />
-                New group
+                <FolderTree className="w-3.5 h-3.5 shrink-0" />
+                <span className="min-w-0 truncate">New group</span>
               </Button>
             )}
           </div>
@@ -1795,7 +1812,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
   // branch above).
   return (
     <div
-      className="flex flex-col border-r border-border bg-background flex-shrink-0"
+      className="flex flex-col border-r border-border bg-card flex-shrink-0"
       style={width ? { width: `${width}px` } : undefined}
     >
       {renderExpandedInner()}

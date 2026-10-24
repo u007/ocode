@@ -293,3 +293,28 @@ Path handling: `canonicalPath` (`filepath.Clean` + `filepath.EvalSymlinks`, reso
 - Only `script_file` runs can be saved. Heredoc and inline-eval source is transient; the call is allowed once and the user is told the rule was not saved.
 - Editing the script changes the hash, so the grant stops matching and the call asks again. The match is on the whole normalized command, so different arguments also ask again.
 - Never reintroduce a per-language prefix rule for `bash.interpreter.*`.
+
+## Toolchain cache env vars are left to the judge
+
+`verifyAutoGrant` vetoes a command whose ask carries `OutOfScopePath`, except a
+judge-eligible ask (`PermissionRequest.JudgeEligible`). That flag is set only for
+an out-of-scope assignment to a toolchain cache variable (`toolchainLocationEnvVars`,
+`permissions.go`). The judge decides those; no `extra_allowed_paths` is needed.
+
+The env-var veto is command-wide (`envPathVetoReason`), because `Decide` keeps only
+the first Ask of a command:
+
+- A **sensitive path** in any assignment (`bash.env.sensitive_path`) is always
+  vetoed, in scope or out, whatever the variable.
+- An **out-of-scope path** in any assignment whose variable is not exempt keeps the
+  veto, even when an exempt assignment comes first or sits in an earlier segment.
+  `GOCACHE=/x LD_PRELOAD=/y go test` and `GOCACHE=/x go build && LD_PRELOAD=/y ls`
+  are both vetoed.
+
+Exempt variables: `GOCACHE`, `NPM_CONFIG_CACHE`, `YARN_CACHE_FOLDER`,
+`PIP_CACHE_DIR`, `UV_CACHE_DIR`.
+
+Not exempt, so an out-of-scope value still vetoes: variables that make the
+toolchain load code or config from the path (`GOPATH`, `GOMODCACHE`,
+`GRADLE_USER_HOME`, `NUGET_PACKAGES`, `PYTHONPATH`, `NODE_PATH`, `GOROOT`,
+`JAVA_HOME`) and install or output targets (`GOBIN`, `CARGO_HOME`, `CARGO_TARGET_DIR`).

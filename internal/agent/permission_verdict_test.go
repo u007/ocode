@@ -343,3 +343,196 @@ func TestConsultPermissionModelReportsUnconsulted(t *testing.T) {
 		}
 	})
 }
+
+// envAskThroughDecide runs cmd through Decide and returns the ask it raised,
+// so the env-var tests exercise the real ask builder and verifyAutoGrant.
+func envAskThroughDecide(t *testing.T, a *Agent, cmd string) (PermissionDecision, json.RawMessage) {
+	t.Helper()
+	args := json.RawMessage(`{"command":` + jsonStr(cmd) + `}`)
+	dec := a.permissions.Decide("bash", args)
+	if dec.Level != PermissionAsk || dec.Request == nil {
+		t.Fatalf("Decide(%q) level = %s, want ask", cmd, dec.Level)
+	}
+	return dec, args
+}
+
+// Only toolchain cache env vars are judge-eligible when they point outside the
+// roots; code/config-loading and install/output-target vars stay vetoed.
+func TestEnvVarAskJudgeEligibilityByVar(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	for _, tc := range []struct {
+		env       string
+		wantJudge bool
+	}{
+		{"GOCACHE", true},
+		{"PIP_CACHE_DIR", true},
+		{"GOPATH", false},
+		{"GOMODCACHE", false},
+		{"JAVA_HOME", false},
+		{"PYTHONPATH", false},
+		{"LD_PRELOAD", false},
+	} {
+		cmd := tc.env + "=/nonexistent-root-xyz/sdk go test ./..."
+		dec, args := envAskThroughDecide(t, a, cmd)
+		if dec.Request.Rule != "bash.env.out_of_scope" {
+			t.Fatalf("%s: rule = %q, want bash.env.out_of_scope", tc.env, dec.Request.Rule)
+		}
+		if dec.Request.JudgeEligible != tc.wantJudge {
+			t.Fatalf("%s: JudgeEligible = %v, want %v", tc.env, dec.Request.JudgeEligible, tc.wantJudge)
+		}
+		if ok, reason := a.verifyAutoGrant("bash", args, dec.Request); ok != tc.wantJudge {
+			t.Fatalf("%s: verifyAutoGrant ok = %v (reason=%q), want %v", tc.env, ok, reason, tc.wantJudge)
+		}
+	}
+}
+
+// A sensitive path is vetoed whatever variable carries it, even a toolchain
+// variable that is judge-eligible when it points at an ordinary path.
+func TestEnvVarAskSensitivePathStaysVetoed(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	cmd := "GOCACHE=/nonexistent-root-xyz/.env go build ./..."
+	dec, args := envAskThroughDecide(t, a, cmd)
+	if dec.Request.Rule != "bash.env.sensitive_path" {
+		t.Fatalf("rule = %q, want bash.env.sensitive_path", dec.Request.Rule)
+	}
+	if ok, reason := a.verifyAutoGrant("bash", args, dec.Request); ok {
+		t.Fatalf("sensitive env path auto-granted (reason=%q)", reason)
+	}
+}
+
+// A toolchain variable outside the roots is judge-eligible only when it is the
+// sole flagged assignment: a later non-exempt assignment wins the ask.
+func TestEnvVarAskExemptThenLdPreloadStaysVetoed(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	cmd := "GOCACHE=/nonexistent-root-xyz/cache LD_PRELOAD=/nonexistent-root-xyz/evil.so go test ./..."
+	dec, args := envAskThroughDecide(t, a, cmd)
+	if dec.Request.JudgeEligible {
+		t.Fatalf("ask for LD_PRELOAD is judge-eligible; a non-exempt assignment must win")
+	}
+	if ok, reason := a.verifyAutoGrant("bash", args, dec.Request); ok {
+		t.Fatalf("LD_PRELOAD behind an exempt var auto-granted (reason=%q)", reason)
+	}
+}
+
+// Decide keeps the first Ask across segments, so an exempt ask in one segment
+// must not hide a non-exempt env path in a later segment from verifyAutoGrant.
+func TestEnvVarAskExemptSegmentDoesNotHideLaterSegment(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	cmd := "GOCACHE=/nonexistent-root-xyz/cache go build ./... && LD_PRELOAD=/nonexistent-root-xyz/evil.so ls"
+	dec, args := envAskThroughDecide(t, a, cmd)
+	if ok, reason := a.verifyAutoGrant("bash", args, dec.Request); ok {
+		t.Fatalf("later-segment LD_PRELOAD auto-granted behind exempt segment (reason=%q)", reason)
+	}
+}
+
+// A judge-eligible ask must keep its eligibility through the JSON round trip
+// that the server and remote surfaces perform.
+func TestEnvVarAskJudgeEligibilitySurvivesJSON(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	dec, args := envAskThroughDecide(t, a, "GOCACHE=/nonexistent-root-xyz/cache go build ./...")
+	raw, err := json.Marshal(dec.Request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var back PermissionRequest
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if !back.JudgeEligible {
+		t.Fatalf("JudgeEligible lost in JSON round trip: %s", raw)
+	}
+	if ok, reason := a.verifyAutoGrant("bash", args, &back); !ok {
+		t.Fatalf("round-tripped exempt ask refused by verifyAutoGrant: %s", reason)
+	}
+}
+
+// A library-preload var into a temp dir asks and is vetoed; other env vars
+// pointing into temp dirs stay in scope.
+func TestEnvVarPreloadInTempDirAsks(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(t.TempDir())
+	for _, env := range []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "LD_LIBRARY_PATH"} {
+		dec, _ := envAskThroughDecide(t, a, env+"=/tmp/evil.so go test ./...")
+		if dec.Request.JudgeEligible || dec.Request.OutOfScopePath == "" {
+			t.Fatalf("%s into /tmp must be vetoed, got %+v", env, dec.Request)
+		}
+	}
+	for _, cmd := range []string{"FOO=/tmp/x go test ./...", "GOCACHE=/tmp/gocache go build ./..."} {
+		dec := a.permissions.Decide("bash", json.RawMessage(`{"command":`+jsonStr(cmd)+`}`))
+		if dec.Level == PermissionAsk && dec.Request != nil && dec.Request.Rule == "bash.env.out_of_scope" {
+			t.Fatalf("%q must not ask for env scope", cmd)
+		}
+	}
+}
+
+// A sensitive redirection target inside the allowed roots raises an Ask with no
+// OutOfScopePath; verifyAutoGrant must still veto it, in any segment, while
+// ordinary redirections keep being grantable.
+func TestVerifyAutoGrantRedirectionSensitiveVeto(t *testing.T) {
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	work := t.TempDir()
+	a.permissions.SetWorkDir(work)
+	grant := func(cmd string) (bool, string) {
+		args := json.RawMessage(`{"command":` + jsonStr(cmd) + `}`)
+		return a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: cmd})
+	}
+	for _, cmd := range []string{
+		"echo KEY=1 > .env",
+		"echo x >> .env.local",
+		"echo ok && echo KEY=1 > .env",
+	} {
+		if ok, _ := grant(cmd); ok {
+			t.Fatalf("%q: sensitive redirection must be vetoed", cmd)
+		}
+	}
+	for _, cmd := range []string{
+		"echo hi > out.txt",
+		"echo hi >> notes.log",
+		"ls 2>/dev/null",
+		"echo hi > .env.example",
+		"echo hi > /tmp/scratch.txt",
+		"echo x > .git/config", // repo metadata deliberately reaches the judge
+		"echo hi && echo there > out2.txt",
+	} {
+		if ok, reason := grant(cmd); !ok {
+			t.Fatalf("%q: ordinary redirection must stay grantable, vetoed: %s", cmd, reason)
+		}
+	}
+}
+
+func TestUserAllowListCoversLine(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetMode(PermissionModeSandbox)
+	pm.SetBashPrefixRule("htrcli", PermissionAllow)
+
+	cases := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"user rule alone", "htrcli --tab 35 page", true},
+		{"pipeline of user rule and builtin", "htrcli --tab 35 page 2>&1 | head -4", true},
+		{"compound reported line", "htrcli --tab 35 reload 2>&1 | head -2; sleep 3; htrcli --tab 35 text body 2>&1 | head -c 600", true},
+		{"unlisted segment", "htrcli --tab 35 page && curl https://example.com", false},
+		{"pipe into unlisted shell", "htrcli --tab 35 page | sh", false},
+		{"no user rule, only builtins", "sleep 3", false},
+		{"redirect to file", "htrcli --tab 35 page > out.txt", false},
+		{"env assignment", "FOO=1 htrcli --tab 35 page", false},
+	}
+	for _, c := range cases {
+		if got := pm.userAllowListCoversLine(c.cmd); got != c.want {
+			t.Errorf("%s: userAllowListCoversLine(%q) = %v, want %v", c.name, c.cmd, got, c.want)
+		}
+	}
+
+	pm.SetBashPrefixRule("htrcli --tab 99", PermissionDeny)
+	if pm.userAllowListCoversLine("htrcli --tab 99 page") {
+		t.Error("a deny rule must beat the allow rule")
+	}
+}

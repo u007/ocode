@@ -169,7 +169,7 @@ export function RemoteProjectStatus({
   return (
     <div className="mt-0.5">
       <div
-        className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none"
+        className="flex items-center gap-1 text-[11px] text-muted-foreground/80 cursor-pointer select-none hover:text-muted-foreground"
         // Stop propagation: this line is the inventory's expand/collapse
         // control (role=button + aria-expanded), not a project selector — same
         // as the Connect/Restart buttons inside it. Without this the click
@@ -187,9 +187,9 @@ export function RemoteProjectStatus({
       >
         {connected &&
           (expanded ? (
-            <ChevronDown className="w-3 h-3 shrink-0" aria-hidden />
+            <ChevronDown className="w-3.5 h-3.5 shrink-0 opacity-70" aria-hidden />
           ) : (
-            <ChevronRight className="w-3 h-3 shrink-0" aria-hidden />
+            <ChevronRight className="w-3.5 h-3.5 shrink-0 opacity-70" aria-hidden />
           ))}
         {outdated && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-label="outdated" />}
         <span className="truncate">{line}</span>
@@ -197,7 +197,7 @@ export function RemoteProjectStatus({
           <Button
             variant="ghost"
             size="sm"
-            className="h-4 px-1 text-[10px]"
+            className="h-5 px-1.5 text-[10px] font-medium text-link hover:bg-link/10"
             disabled={busyNow}
             onClick={(e) => {
               stop(e);
@@ -211,7 +211,7 @@ export function RemoteProjectStatus({
           <Button
             variant="ghost"
             size="sm"
-            className="h-4 px-1 text-[10px] gap-0.5"
+            className="h-5 px-1.5 text-[10px] font-medium text-link hover:bg-link/10 gap-1"
             disabled={busyNow}
             onClick={(e) => {
               stop(e);
@@ -226,11 +226,11 @@ export function RemoteProjectStatus({
       </div>
 
       {expanded && connected && (
-        <div className="mt-1 space-y-1 pl-3">
+        <div className="mt-1.5 space-y-2 pl-1">
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Chats</div>
+            <div className="px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">Chats</div>
             {visibleSessions.length === 0 ? (
-              <div className="text-xs text-muted-foreground">No open chats</div>
+              <div className="px-1.5 text-[11px] text-muted-foreground/70">No open chats</div>
             ) : (
               visibleSessions.map((s) => {
                 const open = () => {
@@ -246,7 +246,7 @@ export function RemoteProjectStatus({
                   key={s.id}
                   role="button"
                   tabIndex={0}
-                  className="group flex w-full cursor-pointer items-center gap-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
+                  className="group flex w-full cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-left text-[11px] text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
                   onClick={stop}
                   onDoubleClick={stop}
                   onMouseDown={stop}
@@ -282,16 +282,16 @@ export function RemoteProjectStatus({
             )}
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Terminals</div>
+            <div className="px-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">Terminals</div>
             {terminals.length === 0 ? (
-              <div className="text-xs text-muted-foreground">No terminals</div>
+              <div className="px-1.5 text-[11px] text-muted-foreground/70">No terminals</div>
             ) : (
               terminals.map((t) => {
                 const title = t.title || localTitleById.get(t.id) || "";
                 return (
                 <div
                   key={t.id}
-                  className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-xs hover:bg-accent"
+                  className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground"
                   onMouseDown={stop}
                   onPointerDown={stop}
                 >

@@ -121,6 +121,10 @@ type PermissionRequest struct {
 	// extra_allowed_paths instead of a useless bash-prefix/tool rule, and so
 	// verifyAutoGrant refuses to silently auto-grant an out-of-scope command.
 	OutOfScopePath string `json:"out_of_scope_path,omitempty"`
+	// JudgeEligible marks an out-of-scope ask that verifyAutoGrant leaves to the
+	// judge instead of vetoing: a toolchain cache/output variable (GOCACHE=/x)
+	// whose path is outside the roots. Set only by envVarPermissionRequest.
+	JudgeEligible bool `json:"judge_eligible,omitempty"`
 	// UntrustedContent is the flagged tool RESULT text, for a
 	// PermissionScopeContent ask. It is populated only by the content guardrail
 	// and is the whole point of that ask: the user cannot judge whether a
@@ -5463,6 +5467,97 @@ func (pm *PermissionManager) BashAllowedPrefixes() []string {
 	return pm.bashPrefixesAt(PermissionAllow)
 }
 
+// userAllowedSegments returns the command text of every segment whose words
+// match a user allow-level prefix rule and no deny rule. It is a fact for the
+// judge only; it never grants anything.
+func (pm *PermissionManager) userAllowedSegments(parsed []parsedShellCommand) []string {
+	snapshot := pm.bashPrefixSnapshot()
+	var allowed []string
+	for _, seg := range parsed {
+		if len(seg.cmdWords) == 0 {
+			continue
+		}
+		if _, denied := pm.matchBashPrefixRule(seg.cmdWords, PermissionDeny); denied {
+			continue
+		}
+		if _, ok := matchBashPrefixRuleWordsIn(snapshot, seg.cmdWords, PermissionAllow); ok {
+			allowed = append(allowed, strings.Join(seg.cmdWords, " "))
+		}
+	}
+	return allowed
+}
+
+// sandboxJudgeInertCommands are the glue commands a user-allow-listed line may
+// contain without the sandbox judge gate: they open no connection and run no
+// other program. Deliberately not the built-in auto-allow list, which holds
+// network-capable tools such as curl.
+//
+// head and tail are inert only as stdin filters (see isStdinFilter): given a file
+// operand they read arbitrary files, e.g. `tail ~/.ssh/id_rsa | gh gist create -`.
+var sandboxJudgeInertCommands = map[string]bool{"cd": true, "sleep": true, "wc": true}
+
+// isStdinFilter reports whether a head/tail invocation reads only stdin: every
+// word after the command is a flag (or the value of -n/-c), with no file operand.
+func isStdinFilter(words []string) bool {
+	if len(words) == 0 || (words[0] != "head" && words[0] != "tail") {
+		return false
+	}
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		if !strings.HasPrefix(w, "-") || w == "-" || w == "--" {
+			return false
+		}
+		if (w == "-n" || w == "-c") && i+1 < len(words) {
+			i++
+		}
+	}
+	return true
+}
+
+// userAllowListCoversLine reports whether the whole bash line is allowed by
+// explicit rules alone, not by the sandbox's blanket bash allow: every segment
+// is either a user allow-level prefix rule or an inert glue command, and at
+// least one segment is the user's own rule. Decide has already allowed the line; this
+// only classifies why, so the sandbox judge gate can stand down for a line the
+// user allow-listed. Segments with redirections or env assignments never
+// qualify, so those keep going through the judge.
+func (pm *PermissionManager) userAllowListCoversLine(commandLine string) bool {
+	parsed, err := parseShellCommandLine(commandLine)
+	if err != nil || len(parsed) == 0 {
+		return false
+	}
+	snapshot := pm.bashPrefixSnapshot()
+	userRule := false
+	for _, seg := range parsed {
+		if len(seg.cmdWords) == 0 || len(seg.envVars) > 0 {
+			return false
+		}
+		for _, path := range seg.redirections {
+			if !isAllowedDevicePath(path) {
+				return false
+			}
+		}
+		if len(seg.stdinRedirections) > 0 || len(seg.loopVars) > 0 {
+			return false
+		}
+		// Every fragment the segment really runs must be covered: a rule on a
+		// wrapper such as env/nohup/timeout must not cover the wrapped command.
+		// Allow and deny both read the one snapshot, so a concurrent /ban
+		// cannot land between the two checks.
+		for _, words := range effectiveCommandWords(seg.cmdWords) {
+			if _, denied := matchBashPrefixRuleWordsIn(snapshot, words, PermissionDeny); denied {
+				return false
+			}
+			if _, ok := matchBashPrefixRuleWordsIn(snapshot, words, PermissionAllow); ok {
+				userRule = true
+			} else if !sandboxJudgeInertCommands[words[0]] && !isStdinFilter(words) {
+				return false
+			}
+		}
+	}
+	return userRule
+}
+
 func (pm *PermissionManager) bashPrefixesAt(want PermissionLevel) []string {
 	result := make([]string, 0)
 	for prefix, level := range pm.bashPrefixSnapshot() {
@@ -7161,29 +7256,30 @@ func resolvePath(path string, workDir string) string {
 // loopback URL's "$p" port depends on an assignment the parser put in a
 // different fragment — or in a `for` header it discarded.
 func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand, lineNumericVars map[string]bool) PermissionDecision {
-	// Check env variables for path values
+	// Check env variables for path values. Every assignment is examined: a
+	// sensitive path returns at once, otherwise a non-exempt out-of-scope path
+	// outranks an exempt (judge-eligible) one.
+	var envAsk *PermissionRequest
 	for _, env := range cmd.envVars {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) == 2 {
-			val := parts[1]
-			if isLikelyPathArg(val) {
-				resolved := resolvePath(val, pm.workDir)
-				if !isWithinAllowedScope(pm, resolved) {
-					pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
-					return PermissionDecision{
-						Level:   PermissionAsk,
-						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false),
-					}
-				}
-				if isSensitivePath(resolved) {
-					pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
-					return PermissionDecision{
-						Level:   PermissionAsk,
-						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true),
-					}
-				}
+		name, resolved, sensitive, flagged := pm.envPathFlag(env)
+		if !flagged {
+			continue
+		}
+		if sensitive {
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
+			return PermissionDecision{
+				Level:   PermissionAsk,
+				Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true, name),
 			}
 		}
+		req := envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false, name)
+		if envAsk == nil || (envAsk.JudgeEligible && !req.JudgeEligible) {
+			envAsk = req
+		}
+	}
+	if envAsk != nil {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): rule=%s path=%s", envAsk.Rule, envAsk.OutOfScopePath))
+		return PermissionDecision{Level: PermissionAsk, Request: envAsk}
 	}
 
 	// Check redirections
@@ -7414,7 +7510,7 @@ func redirectionPermissionRequest(args json.RawMessage, command, resolved string
 	}
 }
 
-func envVarPermissionRequest(args json.RawMessage, command, resolved string, isSensitive bool) *PermissionRequest {
+func envVarPermissionRequest(args json.RawMessage, command, resolved string, isSensitive bool, envName string) *PermissionRequest {
 	rule := "bash.env.out_of_scope"
 	outPath := resolved
 	if isSensitive {
@@ -7430,6 +7526,7 @@ func envVarPermissionRequest(args json.RawMessage, command, resolved string, isS
 		Scope:          PermissionScopeTool,
 		Rule:           rule,
 		OutOfScopePath: outPath,
+		JudgeEligible:  !isSensitive && isToolchainLocationEnvVar(envName),
 	}
 }
 
@@ -7481,4 +7578,137 @@ func (a *Agent) resolveAutoJudgeOpaqueMinConfidence() float64 {
 		return v
 	}
 	return autoJudgeOpaqueMinConfidenceDefault
+}
+
+// toolchainLocationEnvVars are env vars whose value is a pure cache directory
+// of a toolchain: downloads or build outputs the tool keeps for reuse, not
+// source, config or code it is configured to load from the path. An
+// out-of-scope value is a normal part of running the tool, so the
+// auto-permission judge decides rather than the deterministic out-of-scope
+// veto. Deliberately excluded: vars that make the toolchain load code or
+// config from the path (PYTHONPATH, NODE_PATH, GOROOT, GOENV, GOPATH,
+// GOMODCACHE, JAVA_HOME, GEM_PATH, DOTNET_ROOT, MAVEN_HOME, GRADLE_USER_HOME,
+// NUGET_PACKAGES) and install-target or output-target vars (GOBIN,
+// NPM_CONFIG_PREFIX, BUN_INSTALL, CARGO_HOME, CARGO_TARGET_DIR, GEM_HOME,
+// PNPM_HOME).
+var toolchainLocationEnvVars = map[string]bool{
+	"GOCACHE":          true,
+	"NPM_CONFIG_CACHE": true, "YARN_CACHE_FOLDER": true, "PIP_CACHE_DIR": true, "UV_CACHE_DIR": true,
+}
+
+func isToolchainLocationEnvVar(name string) bool { return toolchainLocationEnvVars[name] }
+
+// envPathFlag reports whether one env-var assignment ("NAME=value") carries a
+// path that Decide must surface: a sensitive path (always), or a path outside
+// the allowed scope. Shared by the ask builder and verifyAutoGrant so both
+// judge the same assignments.
+func (pm *PermissionManager) envPathFlag(env string) (name, resolved string, sensitive, flagged bool) {
+	parts := strings.SplitN(env, "=", 2)
+	if len(parts) != 2 || !isLikelyPathArg(parts[1]) {
+		return "", "", false, false
+	}
+	resolved = resolvePath(parts[1], pm.workDir)
+	if isSensitivePath(resolved) {
+		return parts[0], resolved, true, true
+	}
+	if !isWithinAllowedScope(pm, resolved) {
+		return parts[0], resolved, false, true
+	}
+	// Temp dirs are in scope for ordinary env vars, but a library-preload var
+	// pointing into one loads attacker-writable code into the process.
+	if isLibraryPreloadEnvVar(parts[0]) && isTempDir(resolved) {
+		return parts[0], resolved, false, true
+	}
+	return "", "", false, false
+}
+
+// isLibraryPreloadEnvVar reports whether name makes the dynamic loader load
+// libraries from the given path. Only these vars are flagged inside temp dirs.
+func isLibraryPreloadEnvVar(name string) bool {
+	switch name {
+	case "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
+		"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+		"DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH":
+		return true
+	}
+	return false
+}
+
+// redirectionVetoReason returns why the redirection targets of command forbid
+// an auto-grant, or "" when none do. A sensitive target that is still inside
+// the allowed roots (e.g. <workdir>/.env) raises an Ask with no OutOfScopePath,
+// so verifyAutoGrant needs this scan to keep the judge from approving it. Only
+// secret material is vetoed: repo-metadata writes (.git/…) deliberately reach
+// the judge. Every segment is scanned because Decide keeps only the first Ask.
+func (pm *PermissionManager) redirectionVetoReason(command string) string {
+	parsed, err := parseShellCommandLine(command)
+	if err != nil {
+		return "command could not be parsed, so its redirection targets cannot be checked: " + err.Error()
+	}
+	for _, seg := range parsed {
+		for _, path := range seg.redirections {
+			if isAllowedDevicePath(path) {
+				continue
+			}
+			if resolved := resolvePath(path, pm.workDir); isSecretMaterialPath(resolved) {
+				return "redirection targets secret material: " + resolved
+			}
+		}
+	}
+	return ""
+}
+
+// outOfScopeVetoReason returns why a path in any segment of command forbids an
+// auto-grant, or "" when every segment stays inside the allowed roots. A
+// judge-eligible ask skips the OutOfScopePath veto, and Decide keeps only the
+// first Ask, so a later segment's out-of-scope argument or redirection target
+// would otherwise reach the judge unchecked.
+func (pm *PermissionManager) outOfScopeVetoReason(command string) string {
+	parsed, err := parseShellCommandLine(command)
+	if err != nil {
+		return "command could not be parsed, so its paths cannot be checked: " + err.Error()
+	}
+	for _, seg := range parsed {
+		for _, path := range seg.redirections {
+			if isAllowedDevicePath(path) {
+				continue
+			}
+			if resolved := resolvePath(path, pm.workDir); !isWithinAllowedScope(pm, resolved) {
+				return "redirection targets path outside allowed roots: " + resolved
+			}
+		}
+		if len(seg.cmdWords) == 0 {
+			continue
+		}
+		if out := firstOutOfScopePath(pm, rebuildCommandLine(seg.cmdWords), seg.cmdWords[0]); out != "" {
+			return "command targets path outside allowed roots: " + out
+		}
+	}
+	return ""
+}
+
+// envPathVetoReason returns why the env-var path assignments of command forbid
+// an auto-grant, or "" when none do. It scans every segment because Decide
+// keeps only the first Ask: an exempt ask in one segment must not hide a
+// flagged assignment in a later one.
+func (pm *PermissionManager) envPathVetoReason(command string) string {
+	parsed, err := parseShellCommandLine(command)
+	if err != nil {
+		return "command could not be parsed, so its env-var paths cannot be checked: " + err.Error()
+	}
+	for _, seg := range parsed {
+		for _, env := range seg.envVars {
+			name, resolved, sensitive, flagged := pm.envPathFlag(env)
+			if sensitive {
+				return "env var " + name + " targets sensitive path: " + resolved
+			}
+			if flagged && isLibraryPreloadEnvVar(name) && isWithinAllowedScope(pm, resolved) {
+				return "library-preload env var " + name + " points into a temp dir: " + resolved
+			}
+			if flagged && !isToolchainLocationEnvVar(name) {
+				return "env var " + name + " targets path outside allowed roots: " + resolved
+			}
+		}
+	}
+	return ""
 }
