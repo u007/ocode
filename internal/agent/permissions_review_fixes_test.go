@@ -50,7 +50,7 @@ func TestEnvPathVetoReasonPreloadMessage(t *testing.T) {
 	a := newTestAgent(nil, nil, nil, nil)
 	pm := a.Permissions()
 	pm.SetWorkDir(t.TempDir())
-	got := pm.envPathVetoReason("LD_LIBRARY_PATH=/tmp/build/lib ./app")
+	got := pm.envPathVetoReason("LD_LIBRARY_PATH=" + t.TempDir() + " ./app")
 	if got == "" || strings.Contains(got, "outside allowed roots") {
 		t.Fatalf("want accurate preload veto message, got %q", got)
 	}
