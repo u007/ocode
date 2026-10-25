@@ -5,6 +5,9 @@
 
 
 
+## 2026-10-25
+
+* **Update**: Local embed server (llama-server) fails with "Exec format error" ([gotchas/local-embed-server-exec-format-error.md](/gotchas/local-embed-server-exec-format-error.md))
 ## 2026-10-22
 
 * **Creation**: File Editor Grants — Editor-Only Out-of-Project Access ([docs/concepts/file-editor-grants.md](/docs/concepts/file-editor-grants.md))

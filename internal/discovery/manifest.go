@@ -400,6 +400,25 @@ func ManifestForModel(modelID string) (ServerManifest, bool) {
 	return ServerManifest{}, false
 }
 
+// EmbedManifestForHost returns the embedding manifest for modelID that matches
+// THIS host's OS/Arch, or false. EnsureLocalServer must use this, never
+// ManifestForModel: the platform rows of one embedding model share a backend
+// but NOT an archive — bge-m3's first row is darwin/arm64, so a bare ModelID
+// match on a Linux host downloaded the macOS arm64 llama-server tarball and
+// the spawn died with "Exec format error" (seen on a remote SSH project host).
+func EmbedManifestForHost(modelID string) (ServerManifest, bool) {
+	return embedManifestFor(modelID, runtime.GOOS, runtime.GOARCH)
+}
+
+func embedManifestFor(modelID, os, arch string) (ServerManifest, bool) {
+	for _, m := range localManifests {
+		if m.ModelID == modelID && m.Kind != "chat" && m.OS == os && m.Arch == arch {
+			return m, true
+		}
+	}
+	return ServerManifest{}, false
+}
+
 // LocalManifestsForHost returns every embedding manifest that can run on this
 // host (used by the embedding-model picker to list selectable local models).
 // Chat-kind manifests (see ChatManifestsForHost) are excluded.

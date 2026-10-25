@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,36 @@ func TestManifestForModel(t *testing.T) {
 	}
 	if _, ok := ManifestForModel("local/does-not-exist"); ok {
 		t.Fatalf("expected unknown model to be absent")
+	}
+}
+
+// TestEmbedManifestForHost guards the remote-host "Exec format error": the
+// embed spawn path must pick the archive for the HOST platform, not the first
+// row carrying the model id (darwin/arm64 for bge-m3).
+func TestEmbedManifestForHost(t *testing.T) {
+	m, ok := embedManifestFor("local/bge-m3", "linux", "amd64")
+	if !ok {
+		t.Fatalf("bge-m3 has no linux/amd64 manifest")
+	}
+	if m.OS != "linux" || m.Arch != "amd64" {
+		t.Fatalf("linux/amd64 lookup returned %s/%s manifest", m.OS, m.Arch)
+	}
+	for _, a := range m.Artifacts {
+		if strings.Contains(a.URL, "macos") {
+			t.Fatalf("linux/amd64 bge-m3 manifest references a macOS archive: %s", a.URL)
+		}
+	}
+	// lfm2.5 is darwin/arm64 only: a Linux host must get "unsupported", not
+	// the darwin archive.
+	if _, ok := embedManifestFor("local/lfm2.5-embedding", "linux", "amd64"); ok {
+		t.Fatalf("lfm2.5-embedding must not resolve on linux/amd64")
+	}
+	// Chat rows never satisfy an embedding lookup.
+	if _, ok := embedManifestFor("local/bonsai-8b-1bit", "linux", "amd64"); ok {
+		t.Fatalf("chat manifest resolved as an embedding manifest")
+	}
+	if m, ok := EmbedManifestForHost("local/bge-m3"); ok && (m.OS != runtime.GOOS || m.Arch != runtime.GOARCH) {
+		t.Fatalf("EmbedManifestForHost returned %s/%s on %s/%s", m.OS, m.Arch, runtime.GOOS, runtime.GOARCH)
 	}
 }
 

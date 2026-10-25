@@ -99,7 +99,7 @@ type LocalServerOptions struct {
 // spawn via the supplied supervised-spawn function. Singleton within the process
 // via localMu + localBase + localModelID.
 func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDir string, setStatus func(string), opts LocalServerOptions) (string, int, error) {
-	man, ok := ManifestForModel(modelID)
+	man, ok := EmbedManifestForHost(modelID)
 	if !ok {
 		return "", 0, fmt.Errorf("no local embed manifest for model %q on %s/%s", modelID, goos(), goarch())
 	}

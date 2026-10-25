@@ -8,7 +8,7 @@ tags:
   - llama-server
   - localserver
   - diagnosis
-timestamp: 2026-10-20T05:01:09Z
+timestamp: 2026-10-25T00:00:00Z
 ---
 ## Symptom
 
@@ -27,10 +27,22 @@ ocode downloads `llama-server` from
 (`<GlobalDataDir>` is `~/.local/share/opencode` on macOS/Linux.)
 
 The cached binary can end up with the wrong architecture — e.g. a darwin-arm64
-binary sitting on an x86_64 host (a cache dir migrated/copied across machines),
-or a partial/corrupt download. When the process is spawned, the OS kernel refuses
-to run it and reports `Exec format error`, so the server never comes up and
-embeddings are unavailable.
+binary sitting on an x86_64 host, or a partial/corrupt download. When the
+process is spawned, the OS kernel refuses to run it and reports
+`Exec format error`, so the server never comes up and embeddings are unavailable.
+
+Until 2026-10-25 ocode itself produced the wrong-arch binary on every non-macOS
+host: `EnsureLocalServer` (`internal/discovery/localserver.go`) resolved the
+manifest with `ManifestForModel`, a bare model-id match that returns the FIRST
+row for the id regardless of platform. The first `local/bge-m3` row is
+darwin/arm64, so a Linux host (a deployed remote SSH project running
+`ocode serve --remote`) downloaded `llama-b9777-bin-macos-arm64.tar.gz` into
+`local-darwin-arm64/` and spawned it. `/localserver status` and `/localserver fix`
+use `CurrentManifest` (host-matched), so status looked healthy while the spawn
+path kept failing. `EnsureLocalServer` now uses `EmbedManifestForHost`, which
+matches model id AND host OS/Arch (`TestEmbedManifestForHost`). The platform
+rows of one embedding model share a backend but not an archive — never resolve
+a manifest for a spawn or download by model id alone.
 
 ## Diagnosis
 
