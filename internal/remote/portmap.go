@@ -328,22 +328,23 @@ type ProjectPortMap struct {
 	Reverse bool
 }
 
-// forwardArgs builds the ssh argv for one forward. The default is the -L
-// tunnelArgs builds, shared with the api/browse tunnel. Reverse is -R with
+// forwardArgs builds the ssh argv for one forward. The default is a -L to the
+// remote's "localhost" (both loopback families). Reverse is -R with
 // both ends pinned to loopback: the explicit 127.0.0.1 bind keeps the remote
 // listener off the network even when sshd allows GatewayPorts.
 // ExitOnForwardFailure makes a busy remote port exit ssh, rather than leave a
 // tunnel that is alive and forwards nothing.
 func forwardArgs(pm ProjectPortMap, target Target) []string {
-	var args []string
+	args := sshForwardBaseArgs()
 	if pm.Reverse {
-		args = append([]string{"-N"}, sshKeepaliveArgs()...)
-		args = append(args, "-o", "ExitOnForwardFailure=yes",
-			"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", pm.RemotePort, pm.LocalPort),
-			target.String())
+		args = append(args, "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", pm.RemotePort, pm.LocalPort))
 	} else {
-		args = tunnelArgs(pm.LocalPort, pm.RemotePort, 0, target.String())
+		// The destination is "localhost", not 127.0.0.1: sshd resolves it on the
+		// remote host and tries every address until one connects, so a dev server
+		// bound only to ::1 (Vite on Node 17+) or only to 127.0.0.1 both work.
+		args = append(args, "-L", fmt.Sprintf("%d:localhost:%d", pm.LocalPort, pm.RemotePort))
 	}
+	args = append(args, target.String())
 	if target.Port > 0 {
 		args = append(args[:len(args)-1], "-p", strconv.Itoa(target.Port), args[len(args)-1])
 	}

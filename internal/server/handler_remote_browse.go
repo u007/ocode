@@ -59,7 +59,9 @@ func (s *Server) handleRemoteBrowseConfig(w http.ResponseWriter, r *http.Request
 	if h, _, err := net.SplitHostPort(reqHost); err == nil {
 		reqHost = h
 	}
-	baseURL := "http://" + reqHost + ":" + strconv.Itoa(s.browseProxyPort) + "/api/remote/" + host + "/browse"
+	reqHost = strings.Trim(reqHost, "[]")
+	scheme := s.browseProxyScheme(r)
+	baseURL := scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort)) + "/api/remote/" + host + "/browse"
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    baseURL,
 		"remote_mode": true,

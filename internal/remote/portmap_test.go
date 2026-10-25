@@ -463,12 +463,13 @@ func TestRunAsyncReturnsBeforeFnFinishes(t *testing.T) {
 	}
 }
 
-// TestForwardArgsDefaultIsLocalForward pins that the -L path is unchanged by
-// the reverse branch: same tunnelArgs shape, no -R anywhere.
+// TestForwardArgsDefaultIsLocalForward pins that the default is a -L to the
+// remote's "localhost" (so ssh reaches a ::1-only or 127.0.0.1-only listener),
+// with no -R anywhere.
 func TestForwardArgsDefaultIsLocalForward(t *testing.T) {
 	got := strings.Join(forwardArgs(ProjectPortMap{RemotePort: 4000, LocalPort: 5000}, Target{Kind: KindSSH, Host: "devbox"}), " ")
-	if !strings.Contains(got, "-L 5000:127.0.0.1:4000") {
-		t.Fatalf("default forward args = %q, want -L 5000:127.0.0.1:4000", got)
+	if !strings.Contains(got, "-L 5000:localhost:4000") {
+		t.Fatalf("default forward args = %q, want -L 5000:localhost:4000", got)
 	}
 	if strings.Contains(got, "-R") {
 		t.Fatalf("default forward args = %q, must not carry -R", got)
@@ -502,6 +503,20 @@ func TestForwardArgsReverseCarriesSSHPort(t *testing.T) {
 	joined := strings.Join(got, " ")
 	if !strings.HasSuffix(joined, "-p 2222 devbox") {
 		t.Fatalf("reverse args = %q, want -p 2222 immediately before the target", joined)
+	}
+}
+
+// TestForwardArgsExactArgv pins the full argv of both forward kinds, so the
+// shared option block (keepalive, ExitOnForwardFailure) cannot drift between them.
+func TestForwardArgsExactArgv(t *testing.T) {
+	const opts = "-N -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -o ExitOnForwardFailure=yes"
+	local := strings.Join(forwardArgs(ProjectPortMap{RemotePort: 4000, LocalPort: 5000}, Target{Kind: KindSSH, Host: "devbox"}), " ")
+	if want := opts + " -L 5000:localhost:4000 devbox"; local != want {
+		t.Fatalf("local forward argv = %q, want %q", local, want)
+	}
+	reverse := strings.Join(forwardArgs(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Reverse: true}, Target{Kind: KindSSH, Host: "devbox"}), " ")
+	if want := opts + " -R 127.0.0.1:9222:127.0.0.1:9222 devbox"; reverse != want {
+		t.Fatalf("reverse forward argv = %q, want %q", reverse, want)
 	}
 }
 

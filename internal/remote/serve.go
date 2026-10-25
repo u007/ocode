@@ -265,6 +265,14 @@ func KillServer(t Transport, pid int) error {
 	return nil
 }
 
+// sshForwardBaseArgs is the option block shared by every port-forwarding ssh
+// invocation (api/browse tunnel and project port maps): no remote command,
+// keepalives, and exit when a forward cannot be bound.
+func sshForwardBaseArgs() []string {
+	args := append([]string{"-N"}, sshKeepaliveArgs()...)
+	return append(args, "-o", "ExitOnForwardFailure=yes")
+}
+
 // tunnelArgs builds the ssh argument list for StartTunnel. It carries the same
 // keepalive options as the interactive shell (sshKeepaliveArgs): a tunnel with
 // no ServerAlive* never notices a silently-dropped transport, so the desktop
@@ -279,8 +287,7 @@ func KillServer(t Transport, pid int) error {
 // api listener (a fresh FreeLocalPort) exists only once the browse bind
 // succeeded, so a successful dial of the api port proves both forwards.
 func tunnelArgs(localPort, remotePort, browsePort int, target string) []string {
-	args := append([]string{"-N"}, sshKeepaliveArgs()...)
-	args = append(args, "-o", "ExitOnForwardFailure=yes")
+	args := sshForwardBaseArgs()
 	if browsePort > 0 {
 		args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", browsePort, browsePort))
 	}

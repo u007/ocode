@@ -221,10 +221,27 @@ func TestFindChrome_Windows(t *testing.T) {
 	}
 }
 
+func TestFindChrome_AutoDetectFails(t *testing.T) {
+	origGOOS := chromeGOOS
+	origStat := chromeStat
+	origLookPath := chromeLookPath
+	defer func() {
+		chromeGOOS = origGOOS
+		chromeStat = origStat
+		chromeLookPath = origLookPath
+	}()
+
+	chromeGOOS = "darwin"
+	chromeStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	chromeLookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	t.Setenv("OCODE_CHROME_PATH", "")
+
+	if _, err := FindChrome(""); !errors.Is(err, ErrChromeNotFound) {
+		t.Fatalf("want ErrChromeNotFound, got %v", err)
+	}
+}
+
 func TestFindChrome_NoSandboxNoPort(t *testing.T) {
-	// Verify sandbox-opt-out contract: noSandbox=true (config default) adds
-	// --no-sandbox; noSandbox=false omits it. (Security trade-off: disabled by
-	// default for remote/WSL/container compatibility; opt-in to re-enable.)
 	args := chromeArgsFor(t.TempDir(), "", true)
 	found := false
 	for _, a := range args {

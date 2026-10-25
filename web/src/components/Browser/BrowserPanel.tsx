@@ -345,6 +345,20 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
             className="w-full h-full border-0 bg-white"
             sandbox="allow-scripts allow-forms allow-same-origin"
             allow=""
+            onError={() => {
+              let shown = s.url;
+              try {
+                shown = new URL(normalizeBrowseURL(s.url)).hostname;
+              } catch (e) {
+                console.error("browse: iframe error for unparseable url", s.url, e);
+              }
+              actions.setError(
+                stateKey,
+                host
+                  ? `Unable to load page — on remote SSH projects, “${shown}” is dialed on the remote host, not this machine. Run the server on the remote host’s port instead.`
+                  : "Unable to load page — the iframe failed to load.",
+              );
+            }}
           />
         )}
         {showIframe && effectiveMode === "chrome" && (

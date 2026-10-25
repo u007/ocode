@@ -1278,7 +1278,7 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 // typesafeModels is the TypeSafe AI (System One) catalog. It is not served by
 // models.dev, and TypeSafe exposes no public list endpoint, so the picker gets
 // this static list. Jev is decision-only — see TypesafeClient.
-var typesafeModels = []string{"jev-latest"}
+var typesafeModels = []string{"jev-latest", "jev-1.14.0", "jev-1.13.0"}
 
 // clefModels is the Cloudflare Workers AI decision-model catalog. Like TypeSafe
 // it is absent from models.dev, so the picker gets this static list for the same

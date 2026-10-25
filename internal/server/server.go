@@ -1248,6 +1248,12 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 		srv.handleRemoteBrowseProxy(w, r, r.PathValue("host"))
 	}))
 	proxyHS := &http.Server{Handler: proxyMux}
+	// Wrap the browse proxy listener with TLS when the main server does,
+	// so the browse origin scheme matches the SPA's scheme (https vs http)
+	// and mixed content is not blocked.
+	if srv.localTLS != nil {
+		proxyLn = NewSniffTLSListener(proxyLn, srv.localTLS)
+	}
 	srv.shutdownMu.Lock()
 	srv.browseProxyLn = proxyLn
 	srv.browseProxyPort = proxyPort
@@ -1344,6 +1350,7 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 		// is indistinguishable from the local desktop webview here and gets the
 		// local-origin base URL rather than the Tailscale one. No header or
 		// listener distinguishes the two reliably, so the shortcut is kept.
+		scheme := s.browseProxyScheme(r)
 		baseURL := ""
 		if !(isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(reqHost)) {
 			if s.handler.tailscaleShareSnapshot != nil {
@@ -1353,7 +1360,7 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if baseURL == "" {
-			baseURL = "http://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
+			baseURL = scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"base_url":    baseURL,
@@ -1392,6 +1399,30 @@ func requestViaProxy(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// browseProxyScheme returns the scheme of the browse proxy base URL. The
+// browse proxy listener speaks TLS only when localTLS is set: the sniff
+// listener then serves TLS and plain HTTP on one port. The localTLS gate is
+// the actual safety property, so https is never advertised to a plain
+// listener. Given a TLS listener, https is chosen for a real TLS request
+// (r.TLS) or for X-Forwarded-Proto: https.
+// That header is a hint from the proxy, not a trust boundary: a spoofed header
+// can at worst pick https for a listener that already serves it, which the
+// sniff listener accepts. Known limitation: a TLS-terminating reverse proxy in
+// front of a server without localTLS still gets http:// (mixed content),
+// because that listener cannot serve TLS.
+func (s *Server) browseProxyScheme(r *http.Request) string {
+	if s.localTLS == nil {
+		return "http"
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	if r.Header.Get("X-Forwarded-Proto") == "https" {
+		return "https"
+	}
+	return "http"
 }
 
 // sameSiteBrowseBase rewrites base's hostname to the loopback hostname the

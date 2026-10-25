@@ -1,9 +1,11 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/u007/ocode/internal/remote"
@@ -73,5 +75,100 @@ func TestRemoteBrowseConfigFailsWithoutBrowseOrigin(t *testing.T) {
 	w := browseConfigFor(t, s, "user@realhost", "localhost:9999")
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d body %q, want 502", w.Code, w.Body.String())
+	}
+}
+
+// TestRemoteBrowseConfig_HTS_WhenTLS verifies that when the browse listener
+// serves TLS (localTLS set) and the request arrives over a real TLS connection,
+// the advertised remote browse base URL uses https://.
+func TestRemoteBrowseConfig_HTS_WhenTLS(t *testing.T) {
+	ws := &fakeTestWorkspace{state: remote.ServeState{BrowsePort: 40263}}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	s := &Server{handler: h, rl: newRateLimiter()}
+	s.browseProxyPort = 9999
+	s.localTLS = &LocalCert{}
+
+	r := httptest.NewRequest("GET", "/api/browse/config?host=user@realhost", nil)
+	r.Host = "localhost:9999"
+	r.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	s.handleBrowseConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body %q, want 200", w.Code, w.Body.String())
+	}
+	var body struct {
+		BaseURL    string `json:"base_url"`
+		RemoteMode bool   `json:"remote_mode"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "https://localhost:9999/api/remote/user@realhost/browse"; body.BaseURL != want {
+		t.Errorf("base_url = %q, want %q", body.BaseURL, want)
+	}
+	if !body.RemoteMode {
+		t.Error("remote_mode = false, want true for a remote host")
+	}
+}
+
+// TestRemoteBrowseConfig_IPv6HostKeepsBrackets verifies that an IPv6 Host header
+// yields a base URL that parses with the address intact. Both a bracketed host
+// with a port and a bare bracketed host must survive the join.
+func TestRemoteBrowseConfig_IPv6HostKeepsBrackets(t *testing.T) {
+	for _, reqHost := range []string{"[::1]:4096", "[::1]"} {
+		ws := &fakeTestWorkspace{state: remote.ServeState{BrowsePort: 40263}}
+		h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+		s := &Server{handler: h, rl: newRateLimiter()}
+		s.browseProxyPort = 9999
+
+		r := httptest.NewRequest("GET", "/api/browse/config?host=user@realhost", nil)
+		r.Host = reqHost
+		w := httptest.NewRecorder()
+		s.handleBrowseConfig(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Host %s: status = %d body %q, want 200", reqHost, w.Code, w.Body.String())
+		}
+		var body struct {
+			BaseURL string `json:"base_url"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		u, err := url.Parse(body.BaseURL)
+		if err != nil {
+			t.Fatalf("Host %s: base_url %q does not parse: %v", reqHost, body.BaseURL, err)
+		}
+		if u.Hostname() != "::1" {
+			t.Errorf("Host %s: base_url hostname = %q, want ::1", reqHost, u.Hostname())
+		}
+		if u.Port() != "9999" {
+			t.Errorf("Host %s: base_url port = %q, want 9999", reqHost, u.Port())
+		}
+	}
+}
+
+// TestRemoteBrowseConfig_HTTP_WithoutTLS verifies that without TLS, the remote
+// browse base URL uses http://.
+func TestRemoteBrowseConfig_HTTP_WithoutTLS(t *testing.T) {
+	ws := &fakeTestWorkspace{state: remote.ServeState{BrowsePort: 40263}}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	s := &Server{handler: h, rl: newRateLimiter()}
+	s.browseProxyPort = 9999
+
+	r := httptest.NewRequest("GET", "/api/browse/config?host=user@realhost", nil)
+	r.Host = "localhost:9999"
+	w := httptest.NewRecorder()
+	s.handleBrowseConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body %q, want 200", w.Code, w.Body.String())
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "http://localhost:9999/api/remote/user@realhost/browse"; body.BaseURL != want {
+		t.Errorf("base_url = %q, want %q", body.BaseURL, want)
 	}
 }

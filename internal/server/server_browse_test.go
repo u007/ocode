@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -311,5 +312,140 @@ func TestBrowseConfigDecidesByPeerNotHost(t *testing.T) {
 				t.Fatalf("base_url = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBrowseConfigEndpoint_HTS_WhenTLS verifies that when the browse listener
+// serves TLS (localTLS set) and the request arrives over a real TLS connection
+// (r.TLS set), the advertised base URL uses https://.
+func TestBrowseConfigEndpoint_HTS_WhenTLS(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.browseProxyPort = 54321
+	s.localTLS = &LocalCert{}
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Host = "localhost:4096"
+	r.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.BaseURL != "https://localhost:54321" {
+		t.Fatalf("base_url = %q, want https://localhost:54321", body.BaseURL)
+	}
+}
+
+// TestBrowseConfigEndpoint_HTS_WhenForwardedProtoViaProxy verifies that when the
+// browse listener serves TLS (localTLS set) and the request comes through a
+// reverse proxy (requestViaProxy true) with X-Forwarded-Proto: https, the
+// advertised base URL uses https://.
+func TestBrowseConfigEndpoint_HTS_WhenForwardedProtoViaProxy(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.browseProxyPort = 54321
+	s.localTLS = &LocalCert{}
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Host = "localhost:4096"
+	r.Header.Set("X-Forwarded-For", "10.0.0.1")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.BaseURL != "https://localhost:54321" {
+		t.Fatalf("base_url = %q, want https://localhost:54321", body.BaseURL)
+	}
+}
+
+// TestBrowseConfigEndpoint_HTTP_WithoutTLS verifies that without TLS or a
+// proxied X-Forwarded-Proto, the advertised base URL uses http://.
+func TestBrowseConfigEndpoint_HTTP_WithoutTLS(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.browseProxyPort = 54321
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Host = "localhost:4096"
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.BaseURL != "http://localhost:54321" {
+		t.Fatalf("base_url = %q, want http://localhost:54321", body.BaseURL)
+	}
+}
+
+// TestBrowseConfigEndpoint_HTTP_SpoofedForwardedProtoNoTLSListener verifies
+// that X-Forwarded-Proto: https on a proxied request still yields http:// when
+// the browse listener has no TLS. Without localTLS the listener is plain HTTP,
+// so https must never be advertised, whatever the headers claim.
+func TestBrowseConfigEndpoint_HTTP_SpoofedForwardedProtoNoTLSListener(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.browseProxyPort = 54321
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Host = "localhost:4096"
+	r.Header.Set("X-Forwarded-For", "10.0.0.1")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.BaseURL != "http://localhost:54321" {
+		t.Fatalf("base_url = %q, want http://localhost:54321 (no TLS listener)", body.BaseURL)
+	}
+}
+
+// TestBrowseConfigEndpoint_HTTP_TLSListenerPlainRequest verifies that a listener
+// which serves TLS still advertises http:// for a plain request with no proxy
+// headers: the sniff listener accepts plain HTTP too, so https is only chosen
+// for a real TLS connection or a proxied X-Forwarded-Proto.
+func TestBrowseConfigEndpoint_HTTP_TLSListenerPlainRequest(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.browseProxyPort = 54321
+	s.localTLS = &LocalCert{}
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.Host = "localhost:4096"
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d", w.Code)
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.BaseURL != "http://localhost:54321" {
+		t.Fatalf("base_url = %q, want http://localhost:54321", body.BaseURL)
 	}
 }
