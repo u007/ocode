@@ -323,20 +323,6 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
           </button>
         </div>
       )}
-      {s.error?.startsWith("dev-server-module-graph") && s.userMode !== "chrome" && (
-        <div className="px-3 py-2 bg-indigo-50 dark:bg-indigo-950 border-b border-indigo-200 dark:border-indigo-800 text-sm flex items-center gap-3" role="alert" data-testid="dev-server-banner">
-          <span className="flex-1">
-            <span className="font-medium">Dev server can't render in the embedded proxy</span>
-            <span className="text-neutral-600 dark:text-neutral-400"> — {s.error.replace(/^dev-server-module-graph:\s*/, "")}</span>
-          </span>
-          <button
-            onClick={() => actions.setUserMode(stateKey, "chrome")}
-            className="shrink-0 rounded bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 text-xs font-medium"
-          >
-            Open in Chrome mode
-          </button>
-        </div>
-      )}
       <div className="relative flex-1 min-h-0">
         {showIframe && effectiveMode === "local" && (
           <iframe

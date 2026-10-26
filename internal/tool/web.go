@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
@@ -39,7 +40,7 @@ func (t WebFetchTool) Parallel() bool { return true }
 func (t WebFetchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "webfetch",
-		"description": "Fetch the content of a URL and return it as LLM-optimized markdown. Preserves headings, links, lists, tables, and code blocks while stripping navigation, scripts, and boilerplate. HTTP URLs are upgraded to HTTPS. Redirects are followed up to 5 hops.",
+		"description": "Fetch the content of a URL and return it as LLM-optimized markdown. Preserves headings, links, lists, tables, and code blocks while stripping navigation, scripts, and boilerplate. PDF responses are returned as their extracted text. HTTP URLs are upgraded to HTTPS. Redirects are followed up to 5 hops.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -94,6 +95,16 @@ func (t WebFetchTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
+	if isPDF(contentType, body) {
+		if len(body) >= maxFetchBytes {
+			return "", fmt.Errorf("PDF at %s exceeds the %d MB fetch limit", fetchURL, maxFetchBytes/(1024*1024))
+		}
+		text, err := extractPDFText(body)
+		if err != nil {
+			return "", fmt.Errorf("fetch %s: %w", fetchURL, err)
+		}
+		return truncateFetched(text), nil
+	}
 	if strings.Contains(contentType, "text/plain") || strings.Contains(contentType, "application/json") {
 		return string(body), nil
 	}
@@ -110,11 +121,23 @@ func (t WebFetchTool) Execute(args json.RawMessage) (string, error) {
 		return t.stripHTML(string(body)), nil
 	}
 
-	if len(markdown) > 50000 {
-		markdown = markdown[:50000] + "\n\n... [content truncated]"
-	}
+	return truncateFetched(markdown), nil
+}
 
-	return markdown, nil
+// maxFetchedBytes caps fetched content returned to the model. Cuts land on a
+// rune boundary so the kept prefix is always valid UTF-8.
+const maxFetchedBytes = 50000
+
+func truncateFetched(s string) string {
+	s = strings.ToValidUTF8(s, "")
+	if len(s) <= maxFetchedBytes {
+		return s
+	}
+	cut := maxFetchedBytes
+	for !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n\n... [content truncated]"
 }
 
 func (t WebFetchTool) stripHTML(html string) string {

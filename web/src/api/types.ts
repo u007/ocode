@@ -1159,6 +1159,33 @@ export interface ServerProjectTerminals {
   terminals: ServerTerminalTab[];
 }
 
+/** One browser tab in a project's shared strip. Strip order is array order. */
+export interface ServerBrowserTab {
+  id: string;
+  title: string;
+  manual_title?: string;
+}
+
+/** One browser tab's shared navigation state. Absent optional fields are null
+ *  on the client. */
+export interface ServerBrowserSurface {
+  url: string;
+  history: string[];
+  history_index: number;
+  user_mode?: "local" | "chrome";
+  page_title?: string;
+}
+
+/** One project's shared browser state: strip, active tab, navigation per tab. */
+export interface ServerProjectBrowsers {
+  tabs: ServerBrowserTab[];
+  active_id?: string;
+  surfaces: Record<string, ServerBrowserSurface>;
+  /** Server-assigned optimistic-concurrency revision. Echo back the value read;
+   *  0 for a project not yet stored. */
+  revision: number;
+}
+
 export interface ProjectGroup {
   name: string;
   order: number;
@@ -1548,6 +1575,21 @@ export interface PulseSystemPrompt {
   prompt: string;
   default: string;
   effective: string;
+}
+
+/** Where a built-in system prompt is used. Mirrors agent.PromptKind. */
+export type PromptKind = "Sub-agent" | "Judge" | "Helper task" | "Main agent prompt";
+
+/** One configurable built-in system prompt. The built-in text itself is not
+ *  sent. When `enabled` is on and `text` is non-empty, `text` is APPENDED after
+ *  the built-in prompt; otherwise the built-in prompt applies unchanged. */
+export interface PromptOverrideEntry {
+  key: string;
+  label: string;
+  description: string;
+  kind: PromptKind;
+  enabled: boolean;
+  text: string;
 }
 
 // Speech-to-text (voice input). Mirrors internal/stt's catalog JSON. `engine`

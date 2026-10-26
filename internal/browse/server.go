@@ -276,6 +276,9 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
 	s.mux.HandleFunc("GET /b/{stateKey}/__cdp", s.handleCDP)
 	s.mux.HandleFunc("POST /b/{stateKey}/__bypass", s.handleBypass)
+	// Everything else is a root-relative subresource escaping the /b/ mount
+	// (dev-server module imports); redirected onto the route it belongs to.
+	s.mux.HandleFunc("/", s.handleRootRelative)
 	if len(opts) > 0 {
 		s.remoteMode = opts[0].RemoteMode
 		s.initManager(opts[0])

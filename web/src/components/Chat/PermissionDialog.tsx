@@ -32,6 +32,11 @@ const SHELL_CONTROL_KEYWORDS = new Set([
   "function", "select", "time",
 ]);
 
+// Characters of a flagged result rendered at once. Layout cost of one text block
+// grows with its size (measured headless Chrome: ~86 ms at 50 KB, ~6 s at 500 KB),
+// so the rest of the result is revealed a page at a time, never dropped.
+const CONTENT_PAGE_CHARS = 32_000;
+
 interface Props {
   open: boolean;
   /**
@@ -191,6 +196,8 @@ export default function PermissionDialog({
   // submit is never silent (the store's per-session error is not rendered in
   // the chat view). Cleared on the next attempt or a new request.
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Characters of untrustedContent currently rendered (see CONTENT_PAGE_CHARS).
+  const [contentLimit, setContentLimit] = useState(CONTENT_PAGE_CHARS);
   // On-demand explanation of the pending call. Kept per request (reset below)
   // and aborted on a new ask/unmount so a slow reply cannot land on a different
   // ask's dialog.
@@ -226,6 +233,7 @@ export default function PermissionDialog({
     setConfirming(null);
     setChosenPrefix("");
     setSubmitError(null);
+    setContentLimit(CONTENT_PAGE_CHARS);
     digestAbort.current?.abort();
     digestAbort.current = null;
     setDigest(null);
@@ -376,7 +384,7 @@ export default function PermissionDialog({
           be shorter than the viewport. ScopedDialogContent supplies the
           container-relative `max-h-[calc(100%-2rem)]` instead, and two
           `max-height` declarations do NOT take the min — last one wins. */}
-      <ScopedDialogContent className="w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
+      <ScopedDialogContent className="w-[calc(100%-2rem)] grid-cols-[minmax(0,1fr)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
         <ScopedDialogHeader>
           <ScopedDialogTitle className="flex items-center gap-2 text-foreground">
             {confirming ? (
@@ -394,7 +402,7 @@ export default function PermissionDialog({
           </ScopedDialogTitle>
         </ScopedDialogHeader>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {!confirming && (
             <>
               <AskContextPreview context={context} />
@@ -479,8 +487,24 @@ export default function PermissionDialog({
                     data-testid="content-guard-result"
                     className="max-h-96 max-w-full overflow-y-auto rounded-lg border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-words text-foreground [overflow-wrap:anywhere]"
                   >
-                    {untrustedContent}
+                    {untrustedContent?.slice(0, contentLimit)}
                   </pre>
+                  {untrustedContent !== undefined && untrustedContent.length > contentLimit && (
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                      <span>
+                        Showing {Math.min(contentLimit, untrustedContent.length).toLocaleString()} of{" "}
+                        {untrustedContent.length.toLocaleString()} characters.
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setContentLimit((n) => n + CONTENT_PAGE_CHARS)}
+                      >
+                        Show next {CONTENT_PAGE_CHARS.toLocaleString()}
+                      </Button>
+                    </div>
+                  )}
                 </section>
               )}
 

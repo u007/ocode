@@ -609,6 +609,44 @@ func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 	}
 }
 
+// A sub-agent used as the main agent must carry the user's subagent_<name>
+// override, the same way a dispatched sub-agent does.
+func TestSwitchAgentToSubagentAppliesPromptOverride(t *testing.T) {
+	config.SetPromptOverrides(map[string]config.PromptOverride{
+		"subagent_explore": {Enabled: true, Text: "Prefer rg over grep."},
+	})
+	t.Cleanup(func() { config.SetPromptOverrides(nil) })
+
+	builtin := agent.DefaultAgentRegistry.Get("explore").SystemPrompt
+	m := model{
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.switchAgent("explore")
+	spec := m.agent.Spec()
+	if spec == nil || spec.Name != "explore" {
+		t.Fatalf("setup: expected active spec to be explore, got %+v", spec)
+	}
+	if spec.SystemPrompt != builtin {
+		t.Fatalf("explore spec must keep the raw built-in prompt, got %q", spec.SystemPrompt)
+	}
+	want := builtin + "\n\nPrefer rg over grep."
+	assembled := false
+	for _, msg := range m.agent.BasePromptMessages() {
+		if strings.Contains(msg.Content, want) {
+			assembled = true
+		}
+	}
+	if !assembled {
+		t.Fatalf("explore as main agent: assembled prompt does not carry the override %q", want)
+	}
+}
+
 func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
 	m := model{
 		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),

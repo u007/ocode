@@ -232,6 +232,37 @@ func TestHandleLocalRewritesHTMLURLs(t *testing.T) {
 	}
 }
 
+// TestHandleLocalDropsUpstreamReferrerPolicy: a dev server asking for a
+// path-stripping referrer policy must not reach the browser, or the Referer of
+// root-relative module imports loses the /b/ path they are redirected from
+// (rootrelative.go).
+func TestHandleLocalDropsUpstreamReferrerPolicy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<html><head><meta name="referrer" content="origin"><title>dev</title></head><body>hi</body></html>`)
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	s, cookie := newLocalTestServer(t, "tab:rp")
+
+	r := httptest.NewRequest("GET", "/b/tab:rp/http/"+host+"/", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+
+	if got := w.Header().Get("Referrer-Policy"); got != "" {
+		t.Errorf("Referrer-Policy = %q, want it dropped", got)
+	}
+	body := w.Body.String()
+	if strings.Contains(strings.ToLower(body), `name="referrer"`) {
+		t.Errorf("referrer meta survived in:\n%s", body)
+	}
+	if !strings.Contains(body, "<title>dev</title>") {
+		t.Errorf("original HTML content lost: %q", body)
+	}
+}
+
 // TestHandleLocalUpgradeEmitsNoNavEvent pins the second live-QA fix: Chromium
 // may omit Sec-Fetch-Dest on the WebSocket handshake, and a missing header
 // used to be treated as a document navigation — the resulting nav event would
@@ -513,7 +544,11 @@ func TestBrowseBypassStore(t *testing.T) {
 	}
 }
 
-func TestHandleLocalDevServerNoticeReplacesDocument(t *testing.T) {
+func TestHandleLocalDevServerHTMLIsServedOnTheRoute(t *testing.T) {
+	// Vite/TanStack dev-server documents are ordinary documents to the proxy:
+	// their root-relative attribute URLs are rewritten onto the /b/ route and
+	// the capture script is injected. The module imports INSIDE those scripts
+	// are handled by the origin root (rootrelative.go), never by a notice.
 	const devHTML = `<html><head><link rel="modulepreload" href="/@id/virtual:tanstack-start-dev-client-entry"/>` +
 		`<script type="module" async="" src="/@id/virtual:tanstack-start-dev-client-entry"></script></head>` +
 		`<body><div>the dev app shell</div></body></html>`
@@ -537,114 +572,19 @@ func TestHandleLocalDevServerNoticeReplacesDocument(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if strings.Contains(body, "the dev app shell") {
-		t.Fatalf("dev-server HTML was not replaced by the notice: %q", body)
+	if !strings.Contains(body, "the dev app shell") {
+		t.Fatalf("dev-server HTML content lost: %q", body)
 	}
-	if !strings.Contains(body, "Development server not supported") {
-		t.Fatalf("notice text missing from body: %q", body)
+	if !strings.Contains(body, `src="/b/tab:dev1/http/`+host+`/@id/virtual:tanstack-start-dev-client-entry"`) {
+		t.Fatalf("module script src not rewritten onto the route: %q", body)
 	}
-	if strings.Contains(body, "__ocode_capture.js") {
-		t.Fatalf("notice must not inject the capture script: %q", body)
+	if !strings.Contains(body, "__ocode_capture.js") {
+		t.Fatalf("capture script not injected: %q", body)
 	}
-	// Terminal nav event carries the error token the SPA matches on.
-	foundErr := false
 	for _, ev := range got {
-		if ev.Mode == "local" && strings.HasPrefix(ev.Error, "dev-server-module-graph") {
-			foundErr = true
+		if ev.Error != "" {
+			t.Fatalf("dev-server document must not emit an error-tagged nav event, got %+v", ev)
 		}
-	}
-	if !foundErr {
-		t.Fatalf("no error-tagged local nav event, got %+v", got)
-	}
-}
-
-func TestHandleLocalDevServerMarkerSubresourceNotReplaced(t *testing.T) {
-	// A TRUE subresource (script/image/…, not an iframe — iframes count as
-	// document requests) with dev-server markers must keep the normal
-	// rewrite+capture path, not be replaced by the notice: only document
-	// loads get the notice, and only they drive the address bar.
-	const devHTML = `<html><head><script src="/@id/virtual:tanstack-start-dev-client-entry"></script></head><body>subresource content</body></html>`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, devHTML)
-	}))
-	defer upstream.Close()
-	host := strings.TrimPrefix(upstream.URL, "http://")
-	s, cookie := newLocalTestServer(t, "tab:dev2")
-
-	r := httptest.NewRequest("GET", "/b/tab:dev2/http/"+host+"/sub", nil)
-	r.Header.Set("Sec-Fetch-Dest", "script")
-	r.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %q", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "subresource content") {
-		t.Fatalf("subresource HTML should pass through untouched: %q", body)
-	}
-	if !strings.Contains(body, "__ocode_capture.js") {
-		t.Fatalf("subresource HTML should still get capture injection: %q", body)
-	}
-}
-
-func TestHandleLocalNormalHTMLGetsNoNotice(t *testing.T) {
-	// Pages without dev-server markers must never be replaced by the notice.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, "<html><body>plain page</body></html>")
-	}))
-	defer upstream.Close()
-	host := strings.TrimPrefix(upstream.URL, "http://")
-	s, cookie := newLocalTestServer(t, "tab:dev3")
-
-	r := httptest.NewRequest("GET", "/b/tab:dev3/http/"+host+"/", nil)
-	r.Header.Set("Sec-Fetch-Dest", "document")
-	r.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-
-	body := w.Body.String()
-	if strings.Contains(body, "Development server not supported") {
-		t.Fatalf("normal HTML wrongly replaced by notice: %q", body)
-	}
-	if !strings.Contains(body, "plain page") {
-		t.Fatalf("normal HTML content lost: %q", body)
-	}
-	if !strings.Contains(body, "__ocode_capture.js") {
-		t.Fatalf("normal HTML should get capture injection: %q", body)
-	}
-}
-
-func TestHandleLocalMarkerAsTextDoesNotTriggerNotice(t *testing.T) {
-	// Markers appearing in TEXT NODES (prose/code samples) must not trip the
-	// detector — only tag attributes are significant.
-	const prose = `<html><body><pre>Vite dev paths like /@fs/ and /@id/virtual: and /node_modules/.vite/ are documented here</pre></body></html>`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, prose)
-	}))
-	defer upstream.Close()
-	host := strings.TrimPrefix(upstream.URL, "http://")
-	s, cookie := newLocalTestServer(t, "tab:dev4")
-
-	r := httptest.NewRequest("GET", "/b/tab:dev4/http/"+host+"/", nil)
-	r.Header.Set("Sec-Fetch-Dest", "document")
-	r.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-
-	body := w.Body.String()
-	if strings.Contains(body, "Development server not supported") {
-		t.Fatalf("marker as text wrongly triggered the notice: %q", body)
-	}
-	if !strings.Contains(body, "are documented here") {
-		t.Fatalf("prose content lost: %q", body)
-	}
-	if !strings.Contains(body, "__ocode_capture.js") {
-		t.Fatalf("normal HTML should still get capture injection: %q", body)
 	}
 }
 

@@ -75,6 +75,22 @@ describe("PermissionDialog content-guardrail ask", () => {
     expect(region.className).toContain("overflow-y-auto");
   });
 
+  it("renders a large result one page at a time and reveals the rest on request", () => {
+    const big = "x".repeat(70_000);
+    renderDialog({ ...contentProps, untrustedContent: big });
+    const region = screen.getByTestId("content-guard-result");
+    // Only the first page is in the DOM, so a huge result cannot freeze layout.
+    expect(region.textContent?.length).toBe(32_000);
+    expect(screen.getByText(/Showing 32,000 of 70,000 characters/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Show next 32,000/ }));
+    expect(region.textContent?.length).toBe(64_000);
+
+    fireEvent.click(screen.getByRole("button", { name: /Show next 32,000/ }));
+    expect(region.textContent?.length).toBe(70_000);
+    expect(screen.queryByRole("button", { name: /Show next/ })).not.toBeInTheDocument();
+  });
+
   it("names the source and the guardrail summary", () => {
     renderDialog(contentProps);
     expect(screen.getByText("MCP github_create_issue")).toBeInTheDocument();

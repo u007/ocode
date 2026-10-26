@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Web/Desktop Server Project Scoping
-description: 'Project dirs are per-session not per-process: session project roots, project-scoped endpoint params, remote project proxying rules and the server-side terminal tab list.'
+description: 'Project dirs are per-session not per-process: session project roots, project-scoped endpoint params, remote project proxying rules and the server-side terminal and browser tab lists.'
 resource: CLAUDE.md
 tags:
   - server
@@ -195,6 +195,63 @@ shared, one attachment slot / `superseded` / **Take over**) lives in
   only detaches and keeps both (2 h local / 24 h remote TTL). With the list
   shared, a close ends the session for EVERY client, including one attached to
   that shell. `TestTerminalKillDropsDiskHistory` pins the history removal.
+
+### The embedded browser's TAB STRIP and navigation are server state too
+
+`GET/PUT /api/browser-tabs` → `internal/browsertabs` (`browser-tabs.json` under
+the global data dir, same cross-process lock, mtime reload and atomic rename as
+`internal/termtabs`). A client that opens the same server (a phone beside the
+desktop app) sees the same browser tabs and URLs, and each client still renders
+its own iframe. What is shared, per project key:
+
+- the strip: each tab's id, title and manual rename, in array order;
+- `active_id`;
+- per tab, the surface: `url`, `history`, `history_index`, `user_mode` and
+  `page_title`.
+
+Scroll offsets per URL are NOT shared. They live in localStorage
+(`ocode.ui.browser.scroll.v1`, keyed by tab id), so one window scrolling never
+moves another window's page. Rules recorded only here:
+
+- **Keys match the terminal list.** The key is `projectTerminalsKey(path, host)`,
+  so a remote project's tabs never share a list with a local project at the same
+  path. The endpoint takes no `?host=` parameter.
+- **The PUT is a MERGE, and every entry is validated first.** A provided key
+  replaces that project, an empty `tabs` list deletes it, and absent keys are kept.
+  An entry that fails `Validate` (a non-http(s) URL, a dangling `active_id`, a
+  history index out of range, more than 25 tabs, or a URL over 2048 UTF-8 bytes)
+  fails the WHOLE request with 400. The client drops such surfaces before it
+  sends, so a valid strip still syncs.
+  Silently repairing it would give the server a value the sender does not hold.
+- **Nothing is written before the server state is read.** The write gate in
+  `useBrowserPersistence` stays closed until the initial read has been applied. A
+  client that wrote first would replace the server's list with an empty one.
+- **Echoes are compared by content, not by event.** The state the server is known
+  to hold is kept as JSON. Applying server state records it BEFORE the save effect
+  runs, so the echo of a client's own write, or the write that produced a remote
+  change, is never sent back. The test "applies another client's navigation
+  without growing history or sending it back" in `browserPersistenceSync.test.tsx`
+  pins this: a remote navigation applies without growing history or sending a PUT.
+- **A read never overwrites unsent local edits.** A read is dropped when a write
+  started during it, or when local changes have not been sent. The write's own
+  `browser_tabs_changed` echo then triggers a fresh read.
+- **A local tab the server lacks is closed only if the server once held it.**
+  Each client keeps the ids it has seen on the server, per project. A tab that was
+  never synced, such as one opened in the background for a project that is not
+  shown, is kept by the next read and sent by the save. A tab in that set that is
+  missing from a read was closed by another client, so it is closed here.
+- **Remote navigation uses `applySharedNavigation`, never `restoreSurface`.**
+  `restoreSurface` resets console, network, zoom and status, and it would stop the
+  iframe's live state. Only the shared fields change; a URL change reloads the
+  surface and scrolls to this client's saved offset.
+- **Switching project flushes the previous project's unsent write** before the new
+  project's read, so a tab opened just before a switch survives the switch.
+- **Closing the last tab sends an explicit empty `tabs` list**, which deletes the
+  project for every client (the same trap as the terminal list).
+- **Migration.** The pre-server `ocode.ui.browser.project.v1` localStorage entry is
+  moved to the server once per project, on the first read that finds no server
+  entry. It is removed from localStorage as it moves. Remote projects are not
+  migrated: that old key was bare-path only.
 
 ### Editor file-access grants (see `docs/concepts/file-editor-grants.md`)
 The editor/preview opens files outside the active project via an EDITOR-ONLY in-memory grant (internal/server/handler_file_grants.go), separate from extra_allowed_paths — which feeds the agent scope. resolveEditorFilePath (scopeEditorRoots, handler_files.go:966) uses it; the DB browser (scopeProjectRoots) excludes grants (handler_db.go:46). See file-editor-grants.md for the LFI-shaped hole (handler_files.go:1007) and verified anchors.

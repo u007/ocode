@@ -172,3 +172,31 @@ func TestRemoteBrowseConfig_HTTP_WithoutTLS(t *testing.T) {
 		t.Errorf("base_url = %q, want %q", body.BaseURL, want)
 	}
 }
+
+// TestRemoteBrowseConfigPrefersSharedBrowseURL: a tailnet client (non-loopback
+// peer) must be handed the SHARED browse URL for a remote project too — the
+// bare proxy port is not reachable from a phone, so its iframe loaded nothing.
+func TestRemoteBrowseConfigPrefersSharedBrowseURL(t *testing.T) {
+	ws := &fakeTestWorkspace{state: remote.ServeState{BrowsePort: 40263}}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	h.tailscaleShareSnapshot = func() tailscaleShareStatus {
+		return tailscaleShareStatus{Running: true, BrowseURL: "https://desk.tailnet.ts.net:8444"}
+	}
+	s := &Server{handler: h, rl: newRateLimiter()}
+	s.browseProxyPort = 9999
+
+	// httptest.NewRequest's peer is 192.0.2.1, a non-loopback client.
+	w := browseConfigFor(t, s, "user@realhost", "desk.tailnet.ts.net:8443")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body %q, want 200", w.Code, w.Body.String())
+	}
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "https://desk.tailnet.ts.net:8444/api/remote/user@realhost/browse"; body.BaseURL != want {
+		t.Errorf("base_url = %q, want %q", body.BaseURL, want)
+	}
+}

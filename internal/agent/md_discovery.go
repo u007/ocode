@@ -62,6 +62,23 @@ type mdEntry struct {
 	MTime   int64  `json:"mtime"`             // unix nanos, fast-path change gate
 	Size    int64  `json:"size"`              // bytes, fast-path change gate
 	FailAt  int64  `json:"fail_at,omitempty"` // unix nanos of last failed summarize (negative cache)
+	// PromptHash is the hash of the active md_summary prompt override, or ""
+	// when none is enabled, so editing the override re-summarises every file
+	// instead of replaying the previous prompt's output. "" keeps entries
+	// written before the field existed valid as long as no override is set.
+	PromptHash string `json:"prompt_hash,omitempty"`
+}
+
+// mdSummaryPromptHash identifies the md_summary prompt override in effect:
+// "" when disabled or empty (the built-in prompt), else the hash of the
+// effective prompt (built-in plus override), the same text ApplyPromptOverride
+// builds.
+func mdSummaryPromptHash() string {
+	text, ok := config.EffectivePromptOverride("md_summary")
+	if !ok {
+		return ""
+	}
+	return hashBytes([]byte(mdSummarySystemPrompt + "\n\n" + text))
 }
 
 type mdDiscoveryState struct {
@@ -321,10 +338,11 @@ func (a *Agent) mdSummarizePassLocked(root string, refs []mdRef) {
 	next := make(map[string]mdEntry, len(refs))
 	var jobs []mdRef // files that need a fresh summary
 	dirty := false
+	promptHash := mdSummaryPromptHash()
 
 	for _, r := range refs {
 		// Fast path: unchanged mtime+size → reuse cached entry without hashing.
-		if e, ok := cur[r.rel]; ok && e.MTime == r.mtime && e.Size == r.size && e.Summary != "" {
+		if e, ok := cur[r.rel]; ok && e.MTime == r.mtime && e.Size == r.size && e.Summary != "" && e.PromptHash == promptHash {
 			next[r.rel] = e
 			continue
 		}
@@ -338,7 +356,7 @@ func (a *Agent) mdSummarizePassLocked(root string, refs []mdRef) {
 		}
 		hash := hashBytes(content)
 		// Content unchanged (mtime touched but bytes identical) → refresh gate fields.
-		if e, ok := cur[r.rel]; ok && e.Hash == hash && e.Summary != "" {
+		if e, ok := cur[r.rel]; ok && e.Hash == hash && e.Summary != "" && e.PromptHash == promptHash {
 			e.MTime, e.Size = r.mtime, r.size
 			next[r.rel] = e
 			dirty = true
@@ -346,7 +364,7 @@ func (a *Agent) mdSummarizePassLocked(root string, refs []mdRef) {
 		}
 		// Negative cache: a file whose summarization recently failed (same
 		// content) is left alone until the backoff elapses.
-		if e, ok := cur[r.rel]; ok && e.Hash == hash && e.FailAt != 0 && time.Since(time.Unix(0, e.FailAt)) < mdFailBackoff {
+		if e, ok := cur[r.rel]; ok && e.Hash == hash && e.PromptHash == promptHash && e.FailAt != 0 && time.Since(time.Unix(0, e.FailAt)) < mdFailBackoff {
 			next[r.rel] = e
 			continue
 		}
@@ -378,10 +396,10 @@ func (a *Agent) mdSummarizePassLocked(root string, refs []mdRef) {
 				if summary == "" {
 					// Record the failure (negative cache) so the next scan backs
 					// off. Do NOT inject a placeholder summary.
-					results[i] = mdEntry{Hash: hash, MTime: r.mtime, Size: r.size, FailAt: time.Now().UnixNano()}
+					results[i] = mdEntry{Hash: hash, MTime: r.mtime, Size: r.size, FailAt: time.Now().UnixNano(), PromptHash: promptHash}
 					return
 				}
-				results[i] = mdEntry{Hash: hash, Summary: summary, MTime: r.mtime, Size: r.size}
+				results[i] = mdEntry{Hash: hash, Summary: summary, MTime: r.mtime, Size: r.size, PromptHash: promptHash}
 			}(i, r)
 		}
 		wg.Wait()
@@ -493,7 +511,7 @@ func (a *Agent) summarizeMarkdown(rel string, content []byte) string {
 	}, 1)
 	crashguard.Go(func() {
 		resp, err := client.Chat([]Message{
-			{Role: "system", Content: mdSummarySystemPrompt},
+			{Role: "system", Content: config.ApplyPromptOverride("md_summary", mdSummarySystemPrompt)},
 			{Role: "user", Content: prompt},
 		}, nil)
 		if err != nil {

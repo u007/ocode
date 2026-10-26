@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/skill"
 )
@@ -204,8 +205,12 @@ func (a *Agent) BasePromptMessages() []Message {
 		}
 	}
 	agentPrompt := a.Mode().SystemPrompt()
+	// The subagent_<name> override is applied here, at assembly time, so an edit
+	// in the store reaches the next turn of a spec installed before the edit.
+	// Specs keep the raw built-in text; the override only applies while that
+	// text is unmodified (see overrideBuiltinPrompt).
 	if a.spec != nil && strings.TrimSpace(a.spec.SystemPrompt) != "" {
-		agentPrompt = strings.TrimSpace(a.spec.SystemPrompt)
+		agentPrompt = strings.TrimSpace(SubAgentPromptWithOverride(a.spec.Name, a.spec.SystemPrompt))
 	}
 	// Harness identity line (opencode parity): real opencode's system prompt
 	// opens by naming itself (anthropic.txt: "You are OpenCode, the best
@@ -227,7 +232,7 @@ func (a *Agent) BasePromptMessages() []Message {
 	// the agent may do, the recap says how it closes a turn that did work. Both
 	// are static, so the ordering is stable for the cached prefix.
 	if a.RecapPromptEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + recapPromptContent})
+		msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + config.ApplyPromptOverride("recap", recapPromptContent)})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {
@@ -263,12 +268,12 @@ func (a *Agent) BasePromptMessages() []Message {
 		}
 	}
 	if a.DocPromptEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + docPromptContent})
+		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + config.ApplyPromptOverride("doc_prompt", docPromptContent)})
 	}
 	// Suggested responses: the same static-fragment contract as the doc prompt
 	// above — a const in the cached prefix, gated on a construction-time flag.
 	if a.SuggestedResponsesEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptSuggestionsMarker + "\n" + suggestedResponsesPromptContent})
+		msgs = append(msgs, Message{Role: "system", Content: promptSuggestionsMarker + "\n" + config.ApplyPromptOverride("suggested_responses", suggestedResponsesPromptContent)})
 	}
 	// Notes protocol fragment. Gate strictly on bus presence:
 	// a child not in a group has no bus, and the prompt must

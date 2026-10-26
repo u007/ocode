@@ -1018,6 +1018,10 @@ type OcodeConfig struct {
 	// chat model; empty PulseSystemPrompt uses the built-in prompt.
 	PulseModel        string
 	PulseSystemPrompt string
+	// Prompts holds the user's refinements of built-in system prompts, keyed by
+	// the catalog key in internal/agent/prompt_catalog.go. Prompt call sites read
+	// them through ApplyPromptOverride (the process-wide store), not this field.
+	Prompts map[string]PromptOverride
 	// PulseActivationModel is the decision-judge model that gates whether a
 	// stop indicator wakes the Pulse assistant (the assistant-authored activation
 	// condition). Empty uses the default judge model (typesafe/jev-latest).
@@ -1417,6 +1421,7 @@ type ocodeConfigFile struct {
 	AutoContinueModel          string                      `json:"auto_continue_model,omitempty"`
 	PulseModel                 string                      `json:"pulse_model,omitempty"`
 	PulseSystemPrompt          string                      `json:"pulse_system_prompt,omitempty"`
+	Prompts                    map[string]PromptOverride   `json:"prompts,omitempty"`
 	PulseActivationModel       string                      `json:"pulse_activation_model,omitempty"`
 	PulseAutoReceive           *bool                       `json:"pulse_auto_receive,omitempty"`
 	PulseAutoGapMs             *int                        `json:"pulse_auto_gap_ms,omitempty"`
@@ -1650,6 +1655,9 @@ func LoadOcodeConfig(cfg *Config) error {
 		cfg.Plugins = make(map[string]PluginConfig)
 	}
 
+	// Seed the process-wide prompt override store from the same load that fills
+	// cfg.Ocode, so a fresh process and a config reload both see the file.
+	SetPromptOverrides(ocode.Prompts)
 	cfg.Ocode = ocode
 	return nil
 }
@@ -2024,6 +2032,10 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.PulseSystemPrompt = file.PulseSystemPrompt
 		}
 		delete(raw, "pulse_system_prompt")
+	}
+	if _, ok := raw["prompts"]; ok {
+		cfg.Prompts = file.Prompts
+		delete(raw, "prompts")
 	}
 	if _, ok := raw["pulse_activation_model"]; ok {
 		if file.PulseActivationModel != "" {
@@ -2869,6 +2881,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.PulseSystemPrompt != "" {
 		payload["pulse_system_prompt"] = cfg.PulseSystemPrompt
 	}
+	if len(cfg.Prompts) > 0 {
+		payload["prompts"] = cfg.Prompts
+	}
 	if cfg.PulseActivationModel != "" {
 		payload["pulse_activation_model"] = cfg.PulseActivationModel
 	}
@@ -2940,7 +2955,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" {
 			continue
 		}
 		payload[k] = v

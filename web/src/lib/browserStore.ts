@@ -197,6 +197,14 @@ function cap<T>(arr: T[], limit: number): T[] {
   return arr.length > limit ? arr.slice(arr.length - limit) : arr;
 }
 
+function dropTabState(key: StateKey): void {
+  browserStore.setState((s) => {
+    const next = { ...s.byKey };
+    delete next[key];
+    return { byKey: next };
+  });
+}
+
 export const browserActions = {
   open(key: StateKey, persistedUrl = "") {
     browserStore.setState((s) => {
@@ -207,15 +215,17 @@ export const browserActions = {
     });
   },
 
+  /** Drops a tab's state from this client only. Used when another client closed
+   *  the tab: that client already revoked the grant, so no revoke is sent here. */
+  closeLocal(key: StateKey) {
+    dropTabState(key);
+  },
+
   /** `host` is the owning project's host ("" = this machine): the revoke must
    *  reach the server that minted the grant, which the SPA cannot recall after
    *  a reload. */
   close(key: StateKey, host: string) {
-    browserStore.setState((s) => {
-      const next = { ...s.byKey };
-      delete next[key];
-      return { byKey: next };
-    });
+    dropTabState(key);
     // Best-effort server revoke; failure is non-fatal (session expires anyway).
     void revokeBrowseSession(key, host).catch((err) =>
       console.error("browse: revoke failed for", key, "on host", host || "local", err),
@@ -359,6 +369,44 @@ export const browserActions = {
 
   setPerfRecording(key: StateKey, recording: boolean) {
     mutate(key, (t) => ({ ...t, perfRecording: recording }));
+  },
+
+  /** Apply a navigation state another client shared through the server
+   *  (`browser_tabs_changed`). Only the shared fields change; console, network,
+   *  zoom, status and error stay this client's own. A URL change mirrors
+   *  navigate(): the surface reloads, drops the previous page title, and scrolls
+   *  to this client's saved offset. Returns the same tab when nothing differs,
+   *  so applying the echo of this client's own save is a no-op. */
+  applySharedNavigation(
+    key: StateKey,
+    snap: { url: string; history: string[]; historyIndex: number; userMode: BrowseMode | null; pageTitle: string | null },
+  ) {
+    mutate(key, (t) => {
+      const sameHistory = t.history.length === snap.history.length && t.history.every((u, i) => u === snap.history[i]);
+      if (
+        t.url === snap.url &&
+        sameHistory &&
+        t.historyIndex === snap.historyIndex &&
+        t.userMode === snap.userMode &&
+        t.pageTitle === snap.pageTitle
+      ) {
+        return t;
+      }
+      const next: BrowserTabState = {
+        ...t,
+        url: snap.url,
+        history: snap.history,
+        historyIndex: snap.historyIndex,
+        userMode: snap.userMode,
+        pageTitle: snap.pageTitle,
+      };
+      if (t.url !== snap.url) {
+        next.loading = true;
+        next.error = null;
+        next.scrollY = t.scrollByUrl[snap.url] ?? 0;
+      }
+      return next;
+    });
   },
 
   /** Persist the Chrome-mode page zoom for a surface. ChromeViewport applies

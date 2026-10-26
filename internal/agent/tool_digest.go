@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -146,7 +147,7 @@ func (a *Agent) SummarizeToolCallCtx(ctx context.Context, in ToolCallDigestInput
 	payload = maskSecretsForDigest(payload)
 
 	messages := []Message{
-		{Role: "system", Content: toolDigestSystemPrompt},
+		{Role: "system", Content: config.ApplyPromptOverride("tool_digest", toolDigestSystemPrompt)},
 		{Role: "user", Content: payload},
 	}
 

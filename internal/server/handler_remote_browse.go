@@ -3,11 +3,9 @@ package server
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/u007/ocode/internal/browse"
@@ -47,21 +45,18 @@ func (s *Server) handleRemoteBrowseConfig(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadGateway, "remote server has no browse origin")
 		return
 	}
-	// The browse proxy is served on the main server's second listener. Build
-	// the base URL from the request host so a remote client reaches it.
-	// Fail loudly if the listener is not up — never fall back to this
-	// machine's browse origin for a remote host (the global rule).
-	if s.browseProxyPort == 0 {
+	// The browse proxy is served on the main server's second listener, and
+	// the client must reach it the same way it reaches a local project's
+	// browser: a tailnet phone gets the shared HTTPS URL, a loopback client
+	// the same-site loopback one (browseProxyBaseURL). Fail loudly if the
+	// listener is not up — never fall back to this machine's browse origin
+	// for a remote host (the global rule).
+	proxyBase := s.browseProxyBaseURL(r)
+	if proxyBase == "" {
 		writeError(w, http.StatusServiceUnavailable, "browse proxy listener not available")
 		return
 	}
-	reqHost := r.Host
-	if h, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = h
-	}
-	reqHost = strings.Trim(reqHost, "[]")
-	scheme := s.browseProxyScheme(r)
-	baseURL := scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort)) + "/api/remote/" + host + "/browse"
+	baseURL := proxyBase + "/api/remote/" + host + "/browse"
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    baseURL,
 		"remote_mode": true,

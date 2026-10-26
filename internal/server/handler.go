@@ -19,6 +19,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/browsertabs"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
@@ -206,7 +207,13 @@ type Handler struct {
 	// does the same for session tabs). Nil when the data dir could not be
 	// resolved; its handlers then 500 rather than silently losing the list.
 	termTabsStore *termtabs.Store
-	monaco        *monaco.Store
+
+	// browserTabsStore persists the embedded browser's tab strip and each tab's
+	// navigation state, so every client on this server shows the same browser
+	// tabs and URLs. Nil when the data dir could not be resolved; its handlers
+	// then 500 rather than silently losing the state.
+	browserTabsStore *browsertabs.Store
+	monaco           *monaco.Store
 	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
 	// nil when the data dir could not be resolved (its handlers then 500).
 	// vaultGrants records which client surfaces have unlocked it; guarded by
@@ -654,6 +661,11 @@ func NewHandler() *Handler {
 		log.Printf("handler: init terminal tab store: %v (shared terminal-tab persistence disabled)", err)
 	}
 
+	browserTabsStore, err := browsertabs.NewStore()
+	if err != nil {
+		log.Printf("handler: init browser tab store: %v (shared browser-tab persistence disabled)", err)
+	}
+
 	monacoStore, err := monaco.NewStore()
 	if err != nil {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
@@ -668,6 +680,7 @@ func NewHandler() *Handler {
 		projectGroups:       projGroupStore,
 		tabsStore:           tabsStore,
 		termTabsStore:       termTabsStore,
+		browserTabsStore:    browserTabsStore,
 		monaco:              monacoStore,
 		vaultGrants:         make(map[string]bool),
 		headlessSubs:        make(map[chan SSEEvent]struct{}),

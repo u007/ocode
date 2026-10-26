@@ -36,6 +36,7 @@ import QuickActionsForm from "./QuickActionsForm";
 import SkillsForm from "./SkillsForm";
 import ConnectorsForm from "./ConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
+import PromptsForm from "./PromptsForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
 
 export type SettingsGroupId =
@@ -55,6 +56,7 @@ export type SettingsGroupId =
   | "quick-actions"
   | "advisor"
   | "pulse-assistant"
+  | "prompts"
   | "permissions"
   | "system-permissions"
   | "security"
@@ -99,6 +101,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "quick-actions", label: "Quick actions" },
   { id: "advisor", label: "Advisor" },
   { id: "pulse-assistant", label: "Pulse assistant" },
+  { id: "prompts", label: "System Prompts" },
   { id: "permissions", label: "Permissions" },
   { id: "system-permissions", label: "System Permissions" },
   { id: "security", label: "Security & Redaction" },
@@ -166,6 +169,8 @@ function renderGroup(id: SettingsGroupId) {
       return <AdvisorForm />;
     case "pulse-assistant":
       return <PulseAssistantForm />;
+    case "prompts":
+      return <PromptsForm />;
     case "permissions":
       return <PermissionsForm />;
     case "system-permissions":

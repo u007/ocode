@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 )
 
@@ -170,10 +171,11 @@ func chatWithOptionalContext(ctx context.Context, client LLMClient, messages []M
 // than inlined so the length test has exactly one home, and so a future prompt
 // variant cannot be added on a path that forgot to ask whether it applies.
 func speechSummaryPromptFor(text string) string {
+	base := config.ApplyPromptOverride("speech_summary", speechSummarySystemPrompt)
 	if len([]rune(text)) < speechSummaryRecapMinChars {
-		return speechSummarySystemPrompt
+		return base
 	}
-	return speechSummarySystemPrompt + speechSummaryRecapClause
+	return base + speechSummaryRecapClause
 }
 
 // speechTextNeedsRewrite reports whether text is worth a summariser round
@@ -507,7 +509,19 @@ func speechSummaryCacheDir() string {
 // the hash because a cache entry is the output of a PROMPT, and a prompt edit
 // would otherwise keep replaying the previous prompt's output for the whole TTL.
 func speechSummaryCacheKey(text, modelID string) string {
-	return speechSummaryCacheKeyFor(text, modelID, speechSummaryPromptVersion)
+	return speechSummaryCacheKeyFor(text, modelID, speechSummaryPromptSalt())
+}
+
+// speechSummaryPromptSalt is speechSummaryPromptVersion extended with the
+// speech_summary prompt override in effect, so editing the override in
+// Settings invalidates the cache the same way a bump of the version does.
+// With no active override it is exactly speechSummaryPromptVersion.
+func speechSummaryPromptSalt() string {
+	text, ok := config.EffectivePromptOverride("speech_summary")
+	if !ok {
+		return speechSummaryPromptVersion
+	}
+	return speechSummaryPromptVersion + "\x00" + text
 }
 
 // speechSummaryCacheKeyFor is the version-parameterised form of the key, so a

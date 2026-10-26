@@ -300,6 +300,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/pulse-activation-model", s.authMiddleware(s.handler.HandleSetPulseActivationModel))
 	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
 	s.mux.HandleFunc("PUT /api/config/pulse-system-prompt", s.authMiddleware(s.handleSetPulseSystemPrompt))
+	s.mux.HandleFunc("GET /api/config/prompts", s.authMiddleware(s.handler.HandleListPromptOverrides))
+	s.mux.HandleFunc("PUT /api/config/prompts/{key}", s.authMiddleware(s.handler.HandleSetPromptOverride))
 	s.mux.HandleFunc("GET /api/config/pulse-auto-receive", s.authMiddleware(s.handler.HandleGetPulseAutoReceive))
 	s.mux.HandleFunc("PUT /api/config/pulse-auto-receive", s.authMiddleware(s.handler.HandleSetPulseAutoReceive))
 	s.mux.HandleFunc("GET /api/config/pulse-auto-gap-ms", s.authMiddleware(s.handler.HandleGetPulseAutoGapMs))
@@ -752,6 +754,8 @@ func (s *Server) registerRoutes() {
 	// itself is shared.
 	s.mux.HandleFunc("GET /api/terminal-tabs", s.authMiddleware(s.handler.HandleGetTerminalTabs))
 	s.mux.HandleFunc("PUT /api/terminal-tabs", s.authMiddleware(s.handler.HandleSetTerminalTabs))
+	s.mux.HandleFunc("GET /api/browser-tabs", s.authMiddleware(s.handler.HandleGetBrowserTabs))
+	s.mux.HandleFunc("PUT /api/browser-tabs", s.authMiddleware(s.handler.HandleSetBrowserTabs))
 
 	// Directory browser for the project sidebar folder picker.
 	s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
@@ -1038,6 +1042,23 @@ func (s *Server) browseProxyGate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleBrowseRootRelative is the browse-proxy listener's root: a dev-server
+// module import that escaped the /b/ or /api/remote/{host}/browse mount is
+// redirected onto the route its Referer came from (browse.RootRelativeRedirect).
+// No upstream call, no cookie; a blocked IP is still refused.
+func (s *Server) handleBrowseRootRelative(w http.ResponseWriter, r *http.Request) {
+	if s.rl.isBlocked(realIP(r)) {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+	loc, ok := browse.RootRelativeRedirect(r.Header.Get("Referer"), r.URL.EscapedPath(), r.URL.RawQuery)
+	if !ok {
+		browse.WriteRootRelativeNotFound(w, r, log.Default())
+		return
+	}
+	http.Redirect(w, r, loc, http.StatusTemporaryRedirect)
+}
+
 // statusRecorder captures the status a handler writes. Unwrap lets
 // http.ResponseController (used by httputil.ReverseProxy for Flush and for
 // the websocket Hijack) reach the underlying writer.
@@ -1247,6 +1268,11 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	proxyMux.HandleFunc("/api/remote/{host}/browse/{rest...}", srv.browseProxyGate(func(w http.ResponseWriter, r *http.Request) {
 		srv.handleRemoteBrowseProxy(w, r, r.PathValue("host"))
 	}))
+	// Root-relative dev-server imports escape the /b/ (or remote) mount and
+	// land here; redirect them onto the route their Referer came from. Not
+	// gated: a remote mount's browse cookie is path-scoped to the mount, so
+	// these requests carry none, and the redirected request is gated anyway.
+	proxyMux.HandleFunc("/", srv.handleBrowseRootRelative)
 	proxyHS := &http.Server{Handler: proxyMux}
 	// Wrap the browse proxy listener with TLS when the main server does,
 	// so the browse origin scheme matches the SPA's scheme (https vs http)
@@ -1318,6 +1344,48 @@ func (s *Server) browsePort() int {
 	return 0
 }
 
+// browseProxyBaseURL is the browse-proxy listener's origin as THIS client must
+// reach it; "" when the listener is not up. Shared by the local and the remote
+// (`?host=`) browse config so a phone on the tailnet reaches a remote project's
+// browser through the same shared HTTPS URL it already uses for a local one.
+func (s *Server) browseProxyBaseURL(r *http.Request) string {
+	if s.browseProxyPort == 0 {
+		return ""
+	}
+	reqHost := r.Host
+	if h, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = h
+	}
+	reqHost = strings.Trim(reqHost, "[]")
+	// Same-site: when the SPA is loaded directly from this machine (desktop
+	// webview or a local browser), the browse origin MUST share that host
+	// so the SameSite=Lax browse cookie is treated as first-party. A
+	// cross-origin (tailnet) browse origin makes the cookie third-party,
+	// which WKWebView/Safari ITP blocks, breaking local-mode navigation
+	// with 401 "browse: unauthorized". Remote, phone and proxied clients
+	// keep the Tailscale HTTPS URL so they can reach the proxy. The peer
+	// address decides, never Host: a proxied tailnet request arrives from
+	// 127.0.0.1 with a loopback Host, so Host alone would send it local.
+	// Known limitation: a client tunnelled to this server over SSH -L or a
+	// port forward also arrives from 127.0.0.1 with no proxy headers, so it
+	// is indistinguishable from the local desktop webview here and gets the
+	// local-origin base URL rather than the Tailscale one. No header or
+	// listener distinguishes the two reliably, so the shortcut is kept.
+	scheme := s.browseProxyScheme(r)
+	baseURL := ""
+	if !(isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(reqHost)) {
+		if s.handler.tailscaleShareSnapshot != nil {
+			if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
+				baseURL = st.BrowseURL
+			}
+		}
+	}
+	if baseURL == "" {
+		baseURL = scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
+	}
+	return baseURL
+}
+
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	if host := hostParam(r); host != "" {
 		s.handleRemoteBrowseConfig(w, r, host)
@@ -1330,38 +1398,7 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	// When the browse proxy listener is up (normal boot), point the SPA at
 	// it so browsed pages are cross-origin. Prefer the shared HTTPS URL when
 	// the instance is exposed via Tailscale (second mount on the browse port).
-	if s.browseProxyPort != 0 {
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(reqHost); err == nil {
-			reqHost = h
-		}
-		reqHost = strings.Trim(reqHost, "[]")
-		// Same-site: when the SPA is loaded directly from this machine (desktop
-		// webview or a local browser), the browse origin MUST share that host
-		// so the SameSite=Lax browse cookie is treated as first-party. A
-		// cross-origin (tailnet) browse origin makes the cookie third-party,
-		// which WKWebView/Safari ITP blocks, breaking local-mode navigation
-		// with 401 "browse: unauthorized". Remote, phone and proxied clients
-		// keep the Tailscale HTTPS URL so they can reach the proxy. The peer
-		// address decides, never Host: a proxied tailnet request arrives from
-		// 127.0.0.1 with a loopback Host, so Host alone would send it local.
-		// Known limitation: a client tunnelled to this server over SSH -L or a
-		// port forward also arrives from 127.0.0.1 with no proxy headers, so it
-		// is indistinguishable from the local desktop webview here and gets the
-		// local-origin base URL rather than the Tailscale one. No header or
-		// listener distinguishes the two reliably, so the shortcut is kept.
-		scheme := s.browseProxyScheme(r)
-		baseURL := ""
-		if !(isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(reqHost)) {
-			if s.handler.tailscaleShareSnapshot != nil {
-				if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
-					baseURL = st.BrowseURL
-				}
-			}
-		}
-		if baseURL == "" {
-			baseURL = scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
-		}
+	if baseURL := s.browseProxyBaseURL(r); baseURL != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"base_url":    baseURL,
 			"htr_notice":  s.HTRNotice(),

@@ -825,3 +825,25 @@ func TestBashTargetsOnlyLoopback(t *testing.T) {
 		t.Error("remote curl must still be content-scanned")
 	}
 }
+
+// Every chunk is judged (there is no early stop), so a flag on a multi-chunk
+// result must report full coverage. It used to report the flagged chunk's
+// position ("6 of 9 chunks judged") while all nine scores were on screen.
+func TestContentGuardFlagReportsEveryJudgedChunk(t *testing.T) {
+	h := &contentGuardHarness{verdict: contentGuardVerdictClean, confidence: 0.46, concern: "obfuscation"}
+	a := newContentGuardAgent(t, h)
+	a.mcpTools = map[string]struct{}{"some_mcp": {}}
+
+	body := strings.Repeat("x", contentGuardChunkChars*2+10) // 3 chunks
+	got := a.guardToolResult(context.Background(), "some_mcp", `{}`, body)
+	req, ok := parseContentAsk(got)
+	if !ok {
+		t.Fatal("a below-floor clean must escalate")
+	}
+	if len(req.UntrustedScores) != 3 {
+		t.Fatalf("scores = %d, want 3", len(req.UntrustedScores))
+	}
+	if !strings.Contains(req.UntrustedSummary, "3 of 3 chunks judged") {
+		t.Fatalf("headline = %q, want full coverage", req.UntrustedSummary)
+	}
+}

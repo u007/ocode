@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -364,12 +365,12 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 	questions := map[string]TypesafeQuestion{
 		typesafeAutoContinueVerdictKey: {
 			Type:         "choice",
-			Instructions: typesafeAutoContinueInstructions,
+			Instructions: config.ApplyPromptOverride("auto_continue_judge", typesafeAutoContinueInstructions),
 			Criteria:     verdictCriteria,
 		},
 		typesafeAutoContinueReasonKey: {
 			Type:         "choice",
-			Instructions: typesafeAutoContinueInstructions + "\nName the single best description of how the last reply ended, or \"finished\" if it completed the request.",
+			Instructions: config.ApplyPromptOverride("auto_continue_judge", typesafeAutoContinueInstructions) + "\nName the single best description of how the last reply ended, or \"finished\" if it completed the request.",
 			Criteria:     reasonCriteria,
 		},
 	}
@@ -390,7 +391,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 		criteria[typesafeAutoContinueTodoNoneChoice] = "no single open item is the target; the chosen action is not todo-specific"
 		questions[typesafeAutoContinueTodoItemKey] = TypesafeQuestion{
 			Type:         "choice",
-			Instructions: typesafeAutoContinueInstructions + "\nIf you chose continue_todo, validate_todo or skip_todo, name the single open todo item it should target; for any other action choose \"none\".",
+			Instructions: config.ApplyPromptOverride("auto_continue_judge", typesafeAutoContinueInstructions) + "\nIf you chose continue_todo, validate_todo or skip_todo, name the single open todo item it should target; for any other action choose \"none\".",
 			Criteria:     criteria,
 		}
 	}

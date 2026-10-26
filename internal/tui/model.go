@@ -2485,7 +2485,8 @@ func (m *model) switchAgent(name string) {
 	} else if def := agent.DefaultAgentRegistry.Get(name); def != nil && !def.Hidden {
 		// Build an AgentSpec from the registry definition (handles subagent-only agents).
 		// Hidden agents (title, compaction) drive runtime helpers and must not be
-		// reachable as user-invokable specs.
+		// reachable as user-invokable specs. The subagent_<name> override is not
+		// baked in here: the prompt assembler applies it on every turn.
 		as := agent.AgentSpec{
 			Name:         def.Name,
 			Description:  def.Description,

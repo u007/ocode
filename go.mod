@@ -18,6 +18,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/ledongthuc/pdf v0.0.0-20261020125853-5e46805f718e
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mattn/go-runewidth v0.0.23
 	github.com/r3labs/sse/v2 v2.10.0

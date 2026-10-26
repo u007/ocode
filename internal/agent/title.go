@@ -43,11 +43,19 @@ func (a *Agent) GenerateTitleAsync(userMsg, assistantMsg string, onResult func(s
 	})
 }
 
-func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
+// resolveTitleSystem returns the system prompt sent for title generation: the
+// hidden title agent's prompt when one is defined, else the built-in. The
+// user's title override is applied at call time, not when the registry was built.
+func resolveTitleSystem() string {
 	system := titleSystemPrompt
 	if def := lookupHiddenAgent("title"); def != nil && strings.TrimSpace(def.SystemPrompt) != "" {
 		system = def.SystemPrompt
 	}
+	return overrideBuiltinPrompt("title", system)
+}
+
+func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
+	system := resolveTitleSystem()
 	prompt := buildTitlePrompt(userMsg, assistantMsg)
 	return a.generateTitleWithClients(a.titleClients(), system, prompt)
 }

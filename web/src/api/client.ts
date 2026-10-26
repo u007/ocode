@@ -29,6 +29,7 @@ import type {
   Project,
   ProjectGroup,
   ServerProjectTabs,
+  ServerProjectBrowsers,
   ServerProjectTerminals,
   BrowseResponse,
   PermissionsResponse,
@@ -576,13 +577,16 @@ function projQueryAppend(project?: string, host?: string): string {
 
 /** Non-2xx response from fetchJSON. Carries the HTTP status so callers can
  *  tell a terminal answer (404/409: the thing no longer exists / already
- *  changed) from a retryable failure (network, 5xx). */
+ *  changed) from a retryable failure (network, 5xx). `body` is the parsed
+ *  error JSON, so a 409 from setBrowserTabs exposes its `projects`. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  readonly body: unknown;
+  constructor(message: string, status: number, body?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -602,7 +606,7 @@ export async function fetchJSON<T>(
   if (!res.ok) {
     reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError(err.message || err.error || res.statusText, res.status);
+    throw new ApiError(err.message || err.error || res.statusText, res.status, err);
   }
   // Guard the success path: a 2xx response with an empty or non-JSON body
   // (server bug, proxy misconfig, HTML SPA fallback for an unknown /api
@@ -1451,6 +1455,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ prompt }),
     }),
+  // System-prompt overrides for every configurable built-in prompt. `text` is
+  // appended after the built-in when `enabled` is on and `text` is non-empty.
+  getPromptOverrides: () =>
+    fetchJSON<{ prompts: import("./types").PromptOverrideEntry[] }>("/api/config/prompts"),
+  setPromptOverride: (key: string, body: { enabled: boolean; text: string }) =>
+    fetchJSON<import("./types").PromptOverrideEntry>(
+      `/api/config/prompts/${encodeURIComponent(key)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
   // Pulse auto-receive: when on, the assistant automatically receives stop
   // indicators (turn done, permission ask, question ask, task complete) from
   // other sessions. Default off.
@@ -3100,6 +3113,21 @@ export const api = {
    *  that has never seen another client's projects cannot wipe them. */
   setTerminalTabs: (projects: Record<string, ServerProjectTerminals>) =>
     fetchJSON<{ status: string }>("/api/terminal-tabs", {
+      method: "PUT",
+      body: JSON.stringify({ projects }),
+    }),
+  /** Every project's embedded-browser tab strip and navigation state, shared
+   *  so every client on this server shows the same browser tabs and URLs. */
+  getBrowserTabs: () =>
+    fetchJSON<{ projects: Record<string, ServerProjectBrowsers> }>("/api/browser-tabs"),
+  /** Merge of the projects the caller knows about. A project with an empty
+   *  `tabs` list is deleted; projects absent from the body are preserved.
+   *  Each entry must echo the `revision` it was read at. A stale entry makes
+   *  the whole PUT fail with an ApiError whose `status` is 409 and whose
+   *  `body` is `{ error, projects }`: `projects` is the current server state,
+   *  so the caller re-merges its edit onto it and retries. Nothing was written. */
+  setBrowserTabs: (projects: Record<string, ServerProjectBrowsers>) =>
+    fetchJSON<{ status: string }>("/api/browser-tabs", {
       method: "PUT",
       body: JSON.stringify({ projects }),
     }),

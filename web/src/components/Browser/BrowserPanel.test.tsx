@@ -243,23 +243,6 @@ describe("BrowserPanel", () => {
     expect(actions.pushConsole).toHaveBeenCalledTimes(1); // foreign origin dropped
   });
 
-  it("shows the dev-server banner when error carries the module-graph token, and offers Chrome mode", async () => {
-    (state as unknown as Record<string, unknown>).mode = "local";
-    state.url = "https://localhost:3510/admin";
-    state.error = "dev-server-module-graph: this dev server's module graph can't be served by the embedded proxy — open externally or switch to Chrome mode";
-    const { container, getByTestId } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
-    await waitFor(() => expect(getByTestId("dev-server-banner")).toBeTruthy());
-    expect(container.textContent).toContain("Dev server can't render in the embedded proxy");
-    fireEvent.click(getByTestId("dev-server-banner").querySelector("button")!);
-    expect(actions.setUserMode).toHaveBeenCalledWith("tab:abc", "chrome");
-  });
-
-  it("does not show the dev-server banner for unrelated errors", async () => {
-    state.error = "TLS certificate not trusted — x509: self-signed";
-    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
-    expect(container.querySelector("[data-testid='dev-server-banner']")).toBeNull();
-  });
-
   it("shows the chrome-mode banner with an exit when userMode is chrome", async () => {
     (state as unknown as Record<string, unknown>).userMode = "chrome";
     const { getByTestId } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);

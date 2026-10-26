@@ -298,7 +298,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 		// single-turn chat so the advisor still returns something useful.
 		emitDebug("ADVISOR", "no exploration tools available; falling back to plain chat")
 		messages := []Message{
-			{Role: "system", Content: advisorSystemPrompt},
+			{Role: "system", Content: config.ApplyPromptOverride("advisor", advisorSystemPrompt)},
 			{Role: "user", Content: params.Prompt},
 		}
 		var (
@@ -345,7 +345,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// advisor client is preserved — SetSpec would try to swap clients based on
 	// spec.Model, which we intentionally leave empty.
 	advisorAgent.spec = &AgentSpec{
-		SystemPrompt: advisorSystemPrompt,
+		SystemPrompt: config.ApplyPromptOverride("advisor", advisorSystemPrompt),
 		Tools:        advisorAllowedTools,
 		MaxSteps:     60,
 	}
@@ -548,7 +548,7 @@ func executeClaudeCodeAdvisor(parent context.Context, modelName, prompt, workDir
 	args := []string{
 		"-p",
 		"--model", modelName,
-		"--append-system-prompt", claudeCodeAdvisorPrompt,
+		"--append-system-prompt", config.ApplyPromptOverride("advisor_claude_code", claudeCodeAdvisorPrompt),
 		"--allowedTools", "Read,Glob,Grep,LS,WebFetch,WebSearch",
 		"--",
 		prompt,

@@ -163,6 +163,30 @@ func TestMapURLEdgeCases(t *testing.T) {
 	}
 }
 
+func TestRewriteHTMLDropsReferrerPolicyMeta(t *testing.T) {
+	in := []byte(`<!doctype html><html><head>
+<meta name="referrer" content="no-referrer">
+<META content='origin' name=referrer>
+<meta name="Referrer" content="strict-origin">
+<meta name="viewport" content="width=device-width">
+<meta http-equiv="refresh" content="5; url=/next">
+</head><body></body></html>`)
+	out, err := rewriteHTML(in, tgt(), "", "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(strings.ToLower(s), "referrer") {
+		t.Errorf("referrer meta not removed:\n%s", s)
+	}
+	// Other meta tags are left alone.
+	for _, want := range []string{`name="viewport"`, `width=device-width`, `content="5; url=/b/tab:abc/https/example.com/next"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in:\n%s", want, s)
+		}
+	}
+}
+
 func TestRewriteHTMLRelativeBase(t *testing.T) {
 	// <base href="../lib/"> relative to document /page/ resolves to /lib/.
 	in := []byte(`<!doctype html><html><head><base href="../lib/"></head>

@@ -802,7 +802,7 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	// the cached system block (stable across turns when redaction status does
 	// not change).
 	if a.redactionEnabled && a.redactionRegistry != nil {
-		messages = append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + redactionAwarenessPrompt})
+		messages = append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + config.ApplyPromptOverride("redaction_awareness", redactionAwarenessPrompt)})
 	}
 	// Auto-injected skill body, LAST so it sits closest to the user message in
 	// the uncached tail (same attention rationale as every other volatile
@@ -830,7 +830,7 @@ func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) boo
 	var sys strings.Builder
 	sys.WriteString(promptDiscoveryMarker)
 	sys.WriteString("\n")
-	sys.WriteString(discoveryPromptContract)
+	sys.WriteString(config.ApplyPromptOverride("discovery_contract", discoveryPromptContract))
 	sys.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
 	for _, d := range docs {
 		if d.Kind == "mcp" {

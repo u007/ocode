@@ -240,7 +240,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `rgrep` | Ripgrep-backed search (registered when `rg` is on PATH): honors .gitignore/.ignore at every depth even outside git repos, searches hidden files, hard-excludes .git/node_modules. `grep` runs through the same engine when `rg` is available; the in-process walk is the fallback. `rg` is looked up once per app start |
 | `lsp`, `lsp_diagnostics`, `ast`, `ast_grep`, `format` | Go-to-definition / hover / symbol search / diagnostics; semantic `ast` (auto-enabled when any LSP server is on PATH); structural `ast_grep` (opt-in `plugins.ast`); formatter dispatch |
 | `agent` / `task` | Delegate work to sub-agents with permission isolation, DAG deps, and contract verification |
-| `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo |
+| `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo; PDF responses are returned as extracted text |
 | `github_pr`, `github_issue`, `github_workflow` | GitHub PR / issue / workflow inspection |
 | `ocr` | Extract text from images (openai-compat, LM Studio native chat, or paddle); reuses stored `auth.json` creds |
 | `imagegen` | Generate images via configured provider |

@@ -22,18 +22,18 @@ package browse
 // their assets root-relative ("/src/main.js", "/@vite/client"); without the
 // static rewrite those requests hit the browse origin root, drop out of the
 // stateless route, and 404. Non-HTML bodies (JS/CSS/images/WS) still stream
-// byte-for-byte untouched.
+// byte-for-byte untouched — the root-relative imports INSIDE those JS bodies
+// are caught at the origin root and redirected back onto the route instead
+// (rootrelative.go).
 
 import (
 	"bytes"
 	"compress/gzip"
-	"html"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -179,6 +179,9 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 			resp.Header.Del("X-Frame-Options")
 			resp.Header.Del("Content-Security-Policy")
 			resp.Header.Del("Content-Security-Policy-Report-Only")
+			// A no-referrer or origin-only policy strips the /b/ path from the
+			// Referer that rootrelative.go resolves dev-server imports from.
+			resp.Header.Del("Referrer-Policy")
 			ct := resp.Header.Get("Content-Type")
 			isHTML := strings.HasPrefix(ct, "text/html")
 			if !isHTML {
@@ -189,10 +192,7 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 			// response type as well as the request protects against
 			// header-less subresources (WS handshakes, EventSource) being
 			// misclassified as documents and hijacking the address bar.
-			// The terminal payload is decided after the body is read
-			// (dev-server HTML replaces the normal local event with an
-			// error-tagged one), so rewriteAndInjectResponse returns it.
-			term, err := s.rewriteAndInjectResponse(resp, t, isDocumentRequest(r), basePath)
+			term, err := s.rewriteAndInjectResponse(resp, t, basePath)
 			if err != nil {
 				return err
 			}
@@ -252,14 +252,10 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 // buffering is bounded by page size.
 //
 // It returns the terminal NavEvent for the response (nil when no terminal
-// event applies); the caller emits it. Top-level documents whose body looks
-// like a Vite/TanStack dev server get a self-contained notice instead (see
-// devServerHTMLRe) — such pages cannot render through the proxy — and the
-// returned event carries DevServerNoticeError so the SPA can offer the
-// Chrome-mode fallback.
+// event applies); the caller emits it.
 // basePath is the mount prefix the origin is served under ("" = root-mounted);
 // it is applied to every root-relative path this function emits. See basepath.go.
-func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc bool, basePath string) (*NavEvent, error) {
+func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, basePath string) (*NavEvent, error) {
 	var reader io.Reader = resp.Body
 	gzipped := strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
 	if gzipped {
@@ -281,27 +277,6 @@ func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc b
 	if err != nil {
 		return nil, err
 	}
-	if isDoc && isDevServerHTML(raw) {
-		// Vite/TanStack dev servers serve JS modules whose static imports are
-		// resolved by the BROWSER against the module URL's origin (root-absolute
-		// "/@fs/...", "/@id/virtual:...", "/node_modules/.vite/..."). Behind the
-		// /b/ proxy that origin is the browse server, so those imports 404 and
-		// the whole module graph dies — the page renders blank. Neither the
-		// server-side HTML rewrite nor capture.js can reach native module
-		// resolution, so the page is unsalvageable in local mode. Serve a
-		// self-contained notice instead of a blank document and tag the nav
-		// event so the SPA can offer Chrome (CDP) mode, which renders with a
-		// real browser.
-		notice := devServerNotice(t)
-		resp.Body = io.NopCloser(bytes.NewReader(notice))
-		// Identity-encoded, like every other transformed HTML response.
-		resp.Header.Del("Content-Encoding")
-		resp.Header.Set("Content-Length", strconv.Itoa(len(notice)))
-		resp.ContentLength = int64(len(notice))
-		term := localTerminalNav(t, resp.StatusCode)
-		term.Error = DevServerNoticeError
-		return term, nil
-	}
 	// base "" = resolve relative URLs against the document target (see the
 	// rewriteHTML contract); the SPA origin is only for capture injection.
 	injected, rerr := rewriteHTML(raw, t, "", basePath)
@@ -319,38 +294,6 @@ func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, isDoc b
 	return localTerminalNav(t, resp.StatusCode), nil
 }
 
-// devServerTagRe matches the bracketed tags in an HTML document. Dev-server
-// markers are only significant inside TAG ATTRIBUTES (script src / link href /
-// modulepreload); text nodes — e.g. a documentation page displaying "/@fs/"
-// as prose — must never trip the detector (see isDevServerHTML).
-var devServerTagRe = regexp.MustCompile(`<[^>]+>`)
-
-// devServerMarkerRe matches markers that, inside a tag, only appear in
-// development-mode HTML emitted by Vite / TanStack Start servers. Kept
-// deliberately conservative: a false NEGATIVE (an undetected dev server)
-// leaves today's blank-page behavior unchanged, but a false positive would
-// replace a page that actually renders. Bare-Vite pages typically carry
-// "/src/main.tsx" (no marker) and are not detected — acceptable, fail-open.
-var devServerMarkerRe = regexp.MustCompile(`/@id/virtual:|/@fs/|/@vite/client|/node_modules/\.vite/|tanstack-start-dev-client-entry|@tanstack-start/`)
-
-// isDevServerHTML reports whether raw looks like a Vite/TanStack dev-server
-// document. Markers are matched against the TAG TEXT ONLY (attributes), so
-// prose or code samples displaying marker-like strings never trigger the
-// notice.
-func isDevServerHTML(raw []byte) bool {
-	var sb strings.Builder
-	for _, tag := range devServerTagRe.FindAll(raw, -1) {
-		sb.Write(tag)
-		sb.WriteByte('\n')
-	}
-	return devServerMarkerRe.MatchString(sb.String())
-}
-
-// DevServerNoticeError tags the nav event for dev-server HTML. The SPA
-// matches the "dev-server-module-graph:" prefix to offer the Chrome-mode
-// fallback (see BrowserPanel).
-const DevServerNoticeError = "dev-server-module-graph: this dev server's module graph can't be served by the embedded proxy — open externally or switch to Chrome mode"
-
 // localTerminalNav is the plain terminal nav event for a served document.
 // The query string is preserved so the address bar and any Chrome-mode
 // hand-off navigate to the exact URL the user asked for.
@@ -360,34 +303,6 @@ func localTerminalNav(t target, status int) *NavEvent {
 		u += "?" + t.RawQuery
 	}
 	return &NavEvent{StateKey: t.StateKey, URL: u, Status: status, Mode: "local"}
-}
-
-// devServerNotice builds the self-contained replacement document for
-// unsupported dev-server pages. No external assets, no scripts, no popups —
-// it must render inside the sandboxed iframe; the actionable affordances
-// (open external / Chrome mode) live in the SPA chrome, driven by the
-// DevServerNoticeError nav event.
-func devServerNotice(t target) []byte {
-	u := t.Scheme + "://" + t.Host + t.Path
-	if t.RawQuery != "" {
-		u += "?" + t.RawQuery
-	}
-	esc := html.EscapeString(u)
-	return []byte(`<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>Dev server not supported in embedded browser</title>
-<style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#141414;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px}
-  .card{max-width:560px;padding:24px 28px;border:1px solid #3a3a3a;border-radius:10px;background:#1e1e1e}
-  h1{font-size:16px;margin:0 0 10px;color:#fff}
-  p{font-size:13.5px;line-height:1.55;color:#c9c9c9;margin:8px 0}
-  code{color:#dfb3ff;word-break:break-all}
-  b{color:#fff}
-</style></head>
-<body><div class="card">
-<h1>Development server not supported in the embedded browser</h1>
-<p>This page (<code>` + esc + `</code>) is served by a Vite/TanStack development server. Its JavaScript loads through a module graph the browser resolves against the server origin — the embedded proxy cannot serve that graph, so the page would render blank here.</p>
-<p>Use <b>Open external</b> in the address bar, or switch this browser to <b>Chrome mode</b> to render the page with a real browser.</p>
-</div></body></html>`)
 }
 
 // --- shared request-classification helpers (local + external modes) ---

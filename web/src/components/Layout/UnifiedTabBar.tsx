@@ -566,7 +566,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
-  useBrowserPersistence(activeProjectPath);
+  useBrowserPersistence(activeProjectPath, activeProjectHost);
 
   const chatDispatch = useChatDispatch();
   const { available: terminalAvailable } = useTerminalConfig();

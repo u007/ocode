@@ -155,11 +155,13 @@ func rewriteHTML(body []byte, t target, base string, basePath string) ([]byte, e
 						curBase = resolveBase(t, curBase, a.Val)
 					}
 				}
-				// Drop the element: convert to an empty text node so render omits it.
-				n.Type = html.TextNode
-				n.Data = ""
-				n.Attr = nil
-				n.DataAtom = 0
+				dropElement(n)
+				return
+			}
+			// A referrer meta resets the document's policy and strips the path from
+			// the Referer that rootrelative.go depends on.
+			if isReferrerPolicyMeta(n) {
+				dropElement(n)
 				return
 			}
 			rewriteElement(n, t, curBase, basePath)
@@ -175,6 +177,30 @@ func rewriteHTML(body []byte, t target, base string, basePath string) ([]byte, e
 		return nil, fmt.Errorf("browse: html render: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// dropElement turns n into an empty text node so html.Render omits it. The
+// walk holds its sibling cursor, so the node is blanked, not unlinked.
+func dropElement(n *html.Node) {
+	n.Type = html.TextNode
+	n.Data = ""
+	n.Attr = nil
+	n.DataAtom = 0
+}
+
+// isReferrerPolicyMeta reports whether n is <meta name="referrer">. The name
+// value is matched case-insensitively. The parser lowercases attribute keys,
+// so attribute order and quoting do not matter.
+func isReferrerPolicyMeta(n *html.Node) bool {
+	if n.DataAtom != atom.Meta {
+		return false
+	}
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, "name") && strings.EqualFold(strings.TrimSpace(a.Val), "referrer") {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveBase folds a possibly-relative <base href> onto the existing base.

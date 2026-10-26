@@ -584,7 +584,9 @@ session's working directory. Details, endpoint params and remote-project routing
 - **The open-terminal tab list is server state** (`GET/PUT /api/terminal-tabs`,
   `internal/termtabs`): keys are opaque (never `filepath.Clean`); the PUT is a MERGE
   (emit an explicit empty entry for a project whose last tab closed); closing a tab is a
-  PERMANENT discard (`DELETE /api/terminal/{id}` also removes disk history).
+  PERMANENT discard (`DELETE /api/terminal/{id}` also removes disk history). The embedded
+  browser's tab strip and per-tab navigation are server state the same way (`GET/PUT
+  /api/browser-tabs`, `internal/browsertabs`); only scroll offsets stay per viewer.
 
 ## Web/Desktop Context gauge: provider-reported first, estimate as fallback
 The gauge (`TUIStatus.context_current_tokens`) and `/context` (`current_tokens`) use

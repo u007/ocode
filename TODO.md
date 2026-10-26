@@ -6417,3 +6417,19 @@ Open:
 - **Verification gap:** `go test ./internal/server` fails to compile from another session's untracked `handler_portmaps_boot_test.go`. The terminal tests were run in a clean worktree at HEAD with the attach log line added.
 - **Remote sync does not carry Claude plugins:** `internal/remote/sync_home.go` mirrors skills/agents/CLAUDE.md/AGENTS.md/settings, but not `~/.claude/plugins` (large; Claude plugin installs). Remote sessions miss plugin-provided skills and agents.
 - **Root `package.json` + `pnpm-lock.yaml` are probe leftovers and owe their own cleanup:** they are NOT part of the repo build (the real package is `web/`, which is the only place `pnpm` runs), and their deps are the `example-pkg`/`placeholder` fixture strings that also appear in `internal/agent/bash_prefix_candidates_test.go`, `permission_shellvars_test.go`, `internal/agent/testdata/contentguard_eval/cases.yaml` and `internal/server/handler_bash_prefix_choice_test.go`. No Go test writes these files — they came from a manual `pnpm init`/`pnpm add` in the repo root — so whatever probe/escalation test injected them must create them under `t.TempDir()` (or an explicit scratch dir) and remove them afterwards instead of polluting the checkout. Until that lands they stay untracked, so `git status` never comes back clean.
+
+## Open: embedded browser — Vite HMR WebSocket through the proxy (2026-10-26)
+
+- **`internal/browse/rootrelative.go`** — root-relative dev-server module imports are now redirected onto the `/b/` route via the request's Referer, so Vite/TanStack pages render in local mode (local and remote projects). A WebSocket handshake carries no Referer, so Vite's HMR socket at the origin root (`ws://<origin>/?token=…`) still 404s: the page renders, hot reload does not connect and the Vite client logs reconnect attempts. Fix needs a stateKey source other than Referer for upgrade requests (e.g. the browse cookie on a root-mounted origin, or a `/b/{stateKey}/__hmr` rewrite of the Vite client's socket URL). Concept: `docs/concepts/browse-root-relative-redirect.md`.
+
+## Open: shared browser tabs — line anchors in other docs (2026-10-26)
+
+- **Anchors shifted in seven pages.** The shared browser-tab change inserted lines into `internal/server/handler.go` (+1 after old line 21, +6 after old 209, +5 after old 656, +1 after old 670) and `internal/server/server.go` (+2 after old 756). Only anchors past those points moved. Re-derive each one by printing the real source line, then fix the prose if the line moved:
+  - `docs/concepts/per-chat-mcp-toggle.md`: `handler.go:508` becomes 515.
+  - `docs/gotchas/files-tab-preview-only-routing.md`: `handler.go:226` becomes 233.
+  - `docs/gotchas/remote-project-path-trust-boundary.md`: `handler.go:662` becomes 674.
+  - `docs/gotchas/session-snapshot-stale-derived-fields.md`: `handler.go:1580` becomes 1593.
+  - `docs/concepts/compaction-cancellation.md`: `handler.go:1950, 2002, 2017, 2022, 2031, 2040` each become +13, and `server.go:2212` becomes 2214.
+  - `docs/concepts/auto-share-on-start.md`: `server.go:1857` becomes 1859.
+  - `docs/gotchas/port-forwards-url-composition-and-supervisor-restart.md`: `server.go:2062` and `2069` become 2064 and 2071.
+- **Other sessions' uncommitted `server.go` hunks** (near lines 303, 1045, 1271, 1347, 1401) also move these anchors. Re-derive from the working tree at the time of the fix, not from the deltas above alone.

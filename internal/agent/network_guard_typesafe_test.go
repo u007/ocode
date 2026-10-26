@@ -888,7 +888,7 @@ func TestNetworkGuardMasksSecretsBeforeTheyLeaveTheHost(t *testing.T) {
 // "[[OCSEC:…:1]]" as ordinary text and stop detecting the very secrets the
 // masking preserved for it.
 func TestNetworkGuardRubricTeachesTheMaskedToken(t *testing.T) {
-	for _, instr := range []string{networkGuardInstructions, networkGuardConcernInstructions} {
+	for _, instr := range []string{networkGuardInstructions, networkGuardQuestions()[networkGuardConcernKey].Instructions} {
 		if !strings.Contains(instr, "OCSEC") {
 			t.Fatalf("the rubric must explain the masked-token form; it does not mention OCSEC")
 		}

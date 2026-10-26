@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 )
 
@@ -144,7 +145,7 @@ func goalQuestions() map[string]TypesafeQuestion {
 	return map[string]TypesafeQuestion{
 		goalVerdictKey: {
 			Type:         "choice",
-			Instructions: goalJudgeInstructions,
+			Instructions: config.ApplyPromptOverride("goal_judge", goalJudgeInstructions),
 			Criteria: map[string]string{
 				"met":        "every part of the condition is satisfied, and the transcript's tool output shows it",
 				"not_met":    "the condition is not yet satisfied: work remains, the claim is unverified, or the assistant is waiting on the user",
@@ -153,7 +154,7 @@ func goalQuestions() map[string]TypesafeQuestion {
 		},
 		goalReasonKey: {
 			Type:         "choice",
-			Instructions: goalJudgeInstructions + "\nName the single best reason for the verdict.",
+			Instructions: config.ApplyPromptOverride("goal_judge", goalJudgeInstructions) + "\nName the single best reason for the verdict.",
 			Criteria:     reasonCriteria,
 		},
 	}

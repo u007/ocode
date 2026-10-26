@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 )
 
@@ -724,7 +725,7 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int, previousSummary, f
 
 func renderSummaryPrompt(previousSummary, joined string, dropped int, focus string) string {
 	var b strings.Builder
-	b.WriteString(compactionSystemPrompt)
+	b.WriteString(config.ApplyPromptOverride("compaction", compactionSystemPrompt))
 	b.WriteString("\n\n")
 	b.WriteString(summaryTemplate)
 	b.WriteString("\n\n")
@@ -1310,7 +1311,7 @@ func (a *Agent) runInlineSummary(ctx context.Context, messages []Message, rt com
 	}
 
 	var instruction strings.Builder
-	instruction.WriteString(compactionSystemPrompt)
+	instruction.WriteString(config.ApplyPromptOverride("compaction", compactionSystemPrompt))
 	instruction.WriteString("\n\n")
 	instruction.WriteString(summaryTemplate)
 	instruction.WriteString("\n\n")
