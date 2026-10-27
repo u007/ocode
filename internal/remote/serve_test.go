@@ -1,11 +1,17 @@
 package remote
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -534,5 +540,215 @@ func TestKillServer_InvalidPID(t *testing.T) {
 	}
 	if len(ft.execCalls) != 0 {
 		t.Fatalf("expected no remote commands for an invalid pid, got %v", ft.execCalls)
+	}
+}
+
+// scriptedStateFake answers successive state-file reads with replies, in order;
+// the last reply repeats. It models a sibling client rewriting the state file
+// between this client's launch poll and its orphan reap.
+type scriptedStateFake struct {
+	*fakeTransport
+	slot    ServeSlot
+	replies []string
+	reads   int
+}
+
+func (s *scriptedStateFake) Exec(command string) (ExecResult, error) {
+	if command != stateCatCmd(s.slot) {
+		return s.fakeTransport.Exec(command)
+	}
+	s.execCalls = append(s.execCalls, command)
+	i := min(s.reads, len(s.replies)-1)
+	s.reads++
+	return ExecResult{Stdout: s.replies[i]}, nil
+}
+
+// TestEnsureRemoteServerAdoptsSiblingStatePID is the concurrent-launch race: this
+// client launches server A, a sibling launches B and rewrites the state file
+// before this client's reap. The reap must keep B (the state-file server), and
+// this client must return B, so no client is left holding a server the reaper
+// then kills.
+func TestEnsureRemoteServerAdoptsSiblingStatePID(t *testing.T) {
+	const ver = "0.8.85"
+	a := ServeState{PID: 100, Port: 4100, Token: "a", Version: ver}
+	b := ServeState{PID: 200, Port: 4200, Token: "b", Version: ver}
+	aJSON, _ := json.Marshal(a)
+	bJSON, _ := json.Marshal(b)
+
+	ft := newFakeTransport()
+	ft.execResults[healthProbeCmd(4200)] = ExecResult{Stdout: "200"}
+	fake := &scriptedStateFake{fakeTransport: ft, replies: []string{"", string(aJSON), string(bJSON)}}
+
+	state, reused, err := EnsureRemoteServer(fake, ver, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reused || state != b {
+		t.Fatalf("reused=%v state=%+v, want the state-file server %+v", reused, state, b)
+	}
+	for _, sig := range []string{"-TERM", "-KILL"} {
+		if !slices.Contains(ft.execCalls, orphanSlotServersCmd(ver, "", 200, sig)) {
+			t.Errorf("reap (%s) did not keep the state-file pid 200: %q", sig, ft.execCalls)
+		}
+		if slices.Contains(ft.execCalls, orphanSlotServersCmd(ver, "", 100, sig)) {
+			t.Errorf("reap (%s) still keyed on the launching client's pid 100", sig)
+		}
+	}
+}
+
+// TestEnsureRemoteServerSkipsReapWhenStateFileMissing: a missing state file at
+// reap time means a sibling launch rm'd it and has not rewritten it yet. Reaping
+// then would kill a server about to be discovered, so the reap must not run.
+func TestEnsureRemoteServerSkipsReapWhenStateFileMissing(t *testing.T) {
+	const ver = "0.8.85"
+	a := ServeState{PID: 100, Port: 4100, Token: "a", Version: ver}
+	aJSON, _ := json.Marshal(a)
+
+	ft := newFakeTransport()
+	fake := &scriptedStateFake{fakeTransport: ft, replies: []string{"", string(aJSON), ""}}
+
+	state, _, err := EnsureRemoteServer(fake, ver, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state != a {
+		t.Fatalf("state = %+v, want this client's own server %+v", state, a)
+	}
+	for _, sig := range []string{"-TERM", "-KILL"} {
+		if slices.Contains(ft.execCalls, orphanSlotServersCmd(ver, "", 100, sig)) {
+			t.Errorf("orphan reap (%s) ran while the state file was missing", sig)
+		}
+	}
+}
+
+// stubbedShellTransport runs each command under the local sh with HOME and PATH
+// pointed at a test sandbox, so the orphan reaper's real shell pipeline runs
+// against a canned `ps` and a logging `kill` stub (placed first on PATH).
+type stubbedShellTransport struct {
+	*fakeTransport
+	home string
+	bin  string
+}
+
+func (l *stubbedShellTransport) Exec(command string) (ExecResult, error) {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{"HOME=" + l.home, "PATH=" + l.bin + ":/usr/bin:/bin"}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	code := 0
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+	}
+	return ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: code}, err
+}
+
+// TestKillOrphanSlotServersReapsOnlyUnkeptSameSlotServers runs the real reaper
+// shell pipeline. Only the same-version, same-slot server that is not the kept
+// pid may be signalled; a sibling slot, the legacy slot, and another version are
+// out of its blast radius.
+func TestKillOrphanSlotServersReapsOnlyUnkeptSameSlotServers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("reaper is a POSIX shell pipeline")
+	}
+	const ver = "1.0.0"
+	const slotA ServeSlot = "abcdef012345"
+	const slotB ServeSlot = "0123456789ab"
+
+	cases := []struct {
+		name string
+		slot ServeSlot
+		want []int
+	}{
+		{name: "legacy slot", slot: "", want: []int{200}},
+		{name: "named slot", slot: slotA, want: []int{200}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			bin := t.TempDir()
+			sameVer := filepath.Join(home, ".ocode", "bin", ver, "ocode")
+			otherVer := filepath.Join(home, ".ocode", "bin", "0.9.0", "ocode")
+			serveLine := func(pid int, binPath string, s ServeSlot) string {
+				return fmt.Sprintf("%d %s serve --remote --host 127.0.0.1 --port 0%s", pid, binPath, s.serveArgs())
+			}
+			lines := []string{
+				serveLine(100, sameVer, tc.slot),  // kept pid
+				serveLine(200, sameVer, tc.slot),  // orphan in this slot
+				serveLine(300, sameVer, slotB),    // sibling project's slot
+				serveLine(301, sameVer, ""),       // legacy slot (no flag)
+				serveLine(400, otherVer, tc.slot), // other version
+			}
+			killLog := filepath.Join(bin, "kill.log")
+			ps := "#!/bin/sh\ncat <<'EOT'\n" + strings.Join(lines, "\n") + "\nEOT\n"
+			kill := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\n", killLog)
+			for name, body := range map[string]string{"ps": ps, "kill": kill} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			tr := &stubbedShellTransport{fakeTransport: newFakeTransport(), home: home, bin: bin}
+			if err := killOrphanSlotServers(tr, ver, tc.slot, 100); err != nil {
+				t.Fatalf("killOrphanSlotServers: %v", err)
+			}
+
+			killed := map[int]bool{}
+			if data, err := os.ReadFile(killLog); err == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+					var sig string
+					var pid int
+					if _, err := fmt.Sscanf(line, "%s %d", &sig, &pid); err != nil {
+						t.Fatalf("unparseable kill line %q: %v", line, err)
+					}
+					killed[pid] = true
+				}
+			}
+			var got []int
+			for pid := range killed {
+				got = append(got, pid)
+			}
+			sort.Ints(got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("signalled pids = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestServeSlotPaths covers the non-empty slot branch that RemoteWorkspace.slot()
+// keeps off (see TODO.md): state and log naming, the serve flag, the launch and
+// state-read commands, and the slot validity check.
+func TestServeSlotPaths(t *testing.T) {
+	slot := SlotForProject("/srv/projects/alpha")
+	if slot != SlotForProject("/srv/projects/alpha") || slot == SlotForProject("/srv/projects/beta") {
+		t.Fatalf("SlotForProject must be stable per path and distinct across paths: %q", slot)
+	}
+	if err := slot.valid(); err != nil {
+		t.Fatalf("SlotForProject produced an invalid slot %q: %v", slot, err)
+	}
+	s := string(slot)
+	if got, want := slot.stateFile(), remoteStateDir+"/serve-"+s+".json"; got != want {
+		t.Errorf("stateFile = %q, want %q", got, want)
+	}
+	if got, want := slot.logFile(), remoteStateDir+"/serve-"+s+".log"; got != want {
+		t.Errorf("logFile = %q, want %q", got, want)
+	}
+	if got, want := slot.serveArgs(), " --state-slot "+s; got != want {
+		t.Errorf("serveArgs = %q, want %q", got, want)
+	}
+	if got := stateCatCmd(slot); !strings.Contains(got, shellQuotePath(slot.stateFile())) {
+		t.Errorf("state read must target the slot state file: %q", got)
+	}
+	launch := launchServerCmd("1.0.0", slot)
+	for _, want := range []string{"rm -f " + shellQuotePath(slot.stateFile()) + "; ", "--state-slot " + s, shellQuotePath(slot.logFile())} {
+		if !strings.Contains(launch, want) {
+			t.Errorf("slot launch command missing %q: %q", want, launch)
+		}
+	}
+	for _, bad := range []ServeSlot{"../x", "ABCDEF", "0123456789abcdef0"} {
+		if err := bad.valid(); err == nil {
+			t.Errorf("slot %q must be rejected", bad)
+		}
 	}
 }

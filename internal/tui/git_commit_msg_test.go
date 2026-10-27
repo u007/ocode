@@ -1,15 +1,17 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 )
 
 // stubCommitMessage replaces the agent-side generator for one test.
-func stubCommitMessage(t *testing.T, fn func(cfg *config.Config, profile, diff string) (*agent.CommitMessageResult, error)) {
+func stubCommitMessage(t *testing.T, fn func(ctx context.Context, cfg *config.Config, profile, diff string) (*agent.CommitMessageResult, error)) {
 	t.Helper()
 	prev := generateCommitMessage
 	generateCommitMessage = fn
@@ -18,7 +20,7 @@ func stubCommitMessage(t *testing.T, fn func(cfg *config.Config, profile, diff s
 
 func TestCommitMsgGeneratorWritesGeneratedText(t *testing.T) {
 	var gotDiff string
-	stubCommitMessage(t, func(_ *config.Config, profile, diff string) (*agent.CommitMessageResult, error) {
+	stubCommitMessage(t, func(_ context.Context, _ *config.Config, profile, diff string) (*agent.CommitMessageResult, error) {
 		if profile != "" {
 			t.Errorf("TUI generation must not force a profile, got %q", profile)
 		}
@@ -42,8 +44,30 @@ func TestCommitMsgGeneratorWritesGeneratedText(t *testing.T) {
 	}
 }
 
+// The provider call runs under a deadline, so a stalled provider cannot leave
+// the Git tab's generating state stuck forever.
+func TestCommitMsgGeneratorBoundsGenerationWithDeadline(t *testing.T) {
+	var deadline time.Time
+	var hasDeadline bool
+	stubCommitMessage(t, func(ctx context.Context, _ *config.Config, _, _ string) (*agent.CommitMessageResult, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return &agent.CommitMessageResult{Text: "fix: bounded"}, nil
+	})
+
+	m := &model{}
+	if _, ok := m.makeCommitMsgGenerator(&config.Config{})("DIFF")().(gitCommitMsgMsg); !ok {
+		t.Fatal("generator did not return gitCommitMsgMsg")
+	}
+	if !hasDeadline {
+		t.Fatal("generator context has no deadline")
+	}
+	if left := time.Until(deadline); left <= 0 || left > commitMessageTimeout {
+		t.Fatalf("deadline in %v, want within %v", left, commitMessageTimeout)
+	}
+}
+
 func TestCommitMsgGeneratorSurfacesGeneratorError(t *testing.T) {
-	stubCommitMessage(t, func(*config.Config, string, string) (*agent.CommitMessageResult, error) {
+	stubCommitMessage(t, func(context.Context, *config.Config, string, string) (*agent.CommitMessageResult, error) {
 		return nil, errors.New("small/model: rate limited")
 	})
 
@@ -58,7 +82,7 @@ func TestCommitMsgGeneratorSurfacesGeneratorError(t *testing.T) {
 }
 
 func TestCommitMsgGeneratorNilResultIsAnError(t *testing.T) {
-	stubCommitMessage(t, func(*config.Config, string, string) (*agent.CommitMessageResult, error) {
+	stubCommitMessage(t, func(context.Context, *config.Config, string, string) (*agent.CommitMessageResult, error) {
 		return nil, nil
 	})
 
@@ -76,7 +100,7 @@ func TestCommitMsgGeneratorNilResultIsAnError(t *testing.T) {
 // produced the message is decided there).
 func TestCommitMsgGeneratorEmitsSideUsage(t *testing.T) {
 	spend := 0.25
-	stubCommitMessage(t, func(*config.Config, string, string) (*agent.CommitMessageResult, error) {
+	stubCommitMessage(t, func(context.Context, *config.Config, string, string) (*agent.CommitMessageResult, error) {
 		return &agent.CommitMessageResult{
 			Text:  "fix: usage",
 			Model: "main/model",

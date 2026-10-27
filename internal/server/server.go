@@ -436,6 +436,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/fs/new-file", s.authMiddleware(s.handler.HandleFSNewFile))
 	s.mux.HandleFunc("POST /api/fs/new-folder", s.authMiddleware(s.handler.HandleFSNewFolder))
 	s.mux.HandleFunc("POST /api/fs/duplicate", s.authMiddleware(s.handler.HandleFSDuplicate))
+	s.mux.HandleFunc("POST /api/fs/upload", s.authMiddleware(s.handler.HandleFSUpload))
 	s.mux.HandleFunc("POST /api/secret/init", s.authMiddleware(s.handleSecretInit))
 	s.mux.HandleFunc("GET /api/secret/scan", s.authMiddleware(s.handleSecretScan))
 	s.mux.HandleFunc("POST /api/secret/encrypt", s.authMiddleware(s.handleSecretEncrypt))
@@ -2099,6 +2100,19 @@ func (s *Server) SetRemoteMode(v bool) {
 // remoteStateSlotPattern mirrors remote.safeServeSlot: the slot lands in a file name.
 var remoteStateSlotPattern = regexp.MustCompile(`^[0-9a-f]{0,16}$`)
 
+// validateStateSlot checks the --state-slot flag. The slot only selects the
+// remote state file, so a non-empty slot without --remote would be silently
+// ignored; reject that rather than run with the wrong state file.
+func validateStateSlot(remote bool, slot string) error {
+	if !remoteStateSlotPattern.MatchString(slot) {
+		return fmt.Errorf("invalid --state-slot %q: want up to 16 lowercase hex characters", slot)
+	}
+	if slot != "" && !remote {
+		return fmt.Errorf("--state-slot requires --remote")
+	}
+	return nil
+}
+
 // remoteServeState is the JSON shape written to ~/.ocode/remote/serve.json
 // by a --remote launch, and read back by internal/remote's reconnect
 // discovery (DiscoverServer). Field names are the wire contract with that
@@ -2389,9 +2403,8 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	remoteFlag := fs.Bool("remote", false, "Remote mode: bind 127.0.0.1 only, require a generated API token, and write ~/.ocode/remote/serve.json for reconnect discovery")
 	stateSlot := fs.String("state-slot", "", "With --remote: write serve-<slot>.json instead of serve.json so each project on a host gets its own server")
 	fs.Parse(args)
-	if !remoteStateSlotPattern.MatchString(*stateSlot) {
-		fmt.Fprintf(os.Stderr, "invalid --state-slot %q\n", *stateSlot)
-		os.Exit(2)
+	if err := validateStateSlot(*remoteFlag, *stateSlot); err != nil {
+		return err
 	}
 
 	addr, username, password, err := resolveRemoteLaunchParams(

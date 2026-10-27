@@ -473,3 +473,37 @@ func TestRunRemoteModeWritesStateFile(t *testing.T) {
 		t.Errorf("port = %d, want %d", state.Port, boundPort)
 	}
 }
+
+// TestValidateStateSlot pins the --state-slot contract: the slot must be the
+// hex form remote.safeServeSlot accepts, and a non-empty slot only means
+// something with --remote (otherwise it would be silently ignored).
+func TestValidateStateSlot(t *testing.T) {
+	cases := []struct {
+		name    string
+		remote  bool
+		slot    string
+		wantErr string
+	}{
+		{name: "no slot, no remote", remote: false, slot: ""},
+		{name: "no slot, remote", remote: true, slot: ""},
+		{name: "slot with remote", remote: true, slot: "abcdef012345"},
+		{name: "slot without remote", remote: false, slot: "abcdef012345", wantErr: "--state-slot requires --remote"},
+		{name: "uppercase slot", remote: true, slot: "ABCDEF", wantErr: "invalid --state-slot"},
+		{name: "path traversal slot", remote: true, slot: "../x", wantErr: "invalid --state-slot"},
+		{name: "overlong slot", remote: true, slot: "0123456789abcdef0", wantErr: "invalid --state-slot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStateSlot(tc.remote, tc.slot)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -6,6 +6,8 @@ import {
   truncateCommitMessageDiff,
 } from "./commitMessageDiff";
 
+const utf8Encoder = new TextEncoder();
+
 function file(path: string, patch: string, status = "modified"): GitDiffFile {
   return { path, status, patch };
 }
@@ -55,11 +57,30 @@ describe("truncateCommitMessageDiff", () => {
     expect(truncateCommitMessageDiff("short", 10)).toBe("short");
   });
 
-  it("does not split a surrogate pair", () => {
-    // "ab😀" is a,b,high-surrogate,low-surrogate: a limit of 3 lands between
-    // the two halves, so the pair is dropped whole.
-    expect(truncateCommitMessageDiff("ab😀cd", 3)).toBe("ab");
-    // A limit of 4 keeps the whole pair.
-    expect(truncateCommitMessageDiff("ab😀cd", 4)).toBe("ab😀");
+  it("counts the limit in UTF-8 bytes, not UTF-16 units", () => {
+    // "é" is 2 UTF-8 bytes; "éé" is 4. A 3-byte limit keeps one whole "é".
+    expect(truncateCommitMessageDiff("éé", 3)).toBe("é");
+    // "😀" is 4 UTF-8 bytes (2 UTF-16 units). Bytes 2-5 of "ab😀cd" are the emoji.
+    expect(truncateCommitMessageDiff("ab😀cd", 4)).toBe("ab");
+    expect(truncateCommitMessageDiff("ab😀cd", 5)).toBe("ab");
+    expect(truncateCommitMessageDiff("ab😀cd", 6)).toBe("ab😀");
+  });
+
+  it("never returns more than the byte limit", () => {
+    const text = "日本語のテキスト😀".repeat(50);
+    for (const limit of [1, 2, 3, 7, 100, 999]) {
+      const out = truncateCommitMessageDiff(text, limit);
+      expect(utf8Encoder.encode(out).length).toBeLessThanOrEqual(limit);
+      expect(text.startsWith(out)).toBe(true);
+    }
+  });
+
+  it("caps multi-byte diffs at the server's byte limit", () => {
+    const diff = buildCommitMessageDiff(
+      [file("src/unicode.ts", "é".repeat(COMMIT_MESSAGE_DIFF_LIMIT))],
+      [],
+    );
+    expect(utf8Encoder.encode(diff).length).toBeLessThanOrEqual(COMMIT_MESSAGE_DIFF_LIMIT);
+    expect(diff).not.toContain("\uFFFD");
   });
 });

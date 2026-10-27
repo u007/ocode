@@ -1,5 +1,15 @@
 # TODO
 
+## Open: Files-tab paste follow-ups (2026-10-27)
+
+The Files tab now has cut/copy/paste to the project root, keyboard shortcuts, and OS-file paste (`docs/concepts/files-tab-clipboard.md`). Deliberately deferred:
+
+- **Pasting a FOLDER copied in Finder/Explorer is unsupported.** The browser exposes a copied directory only as a file-less `webkitGetAsEntry()` entry it cannot read, so the tree refuses with "Folders can't be pasted — copy the files inside instead". Supporting it needs a directory-picker/`showDirectoryPicker` path or drag-and-drop (which has the same limitation in WKWebView).
+- **Pasted TEXT is not written anywhere.** The paste event falls back to the in-app clipboard when it carries no files, so copying text (or an image with no filename) in another app and pasting into the tree silently does nothing. Decide whether text should become a new file (and with what name/extension).
+- **A pasted file has no Changes-tab entry / undo.** Uploads bypass the snapshot store by design (that tab lists agent-authored edits), so a paste cannot be undone from the Changes tab. `fsCopy` has the same gap.
+- **Remote uploads cap at 100 MiB** (`fsUploadRemoteMaxBytes`) versus 512 MiB locally, because the bytes cross an ssh stdin pipe in a long-running exec slot. Revisit if real projects need bigger remote pastes.
+- **The upload endpoint is not covered by the browser E2E probe.** `clipboardData.files` on a real Finder copy could only be verified in Chrome by hand; **WKWebView (desktop shell) support is unverified** — if it turns out not to populate `files`, OS-file paste is dead on desktop while the other three entry points still work.
+
 ## Open: review findings deferred from the 2026-10-21 change set
 
 The 2026-10-21 uncommitted change set (suggested responses, pending-ask gate, auto-resume after Stop, Kyutai resident worker, global skills, models.dev registry refresh, remote-host read gate, git commit counts, push-and-hold voice) was reviewed and its **9 ERROR findings were fixed in place** (E9 was found by the orchestrator during validation, not by the reviewers), plus W9 (the Settings skills-form rollback, which the sibling chat-sidebar path still has — see the W9 replacement below). The WARNING and INFO findings below were **verified but deliberately deferred** — each is a behaviour change or a design decision rather than a straight bug fix, so it needs its own decision. Full review: `~/.local/share/opencode/project/dcd5a911f8bd/review-2026-10-21.md`.
@@ -6309,8 +6319,8 @@ root-relative path from per-session agent state, read through the live agent wit
 
 Added `NSMicrophoneUsageDescription` to the bundle `Info.plist` (`scripts/bundle-macos.sh`). Not yet
 verified in a rebuilt `.app`: rebuild, click the voice button, confirm the macOS mic prompt appears and
-recording works. If no prompt: Wails v3 beta.12 has no darwin `WKUIDelegate`
-`requestMediaCapturePermissionForOrigin:` handler — add one in `cmd/ocode-desktop/native_darwin.m`. A signed
+recording works with exactly ONE prompt (macOS). The WebKit-level prompt is now auto-granted by a
+`requestMediaCapturePermissionForOrigin:` category in `cmd/ocode-desktop/native_darwin.m` (compiles, not yet run in a rebuilt `.app`). A signed
 build also needs the `com.apple.security.device.audio-input` entitlement.
 
 ## Goal and tool-map races: residual gaps (2026-10-14)

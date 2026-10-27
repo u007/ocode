@@ -335,10 +335,8 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 // (connected or failed, waiters broadcast). A panic in the connect implementation
 // is converted to an error by connectGuarded so the entry is always resolved.
 func (reg *remoteHostRegistry) runConnect(e *remoteHostEntry, key string, target remote.Target, path, host string) {
-	// Run the connect outside the registry-wide mutex. A panic in the connect
-	// implementation is converted to an error so the entry is always resolved;
-	// otherwise it would stay in byConn with nobody to broadcast and every
-	// later caller for this connection would block forever.
+	// The connect runs without reg.mu held (connectBounded enforces the
+	// deadline); every exit below resolves the entry so no waiter is stranded.
 	log.Printf("remote: connecting to %s", key)
 	start := time.Now()
 	ws, err := reg.connectBounded(target, path, host)
@@ -412,7 +410,6 @@ func (reg *remoteHostRegistry) runConnect(e *remoteHostEntry, key string, target
 	reg.mu.Unlock()
 
 	log.Printf("remote: connected to %s at %s (took %v)", key, ws.APIURL(), time.Since(start))
-	return
 }
 
 // status reports what the registry knows about host without connecting. A host
@@ -665,6 +662,29 @@ func (reg *remoteHostRegistry) drop(host string, port int) {
 			log.Printf("remote: disconnect %s: %v", key, err)
 		}
 	}
+}
+
+// clearFailed evicts a connection whose last connect FAILED, so an explicit
+// user connect starts a fresh attempt instead of replaying the cooldown error.
+// It is deliberately narrower than drop: a connected entry keeps its live
+// tunnel, and an in-flight connect is left to resolve (drop would tear down a
+// live tunnel or supersede the in-flight connect).
+func (reg *remoteHostRegistry) clearFailed(host string, port int) {
+	key := remoteConnectionKey(host, port)
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	e, ok := reg.byConn[key]
+	if !ok {
+		return
+	}
+	e.mu.Lock()
+	failed := e.failed
+	e.mu.Unlock()
+	if !failed {
+		return
+	}
+	delete(reg.byConn, key)
+	delete(reg.registeredPaths, key)
 }
 
 // closeAll disconnects every live entry. It is called from Handler.Shutdown.

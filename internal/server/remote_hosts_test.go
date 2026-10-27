@@ -1198,3 +1198,33 @@ func TestWorkspaceForPortOwnerFailsFastAndConnectFinishes(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A user-initiated connect must not replay a failure remembered for the polling
+// cooldown: clearFailed evicts the failed entry so the next connect really runs.
+// Polling callers inside the window still get the cached error.
+func TestRemoteClearFailedStartsFreshConnectWithinCooldown(t *testing.T) {
+	reg := newRemoteHostRegistry(nil)
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		if connects.Add(1) == 1 {
+			return nil, errors.New("tunnel not ready")
+		}
+		return &fakeWorkspace{apiURL: "http://127.0.0.1:1", token: "t"}, nil
+	}
+	if _, err := reg.workspaceForPort("u@host", "/p", 0); err == nil {
+		t.Fatal("expected the first connect to fail")
+	}
+	if _, err := reg.workspaceForPort("u@host", "/p", 0); err == nil {
+		t.Fatal("expected the polling caller to get the cached failure")
+	}
+	if got := connects.Load(); got != 1 {
+		t.Fatalf("connect attempts = %d before clearFailed, want 1", got)
+	}
+	reg.clearFailed("u@host", 0)
+	if _, err := reg.workspaceForPort("u@host", "/p", 0); err != nil {
+		t.Fatalf("connect after clearFailed: %v", err)
+	}
+	if got := connects.Load(); got != 2 {
+		t.Fatalf("connect attempts = %d after clearFailed, want 2", got)
+	}
+}

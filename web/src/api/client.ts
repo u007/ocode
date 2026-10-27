@@ -2332,7 +2332,8 @@ export const api = {
 
   /**
    * Generate a commit message from a unified diff. The server prefers the
-   * small model and falls back to the main model (see agent.GenerateCommitMessage).
+   * small model, else the main model, and never retries on another model
+   * (see agent.ResolveCommitMessageModel).
    * Generation runs on the server serving the UI, so the diff is sent in the
    * body rather than fetched from a (possibly remote) project.
    */
@@ -2414,6 +2415,38 @@ export const api = {
         body: JSON.stringify({ path }),
       },
     ),
+  /**
+   * Write one pasted OS file (Finder/Explorer) into a project directory.
+   * The body is the RAW file, not JSON: pasted files can be binary, and the
+   * JSON content-save endpoint takes a string. The server never overwrites —
+   * a name collision yields a Finder-style "copy" name. `signal` aborts the
+   * in-flight request (the fetch rejects with an AbortError).
+   */
+  fsUpload: async (
+    destDir: string,
+    file: File,
+    project?: string,
+    host?: string,
+    signal?: AbortSignal,
+  ): Promise<{ success: boolean; path: string }> => {
+    const query = projQuery(project, host, { dest_dir: destDir, name: file.name });
+    const res = await fetch(apiPath(`/api/fs/upload${query}`), {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/octet-stream" },
+      body: file,
+      signal,
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+      throw new Error(err.error || res.statusText);
+    }
+    const text = await res.text();
+    // A 200 with no body means the route answered something that is not this
+    // endpoint (proxy/SPA fallback). Fail loudly instead of reporting a
+    // successful paste that wrote nothing.
+    if (text.trim() === "") throw new Error("upload returned an empty response");
+    return JSON.parse(text) as { success: boolean; path: string };
+  },
   // --- Cron (jobs, outbox, runs, targets) + reminders and tasks ------------
   //
   // Every method on this surface is PROJECT-SCOPED, and every one therefore

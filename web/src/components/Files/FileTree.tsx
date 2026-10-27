@@ -109,6 +109,9 @@ interface FileMenuActions {
   rangeSelect: (paths: string[]) => void;
   deselectRange: (paths: string[]) => void;
   setSelection: (paths: string[]) => void;
+  /** Remember the row the user last acted on (kind included): it decides the
+   *  destination for the ⌘V shortcut and the node menu's Paste item. */
+  setFocus: (node: { path: string; isDir: boolean }) => void;
   open: (p: string) => void;
   copyPath: (p: string) => void;
   /** Reveal a path in the OS-native file manager (server host). */
@@ -184,6 +187,13 @@ const REVEAL_FLASH_MS = 1600;
 // fetched one SSH round trip at a time; it only fires where the tree could
 // not resolve the request at all.
 const REVEAL_TIMEOUT_MS = 15000;
+/** How long the ⌘V keydown waits for the native `paste` event before falling
+ *  back to the in-app clipboard. Same keystroke, so it must stay imperceptible. */
+const PASTE_EVENT_FALLBACK_MS = 100;
+/** Two paste deliveries inside this window are one user action. The desktop
+ *  shell routes one ⌘V through its native Edit-menu role AND the key's default
+ *  action (see TerminalPanel's DUPLICATE_PASTE_WINDOW_MS). */
+const PASTE_DEDUPE_MS = 150;
 
 const langIcons: Record<string, string> = {
   ts: "🔷",
@@ -214,8 +224,48 @@ export function treePathForRequest(projectRoot: string | undefined, nodePath: st
 }
 
 function parentDir(p: string): string {
-  const i = p.lastIndexOf("/");
+  // Both separators: a Windows project root arrives as C:\proj while the
+  // tree joins relative children with "/", so a mixed path is normal.
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i >= 0 ? p.slice(0, i) : p;
+}
+
+/**
+ * Where a paste should land. A focused folder is the destination, a focused
+ * file pastes beside itself (its parent), and no focus — or a multi-selection,
+ * which has no single "current folder" — falls back to the tree root.
+ *
+ * ONE rule for every entry point: the ⌘V shortcut, the node context menu, the
+ * empty-area/root menus and the toolbar button. The toolbar and the root menus
+ * are the explicit "paste to project root" override; they pass the root
+ * directly instead of calling this. Shared and exported so the rule can be
+ * tested without driving the Radix menus.
+ */
+export function pasteDestination(
+  root: string,
+  focus: { path: string; isDir: boolean } | null,
+  selectionSize: number,
+): string {
+  if (!focus || selectionSize > 1) return root;
+  const abs = treePathForRequest(root, focus.path);
+  return focus.isDir ? abs : parentDir(abs);
+}
+
+/** Human label for a paste destination: the root-relative folder, or the
+ *  project folder name when the destination IS the tree root. Used in the
+ *  post-paste notice so the user can see where the items landed. */
+export function pasteDestinationLabel(root: string, dest: string): string {
+  // Compare on a normalized separator so a Windows root (`C:\proj`) still
+  // matches the `/`-joined destination the tree builds.
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const base = norm(root);
+  const target = norm(dest);
+  if (!base || target === base) {
+    const name = base.split("/").filter(Boolean).pop();
+    return name ? `${name}/` : "project root";
+  }
+  if (target.startsWith(base + "/")) return `${target.slice(base.length + 1)}/`;
+  return `${target}/`;
 }
 
 // Human name of the OS-native file manager for the "reveal" menu action. The
@@ -594,6 +644,7 @@ function TreeNode({
     : [node.path];
 
   const handleRowClick = (e: React.MouseEvent) => {
+    menu.setFocus({ path: node.path, isDir: node.is_dir });
     if (e.shiftKey && lastClickedPath && siblings.some((s) => s.path === lastClickedPath)) {
       const idxA = siblings.findIndex((s) => s.path === lastClickedPath);
       const idxB = siblings.findIndex((s) => s.path === node.path);
@@ -623,6 +674,7 @@ function TreeNode({
       aria-label={`${node.name} — ${selected ? "deselect" : "select"}`}
       onClick={(e) => {
         e.stopPropagation();
+        menu.setFocus({ path: node.path, isDir: node.is_dir });
         menu.toggleSelect(node.path);
       }}
       className={`shrink-0 w-3.5 h-3.5 rounded-sm border flex items-center justify-center transition-colors ${
@@ -643,6 +695,7 @@ function TreeNode({
       : "text-muted-foreground hover:bg-muted";
 
   const openMenu = () => {
+    menu.setFocus({ path: node.path, isDir: node.is_dir });
     if (!menu.selectedPaths.has(node.path)) menu.setSelection([node.path]);
   };
 
@@ -937,6 +990,15 @@ export default function FileTree({
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastClickedPath, setLastClickedPath] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<{ op: "copy" | "cut"; paths: string[] } | null>(null);
+  // The row the user last acted on, WITH its kind: a directory is a paste
+  // destination, a file means "paste beside me" (see pasteDestination).
+  const [focusNode, setFocusNode] = useState<{ path: string; isDir: boolean } | null>(null);
+  // True after the window lost focus since the last in-app copy. The OS
+  // clipboard is then the more likely intent (the user copied something in
+  // another app), so an OS-file paste wins over the in-app clipboard.
+  const appClipboardStaleRef = useRef(false);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -1753,10 +1815,10 @@ export default function FileTree({
   );
 
   const runFs = useCallback(
-    async (fn: () => Promise<unknown>): Promise<boolean> => {
+    async (fn: () => Promise<unknown>, successMessage = "Done"): Promise<boolean> => {
       try {
         await fn();
-        showNotice("Done");
+        showNotice(successMessage);
         refresh();
         return true;
       } catch (err) {
@@ -1765,6 +1827,53 @@ export default function FileTree({
       }
     },
     [refresh, showNotice],
+  );
+
+  // Upload pasted OS files (Finder/Explorer) one at a time into destDir.
+  // Sequential, not parallel: a burst of parallel uploads would occupy every
+  // connection slot for the whole batch (the 2026-09-18 stall class) and the
+  // progress label would mean nothing. Cancelled when the project changes or a
+  // newer paste supersedes it.
+  const uploadFiles = useCallback(
+    async (files: File[], destDir: string) => {
+      if (files.length === 0 || !destDir) return;
+      uploadAbortRef.current?.abort();
+      const controller = new AbortController();
+      uploadAbortRef.current = controller;
+      const root = activeRoot ?? projectPath ?? "";
+      const destLabel = pasteDestinationLabel(root, destDir);
+      let done = 0;
+      let firstError = "";
+      for (let i = 0; i < files.length; i++) {
+        if (controller.signal.aborted) return;
+        setUploadProgress(`Uploading ${i + 1}/${files.length} to ${destLabel}…`);
+        try {
+          await api.fsUpload(destDir, files[i], activeRoot, projectHost, controller.signal);
+          done++;
+        } catch (err) {
+          // An abort is not a failure: whoever aborted this batch (a newer paste or
+          // a project change) already owns the progress label and the ref, so this
+          // loop must leave both alone or it would clear the newer label.
+          if (controller.signal.aborted) return;
+          // Kept as data, not rethrown: one bad file must not abort the rest of
+          // the batch. The first failure is surfaced in the notice below and
+          // logged here like the rest of this component's async failures.
+          console.error("File tree upload error:", err);
+          if (!firstError) firstError = `${files[i].name}: ${(err as Error).message}`;
+        }
+      }
+      if (controller.signal.aborted) return;
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+      setUploadProgress(null);
+      refresh();
+      const noun = done === 1 ? "file" : "files";
+      if (firstError) {
+        showNotice(`Added ${done} ${noun} to ${destLabel} — ${firstError}`);
+      } else {
+        showNotice(`Added ${done} ${noun} to ${destLabel}`);
+      }
+    },
+    [activeRoot, projectPath, projectHost, refresh, showNotice],
   );
 
   const confirmDelete = useCallback(async () => {
@@ -1797,6 +1906,7 @@ export default function FileTree({
     rangeSelect,
     deselectRange,
     setSelection: (paths) => setSelectedPaths(new Set(paths)),
+    setFocus: (node) => setFocusNode(node),
     open: (p) => onOpenFile(p, activeRoot),
     // Reveal runs on the LOCAL server host (no remote branch), so it is only
     // offered for a local project — see canReveal below.
@@ -1835,10 +1945,12 @@ export default function FileTree({
       ta.remove();
     },
     copy: (paths) => {
+      appClipboardStaleRef.current = false;
       setClipboard({ op: "copy", paths });
       showNotice(`Copied ${paths.length} item(s)`);
     },
     cut: (paths) => {
+      appClipboardStaleRef.current = false;
       setClipboard({ op: "cut", paths });
       showNotice(`Cut ${paths.length} item(s)`);
     },
@@ -1846,7 +1958,10 @@ export default function FileTree({
       if (!clipboard) return;
       const cut = clipboard.op === "cut";
       const paths = [...clipboard.paths];
-      runFs(async () => {
+      const verb = cut ? "Moved" : "Copied";
+      const destLabel = pasteDestinationLabel(activeRoot ?? projectPath ?? "", destDir);
+      const count = `${paths.length} item${paths.length === 1 ? "" : "s"}`;
+      void runFs(async () => {
         if (cut) {
           await api.fsMove(paths, destDir, activeRoot, projectHost);
           setClipboard(null);
@@ -1854,7 +1969,7 @@ export default function FileTree({
         } else {
           await api.fsCopy(paths, destDir, activeRoot, projectHost);
         }
-      });
+      }, `${verb} ${count} to ${destLabel}`);
     },
     remove: (paths) => {
       // Snapshot into dialog state; selection can change while the dialog is open.
@@ -1933,11 +2048,243 @@ export default function FileTree({
       }),
   };
 
+  // The root currently being browsed: the paste destination for the explicit
+  // "paste to project root" affordances (empty-area/root menus, toolbar) and
+  // the fallback when no single row is focused.
+  const treeRoot = activeRoot ?? projectPath ?? "";
+  // "2 items · copy" for the toolbar tooltip, so the user can see what a paste
+  // would apply before clicking.
+  const clipboardSummary = clipboard
+    ? `${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"} · ${clipboard.op}`
+    : "";
+
+  // Right-clicking blank space below the rows (or the columns-view root
+  // header) targets the PROJECT ROOT. Radix composes this outer trigger with
+  // the per-node triggers inside it: a node's menu calls preventDefault, and
+  // composeEventHandlers skips this handler when the event was already
+  // handled, so a row never opens both menus.
+  const rootMenuItems = (
+    <>
+      <ContextMenuItem
+        disabled={!clipboard || !treeRoot}
+        onSelect={() => treeRoot && menu.paste(treeRoot)}
+      >
+        <Clipboard className="w-3.5 h-3.5 mr-2" /> Paste to project root
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem disabled={!treeRoot} onSelect={() => treeRoot && menu.newFile(treeRoot)}>
+        <FilePlus2 className="w-3.5 h-3.5 mr-2" /> New file…
+      </ContextMenuItem>
+      <ContextMenuItem disabled={!treeRoot} onSelect={() => treeRoot && menu.newFolder(treeRoot)}>
+        <FolderPlus className="w-3.5 h-3.5 mr-2" /> New folder…
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={refresh}>
+        <RefreshCw className="w-3.5 h-3.5 mr-2" /> Refresh
+      </ContextMenuItem>
+    </>
+  );
+
+  // ---- clipboard shortcuts ------------------------------------------------
+  // Cmd/Ctrl+C and Cmd/Ctrl+X copy/cut the selection. Cmd/Ctrl+V is owned by
+  // the native `paste` event — the only channel that can also carry files
+  // copied in Finder/Explorer — with a short keydown fallback timer for a
+  // webview that never dispatches it. preventDefault on V is deliberately
+  // absent: it would suppress the paste event and with it every file paste.
+  //
+  // The gate is "the last pointer interaction landed inside this pane", not
+  // document.activeElement: WebKit does not focus a <button> on click, so a
+  // focus-based gate makes the shortcuts dead in the desktop shell. The Files
+  // pane is mounted with forceMount, hence the offsetParent check as well.
+  const selectionForClipboard = useCallback((): string[] => {
+    if (selectedPaths.size > 0) return Array.from(selectedPaths);
+    return selectedPath ? [selectedPath] : [];
+  }, [selectedPaths, selectedPath]);
+
+  const clipboardOpsRef = useRef<{
+    copy: () => void;
+    cut: () => void;
+    paste: () => void;
+    hasClipboard: boolean;
+    isClipboardStale: () => boolean;
+    upload: (files: File[]) => void;
+    hasSelection: () => boolean;
+  }>({
+    copy: () => {},
+    cut: () => {},
+    paste: () => {},
+    hasSelection: () => false,
+    hasClipboard: false,
+    isClipboardStale: () => false,
+    upload: (_files: File[]) => {},
+  });
+  clipboardOpsRef.current = {
+    copy: () => {
+      const paths = selectionForClipboard();
+      if (paths.length > 0) menu.copy(paths);
+    },
+    cut: () => {
+      const paths = selectionForClipboard();
+      if (paths.length > 0) menu.cut(paths);
+    },
+    paste: () => {
+      const dest = pasteDestination(treeRoot, focusNode, selectedPaths.size);
+      if (dest) menu.paste(dest);
+    },
+    hasSelection: () => selectionForClipboard().length > 0,
+    hasClipboard: clipboard !== null,
+    // Read through the ref: leaving the window flips it with no re-render, so
+    // a snapshot value here would still report "fresh" when it matters.
+    isClipboardStale: () => appClipboardStaleRef.current,
+    upload: (files) => {
+      const dest = pasteDestination(treeRoot, focusNode, selectedPaths.size);
+      if (dest) void uploadFiles(files, dest);
+    },
+  };
+
+  const treePaneRef = useRef<HTMLDivElement | null>(null);
+  const engagedRef = useRef(false);
+  const pasteFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastInternalPasteAt = useRef(0);
+
+  useEffect(() => {
+    const pane = () => treePaneRef.current;
+    const isEditableTarget = (t: EventTarget | null) =>
+      t instanceof Element &&
+      t.closest("input, textarea, select, [contenteditable], .monaco-editor, .xterm") !== null;
+    const engaged = () => {
+      const el = pane();
+      if (!engagedRef.current || el === null) return false;
+      // The Files pane is mounted with forceMount and merely hidden (Tailwind
+      // `hidden` on an ancestor) while another tab is in front, so a pane that
+      // is not rendered must not swallow the shortcut. offsetParent is null in
+      // jsdom (no layout engine), hence the class fallback.
+      return el.offsetParent !== null || el.closest(".hidden, [hidden]") === null;
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const el = pane();
+      engagedRef.current = el !== null && e.target instanceof Node && el.contains(e.target);
+    };
+    const cancelFallback = () => {
+      if (pasteFallbackTimer.current !== null) {
+        clearTimeout(pasteFallbackTimer.current);
+        pasteFallbackTimer.current = null;
+      }
+    };
+    const pasteInternalNow = () => {
+      const now = Date.now();
+      // The desktop shell delivers one Cmd+V through two routes (its native
+      // Edit-menu role and the key's default action), and the fallback timer
+      // can race the event. One paste per keystroke, as in TerminalPanel.
+      if (now - lastInternalPasteAt.current < PASTE_DEDUPE_MS) return;
+      lastInternalPasteAt.current = now;
+      clipboardOpsRef.current.paste();
+    };
+    // Cmd/Ctrl+C/X belong to the tree only when it has a selection and the user
+    // has not selected native text (the browser's own copy must win then). The
+    // check runs before preventDefault so an unclaimed key keeps its default.
+    const treeOwnsCopyKey = () => {
+      const sel = window.getSelection();
+      const nativeTextSelected = sel !== null && !sel.isCollapsed;
+      return !nativeTextSelected && clipboardOpsRef.current.hasSelection();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!engaged() || e.defaultPrevented) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (isEditableTarget(e.target)) return;
+      const key = e.key.toLowerCase();
+      if (key === "c") {
+        if (!treeOwnsCopyKey()) return;
+        e.preventDefault();
+        clipboardOpsRef.current.copy();
+        return;
+      }
+      if (key === "x") {
+        if (!treeOwnsCopyKey()) return;
+        e.preventDefault();
+        clipboardOpsRef.current.cut();
+        return;
+      }
+      if (key === "v") {
+        cancelFallback();
+        pasteFallbackTimer.current = setTimeout(() => {
+          pasteFallbackTimer.current = null;
+          pasteInternalNow();
+        }, PASTE_EVENT_FALLBACK_MS);
+      }
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      if (!engaged() || isEditableTarget(e.target)) return;
+      // A paste event arrived for this keystroke, so the fallback must not fire.
+      cancelFallback();
+      const data = e.clipboardData;
+      const files = data ? Array.from(data.files ?? []) : [];
+      // A copied FOLDER reaches the page as a file-less directory entry, which
+      // the browser cannot read — say so instead of silently pasting nothing.
+      const hasFolder = data
+        ? Array.from(data.items ?? []).some((item) => {
+            if (item.kind !== "file") return false;
+            const entry = (
+              item as DataTransferItem & {
+                webkitGetAsEntry?: () => { isDirectory: boolean } | null;
+              }
+            ).webkitGetAsEntry?.();
+            return !!entry && entry.isDirectory;
+          })
+        : false;
+      if (hasFolder) {
+        setUploadProgress(null);
+        showNotice("Folders can't be pasted — copy the files inside instead");
+        return;
+      }
+      if (files.length > 0) {
+        const ops = clipboardOpsRef.current;
+        if (ops.hasClipboard && !ops.isClipboardStale()) {
+          // Copied in this app and never left it: the in-app clipboard is what
+          // the user means, so a stray OS file does not hijack the paste.
+          pasteInternalNow();
+          return;
+        }
+        ops.upload(files);
+        return;
+      }
+      pasteInternalNow();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      cancelFallback();
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, []);
+
+  // Leaving the window makes the OS clipboard the more likely paste intent: a
+  // user who copies a file in Finder/Explorer and comes back must not have the
+  // stale in-app clipboard win.
+  useEffect(() => {
+    const onBlur = () => {
+      appClipboardStaleRef.current = true;
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, []);
+
+  // Never keep uploading into a project the user already left.
+  useEffect(() => {
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+    setUploadProgress(null);
+  }, [activeRoot, projectHost]);
+
   return (
     <div className="flex flex-col h-full">
-      {notice && (
+      {(uploadProgress ?? notice) && (
         <div className="px-3 py-1 text-[11px] bg-accent text-accent-foreground border-b border-border shrink-0">
-          {notice}
+          {uploadProgress ?? notice}
         </div>
       )}
       <div className="flex items-center px-3 h-9 border-b border-border shrink-0 gap-2">
@@ -1967,6 +2314,18 @@ export default function FileTree({
           </Select>
         )}
         <div className="flex-1" />
+        {clipboard && (
+          <button
+            type="button"
+            onClick={() => treeRoot && menu.paste(treeRoot)}
+            disabled={!treeRoot}
+            title={`Paste to project root — ${clipboardSummary}`}
+            aria-label="Paste to project root"
+            className="p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors rounded-md disabled:opacity-50 shrink-0"
+          >
+            <Clipboard className="h-3.5 w-3.5" />
+          </button>
+        )}
         {onRequestOpenOutsideProject && (
           <button
             type="button"
@@ -2157,6 +2516,9 @@ export default function FileTree({
           </div>
         )}
       </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div ref={treePaneRef} className="flex flex-1 min-h-0 flex-col">
       <ScrollArea className="flex-1" ref={useCallback((el: HTMLDivElement | null) => {
         const prev = scrollViewportRef.current;
         if (prev) prev.removeEventListener("scroll", onSearchScroll);
@@ -2258,20 +2620,39 @@ export default function FileTree({
               ) : (
                 columns.map((col, colIdx) => {
                   const colSelected = columnSelections[colIdx] ?? null;
+                  const columnHeader = (
+                    <>
+                      <span className="truncate flex-1 text-left">
+                        {colIdx === 0 ? (activeRoot?.split("/").pop() || col.path?.split("/").pop() || "Root") : col.path.split("/").pop() || col.path}
+                      </span>
+                      {col.loading && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
+                    </>
+                  );
                   return (
                     <div
                       key={`${col.path}-${colIdx}`}
                       className="w-[200px] min-w-[180px] max-w-[260px] shrink-0 border-r border-border flex flex-col overflow-hidden bg-background"
                     >
-                      <div
-                        className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1 text-left"
-                        title={col.path || "/"}
-                      >
-                        <span className="truncate flex-1 text-left">
-                          {colIdx === 0 ? (activeRoot?.split("/").pop() || col.path?.split("/").pop() || "Root") : col.path.split("/").pop() || col.path}
-                        </span>
-                        {col.loading && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
-                      </div>
+                      {colIdx === 0 ? (
+                        <ContextMenu>
+                          <ContextMenuTrigger asChild>
+                            <div
+                              className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1 text-left"
+                              title={col.path || "/"}
+                            >
+                              {columnHeader}
+                            </div>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent>{rootMenuItems}</ContextMenuContent>
+                        </ContextMenu>
+                      ) : (
+                        <div
+                          className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border bg-muted/30 truncate shrink-0 flex items-center gap-1 text-left"
+                          title={col.path || "/"}
+                        >
+                          {columnHeader}
+                        </div>
+                      )}
                       <div className="flex-1 overflow-y-auto overflow-x-hidden">
                         {col.loading && !col.nodes ? (
                           <div className="flex items-center justify-center py-8 text-xs text-muted-foreground gap-1.5">
@@ -2304,7 +2685,10 @@ export default function FileTree({
                                   <ContextMenuTrigger asChild>
                                     <button
                                       type="button"
-                                      onClick={() => handleColumnSelect(colIdx, node)}
+                                      onClick={() => {
+                                        menu.setFocus({ path: node.path, isDir });
+                                        handleColumnSelect(colIdx, node);
+                                      }}
                                       className={`${rowBase} ${rowState}`}
                                       title={node.path}
                                     >
@@ -2447,6 +2831,10 @@ export default function FileTree({
           </div>
         )}
       </ScrollArea>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>{rootMenuItems}</ContextMenuContent>
+      </ContextMenu>
       {secretAction && (
         <SecretActionDialog
           open

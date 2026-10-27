@@ -82,6 +82,9 @@ func (h *Handler) HandleRemoteConnect(w http.ResponseWriter, r *http.Request) {
 	if !h.requireRemoteHosts(w) {
 		return
 	}
+	// A user connect is an explicit retry: do not replay a failure remembered
+	// for the polling cooldown.
+	h.remoteHosts.clearFailed(p.Host, p.RemotePort)
 	st, err := h.remoteHosts.connectHost(p.Host, p.Path, p.RemotePort)
 	if err != nil {
 		log.Printf("remote lifecycle: connect host %s failed: %v", p.Host, err)

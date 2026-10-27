@@ -543,7 +543,9 @@ request parked on a slow remote connect (`workspaceForPort`) pins a slot, and ~5
 
 - **A failed connect is remembered for `remoteConnectCooldown` (5 s)**; callers in that
   window get the cached error. Never delete a failed entry immediately: browser polls then
-  each start their own ~11 s connect and their own remote server.
+  each start their own ~11 s connect and their own remote server. The one exception is an
+  explicit user Connect (`HandleRemoteConnect`), which calls `clearFailed` first so it starts
+  a fresh attempt; `clearFailed` evicts only a failed entry, never a connected or in-flight one.
 - **The connect runs in the background (`runConnect`) and EVERY caller, the one that started
   it included, waits at most `remoteConnectWaitBound` (2 s)** then gets a "still in progress"
   error. Never block a request for the whole connect: that is how one slow project pinned

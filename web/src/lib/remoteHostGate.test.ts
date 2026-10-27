@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
 import {
   __resetRemoteReadGatesForTests,
+  isHostConnecting,
   isHostUnreachable,
   noteRemoteHostReachable,
   noteRemoteHostUnreachable,
@@ -29,13 +30,26 @@ describe("periodicRemoteRead", () => {
 
   it("treats a 503 (still connecting) as a skipped read without opening the retry window", async () => {
     const connecting = vi.fn(async () => {
-      throw new ApiError("remote connecting", 503);
+      throw new ApiError("remote connecting", 503, { error: "remote connecting", stage: "remote-connecting" });
     });
     await expect(periodicRemoteRead("dev@box", "/proj", connecting)).resolves.toBeNull();
     expect(remoteHostRetryInMs("dev@box")).toBe(0);
 
     const next = vi.fn(async () => "fresh");
     await expect(periodicRemoteRead("dev@box", "/other", next)).resolves.toEqual({ value: "fresh" });
+  });
+
+  it("treats a plain 503 (no connecting stage) as an ordinary error", async () => {
+    const unavailable = vi.fn(async () => {
+      throw new ApiError("remote connections not available", 503, { error: "remote connections not available" });
+    });
+    await expect(periodicRemoteRead("dev@box", "/proj", unavailable)).rejects.toThrow(
+      "remote connections not available",
+    );
+
+    const next = vi.fn(async () => "fresh");
+    await expect(periodicRemoteRead("dev@box", "/other", next)).resolves.toEqual({ value: "fresh" });
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
   it("skips the host after an unreachable failure instead of asking it again", async () => {
@@ -70,6 +84,15 @@ describe("periodicRemoteRead", () => {
     ).rejects.toThrow("Failed to fetch");
 
     await expect(periodicRemoteRead("dev@up", "/proj", async () => "ok")).resolves.toEqual({ value: "ok" });
+  });
+});
+
+describe("isHostConnecting", () => {
+  it("requires the remote-connecting stage on a 503", () => {
+    expect(isHostConnecting(new ApiError("remote connecting", 503, { stage: "remote-connecting" }))).toBe(true);
+    expect(isHostConnecting(new ApiError("remote connections not available", 503))).toBe(false);
+    expect(isHostConnecting(new ApiError("remote connect failed", 502, { stage: "remote-connect" }))).toBe(false);
+    expect(isHostConnecting(new Error("reducer bug"))).toBe(false);
   });
 });
 

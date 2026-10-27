@@ -5,6 +5,12 @@
 
 
 
+
+## 2026-10-27
+
+* **Update**: Files Tab Clipboard (Cut / Copy / Paste) ([concepts/files-tab-clipboard.md](/concepts/files-tab-clipboard.md))
+* **Update**: Files Tab Clipboard (Cut / Copy / Paste) ([concepts/files-tab-clipboard.md](/concepts/files-tab-clipboard.md))
+* **Creation**: Files Tab Clipboard (Cut / Copy / Paste) ([concepts/files-tab-clipboard.md](/concepts/files-tab-clipboard.md))
 ## 2026-10-25
 
 * **Update**: Local embed server (llama-server) fails with "Exec format error" ([gotchas/local-embed-server-exec-format-error.md](/gotchas/local-embed-server-exec-format-error.md))

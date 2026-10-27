@@ -1,18 +1,31 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/redact"
 )
 
 // maxCommitMessageBodyBytes bounds the POST body. The generator caps the diff it
 // sends to the model, but the request is still rejected before a huge payload is
 // decoded into memory.
 const maxCommitMessageBodyBytes = 8 << 20
+
+// commitMessageTimeout bounds one commit-message provider call. Without it a
+// stalled provider holds the request, and the Git tab's spinner, open forever.
+const commitMessageTimeout = 60 * time.Second
+
+// commitMessageDetailMaxRunes caps the provider detail echoed in a failure body.
+const commitMessageDetailMaxRunes = 200
 
 // commitMessageGenerator is agent.GenerateCommitMessage behind a package
 // variable so handler tests can stub the LLM call.
@@ -25,7 +38,12 @@ var commitMessageGenerator = agent.GenerateCommitMessage
 // project needs no host round-trip: generation runs on the server serving the
 // UI, using the request's credential profile. Model policy (explicit
 // commit_msg_model, else the small model, else the main model) is shared with
-// the TUI via agent.GenerateCommitMessage.
+// the TUI via agent.GenerateCommitMessage, which never falls back to another model.
+//
+// 409 means no model is configured. 500 means the model was configured but
+// generation failed or timed out; the body carries the provider error as one
+// redacted line (see commitMessageErrorDetail), and the full error is logged.
+// Not 502: the SPA reads 502 as the remote host being unreachable.
 func (h *Handler) HandleGitCommitMessage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCommitMessageBodyBytes)
 	var req struct {
@@ -50,15 +68,48 @@ func (h *Handler) HandleGitCommitMessage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	res, err := commitMessageGenerator(cfg, h.commitMessageProfile(r, req.Project), diff)
+	ctx, cancel := context.WithTimeout(r.Context(), commitMessageTimeout)
+	defer cancel()
+	res, err := commitMessageGenerator(ctx, cfg, h.commitMessageProfile(r, req.Project), diff)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		slog.Error("commit message generation failed", "project", req.Project, "err", err)
+		if errors.Is(err, agent.ErrCommitMessageNotConfigured) {
+			writeError(w, http.StatusConflict, "no LLM configured for commit messages; set a model in settings")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "commit message generation failed: "+commitMessageErrorDetail(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": res.Text,
 		"model":   res.Model,
 	})
+}
+
+// commitMessageErrorDetail renders a provider error as one short line that is
+// safe to return to the client. Secret-looking spans (API keys in URLs, bearer
+// tokens, key=value pairs) are masked by the tier-1 detector before anything is
+// truncated, so a cut can never expose a partial secret. Whitespace, including
+// newlines, collapses to single spaces.
+func commitMessageErrorDetail(err error) string {
+	line := strings.Join(strings.Fields(err.Error()), " ")
+	spans := redact.Detect(line, nil, redact.DetectOpts{})
+	var b strings.Builder
+	cursor := 0
+	for _, s := range spans {
+		if s.Start < cursor {
+			continue
+		}
+		b.WriteString(line[cursor:s.Start])
+		fmt.Fprintf(&b, "[REDACTED:%s]", s.Kind)
+		cursor = s.End
+	}
+	b.WriteString(line[cursor:])
+	runes := []rune(b.String())
+	if len(runes) > commitMessageDetailMaxRunes {
+		return string(runes[:commitMessageDetailMaxRunes]) + "..."
+	}
+	return string(runes)
 }
 
 // commitMessageProfile resolves the credential profile for a one-shot

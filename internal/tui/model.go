@@ -24403,16 +24403,23 @@ func (m *model) filesAddToContext() tea.Cmd {
 }
 
 // generateCommitMessage is agent.GenerateCommitMessage behind a package
-// variable so TUI tests can stub the LLM call. The generation policy (small
-// model, main-model fallback) lives in the agent package and is shared with the
-// web/desktop Git tab's endpoint.
+// variable so TUI tests can stub the LLM call. The generation policy (explicit,
+// small, then main model; no fallback) lives in the agent package and is shared
+// with the web/desktop Git tab's endpoint.
 var generateCommitMessage = agent.GenerateCommitMessage
+
+// commitMessageTimeout bounds one TUI commit-message call. It mirrors
+// commitMessageTimeout in internal/server/handler_git_message.go, which is
+// unexported and so cannot be shared; keep the two in step.
+const commitMessageTimeout = 60 * time.Second
 
 func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea.Cmd {
 	return func(diff string) tea.Cmd {
 		sideUsageCh := m.sideUsageCh
 		return func() tea.Msg {
-			result, err := generateCommitMessage(cfg, "", diff)
+			ctx, cancel := context.WithTimeout(context.Background(), commitMessageTimeout)
+			defer cancel()
+			result, err := generateCommitMessage(ctx, cfg, "", diff)
 			if err != nil {
 				return gitCommitMsgMsg{err: err}
 			}

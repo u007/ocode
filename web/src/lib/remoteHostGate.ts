@@ -66,13 +66,15 @@ export function isHostUnreachable(err: unknown): boolean {
 }
 
 /**
- * True when the local server answered 503: it is still connecting to the host
- * in the background (stage `remote-connecting`). That is not a failure, so it
+ * True when the local server answered 503 with stage `remote-connecting`: it is
+ * still connecting to the host in the background. That is not a failure, so it
  * must not open the retry window a 502 does; the read is simply retried on the
- * next tick.
+ * next tick. A bare 503 (no stage marker) is an ordinary error.
  */
 export function isHostConnecting(err: unknown): boolean {
-  return err instanceof Error && "status" in err && err.status === 503;
+  if (!(err instanceof Error) || !("status" in err) || err.status !== 503) return false;
+  if (!("body" in err) || typeof err.body !== "object" || err.body === null) return false;
+  return "stage" in err.body && err.body.stage === "remote-connecting";
 }
 
 /**

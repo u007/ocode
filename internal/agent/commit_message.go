@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -16,39 +19,52 @@ const DefaultCommitMsgPrompt = "Write a concise git commit message (subject line
 // they cannot drift on the cap.
 const commitMsgMaxDiffBytes = 8000
 
-// CommitMessageModelChain returns the models a commit-message generation
-// attempt should try, in order. An explicit commit_msg_model is authoritative
-// and is tried alone; otherwise the small model is preferred and the main model
-// is the fallback, so generation still works when no small model resolves or
-// its request fails. Empty and duplicate entries are dropped.
-func CommitMessageModelChain(explicit, small, main string) []string {
-	if explicit = strings.TrimSpace(explicit); explicit != "" {
-		return []string{explicit}
-	}
-	models := make([]string, 0, 2)
-	seen := make(map[string]bool, 2)
-	for _, model := range []string{strings.TrimSpace(small), strings.TrimSpace(main)} {
-		if model == "" || seen[model] {
-			continue
+// ErrCommitMessageNotConfigured reports that no model can serve commit-message
+// generation: none is configured, or the chosen model's provider has no client.
+// Callers treat it as a configuration precondition, not a generation failure.
+var ErrCommitMessageNotConfigured = errors.New("no LLM configured")
+
+// CommitMessageModel returns the one model a commit-message generation uses: an
+// explicit commit_msg_model, else the resolved small model, else the main model.
+// Blank entries are skipped. A single model is returned on purpose: a failing
+// model is reported, never replaced by another.
+func CommitMessageModel(explicit, small, main string) string {
+	for _, model := range []string{explicit, small, main} {
+		if model = strings.TrimSpace(model); model != "" {
+			return model
 		}
-		seen[model] = true
-		models = append(models, model)
 	}
-	return models
+	return ""
 }
 
-// ResolveCommitMessageModelChain resolves the commit-message model chain for
-// cfg. It probes the small model only when no explicit commit_msg_model is set,
-// because resolution constructs provider clients.
-func ResolveCommitMessageModelChain(cfg *config.Config) []string {
+// ResolveCommitMessageModel resolves the commit-message model for cfg. It probes
+// the small model only when no explicit commit_msg_model is set, because
+// resolution constructs provider clients. The probe runs under profile, so the
+// profile's own credentials decide which small model resolves.
+func ResolveCommitMessageModel(cfg *config.Config, profile string) string {
 	if cfg == nil {
-		return nil
+		return ""
 	}
 	small := ""
 	if strings.TrimSpace(cfg.Ocode.CommitMsgModel) == "" {
-		small = ResolveSmallModel(cfg)
+		small = resolveCommitMessageSmallModel(cfg, profile)
 	}
-	return CommitMessageModelChain(cfg.Ocode.CommitMsgModel, small, cfg.Model)
+	return CommitMessageModel(cfg.Ocode.CommitMsgModel, small, cfg.Model)
+}
+
+// resolveCommitMessageSmallModel mirrors ResolveSmallModel, except that each
+// candidate is probed under profile. ResolveSmallModel always probes with the
+// process-global credentials.
+func resolveCommitMessageSmallModel(cfg *config.Config, profile string) string {
+	if cfg.Ocode.SmallModel != "" {
+		return cfg.Ocode.SmallModel
+	}
+	for _, candidate := range SmallModelPriority {
+		if commitMessageClient(cfg, candidate, profile) != nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // CommitMessageResult is one successful commit-message generation.
@@ -68,63 +84,70 @@ func commitMessageClient(cfg *config.Config, model, profile string) LLMClient {
 	return newClientFn(cfg, model)
 }
 
-// GenerateCommitMessage summarises diff as a git commit message, trying the
-// resolved model chain in order and falling back when a client cannot be built,
-// the request fails, or the reply is empty. profile may be empty.
+// capDiffBytes cuts diff to at most limit bytes without splitting a UTF-8
+// sequence. It backs up over at most utf8.UTFMax-1 bytes, the most a valid rune
+// can span before its lead byte, so input that is not valid UTF-8 cannot walk
+// the cut back to an empty diff.
+func capDiffBytes(diff string, limit int) string {
+	if len(diff) <= limit {
+		return diff
+	}
+	end := limit
+	for i := 0; i < utf8.UTFMax-1 && !utf8.RuneStart(diff[end]); i++ {
+		end--
+	}
+	return diff[:end]
+}
+
+// GenerateCommitMessage summarises diff as a git commit message with the one
+// resolved model (see ResolveCommitMessageModel). It never falls back to another
+// model: a failure is returned naming the model. ctx bounds the provider call.
+// profile may be empty.
 //
 // This is the single implementation behind both the TUI git tab's Ctrl+G
 // generator and POST /api/git/commit-message (web/desktop Git tab).
-func GenerateCommitMessage(cfg *config.Config, profile, diff string) (*CommitMessageResult, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("no LLM configured")
+func GenerateCommitMessage(ctx context.Context, cfg *config.Config, profile, diff string) (*CommitMessageResult, error) {
+	model := ResolveCommitMessageModel(cfg, profile)
+	if model == "" {
+		return nil, ErrCommitMessageNotConfigured
 	}
-	models := ResolveCommitMessageModelChain(cfg)
-	if len(models) == 0 {
-		return nil, fmt.Errorf("no LLM configured")
+	client := commitMessageClient(cfg, model, profile)
+	if client == nil {
+		return nil, fmt.Errorf("%w: %s has no configured provider", ErrCommitMessageNotConfigured, model)
 	}
-	if len(diff) > commitMsgMaxDiffBytes {
-		diff = diff[:commitMsgMaxDiffBytes]
+	// A client that cannot honour ctx would run past the caller's deadline, so it
+	// is refused rather than called uncancellably.
+	cc, ok := client.(contextChatter)
+	if !ok {
+		return nil, fmt.Errorf("%s: client cannot honour a request deadline", model)
 	}
+	diff = capDiffBytes(diff, commitMsgMaxDiffBytes)
 	prompt := cfg.Ocode.CommitMsgPrompt
 	if prompt == "" {
 		prompt = DefaultCommitMsgPrompt
 	}
-	var lastErr error
-	for _, model := range models {
-		client := commitMessageClient(cfg, model, profile)
-		if client == nil {
-			lastErr = fmt.Errorf("%s: no client (provider not configured)", model)
-			continue
-		}
-		resp, err := client.Chat([]Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
-		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", model, err)
-			continue
-		}
-		text := ""
-		if resp != nil {
-			text = strings.TrimSpace(resp.Content)
-		}
-		if text == "" {
-			lastErr = fmt.Errorf("%s: empty commit message", model)
-			continue
-		}
-		res := &CommitMessageResult{Text: text, Model: model}
-		if resp.Usage != nil {
-			res.Usage = resp.Usage
-		}
-		if resp.Spend != nil {
-			s := *resp.Spend
-			res.Spend = &s
-		} else if resp.Usage != nil && resp.Model != "" && promptAndCompletionTokens(resp.Usage) > 0 {
-			res.Spend = resp.Usage.Spend(resp.Model)
-		}
-		return res, nil
+	resp, err := cc.ChatWithContext(ctx, []Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", model, err)
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no LLM configured")
+	text := ""
+	if resp != nil {
+		text = strings.TrimSpace(resp.Content)
 	}
-	return nil, lastErr
+	if text == "" {
+		return nil, fmt.Errorf("%s: empty commit message", model)
+	}
+	res := &CommitMessageResult{Text: text, Model: model}
+	if resp.Usage != nil {
+		res.Usage = resp.Usage
+	}
+	if resp.Spend != nil {
+		s := *resp.Spend
+		res.Spend = &s
+	} else if resp.Usage != nil && resp.Model != "" && promptAndCompletionTokens(resp.Usage) > 0 {
+		res.Spend = resp.Usage.Spend(resp.Model)
+	}
+	return res, nil
 }
 
 func promptAndCompletionTokens(u *TokenUsage) int64 {

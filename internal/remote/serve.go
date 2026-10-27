@@ -241,13 +241,50 @@ func EnsureRemoteServer(t Transport, ver string, slot ServeSlot) (state ServeSta
 	if err := killOtherVersionServers(t, ver); err != nil {
 		log.Printf("remote: reap old-version servers on %s: %v", t, err)
 	}
-	if err := killOrphanSlotServers(t, ver, slot, fresh.PID); err != nil {
-		log.Printf("remote: reap orphaned %q servers on %s: %v", string(slot), t, err)
+	fresh, reap := settleOnStateFileServer(t, ver, slot, fresh)
+	if reap {
+		if err := killOrphanSlotServers(t, ver, slot, fresh.PID); err != nil {
+			log.Printf("remote: reap orphaned %q servers on %s: %v", string(slot), t, err)
+		}
 	}
 	// A freshly launched server always reports the local version; a stale
 	// Outdated value can never leak in from the state file (json:"-").
 	fresh.Outdated = false
 	return fresh, false, nil
+}
+
+// settleOnStateFileServer re-reads the state file immediately before the orphan
+// reap and returns the server this client should converge on, plus whether the
+// reap may run. Concurrent connects each relaunch (launchServerCmd deletes the
+// state file first), so the server a sibling client discovered is the one the
+// state file names now, not necessarily the one this client launched. Outcomes:
+//   - the file names our own server: keep it and reap around it;
+//   - it names a different, healthy, same-version server: a sibling won, so
+//     adopt it and reap around it. Every client converges on the state-file
+//     server, so the reaper never kills the server a client is returning;
+//   - the file is missing or unreadable, or names an unhealthy or other-version
+//     server: a sibling launch is in flight (its rm has run, its server has not
+//     written yet) or the named server is unusable. Skip the reap, because a
+//     server about to be discovered is indistinguishable from an orphan.
+//     Leftovers are reaped by a later launch.
+//
+// Residual window: one Exec round trip between this read and the kill. A launch
+// that starts inside it can lose a server nobody has discovered yet; that
+// client's state-file poll fails loudly rather than using a dead server.
+func settleOnStateFileServer(t Transport, ver string, slot ServeSlot, fresh ServeState) (ServeState, bool) {
+	current, ok := DiscoverServer(t, slot)
+	if !ok {
+		log.Printf("remote: state file for slot %q missing or unreadable on %s; skipping orphan reap", string(slot), t.Describe())
+		return fresh, false
+	}
+	if current.PID == fresh.PID {
+		return fresh, true
+	}
+	if current.Version != ver || !serverHealthy(t, current) {
+		log.Printf("remote: state file on %s names pid %d (version %q, not reusable); skipping orphan reap", t.Describe(), current.PID, current.Version)
+		return fresh, false
+	}
+	return current, true
 }
 
 // otherVersionServersCmd signals (with sig) every

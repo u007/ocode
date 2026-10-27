@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/u007/ocode/internal/projects"
@@ -113,6 +114,33 @@ func TestRemoteLifecycleConnectUsesSavedPathAndPort(t *testing.T) {
 	}
 	if !st.Connected || st.PID != 5 {
 		t.Fatalf("status = %+v, want connected with pid 5", st)
+	}
+}
+
+// A user Connect after a failed connect must start a fresh attempt, not replay
+// the cooldown error the polling path would get.
+func TestRemoteLifecycleConnectRetriesAfterFailedConnect(t *testing.T) {
+	ws := &fakeWorkspace{
+		apiURL: "http://127.0.0.1:9",
+		token:  "t",
+		state:  remote.ServeState{Version: version.Version, PID: 5},
+	}
+	var connects atomic.Int32
+	s := newLifecycleServer(t, "user@realhost", "/srv/app", 0, func(remote.Target, string) (remoteHostWorkspace, error) {
+		if connects.Add(1) == 1 {
+			return nil, errors.New("tunnel not ready")
+		}
+		return ws, nil
+	})
+	if w := doLifecycle(s, "POST", "/api/remote/user%40realhost/connect"); w.Code != http.StatusBadGateway {
+		t.Fatalf("first connect status = %d, want 502: %s", w.Code, w.Body.String())
+	}
+	w := doLifecycle(s, "POST", "/api/remote/user%40realhost/connect")
+	if w.Code != http.StatusOK {
+		t.Fatalf("retry connect status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if got := connects.Load(); got != 2 {
+		t.Fatalf("connect attempts = %d, want 2", got)
 	}
 }
 

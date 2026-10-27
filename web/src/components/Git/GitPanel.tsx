@@ -875,8 +875,8 @@ export default function GitPanel({
   };
 
   // Ask the server to draft a commit message from the current diff. The server
-  // prefers the small model and falls back to the main model, so the button
-  // still works when no small model is configured or its request fails.
+  // uses the small model when configured, else the main model. A failed request
+  // is surfaced, never retried on the other model.
   const generateCommitMessage = async () => {
     if (generatingMessage) return;
     const diff = buildCommitMessageDiff(
