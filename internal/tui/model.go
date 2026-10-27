@@ -24402,75 +24402,49 @@ func (m *model) filesAddToContext() tea.Cmd {
 	}
 }
 
+// generateCommitMessage is agent.GenerateCommitMessage behind a package
+// variable so TUI tests can stub the LLM call. The generation policy (small
+// model, main-model fallback) lives in the agent package and is shared with the
+// web/desktop Git tab's endpoint.
+var generateCommitMessage = agent.GenerateCommitMessage
+
 func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea.Cmd {
 	return func(diff string) tea.Cmd {
 		sideUsageCh := m.sideUsageCh
 		return func() tea.Msg {
-			model := cfg.Ocode.CommitMsgModel
-			if model == "" {
-				model = agent.ResolveSmallModel(cfg)
-			}
-			if model == "" {
-				return gitCommitMsgMsg{err: fmt.Errorf("no LLM configured")}
-			}
-			client := agent.NewClient(cfg, model)
-			if client == nil {
-				return gitCommitMsgMsg{err: fmt.Errorf("no LLM configured")}
-			}
-			if len(diff) > 8000 {
-				diff = diff[:8000]
-			}
-			prompt := cfg.Ocode.CommitMsgPrompt
-			if prompt == "" {
-				prompt = "Write a concise git commit message (subject line only, max 72 chars) for these changes. Output only the commit message text, nothing else:"
-			}
-			resp, err := client.Chat([]agent.Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
+			result, err := generateCommitMessage(cfg, "", diff)
 			if err != nil {
 				return gitCommitMsgMsg{err: err}
 			}
-			if resp != nil && sideUsageCh != nil {
-				if resp.Usage != nil {
-					pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
-					if resp.Usage.PromptTokens != nil {
-						pt = *resp.Usage.PromptTokens
-					}
-					if resp.Usage.CompletionTokens != nil {
-						ct = *resp.Usage.CompletionTokens
-					}
-					if resp.Usage.CacheReadTokens != nil {
-						crt = *resp.Usage.CacheReadTokens
-					}
-					if resp.Usage.CacheWriteTokens != nil {
-						cwt = *resp.Usage.CacheWriteTokens
-					}
-					var spend *float64
-					if resp.Spend != nil {
-						s := *resp.Spend
-						spend = &s
-					} else if resp.Model != "" && pt+ct > 0 {
-						usage := &agent.TokenUsage{
-							PromptTokens:     &pt,
-							CompletionTokens: &ct,
-							CacheReadTokens:  &crt,
-							CacheWriteTokens: &cwt,
-						}
-						total := pt + ct
-						usage.TotalTokens = &total
-						spend = usage.Spend(resp.Model)
-					}
-					select {
-					case sideUsageCh <- sideUsageData{
-						promptTokens:     pt,
-						completionTokens: ct,
-						cacheReadTokens:  crt,
-						cacheWriteTokens: cwt,
-						spend:            spend,
-					}:
-					default:
-					}
+			if result == nil {
+				return gitCommitMsgMsg{err: fmt.Errorf("no LLM configured")}
+			}
+			if u := result.Usage; u != nil && sideUsageCh != nil {
+				pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+				if u.PromptTokens != nil {
+					pt = *u.PromptTokens
+				}
+				if u.CompletionTokens != nil {
+					ct = *u.CompletionTokens
+				}
+				if u.CacheReadTokens != nil {
+					crt = *u.CacheReadTokens
+				}
+				if u.CacheWriteTokens != nil {
+					cwt = *u.CacheWriteTokens
+				}
+				select {
+				case sideUsageCh <- sideUsageData{
+					promptTokens:     pt,
+					completionTokens: ct,
+					cacheReadTokens:  crt,
+					cacheWriteTokens: cwt,
+					spend:            result.Spend,
+				}:
+				default:
 				}
 			}
-			return gitCommitMsgMsg{text: strings.TrimSpace(resp.Content)}
+			return gitCommitMsgMsg{text: result.Text}
 		}
 	}
 }

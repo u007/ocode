@@ -26,7 +26,7 @@ func newConnectFakeTransport(state ServeState) *fakeTransport {
 
 	// State file discovery
 	stateJSON, _ := json.Marshal(state)
-	catCmd := "cat " + shellQuotePath("~/.ocode/remote/serve.json") + " 2>/dev/null || true"
+	catCmd := stateCatCmd("")
 	ft.execResults[catCmd] = ExecResult{Stdout: string(stateJSON)}
 
 	// serverHealthy: pid + health
@@ -221,7 +221,7 @@ func TestWorkspaceDiscoverOrStartServerRetiresOutdated(t *testing.T) {
 	ft := newConnectFakeTransport(existing)
 	fresh := ServeState{PID: 77, Port: 4100, Token: "new", Version: version.Version}
 	freshData, _ := json.Marshal(fresh)
-	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd(version.Version), freshStateJSON: string(freshData)}
+	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd(version.Version, ""), freshStateJSON: string(freshData)}
 
 	rw := &RemoteWorkspace{
 		Transport:  k,

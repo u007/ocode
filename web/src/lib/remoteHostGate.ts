@@ -66,6 +66,16 @@ export function isHostUnreachable(err: unknown): boolean {
 }
 
 /**
+ * True when the local server answered 503: it is still connecting to the host
+ * in the background (stage `remote-connecting`). That is not a failure, so it
+ * must not open the retry window a 502 does; the read is simply retried on the
+ * next tick.
+ */
+export function isHostConnecting(err: unknown): boolean {
+  return err instanceof Error && "status" in err && err.status === 503;
+}
+
+/**
  * Runs `fn` under this host's read slot, waiting in line if another read of
  * the same host is in flight.
  *
@@ -122,8 +132,8 @@ export async function withRemoteRead(
 /**
  * One periodic read of project data on `host`, gated like every other remote
  * read. A read with no host is local and runs directly. Resolves null when the
- * read was skipped because the host is inside its retry window, so the caller
- * keeps its last good data. Only an unreachable host (see isHostUnreachable)
+ * read was skipped because the host is inside its retry window or still
+ * connecting (503), so the caller keeps its last good data. Only an unreachable host (see isHostUnreachable)
  * opens the window; any other failure rethrows while the host still counts as
  * answering.
  */
@@ -141,6 +151,7 @@ export async function periodicRemoteRead<T>(
     try {
       outcome.read = { value: await fn() };
     } catch (error) {
+      if (isHostConnecting(error)) return true;
       if (!isHostUnreachable(error)) {
         outcome.failure = { error };
         return true;

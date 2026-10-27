@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -108,6 +109,16 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("remote proxy: connect host %s failed: %v", host, err)
 		w.Header().Set("Content-Type", "application/json")
+		if errors.Is(err, errConnectInProgress) {
+			// Not a failure: the connect is still running in the background.
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("remote connecting: %v", err),
+				"stage": "remote-connecting",
+			})
+			return
+		}
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": fmt.Sprintf("remote connect failed: %v", err),

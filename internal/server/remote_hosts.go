@@ -30,6 +30,9 @@ type remoteHostWorkspace interface {
 	// Transport fields, and Go forbids a method sharing a field's name.
 	ServeState() remote.ServeState
 	ServeTransport() remote.Transport
+	// ServeSlot names the remote server instance this workspace talks to, so
+	// restart kills the right process and state file.
+	ServeSlot() remote.ServeSlot
 	// BrowseURL is the local end of the workspace's browse tunnel ("" when the
 	// remote reports no browse origin). It is the one place that encodes the
 	// same-port-number tunnel contract; handlers must not re-derive it.
@@ -86,8 +89,9 @@ type remoteHostEntry struct {
 	workspace  remoteHostWorkspace
 	connecting sync.Cond // waits for an in-flight connect to finish
 	connected  bool
-	failed     bool  // connect failed; entry should be removed
+	failed     bool  // connect failed; entry is kept until remoteConnectCooldown elapses
 	connectErr error // the error from a failed connect attempt
+	failedAt   time.Time
 	// proxy is the cached reverse proxy built once per connect. The ErrorHandler
 	// calls drop(host) on round-trip failure so the next request reconnects.
 	proxy *httputil.ReverseProxy
@@ -126,6 +130,10 @@ type remoteHostRegistry struct {
 	// connectTimeout overrides the default backstop on one connect attempt
 	// (remoteConnectTimeout). Tests set a short value; production leaves it 0.
 	connectTimeout time.Duration
+
+	// connectCooldown overrides remoteConnectCooldown. Tests that exercise
+	// retry-after-failure set a tiny value; production leaves it 0.
+	connectCooldown time.Duration
 
 	// eventsLiveness overrides the upstream-silence bound of the /api/events
 	// relay (remoteEventsLiveness). Tests set a short value; production
@@ -197,7 +205,7 @@ func (reg *remoteHostRegistry) isRegistered(host string, port int, path string) 
 // workspaceFor returns a connected workspace for the given host at its default
 // port, creating one lazily if needed. Concurrent callers for the same
 // CONNECTION share one connect attempt; callers for different hosts or ports
-// proceed in parallel. A failed connect is not cached — the next call retries.
+// proceed in parallel. A failed connect is remembered for remoteConnectCooldown.
 // It delegates to workspaceForPort with port 0 (meaning: no explicit port
 // override).
 func (reg *remoteHostRegistry) workspaceFor(host, path string) (remoteHostWorkspace, error) {
@@ -257,7 +265,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	// the connect actually dials.
 	key := remoteConnectionKey(host, target.Port)
 
-	// Fast path: entry already connected.
+	// Fast path: entry already connected, or failed within the cooldown.
 	reg.mu.Lock()
 	if e, ok := reg.byConn[key]; ok {
 		e.mu.Lock()
@@ -267,7 +275,17 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 			reg.mu.Unlock()
 			return ws, nil
 		}
-		// Connect in progress or failed — wait for it.
+		if e.failed {
+			if time.Since(e.failedAt) < reg.cooldown() {
+				err := e.connectErr
+				e.mu.Unlock()
+				reg.mu.Unlock()
+				return nil, err
+			}
+			// Cooldown over: evict so this call starts a fresh connect.
+			delete(reg.byConn, key)
+		}
+		// Connect in progress — wait for it.
 		e.mu.Unlock()
 	}
 
@@ -275,47 +293,72 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	e, created := reg.getOrCreateEntry(key)
 	reg.mu.Unlock()
 
-	if !created {
-		// Another goroutine is connecting. Wait for it.
-		e.mu.Lock()
-		for !e.connected && !e.failed {
-			e.connecting.Wait()
-		}
-		if e.failed {
-			err := e.connectErr
-			e.mu.Unlock()
-			return nil, err
-		}
-		ws := e.workspace
-		e.mu.Unlock()
-		return ws, nil
+	if created {
+		// The connect runs in the background: a request must never stay parked for
+		// a whole connect, or one slow project pins a browser connection (WebKit
+		// allows ~6 per origin) and stalls every other project.
+		go reg.runConnect(e, key, target, path, host)
 	}
 
-	// We own the connect. Run it outside the registry-wide mutex. A panic in
-	// the connect implementation is converted to an error so the entry is
-	// always resolved; otherwise it would stay in byConn with nobody to
-	// broadcast and every later caller for this connection would block forever.
+	// Every caller, owner included, waits only briefly: a proxied request parked
+	// for a whole connect pins one of the browser's few per-origin connections
+	// and starves every other project.
+	e.mu.Lock()
+	waitStart := time.Now()
+	timer := time.AfterFunc(remoteConnectWaitBound, func() {
+		e.mu.Lock()
+		e.connecting.Broadcast()
+		e.mu.Unlock()
+	})
+	defer timer.Stop()
+	for !e.connected && !e.failed {
+		if time.Since(waitStart) >= remoteConnectWaitBound {
+			e.mu.Unlock()
+			return nil, &remoteHostStageError{
+				Stage: "remote-connecting",
+				Err:   fmt.Errorf("remote connect to %s: %w", key, errConnectInProgress),
+			}
+		}
+		e.connecting.Wait()
+	}
+	if e.failed {
+		err := e.connectErr
+		e.mu.Unlock()
+		return nil, err
+	}
+	ws := e.workspace
+	e.mu.Unlock()
+	return ws, nil
+}
+
+// runConnect performs the connect for the entry the caller created and resolves it
+// (connected or failed, waiters broadcast). A panic in the connect implementation
+// is converted to an error by connectGuarded so the entry is always resolved.
+func (reg *remoteHostRegistry) runConnect(e *remoteHostEntry, key string, target remote.Target, path, host string) {
+	// Run the connect outside the registry-wide mutex. A panic in the connect
+	// implementation is converted to an error so the entry is always resolved;
+	// otherwise it would stay in byConn with nobody to broadcast and every
+	// later caller for this connection would block forever.
 	log.Printf("remote: connecting to %s", key)
 	start := time.Now()
 	ws, err := reg.connectBounded(target, path, host)
 	if err != nil {
-		// Publish the failure and evict the entry under reg.mu → e.mu, the
-		// established lock order. The delete is conditional on identity: a
-		// concurrent drop()/closeAll() may have replaced this entry with a
-		// fresh one that must not be evicted by this older failure.
+		// Publish the failure under reg.mu → e.mu, the established lock order.
+		// The entry STAYS in byConn for remoteConnectCooldown so callers that
+		// arrive right after the failure get this error instead of each starting
+		// another connect (and another remote server). If drop()/closeAll()
+		// already replaced the entry, there is nothing to keep.
 		reg.mu.Lock()
 		e.mu.Lock()
 		e.failed = true
+		e.failedAt = time.Now()
 		e.connectErr = err
 		e.connecting.Broadcast()
-		if reg.byConn[key] == e {
-			delete(reg.byConn, key)
-		}
 		e.mu.Unlock()
 		reg.mu.Unlock()
 
 		log.Printf("remote: connect to %s failed after %v: %v", key, time.Since(start), err)
-		return nil, err
+		return
 	}
 
 	// Publish success atomically with the identity check. If drop()/closeAll()
@@ -336,7 +379,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 			log.Printf("remote: disconnect superseded workspace for %s: %v", key, derr)
 		}
 		log.Printf("remote: connect to %s superseded by drop after %v", key, time.Since(start))
-		return nil, errConnectSuperseded
+		return
 	}
 	e.workspace = ws
 	e.proxy = nil
@@ -360,7 +403,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 		if derr := ws.Disconnect(); derr != nil {
 			log.Printf("remote: disconnect after proxy build failure for %s: %v", key, derr)
 		}
-		return nil, perr
+		return
 	}
 	e.proxy = p
 	e.connected = true
@@ -369,7 +412,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	reg.mu.Unlock()
 
 	log.Printf("remote: connected to %s at %s (took %v)", key, ws.APIURL(), time.Since(start))
-	return ws, nil
+	return
 }
 
 // status reports what the registry knows about host without connecting. A host
@@ -405,16 +448,18 @@ func (reg *remoteHostRegistry) connectHost(host, path string, port int) (remoteH
 
 // snapshotForRestart reads the connected workspace's transport and pid and the
 // set of paths registered on the host, all before drop clears them.
-func (reg *remoteHostRegistry) snapshotForRestart(host string, port int) (remote.Transport, int, []string) {
+func (reg *remoteHostRegistry) snapshotForRestart(host string, port int) (remote.Transport, int, remote.ServeSlot, []string) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 	key := remoteConnectionKey(host, port)
 	var transport remote.Transport
+	var slot remote.ServeSlot
 	pid := 0
 	if e, ok := reg.byConn[key]; ok {
 		e.mu.Lock()
 		if e.connected && e.workspace != nil {
 			transport = e.workspace.ServeTransport()
+			slot = e.workspace.ServeSlot()
 			pid = e.workspace.ServeState().PID
 		}
 		e.mu.Unlock()
@@ -424,7 +469,7 @@ func (reg *remoteHostRegistry) snapshotForRestart(host string, port int) (remote
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
-	return transport, pid, paths
+	return transport, pid, slot, paths
 }
 
 // restart kills the connected remote server (if any), drops the host entry,
@@ -434,12 +479,12 @@ func (reg *remoteHostRegistry) snapshotForRestart(host string, port int) (remote
 // entry is left dropped so the next request reconnects; the returned error
 // carries the stage that failed.
 func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostStatus, error) {
-	transport, pid, savedPaths := reg.snapshotForRestart(host, port)
+	transport, pid, slot, savedPaths := reg.snapshotForRestart(host, port)
 	// Kill over the still-live transport, then drop unconditionally so a
 	// failure at any stage leaves no half-live entry.
 	var killErr error
 	if transport != nil && pid > 0 {
-		killErr = remote.KillServer(transport, pid)
+		killErr = remote.KillServer(transport, pid, slot)
 	}
 	reg.drop(host, port)
 	if killErr != nil {
@@ -456,6 +501,30 @@ func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostS
 	}
 	return reg.status(host, port), nil
 }
+
+// remoteConnectCooldown is how long a failed connect is remembered. Browser
+// polls (terminal sockets, session state, the events relay) keep arriving while
+// a host is down; without this each one started its own ~11s connect.
+var remoteConnectCooldown = 5 * time.Second
+
+// errConnectInProgress is returned to a caller that stopped waiting for a
+// connect that is still running in the background. It is NOT a host failure:
+// handlers answer 503 + Retry-After (stage "remote-connecting") so the SPA does
+// not open the 2-minute unreachable window it applies to a 502.
+var errConnectInProgress = errors.New("still connecting")
+
+// cooldown returns the effective failed-connect memory: the registry's override
+// when set, else remoteConnectCooldown.
+func (reg *remoteHostRegistry) cooldown() time.Duration {
+	if reg.connectCooldown > 0 {
+		return reg.connectCooldown
+	}
+	return remoteConnectCooldown
+}
+
+// remoteConnectWaitBound caps how long a request waits on another caller's
+// in-flight connect before failing fast.
+var remoteConnectWaitBound = 2 * time.Second
 
 // errConnectSuperseded is returned when a drop()/closeAll() removed the entry
 // while its connect was in flight. The built workspace was disconnected. In
@@ -562,6 +631,19 @@ func (reg *remoteHostRegistry) drop(host string, port int) {
 	key := remoteConnectionKey(host, port)
 	reg.mu.Lock()
 	e, ok := reg.byConn[key]
+	if ok {
+		e.mu.Lock()
+		inFlight := !e.connected && !e.failed
+		e.mu.Unlock()
+		if inFlight {
+			// A connect is still running for this connection. Superseding it
+			// lets the next poller start a parallel connect, which relaunches
+			// the remote server and orphans the first. The in-flight connect
+			// resolves the entry itself.
+			reg.mu.Unlock()
+			return
+		}
+	}
 	delete(reg.byConn, key)
 	// Clear unconditionally: markRegistered may have recorded paths for a
 	// connection with no live entry yet, and a reconnect must re-register the

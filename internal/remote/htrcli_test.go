@@ -152,7 +152,7 @@ func TestLocalSHA256MatchesContent(t *testing.T) {
 }
 
 func TestLaunchServerCmdPutsVersionDirOnPath(t *testing.T) {
-	cmd := launchServerCmd("0.8.85")
+	cmd := launchServerCmd("0.8.85", "")
 	if !strings.Contains(cmd, `PATH="$HOME/.ocode/bin/0.8.85":"$PATH"`) {
 		t.Fatalf("launch command must put the version dir first on PATH so the agent shell finds htrcli: %q", cmd)
 	}

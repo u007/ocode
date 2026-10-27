@@ -38,6 +38,7 @@ func (f *fakeWorkspace) Disconnect() error {
 }
 func (f *fakeWorkspace) ServeState() remote.ServeState    { return f.state }
 func (f *fakeWorkspace) ServeTransport() remote.Transport { return f.transport }
+func (f *fakeWorkspace) ServeSlot() remote.ServeSlot      { return "" }
 func (f *fakeWorkspace) BrowseURL() string                { return "" }
 func (f *fakeWorkspace) SyncConfig(force bool) error      { return nil }
 
@@ -473,8 +474,9 @@ func TestDropDuringConnectDoesNotEvictReplacement(t *testing.T) {
 	}()
 	<-entered
 
-	// Drop the in-flight entry, then connect a replacement.
-	reg.drop("h", 0)
+	// closeAll replaces the in-flight entry (drop() deliberately leaves an
+	// in-flight connect alone), then connect a replacement.
+	reg.closeAll(context.Background())
 	if _, err := reg.workspaceFor("h", "/p"); err != nil {
 		t.Fatalf("replacement connect: %v", err)
 	}
@@ -566,13 +568,19 @@ func TestConnectTimeoutReleasesWaiters(t *testing.T) {
 		t.Fatal("connect timeout never released the caller — waiter pinned forever")
 	}
 
-	// The timed-out entry must be evicted so a later call retries instead of
-	// joining a dead in-flight connect.
+	// The timed-out entry must be resolved as failed (kept only for the
+	// cooldown) so a later call retries instead of joining a dead in-flight
+	// connect.
 	reg.mu.Lock()
-	_, present := reg.byConn["h"]
+	e := reg.byConn["h"]
 	reg.mu.Unlock()
-	if present {
-		t.Fatal("timed-out connect left its entry in byConn; later callers would wait on it")
+	if e != nil {
+		e.mu.Lock()
+		failed := e.failed
+		e.mu.Unlock()
+		if !failed {
+			t.Fatal("timed-out connect left an unresolved entry; later callers would wait on it")
+		}
 	}
 
 	close(block)
@@ -616,6 +624,9 @@ func newTestRegistry(connectFn func(remote.Target, string) (remoteHostWorkspace,
 		byConn:          make(map[string]*remoteHostEntry),
 		registeredPaths: make(map[string]map[string]struct{}),
 		connect:         connectFn,
+		// Effectively no cooldown: these tests assert the next call after a
+		// failure reconnects. The cooldown itself has dedicated tests.
+		connectCooldown: time.Nanosecond,
 		factory: func(remote.Target, string, *tool.ProcessSupervisor) (remoteHostWorkspaceConnector, error) {
 			return nil, errors.New("factory not configured in this test")
 		},
@@ -1058,5 +1069,132 @@ func TestRemoteConnectionKeyAgreesWithMuxIdentity(t *testing.T) {
 		if got, want := remoteSlotKey(tgt), remoteConnectionKey(tgt.String(), tgt.Port); got != want {
 			t.Errorf("slot key %q != registry key %q for %+v", got, want, tgt)
 		}
+	}
+}
+
+// A failed connect is remembered for the cooldown: pollers arriving right after
+// it must get the cached error instead of each starting another connect (and
+// another remote server).
+func TestWorkspaceForPortCachesFailureDuringCooldown(t *testing.T) {
+	reg := newRemoteHostRegistry(nil)
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		return nil, errors.New("tunnel not ready")
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := reg.workspaceForPort("u@host", "/p", 0); err == nil {
+			t.Fatal("expected connect error")
+		}
+	}
+	if got := connects.Load(); got != 1 {
+		t.Fatalf("connect attempts = %d, want 1 within the cooldown", got)
+	}
+}
+
+func TestWorkspaceForPortRetriesAfterCooldown(t *testing.T) {
+	old := remoteConnectCooldown
+	remoteConnectCooldown = 20 * time.Millisecond
+	t.Cleanup(func() { remoteConnectCooldown = old })
+
+	reg := newRemoteHostRegistry(nil)
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		return nil, errors.New("tunnel not ready")
+	}
+	_, _ = reg.workspaceForPort("u@host", "/p", 0)
+	time.Sleep(40 * time.Millisecond)
+	_, _ = reg.workspaceForPort("u@host", "/p", 0)
+	if got := connects.Load(); got != 2 {
+		t.Fatalf("connect attempts = %d, want 2 after the cooldown", got)
+	}
+}
+
+// drop() must not supersede a connect that is still running: the next poller
+// would start a parallel connect and orphan the first one's remote server.
+func TestDropDoesNotSupersedeInFlightConnect(t *testing.T) {
+	reg := newRemoteHostRegistry(nil)
+	release := make(chan struct{})
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		<-release
+		return &fakeWorkspace{apiURL: "http://127.0.0.1:1", token: "t"}, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.workspaceForPort("u@host", "/p", 0)
+		done <- err
+	}()
+	for connects.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	reg.drop("u@host", 0)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("in-flight connect was superseded: %v", err)
+	}
+}
+
+// A waiter on another caller's slow connect fails fast instead of pinning a
+// browser connection for the whole connect.
+func TestWorkspaceForPortWaiterFailsFast(t *testing.T) {
+	old := remoteConnectWaitBound
+	remoteConnectWaitBound = 30 * time.Millisecond
+	t.Cleanup(func() { remoteConnectWaitBound = old })
+
+	reg := newRemoteHostRegistry(nil)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		<-release
+		return nil, errors.New("late")
+	}
+	go func() { _, _ = reg.workspaceForPort("u@host", "/p", 0) }()
+	for connects.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	if _, err := reg.workspaceForPort("u@host", "/p", 0); err == nil {
+		t.Fatal("expected in-progress error")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("waiter blocked %v, want fail-fast", d)
+	}
+}
+
+// The caller that starts a slow connect must not stay parked for it either:
+// one slow project would otherwise pin a browser connection per request.
+func TestWorkspaceForPortOwnerFailsFastAndConnectFinishes(t *testing.T) {
+	old := remoteConnectWaitBound
+	remoteConnectWaitBound = 30 * time.Millisecond
+	t.Cleanup(func() { remoteConnectWaitBound = old })
+
+	reg := newRemoteHostRegistry(nil)
+	release := make(chan struct{})
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		<-release
+		return &fakeWorkspace{apiURL: "http://127.0.0.1:1", token: "t"}, nil
+	}
+	start := time.Now()
+	if _, err := reg.workspaceForPort("u@host", "/p", 0); !errors.Is(err, errConnectInProgress) {
+		t.Fatalf("err = %v, want errConnectInProgress while the connect is slow", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("owner blocked %v, want fail-fast", d)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if ws, err := reg.workspaceForPort("u@host", "/p", 0); err == nil && ws != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background connect never published the workspace")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

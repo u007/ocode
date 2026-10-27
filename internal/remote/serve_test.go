@@ -13,8 +13,8 @@ import (
 
 func TestDiscoverServerMissing(t *testing.T) {
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: "", ExitCode: 0}
-	_, ok := DiscoverServer(ft)
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: "", ExitCode: 0}
+	_, ok := DiscoverServer(ft, "")
 	if ok {
 		t.Fatal("expected ok=false for empty state file output")
 	}
@@ -24,9 +24,9 @@ func TestDiscoverServerParsesState(t *testing.T) {
 	ft := newFakeTransport()
 	want := ServeState{PID: 123, Port: 4096, Token: "tok", Version: "0.8.85", StartedAt: time.Unix(1700000000, 0).UTC()}
 	data, _ := json.Marshal(want)
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data), ExitCode: 0}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data), ExitCode: 0}
 
-	got, ok := DiscoverServer(ft)
+	got, ok := DiscoverServer(ft, "")
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -37,8 +37,8 @@ func TestDiscoverServerParsesState(t *testing.T) {
 
 func TestDiscoverServerCorruptFileTreatedAsMissing(t *testing.T) {
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: "not json", ExitCode: 0}
-	if _, ok := DiscoverServer(ft); ok {
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: "not json", ExitCode: 0}
+	if _, ok := DiscoverServer(ft, ""); ok {
 		t.Fatal("corrupt state file must be treated as missing, not surfaced as an error")
 	}
 }
@@ -102,10 +102,10 @@ func (l *launchFailsWithStderrFake) Exec(command string) (ExecResult, error) {
 func TestStartFreshServerLaunchFailureIncludesStderr(t *testing.T) {
 	ft := &launchFailsWithStderrFake{
 		fakeTransport: newFakeTransport(),
-		failCmd:       launchServerCmd("0.8.85"),
+		failCmd:       launchServerCmd("0.8.85", ""),
 		stderr:        "nohup: command not found",
 	}
-	_, err := StartFreshServer(ft, "0.8.85")
+	_, err := StartFreshServer(ft, "0.8.85", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -119,11 +119,11 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	data, _ := json.Marshal(existing)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "0.8.85")
+	state, reused, err := EnsureRemoteServer(ft, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 		t.Errorf("expected Outdated=false for a matching version, got true")
 	}
 	for _, c := range ft.execCalls {
-		if c == launchServerCmd("0.8.85") {
+		if c == launchServerCmd("0.8.85", "") {
 			t.Error("EnsureRemoteServer launched a fresh server when an alive one was discovered")
 		}
 	}
@@ -150,7 +150,7 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1} // dead
 
 	// After the launch command runs, the poll for the state file must see
@@ -158,12 +158,12 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	// command), so make every subsequent "cat state file" call return the
 	// fresh state by overwriting the same key the launch stage's poll loop
 	// reads from.
-	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
-	origExec := ft.execResults[remoteStateCatCmd]
+	ft.execResults[launchServerCmd("0.8.85", "")] = ExecResult{ExitCode: 0}
+	origExec := ft.execResults[stateCatCmd("")]
 	_ = origExec
 	// Simulate "file now exists" by having a second fakeTransport wrapper
 	// switch its answer after the launch call is observed.
-	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,6 +183,7 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 type killedAfterTermFake struct {
 	*fakeTransport
 	pid            int
+	slot           ServeSlot
 	launchCmd      string
 	freshStateJSON string
 	killed         bool
@@ -198,7 +199,7 @@ func (k *killedAfterTermFake) Exec(command string) (ExecResult, error) {
 		return ExecResult{ExitCode: 1}, nil
 	case command == k.launchCmd:
 		k.launched = true
-	case command == remoteStateCatCmd && k.launched:
+	case command == stateCatCmd(k.slot) && k.launched:
 		return ExecResult{Stdout: k.freshStateJSON}, nil
 	}
 	return k.fakeTransport.Exec(command)
@@ -215,12 +216,12 @@ func TestEnsureRemoteServerRetiresMismatchedAliveServer(t *testing.T) {
 	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd("2.0.0"), freshStateJSON: string(freshData)}
-	state, reused, err := EnsureRemoteServer(k, "2.0.0")
+	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd("2.0.0", ""), freshStateJSON: string(freshData)}
+	state, reused, err := EnsureRemoteServer(k, "2.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestEnsureRemoteServerRetiresMismatchedAliveServer(t *testing.T) {
 		switch c {
 		case killTERMCmd(42):
 			killedOld = true
-		case launchServerCmd("2.0.0"):
+		case launchServerCmd("2.0.0", ""):
 			launched = true
 		case otherVersionServersCmd("2.0.0", "-KILL"):
 			reaped = true
@@ -253,11 +254,11 @@ func TestEnsureRemoteServerReplacesDeadMismatchedServer(t *testing.T) {
 	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1} // dead
-	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
+	ft.execResults[launchServerCmd("0.8.85", "")] = ExecResult{ExitCode: 0}
 
-	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85")
+	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -279,11 +280,11 @@ func TestEnsureRemoteServerMatchingVersionNotOutdated(t *testing.T) {
 	data, _ := json.Marshal(existing)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "2.0.0")
+	state, reused, err := EnsureRemoteServer(ft, "2.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -305,10 +306,10 @@ type pollAfterLaunchFake struct {
 }
 
 func (p *pollAfterLaunchFake) Exec(command string) (ExecResult, error) {
-	if command == launchServerCmd("0.8.85") {
+	if command == launchServerCmd("0.8.85", "") {
 		p.launched = true
 	}
-	if command == remoteStateCatCmd && p.launched {
+	if command == stateCatCmd("") && p.launched {
 		return ExecResult{Stdout: p.freshStateJSON}, nil
 	}
 	return p.fakeTransport.Exec(command)
@@ -333,11 +334,11 @@ type raceProneFake struct {
 }
 
 func (p *raceProneFake) Exec(command string) (ExecResult, error) {
-	if command == launchServerCmd("0.8.85") {
+	if command == launchServerCmd("0.8.85", "") {
 		p.launched = true
 		return p.fakeTransport.Exec(command)
 	}
-	if command == remoteStateCatCmd {
+	if command == stateCatCmd("") {
 		if !p.launched {
 			return p.fakeTransport.Exec(command) // pre-launch: stale file still there
 		}
@@ -351,8 +352,8 @@ func (p *raceProneFake) Exec(command string) (ExecResult, error) {
 }
 
 func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
-	cmd := launchServerCmd("0.8.85")
-	statePath := shellQuotePath(remoteStateFilePath)
+	cmd := launchServerCmd("0.8.85", "")
+	statePath := shellQuotePath(ServeSlot("").stateFile())
 	if !strings.Contains(cmd, "rm -f "+statePath) {
 		t.Errorf("launch command must delete the old state file before starting: %q", cmd)
 	}
@@ -375,7 +376,7 @@ func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
 // timeout. The nohup must run inside its own `( … & )` so the command's shell
 // returns immediately while the server survives.
 func TestLaunchServerCmdDetachesServerInSubshell(t *testing.T) {
-	cmd := launchServerCmd("0.8.85")
+	cmd := launchServerCmd("0.8.85", "")
 	if !strings.Contains(cmd, "&& (PATH=") || !strings.Contains(cmd, " nohup ") || !strings.Contains(cmd, "&); echo launched") {
 		t.Fatalf("launch command must detach the server in a `( nohup … & )` subshell: %q", cmd)
 	}
@@ -391,15 +392,15 @@ func TestStartFreshServerNeverReturnsStaleStateEvenIfObservableAfterLaunch(t *te
 	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
-	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(staleData)}
-	ft.execResults[launchServerCmd("0.8.85")] = ExecResult{ExitCode: 0}
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(staleData)}
+	ft.execResults[launchServerCmd("0.8.85", "")] = ExecResult{ExitCode: 0}
 	raceFake := &raceProneFake{fakeTransport: ft, freshStateJSON: string(freshData), appearAfterPolls: 2}
 
 	origInterval := serveStatePollInterval
 	serveStatePollInterval = time.Millisecond
 	defer func() { serveStatePollInterval = origInterval }()
 
-	state, err := StartFreshServer(raceFake, "0.8.85")
+	state, err := StartFreshServer(raceFake, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -488,7 +489,7 @@ func TestKillServer_TermThenKill(t *testing.T) {
 
 	ft := newFakeTransport()
 	tpt := &aliveScriptTransport{fakeTransport: ft, pid: 42, alive: 2}
-	if err := KillServer(tpt, 42); err != nil {
+	if err := KillServer(tpt, 42, ""); err != nil {
 		t.Fatalf("KillServer: %v", err)
 	}
 	if !slices.Contains(ft.execCalls, killTERMCmd(42)) {
@@ -506,7 +507,7 @@ func TestKillServer_TermThenKill(t *testing.T) {
 	if aliveProbes != 3 {
 		t.Fatalf("pid probes = %d, want 3 (alive, alive, dead): %v", aliveProbes, ft.execCalls)
 	}
-	if !slices.Contains(ft.execCalls, "rm -f "+shellQuotePath(remoteStateFilePath)) {
+	if !slices.Contains(ft.execCalls, "rm -f "+shellQuotePath(ServeSlot("").stateFile())) {
 		t.Fatalf("state file not removed: %v", ft.execCalls)
 	}
 }
@@ -518,7 +519,7 @@ func TestKillServer_StillAlive(t *testing.T) {
 
 	ft := newFakeTransport()
 	tpt := &aliveScriptTransport{fakeTransport: ft, pid: 7, alive: 100}
-	if err := KillServer(tpt, 7); err == nil {
+	if err := KillServer(tpt, 7, ""); err == nil {
 		t.Fatal("expected an error when the pid is still alive after SIGKILL")
 	}
 	if !slices.Contains(ft.execCalls, killKILLCmd(7)) {
@@ -528,7 +529,7 @@ func TestKillServer_StillAlive(t *testing.T) {
 
 func TestKillServer_InvalidPID(t *testing.T) {
 	ft := newFakeTransport()
-	if err := KillServer(ft, 0); err == nil {
+	if err := KillServer(ft, 0, ""); err == nil {
 		t.Fatal("expected an error for a non-positive pid")
 	}
 	if len(ft.execCalls) != 0 {

@@ -45,7 +45,12 @@ func writeRemoteLifecycleError(w http.ResponseWriter, err error, fallbackStage s
 	if errors.As(err, &stageErr) && stageErr.Stage != "" {
 		stage = stageErr.Stage
 	}
-	writeJSON(w, http.StatusBadGateway, map[string]string{
+	code := http.StatusBadGateway
+	if errors.Is(err, errConnectInProgress) {
+		w.Header().Set("Retry-After", "2")
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]string{
 		"error": err.Error(),
 		"stage": stage,
 	})

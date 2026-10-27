@@ -6433,3 +6433,19 @@ Open:
   - `docs/concepts/auto-share-on-start.md`: `server.go:1857` becomes 1859.
   - `docs/gotchas/port-forwards-url-composition-and-supervisor-restart.md`: `server.go:2062` and `2069` become 2064 and 2071.
 - **Other sessions' uncommitted `server.go` hunks** (near lines 303, 1045, 1271, 1347, 1401) also move these anchors. Re-derive from the working tree at the time of the fix, not from the deltas above alone.
+
+## Remote projects: isolation (2026-10-27)
+Done: failure cooldown, background connect with a 2 s caller bound (503 `remote-connecting` +
+`Retry-After`, SPA treats 503 as a skipped read), `drop()` no-op mid-connect, same-slot orphan
+reaper, WebKit finding (WebSockets are free; pending fetches are not).
+- [ ] Per-project servers are intentionally OFF. `remote.SlotForProject` / `serve --state-slot`
+      exist, but `RemoteWorkspace.slot()` returns the legacy per-host slot. Enabling them needs
+      the registry keyed per host+port+project AND every path-less session-scoped proxy call
+      (`handler_remote_proxy.go`) routed to its owning project (SPA `fetchJSON` only sends
+      `X-Ocode-Project` when the caller passes `projectPath`). Gain is small: a slow host is slow
+      for every project on it; it only isolates a single crashed remote server. Decide before doing.
+- [ ] Events relay is still one upstream stream per host (`handler_events_remote.go`).
+- [ ] Update `docs/concepts/web-server-project-scoping.md` and add a `docs/gotchas/` page for the
+      connect cooldown + WebKit connection limit (CLAUDE.md already carries the rules).
+- [ ] Stale `ocode serve --remote` processes on james@217.216.72.49 (7 old ones) not killed; the
+      reaper only runs after the next fresh launch.

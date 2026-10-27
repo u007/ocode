@@ -533,6 +533,32 @@ while another runs"). Rationale and cases: `docs/concepts/web-server-locking-and
 - **Routes live in `Server.registerRoutes()` behind one of four middleware wrappers**;
   pick one deliberately, and thread `?host=` on session/project-scoped routes.
 
+## Remote connects: never park a proxied request, never storm a host
+WKWebView allows ~6 concurrent HTTP connections per origin. Measured 2026-10-27: pending
+fetches and SSE consume those slots, **WebSockets do not** (20 sockets + SSE left a ping at
+2-5 ms), so terminal sockets are not a budget problem and need no multiplexer. A proxied
+request parked on a slow remote connect (`workspaceForPort`) pins a slot, and ~5 of them
+(`/api/events` holds one) freeze the whole UI for every project. Registry code in
+`internal/server/remote_hosts.go`:
+
+- **A failed connect is remembered for `remoteConnectCooldown` (5 s)**; callers in that
+  window get the cached error. Never delete a failed entry immediately: browser polls then
+  each start their own ~11 s connect and their own remote server.
+- **The connect runs in the background (`runConnect`) and EVERY caller, the one that started
+  it included, waits at most `remoteConnectWaitBound` (2 s)** then gets a "still in progress"
+  error. Never block a request for the whole connect: that is how one slow project pinned
+  browser slots and stalled all the others.
+- **`drop()` is a no-op while a connect is in flight.** Superseding it lets the next poller
+  start a parallel connect, which relaunches the remote server and orphans the first.
+- **A connect still in progress is HTTP 503 + `Retry-After` (stage `remote-connecting`,
+  `errConnectInProgress`), never 502.** The SPA opens a 2-minute unreachable window on a 502
+  (`isHostUnreachable`) and treats a 503 as a skipped read (`isHostConnecting`).
+- **After a fresh launch `killOrphanSlotServers` reaps same-version, same-slot strays** (the
+  legacy per-host slot in production). `remote.ServeSlot` / `serve --state-slot` (per-project
+  server) exist but are OFF: `RemoteWorkspace.slot()` returns `""`. Do not enable them before the
+  registry is keyed per project and path-less session-scoped proxy calls reach the owning
+  project's server (`TODO.md`).
+
 ## Git subprocesses: `gitexec`, never a bare `exec.Command("git", …)`
 
 ocode polls git constantly (git-status emitter, web Git tab, TUI badge ticker),

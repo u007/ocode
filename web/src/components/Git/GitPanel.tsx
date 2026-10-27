@@ -15,10 +15,13 @@ import {
   PanelLeft,
   PanelLeftClose,
   FileX2,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { cn } from "@/lib/utils";
+import { buildCommitMessageDiff } from "@/lib/commitMessageDiff";
 import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
@@ -284,6 +287,7 @@ export default function GitPanel({
   >(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [generatingMessage, setGeneratingMessage] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Whether the previous load reported an operation in progress. Used only to
@@ -868,6 +872,34 @@ export default function GitPanel({
       setSelection(null);
       setCommitDiff(null);
     }, "committed");
+  };
+
+  // Ask the server to draft a commit message from the current diff. The server
+  // prefers the small model and falls back to the main model, so the button
+  // still works when no small model is configured or its request fails.
+  const generateCommitMessage = async () => {
+    if (generatingMessage) return;
+    const diff = buildCommitMessageDiff(
+      workspace?.staged ?? [],
+      workspace?.unstaged ?? [],
+    );
+    if (!diff.trim()) {
+      setError("Nothing to summarise yet — stage or edit some files first");
+      return;
+    }
+    setGeneratingMessage(true);
+    setError(null);
+    try {
+      const res = await api.gitCommitMessage(diff, projectPath);
+      setCommitMessage(res.message);
+      showNotice(
+        res.model ? `commit message generated · ${res.model}` : "commit message generated",
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "commit message generation failed");
+    } finally {
+      setGeneratingMessage(false);
+    }
   };
 
   // Commit staged changes and push to the remote in one action. The awaits are
@@ -1799,6 +1831,24 @@ export default function GitPanel({
           placeholder="Commit message for staged changes…"
           className="flex-1 h-9 px-3 rounded-md bg-muted/40 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
         />
+        <button
+          type="button"
+          onClick={generateCommitMessage}
+          disabled={generatingMessage || busy || opInProgress || !status.has_changes}
+          aria-label="Generate commit message with AI"
+          title={
+            generatingMessage
+              ? "Generating a commit message…"
+              : "Generate a commit message from the staged (or working-tree) changes"
+          }
+          className="h-9 w-9 shrink-0 inline-flex items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground hover:bg-muted/60 disabled:opacity-40"
+        >
+          {generatingMessage ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Sparkles className="w-4 h-4" />
+          )}
+        </button>
         <button
           onClick={commit}
           disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}

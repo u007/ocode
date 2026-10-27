@@ -262,14 +262,16 @@ Full git capability built into the TUI — no context-switching to a separate to
 |---------|----------|
 | **Status & Diff** | Real-time diff with line numbers and soft-wrap |
 | **Stage / Unstage / Discard** | `Ctrl+S` / `Ctrl+U` / `Ctrl+D` |
-| **AI Commit Messages** | `Ctrl+G` auto-generates from staged changes (configurable `commit_msg_model`) |
+| **AI Commit Messages** | `Ctrl+G` auto-generates from staged changes using the small model, falling back to the main model (configurable `commit_msg_model`) |
 | **Push / Pull / Fetch** | `Ctrl+O` / `Ctrl+P` / `Ctrl+G` |
 | **Branch Management** | Create, delete, checkout branches |
 | **Stash Operations** | Stash, apply, list stashes; the web Git tab adds per-file/multi-file stash, per-file restore, and delete |
 | **AI Code Review** | `/review` reviews working directory, files, commits, branches, or GitHub PRs |
 
-Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status
-and provides Fetch, Pull, Push, and confirmed destructive actions. Force push uses
+Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status,
+provides Fetch, Pull, Push, and confirmed destructive actions, and its commit box
+has the same AI message generator (✦ button → `POST /api/git/commit-message`, small
+model with main-model fallback). Force push uses
 `--force-with-lease`; the explicit **Reset to remote** action fetches and hard-resets
 to the current branch's upstream. Status also reports conflicted paths and halted
 Git operations separately from ordinary staged/unstaged changes, so badges and

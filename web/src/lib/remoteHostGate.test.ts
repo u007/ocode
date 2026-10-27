@@ -27,6 +27,17 @@ describe("periodicRemoteRead", () => {
     await expect(periodicRemoteRead("dev@box", "/proj", async () => 7)).resolves.toEqual({ value: 7 });
   });
 
+  it("treats a 503 (still connecting) as a skipped read without opening the retry window", async () => {
+    const connecting = vi.fn(async () => {
+      throw new ApiError("remote connecting", 503);
+    });
+    await expect(periodicRemoteRead("dev@box", "/proj", connecting)).resolves.toBeNull();
+    expect(remoteHostRetryInMs("dev@box")).toBe(0);
+
+    const next = vi.fn(async () => "fresh");
+    await expect(periodicRemoteRead("dev@box", "/other", next)).resolves.toEqual({ value: "fresh" });
+  });
+
   it("skips the host after an unreachable failure instead of asking it again", async () => {
     const failing = vi.fn(async () => {
       throw new ApiError("bad gateway", 502);

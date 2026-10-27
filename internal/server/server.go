@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -131,6 +132,10 @@ type Server struct {
 	// query-string path: query strings reach access logs and intermediary
 	// proxies, which the remote token model treats as a leak.
 	remoteMode bool
+
+	// remoteStateSlot selects serve-<slot>.json instead of serve.json (see
+	// the --state-slot flag); empty is the legacy per-host state file.
+	remoteStateSlot string
 
 	// browse is the isolated browse-origin server backing the embedded
 	// browser panel; browseBase is its loopback base URL as advertised to
@@ -372,6 +377,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/worktree", s.authMiddleware(s.handler.HandleGitWorktreeCreate))
 	s.mux.HandleFunc("POST /api/git/worktree/remove", s.authMiddleware(s.handler.HandleGitWorktreeRemove))
 	s.mux.HandleFunc("POST /api/git/commit", s.authMiddleware(s.handler.HandleGitCommit))
+	s.mux.HandleFunc("POST /api/git/commit-message", s.authMiddleware(s.handler.HandleGitCommitMessage))
 	s.mux.HandleFunc("POST /api/git/fetch", s.authMiddleware(s.handler.HandleGitFetch))
 	s.mux.HandleFunc("POST /api/git/pull", s.authMiddleware(s.handler.HandleGitPull))
 	s.mux.HandleFunc("POST /api/git/push", s.authMiddleware(s.handler.HandleGitPush))
@@ -2090,6 +2096,9 @@ func (s *Server) SetRemoteMode(v bool) {
 	}
 }
 
+// remoteStateSlotPattern mirrors remote.safeServeSlot: the slot lands in a file name.
+var remoteStateSlotPattern = regexp.MustCompile(`^[0-9a-f]{0,16}$`)
+
 // remoteServeState is the JSON shape written to ~/.ocode/remote/serve.json
 // by a --remote launch, and read back by internal/remote's reconnect
 // discovery (DiscoverServer). Field names are the wire contract with that
@@ -2115,6 +2124,10 @@ type remoteServeState struct {
 // writer) — never partially visible, never world-readable (it carries the
 // bearer token).
 func (s *Server) writeRemoteStateFile(ln net.Listener, browsePort int) error {
+	file := "serve.json"
+	if s.remoteStateSlot != "" {
+		file = "serve-" + s.remoteStateSlot + ".json"
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home dir for remote state file: %w", err)
@@ -2143,7 +2156,7 @@ func (s *Server) writeRemoteStateFile(ln net.Listener, browsePort int) error {
 	if err != nil {
 		return fmt.Errorf("marshal remote state: %w", err)
 	}
-	return secretfile.WriteFileAtomic(filepath.Join(dir, "serve.json"), data, 0600)
+	return secretfile.WriteFileAtomic(filepath.Join(dir, file), data, 0600)
 }
 
 // Serve serves requests on an already-bound listener.
@@ -2374,7 +2387,12 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	host := fs.String("host", "0.0.0.0", "Host to bind to")
 	openBrowser := fs.Bool("open", false, "Open browser after starting")
 	remoteFlag := fs.Bool("remote", false, "Remote mode: bind 127.0.0.1 only, require a generated API token, and write ~/.ocode/remote/serve.json for reconnect discovery")
+	stateSlot := fs.String("state-slot", "", "With --remote: write serve-<slot>.json instead of serve.json so each project on a host gets its own server")
 	fs.Parse(args)
+	if !remoteStateSlotPattern.MatchString(*stateSlot) {
+		fmt.Fprintf(os.Stderr, "invalid --state-slot %q\n", *stateSlot)
+		os.Exit(2)
+	}
 
 	addr, username, password, err := resolveRemoteLaunchParams(
 		*remoteFlag, *host, *port,
@@ -2389,6 +2407,7 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	auth.EnableWindowStateFallback()
 	srv := New(addr, username, password, webFS)
 	srv.SetRemoteMode(*remoteFlag)
+	srv.remoteStateSlot = *stateSlot
 	// Anchor the server to the process working directory so relative-path
 	// endpoints (file tree, file content, git, uploads) resolve against the
 	// project root regardless of where the process was launched from. The

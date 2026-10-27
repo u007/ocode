@@ -2330,6 +2330,19 @@ export const api = {
       body: JSON.stringify({ paths, message }),
     }),
 
+  /**
+   * Generate a commit message from a unified diff. The server prefers the
+   * small model and falls back to the main model (see agent.GenerateCommitMessage).
+   * Generation runs on the server serving the UI, so the diff is sent in the
+   * body rather than fetched from a (possibly remote) project.
+   */
+  gitCommitMessage: (diff: string, project?: string) =>
+    fetchJSON<{ message: string; model: string }>("/api/git/commit-message", {
+      method: "POST",
+      headers: { "X-Window-Id": getWindowId() },
+      body: JSON.stringify({ diff, project }),
+    }),
+
   // ── Git network actions ──
   gitFetch: (project?: string, host?: string) =>
     fetchJSON<GitStatus>(`/api/git/fetch${projQuery(project, host)}`, {

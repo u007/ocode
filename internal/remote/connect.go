@@ -249,7 +249,7 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 
 	progress.Start("server", "discovering or starting remote server")
-	state, reused, err := EnsureRemoteServer(transport, version.Version)
+	state, reused, err := EnsureRemoteServer(transport, version.Version, "")
 	if err != nil {
 		progress.Fail(err, "check ~/.ocode/remote/serve.log on the remote")
 		return err

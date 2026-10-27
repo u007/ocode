@@ -1,6 +1,8 @@
 package remote
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -36,16 +38,65 @@ type ServeState struct {
 	Outdated bool `json:"-"`
 }
 
-const remoteStateFilePath = "~/.ocode/remote/serve.json"
+// remoteStateDir holds one state file and one log per server slot.
+const remoteStateDir = "~/.ocode/remote"
 
-var remoteStateCatCmd = "cat " + shellQuotePath(remoteStateFilePath) + " 2>/dev/null || true"
+// ServeSlot names one remote server instance. The empty slot is the single
+// per-host server (`ocode remote --web`); a non-empty slot is a per-project
+// server whose state file is serve-<slot>.json, so projects on one host never
+// share a process, a token or a failure.
+type ServeSlot string
+
+var safeServeSlot = regexp.MustCompile(`^[0-9a-f]{0,16}$`)
+
+// SlotForProject derives the stable slot for a project root on the remote.
+func SlotForProject(projectPath string) ServeSlot {
+	sum := sha256.Sum256([]byte(projectPath))
+	return ServeSlot(hex.EncodeToString(sum[:6]))
+}
+
+func (s ServeSlot) valid() error {
+	if !safeServeSlot.MatchString(string(s)) {
+		return fmt.Errorf("unsafe serve slot %q", string(s))
+	}
+	return nil
+}
+
+func (s ServeSlot) stateFile() string {
+	if s == "" {
+		return remoteStateDir + "/serve.json"
+	}
+	return remoteStateDir + "/serve-" + string(s) + ".json"
+}
+
+func (s ServeSlot) logFile() string {
+	if s == "" {
+		return remoteStateDir + "/serve.log"
+	}
+	return remoteStateDir + "/serve-" + string(s) + ".log"
+}
+
+// serveArgs is the slot's extra `serve` argument string (leading space).
+func (s ServeSlot) serveArgs() string {
+	if s == "" {
+		return ""
+	}
+	return " --state-slot " + string(s)
+}
+
+func stateCatCmd(slot ServeSlot) string {
+	return "cat " + shellQuotePath(slot.stateFile()) + " 2>/dev/null || true"
+}
 
 // DiscoverServer reads and parses the remote state file. A missing file (no
 // stdout), a read error, or a corrupt/partial JSON body all return
 // ok=false — every one of those is "no reusable server," never a fatal
 // connect error.
-func DiscoverServer(t Transport) (ServeState, bool) {
-	res, err := t.Exec(remoteStateCatCmd)
+func DiscoverServer(t Transport, slot ServeSlot) (ServeState, bool) {
+	if slot.valid() != nil {
+		return ServeState{}, false
+	}
+	res, err := t.Exec(stateCatCmd(slot))
 	if err != nil {
 		return ServeState{}, false
 	}
@@ -99,10 +150,10 @@ func serverHealthy(t Transport, state ServeState) bool {
 	return strings.TrimSpace(res.Stdout) == "200"
 }
 
-func launchServerCmd(ver string) string {
+func launchServerCmd(ver string, slot ServeSlot) string {
 	remoteOcode := shellQuotePath(RemoteBinaryPath(ver))
-	logPath := shellQuotePath("~/.ocode/remote/serve.log")
-	statePath := shellQuotePath(remoteStateFilePath)
+	logPath := shellQuotePath(slot.logFile())
+	statePath := shellQuotePath(slot.stateFile())
 	// Delete any existing state file before launching: StartFreshServer only
 	// gets here because the previously discovered state was unusable (dead
 	// pid, version mismatch, unhealthy) — not because the file was missing —
@@ -131,8 +182,8 @@ func launchServerCmd(ver string) string {
 	// bare `htrcli` to the version-matched install (see EnsureHTRCli).
 	versionDir := shellQuotePath(RemoteBinDir + "/" + ver)
 	return fmt.Sprintf(
-		"rm -f %s; mkdir -p %s && (PATH=%s:\"$PATH\" nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 &); echo launched",
-		statePath, shellQuotePath("~/.ocode/remote"), versionDir, remoteOcode, logPath,
+		"rm -f %s; mkdir -p %s && (PATH=%s:\"$PATH\" nohup %s serve --remote --host 127.0.0.1 --port 0%s </dev/null >%s 2>&1 &); echo launched",
+		statePath, shellQuotePath(remoteStateDir), versionDir, remoteOcode, slot.serveArgs(), logPath,
 	)
 }
 
@@ -148,41 +199,50 @@ var (
 // blocks until its state file appears (bounded by
 // serveStatePollAttempts × serveStatePollInterval), returning the parsed
 // state. Used when DiscoverServer finds nothing reusable.
-func StartFreshServer(t Transport, ver string) (ServeState, error) {
-	if res, err := t.Exec(launchServerCmd(ver)); err != nil {
+func StartFreshServer(t Transport, ver string, slot ServeSlot) (ServeState, error) {
+	if err := slot.valid(); err != nil {
+		return ServeState{}, err
+	}
+	if res, err := t.Exec(launchServerCmd(ver, slot)); err != nil {
 		return ServeState{}, fmt.Errorf("launch remote server: %w: %s", err, res.Stderr)
 	}
 	for i := 0; i < serveStatePollAttempts; i++ {
-		if state, ok := DiscoverServer(t); ok {
+		if state, ok := DiscoverServer(t, slot); ok {
 			return state, nil
 		}
 		time.Sleep(serveStatePollInterval)
 	}
-	return ServeState{}, fmt.Errorf("remote server did not write its state file within %s — check ~/.ocode/remote/serve.log on the remote", time.Duration(serveStatePollAttempts)*serveStatePollInterval)
+	return ServeState{}, fmt.Errorf("remote server did not write its state file within %s — check %s on the remote", time.Duration(serveStatePollAttempts)*serveStatePollInterval, slot.logFile())
 }
 
 // EnsureRemoteServer implements the reuse-vs-fresh decision table: discover →
 // alive and healthy → reuse (flagging Outdated when the version differs);
 // anything else (missing, dead, unhealthy) → start fresh at the local version.
 // reused reports which path was taken, for progress reporting.
-func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, err error) {
-	if existing, ok := DiscoverServer(t); ok && serverHealthy(t, existing) {
+func EnsureRemoteServer(t Transport, ver string, slot ServeSlot) (state ServeState, reused bool, err error) {
+	if err := slot.valid(); err != nil {
+		return ServeState{}, false, err
+	}
+	if existing, ok := DiscoverServer(t, slot); ok && serverHealthy(t, existing) {
 		existing.Outdated = existing.Version != ver
 		if !existing.Outdated {
 			return existing, true, nil
 		}
 		// A patch update leaves the previous version's server running and
 		// holding memory; retire it and start one at the local version.
-		if err := KillServer(t, existing.PID); err != nil {
+		if err := KillServer(t, existing.PID, slot); err != nil {
 			return ServeState{}, false, fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
 		}
 	}
-	fresh, err := StartFreshServer(t, ver)
+	fresh, err := StartFreshServer(t, ver, slot)
 	if err != nil {
 		return ServeState{}, false, err
 	}
 	if err := killOtherVersionServers(t, ver); err != nil {
 		log.Printf("remote: reap old-version servers on %s: %v", t, err)
+	}
+	if err := killOrphanSlotServers(t, ver, slot, fresh.PID); err != nil {
+		log.Printf("remote: reap orphaned %q servers on %s: %v", string(slot), t, err)
 	}
 	// A freshly launched server always reports the local version; a stale
 	// Outdated value can never leak in from the state file (json:"-").
@@ -198,6 +258,34 @@ func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool,
 // command line: the ssh shell's $2 is "-c", not an ocode binary path.
 func otherVersionServersCmd(ver, sig string) string {
 	return fmt.Sprintf(`ps -eo pid=,args= | awk -v keep="$HOME/.ocode/bin/%s/ocode" '$2 ~ /\/\.ocode\/bin\/[^\/]+\/ocode$/ && $3 == "serve" && $2 != keep {print $1}' | xargs -r kill %s 2>/dev/null; true`, ver, sig)
+}
+
+// orphanSlotServersCmd signals every same-version server of ONE slot except
+// keepPID. Concurrent connects each relaunch (launchServerCmd deletes the state
+// file first), so all but the last launch lose their state file and would live
+// forever; the slot match (`--state-slot <slot>`, or no such flag for the
+// legacy slot) keeps a sibling project's live server out of the blast radius.
+func orphanSlotServersCmd(ver string, slot ServeSlot, keepPID int, sig string) string {
+	want := "0"
+	if slot != "" {
+		want = "1"
+	}
+	return fmt.Sprintf(`ps -eo pid=,args= | awk -v bin="$HOME/.ocode/bin/%s/ocode" -v slot=%q -v want=%s -v keep=%d '$2 == bin && $3 == "serve" && $1 != keep { has = 0; for (i = 4; i < NF; i++) if ($i == "--state-slot" && $(i+1) == slot) has = 1; if (has == want) print $1 }' | xargs -r kill %s 2>/dev/null; true`, ver, string(slot), want, keepPID, sig)
+}
+
+// killOrphanSlotServers terminates same-version, same-slot servers other than
+// keepPID (SIGTERM, then SIGKILL for survivors).
+func killOrphanSlotServers(t Transport, ver string, slot ServeSlot, keepPID int) error {
+	if !safeVersion.MatchString(ver) {
+		return fmt.Errorf("unsafe version string %q", ver)
+	}
+	if res, err := t.Exec(orphanSlotServersCmd(ver, slot, keepPID, "-TERM")); err != nil {
+		return fmt.Errorf("terminate orphaned servers: %w: %s", err, res.Stderr)
+	}
+	if res, err := t.Exec(orphanSlotServersCmd(ver, slot, keepPID, "-KILL")); err != nil {
+		return fmt.Errorf("kill orphaned servers: %w: %s", err, res.Stderr)
+	}
+	return nil
 }
 
 var safeVersion = regexp.MustCompile(`^[0-9A-Za-z._+-]+$`)
@@ -235,7 +323,10 @@ var (
 // (bounded) for it to exit, escalates to SIGKILL once, and finally removes the
 // remote state file so a later discovery cannot reuse the dead pid. It returns
 // an error if the process is still alive after SIGKILL.
-func KillServer(t Transport, pid int) error {
+func KillServer(t Transport, pid int, slot ServeSlot) error {
+	if err := slot.valid(); err != nil {
+		return err
+	}
 	if pid <= 0 {
 		return fmt.Errorf("kill remote server: invalid pid %d", pid)
 	}
@@ -259,7 +350,7 @@ func KillServer(t Transport, pid int) error {
 			return fmt.Errorf("remote server pid %d still alive after SIGKILL", pid)
 		}
 	}
-	if res, err := t.Exec("rm -f " + shellQuotePath(remoteStateFilePath)); err != nil {
+	if res, err := t.Exec("rm -f " + shellQuotePath(slot.stateFile())); err != nil {
 		return fmt.Errorf("remove remote state file: %w: %s", err, res.Stderr)
 	}
 	return nil

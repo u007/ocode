@@ -145,7 +145,7 @@ web/
         │   ├── OpenPathDialog.tsx  # Open a file OUTSIDE the project (grants its dir)
         │   └── MonacoSettingsPanel.tsx # Monaco editor settings
         ├── Git/
-        │   └── GitPanel.tsx        # SourceTree-style: staged/unstaged panes, hunk actions, commit log, commit box (Commit + Commit & Push)
+        │   └── GitPanel.tsx        # SourceTree-style: staged/unstaged panes, hunk actions, commit log, commit box (✦ AI generate, Commit, Commit & Push)
         ├── Logs/
         │   └── LogPanel.tsx        # Server logs with SSE stream, filtering
         ├── Assets/
@@ -916,4 +916,11 @@ Test harness rules: **`useChatDispatch` must return a STABLE reference** when re
     - Verified in headless Chromium against the live server at 240px (default) and 160px, dark custom theme and light: no horizontal overflow, hover/active read, remote inventory expands inside the row.
 
     Regression: `web/src/components/Layout/ProjectSidebar.test.tsx` + `RemoteProjectStatus.test.tsx` (their class assertions also pin the wrap contract and `sidebar-collapsed-rail`).
+
+78. **The Git tab's commit box has the same AI generate button as the TUI's `Ctrl+G`, and the model policy is SHARED** — the ✦ button (`aria-label="Generate commit message with AI"`) calls `api.gitCommitMessage(diff, project)` → `POST /api/git/commit-message`. Rules that are easy to get wrong:
+    - **The diff is built CLIENT-SIDE** by `buildCommitMessageDiff` (`web/src/lib/commitMessageDiff.ts`) from the already-loaded workspace: staged patches when anything is staged, else the working-tree patches (which include untracked files), capped at the server's 8000-char limit (surrogate-safe). Generation runs NO git, so a remote project needs no `host=` round-trip and the request goes to the server serving the UI.
+    - **Model policy lives in `agent.GenerateCommitMessage`** and is shared with the TUI: an explicit `commit_msg_model` is authoritative and tried alone; otherwise the small model is preferred and the MAIN model is the fallback when no small model resolves, the client cannot be built, the request errors, or the reply is empty. Never re-implement the chain in a surface; usage is booked to the model that produced the message.
+    - **The request carries `X-Window-Id` and the project path** so the handler resolves the credential profile in the documented order (env > project binding > window > global). Without the window id a remote project's per-window profile (e.g. a custom key) would be ignored.
+    - A failed generation keeps the user's draft and shows the sticky error; only success replaces the input (with a transient `commit message generated · <model>` notice).
+    - Regression: `web/src/lib/commitMessageDiff.test.ts`, the generate-message cases in `GitPanel.test.tsx`, `internal/agent/commit_message_test.go`, `internal/server/handler_git_message_test.go` (drives the REAL mux, because a missing route answers with the SPA fallback).
 

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   gitUnstage: vi.fn(),
   gitIgnore: vi.fn(),
   gitCommit: vi.fn(),
+  gitCommitMessage: vi.fn(),
   gitPush: vi.fn(),
   gitFetch: vi.fn(),
   gitPull: vi.fn(),
@@ -149,6 +150,7 @@ describe("GitPanel", () => {
     mocks.gitUnstage.mockResolvedValue(workspace.status);
     mocks.gitIgnore.mockResolvedValue(workspace.status);
     mocks.gitCommit.mockResolvedValue(workspace.status);
+    mocks.gitCommitMessage.mockResolvedValue({ message: "", model: "" });
     mocks.gitPush.mockResolvedValue(workspace.status);
     mocks.gitFetch.mockResolvedValue(workspace.status);
     mocks.gitPull.mockResolvedValue(workspace.status);
@@ -252,6 +254,58 @@ describe("GitPanel", () => {
     expect(commitButton).toBeEnabled();
     fireEvent.click(commitButton);
     await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledWith("save changes", [], "/proj", undefined));
+  });
+
+  it("generates a commit message from the staged diff and fills the input", async () => {
+    mocks.gitCommitMessage.mockResolvedValue({
+      message: "feat: generated subject",
+      model: "small/model",
+    });
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+    fireEvent.click(screen.getByRole("button", { name: "Generate commit message with AI" }));
+
+    await waitFor(() => expect(mocks.gitCommitMessage).toHaveBeenCalledTimes(1));
+    const [diff, project] = mocks.gitCommitMessage.mock.calls[0] as [string, string];
+    expect(project).toBe("/proj");
+    expect(diff).toContain("src/staged.ts");
+    // Staged patches win over the working tree, mirroring the TUI generator.
+    expect(diff).not.toContain("src/unstaged.ts");
+
+    const input = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("feat: generated subject"));
+  });
+
+  it("uses the working-tree diff when nothing is staged", async () => {
+    mocks.getGitWorkspace.mockResolvedValue({ ...workspace, staged: [] });
+    mocks.gitCommitMessage.mockResolvedValue({ message: "fix: from worktree", model: "" });
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    fireEvent.click(screen.getByRole("button", { name: "Generate commit message with AI" }));
+
+    await waitFor(() => expect(mocks.gitCommitMessage).toHaveBeenCalledTimes(1));
+    const [diff] = mocks.gitCommitMessage.mock.calls[0] as [string];
+    expect(diff).toContain("src/unstaged.ts");
+    expect(diff).toContain("src/untracked.txt");
+  });
+
+  it("keeps the draft and shows the error when generation fails", async () => {
+    mocks.gitCommitMessage.mockRejectedValue(new Error("small/model: rate limited"));
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const input = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "my draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate commit message with AI" }));
+
+    expect(await screen.findByText("small/model: rate limited")).toBeTruthy();
+    expect(input.value).toBe("my draft");
   });
 
   it("commits then pushes in one action", async () => {

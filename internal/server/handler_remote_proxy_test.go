@@ -42,6 +42,7 @@ func (f *fakeTestWorkspace) Disconnect() error {
 }
 func (f *fakeTestWorkspace) ServeState() remote.ServeState    { return f.state }
 func (f *fakeTestWorkspace) ServeTransport() remote.Transport { return f.transport }
+func (f *fakeTestWorkspace) ServeSlot() remote.ServeSlot      { return "" }
 func (f *fakeTestWorkspace) BrowseURL() string {
 	if f.state.BrowsePort == 0 {
 		return ""

@@ -56,6 +56,17 @@ func NewRemoteWorkspace(target Target, remotePath, workspaceID string, sup *tool
 	}, nil
 }
 
+// slot is the serve slot this workspace uses. It is always the legacy per-host
+// slot: the registry is still keyed per host+port, so a project-derived slot
+// would make whichever project connects first pick the server and a later
+// reconnect from another project launch a second one. Per-project slots
+// (SlotForProject, `serve --state-slot`) exist but stay off until the registry
+// is keyed per project (see TODO.md).
+func (rw *RemoteWorkspace) slot() ServeSlot { return "" }
+
+// ServeSlot reports which remote server instance this workspace talks to.
+func (rw *RemoteWorkspace) ServeSlot() ServeSlot { return rw.slot() }
+
 func generateWorkspaceID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -248,7 +259,7 @@ func (rw *RemoteWorkspace) ensureBinary() error {
 // decision (and the Outdated flag) has a single implementation shared with the
 // CLI's ConnectWeb path.
 func (rw *RemoteWorkspace) discoverOrStartServer() (ServeState, error) {
-	state, _, err := EnsureRemoteServer(rw.Transport, version.Version)
+	state, _, err := EnsureRemoteServer(rw.Transport, version.Version, rw.slot())
 	if err != nil {
 		return ServeState{}, err
 	}
