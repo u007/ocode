@@ -2,6 +2,7 @@ package cdp
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -9,9 +10,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -47,10 +51,74 @@ type EgressProxy struct {
 	// hosts a target is currently showing as its TOP-LEVEL page, refcounted
 	// across targets. Dials to these bypass the policy dialer's private-IP
 	// guard: the user navigated there on purpose (loopback/LAN dev server in
-	// Chrome mode). Everything else — including a public page's subrequests
-	// to private ranges — stays policed.
+	// Chrome mode). Link-local and metadata destinations stay denied even for
+	// these (dialTopLevel). Everything else — including a public page's
+	// subrequests to private ranges — stays policed.
 	allowMu sync.Mutex
 	allowed map[string]int
+
+	// resolver looks up top-level host names before they are pinned.
+	// net.DefaultResolver in production; tests inject a fake.
+	resolver upstreamResolver
+	// dialPinned connects to one already-checked IP literal. Defaults to a
+	// net.Dialer with the metadata/link-local deny on its Control hook.
+	dialPinned func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// upstreamResolver is the name lookup for top-level hosts.
+type upstreamResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// upstreamMetadataHost is the GCP metadata name. It is refused before any
+// lookup, so a resolver answering it with a public address cannot pass.
+const upstreamMetadataHost = "metadata.google.internal"
+
+// upstreamDeniedPrefixes and upstreamDeniedAddrs are the destinations a
+// top-level navigation may never reach: link-local ranges and cloud metadata
+// endpoints. Loopback, LAN, CGNAT and ULA stay governed by the allow rules,
+// so the exact metadata addresses are listed rather than their enclosing ranges.
+var upstreamDeniedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("169.254.0.0/16"), // IPv4 link-local, incl. 169.254.169.254
+	netip.MustParsePrefix("fe80::/10"),      // IPv6 link-local
+}
+
+var upstreamDeniedAddrs = []netip.Addr{
+	netip.MustParseAddr("100.100.100.200"), // Alibaba Cloud metadata (sits inside CGNAT)
+	netip.MustParseAddr("fd00:ec2::254"),   // AWS IPv6 metadata (sits inside ULA)
+}
+
+// upstreamDenied reports whether ip is a link-local or metadata destination.
+// IPv4-mapped IPv6 is unmapped first, and the zone is stripped because
+// netip.Prefix.Contains returns false for zoned addresses (fe80::1%en0).
+func upstreamDenied(ip netip.Addr) bool {
+	ip = ip.Unmap().WithZone("")
+	for _, p := range upstreamDeniedPrefixes {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return slices.Contains(upstreamDeniedAddrs, ip)
+}
+
+// denyUpstreamControl is the connect-time form of upstreamDenied. It sees the
+// address the socket is about to dial, so it re-checks the pinned IP literal.
+func denyUpstreamControl(_, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("egress: unparseable dial address %q: %w", address, err)
+	}
+	if upstreamDenied(ap.Addr()) {
+		return fmt.Errorf("%w: %s", ErrBlocked, ap.Addr())
+	}
+	return nil
+}
+
+// newPinnedDial returns the connect function for top-level hosts, using the
+// policy dialer's timeouts and the metadata/link-local deny at connect time.
+func newPinnedDial(policy *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: policy.Timeout, KeepAlive: policy.KeepAlive, Control: denyUpstreamControl}
+	return d.DialContext
 }
 
 // NewEgressProxy binds 127.0.0.1:0, generates a random 24-byte proxy
@@ -75,7 +143,9 @@ func NewEgressProxy(dialer *net.Dialer) (*EgressProxy, error) {
 		password: base64.RawURLEncoding.EncodeToString(cred[9:]),
 		tunnels:  make(map[net.Conn]struct{}),
 		allowed:  make(map[string]int),
+		resolver: net.DefaultResolver,
 	}
+	p.dialPinned = newPinnedDial(dialer)
 	p.server = &http.Server{
 		Handler:           http.HandlerFunc(p.handle),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -124,18 +194,74 @@ func (p *EgressProxy) hostAllowed(host string, port int) bool {
 	return p.allowed[key] > 0
 }
 
-// dialerFor picks the dialer for one upstream: the policy dialer normally, or
-// an unguarded copy (same timeouts, no Control hook) when hostport is a
-// registered top-level navigation host.
-func (p *EgressProxy) dialerFor(hostport string, defaultPort int) *net.Dialer {
+// dialFor picks the dial function for one upstream: the policy dialer normally,
+// or dialTopLevel when hostport is a registered top-level navigation host.
+func (p *EgressProxy) dialFor(hostport string, defaultPort int) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	key := canonHostPort(hostport, defaultPort)
 	p.allowMu.Lock()
 	ok := p.allowed[key] > 0
 	p.allowMu.Unlock()
 	if !ok {
-		return p.dialer
+		return p.dialer.DialContext
 	}
-	return &net.Dialer{Timeout: p.dialer.Timeout, KeepAlive: p.dialer.KeepAlive}
+	return p.dialTopLevel
+}
+
+// dialTopLevel dials a registered top-level navigation host. The name is
+// resolved here, every address is checked against upstreamDenied, and the
+// checked addresses are dialed as IP literals in order. The connect never
+// re-resolves the name, so DNS rebinding cannot swap in a different answer.
+// Loopback and LAN stay reachable, as the allow rules always permitted.
+func (p *EgressProxy) dialTopLevel(ctx context.Context, network, hostport string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return nil, fmt.Errorf("egress: top-level dial %q: %w", hostport, err)
+	}
+	addrs, err := p.resolveTopLevel(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, a := range addrs {
+		conn, dialErr := p.dialPinned(ctx, network, net.JoinHostPort(a.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	return nil, lastErr
+}
+
+// resolveTopLevel returns the checked addresses for one top-level host. An IP
+// literal is used as-is; a name is looked up once. Any denied address refuses
+// the whole host (fail closed), wrapping ErrBlocked so the page sees a 403.
+func (p *EgressProxy) resolveTopLevel(ctx context.Context, host string) ([]netip.Addr, error) {
+	name := strings.TrimSuffix(strings.ToLower(host), ".")
+	if name == upstreamMetadataHost {
+		return nil, fmt.Errorf("%w: metadata hostname %s", ErrBlocked, host)
+	}
+	var addrs []netip.Addr
+	if lit, perr := netip.ParseAddr(name); perr == nil {
+		addrs = []netip.Addr{lit}
+	} else {
+		resolved, rerr := p.resolver.LookupNetIP(ctx, "ip", name)
+		if rerr != nil {
+			return nil, fmt.Errorf("egress: resolve %q: %w", host, rerr)
+		}
+		addrs = resolved
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("egress: resolve %q: no addresses", host)
+	}
+	out := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		a = a.Unmap().WithZone("")
+		if upstreamDenied(a) {
+			return nil, fmt.Errorf("%w: %s resolves to %s", ErrBlocked, host, a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // ProxyServerURL returns the proxy URL to hand to Chrome's
@@ -257,7 +383,7 @@ func (p *EgressProxy) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// Ensure the Host header matches the upstream, not the proxy.
 	req.Host = r.URL.Host
 
-	tr := &http.Transport{DialContext: p.dialerFor(req.URL.Host, 80).DialContext, Proxy: nil, DisableCompression: true}
+	tr := &http.Transport{DialContext: p.dialFor(req.URL.Host, 80), Proxy: nil, DisableCompression: true}
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
 		p.classifyDialErr(w, err)
@@ -299,7 +425,7 @@ func (p *EgressProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = r.Host
 	}
-	up, err := p.dialerFor(target, 80).DialContext(r.Context(), "tcp", target)
+	up, err := p.dialFor(target, 80)(r.Context(), "tcp", target)
 	if err != nil {
 		p.classifyDialErr(w, err)
 		return
@@ -372,7 +498,7 @@ func (p *EgressProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 // handleConnect establishes a CONNECT tunnel to the requested host.
 func (p *EgressProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
-	up, err := p.dialerFor(host, 443).DialContext(r.Context(), "tcp", host)
+	up, err := p.dialFor(host, 443)(r.Context(), "tcp", host)
 	if err != nil {
 		p.classifyDialErr(w, err)
 		return

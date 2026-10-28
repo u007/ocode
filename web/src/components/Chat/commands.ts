@@ -419,9 +419,13 @@ export interface CommandContext {
     setLimitsConfig?: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) => Promise<unknown>;
     getThinkingBudget?: (host?: string) => Promise<{ budget: number; level: string; levels: { level: string; budget: number }[] }>;
     setThinkingBudget?: (level: string, host?: string) => Promise<unknown>;
-    listModels?: (host?: string) => Promise<{ name: string; model: string; provider: string; active: boolean }[]>;
+    // `name` is the canonical provider-qualified id (what the setters accept);
+    // `model` is the bare model name; `display_name` is the human label.
+    listModels?: (host?: string) => Promise<{ name: string; model: string; provider: string; active: boolean; display_name?: string }[]>;
     getConfigModel?: (host?: string) => Promise<{ model: string }>;
     setConfigModel?: (model: string, host?: string) => Promise<unknown>;
+    /** Persist a per-chat model override (/models <name> on a real session). */
+    setSessionModel?: (sessionId: string, model: string, host?: string) => Promise<unknown>;
     getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean; suggested_responses_enabled?: boolean }>;
     // The third argument is optional: a caller that omits it leaves the
     // server's stored suggested-responses value untouched (the /mem and /docs
@@ -1975,29 +1979,47 @@ async function handleModels(args: string, ctx: CommandContext): Promise<CommandR
   }
   if (!ctx.api.setConfigModel) return unsupported("/models");
   try {
+    // Resolve a display name / partial id to the canonical provider-prefixed id
+    // the server validates: ModelInfo.name IS that id, while ModelInfo.model is
+    // the bare model name and would 400 ("no provider prefix").
+    let modelId = name;
     if (ctx.api.listModels) {
       const models = await ctx.api.listModels(ctx.host);
       const match = models.find(
-        (m) => m.model.toLowerCase() === name.toLowerCase() || m.name.toLowerCase() === name.toLowerCase(),
+        (m) =>
+          m.model.toLowerCase() === name.toLowerCase() ||
+          m.name.toLowerCase() === name.toLowerCase() ||
+          (m.display_name ?? "").toLowerCase() === name.toLowerCase(),
       );
       if (!match && models.length > 0) {
         const suggestions = models
           .filter(
             (m) =>
               m.model.toLowerCase().includes(name.toLowerCase()) ||
-              m.name.toLowerCase().includes(name.toLowerCase()),
+              m.name.toLowerCase().includes(name.toLowerCase()) ||
+              (m.display_name ?? "").toLowerCase().includes(name.toLowerCase()),
           )
           .slice(0, 8)
-          .map((m) => `\`${m.model}\``);
+          .map((m) => `\`${m.name}\``);
         return ok(
           suggestions.length > 0
             ? `No exact model \`${name}\`. Did you mean:\n${suggestions.join("\n")}`
             : `No model matching \`${name}\` found (${models.length} known models).`,
         );
       }
+      if (match) modelId = match.name;
     }
-    await ctx.api.setConfigModel(name, ctx.host);
-    return ok(`**Model:** switched to \`${name}\`. Applies to this and new sessions.`);
+    // A real chat scopes the pick to itself, exactly like the sidebar picker.
+    // Only a draft (`new-*`) tab or no tab at all moves the DEFAULT that new
+    // chats start with — writing the global model from a live chat is what made
+    // one chat's switch show up on every other chat.
+    const sid = ctx.getSessionId?.() ?? null;
+    if (sid && !sid.startsWith("new-") && ctx.api.setSessionModel) {
+      await ctx.api.setSessionModel(sid, modelId, ctx.host);
+      return ok(`**Model:** this chat now runs \`${modelId}\`.`);
+    }
+    await ctx.api.setConfigModel(modelId, ctx.host);
+    return ok(`**Model:** new chats will start with \`${modelId}\`. Existing chats keep their own model.`);
   } catch (err) {
     return fail("/models", err);
   }

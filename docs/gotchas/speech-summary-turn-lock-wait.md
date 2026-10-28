@@ -28,7 +28,7 @@ Three separate locks were being held across slow work, and each one turns a
 side task into a stall for unrelated code:
 
 1. **Waiting behind the turn.** `runTurn` does `as.mu.Lock(); defer
-   as.mu.Unlock()` (`internal/server/agent_session.go:1055-1057`) and holds it
+   as.mu.Unlock()` (`internal/server/agent_session.go:1074-1076`) and holds it
    for the **entire** turn. The handler's later `as.mu.Lock()` to read
    `as.agent` therefore used to block until the turn finished — the summariser
    only started after the turn ended, with the user waiting the whole time.

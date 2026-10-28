@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "../../api/client";
 import { useChat } from "../../hooks/useChat";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import { useTurnWatchdogAll } from "../../hooks/useTurnWatchdog";
 import ChatPanel from "../Chat/ChatPanel";
 import ChatInput from "../Chat/ChatInput";
@@ -144,13 +145,31 @@ function playDing(): void {
   }
 }
 
-/** The window's viewport, kept current on resize. */
+/**
+ * The window's viewport, kept current on resize.
+ *
+ * `visualViewport` is observed as well as `resize`: on a phone, showing or
+ * hiding the URL bar (and the on-screen keyboard) changes the VISIBLE height
+ * without necessarily firing a window `resize`, and `orientationchange` can
+ * also land before the window dimensions settle. A stale (desktop) size here
+ * is not cosmetic — it makes `narrow` false on a phone, so the window renders
+ * as a floating rect saved on another device instead of the inset sheet, which
+ * can put its header (and the Close button) off-screen while its composer sits
+ * over the app's own bottom chrome.
+ */
 function useViewport(): Viewport {
   const [vp, setVp] = useState<Viewport>(() => ({ width: window.innerWidth, height: window.innerHeight }));
   useEffect(() => {
     const onResize = () => setVp({ width: window.innerWidth, height: window.innerHeight });
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+      vv?.removeEventListener("resize", onResize);
+    };
   }, []);
   return vp;
 }
@@ -162,10 +181,11 @@ function useViewport(): Viewport {
  * Modes: normal (floating, draggable by its grip and docked to a viewport edge
  * when released near one, resizable from the corner),
  * minimised (only the header bar stays), maximised (fills the app inside a
- * margin). Below ASSISTANT_NARROW_BREAKPOINT it is an inset sheet and neither
- * drags nor resizes. The window keeps ONE DOM tree across modes: minimising only
- * hides the body, so the composer draft, the hydrated asks and the chat's scoped
- * dialog surface all survive. Unmounting would drop them.
+ * margin). Below ASSISTANT_NARROW_BREAKPOINT — or on any viewport the app treats
+ * as mobile (`useIsMobile`, ≤767px), whichever is wider — it is an inset sheet
+ * and neither drags nor resizes. The window keeps ONE DOM tree across modes:
+ * minimising only hides the body, so the composer draft, the hydrated asks and
+ * the chat's scoped dialog surface all survive. Unmounting would drop them.
  *
  * It reuses the real chat surface rather than rendering a second transcript or
  * a second composer: `ChatPanel` for the transcript and `ChatInput` for sending
@@ -209,7 +229,15 @@ export function PulseAssistantWindow() {
 function AssistantWindowFrame() {
   const prefs = usePulseAssistantPrefs();
   const vp = useViewport();
-  const narrow = isNarrowViewport(vp);
+  // The mobile breakpoint OR the sheet breakpoint, whichever is wider. On a
+  // phone the two disagreed (a 700px-wide device is "mobile" for the app's
+  // layout at ≤767px but was NOT "narrow" here at <640px), so the window
+  // rendered as a floating rect — restored from desktop localStorage or from
+  // the default — instead of the inset sheet, leaving its header (and the
+  // Close button) off-screen with only the composer visible at the bottom. A
+  // phone must always get the sheet: it covers the app and one obvious Close.
+  const isMobile = useIsMobile();
+  const narrow = isNarrowViewport(vp) || isMobile;
   const modeRef = useRef(prefs.mode);
   modeRef.current = prefs.mode;
 
@@ -506,7 +534,16 @@ function AssistantWindowFrame() {
         </div>
       </header>
 
-      <div hidden={minimised} className="flex min-h-0 flex-1 flex-col">
+      {/* Hidden by CLASS, never by the `hidden` attribute: this div's own
+          `flex` utility overrides the UA `[hidden] { display: none }` rule
+          (author styles beat the UA sheet), so `hidden={minimised}` left the
+          body — transcript AND composer — laid out inside the 40px bar while
+          minimised. Keeping it mounted (display:none) is still required: the
+          draft, hydrated asks and scoped dialogs must survive minimise. */}
+      <div
+        data-testid="pulse-assistant-body"
+        className={minimised ? "hidden" : "flex min-h-0 flex-1 flex-col"}
+      >
         {modelError && (
           <p role="alert" data-testid="pulse-assistant-model-error" className="px-3 py-1 text-xs text-destructive">
             {modelError}

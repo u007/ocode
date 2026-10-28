@@ -25,6 +25,11 @@ vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWeb
 vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
 vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("../../api/client", () => ({
+  // TerminalPanel mounts the voice recorder; its lifecycle reads these.
+  api: {
+    prewarmSpeech: () => Promise.resolve(true),
+    cancelPrewarmSpeech: () => Promise.resolve(true),
+  },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => null,

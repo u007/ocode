@@ -319,6 +319,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           tc: import("../../api/types").ToolCall;
           resultContent?: string;
           resultIdx?: number;
+          /** Images the tool result carried (see MessageImage). */
+          resultImages?: import("../../api/types").MessageImage[];
           /** The unanswered `question` prompt this call is paused on, so the
            *  card can re-open its dialog on demand. */
           pendingQuestion?: QuestionRequest;
@@ -358,12 +360,12 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
   // rendered by dedicated dialogs and are excluded from both grouping and
   // virtualization so they never claim a slot.
   const renderEntries: RenderEntry[] = useMemo(() => {
-    const resultById = new Map<string, { content: string; idx: number }>();
+    const resultById = new Map<string, { content: string; idx: number; images?: import("../../api/types").MessageImage[] }>();
     const pendingQuestionById = new Map<string, QuestionRequest>();
     const pendingPermissionById = new Map<string, PermissionRequest>();
     messages.forEach((m, idx) => {
       if (m.role === "tool" && m.tool_call_id && !isSentinelToolContent(m.content)) {
-        resultById.set(m.tool_call_id, { content: m.content, idx });
+        resultById.set(m.tool_call_id, { content: m.content, idx, images: m.images });
       }
       if (m.role === "tool" && m.tool_call_id) {
         const q = parseQuestionFromMessage(m);
@@ -397,7 +399,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           // is not re-attached to a later duplicate id.
           if (hit && !consumed.has(tc.id)) {
             consumed.add(tc.id);
-            return { tc, resultContent: hit.content, resultIdx: hit.idx };
+            return { tc, resultContent: hit.content, resultIdx: hit.idx, resultImages: hit.images };
           }
           if (hit) {
             // Duplicate id — show the call without a second copy of the same result.
@@ -1902,12 +1904,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             forceOpen={forceOpen}
                           />
                         ) : null}
-                        {entry.calls.map(({ tc, resultContent, pendingQuestion, pendingPermission }) => (
+                        {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, pendingPermission }) => (
                           <ToolBlock
                             key={tc.id}
                             tool={tc.function.name}
                             command={tc.function.arguments}
                             output={resultContent}
+                            images={resultImages}
                             highlight={highlight}
                             onOpenQuestion={
                               pendingQuestion

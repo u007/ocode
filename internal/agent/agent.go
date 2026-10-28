@@ -2014,7 +2014,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					if err != nil {
 						return "", nil, err
 					}
-					result, images, err := a.handleToolCallWithImages(tc.Function.Name, args, binding, toolCallID)
+					result, images, err := a.handleToolCallWithImages(guardCtx, tc.Function.Name, args, binding, toolCallID)
 					if err == nil && binding != nil && binding.bus != nil {
 						// Auto-touch for grouped writes —
 						// mirrors the legacy path exactly.
@@ -2120,7 +2120,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							}
 							binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
 						}
-						result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
+						result, images, err := a.handleToolCallWithImages(guardCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
 						// Auto-touch: if the call succeeded and was a
 						// write-class tool, append a touch to the bus
 						// so peers know this file changed. Read tools
@@ -2181,7 +2181,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			tc := resp.ToolCalls[i]
 			a.activity.toolStarted(tc.Function.Name)
-			result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
+			result, images, err := a.handleToolCallWithImages(guardCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
 			a.activity.toolDone(tc.Function.Name)
 			var notice string
 			if err != nil {
@@ -3786,8 +3786,16 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 // other case images is nil and the returned text is exactly handleToolCall's
 // result — an image read on a non-vision model yields the textual image stub
 // from ReadTool.Execute, so text-only providers still get a useful description.
-func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
-	text, err := a.handleToolCallWithContext(context.Background(), name, args, b, toolCallID)
+//
+// ctx is the turn's stop context (Step's guardCtx): cancelling it interrupts
+// a running tool. A call that fails because of that cancellation returns
+// tool.ToolCancelledResult with a nil error, so the round still gets a tool
+// message for it (see finishCancelledRound).
+func (a *Agent) handleToolCallWithImages(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
+	text, err := a.handleToolCallWithContext(ctx, name, args, b, toolCallID)
+	if err != nil && ctx.Err() != nil {
+		return tool.ToolCancelledResult, nil, nil
+	}
 	if err != nil {
 		return text, nil, err
 	}
@@ -3804,7 +3812,9 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 		if ierr != nil {
 			return text, nil, nil
 		}
-		return "[computer image — shown below]", []Image{enc.Image}, nil
+		// Keep the tool's own text: it carries the coordinate space the model
+		// needs to act on the image (see the browser tool).
+		return text + "\n[image shown below]", []Image{enc.Image}, nil
 	}
 	// Tool that returns an image via a file path (e.g. read).
 	irt, ok := a.tools[name].(tool.ImageResultTool)
@@ -3915,6 +3925,16 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 		return "", dupErr
 	}
 
+	// A refusal belongs to the agent type, not to the permission rules, so it is
+	// checked before any permission decision: no rule (not even an always-allow)
+	// and no judge can raise an ask for it. See tool.RefusingTool.
+	if rt, ok := a.tools[name].(tool.RefusingTool); ok {
+		if refusal := rt.Refusal(args); refusal != "" {
+			a.emitDebug("TOOL", fmt.Sprintf("refused %s: %s", name, refusal))
+			return "", errors.New(refusal)
+		}
+	}
+
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
 	}
@@ -3949,6 +3969,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 	if a.permissions != nil {
 		autoEnabled := a.permissions.AutoPermissionEnabled()
 		decision := a.permissions.Decide(name, args)
+		decision = a.browserDecision(name, args, decision)
 		a.emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 
 		// The outbound-network guardrail (network_guard_typesafe.go). It runs
@@ -4262,6 +4283,13 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 		modelLabel := a.autoPermissionModelDisplayName()
 		a.OnPermissionCheck(name, modelLabel, true)
 		defer a.OnPermissionCheck(name, modelLabel, false)
+	}
+	// A browser action whose target page cannot be resolved is never shown to the
+	// judge: the judge would decide without seeing the page. A person decides.
+	if name == "browser" {
+		if _, ok := a.browserPageContext(args); !ok {
+			return false, "could not resolve the browser tab this action targets, so the judge was not asked; a person decides", "", false
+		}
 	}
 	// Decision backends (TypeSafe/Jev, Cloudflare clef) answer typed questions
 	// only: no chat loop, no read_file, no JSON effect report. They take the
@@ -4747,7 +4775,20 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 				return false, "target path outside allowed roots: " + path
 			}
 			if isSensitivePath(path) {
-				return false, "target touches sensitive path: " + path
+				// The `secrets` opt-out (Settings → Permissions) is the user
+				// explicitly accepting credential exposure, so it clears the
+				// SECRET-MATERIAL half of this guard for a READ of one. The
+				// scope is deliberately read-only:
+				//   - a write/edit/delete of a credential file can destroy or
+				//     plant credentials, which is an integrity risk the user
+				//     never opted into by accepting exposure;
+				//   - repo metadata (.git/, .github/workflows/) is not
+				//     credential material at all (it protects against planted
+				//     hooks/workflows).
+				readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]
+				if !readableSecret {
+					return false, "target touches sensitive path: " + path
+				}
 			}
 		}
 	}
@@ -6441,6 +6482,7 @@ func (a *Agent) Shutdown() {
 	if a.runs != nil {
 		a.runs.CancelAll()
 	}
+	a.closeSessionTools()
 	// Shut down doc maintenance worker (drains current item, drops queued).
 	a.docMaintShutdown()
 	// Shut down memory maintenance worker as well. Both workers are started by
@@ -6463,6 +6505,28 @@ func (a *Agent) Shutdown() {
 	// multiple times.
 	if a.snapshotStore != nil {
 		a.snapshotStore.Retire()
+	}
+}
+
+// sessionCloseTimeout bounds the cleanup of what an agent's tools opened, when the
+// agent or a subagent run ends.
+const sessionCloseTimeout = 15 * time.Second
+
+// closeSessionTools releases what this agent's own tools opened, such as browser
+// tabs. A tool is closed under its own bounded context. A failure is logged and
+// the teardown goes on, so one stuck tab cannot hold up the rest of it.
+func (a *Agent) closeSessionTools() {
+	for name, t := range a.tools {
+		closer, ok := t.(tool.SessionCloser)
+		if !ok {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sessionCloseTimeout)
+		err := closer.CloseOpenedTabs(ctx)
+		cancel()
+		if err != nil {
+			a.emitDebug("TOOL", fmt.Sprintf("teardown could not close the resources opened by tool %s: %v", name, err))
+		}
 	}
 }
 

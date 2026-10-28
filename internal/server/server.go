@@ -529,6 +529,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/speech-summary", s.authMiddleware(s.handleSetSpeechSummaryConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/commit-msg", s.authMiddleware(s.handleGetCommitMsgConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/commit-msg", s.authMiddleware(s.handleSetCommitMsgConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/git", s.authMiddleware(s.handleGetGitConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/git", s.authMiddleware(s.handleSetGitConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/compact", s.authMiddleware(s.handleGetCompactConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/compact", s.authMiddleware(s.handleSetCompactConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-auto", s.authMiddleware(s.handleGetAutoPermissionConfig))
@@ -1005,6 +1007,10 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	bs.SetNewTabPublisher(func(_ string, ev browse.NewTabEvent) {
 		s.publishBrowseNewTab(ev)
 	})
+	// The browser agent tool drives the Chrome of the machine running the
+	// session. On a remote-mode host that is the host's own Chrome: a remote
+	// project's session runs there, and its tabs are reached headless.
+	s.handler.browseSurfaces = browseAgentSurfaces{bs: bs}
 }
 
 // browseProxyGate wraps a browse-proxy handler with the two protections the
@@ -2740,6 +2746,12 @@ func (s *Server) handleSetSpeechSummaryConfig(w http.ResponseWriter, r *http.Req
 }
 func (s *Server) handleSetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetCommitMsgConfig(w, r)
+}
+func (s *Server) handleGetGitConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetGitConfig(w, r)
+}
+func (s *Server) handleSetGitConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetGitConfig(w, r)
 }
 func (s *Server) handleGetCompactConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetCompactConfig(w, r)

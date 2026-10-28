@@ -46,6 +46,43 @@ type ContextualTool interface {
 	ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// PageContextTool is implemented by a tool whose calls act on a page. PageContext
+// describes that page for the auto-permission judge, from the call's arguments.
+// ok is false when the page cannot be resolved; the judge is then not asked.
+type PageContextTool interface {
+	Tool
+	PageContext(args json.RawMessage) (map[string]any, bool)
+}
+
+// AgentScopedTool is implemented by a tool that keeps per-agent mutable state
+// (for example a screenshot cache or the tabs an agent opened). A subagent is
+// handed ForAgent(name) instead of the parent's instance, so the two never share
+// that state. name is the subagent's definition name (for example "explore").
+// ForAgent keeps the configuration and returns a fresh state.
+type AgentScopedTool interface {
+	Tool
+	ForAgent(agentName string) Tool
+}
+
+// RefusingTool is implemented by a tool that can refuse one call for the agent
+// that holds it, by the call's arguments: for example a read-only subagent
+// asking for a page-changing browser action. Refusal returns the message the
+// agent receives as the tool error, or "" to let the call through. A refused
+// call raises no permission ask, and no permission rule overrides it.
+type RefusingTool interface {
+	Tool
+	Refusal(args json.RawMessage) string
+}
+
+// SessionCloser is implemented by a tool that holds resources the agent opened
+// during its run (for example browser tabs). CloseOpenedTabs releases them. The
+// agent calls it when it shuts down, and when a subagent run finishes, on the
+// instance that subagent owns. Errors are reported to the caller, which logs them.
+type SessionCloser interface {
+	Tool
+	CloseOpenedTabs(ctx context.Context) error
+}
+
 // ContextualImageResultTool is an optional extension of ImageResultTool for
 // tools whose image read needs the execution context — notably the session's
 // project root (WithWorkDir), so a relative path anchors on the project rather

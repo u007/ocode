@@ -32,6 +32,7 @@ func TestContentGuardScopeIncludesOnlyRemoteContent(t *testing.T) {
 	}{
 		{"webfetch", "webfetch", `{"url":"https://example.com/x"}`, true},
 		{"websearch", "websearch", `{"query":"go generics"}`, true},
+		{"browser page text", "browser", `{"action":"text"}`, true},
 		{"mcp tool", "github_create_issue", `{"title":"x"}`, true},
 		{"bash curl", "bash", `{"command":"curl https://example.com/x"}`, true},
 		{"bash wget", "bash", `{"command":"wget https://example.com/x"}`, true},
@@ -49,6 +50,33 @@ func TestContentGuardScopeIncludesOnlyRemoteContent(t *testing.T) {
 		{"bash ls", "bash", `{"command":"ls -la"}`, false},
 		{"write", "write", `{"path":"a.go","content":"x"}`, false},
 		{"unknown tool", "some_other_tool", `{}`, false},
+		// Browser results that carry page-authored text are scanned.
+		{"browser snapshot", "browser", `{"action":"snapshot"}`, true},
+		{"browser snapshot in a frame", "browser", `{"action":"snapshot","frame":"#pay"}`, true},
+		{"browser find", "browser", `{"action":"find","target":"button"}`, true},
+		{"browser find in a frame", "browser", `{"action":"find","target":"button","frame":"#pay"}`, true},
+		{"browser console", "browser", `{"action":"console"}`, true},
+		{"browser network", "browser", `{"action":"network"}`, true},
+		{"browser fill_form report", "browser", `{"action":"fill_form","fields":[{"selector":"#a","value":"x"}]}`, true},
+		{"browser pick", "browser", `{"action":"pick","target":"#cb","text":"Canada"}`, true},
+		{"browser select", "browser", `{"action":"select","target":"#c","value":"CA"}`, true},
+		// Browser actions that return only local status, a count, or an image.
+		{"browser tabs", "browser", `{"action":"tabs"}`, true},
+		{"browser screenshot", "browser", `{"action":"screenshot"}`, false},
+		{"browser click", "browser", `{"action":"click","x":1,"y":2}`, false},
+		{"browser click target", "browser", `{"action":"click","target":"@e1"}`, false},
+		{"browser click target in a frame", "browser", `{"action":"click","target":"@e1","frame":"#pay"}`, false},
+		{"browser fill", "browser", `{"action":"fill","target":"#q","value":"hunter2"}`, false},
+		{"browser check", "browser", `{"action":"check","target":"@e2"}`, false},
+		{"browser uncheck", "browser", `{"action":"uncheck","target":"@e2"}`, false},
+		{"browser type", "browser", `{"action":"type","text":"hi"}`, false},
+		{"browser upload", "browser", `{"action":"upload","target":"#f","files":["a.pdf"]}`, false},
+		{"browser wait", "browser", `{"action":"wait","text":"Done"}`, false},
+		{"browser key", "browser", `{"action":"key","key":"Enter"}`, false},
+		{"browser scroll", "browser", `{"action":"scroll","direction":"down"}`, false},
+		{"browser navigate", "browser", `{"action":"navigate","url":"https://example.com/"}`, false},
+		{"browser open", "browser", `{"action":"open"}`, false},
+		{"browser reload", "browser", `{"action":"reload"}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2005,6 +2005,14 @@ export const api = {
   listHtrTabs: () =>
     fetchJSON<{ tabs: HtrTab[]; error?: string }>("/api/config/ocode/htr/tabs"),
 
+  getGitConfig: () =>
+    fetchJSON<{ pull_strategy: "rebase" | "merge" }>("/api/config/ocode/git"),
+  setGitConfig: (pull_strategy: "rebase" | "merge") =>
+    fetchJSON<{ pull_strategy: "rebase" | "merge" }>("/api/config/ocode/git", {
+      method: "PUT",
+      body: JSON.stringify({ pull_strategy }),
+    }),
+
   getFeaturesConfig: () =>
     fetchJSON<{
       memory_enabled: boolean;

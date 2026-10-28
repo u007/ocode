@@ -165,18 +165,21 @@ describe("ToolBlock argument summary", () => {
   });
 });
 
-// Bash tool-call blocks: command/result text is kept intact (no soft wrap) and
-// scrolled horizontally so column-aligned output stays readable. A command that
-// does not fit the header line is repeated in full in its own code block.
+// Bash tool-call blocks: command/result text soft-wraps at the bubble width
+// (bash output used to scroll horizontally, which clipped wide rows behind an
+// undiscoverable inner scrollbar). A command that does not fit the header line
+// is repeated in full in its own wrapping code block.
 describe("ToolBlock bash code block", () => {
-  it("repeats a bash command that doesn't fit one line in a non-wrapping scroll block", () => {
+  it("repeats a bash command that doesn't fit one line in a wrapping block", () => {
     const cmd = "echo " + "x".repeat(120);
     const { container } = render(
       <ToolBlock tool="bash" command={JSON.stringify({ command: cmd })} />,
     );
-    const block = container.querySelector("pre.overflow-x-auto.whitespace-pre");
+    const block = container.querySelector("pre.whitespace-pre-wrap");
     expect(block).not.toBeNull();
     expect(block!.textContent).toContain(`$ ${cmd}`);
+    expect(block!.className).toContain("[overflow-wrap:anywhere]");
+    expect(block!.className).not.toContain("overflow-x-auto");
   });
 
   it("repeats a multi-line bash command even when it is short", () => {
@@ -184,7 +187,7 @@ describe("ToolBlock bash code block", () => {
     const { container } = render(
       <ToolBlock tool="bash" command={JSON.stringify({ command: cmd })} />,
     );
-    const block = container.querySelector("pre.overflow-x-auto.whitespace-pre");
+    const block = container.querySelector("pre.whitespace-pre-wrap");
     expect(block).not.toBeNull();
     expect(block!.textContent).toContain("cd /tmp\nls");
   });
@@ -193,10 +196,10 @@ describe("ToolBlock bash code block", () => {
     const { container } = render(
       <ToolBlock tool="bash" command={'{"command":"ls -la /tmp"}'} />,
     );
-    expect(container.querySelector("pre.overflow-x-auto.whitespace-pre")).toBeNull();
+    expect(container.querySelector("pre")).toBeNull();
   });
 
-  it("renders bash output without wrapping so wide lines scroll horizontally", () => {
+  it("wraps bash output instead of scrolling it horizontally", () => {
     const { container } = render(
       <ToolBlock
         tool="bash"
@@ -204,9 +207,12 @@ describe("ToolBlock bash code block", () => {
         output={"a".repeat(200) + "\nsecond"}
       />,
     );
-    expect(container.querySelector("span.whitespace-pre")).not.toBeNull();
-    expect(container.querySelector("span.whitespace-pre-wrap")).toBeNull();
-    expect(container.querySelector("div.overflow-x-auto")).not.toBeNull();
+    const line = container.querySelector("span.whitespace-pre-wrap");
+    expect(line).not.toBeNull();
+    expect(line!.className).toContain("[overflow-wrap:anywhere]");
+    // No non-wrapping span and no horizontal scroll container.
+    expect(container.querySelector("span.whitespace-pre")).toBeNull();
+    expect(container.querySelector("div.overflow-x-auto")).toBeNull();
   });
 
   it("keeps soft wrapping for non-bash tool output", () => {

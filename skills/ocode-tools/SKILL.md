@@ -109,6 +109,7 @@ Called from each process entry point, not from the agent: `internal/runcli/run.g
 | 36 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
 | 37 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
 | 38 | `ComputerTool` | `computer.go` | `computer` | ❌ | ask |
+| 38a | `browser` (sessions on a server that starts the embedded browser; not the TUI's own agent) | `internal/server/browser_tool.go` | `browser` | ❌ | observe allow, mutating ask |
 | | **Scheduled** | | | | |
 | 39 | `CronTool` | `cron.go` | `cron` | ❌ | allow |
 
@@ -156,7 +157,7 @@ differ, the effective default wins. Known divergences: `task` is allow in the ba
 `NewPermissionManager`.
 - **Always allow** (no prompt): read, glob, grep, rgrep, list, lsp, lsp_diagnostics, skill, load_skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell, list_processes, ocr, cron
 - **Default allow**: write, edit, multiedit, multi_file_edit, replace_lines, apply_patch, format, imagegen
-- **Default ask**: delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
+- **Default ask**: delete, bash, webfetch, websearch, repo_clone, mcp_*, computer, browser
 
 Tools not in any list default to `PermissionAsk` (e.g. `github_pr`, `github_issue`, `github_workflow`).
 
@@ -234,6 +235,7 @@ timeout budget, empty intent, fail-open); `internal/agent/search_wiring_test.go`
 | `repo.go` | `RepoCloneTool`, `RepoOverviewTool` — external repo research |
 | `computer.go` | `ComputerTool` — host desktop control (opt-in via `computer_use.enabled`) |
 | `computer_driver.go` | `ComputerDriver` interface — platform abstraction for desktop control |
+| `internal/server/browser_tool.go` | `browser` tool — embedded Chrome tabs (sessions on a server that starts the embedded browser; see docs/concepts/browser-agent-tools.md) |
 | `todo_store.go` | `TodoWriteTool`, `TodoReadTool`, `TodoUpdateTool` — persistent todo plan |
 | `readpath.go` | `NormalizeUnicodeSpaces` + `ResolveReadTarget` — Unicode-space-tolerant read-target resolution and not-found hints (see below) |
 

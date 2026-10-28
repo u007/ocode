@@ -54,10 +54,10 @@ This pattern generalises to **any bounded loop that mutates the message slice be
 
 | Area | Path |
 |------|------|
-| turnBaseLen capture | `internal/server/agent_session.go:623-629` |
-| Auto-continue loop | `internal/server/agent_session.go:753-798` |
-| persistTurnTranscript | `internal/server/agent_session.go:944-970` |
-| reconcileTurnSave | `internal/server/agent_session.go:974-979` |
+| turnBaseLen capture | `internal/server/agent_session.go:642-648` |
+| Auto-continue loop | `internal/server/agent_session.go:772-817` |
+| persistTurnTranscript | `internal/server/agent_session.go:963-989` |
+| reconcileTurnSave | `internal/server/agent_session.go:993-998` |
 
 ## The Rule
 

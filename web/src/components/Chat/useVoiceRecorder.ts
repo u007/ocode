@@ -17,6 +17,11 @@ export const VOICE_NOTHING_HEARD_MESSAGE = "Nothing was heard. Try again.";
 export const VOICE_TIMESLICE_MS = 1000;
 /** How often a live partial transcript is requested while recording. */
 export const VOICE_PARTIAL_INTERVAL_MS = 3000;
+/** Hard cap on one recording. A forgotten tab must not keep the microphone hot
+ *  (a 5-minute clip is already far longer than any dictation); the server's
+ *  upload limit would only reject it afterwards. Reaching the cap stops and
+ *  transcribes, exactly like pressing stop. */
+export const VOICE_MAX_RECORDING_MS = 5 * 60 * 1000;
 /** How long a press must be held before recording locks into continuous mode:
  *  release won't stop it; the user clicks the stop button to stop & send. */
 export const VOICE_HOLD_THRESHOLD_MS = 2000;
@@ -144,6 +149,11 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   // Bumped whenever a recording ends or restarts; a partial result that
   // captured an older epoch is dropped.
   const partialEpochRef = useRef(0);
+  // Stops a recording that reaches VOICE_MAX_RECORDING_MS. Cleared on every
+  // exit path, so a finished recording never fires a stray stop.
+  const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latest stop(), for the max-duration timer (stop is defined after start).
+  const stopRef = useRef<() => void>(() => {});
   // True while the user is holding the mic button but the hold threshold has
   // not fired yet: used for a subtle visual "press to lock" cue.
   const [holding, setHolding] = useState(false);
@@ -188,6 +198,14 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
 
   const setPartial = useCallback((text: string) => {
     if (mountedRef.current) setPartialTextState(text);
+  }, []);
+
+  /** Clears the max-duration timer (idempotent). */
+  const clearMaxTimer = useCallback(() => {
+    if (maxTimerRef.current !== null) {
+      clearTimeout(maxTimerRef.current);
+      maxTimerRef.current = null;
+    }
   }, []);
 
   /** Ends the live preview: stops the timer, invalidates in-flight partials, clears the text. */
@@ -303,6 +321,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       if (recorder.state !== "inactive") recorder.stop();
     };
     recorder.onstop = () => {
+      clearMaxTimer();
       stopPartials();
       releaseStream();
       recorderRef.current = null;
@@ -352,10 +371,16 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     partialTimerRef.current = setInterval(() => {
       void sendPartial(partialType);
     }, VOICE_PARTIAL_INTERVAL_MS);
-  }, [releaseStream, report, setPhase, sendPartial, stopPartials, transcribeBlob]);
+    clearMaxTimer();
+    maxTimerRef.current = setTimeout(() => {
+      maxTimerRef.current = null;
+      stopRef.current();
+    }, VOICE_MAX_RECORDING_MS);
+  }, [clearMaxTimer, releaseStream, report, setPhase, sendPartial, stopPartials, transcribeBlob]);
 
   const stop = useCallback(() => {
     if (stateRef.current !== "recording") return;
+    clearMaxTimer();
     pressSinceStartRef.current = false; // stopped: no press pending for the next release
     stopPartials();
     const recorder = recorderRef.current;
@@ -367,11 +392,12 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     }
     setPhase("transcribing");
     if (recorder.state !== "inactive") recorder.stop();
-  }, [setPhase, stopPartials]);
+  }, [clearMaxTimer, setPhase, stopPartials]);
 
   /** Stops the recording and discards the clip: no transcription, back to idle. */
   const cancel = useCallback(() => {
     if (stateRef.current === "idle") return;
+    clearMaxTimer();
     stopPartials();
     discardRef.current = true; // onstop skips transcription
     const recorder = recorderRef.current;
@@ -387,7 +413,9 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     pressSinceStartRef.current = false;
     setPartial("");
     setPhase("idle");
-  }, [setPhase, stopPartials]);
+  }, [clearMaxTimer, setPhase, stopPartials]);
+
+  stopRef.current = stop;
 
   /** Arms the hold timer: call on press (pointerdown/keydown) when idle. */
   const press = useCallback(() => {
@@ -472,6 +500,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
         clearTimeout(holdTimerRef.current);
         holdTimerRef.current = null;
       }
+      clearMaxTimer();
       stopPartials();
       const recorder = recorderRef.current;
       recorderRef.current = null;
@@ -485,7 +514,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       releaseStream();
       void cancelPrewarmRef.current?.().catch(() => undefined);
     };
-  }, [releaseStream, stopPartials]);
+  }, [clearMaxTimer, releaseStream, stopPartials]);
 
   return { supported, state, partialText, error, holding, start, stop, cancel, press, release, cancelPress, dismissError };
 }

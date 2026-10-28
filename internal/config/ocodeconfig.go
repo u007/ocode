@@ -407,6 +407,67 @@ func (p CompactConfigPatch) applyTo(dst *CompactConfig) {
 	}
 }
 
+// Git pull reconcile strategies. git >= 2.33 refuses a divergent `git pull`
+// when neither the command line nor pull.rebase/pull.ff/branch.<name>.rebase
+// says how to reconcile ("fatal: Need to specify how to reconcile divergent
+// branches"), so ocode always passes one of these flags explicitly.
+const (
+	GitPullStrategyRebase = "rebase"
+	GitPullStrategyMerge  = "merge"
+)
+
+// GitConfig holds repository behaviour shared by every ocode surface that runs
+// git (the TUI Git tab and the web/desktop Git tab), so one setting covers both
+// and also remote projects: ocode passes the flag to the host instead of
+// relying on that host's git config.
+type GitConfig struct {
+	// PullStrategy is how `git pull` reconciles divergent branches: "rebase"
+	// (the default — rewrites local commits onto upstream) or "merge"
+	// (creates a merge commit, i.e. `--no-rebase`). An empty value means the
+	// default, so an in-memory OcodeConfig built by an older caller keeps
+	// working.
+	PullStrategy string `json:"pull_strategy"`
+}
+
+func defaultGitConfig() GitConfig {
+	return GitConfig{PullStrategy: GitPullStrategyRebase}
+}
+
+// withDefaults resolves an unset strategy to the rebase default.
+func (c GitConfig) withDefaults() GitConfig {
+	if strings.TrimSpace(c.PullStrategy) == "" {
+		return defaultGitConfig()
+	}
+	return c
+}
+
+// NormalizeGitConfig fills an unset strategy with the default. Unlike a raw
+// field read it never yields an empty strategy, so callers can rely on
+// PullFlag without a zero-value guard.
+func NormalizeGitConfig(cfg GitConfig) GitConfig {
+	return cfg.withDefaults()
+}
+
+// Validate rejects an unknown strategy rather than silently rebasing: a typo in
+// ocodeconfig.json is a configuration error the user can see and fix.
+func (c GitConfig) Validate() error {
+	switch c.withDefaults().PullStrategy {
+	case GitPullStrategyRebase, GitPullStrategyMerge:
+		return nil
+	}
+	return fmt.Errorf("git.pull_strategy must be %q or %q", GitPullStrategyRebase, GitPullStrategyMerge)
+}
+
+// PullFlag is the reconcile flag `git pull` must carry. It is always explicit:
+// the point of the setting is that ocode answers git's question instead of
+// leaving it to the repository's (or the remote host's) git config.
+func (c GitConfig) PullFlag() string {
+	if c.withDefaults().PullStrategy == GitPullStrategyMerge {
+		return "--no-rebase"
+	}
+	return "--rebase"
+}
+
 const (
 	ChatVerbosityFull     = "full"
 	ChatVerbosityBalanced = "balanced"
@@ -913,6 +974,8 @@ type OcodeConfig struct {
 	TTS           TTSConfig
 	STT           STTConfig
 	ChatVerbosity ChatVerbosityConfig
+	// Git is repository behaviour shared by the TUI and web/desktop Git tabs.
+	Git GitConfig
 	// QuickActions is the composer strip. It is seeded in memory by
 	// defaultOcodeConfig when the key is absent, so an untouched install
 	// renders the three starters without anything on disk.
@@ -1373,9 +1436,14 @@ type browserConfigFile struct {
 	Extensions         json.RawMessage `json:"extensions,omitempty"`
 }
 
+type gitConfigFile struct {
+	PullStrategy *string `json:"pull_strategy,omitempty"`
+}
+
 type ocodeConfigFile struct {
 	Compact                    compactConfigFile           `json:"compact"`
 	Advisor                    advisorConfigFile           `json:"advisor"`
+	Git                        *gitConfigFile              `json:"git,omitempty"`
 	Permissions                permissionConfigFile        `json:"permissions"`
 	Plugins                    pluginsConfigFile           `json:"plugins"`
 	Browser                    browserConfigFile           `json:"browser"`
@@ -1491,6 +1559,7 @@ func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
 		Compact:                   defaultCompactConfig(),
 		Advisor:                   defaultAdvisorConfig(),
+		Git:                       defaultGitConfig(),
 		Permissions:               defaultPermissionConfig(),
 		Browser:                   BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRRemoteAutoStart: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
 		TTS:                       TTSConfig{Engine: "browser-native", Mode: "manual"},
@@ -1768,6 +1837,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["advisor"]; ok {
 		applyAdvisorConfig(&cfg.Advisor, file.Advisor)
 		delete(raw, "advisor")
+	}
+
+	if _, ok := raw["git"]; ok {
+		if err := applyGitConfig(&cfg.Git, file.Git); err != nil {
+			return err
+		}
+		delete(raw, "git")
 	}
 
 	if _, ok := raw["permissions"]; ok {
@@ -2363,6 +2439,22 @@ func applyPermissionConfig(dst *PermissionConfig, src permissionConfigFile) {
 	}
 }
 
+// applyGitConfig merges the on-disk git block into the in-memory default. An
+// absent block or an absent field keeps the current value, so a partial write
+// from an older binary cannot reset the strategy; an unknown value is rejected.
+func applyGitConfig(dst *GitConfig, src *gitConfigFile) error {
+	if src == nil || src.PullStrategy == nil {
+		return nil
+	}
+	next := dst.withDefaults()
+	next.PullStrategy = strings.TrimSpace(*src.PullStrategy)
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	*dst = next
+	return nil
+}
+
 func applyChatVerbosityConfig(dst *ChatVerbosityConfig, src *chatVerbosityConfigFile) error {
 	if src == nil {
 		return nil
@@ -2805,6 +2897,11 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"chat_verbosity": chatVerbosity,
 		"quick_actions":  NormalizeQuickActions(cfg.QuickActions),
 	}
+	// Only written once the user departs from the rebase default, so an
+	// untouched install gains no new key and a switch back to rebase removes it.
+	if gitCfg := cfg.Git.withDefaults(); gitCfg.PullStrategy != GitPullStrategyRebase {
+		payload["git"] = gitCfg
+	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
 	}
@@ -2955,7 +3052,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" || k == "git" {
 			continue
 		}
 		payload[k] = v
@@ -4333,6 +4430,20 @@ func SaveOcodeCommitMsgConfig(model, prompt string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.CommitMsgModel = model
 		cfg.CommitMsgPrompt = prompt
+		return nil
+	})
+}
+
+// SaveOcodeGitConfig persists the shared git behaviour block. Validation runs
+// before taking the lock so an invalid request cannot rewrite an existing
+// config file.
+func SaveOcodeGitConfig(cfg GitConfig) error {
+	cfg = cfg.withDefaults()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Git = cfg
 		return nil
 	})
 }

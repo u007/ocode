@@ -152,7 +152,7 @@ output is a tool result consumed by the model, not a response shown to a user.
   `internal/server/event_bus.go`. The Go list and the web `SESSION_SCOPED_EVENTS` set
   in `web/src/lib/sessionEvents.ts` MUST stay in step (the web list mirrors the Go one).
 - The headless (web/desktop) path publishes it from the agent's `OnMessage` callback in
-  `wireHeadlessAgentCallbacks` (`internal/server/handler.go:891`), which is the single
+  `wireHeadlessAgentCallbacks` (`internal/server/handler.go:896`), which is the single
   place that already translates agent messages into bus frames.
 - The legacy SSE path (`internal/server/handler_sse.go`) publishes the same event so
   the older client contract stays intact.

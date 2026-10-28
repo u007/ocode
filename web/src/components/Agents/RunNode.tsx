@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { AgentRun, AgentRunMessage } from "../../api/types";
+import ScrollNavButtons from "../common/ScrollNavButtons";
+import { useStickToBottom } from "../../hooks/useStickToBottom";
 
 // statusStyles maps a run status to its dot, glow and accent-bar treatment.
 export function statusStyles(status: string): { dot: string; bar: string; text: string } {
@@ -117,6 +119,14 @@ interface RunNodeProps {
 // nested sub-agent runs (recursively).
 export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }: RunNodeProps) {
   const [open, setOpen] = useState(defaultOpen);
+  // The expanded transcript is a bounded scroll box that content streams into,
+  // so it follows the tail while the reader is at the bottom ("once at the
+  // bottom, auto scroll") and stops the moment they scroll up to read. Passing
+  // the messages only while open is what makes the FIRST pin land on the real
+  // scroller: the box mounts with `open`, and the hook's effect would otherwise
+  // have run once against a null ref when the card was collapsed.
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const stick = useStickToBottom(messagesRef, open ? run.messages : undefined);
   const summary = childSummary(run.children);
   const hasResult = Boolean(run.result?.trim());
   const hasDetail = run.messages.length > 0 || run.children.length > 0 || hasResult;
@@ -205,8 +215,21 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
             </div>
           )}
           {run.messages.length > 0 && (
-            <div className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-card/70 p-2 ring-1 ring-inset ring-ring/80">
-              {run.messages.map((m, i) => messageLine(m, i))}
+            <div className="relative">
+              <div
+                ref={messagesRef}
+                onScroll={stick.onScroll}
+                data-testid="agent-transcript"
+                className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-card/70 p-2 ring-1 ring-inset ring-ring/80"
+              >
+                {run.messages.map((m, i) => messageLine(m, i))}
+              </div>
+              <ScrollNavButtons
+                scrollRef={messagesRef}
+                watch={run.messages.length}
+                size="sm"
+                onNavigate={stick.onNavigate}
+              />
             </div>
           )}
           {hasResult && (

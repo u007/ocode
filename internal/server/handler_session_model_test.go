@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/usage"
 )
 
 // setSessionModel calls the PUT endpoint handler for id with the given model.
@@ -154,7 +157,10 @@ func TestPerSessionModelOverrideIsolation(t *testing.T) {
 		t.Fatalf("A context_model = %q, want override to flow into context gauge", snap.ContextModel)
 	}
 
-	// Clear: A falls back to the global default and the metadata key is gone.
+	// Clear: A falls back to the global default. The key itself stays with an
+	// empty value — that sentinel is what distinguishes "explicitly follow the
+	// default" from a legacy chat with no model metadata (which recovers its own
+	// model from the usage ledger instead).
 	clearRec := httptest.NewRecorder()
 	h.HandleClearSessionModel(clearRec, httptest.NewRequest("DELETE", "/api/sessions/"+a+"/model", nil), a)
 	if clearRec.Code != http.StatusOK {
@@ -167,8 +173,8 @@ func TestPerSessionModelOverrideIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload A after clear: %v", err)
 	}
-	if _, ok := s.Metadata["model"]; ok {
-		t.Fatalf("metadata still holds model override after clear: %v", s.Metadata["model"])
+	if v, ok := s.Metadata["model"]; !ok || v != "" {
+		t.Fatalf("metadata after clear = %v (present=%v), want the empty follow-default sentinel", v, ok)
 	}
 }
 
@@ -239,10 +245,12 @@ func TestHandleChatPersistsNewSessionModel(t *testing.T) {
 	}
 }
 
-// TestHandleChatNewSessionWithoutModelHasNoOverride asserts the flip side: a
-// session created without an explicit model carries no override and follows
-// the global default — including when the default later changes.
-func TestHandleChatNewSessionWithoutModelHasNoOverride(t *testing.T) {
+// TestHandleChatPinsNewSessionModelAtCreation is the regression test for the
+// "switch chat and it runs the LAST switched model" report. A chat created
+// without an explicit pick must be pinned to the process-wide default IN EFFECT
+// AT CREATION, so a later default change (which is what pre-seeds a NEW chat)
+// cannot retroactively move an existing chat.
+func TestHandleChatPinsNewSessionModelAtCreation(t *testing.T) {
 	h := NewHandler()
 	if h.cfg == nil {
 		t.Skip("no config loaded")
@@ -254,8 +262,6 @@ func TestHandleChatNewSessionWithoutModelHasNoOverride(t *testing.T) {
 	t.Cleanup(func() { session.SetWorkDir("") })
 	h.cfg.Model = "openai/global-default"
 
-	// No "model" in the body: HandleChat resolves the effective model
-	// internally (the global default here) and must NOT persist an override.
 	raw, _ := json.Marshal(map[string]any{
 		"content": "hello",
 		"async":   true,
@@ -276,13 +282,124 @@ func TestHandleChatNewSessionWithoutModelHasNoOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load session: %v", err)
 	}
-	if _, ok := s.Metadata["model"]; ok {
-		t.Fatalf("session without an explicit pick must not persist an override: %v", s.Metadata["model"])
+	if m, _ := s.Metadata["model"].(string); m != "openai/global-default" {
+		t.Fatalf("persisted metadata model = %v, want the creation-time default", s.Metadata["model"])
 	}
-	// Flipping the global default moves this session with it.
+	// The default moving on (a later pick for a NEW chat) must not touch it.
 	h.cfg.Model = "openai/other-default"
-	if got := h.effectiveSessionModel(resp.SessionID); got != "openai/other-default" {
-		t.Fatalf("no-override session model = %q, want it to follow the global default", got)
+	if got := h.effectiveSessionModel(resp.SessionID); got != "openai/global-default" {
+		t.Fatalf("pinned session model = %q, want the creation-time model", got)
+	}
+}
+
+// TestEffectiveSessionModelRecoversLegacyModel proves the migration path for
+// chats created before every session was pinned: with no override in the
+// transcript metadata, the model is recovered from the newest usage-ledger row
+// attributed to that chat, so resuming it runs what it actually last ran
+// instead of the process-wide default someone picked later.
+func TestEffectiveSessionModelRecoversLegacyModel(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	h.cfg.Model = "opencode-go/last-switched"
+
+	legacy := session.NewSessionID()
+	saveSessionToDir(t, proj, legacy)
+	// No "model" in metadata — this is what a pre-fix chat looks like.
+	usage.RecordUsageForSession(time.Now(), legacy, "nemotron-3.5-super-vl:free", "openrouter", 10, 5, 0, 15, 0)
+	usage.RecordUsageForSession(time.Now(), legacy, "deepseek-v4.1-flash", "opencode-go", 10, 5, 0, 15, 0)
+
+	if got := h.effectiveSessionModel(legacy); got != "opencode-go/deepseek-v4.1-flash" {
+		t.Fatalf("legacy session model = %q, want the newest ledger model for that chat", got)
+	}
+	if got := sessionStatusMainModel(t, h, legacy); got != "opencode-go/deepseek-v4.1-flash" {
+		t.Fatalf("legacy status main_model = %q, want the recovered model", got)
+	}
+
+	// A chat with no ledger history and no override still follows the default.
+	fresh := session.NewSessionID()
+	saveSessionToDir(t, proj, fresh)
+	if got := h.effectiveSessionModel(fresh); got != "opencode-go/last-switched" {
+		t.Fatalf("session with no history = %q, want the process default", got)
+	}
+}
+
+// TestClearSessionModelIgnoresLedgerModel pins the "explicit clear still means
+// follow the default" contract: the empty sentinel written by the DELETE
+// endpoint must suppress the usage-ledger recovery, otherwise clearing a model
+// would silently keep the old one.
+func TestClearSessionModelIgnoresLedgerModel(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	h.cfg.Model = "openai/global-default"
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	usage.RecordUsageForSession(time.Now(), id, "claude-sonnet", "anthropic", 1, 1, 0, 2, 0)
+	if got := h.effectiveSessionModel(id); got != "anthropic/claude-sonnet" {
+		t.Fatalf("pre-clear model = %q, want the ledger model", got)
+	}
+
+	clearRec := httptest.NewRecorder()
+	h.HandleClearSessionModel(clearRec, httptest.NewRequest("DELETE", "/api/sessions/"+id+"/model", nil), id)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear: %d, want 200 (%s)", clearRec.Code, clearRec.Body.String())
+	}
+	if got := h.effectiveSessionModel(id); got != "openai/global-default" {
+		t.Fatalf("post-clear model = %q, want the global default (ledger ignored)", got)
+	}
+}
+
+// TestPinSessionModel covers the first-turn pin: a legacy chat is frozen to the
+// model it resolved with, while an explicit pick (or the explicit clear
+// sentinel) is never overwritten.
+func TestPinSessionModel(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+
+	legacy := session.NewSessionID()
+	saveSessionToDir(t, proj, legacy)
+	h.pinSessionModel(legacy, "openai/pinned")
+	if got := h.effectiveSessionModel(legacy); got != "openai/pinned" {
+		t.Fatalf("legacy after pin = %q, want the pinned model", got)
+	}
+
+	picked := session.NewSessionID()
+	saveSessionToDir(t, proj, picked)
+	if rec := setSessionModel(t, h, picked, "anthropic/chosen"); rec.Code != http.StatusOK {
+		t.Fatalf("set model: %d (%s)", rec.Code, rec.Body.String())
+	}
+	h.pinSessionModel(picked, "openai/pin-must-not-win")
+	if got := h.effectiveSessionModel(picked); got != "anthropic/chosen" {
+		t.Fatalf("explicit pick overwritten by pin: %q", got)
+	}
+
+	cleared := session.NewSessionID()
+	saveSessionToDir(t, proj, cleared)
+	if _, err := h.setSessionModelOverride(cleared, ""); err != nil {
+		t.Fatalf("clear override: %v", err)
+	}
+	h.pinSessionModel(cleared, "openai/pin-must-not-win")
+	md, err := session.ReadMetadataForDir(proj, cleared)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if v, ok := md["model"]; !ok || v != "" {
+		t.Fatalf("clear sentinel replaced by pin: %v (present=%v)", v, ok)
 	}
 }
 
@@ -337,5 +454,129 @@ func TestSetSessionModelWithFilteredTranscriptRows(t *testing.T) {
 	}
 	if got := h.effectiveSessionModel(id); got != "openai/global-default" {
 		t.Fatalf("effectiveSessionModel after clear = %q, want global default", got)
+	}
+}
+
+// seedLoopbackCredential registers a usable credential for provider with a
+// base URL that refuses connections immediately, so a rebuilt client can be
+// CONSTRUCTED in tests without any request leaving the machine.
+func seedLoopbackCredential(t *testing.T, provider string) {
+	t.Helper()
+	prev, hadPrev := auth.Get(provider)
+	t.Cleanup(func() {
+		if hadPrev {
+			_ = auth.Set(provider, prev)
+		} else {
+			_ = auth.Remove(provider)
+		}
+	})
+	if err := auth.Set(provider, auth.Credential{
+		Kind:    auth.KindAPIKey,
+		Key:     "test-key",
+		BaseURL: "http://127.0.0.1:1",
+	}); err != nil {
+		t.Fatalf("seed %s credential: %v", provider, err)
+	}
+}
+
+// TestModelPickAppliesToNextMessageInSameChat is the end-to-end regression for
+// "selecting a new model on the same existing chat must reflect on the next
+// message": the pick writes the per-session override, and the very next send
+// must resolve it, replace the RESIDENT agent (which otherwise keeps the client
+// it was constructed with) and dispatch on the picked model.
+func TestModelPickAppliesToNextMessageInSameChat(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	seedLoopbackCredential(t, "anthropic")
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+
+	// Resident on its creation model — the case where a stale client would
+	// otherwise keep serving the old model.
+	h.cfg.Model = "opencode-go/deepseek-v4.1-flash"
+	as := newTestSession(h, id, instantClient{})
+	as.model = "opencode-go/deepseek-v4.1-flash"
+
+	if rec := setSessionModel(t, h, id, "anthropic/claude-sonnet-5-5"); rec.Code != http.StatusOK {
+		t.Fatalf("pick model: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := h.effectiveSessionModel(id); got != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("after pick effectiveSessionModel = %q, want the picked model", got)
+	}
+
+	raw, _ := json.Marshal(map[string]any{"content": "hello", "async": true})
+	rec := httptest.NewRecorder()
+	h.HandleSendMessage(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/message", bytes.NewReader(raw)), id)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("send after pick: %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode send response: %v", err)
+	}
+	if resp.Model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("dispatch model = %q, want the model picked in this chat", resp.Model)
+	}
+	// The resident agent must have been REPLACED, not merely annotated: a kept
+	// agent still calls the old provider on this turn.
+	if got := h.lookupAgentSession(id); got == nil || got == as || got.model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("resident agent not rebuilt to the picked model: %+v", got)
+	}
+
+	// Stop the background turn (its loopback base URL refuses the connection).
+	h.HandleCancelSession(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/sessions/"+id+"/cancel", nil), id)
+}
+
+// TestModelPickDuringActiveTurnAppliesToFollowingTurn pins the IsTurnActive
+// guard: a model picked while the turn is streaming must not tear down the
+// running agent mid-turn, and the FOLLOWING turn must pick the new model up.
+func TestModelPickDuringActiveTurnAppliesToFollowingTurn(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	seedLoopbackCredential(t, "anthropic")
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	h.cfg.Model = "opencode-go/deepseek-v4.1-flash"
+	as := newTestSession(h, id, instantClient{})
+	as.model = "opencode-go/deepseek-v4.1-flash"
+
+	if rec := setSessionModel(t, h, id, "anthropic/claude-sonnet-5-5"); rec.Code != http.StatusOK {
+		t.Fatalf("pick model: %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Mid-turn: the running agent keeps its client.
+	h.sessions.setTurnActive(id, true)
+	mid, err := h.reconcileProfileAgent(id, as, h.effectiveSessionModel(id))
+	if err != nil {
+		t.Fatalf("mid-turn reconcile: %v", err)
+	}
+	if mid != as {
+		t.Fatalf("mid-turn reconcile replaced the running agent; the turn would be torn down")
+	}
+
+	// Turn over: the next turn rebuilds on the picked model.
+	h.sessions.setTurnActive(id, false)
+	next, err := h.reconcileProfileAgent(id, mid, h.effectiveSessionModel(id))
+	if err != nil {
+		t.Fatalf("post-turn reconcile: %v", err)
+	}
+	if next == as || next.model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("following turn did not adopt the picked model: %+v", next)
 	}
 }

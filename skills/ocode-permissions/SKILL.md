@@ -60,7 +60,7 @@ Always allow (no prompt):  read, glob, grep, rgrep, list, lsp, lsp_diagnostics,
 Default allow:             write, edit, multiedit, multi_file_edit,
                            replace_lines, apply_patch, format, imagegen
 
-Default ask:               delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
+Default ask:               delete, bash, webfetch, websearch, repo_clone, mcp_*, computer, browser
 ```
 
 Override per-tool in `ocodeconfig.json` → `permissions.tools`:

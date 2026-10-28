@@ -14,5 +14,11 @@
     "/Applications/Google Chrome.app/Contents/MacOS",
     "/home",
     "/Users/james/Downloads"
-  ]
+  ],
+  "skills": {
+    "disabled": [
+      "basin",
+      "turnstile-spin"
+    ]
+  }
 }

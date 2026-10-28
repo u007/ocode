@@ -20,7 +20,7 @@ The test fixture `expectedBuiltinTools` in `internal/tool/tool_test.go:21` lists
 
 - `SkillTool` (defined in `internal/tool/misc.go:17`) has `Name() string { return "skill" }` — **present** in the expected list.
 - `SkillAliasTool` (defined in `internal/tool/misc.go:66`) embeds `SkillTool` and overrides `Name()` to return `"load_skill"` — **absent** from the expected list.
-- Both are registered unconditionally in `InitBuiltinTools` (`tool.go:121-122`).
+- Both are registered unconditionally in `InitBuiltinTools` (`tool.go:137`).
 - The test at `tool_test.go:83-98` iterates every tool returned by `InitBuiltinTools` and flags any name not in `expectedBuiltinTools` as unexpected (line 96: `t.Errorf("InitBuiltinTools returned unexpected tool %q", g)`).
 
 ## Symptom

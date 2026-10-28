@@ -199,7 +199,7 @@ Three conclusions:
    `write` — ~55K tokens of arguments — already exceeds Jev's documented 32k
    state allowance in production today. ocode puts the raw arguments into the
    judge state uncapped (`"arguments":         arguments,` at
-   `internal/agent/permission_typesafe.go:430`); `maxCtxBytes` (default 2048)
+   `internal/agent/permission_typesafe.go:570`); `maxCtxBytes` (default 2048)
    bounds only `project_context`. TypeSafe's own guidance for this case is
    *"retrieve and filter in code first, and send only the fields the question
    needs"*, and their jaggedness page lists "Large state full of irrelevant
@@ -231,7 +231,7 @@ One resolver replaces the five hardcoded `newClientFn(...).(*TypesafeClient)`
 sites — `if client := newClientFn(a.config, model); client != nil {` at
 `internal/agent/agent.go:2607` (auto-continue),
 `client, ok := newClientFn(a.config, modelName).(*TypesafeClient)` at
-`internal/agent/agent.go:3833` (permission),
+`internal/agent/agent.go:3835` (permission),
 `newClientFn(a.config, discoveryJudgeModel).(*TypesafeClient)` at
 `internal/agent/discovery_typesafe.go:53`,
 `newClientFn(a.config, networkGuardJudgeModel).(*TypesafeClient)` at

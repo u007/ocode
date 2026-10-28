@@ -87,6 +87,14 @@ func validUploadName(name string) error {
 // string. Admission is the same registered-project rule as every other fs
 // mutation, keyed by ?project= (+ ?host= for a remote project).
 func (h *Handler) HandleFSUpload(w http.ResponseWriter, r *http.Request) {
+	// A raw-bytes body with a non-JSON type is a CORS "simple request" when
+	// sent as text/plain: no preflight, so a foreign page could write files.
+	// application/octet-stream forces a preflight that corsMiddleware denies
+	// for non-allowed origins.
+	if r.Header.Get("Content-Type") != "application/octet-stream" {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/octet-stream")
+		return
+	}
 	if host := hostParam(r); host != "" {
 		h.fsUploadRemote(w, r, host)
 		return

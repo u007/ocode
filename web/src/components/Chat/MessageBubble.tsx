@@ -98,8 +98,14 @@ const MARKDOWN_COMPONENTS: Components = {
   // The `pre` override marks its whole subtree as a fenced (block) code region.
   // Inline code never passes through `pre`, so its `code` sees the default
   // (false) and renders the inline chip.
+  //
+  // Fenced blocks SOFT-WRAP rather than scrolling horizontally: in a chat pane
+  // a long line (a command, a log row, a wide tree) would otherwise be clipped
+  // behind an inner horizontal scrollbar the reader has to discover. `break-words`
+  // + `[overflow-wrap:anywhere]` also break unbroken tokens (paths/URLs/hashes)
+  // that have no space to wrap at, so the block can never widen the bubble.
   pre: ({ children }) => (
-    <pre className="rounded-md bg-card p-3 overflow-x-auto text-xs">
+    <pre className="rounded-md bg-card p-3 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs">
       <BlockCodeContext.Provider value={true}>
         {children}
       </BlockCodeContext.Provider>
@@ -158,18 +164,23 @@ const MARKDOWN_COMPONENTS: Components = {
   a: (props) => (
     <MarkdownLink className="text-link hover:underline" {...props} />
   ),
+  // Tables wrap to the bubble width instead of scrolling sideways: the wrapper
+  // no longer owns `overflow-x-auto`, and every cell breaks long unbroken tokens
+  // so a wide column can always shrink to the available width.
   table: ({ children }) => (
-    <div className="overflow-x-auto mb-2">
-      <table className="border-collapse text-xs">{children}</table>
+    <div className="mb-2 w-full max-w-full">
+      <table className="w-full max-w-full border-collapse text-xs">{children}</table>
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-border px-2 py-1 text-left font-semibold bg-card text-foreground [&_.file-link]:underline">
+    <th className="break-words [overflow-wrap:anywhere] border border-border px-2 py-1 text-left font-semibold bg-card text-foreground [&_.file-link]:underline">
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="border border-border px-2 py-1">{children}</td>
+    <td className="break-words [overflow-wrap:anywhere] border border-border px-2 py-1">
+      {children}
+    </td>
   ),
   hr: () => <hr className="border-border my-3" />,
   strong: ({ children }) => <strong className="font-bold">{children}</strong>,
@@ -182,6 +193,11 @@ const MARKDOWN_COMPONENTS: Components = {
 // `onSpeak` receives the RENDERED text of this block (extracted from the DOM in
 // `speechRef`), never the raw markdown `content`: speaking the source would read
 // heading hashes, `**` markers, backticks and link targets aloud.
+//
+// The wrapper carries `break-words`/`[overflow-wrap:anywhere]` (inherited by
+// every markdown child) so an unbroken token — a long URL, hash or path — wraps
+// inside the bubble instead of painting past its max width. Fenced blocks and
+// tables have their own wrapper rules above and never scroll sideways.
 export function AssistantText({
   content,
   onSpeak,
@@ -197,7 +213,7 @@ export function AssistantText({
           ref={speechRef}
           data-speech-content=""
           data-copy-content=""
-          className="relative prose prose-invert prose-sm max-w-none text-sm"
+          className="relative prose prose-invert prose-sm max-w-none text-sm break-words [overflow-wrap:anywhere]"
         >
           <ReactMarkdown
             remarkPlugins={MARKDOWN_REMARK_PLUGINS}
@@ -265,6 +281,7 @@ function MessageBubble({
       <ToolBlock
         tool={toolName || "result"}
         output={message.content}
+        images={message.images}
         highlight={highlight}
         callKey={`${baseKey}:call:${message.tool_call_id ?? "result"}`}
         outputKey={`${baseKey}:output:${message.tool_call_id ?? "result"}`}
@@ -380,7 +397,7 @@ function UserBubble({
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
         <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground [&_.file-link]:text-primary-foreground [&_.file-link]:underline">
-          <pre className="whitespace-pre-wrap font-sans text-sm">
+          <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-sans text-sm">
             {highlight.trim()
               ? highlightMatches(shownContent, highlight)
               : linkifyPlainText(shownContent)}

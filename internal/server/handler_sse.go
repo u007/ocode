@@ -107,11 +107,22 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	model := r.URL.Query().Get("model")
 	if model == "" {
-		model = h.cfg.Model
+		// Same per-chat resolution as the async paths: an explicit override, then
+		// the usage-ledger recovery for a legacy chat, then the default. This
+		// endpoint is the Telegram bot's transport, so it must not run a resumed
+		// chat's turns on whatever the default happens to be.
+		model = h.effectiveSessionModel(sessionID)
 	}
 	if model == "" {
 		writeError(w, http.StatusBadRequest, "no model configured")
 		return
+	}
+	// A session supplied by the caller exists already; freeze its resolved model
+	// on this first post-upgrade turn like the other dispatch paths. A brand-new
+	// id generated below has no transcript to pin yet and keeps following the
+	// default (this legacy endpoint does not create the metadata row).
+	if sessionID != "" {
+		h.pinSessionModel(sessionID, model)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

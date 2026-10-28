@@ -106,19 +106,19 @@ var DefaultSubAgents = []SubAgentSpec{
 		Name:         "explore",
 		Description:  "Fast read-only codebase exploration",
 		SystemPrompt: exploreSubAgentPrompt,
-		Tools:        []string{"read", "glob", "grep", "rgrep", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
+		Tools:        []string{"read", "glob", "grep", "rgrep", "list", "lsp", "bash", "webfetch", "websearch", "browser", "skill", "load_skill"},
 	},
 	{
 		Name:         "scout",
 		Description:  "External docs, dependency research",
 		SystemPrompt: scoutSubAgentPrompt,
-		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "rgrep", "list", "read", "webfetch", "websearch", "skill", "load_skill"},
+		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "rgrep", "list", "read", "webfetch", "websearch", "browser", "skill", "load_skill"},
 	},
 	{
 		Name:         "context",
 		Description:  "knowledge curator and retriever for the project's OKF docs/ bundle — answers why/decision/playbook questions from curated docs, cites doc paths, sole automated writer of the bundle; also handles codebase exploration (where/how/what) when the bundle is active — subsumes explore",
 		SystemPrompt: contextSubAgentPrompt,
-		Tools:        []string{"grep", "rgrep", "glob", "read", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
+		Tools:        []string{"grep", "rgrep", "glob", "read", "list", "lsp", "bash", "webfetch", "websearch", "browser", "skill", "load_skill"},
 	},
 }
 
@@ -821,6 +821,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// which return before this deferred func runs) but the maintenance
 		// goroutines RearmMaintenance would reinitialize are still live.
 		defer func() {
+			subAgent.closeSessionTools()
 			subAgent.shutdownTransient()
 			run.markTeardownDone()
 			releaseActive()
@@ -895,6 +896,7 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	// started its maintenance workers. Every exit path must tear those workers
 	// down and signal teardown completion for a later resume.
 	defer func() {
+		subAgent.closeSessionTools()
 		subAgent.shutdownTransient()
 		if run != nil {
 			run.markTeardownDone()
@@ -1150,11 +1152,25 @@ var mainAgentOnlyTools = map[string]bool{
 	"todo_update": true,
 }
 
+// agentOwnTools gives the named agent its own instance of every AgentScopedTool,
+// so a subagent's screenshot cache and opened tabs are not the parent's. The
+// name lets a tool apply the agent type's policy (see tool.RefusingTool).
+func agentOwnTools(agentName string, tools []tool.Tool) []tool.Tool {
+	out := make([]tool.Tool, 0, len(tools))
+	for _, tl := range tools {
+		if st, ok := tl.(tool.AgentScopedTool); ok {
+			tl = st.ForAgent(agentName)
+		}
+		out = append(out, tl)
+	}
+	return out
+}
+
 func (t TaskTool) getToolsForDef(spec *AgentDefinition) []tool.Tool {
 	if len(spec.Tools) == 0 {
-		return filterMainOnlyTools(t.mainAgent.GetTools())
+		return agentOwnTools(spec.Name, filterMainOnlyTools(t.mainAgent.GetTools()))
 	}
-	allTools := filterMainOnlyTools(t.mainAgent.GetTools())
+	allTools := agentOwnTools(spec.Name, filterMainOnlyTools(t.mainAgent.GetTools()))
 	result := make([]tool.Tool, 0, len(spec.Tools))
 	for _, mainTool := range allTools {
 		for _, allowed := range spec.Tools {

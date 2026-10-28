@@ -58,8 +58,12 @@ export default function CompactionNotice({ content }: { content: string }) {
           <Archive aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
           <span className="truncate">{label}</span>
         </button>
+        {/* The summary is model-authored markdown, so its own fenced blocks and
+            tables must wrap like the transcript's: a default `pre` is
+            `white-space: pre` (no wrap, no scrollbar) and a wide table would
+            paint past the notice. Child utilities keep both inside the pane. */}
         {expanded && body && (
-          <div className="mt-2 prose prose-invert prose-sm max-w-none text-sm text-foreground">
+          <div className="mt-2 prose prose-invert prose-sm max-w-none text-sm text-foreground break-words [overflow-wrap:anywhere] [&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:[overflow-wrap:anywhere] [&_table]:w-full [&_td]:[overflow-wrap:anywhere] [&_th]:[overflow-wrap:anywhere]">
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{body}</ReactMarkdown>
           </div>
         )}

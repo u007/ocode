@@ -1,4 +1,4 @@
-.PHONY: restart-app test-judges test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
+.PHONY: restart-app test-judges test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets htrcli-bundle up-patch up-minor
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -139,6 +139,48 @@ prepare-htr-assets:
 		if [ -n "$(HTRCLI_BIN)" ]; then cp "$(HTRCLI_BIN)" "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)"; else (cd "$(HTRCLI_ROOT)" && GOOS=$(HTR_GOOS) GOARCH=$(HTR_GOARCH) go build $(HTRCLI_LDFLAGS) -o "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)" ./cmd/htrcli) || { echo "failed to build htrcli for $(HTR_GOOS)/$(HTR_GOARCH); install the sibling repo's toolchain/dependencies or provide HTRCLI_BIN" >&2; exit 1; }; fi; \
 		rm -f "$(HTR_BUNDLE)"; (cd "$$tmp" && zip -qr "$(CURDIR)/$(HTR_BUNDLE)" extension htrcli); \
 		echo "Prepared HTR assets for $(HTR_GOOS)/$(HTR_GOARCH)"
+
+# Refreshes the committed htrcli DOM bundle and form kit that internal/browse/cdp
+# embeds (bundle/htrcli-dom.js, bundle/formkit.js). Developer-only: the normal
+# build never reads HTRCLI_ROOT, it only embeds the committed copies.
+#
+# Refuses a dirty htrcli checkout: the vendored code is supplied to an agent that
+# can act on the user's pages, and the only automated check is the AIA_API_KEY
+# blanking. Set HTRCLI_ALLOW_DIRTY=1 to vendor an unreleased local build on
+# purpose (the provenance header then records that the tree differed).
+HTRCLI_ALLOW_DIRTY ?=
+htrcli-bundle:
+	@set -e; \
+	src_dom="$(HTRCLI_ROOT)/internal/cdp/bundle/htrcli-dom.js"; \
+	src_kit="$(HTRCLI_ROOT)/internal/cdp/formkit.js"; \
+	test -f "$$src_dom" && test -f "$$src_kit" || (echo "htrcli bundle sources missing under $(HTRCLI_ROOT) (set HTRCLI_ROOT)" >&2; exit 1); \
+	dst=internal/browse/cdp/bundle; mkdir -p "$$dst"; \
+	sha=$$(git -C "$(HTRCLI_ROOT)" rev-parse --short HEAD); \
+	day=$$(date -u +%Y-%m-%d); \
+	dirty_dom=$$(git -C "$(HTRCLI_ROOT)" status --porcelain -- internal/cdp/bundle/htrcli-dom.js); \
+	dirty_kit=$$(git -C "$(HTRCLI_ROOT)" status --porcelain -- internal/cdp/formkit.js); \
+	wt_dom=$$([ -n "$$dirty_dom" ] && echo yes || echo no); \
+	wt_kit=$$([ -n "$$dirty_kit" ] && echo yes || echo no); \
+	if [ "$(HTRCLI_ALLOW_DIRTY)" != "1" ] && { [ -n "$$dirty_dom" ] || [ -n "$$dirty_kit" ]; }; then \
+		echo "htrcli bundle sources have uncommitted changes (htrcli $$sha); commit them, or re-run with HTRCLI_ALLOW_DIRTY=1 to vendor the working tree anyway" >&2; \
+		exit 1; \
+	fi; \
+	{ printf '%s\n' \
+		'// Vendored from htrcli internal/cdp/bundle/htrcli-dom.js. Do not edit by hand;' \
+		'// refresh with: make htrcli-bundle' \
+		"// htrcli commit: $$sha   working tree differed from commit: $$wt_dom   copied: $$day" \
+		'// Deviation: the AIA_API_KEY value on line 3 is blanked to "" (htrcli gateway key,' \
+		'// used only by fetch paths outside this package). No other change.'; \
+	  sed '3s/\(const AIA_API_KEY = "\)[^"]*"/\1"/' "$$src_dom"; } > "$$dst/htrcli-dom.js"; \
+	grep -q '^  const AIA_API_KEY = "";$$' "$$dst/htrcli-dom.js" || (echo "AIA_API_KEY line not blanked in $$dst/htrcli-dom.js" >&2; exit 1); \
+	grep -En 'AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}' "$$dst/htrcli-dom.js" "$$src_kit" && { echo "possible live secret in the vendored bundle; refusing to write it" >&2; exit 1; } || true; \
+	{ printf '%s\n' \
+		'// Vendored from htrcli internal/cdp/formkit.js. Do not edit by hand;' \
+		'// refresh with: make htrcli-bundle' \
+		"// htrcli commit: $$sha   working tree differed from commit: $$wt_kit   copied: $$day" \
+		'// No deviations: copied verbatim.'; \
+	  cat "$$src_kit"; } > "$$dst/formkit.js"; \
+	echo "wrote $$dst/htrcli-dom.js and $$dst/formkit.js from htrcli $$sha"
 
 ## desktop-icon-windows: regenerate the committed Windows .exe icon resource
 ## (cmd/ocode-desktop/rsrc_windows_*.syso) from cmd/ocode-desktop/winres/.

@@ -1,5 +1,45 @@
 # TODO
 
+## Open: browser agent tool follow-ups (2026-10-27)
+
+The agent tool (`docs/concepts/browser-agent-tools.md`) drives this machine's browser tabs: the project's strip tabs and tabs it opens. Remote-project sessions run on their host and drive that host's Chrome. Deliberately deferred:
+
+- **A remote project's strip is invisible to its host.** Tab state is stored only on the desktop (`host::path` keys in `/api/browser-tabs`), so the host-side agent sees no strip tabs for that project and must use `action=open`. Those tabs are not shown in the desktop's Browser panel. Fix: route the strip (or the agent's opened tabs) to the host.
+- **Agent-opened and headless tabs are not in the panel.** A tab from `action=open`, or a restored tab the agent attached headless, has no panel view. For a local-mode (private-host) tab the agent's headless page is a separate Chrome view from the panel's iframe.
+- **Attaches are serialized.** `Manager.attachMu` makes every attach (panel and headless) run one at a time, so restoring many tabs at once is slower than before.
+- **No wait-for-load on navigation.** `navigate`, `back`, `forward`, `reload` and `open` return before the page settles. The model blocks on the outcome with `wait` (text or an element). The first load of a tab the agent attaches (`AgentTarget`) now waits for `readyState` "complete" up to 10 s. The action paths above are still open.
+- **Chords, hover and drag remain.** Keys are a named allowlist with no modifiers, and there is no hover or drag. File upload (`upload`, and file values in `fill_form`) and element refs (`@eN` from `snapshot` and `find`) are implemented; see `docs/concepts/browser-agent-tools.md`.
+- **The TUI's own chat agent is not wired.** Sessions on the TUI's `/rc` server do get the tool, because that server starts the embedded browser. The TUI's own agent (`internal/tui/model.go` `NewAgent`) does not. Wiring it would need its own embedded browser start; not done speculatively.
+- **Scroll is window-only.** `scroll` does not reach inner scroll containers.
+- **Browser tab titles and URLs are not scanned, and neither are browser errors.** The inbound-content guardrail covers the browser results that carry page text: `text`, `snapshot`, `find`, `console`, `network`, `fill_form`, `pick` and `select`. Titles from `action=tabs` are page-controlled too, and the guard reads only successful results, so an error that quotes page text (a `pick` option list, a `fill` read-back) reaches the model unscanned. Decide whether either is worth a judge call.
+- **Outbound network guard does not judge `navigate` or `open`.** Both raise a permission ask, so the human reviews the URL instead. Auto-allowing them (an `allow` rule) skips that review entirely.
+- **Top-level host can still rebind to LAN, CGNAT or ULA.** `cdp/egress.go` `dialTopLevel` resolves a registered top-level host once, refuses link-local (169.254/16, fe80::/10) and metadata addresses (100.100.100.200, fd00:ec2::254, `metadata.google.internal`), and dials the checked IPs as literals. LAN, CGNAT and ULA stay allowed on this path, as the current policy has them, so a public page whose name rebinds to a LAN address is still reached. Decide whether top-level LAN stays open for dev servers or narrows to loopback and user-trusted hosts. Also open, found in the same review: `browse.isPrivateIP` (`browse/route.go`) does not strip the IPv6 zone before `Prefix.Contains`, so a zoned link-local literal passes the policy dialer; and `browse.newSafeDialer` (`browse/dialer.go`) wraps `errPrivateAddr`, not `cdp.ErrBlocked`, so policy blocks answer 502, not the 403 that `cdp/egress.go` promises.
+- **String `fill_form` values naming a file are not made absolute.** `checkFormFields` (`internal/server/browser_tool.go`) converts only array values, because rewriting a plain string would change typed text (`"Ann"` would become a project path). The browser layer refuses a relative single-string file path. Fix: have `cdp` resolve string paths for file-kind fields itself, through a policy callback that returns the resolved path (the current `allowed func(path string) error` cannot return it).
+- **Docs anchors into changed agent files are not re-derived yet (2026-10-28).** The browser changes (`internal/tool/tool.go`, `internal/agent/agent.go` +10 lines before `gateToolCall` near line 3938, `permissions.go` +2 lines before `browserObserveActions` near line 5698, `subagent.go` +1 line before `agentOwnTools` near line 1158, `permission_typesafe.go` browser block near lines 530-600) shifted `file.go:N` anchors on about 17 `docs/concepts` and `docs/gotchas` pages (the bundle rule in CLAUDE.md). Re-derive each anchor on those pages. The historical `docs/superpowers` plans and specs are snapshots and may stay as they are.
+- **Browser read gate has no auto-mode test.** `browserUserTabReadDecision` (`internal/agent/permission_typesafe.go`) asks through the same path as a mutating action, so auto mode should route it to the judge. No test drives that path yet; the normal-mode, YOLO, deny, allow and unresolved-page cases are covered in `internal/agent/browser_read_gate_test.go`.
+- **`scroll` is not gated by page ownership.** It runs unasked on a user's tab, by design (it only moves the viewport). Revisit if scroll ever triggers page-side effects.
+- **Tab titles are not redacted.** Only URLs in `tabs`, `network`, and `console` text and locations are redacted (`internal/server/browser_redact.go`). A page title that carries a URL with a token is shown as is.
+- **Custom subagent definitions must list `browser`.** Built-in definitions with an explicit tool list now include it. A user-authored definition with an explicit list gets the tool only when it names `browser`; decide whether that is the right default.
+- **Not yet verified live, only partly.** Real-Chrome tests (skipped unless `OCODE_CHROME_PATH` is set) cover the page-DOM foundation and the element actions at the cdp layer. `TestPageDOMRealChrome` (`internal/browse/cdp/pagedom_integration_test.go`) runs the bundle install, snapshot, find in each selector form, wait, a same-origin and a cross-origin iframe, and a stale ref after removal. `TestInteractRealChrome` (`interact_integration_test.go`) runs click, fill, type, check, select, pick, fill_form, upload, and wait. Not covered by a real Chrome: the server tool path (`browserTool` dispatch and its argument checks), refs across a navigation, console and network capture, and the desktop build or a remote host. The stub-Chrome and fake-surface unit tests cover the rest. Also confirm a session's project root equals the browser-tab store key (no trailing slash or `/private/var` vs `/var` drift), and that a remote host's Chrome launches headless.
+- **Element refs survive navigation only by stale detection.** A tab's ref table is not reset on navigation, so an old `@eN` is never re-bound (a reset would restart at `@e1`). Whether Chrome can reuse a `backendNodeId` after a cross-process navigation is unverified; if it can, a stale ref could name a new node. Verify on a real cross-site navigation.
+- **Deferred: recording, trace and video.** Not implemented (htrcli has session recording).
+- **Deferred: network mock and block.** The network action only reads the request log.
+- **Deferred: Firefox and extension transport, and an htrcli daemon.** The tool drives Chrome over CDP directly. Firefox and the extension transport are not wired, and no htrcli daemon is used.
+- **Unsupported: contenteditable.** `fill`, `select`, `check` and `type` with a `target` refuse contenteditable elements with an error.
+- **Deferred: iframes scaled with CSS transforms.** Screenshot coordinates are not mapped through a transformed iframe.
+- **By design: cross-origin iframes are an error.** Their document cannot be reached from the parent. The model is told to open the frame's URL in a tab instead.
+- **Deviation from htrcli: selectors must match exactly one element.** htrcli takes the first match. The tool refuses zero or several matches, so the model never acts on an element it did not pick.
+- **Deviation from the htrcli bundle: snapshot uses the accessibility tree.** The tree is CDP's `Accessibility.getFullAXTree`, not the bundle's own walk, so names and roles can differ from htrcli's output.
+- **Deferred: fill_form file paths are checked per field.** Fields apply in order, so a refused file path comes after the fields before it. Validating every file path before the first field would close that.
+- **Deferred: console and network capture starts at attach.** Entries from before a tab is attached are not kept, and a headless tab attached later starts empty. Keeping a per-tab log that outlives the attach would fix it.
+- **Screenshots are not guarded (injection channel).** A page can paint instructions into a screenshot. The text guard cannot read pixels, and the decision slots have no vision judge. Limit stated in `docs/concepts/browser-agent-tools.md`.
+- **The auto-permission judge's rubric does not mention `browser_page`.** The judge receives the target page (URL, host, opened-by-agent) but the rubric text was not extended to say how to weigh it. Decide the wording before relying on auto-allow for clicks on user pages.
+- **No "agent is controlling this tab" indicator.** Needs a momentary event with the tab id (none exists), and a decision: project-scoped like `browse_*` or session-scoped. Not built.
+- **Screenshots render only in the web chat, after turn end.** The live stream carries no images; they appear with the `messages` snapshot or on reload. Not verified in a running browser UI.
+- **`Navigate` does not surface `Page.navigate`'s `errorText`.** Chrome commits its own error page for a DNS failure or a refused proxy connect, and `Page.navigate` then returns no CDP error. Observed 2026-10-28: navigating a headless tab to `http://2852039166/` (169.254.169.254) through the egress proxy returned nil, readyState reached `complete`, and the page read `proxy: dial failed` (the nav event carried status 502). So `AgentTarget` reports success with no note for a blocked URL. Fix: return an error when `errorText` is set (this also changes the panel's navigate path), or check the navigation's outcome in `AgentTarget`.
+- **`OpenAgentTab` leaves its blank tab registered when the navigation fails.** `AgentTarget` now closes the tab through `CloseAgentTab`; `OpenAgentTab` (`internal/browse/server.go`) still returns the key with the error. Fix: close the key on that error. The tool caller in `internal/server/browser_tool.go` is owned elsewhere.
+- **Frame clicks assume one level of same-origin iframe with no CSS transform.** `cdp.Target.frameOrigin` takes the iframe's content-box origin as the frame viewport origin. That is exact for a top-level `<iframe>` with no transform; a transformed or nested iframe would hit-test at the wrong point and refuse the click rather than mis-click.
+
 ## Open: Files-tab paste follow-ups (2026-10-27)
 
 The Files tab now has cut/copy/paste to the project root, keyboard shortcuts, and OS-file paste (`docs/concepts/files-tab-clipboard.md`). Deliberately deferred:
@@ -6459,3 +6499,46 @@ reaper, WebKit finding (WebSockets are free; pending fetches are not).
       connect cooldown + WebKit connection limit (CLAUDE.md already carries the rules).
 - [ ] Stale `ocode serve --remote` processes on james@217.216.72.49 (7 old ones) not killed; the
       reaper only runs after the next fresh launch.
+
+## Page-DOM foundation (htrcli port): deferred gaps (2026-10-27)
+Done in `internal/browse/cdp`: vendored DOM bundle + form kit (`bundle/`, `make htrcli-bundle`),
+install-once exec/kit (`pagedom.go`), frame contexts (`pagedom_frame.go`), `@eN` refs over
+backendNodeIds with stale detection (`refs.go`), snapshot/find/wait (`pagedom_read.go`).
+- [ ] Snapshot is Chrome's accessibility tree (`Accessibility.getFullAXTree`), not htrcli's
+      DOM walk: same line layout, different node set and names. Refs need a backendNodeId per
+      node, which the bundle cannot supply. Decide whether to keep it or match htrcli exactly.
+- [ ] Execution contexts are recorded only from subscription time. An iframe that existed before
+      the tab was attached never resolves ("frame not ready" until the timeout). htrcli replays
+      via Runtime.disable/enable, which would duplicate console lines here.
+- [ ] `text=` matches containers too (`<html>`, `<body>`), as htrcli does. There is no tag filter
+      form in this port, so the first match is often a container.
+- [ ] `wait --gone` does not check htrcli's document-still-loading "unsettled" state.
+- [ ] `RefTable` has no eviction; refs accumulate per agent per tab, and only stale detection
+      invalidates them (no navigation hook).
+- [ ] Only same-origin iframes are supported (as in htrcli). Out-of-process frames need their own target.
+- [ ] Mutating actions (click/fill/type/check/select/pick/fill-form/upload) and the agent tool
+      wiring for refs are not in this change.
+
+## Auto-permission: `secrets` opt-out now reaches the deterministic guard (2026-10-28)
+Found while dissecting Jev auto-permission asks for `ses_2026-10-28-055832-3ce3d200` (remote host
+james@217.216.72.49). The user unticked `secrets` in Settings and still had a `.env` read asked.
+- [x] Fixed: `verifyAutoGrant` now clears the sensitive-path refusal for SECRET MATERIAL when
+      `permissions.auto.relaxed_concerns` contains `secrets` (`agent.go:4785`); repo metadata
+      (`.git/`, `.github/workflows/`) stays guarded. Settings note corrected
+      (`permission_typesafe.go:83`). Tests: `internal/agent/permissions_relaxed_secrets_test.go`.
+- [ ] Needs a desktop rebuild + reconnect before the running remote session picks it up.
+- [ ] NOT changed: `Decide` still raises `tool.read.sensitive_path` statically, so the judge is
+      still consulted (that is the intended flow: the judge decides, the guard no longer vetoes).
+- [ ] Saving path was never the bug: `PUT /api/config/ocode/permissions-auto`
+      (`handler_config.go:1617-1648`) pushes `SetAutoPermissionConfig` to every live agent.
+
+## Remote config sync clobbers the host's `extra_allowed_paths` (2026-10-28)
+Same session: the user had granted extra dirs, yet every aimsai2 `cd` still asked.
+- [x] Fixed: `machineLocalConfigKeys` now strips `extra_allowed_paths` on the sender and
+      `WritePayload` re-attaches the DESTINATION's own value (`preserveMachineLocalConfig`,
+      `internal/remote/sync.go:179,311`). Before, every sync overwrote the host's
+      `~/.config/opencode/ocodeconfig.json` with macOS `/Users/...` paths, erasing its own grants.
+      Tests: `internal/remote/sync_machine_local_test.go`.
+- [ ] The host's config currently still holds the macOS path list; the host grant
+      (`/home/james/www/aimsai2`) must be re-applied once after the rebuild.
+

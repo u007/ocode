@@ -301,6 +301,12 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
 		stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
 		defer stopActivity()
+		// Emit turn_started for this continuation round, exactly like runTurn. The
+		// client normally preserves its turnActive flag across the ask pause, but a
+		// reload or a stale turn_done can clear it — and then the re-Step would be
+		// invisible (no running indicator) until the terminal messages/turn_done
+		// frames land. turn_started re-arms it.
+		h.publishTurnStarted(sessID, as.model)
 
 		// Tell every watcher the dialog can be dismissed NOW — before the
 		// continuation round. The answer is already applied in `working`; a slow

@@ -1056,6 +1056,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           // re-derivation of pending_asks starts from a clean slate.
           hiddenPermissionRequestId:
             s.hiddenPermissionRequestId === action.requestId ? null : s.hiddenPermissionRequestId,
+          // The approve/deny continuation runs a fresh Step on the server, so the
+          // turn is active again from this moment — not just after the server's
+          // turn_started, which lands only after the approved tool executed. Arm
+          // the flag here so a cleared/stale turnActive (reload, or a turn_done
+          // from another writer) does not leave the approved tool invisible with
+          // no running indicator. A still-queued ask means the turn is paused on
+          // it, and paused still counts as in-turn (same as hasPendingAsk).
+          turnActive: true,
+          lastHeartbeatAt: Date.now(),
+          turnStalled: false,
         };
       });
     case "QUESTION_REQUEST":

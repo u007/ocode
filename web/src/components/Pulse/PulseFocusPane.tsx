@@ -15,7 +15,7 @@ import {
 } from "./PulseCard";
 import { pulseProjectLabel } from "./pulseFilter";
 import { usePulseTail } from "./usePulseTail";
-import { useStickToBottom } from "./useStickToBottom";
+import { useStickToBottom } from "../../hooks/useStickToBottom";
 import type {
   PermissionDecision,
   PulseRow,

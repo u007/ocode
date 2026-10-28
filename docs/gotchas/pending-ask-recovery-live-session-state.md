@@ -127,7 +127,7 @@ dedupes by `request_id`, so an ask already set by the merge is unaffected.
 
 `web/src/hooks/useChat.ts` — when `api.sendMessage` fails with HTTP 409
 (`ErrPermissionPending`, `run_states.go:20`, turned into the 409 by
-`HandleSendMessage` at `handler.go:1583`), the catch
+`HandleSendMessage` at `handler.go:1588`), the catch
 block calls `hydratePendingAsks()` which fetches session state via
 `api.getSessionState` and dispatches `PERMISSION_REQUEST` / `QUESTION_REQUEST`
 for each pending ask, opening the dialog.

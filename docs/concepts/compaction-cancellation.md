@@ -27,7 +27,7 @@ POST /api/sessions/{id}/compact/cancel        →  200 {"cancelled": true | fals
                                                  404 {"error": "session not found"}   (unknown session)
 ```
 
-- Route: `internal/server/server.go:422` (registered next to `POST /api/sessions/{id}/compact` at `:421`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2212`.
+- Route: `internal/server/server.go:465` (registered next to `POST /api/sessions/{id}/compact` at `:421`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2637`.
 - Handler: `Handler.HandleCancelCompaction` (`internal/server/handler_cancel.go:94-104`). It resolves the session (404 if unknown), then calls `as.agent.CancelCompaction()` and returns `{"cancelled": <bool>}`.
 - **Idempotent by design:** cancelling with nothing in flight returns `200 {"cancelled": false}`, not an error, so a stale or double-clicked Cancel button can never surface as a failure (`TestCancelCompactionEndpointNoPassIsNoop`, `internal/server/compact_cancel_test.go:198`).
 - **No lifecycle bookkeeping in this handler.** The running pass retires its own slot and publishes the terminal `compaction_done` frame itself — a second publisher here would double-decrement the session's compaction counter (see the indicator spec §5 ordering rules).
@@ -37,12 +37,12 @@ POST /api/sessions/{id}/compact/cancel        →  200 {"cancelled": true | fals
 
 `Agent.CancelCompaction() bool` (`internal/agent/compact.go:198-212`) cancels **every** in-flight compaction pass for the agent — manual `/compact` and automatic passes alike — with cause `ErrCompactionCanceled`, and reports whether at least one pass was active. It is safe to call when nothing is compacting (returns `false`).
 
-- **Registry:** `compactPassMu` / `compactPassCancels map[uint64]context.CancelCauseFunc` / `compactPassSeq` on the `Agent` (`internal/agent/agent.go:725-736`), lazily initialised in `registerCompactPass` (`internal/agent/compact.go:180-190`) because many tests construct `&Agent{}` directly.
-- **The mutex is deliberately separate from `compactMu`** (`internal/agent/agent.go:725-728`): the compaction goroutine holds `compactMu` for the whole pass, so a cancel arriving from an HTTP handler must be able to read the registry *without waiting on the pass it is cancelling*.
+- **Registry:** `compactPassMu` / `compactPassCancels map[uint64]context.CancelCauseFunc` / `compactPassSeq` on the `Agent` (`internal/agent/agent.go:764-771`), lazily initialised in `registerCompactPass` (`internal/agent/compact.go:180-190`) because many tests construct `&Agent{}` directly.
+- **The mutex is deliberately separate from `compactMu`** (`internal/agent/agent.go:764`): the compaction goroutine holds `compactMu` for the whole pass, so a cancel arriving from an HTTP handler must be able to read the registry *without waiting on the pass it is cancelling*.
 - **Registration:** `beginCompactPass` (`internal/agent/compact.go:167-178`) creates the operation context, registers its cause-cancel under a fresh id, and returns a release func that unregisters and releases the context (`internal/agent/compact.go:174-177`). Callers `defer release()` around the whole pass.
 - `CancelCompaction` snapshots the cancel funcs under the lock, releases it, then fires them outside the lock (`internal/agent/compact.go:202-211`) — never holding `compactPassMu` across the cancellation of a pass.
 
-Both entry points register: manual synchronous compaction goes through `runCompact` (`internal/agent/agent.go:2810-2814`), the async automatic/manual path through `beginCompactPass` inside `startCompactAsync` (`internal/agent/agent.go:2387`).
+Both entry points register: manual synchronous compaction goes through `runCompact` (`internal/agent/agent.go:3123-3127`), the async automatic/manual path through `beginCompactPass` inside `startCompactAsync` (`internal/agent/agent.go:2610`).
 
 ## 3. Why a distinct sentinel (`ErrCompactionCanceled` ≠ bare `context.Canceled`)
 
@@ -50,7 +50,7 @@ Both entry points register: manual synchronous compaction goes through `runCompa
 
 - A cancellation nobody asked for (provider abort, transport teardown, a mis-routed context) is a *fault*: silently reporting it as a clean user cancel would discard a compaction the user still wants and hide the fault from every client. A user cancel is *intent*: it must clear the shared indicator with no error banner.
 - `summaryContextErr` wraps the cause so the class survives: a non-timeout cause becomes `compact: summary cancelled: %w` (`internal/agent/compact.go:1012`), and because it wraps with `%w`, `errors.Is(err, agent.ErrCompactionCanceled)` matches through the label. Classification is **by sentinel identity only, never by message text**.
-- In `HandleCompactSession` the ordering matters: the `ErrCompactionTimeout` branch (`internal/server/handler.go:2002-2016`) and the dead-request branch (`internal/server/handler.go:2017-2021`) are checked **before** the cancel-sentinel branch (`internal/server/handler.go:2022`); a bare `context.Canceled` that reaches neither falls through to the 500 (`internal/server/handler.go:2040`).
+- In `HandleCompactSession` the ordering matters: the `ErrCompactionTimeout` branch (`internal/server/handler.go:2133-2147`) and the dead-request branch (`internal/server/handler.go:2148-2152`) are checked **before** the cancel-sentinel branch (`internal/server/handler.go:2153`); a bare `context.Canceled` that reaches neither falls through to the 500 (`internal/server/handler.go:2171`).
 
 ## 4. Context plumbing: parent cause, child deadline
 
@@ -63,28 +63,28 @@ The returned func cancels the **parent before the child's timeout cancel** (`int
 
 ## 5. Ordering: the pass is registered before `OnCompactStart`
 
-`startCompactAsync` registers the pass **before** calling `OnCompactStart` (`internal/agent/agent.go:2384-2390`):
+`startCompactAsync` registers the pass **before** calling `OnCompactStart` (`internal/agent/agent.go:2610-2611`):
 
 1. `ctx, release := a.beginCompactPass()` — registry entry exists;
 2. `a.OnCompactStart()` — this is what makes the operation visible to clients (the server's `beginCompaction` → `compaction_started` → every connected client's Cancel button).
 
 A client that reacts to `compaction_started` by pressing Cancel must therefore **always find a registered pass** — otherwise `CancelCompaction` would return `false`, the request would report `cancelled:false`, and the pass would run to completion underneath a Cancel button that appeared to work.
 
-To support this, `runCompact` was split: `runCompact` (`internal/agent/agent.go:2810-2814`) creates + registers the pass itself and is used by the synchronous manual `Compact`/`CompactWithFocus` (`internal/agent/agent.go:2475`, `internal/agent/agent.go:2471`) and by direct test callers; `runCompactWithCtx` (`internal/agent/agent.go:2806-2813`) is the body on a caller-supplied context, which `startCompactAsync` invokes after its own registration (`internal/agent/agent.go:2408`).
+To support this, `runCompact` was split: `runCompact` (`internal/agent/agent.go:3123-3127`) creates + registers the pass itself and is used by the synchronous manual `Compact`/`CompactWithFocus` (`internal/agent/agent.go:2680`, `internal/agent/agent.go:2694`) and by direct test callers; `runCompactWithCtx` (`internal/agent/agent.go:3136-3323`) is the body on a caller-supplied context, which `startCompactAsync` invokes after its own registration (`internal/agent/agent.go:2631`).
 
 ## 6. Server result classification
 
-### Manual path — `HandleCompactSession` (`internal/server/handler.go:1950`)
+### Manual path — `HandleCompactSession` (`internal/server/handler.go:2081`)
 
-On `errors.Is(result.Err, agent.ErrCompactionCanceled)` with a **live** request (`internal/server/handler.go:2022`): `finish("")` — a clean `compaction_done {ok:true}`, no error banner — then `200 {"cancelled": true, "original_len": result.OriginalLen, "compacted_len": len(as.messages)}` (`internal/server/handler.go:2031-2035`). The branch sits **after** the `ErrCompactionTimeout` and `r.Context().Err() != nil` branches, never before them.
+On `errors.Is(result.Err, agent.ErrCompactionCanceled)` with a **live** request (`internal/server/handler.go:2153`): `finish("")` — a clean `compaction_done {ok:true}`, no error banner — then `200 {"cancelled": true, "original_len": result.OriginalLen, "compacted_len": len(as.messages)}` (`internal/server/handler.go:2162-2166`). The branch sits **after** the `ErrCompactionTimeout` and `r.Context().Err() != nil` branches, never before them.
 
-### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2160`)
+### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2533`)
 
-Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2165-2169`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2177-2179` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2173-2175`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
+Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2538-2542`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2550-2552` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2546-2548`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
 
 ### Latch: a cancel never stops auto-compaction
 
-`recordCompactOutcome` (`internal/agent/agent.go:2341-2351`) classifies `ErrCompactionCanceled` exactly like `context.Canceled` (`internal/agent/agent.go:2343-2345`): neither latches `compactFailed`. A user cancel says nothing about whether the next pass would succeed — see `concepts/compaction-config.md` §5 for the latch itself.
+`recordCompactOutcome` (`internal/agent/agent.go:2564-2574`) classifies `ErrCompactionCanceled` exactly like `context.Canceled` (`internal/agent/agent.go:2566`): neither latches `compactFailed`. A user cancel says nothing about whether the next pass would succeed — see `concepts/compaction-config.md` §5 for the latch itself.
 
 ## 7. Stop also cancels — and the `pendingCancel` poisoning hazard
 

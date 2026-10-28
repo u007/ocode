@@ -1187,6 +1187,9 @@ function HomeApp() {
         listModels: (host) => api.listModels(undefined, host),
         getConfigModel: (host?) => api.getConfigModel(host),
         setConfigModel: (model, host?) => api.setConfigModel(model, host),
+        // Scoped model pick for /models <name>: a live chat switches its OWN
+        // model; only a draft/no-tab pick moves the default new chats start with.
+        setSessionModel: (sessionId, model, host?) => api.setSessionModel(sessionId, model, host),
         getFeaturesConfig: () => api.getFeaturesConfig(),
         setFeaturesConfig: (memoryEnabled, docPromptEnabled, suggestedResponsesEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled),
         getPathsInfo: () => api.getPathsInfo(),
@@ -1459,7 +1462,10 @@ function HomeApp() {
   const chatInputRefs = useRef<Map<string, import("./components/Chat/ChatInput").ChatInputHandle>>(new Map());
 
   return (
-    <div className="flex flex-col h-screen bg-background">
+    // `app-viewport` (index.css) — 100dvh, not 100vh: on a phone the large
+    // viewport pushed the StatusBar, the speech toolbar and the bottom of the
+    // composer below the visible screen.
+    <div className="app-viewport flex flex-col bg-background">
       <SessionTabSync onNewTab={openBackgroundBrowserTab} />
       <AttentionSoundBridge
         tabs={attentionTabs}

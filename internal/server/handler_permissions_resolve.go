@@ -441,6 +441,12 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
 		stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
 		defer stopActivity()
+		// Emit turn_started for this continuation round, exactly like runTurn. The
+		// client normally preserves its turnActive flag across the ask pause, but a
+		// reload or a stale turn_done can clear it — and then the approved tool's
+		// execution plus the re-Step would be invisible (no running indicator) until
+		// the terminal messages/turn_done frames land. turn_started re-arms it.
+		h.publishTurnStarted(sessID, as.model)
 
 		resp, err := as.agent.Step(working)
 		if err != nil {

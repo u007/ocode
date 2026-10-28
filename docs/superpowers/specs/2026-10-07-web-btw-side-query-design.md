@@ -20,7 +20,7 @@ an 8-step cap, permission asks denied non-blockingly. It streams live tool activ
 the answer into a popup. Neither the aside, the activity, nor the answer enter
 `m.messages` or the persisted session history.
 
-**Web/desktop** (`internal/server/handler.go:2143` `HandleBtw`): `/btw <msg>` only
+**Web/desktop** (`internal/server/handler.go:2148` `HandleBtw`): `/btw <msg>` only
 prepends `"By the way: "` and **injects the aside into the running turn** (or appends it
 to the transcript when idle). The client then shows `Noted: <args>`
 (`web/src/components/Chat/commands.ts:1751`). There is **no side query and no answer**.

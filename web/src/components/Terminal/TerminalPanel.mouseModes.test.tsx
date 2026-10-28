@@ -39,6 +39,11 @@ vi.mock("./terminalLinkProvider", () => ({
 }));
 
 vi.mock("@/api/client", () => ({
+  // TerminalPanel mounts the voice recorder; its lifecycle reads these.
+  api: {
+    prewarmSpeech: () => Promise.resolve(true),
+    cancelPrewarmSpeech: () => Promise.resolve(true),
+  },
   apiPath: (path: string) => path,
   apiWsPath: (path: string) => `ws://localhost${path}`,
   authHeaders: () => ({}),

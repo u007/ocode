@@ -246,7 +246,7 @@ Chrome renders through a CDP screencast (canvas), so the SPA has no DOM.
 - **Observer injection:** at target attach the server calls
   `Page.addScriptToEvaluateOnNewDocument` with a compact observer script
   (same detection/icon logic as `capture.js`). This mirrors the existing
-  select-picker injection at `internal/browse/cdp/manager.go:1121`.
+  select-picker injection at `internal/browse/cdp/manager.go:1132`.
 - **Capture channel:** the observer calls a bound function registered with
   `Runtime.addBinding("__ocodeVaultCapture")`; the server subscribes to
   `Runtime.bindingCalled` (via `conn.Subscribe`, the established event path)

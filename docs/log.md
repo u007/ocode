@@ -9,7 +9,11 @@
 ## 2026-10-28
 
 * **Creation**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
-
+* **Update**: Main model pick is per chat; only no-session/draft picks set the global default ([gotchas/main-model-pick-also-sets-global-default.md](/gotchas/main-model-pick-also-sets-global-default.md))
+* **Creation**: Main model pick is per chat; only no-session/draft picks set the global default ([docs/gotchas/main-model-pick-also-sets-global-default.md](/docs/gotchas/main-model-pick-also-sets-global-default.md))
+* **Update**: Chat model followed last switched global model (fixed) ([gotchas/chat-model-follows-last-switched-model.md](/gotchas/chat-model-follows-last-switched-model.md))
+* **Creation**: Chat model followed last switched global model (fixed) ([gotchas/chat-model-follows-last-switched-model.md](/gotchas/chat-model-follows-last-switched-model.md))
+* **Creation**:  ([concepts/git-pull-strategy.md](/concepts/git-pull-strategy.md))
 ## 2026-10-27
 
 * **Update**: Files Tab Clipboard (Cut / Copy / Paste) ([concepts/files-tab-clipboard.md](/concepts/files-tab-clipboard.md))

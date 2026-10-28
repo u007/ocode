@@ -274,6 +274,51 @@ func TestHandleResolvePermissionContinuationEmitsHeartbeats(t *testing.T) {
 	waitForAskContinuation(t, as)
 }
 
+// TestHandleResolvePermissionContinuationEmitsTurnStarted guards the missing
+// turn_started frame on the resolve continuation. The continuation runs a fresh
+// Step after the approved tool, but unlike runTurn it never announced the turn,
+// so a client whose turnActive flag was cleared (reload, or a stale turn_done
+// from another writer) had no running indicator until the terminal
+// messages/turn_done frames landed. turn_started must precede Step, and a
+// matching turn_done must follow so the indicator cannot latch on.
+func TestHandleResolvePermissionContinuationEmitsTurnStarted(t *testing.T) {
+	h := NewHandler()
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "clean the build"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, samplePermissionRequest())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	body := `{"request_id":"call-1","approved":false}`
+	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResolvePermission(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// Step blocks in Chat until release closes, so observing turn_started here
+	// proves it was published BEFORE the Step completed.
+	if !waitForBusEvent(sub, "turn_started", 2*time.Second) {
+		t.Fatal("permission continuation published no turn_started while its Step was blocked")
+	}
+	close(client.release)
+	if !waitForBusEvent(sub, "turn_done", 2*time.Second) {
+		t.Fatal("permission continuation published turn_started but no matching turn_done")
+	}
+	waitForAskContinuation(t, as)
+}
+
 // TestHandleResolvePermissionAlreadyResolved verifies the under-lock re-check:
 // once a later message follows the ask, a resolve attempt is a 409.
 func TestHandleResolvePermissionAlreadyResolved(t *testing.T) {

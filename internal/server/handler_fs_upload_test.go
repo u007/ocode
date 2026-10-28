@@ -289,3 +289,14 @@ func TestValidUploadNameAcceptsOrdinaryNames(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleFSUploadRejectsNonOctetStream(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/upload?dest_dir=.&name=a.txt", strings.NewReader("x"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	h.HandleFSUpload(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415", rec.Code)
+	}
+}

@@ -152,13 +152,23 @@ export default function SkillsForm() {
                     )}
                   </div>
                 </div>
+                {/* The switch track MUST be `shrink-0`: it is a flex item, and
+                    a long, `truncate`d description gives the row a huge base
+                    size, so flex would shrink the track below 32px while the
+                    absolutely-positioned knob kept its checked offset — the
+                    knob then poked out past the track and over the card
+                    border, which looked like a broken, half-clipped switch.
+                    The off state is a neutral track on purpose: `bg-accent`
+                    follows the terminal theme's accent colour, which in many
+                    themes is the same green as the on state, so the two
+                    states were indistinguishable except by knob position. */}
                 <input
                   type="checkbox"
                   aria-label={`Skill ${s.name}`}
                   checked={s.enabled}
                   disabled={skillBusy === s.name}
                   onChange={() => toggleSkill(s.name)}
-                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                  className="w-8 h-4 shrink-0 cursor-pointer rounded-full appearance-none bg-muted-foreground/30 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </label>
             ))}

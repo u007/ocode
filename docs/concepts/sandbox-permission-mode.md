@@ -65,7 +65,7 @@ In `PermissionManager.Decide` (`internal/agent/permissions.go`), three guards fi
 
 Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Normal mode is unchanged (already Ask via `IsHarmfulBashCommand`); YOLO remains the promptless escape hatch.
 
-Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:595`) and still auto-allow.
+Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:700`) and still auto-allow.
 
 ## Sensitive-path carve-outs
 
@@ -73,7 +73,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Predicate split
 
-`isSensitivePath` (`permissions.go:2808`) is the OR of two named predicates:
+`isSensitivePath` (`permissions.go:3590`) is the OR of two named predicates:
 
 - **`isSecretMaterialPath()`** (line 2799) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
 
@@ -81,11 +81,11 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Per-target write classification
 
-`sandboxSensitiveTargets` (`permissions.go:2937`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+`sandboxSensitiveTargets` (`permissions.go:3729`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3245`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3891`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -111,20 +111,20 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 
 ## Code references
 
-- Mode constants: `internal/agent/permissions.go:37-45`
+- Mode constants: `internal/agent/permissions.go:38-46`
 - `Decide` path: `internal/agent/permissions.go:~1430-1505`
 - `persistPermissions`: `internal/tui/model.go:15616`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1102`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
-- `isHarmfulForceCommand`: `internal/agent/permissions.go:874`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1489`
-- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:678`
-- `isSensitivePath`: `internal/agent/permissions.go:3204`
-- `isSecretMaterialPath`: `internal/agent/permissions.go:3213`
-- `isRepoMetadataPath`: `internal/agent/permissions.go:3266`
-- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3339`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3501`
+- `isHarmfulForceCommand`: `internal/agent/permissions.go:897`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1557`
+- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:700`
+- `isSensitivePath`: `internal/agent/permissions.go:3590`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:3599`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:3652`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3729`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3891`
 
 ## Enforcement details (moved from CLAUDE.md)
 

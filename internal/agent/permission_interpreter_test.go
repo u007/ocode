@@ -845,6 +845,45 @@ func TestAskPermissionModelInterpreterPromptEncouragesLocalTransforms(t *testing
 	}
 }
 
+// A module import is not an effect. Without this line the chat judge can list
+// `import playwright` under "unknown" as an "unresolved import", which
+// verifyInterpreterEffects refuses — so an ordinary dependency probe defers to a
+// human. Same misread the TypeSafe/Jev rubric's import carve-out fixes; the two
+// backends must not disagree. Both halves are pinned: the import is inert, and a
+// PROJECT-LOCAL module (whose top-level code runs unread) stays fail-closed.
+func TestAskPermissionModelInterpreterPromptTreatsImportsAsInert(t *testing.T) {
+	a, _ := newConsultAgent(t)
+	client := &scriptedCaptureClient{Responses: []string{`{"decision":"allow","confidence":0.97,"summary":"version probe","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}`}}
+	prevClientFn := newClientFn
+	newClientFn = func(_ *config.Config, _ string) LLMClient { return client }
+	t.Cleanup(func() { newClientFn = prevClientFn })
+
+	cmd := `python3 -c "import playwright, sys; print(playwright.__version__)"`
+	ie, ok := classifyInterpreterExecution(cmd)
+	if !ok {
+		t.Fatal("classify failed")
+	}
+	if allowed, reason, _, _ := a.askPermissionModelInterpreter(cmd, ie); !allowed {
+		t.Fatalf("expected allow, got reason=%q", reason)
+	}
+	if len(client.Prompts) != 1 {
+		t.Fatalf("expected one prompt, got %d", len(client.Prompts))
+	}
+	prompt := client.Prompts[0]
+	// Prompt text is line-wrapped, so every fragment below stays inside one
+	// physical line of the raw literal.
+	for _, want := range []string{
+		"A module import is NOT itself an effect",
+		"ONLY when it names a module that is a FILE in the project and you could not",
+		"the module is a network-capable library",
+		"Judge the DESTINATION",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestAskPermissionModelInterpreterFailClosed(t *testing.T) {
 	cases := []struct {
 		name string

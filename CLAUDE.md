@@ -396,10 +396,10 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1376`), TUI
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1527`), TUI
   `streamDoneMsg` (`internal/tui/model.go:5435`).
 - **A pending permission or question ask never auto-resumes a goal.** Server
-  `agent_session.go:1299`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
+  `agent_session.go:1390`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.

@@ -435,6 +435,30 @@ func (h *Handler) projectHostFor(projectRoot string) string {
 	return ""
 }
 
+// browserToolFor returns the browser agent tool for a session's project when
+// this server has a Chrome to drive (EnableBrowse set browseSurfaces), else nil.
+// A remote project's session runs on its host, whose server registers the tool
+// against that host's Chrome. This server builds no session for a project that
+// has a host, so it never hands a remote project the local Chrome. The check
+// depends only on the wiring and the project's host, never on whether tabs are
+// open, so the cached tools array stays stable.
+func (h *Handler) browserToolFor(projectRoot string, cfg *config.Config) tool.Tool {
+	if h.browseSurfaces == nil || h.projectHostFor(projectRoot) != "" {
+		return nil
+	}
+	maxDim := 0
+	if cfg != nil {
+		maxDim = cfg.Ocode.MaxImageDim
+	}
+	// A nil store stays a nil interface: a typed nil *browsertabs.Store would pass
+	// the tool's nil check and then panic on the first strip read.
+	var strip browserStrip
+	if h.browserTabsStore != nil {
+		strip = stripPublisher{store: h.browserTabsStore, bus: h.bus}
+	}
+	return newBrowserTool(projectRoot, agent.ResolveImageMaxDim(maxDim), strip, h.browseSurfaces)
+}
+
 // buildAgentSession constructs a fresh agent session, emitting observable
 // bootstrap stage events (session_bootstrap: model → tools → mcp → ready) and
 // advancing the registry entry's bootstrap stage. **It must be called with no
@@ -538,6 +562,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			computerDriver, computerDriverErr = computer.New(h.computerSup)
 		}
 		tools = tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
+		if bt := h.browserToolFor(projectRoot, effCfg); bt != nil {
+			tools = append(tools, bt)
+		}
 	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)
@@ -2115,6 +2142,10 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	if reconcileModel == "" {
 		reconcileModel = h.effectiveSessionModel(id)
 	}
+	// Every queued turn passes through here (web sends, retries, auto-continue
+	// resumes), so this is the backstop that freezes a legacy chat's model even
+	// when its dispatch entry point did not pin it. See pinSessionModel.
+	h.pinSessionModel(id, reconcileModel)
 	if reb, err := h.reconcileProfileAgent(id, as, reconcileModel); err != nil {
 		log.Printf("serve error: reconcile profile for %s: %v", id, err)
 	} else {

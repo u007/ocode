@@ -245,6 +245,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `ocr` | Extract text from images (openai-compat, LM Studio native chat, or paddle); reuses stored `auth.json` creds |
 | `imagegen` | Generate images via configured provider |
 | `computer` | Opt-in host desktop screenshots and input actions; enable with `/computer enable` (takes effect in new sessions) |
+| `browser` | Drive the embedded Chrome tabs of sessions served by an ocode server that starts the embedded browser (desktop, `ocode serve`, the TUI's `/rc` server): list, screenshot, read, click, fill, pick, fill-form, upload, wait, console, network. Mutating actions ask. The TUI's own chat agent does not get it |
 | `cron` | Manage scheduled jobs from the agent (create/list/remove) |
 | `plan_enter`, `plan_exit` | Structured planning phase (creates `plan.md`) |
 | `todowrite`, `todoread`, `todo_update` | Persistent todo list (see above) |

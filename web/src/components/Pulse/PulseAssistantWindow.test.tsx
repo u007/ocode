@@ -361,6 +361,47 @@ describe("PulseAssistantWindow window modes", () => {
     }
   });
 
+  it("is a sheet on a phone even above the 640px sheet breakpoint, so the header and Close stay reachable", async () => {
+    const original = window.innerWidth;
+    // 700 CSS px: the app's mobile layout (useIsMobile, <=767px) but ABOVE this
+    // window's own narrow breakpoint (640px). Rendering a floating rect there —
+    // restored from another device's localStorage, or the default — is what put
+    // the header (and the Close button) off-screen on a phone while the window's
+    // composer hung over the app's composer, status bar and speech toolbar.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 700 });
+    try {
+      setAssistantRect({ x: 640, y: 500, width: 560, height: 620 });
+      mountDrawer();
+      await screen.findByTestId("chat-panel");
+      const frame = screen.getByTestId("pulse-assistant-window");
+      expect(frame.style.left).toBe(`${ASSISTANT_EDGE}px`);
+      expect(frame.style.top).toBe(`${ASSISTANT_EDGE}px`);
+      expect(frame.style.right).toBe(`${ASSISTANT_EDGE}px`);
+      expect(frame.style.bottom).toBe(`${ASSISTANT_EDGE}px`);
+      // A sheet does not drag or resize.
+      expect(screen.queryByTestId("pulse-assistant-grip")).toBeNull();
+      expect(screen.queryByTestId("pulse-assistant-resize")).toBeNull();
+      // The one affordance a phone user needs to get rid of it.
+      expect(screen.getByRole("button", { name: "Close assistant" })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: original });
+    }
+  });
+
+  it("hides the minimised body with the hidden CLASS, because the flex utility defeats the hidden attribute", async () => {
+    mountDrawer();
+    await screen.findByTestId("chat-panel");
+    expect(screen.getByTestId("pulse-assistant-body")).toHaveClass("flex");
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimise assistant" }));
+
+    const body = screen.getByTestId("pulse-assistant-body");
+    expect(body).toHaveClass("hidden");
+    expect(body).not.toHaveClass("flex");
+    // Still mounted, so the draft, hydrated asks and scoped dialogs survive.
+    expect(screen.getByTestId("chat-panel")).toBeInTheDocument();
+  });
+
   it("resizes from the keyboard on the corner handle, and the size is what the store keeps", async () => {
     setAssistantRect({ x: 100, y: 90, width: 420, height: 560 });
     mountDrawer();

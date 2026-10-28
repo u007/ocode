@@ -42,7 +42,7 @@ via:
   `internal/server/handler_ask_continuation.go:31`.
 - `HandleAnswerQuestion` dispatches at
   `internal/server/handler_questions.go:282` and writes 202 at
-  `handler_questions.go:336`. The callback wires callbacks, sets
+  `handler_questions.go:342`. The callback wires callbacks, sets
   `turnActive(true)`, starts the heartbeat + activity broadcast, broadcasts
   `question_resolved`, runs `Step`, persists, broadcasts `messages` +
   `turn_done`, and calls `MaybeCompactAsync`.
@@ -54,7 +54,7 @@ via:
   `permission_resolved` broadcast still happens synchronously BEFORE dispatch
   (`handler_permissions_resolve.go:270-274`); for questions the
   `question_resolved` broadcast happens inside the callback but still before
-  `Step` (`handler_questions.go:309`, Step at `:311`).
+  `Step` (`handler_questions.go:315`, Step at `:317`).
 - Multi-ask branch: if another unresolved permission ask remains in the same
   trailing round, the callback saves the single resolution and broadcasts
   `messages` without running Step (`handler_permissions_resolve.go:308-322`),
@@ -76,7 +76,7 @@ deadlocks the session.
 
 ### Shutdown admission mirrors `dispatchTurn`
 
-`dispatchTurn` (`internal/server/agent_session.go:1683`) is the pattern;
+`dispatchTurn` (`internal/server/agent_session.go:1702`) is the pattern;
 `dispatchAskContinuation` mirrors it exactly:
 
 - Under `shutdownMu`, if `shutdownStarted`: unlock and run `fn` INLINE on the
@@ -122,6 +122,8 @@ the POST, so the visible result never depends on response latency:
 The SSE `*_resolved` frame is therefore a belt-and-braces dismissal signal
 now, not the only one.
 
+The continuation also emits `turn_started` before `Step` (via `publishTurnStarted`), and the web store re-arms `turnActive` on `PERMISSION_RESOLVED`, so a client whose turn-active flag was cleared (reload or a stale `turn_done`) still shows a running indicator instead of a silent gap between the dialog dismissal and the terminal `messages`/`turn_done` frames.
+
 ## Historical note: the original fix (broadcast before Step)
 
 Before the async conversion, the only lever was ordering: broadcast
@@ -151,6 +153,9 @@ permissions earlier; questions fixed 2026-09-08; endpoints made async
 - Continuation still emits heartbeats:
   `TestHandleAnswerQuestionContinuationEmitsHeartbeats`,
   `TestHandleResolvePermissionContinuationEmitsHeartbeats`.
+- Continuation emits `turn_started` before `Step` and `turn_done` after:
+  `TestHandleAnswerQuestionContinuationEmitsTurnStarted`,
+  `TestHandleResolvePermissionContinuationEmitsTurnStarted`.
 - Web: `web/src/hooks/useChat.remoteHost.test.tsx:273`
   `describe("useChat.submitQuestionAnswers optimistic echo")` and
   `web/src/hooks/useChat.test.tsx:51` (404/409 stays dismissed;

@@ -159,7 +159,7 @@ git commit -m "feat(agent): add AgentRun.beginResume for resuming cancelled/done
 - Test: `internal/agent/rearm_maintenance_test.go` (new file)
 
 **Interfaces:**
-- Consumes: `Agent.stopCh`/`stopMu` (existing), `Agent.docMaintCh`/`docMaintDone`/`docMaintShutdownOnce`/`docMaintMu`/`docMaintClosing`, `Agent.memoryMaintCh`/`memoryMaintDone`/`memoryMaintShutdownOnce` (existing fields, see `internal/agent/agent.go:158-170`), `docMaintChannelCap` constant (`internal/agent/doc_maintenance.go:15`), `Agent.memoryMaintenanceWorker`/`Agent.docMaintenanceWorker` (existing worker loops), `Agent.ResetCancellation()` (existing).
+- Consumes: `Agent.stopCh`/`stopMu` (existing), `Agent.docMaintCh`/`docMaintDone`/`docMaintShutdownOnce`/`docMaintMu`/`docMaintClosing`, `Agent.memoryMaintCh`/`memoryMaintDone`/`memoryMaintShutdownOnce` (existing fields, see `internal/agent/agent.go:588-599`), `docMaintChannelCap` constant (`internal/agent/doc_maintenance.go:15`), `Agent.memoryMaintenanceWorker`/`Agent.docMaintenanceWorker` (existing worker loops), `Agent.ResetCancellation()` (existing).
 - Produces: `func (a *Agent) RearmMaintenance()` — undoes everything `shutdownTransient()` does: reopens `stopCh`, and recreates + restarts the doc/memory maintenance channels and worker goroutines so the agent can safely run `Step()` again and be torn down again afterward.
 
 - [x] **Step 1: Write the failing test**
@@ -218,7 +218,7 @@ In `internal/agent/agent.go`, add immediately after `ResetCancellation` (after t
 // shutdownTransient permanently closed via sync.Once-guarded shutdowns. Used
 // when resuming a previously cancelled-or-completed subagent, whose
 // shutdownTransient already ran once via the dispatch goroutine's defer.
-// Mirrors the channel/goroutine setup in NewAgent (see agent.go:640-649).
+// Mirrors the channel/goroutine setup in NewAgent (see agent.go:1281-1443).
 func (a *Agent) RearmMaintenance() {
 	a.docMaintMu.Lock()
 	a.docMaintClosing = false
@@ -671,7 +671,7 @@ git commit -m "refactor(agent): extract TaskTool background/sync dispatch into s
 - Modify: `internal/agent/subagent.go`
 
 **Interfaces:**
-- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:982`).
+- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:1043`).
 - Produces: `resume_task_id` task-tool schema param; `TaskTool.Execute` resume branch; `taskToolParams` (named type replacing the previous anonymous params struct — needed so `executeResume` can take it as a parameter).
 
 - [x] **Step 1: Name the params struct and add `resume_task_id`**
