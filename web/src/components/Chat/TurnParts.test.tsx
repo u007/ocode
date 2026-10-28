@@ -161,7 +161,29 @@ describe("ToolBlock argument summary", () => {
   it("still renders raw arguments for tools without a summary", () => {
     const args = '{"pattern":"**/*.ts"}';
     render(<ToolBlock tool="glob" command={args} />);
-    expect(screen.getByText(/\{.*"pattern".*\}/)).toBeInTheDocument();
+    // Rendered through the collapsible JSON viewer, not as a raw JSON blob.
+    expect(screen.getByText("pattern:")).toBeInTheDocument();
+    expect(screen.getByText("**/*.ts")).toBeInTheDocument();
+    expect(screen.queryByText(args)).not.toBeInTheDocument();
+  });
+  it("renders a JSON result as a collapsible tree", () => {
+    render(
+      <ToolBlock
+        tool="grep"
+        command={'{"pattern":"x"}'}
+        output={'{"matches":2,"files":["a.ts","b.ts"]}'}
+      />,
+    );
+    expect(screen.getByText("matches:")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("files:")).toBeInTheDocument();
+    expect(screen.queryByText('{"matches":2,"files":["a.ts","b.ts"]}')).not.toBeInTheDocument();
+  });
+
+  it("keeps non-object JSON arguments on the highlighted pre renderer", () => {
+    // A scalar JSON string is not useful as a tree, so it stays a raw pre.
+    const { container } = render(<ToolBlock tool="glob" command='"/tmp/*.ts"' />);
+    expect(container.querySelector("pre")).not.toBeNull();
   });
 });
 

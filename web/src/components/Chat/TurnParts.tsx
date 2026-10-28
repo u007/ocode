@@ -4,6 +4,7 @@ import type { MessageImage, QuestionAnswerPayload } from "@/api/types";
 import { isInlineSafeMediaType } from "../Preview/blobPreview";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
+import JsonTree from "../Preview/JsonTree";
 import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
 import { useChatDisplay } from "./chatDisplayContext";
 import { renderedCopyText } from "../../lib/copyText";
@@ -27,6 +28,15 @@ const BASH_COMMAND_INLINE_BUDGET = 80;
 // footer must stay in the LLM-facing content but is noise for the human
 // reading the chat, so strip it before rendering.
 const TRUNCATION_MARKER_PREFIX = "[output truncated:";
+
+function isJsonString(s: string): boolean {
+  try {
+    const v = JSON.parse(s);
+    return typeof v === "object" && v !== null;
+  } catch {
+    return false;
+  }
+}
 
 function stripTruncationFooter(content: string): string {
   const marker = "\n\n" + TRUNCATION_MARKER_PREFIX;
@@ -491,13 +501,19 @@ const PlainToolBlock = memo(function PlainToolBlock({
               </pre>
             )}
             {command && !argsHint && (
-              <pre className={`${codeBoxClass} rounded bg-card/70 p-2 font-mono text-[11px] text-foreground`}>
-                {highlight.trim() ? (
-                  highlightMatches(command, highlight)
-                ) : (
-                  <HighlightedCode code={command} lang="json" />
-                )}
-              </pre>
+              isJsonString(command) ? (
+                <div className="rounded bg-card/70 p-2">
+                  <JsonTree content={command} />
+                </div>
+              ) : (
+                <pre className={`${codeBoxClass} rounded bg-card/70 p-2 font-mono text-[11px] text-foreground`}>
+                  {highlight.trim() ? (
+                    highlightMatches(command, highlight)
+                  ) : (
+                    <HighlightedCode code={command} lang="json" />
+                  )}
+                </pre>
+              )
             )}
             {pending && stream && (
               <div className="rounded bg-card/70 p-2">
@@ -521,6 +537,9 @@ const PlainToolBlock = memo(function PlainToolBlock({
         )}
         {output !== undefined && output !== "" && outputOpen && (
           <div className="rounded bg-card/70 p-2" data-copy-content="">
+            {isJsonString(displayOutput ?? "") ? (
+              <JsonTree content={displayOutput ?? ""} />
+            ) : (
             <div className="font-mono text-[11px] text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
               {(visibleOutput ?? "").split("\n").map((line, i) => {
                 const colorClass = !isDiffOutput
@@ -538,7 +557,8 @@ const PlainToolBlock = memo(function PlainToolBlock({
                 );
               })}
             </div>
-            {collapsible && (
+            )}
+            {collapsible && !isJsonString(displayOutput ?? "") && (
               <button
                 type="button"
                 onClick={() => disclosure.set(previewKey, !expanded)}
