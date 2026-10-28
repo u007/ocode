@@ -354,6 +354,11 @@ export default function TerminalPanel({
   // Mirrors `active` so the terminal event handlers (registered once at mount) can
   // read the live focused state without re-subscribing.
   const activeRef = useRef(active);
+  // Mirrors `scrollbackLines` so the async mount (it awaits the wasm load) builds the
+  // terminal with the value current at build time, not the one the render that
+  // started the load saw; the live-scrollback effect below only sees an open terminal.
+  const scrollbackLinesRef = useRef(scrollbackLines);
+  scrollbackLinesRef.current = scrollbackLines;
   // False during the initial scrollback replay; flipped true once the live pty
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
@@ -926,7 +931,13 @@ export default function TerminalPanel({
     const setup = (ghostty: Ghostty): (() => void) => {
     const savedBuffer = loadTerminalBuffer(id);
     const term = new Terminal(
-      buildTerminalOptions({ scrollbackLines, fontFamily, fontSize, savedBuffer, ghostty }),
+      buildTerminalOptions({
+        scrollbackLines: scrollbackLinesRef.current,
+        fontFamily,
+        fontSize,
+        savedBuffer,
+        ghostty,
+      }),
     );
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -1818,9 +1829,24 @@ export default function TerminalPanel({
     // use the new apiWsPath; a full reload migrates all.
   }, [projectPath, host, id]);
 
-  // The scrollback setting applies to terminals opened after the change:
-  // ghostty-web 0.4.0 ignores `scrollback` once a terminal is open and has no
-  // runtime option for it (TODO.md). `scrollbackLines` is read only at mount.
+  // Apply a changed scrollback setting to the open terminal. ghostty-web cannot resize the
+  // scrollback of a live wasm terminal, but reset() rebuilds it from `options.scrollback`,
+  // so: serialize the buffer, set the option, reset, replay (the same path as the mount
+  // restore). The pty and socket are untouched. Lost by design: terminal modes (mouse
+  // tracking, alternate screen, bracketed paste), the selection, the link cache, and a
+  // replayed row that was cut off by a smaller limit. Output written during the rebuild
+  // cannot interleave: reset, write and the option change are all synchronous.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || term.options.scrollback === scrollbackLines) return;
+    const text = serializeTerminalBuffer(term, TERMINAL_THEME_DEFAULTS);
+    term.options.scrollback = scrollbackLines;
+    term.reset();
+    term.write(text);
+    term.clearSelection();
+    searchRef.current?.invalidate();
+    snapshotRef.current?.markDirty();
+  }, [scrollbackLines]);
 
   // Apply font changes to the live terminal in place instead of tearing down
   // the session (which would kill the pty/websocket) whenever settings change.

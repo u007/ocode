@@ -69,6 +69,7 @@ export class FakeTerminal {
 
   constructor(opts: Record<string, unknown> = {}) {
     this.ctorOptions = opts;
+    this.options = { ...opts };
     if (typeof opts.cols === "number") this.cols = opts.cols;
     if (typeof opts.rows === "number") this.rows = opts.rows;
     FakeTerminal.instances.push(this);

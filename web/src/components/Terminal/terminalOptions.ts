@@ -40,8 +40,8 @@ export function buildTerminalOptions({
   return {
     ghostty,
     cursorBlink: true,
-    // Read once at construction: ghostty-web 0.4.0 ignores `scrollback` changes
-    // after open(), so the setting applies to terminals opened afterwards.
+    // Read at construction and again by Terminal.reset(); the panel's scrollback
+    // effect sets it and resets to apply a changed setting to an open terminal.
     scrollback: scrollbackLines,
     fontFamily,
     fontSize,
