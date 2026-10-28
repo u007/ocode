@@ -2,24 +2,14 @@ import { render } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import TerminalPanel from "./TerminalPanel";
 
-// Verify that TerminalPanel loads WebLinksAddon (http(s) URLs, e.g. Vite localhost)
-// and the file-link provider (src/*.ts:line → ocode:open-file) and disposes both
-// on unmount. This is the wiring that was missing before the fix — the screenshot
-// shows https://localhost:3510/ in the terminal with no clickable underline.
+// Verify that TerminalPanel registers the URL link provider (http(s) URLs, e.g. Vite
+// localhost) and the file-link provider (src/*.ts:line → ocode:open-file) exactly
+// once per terminal and disposes both on unmount. This is the wiring that was
+// missing before the original fix — the screenshot shows https://localhost:3510/
+// in the terminal with no clickable underline.
 
-const webLinksInstances: unknown[] = [];
+const urlProviderSpy = vi.fn((..._args: unknown[]) => ({ dispose: vi.fn() }));
 const fileProviderSpy = vi.fn((..._args: unknown[]) => ({ dispose: vi.fn() }));
-
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {
-    dispose = vi.fn();
-    handler?: (event: MouseEvent, uri: string) => void;
-    constructor(handler?: (event: MouseEvent, uri: string) => void) {
-      this.handler = handler;
-      webLinksInstances.push(this);
-    }
-  },
-}));
 
 const openExternalSpy = vi.fn();
 vi.mock("../../lib/externalLinks", () => ({
@@ -28,40 +18,12 @@ vi.mock("../../lib/externalLinks", () => ({
 
 vi.mock("./terminalLinkProvider", () => ({
   registerFileLinkProvider: (...args: unknown[]) => fileProviderSpy(...args),
+  registerUrlLinkProvider: (...args: unknown[]) => urlProviderSpy(...args),
 }));
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    writeln = vi.fn();
-    focus = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    dispose = vi.fn();
-    attachCustomKeyEventHandler = vi.fn(() => true);
-    buffer = {
-      active: {
-        getLine: () => undefined,
-        getNullCell: () => ({ getChars: () => "", getWidth: () => 0 }),
-      },
-    };
-    registerLinkProvider = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-  },
-}));
-
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("../../api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
@@ -108,7 +70,7 @@ class StubWS {
 
 describe("TerminalPanel link wiring", () => {
   beforeEach(() => {
-    webLinksInstances.length = 0;
+    urlProviderSpy.mockClear();
     fileProviderSpy.mockClear();
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("", { status: 404 }))));
     // jsdom lacks ResizeObserver
@@ -119,38 +81,45 @@ describe("TerminalPanel link wiring", () => {
     };
   });
 
-  it("loads WebLinksAddon and file link provider exactly once per terminal", async () => {
+  it("registers the URL and file link providers exactly once per terminal", async () => {
     const { unmount } = render(
       <TerminalPanel id="t1" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
     );
-    // Terminal constructor + loadAddon should have been called synchronously in the effect
-    // (effects run after mount in React 18, but render flushes them in test env)
+    // The mount is async (it awaits the libghostty wasm load), so let it settle.
     await new Promise((r) => setTimeout(r, 0));
-    expect(webLinksInstances.length).toBe(1);
+    expect(urlProviderSpy).toHaveBeenCalledTimes(1);
     expect(fileProviderSpy).toHaveBeenCalledTimes(1);
     expect(fileProviderSpy).toHaveBeenCalledWith(expect.any(Object), "/proj", expect.any(Function));
-    const dispose = fileProviderSpy.mock.results[0].value.dispose as ReturnType<typeof vi.fn>;
-    const webLinksDispose = (webLinksInstances[0] as { dispose: ReturnType<typeof vi.fn> }).dispose;
+    const fileDispose = fileProviderSpy.mock.results[0].value.dispose as ReturnType<typeof vi.fn>;
+    const urlDispose = urlProviderSpy.mock.results[0].value.dispose as ReturnType<typeof vi.fn>;
     unmount();
-    expect(dispose).toHaveBeenCalledTimes(1);
-    expect(webLinksDispose).toHaveBeenCalledTimes(1);
+    expect(fileDispose).toHaveBeenCalledTimes(1);
+    expect(urlDispose).toHaveBeenCalledTimes(1);
   });
 
-  it("opens an http(s) URL on left mouseup (xterm activates links from mouseup, not click)", async () => {
+  it("opens only http(s) URLs externally", async () => {
     openExternalSpy.mockClear();
     const { unmount } = render(
       <TerminalPanel id="t3" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
     );
     await new Promise((r) => setTimeout(r, 0));
-    const handler = (webLinksInstances[0] as { handler: (e: MouseEvent, uri: string) => void }).handler;
+    const open = urlProviderSpy.mock.calls[0][1] as (uri: string) => void;
     const url =
       "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=Lbv_ZqZchTvEz5Zyxdt";
-    handler({ type: "mouseup", button: 0 } as MouseEvent, url);
+    open(url);
     expect(openExternalSpy).toHaveBeenCalledWith(url);
     openExternalSpy.mockClear();
-    handler({ type: "mouseup", button: 2 } as MouseEvent, url);
-    handler({ type: "mouseup", button: 0 } as MouseEvent, "ftp://example.com");
+    open("ftp://example.com");
     expect(openExternalSpy).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("passes the drag guard to the URL provider", async () => {
+    const { unmount } = render(
+      <TerminalPanel id="t4" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(typeof urlProviderSpy.mock.calls[0][2]).toBe("function");
     unmount();
   });
 

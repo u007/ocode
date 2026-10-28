@@ -5,48 +5,23 @@ import { TerminalProvider } from "../../stores/terminalStore";
 import type { TerminalTabsHandle } from "./TerminalTabs";
 import TerminalTabs from "./TerminalTabs";
 
-// Real xterm needs canvas/layout that jsdom does not have, so the terminal
-// itself is stubbed: this test covers activation/open/close behaviour and
-// that closing a terminal tears down that terminal's socket (which is what
-// kills the pty server-side).
+// Real ghostty-web needs canvas/layout that jsdom does not have, so the terminal
+// itself is stubbed (ghosttyWebMock.ts): this test covers activation/open/close
+// behaviour and that closing a terminal tears down that terminal's socket (which
+// is what kills the pty server-side).
 const disposeSpy = vi.fn();
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    focus = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = {
-      registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
-    };
-    dispose = disposeSpy;
-    attachCustomKeyEventHandler = vi.fn(() => true);
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit = vi.fn();
-  },
-}));
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize = vi.fn(() => "");
-  },
-}));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
-vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: class {
-    dispose = vi.fn();
-  },
-}));
+vi.mock("ghostty-web", async () => {
+  const mod = (await import("./ghosttyWebMock")).ghosttyWebModule();
+  class Terminal extends mod.Terminal {
+    constructor(opts: Record<string, unknown>) {
+      super(opts);
+      this.dispose = disposeSpy;
+    }
+  }
+  return { ...mod, Terminal };
+});
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("@/api/client", () => ({
   api: {
     getTerminalConfig: () => Promise.resolve({ available: true, scrollback_lines: 9999, work_dir: "/project" }),

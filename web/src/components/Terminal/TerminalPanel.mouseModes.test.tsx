@@ -1,24 +1,18 @@
 import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TerminalPanel from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
 
 // Regression coverage for the "remote SSH terminal times out/crashes → no
 // disconnect, and mouse movement spews gibberish" report:
-//   1. a fresh (resumed=false) attach must disable xterm's mouse-tracking modes
+//   1. a fresh (resumed=false) attach must disable the emulator's mouse-tracking modes
 //      so mouse movement stops emitting escape sequences into the new shell;
 //   2. term.onData must not drive the pty before the attach handshake;
 //   3. reconnect backoff must actually grow instead of resetting every attempt.
 
 const h = vi.hoisted(() => ({
   sockets: [] as MockSocket[],
-  terminals: [] as MockTerminal[],
-  dataHandlers: [] as ((data: string) => void)[],
 }));
-
-type MockTerminal = {
-  write: ReturnType<typeof vi.fn>;
-  reset: ReturnType<typeof vi.fn>;
-};
 
 class MockSocket {
   static OPEN = 1;
@@ -36,55 +30,13 @@ class MockSocket {
   }
 }
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    buffer = { active: { length: 24 } };
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn((_text: string, callback?: () => void) => callback?.());
-    reset = vi.fn();
-    focus = vi.fn();
-    getSelection = vi.fn(() => "");
-    onData = vi.fn((cb: (data: string) => void) => {
-      h.dataHandlers.push(cb);
-      return { dispose: vi.fn() };
-    });
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    attachCustomKeyEventHandler = vi.fn(() => true);
-    dispose = vi.fn();
-
-    constructor() {
-      h.terminals.push(this);
-    }
-  },
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
+vi.mock("./terminalLinkProvider", () => ({
+  registerFileLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+  registerUrlLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
 }));
-
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    onDidChangeResults = vi.fn(() => ({ dispose: vi.fn() }));
-    findNext = vi.fn();
-    findPrevious = vi.fn();
-    clearDecorations = vi.fn();
-    dispose = vi.fn();
-  },
-}));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: class {
-    onContextLoss = vi.fn();
-    dispose = vi.fn();
-  },
-}));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class { dispose = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
-vi.mock("./terminalLinkProvider", () => ({ registerFileLinkProvider: vi.fn(() => ({ dispose: vi.fn() })) }));
 
 vi.mock("@/api/client", () => ({
   apiPath: (path: string) => path,
@@ -116,8 +68,7 @@ function renderPanel() {
 
 beforeEach(() => {
   h.sockets.length = 0;
-  h.terminals.length = 0;
-  h.dataHandlers.length = 0;
+  FakeTerminal.instances.length = 0;
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
@@ -134,7 +85,7 @@ beforeEach(() => {
 });
 
 function writeText(): string {
-  return h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+  return FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
 }
 
 function attach(socket: MockSocket, resumed: boolean) {
@@ -171,7 +122,7 @@ describe("TerminalPanel remote-disconnect mouse-mode recovery", () => {
     expect(written).toContain("\x1b[?1003l");
     expect(written).toContain("\x1b[?1006l");
     // Must not blow away scrollback the way term.reset() would.
-    expect(h.terminals[0].reset).not.toHaveBeenCalled();
+    expect(FakeTerminal.instances[0].reset).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -211,7 +162,7 @@ describe("TerminalPanel remote-disconnect mouse-mode recovery", () => {
     // The reset must land after the replayed history it is undoing.
     expect(written.lastIndexOf("\x1b[?1006l")).toBeGreaterThan(written.indexOf("\x1b[?1006h"));
     // Restored scrollback is preserved (no full term.reset).
-    expect(h.terminals[0].reset).not.toHaveBeenCalled();
+    expect(FakeTerminal.instances[0].reset).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -220,11 +171,11 @@ describe("TerminalPanel remote-disconnect mouse-mode recovery", () => {
     await waitFor(() => expect(h.sockets).toHaveLength(1));
     const socket = h.sockets[0];
 
-    h.dataHandlers[0]("\x1b[<35;10;10M");
+    FakeTerminal.instances[0]._data!("\x1b[<35;10;10M");
     expect(socket.send).not.toHaveBeenCalled();
 
     attach(socket, false);
-    h.dataHandlers[0]("\x1b[<35;10;10M");
+    FakeTerminal.instances[0]._data!("\x1b[<35;10;10M");
     expect(socket.send).toHaveBeenCalledWith("\x1b[<35;10;10M");
     unmount();
   });

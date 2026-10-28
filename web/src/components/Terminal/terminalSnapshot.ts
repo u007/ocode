@@ -1,9 +1,9 @@
 const INPUT_QUIET_MS = 200;
 
 /**
- * Coalesces parsed-buffer generations, not queued writes: xterm parses writes
- * asynchronously. Call markDirty from onWriteParsed/onResize and after explicit
- * synchronous clear/reset operations. Periodic work waits for input to settle;
+ * Coalesces parsed-buffer generations, not queued writes: ghostty-web parses writes
+ * synchronously but exposes no "write parsed" event. Call markDirty after every
+ * write/onResize and after explicit synchronous clear/reset operations. Periodic work waits for input to settle;
  * flush is the lifecycle escape hatch (pagehide/unmount/socket close).
  */
 export function createTerminalSnapshot(save: () => void) {

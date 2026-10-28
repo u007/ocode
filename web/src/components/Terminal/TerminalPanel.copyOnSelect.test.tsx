@@ -2,6 +2,7 @@ import { render, fireEvent, act, waitFor, screen, cleanup } from "@testing-libra
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
 
 // lib/wails.ts reads the desktop clipboard nonce from ?clip= once, when it is
 // first imported. vi.hoisted runs before the static imports above, so the page
@@ -19,19 +20,10 @@ vi.hoisted(() => {
 // debounced onSelectionChange fallback copies after the selection settles, and
 // (4) a cleared selection schedules a no-op that writes nothing.
 
-// xterm needs canvas/layout jsdom lacks, so the Terminal is stubbed. The stub
-// exposes the selection handlers the panel registers and a mutable selection
-// string the tests control.
+// ghostty-web needs canvas/layout jsdom lacks, so the Terminal is stubbed
+// (ghosttyWebMock.ts). The stub exposes the selection handlers the panel
+// registers and a mutable selection string the tests control.
 const h = vi.hoisted(() => ({
-  terminals: [] as Array<{
-    _selectionChange: (() => void) | null;
-    _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null;
-    selectionText: string;
-    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
-    element: HTMLElement | undefined;
-    paste: (text: string) => void;
-    selectAll: ReturnType<typeof vi.fn>;
-  }>,
   sockets: [] as Array<{ onopen: (() => void) | null; send: (data: string) => void }>,
 }));
 
@@ -48,50 +40,9 @@ vi.mock("@/lib/eventBus", () => ({
   },
 }));
 
-vi.mock("@xterm/xterm", () => {
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    selectionText = "";
-    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined = undefined;
-    element: HTMLElement | undefined = undefined;
-    _selectionChange: (() => void) | null = null;
-    _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null = null;
-    constructor() {
-      h.terminals.push(this);
-    }
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    focus = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn((cb: () => void) => {
-      this._selectionChange = cb;
-      return { dispose: vi.fn() };
-    });
-    getSelection = vi.fn(() => this.selectionText);
-    hasSelection = vi.fn(() => this.selectionText.length > 0);
-    getSelectionPosition = vi.fn(() => this.selectionRange);
-    selectAll = vi.fn();
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = {
-      registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
-    };
-    dispose = vi.fn();
-    paste = vi.fn();
-    attachCustomKeyEventHandler = vi.fn((cb: (ev: KeyboardEvent) => boolean) => {
-      this._customKeyHandler = cb;
-    });
-  }
-  return { Terminal };
-});
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class { dispose = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
@@ -149,7 +100,7 @@ Object.defineProperty(navigator, "clipboard", {
 });
 
 beforeEach(async () => {
-  h.terminals.length = 0;
+  FakeTerminal.instances.length = 0;
   h.sockets.length = 0;
   // The panel dedupes same-text clipboard writes within a short window (one
   // physical Cmd+C can legitimately take two copy paths in the desktop
@@ -184,25 +135,41 @@ function Panel() {
   );
 }
 
+// The panel mounts asynchronously (it awaits the libghostty wasm load, then the
+// mocked history restore, before constructing the terminal and opening the
+// socket), so drain microtasks until both exist.
+async function mountPanel() {
+  const utils = render(<Panel />);
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+  expect(FakeTerminal.instances.length).toBe(1);
+  expect(h.sockets.length).toBeGreaterThan(0);
+  return utils;
+}
+
 describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () => {
   // The stub Terminal must capture the custom key handler the panel installs.
   beforeEach(() => {
-    for (const t of h.terminals) t._customKeyHandler = null;
+    for (const t of FakeTerminal.instances) t._customKeyHandler = null;
   });
 
   function fireKey(init: { key: string; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean }) {
-    const term = h.terminals[0];
+    const term = FakeTerminal.instances[0];
     expect(term._customKeyHandler).toBeTruthy();
     const { key, ...modifiers } = init;
     const e = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
-    // The stub records the handler; invoke it the way xterm's _keyDown does.
-    const allowed = term._customKeyHandler!(e);
-    return { allowed: allowed, defaultPrevented: e.defaultPrevented };
+    // The stub records the handler; invoke it the way ghostty-web's keydown
+    // path does: true = handled (the terminal is skipped AND ghostty-web calls
+    // preventDefault); false = carry on, event untouched.
+    const handled = term._customKeyHandler!(e);
+    if (handled) e.preventDefault();
+    return { handled, defaultPrevented: e.defaultPrevented };
   }
 
-  it("copies with Cmd/Ctrl+C when a selection exists and blocks xterm (no \\x03)", async () => {
-    render(<Panel />);
-    const term = h.terminals[0];
+  it("copies with Cmd/Ctrl+C when a selection exists and handles the key (no \\x03)", async () => {
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "selected command output";
 
     await act(async () => {
@@ -211,14 +178,14 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
 
     // mac: metaKey+C
     const mac = fireKey({ key: "c", metaKey: true });
-    expect(mac.allowed).toBe(false); // xterm must not process the keydown
+    expect(mac.handled).toBe(true); // ghostty-web must not process the keydown
     expect(mac.defaultPrevented).toBe(true); // nor run native copy a second time
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("selected command output"));
   });
 
   it("copies with Ctrl+C with a selection on linux/windows too", async () => {
-    render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "selected command output";
 
     await act(async () => {
@@ -226,14 +193,14 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     });
 
     const win = fireKey({ key: "c", ctrlKey: true });
-    expect(win.allowed).toBe(false);
+    expect(win.handled).toBe(true);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("selected command output"));
   });
 
   it("dedupes same-text copies racing for one keystroke (menu copy event + keydown write)", async () => {
     vi.useFakeTimers();
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "dup copy text";
 
     await act(async () => {
@@ -241,7 +208,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     });
 
     // Path 1: the desktop native Edit ▸ Copy role fires the WKWebView copy:
-    // selector → a DOM copy event over the xterm selection (the container
+    // selector → a DOM copy event over the terminal selection (the container
     // listener writes it into clipboardData and marks it seen).
     const host = container.firstElementChild as HTMLElement;
     const store = new Map<string, string>();
@@ -259,7 +226,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     // Path 2: the SAME keystroke's keydown also reached the page; the
     // Clipboard-API write must be recognized as the duplicate and dropped.
     const key = fireKey({ key: "c", metaKey: true });
-    expect(key.allowed).toBe(false);
+    expect(key.handled).toBe(true);
     expect(key.defaultPrevented).toBe(true);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
@@ -272,7 +239,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       await vi.advanceTimersByTimeAsync(300);
     });
     const again = fireKey({ key: "c", metaKey: true });
-    expect(again.allowed).toBe(false);
+    expect(again.handled).toBe(true);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
@@ -281,8 +248,8 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
 
   it("dedupes mouse-up + debounced selection-change double writes", async () => {
     vi.useFakeTimers();
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "dragged text";
 
     await act(async () => {
@@ -310,8 +277,8 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   });
 
   it("lets Ctrl+C fall through when there is no selection (SIGINT)", async () => {
-    render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "";
 
     await act(async () => {
@@ -319,7 +286,7 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     });
 
     const r = fireKey({ key: "c", ctrlKey: true });
-    expect(r.allowed).toBe(true); // xterm converts to \x03 as usual
+    expect(r.handled).toBe(false); // the terminal converts it to \x03 as usual
     expect(r.defaultPrevented).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
   });
@@ -328,31 +295,20 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   //
   // A browser's Cmd/Ctrl+V default action is to dispatch a `paste`
   // ClipboardEvent on the focused editable element — for a terminal that is
-  // xterm's hidden textarea. xterm 6 listens for that event on BOTH the
-  // textarea and the element and pastes the clipboard itself, and its
-  // `_keyDown` returns early WITHOUT preventDefault as soon as a custom key
-  // handler answers false. So a clipboard read in the keydown handler is a
-  // second paste of the same text: one from the read, one from xterm's own
-  // listener. The helpers below model the real DOM shape — a focused
-  // descendant (xterm's textarea) carrying its own paste listener, inside the
-  // panel container that owns the event.
-  function withXtermPasteListener(
-    host: HTMLElement,
-    term: { element: HTMLElement | undefined; paste: (text: string) => void },
-  ) {
-    // xterm's own shape: term.open(host) appends its element, and the hidden
-    // textarea that both receives the browser's paste event and carries
-    // xterm's own paste listener lives inside that element.
-    const xtermEl = document.createElement("div");
-    const textarea = document.createElement("textarea");
+  // ghostty-web's hidden textarea. ghostty-web listens for that event itself and
+  // pastes the clipboard, and it skips (ctrl|meta)+KeyV in its keydown path
+  // without preventDefault. So a clipboard read in the keydown handler is a
+  // second paste of the same text: one from the read, one from ghostty-web's own
+  // listener. The helper below models the real DOM shape — the terminal's
+  // hidden textarea (inside the host element term.open() received) carrying its
+  // own paste listener, inside the panel container that owns the event.
+  function withGhosttyPasteListener(term: FakeTerminal) {
+    const textarea = term.textarea!;
     textarea.addEventListener("paste", (e) => {
       const data = (e as ClipboardEvent).clipboardData?.getData("text/plain") ?? "";
-      // Exactly what xterm's handlePasteEvent does with the event.
+      // Exactly what ghostty-web's paste handler does with the event.
       if (data) term.paste(data);
     });
-    xtermEl.appendChild(textarea);
-    host.appendChild(xtermEl);
-    term.element = xtermEl;
     return textarea;
   }
 
@@ -368,29 +324,30 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     return { defaultPrevented: ev.defaultPrevented };
   }
 
-  it("Cmd/Ctrl+V keydown blocks xterm (no \\x16) and leaves the paste to the browser's paste event", async () => {
+  it("Cmd/Ctrl+V keydown is not handled (no preventDefault) and leaves the paste to the browser's paste event", async () => {
     const readText = vi.fn(() => Promise.resolve("pasted text"));
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText, readText },
       configurable: true,
       writable: true,
     });
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
-    const host = container.firstElementChild as HTMLElement;
-    const textarea = withXtermPasteListener(host, term);
+    const textarea = withGhosttyPasteListener(term);
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
 
     const mac = fireKey({ key: "v", metaKey: true });
-    expect(mac.allowed).toBe(false); // xterm must not emit \x16
-    expect(mac.defaultPrevented).toBe(false); // …but the browser must still fire `paste`
+    // ghostty-web already skips (ctrl|meta)+KeyV before encoding (no \x16);
+    // returning true here would preventDefault and kill the browser's `paste`.
+    expect(mac.handled).toBe(false);
+    expect(mac.defaultPrevented).toBe(false); // the browser must still fire `paste`
     const win = fireKey({ key: "v", ctrlKey: true });
-    expect(win.allowed).toBe(false);
+    expect(win.handled).toBe(false);
     expect(win.defaultPrevented).toBe(false);
     await act(async () => {
       await Promise.resolve();
@@ -403,20 +360,19 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     // Never a raw socket write: paste goes through term.paste (bracketed-paste aware).
     expect(h.sockets[0]?.send).not.toHaveBeenCalled();
 
-    // …and that one event pastes exactly once, even though xterm has a paste
+    // …and that one event pastes exactly once, even though ghostty-web has a paste
     // listener of its own on the focused element.
     firePaste(textarea, "pasted text");
     expect(paste).toHaveBeenCalledTimes(1);
     expect(paste).toHaveBeenCalledWith("pasted text");
   });
 
-  it("pastes a native paste event once and keeps xterm's own paste listener from seeing it", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+  it("pastes a native paste event once and keeps ghostty-web's own paste listener from seeing it", async () => {
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
-    const host = container.firstElementChild as HTMLElement;
-    const textarea = withXtermPasteListener(host, term);
+    const textarea = withGhosttyPasteListener(term);
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
@@ -431,12 +387,11 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   });
 
   it("drops a duplicate paste event for one physical paste (shell menu role + keydown default action)", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
-    const host = container.firstElementChild as HTMLElement;
-    const textarea = withXtermPasteListener(host, term);
+    const textarea = withGhosttyPasteListener(term);
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
@@ -456,12 +411,11 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   // swallowing a user's own rapid repeat.
   it("still pastes the same text again 100ms later — the dedupe window stays short", async () => {
     vi.useFakeTimers();
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
-    const host = container.firstElementChild as HTMLElement;
-    const textarea = withXtermPasteListener(host, term);
+    const textarea = withGhosttyPasteListener(term);
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
@@ -482,12 +436,12 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       configurable: true,
       writable: true,
     });
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
     const host = container.firstElementChild as HTMLElement;
-    withXtermPasteListener(host, term);
+    withGhosttyPasteListener(term);
 
     // TerminalFindBar renders its own search input inside the same container,
     // and this listener runs in the capture phase on that container — so it
@@ -508,8 +462,8 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       configurable: true,
       writable: true,
     });
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
 
@@ -534,12 +488,11 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   });
 
   it("never drops a paste of different text inside the duplicate window", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     const paste = vi.fn();
     term.paste = paste;
-    const host = container.firstElementChild as HTMLElement;
-    const textarea = withXtermPasteListener(host, term);
+    const textarea = withGhosttyPasteListener(term);
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
@@ -559,8 +512,8 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       configurable: true,
       writable: true,
     });
-    render(<Panel />);
-    const term = h.terminals[0];
+    await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "sel";
     const paste = vi.fn();
     term.paste = paste;
@@ -581,25 +534,25 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
   });
 
   it("Shift+Enter sends CSI-u once and cancels the keydown so the follow-up keypress cannot send \\r", async () => {
-    render(<Panel />);
+    await mountPanel();
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
 
     const down = fireKey({ key: "Enter", shiftKey: true });
-    expect(down.allowed).toBe(false);
-    // xterm only cancels the keydown itself when the custom handler lets it
-    // run; when we return false we must preventDefault ourselves, otherwise
-    // the browser fires keypress(Enter) and xterm converts it to "\r".
+    // Handled: ghostty-web skips its own encoding of this Enter and itself
+    // calls preventDefault, so the browser cannot fire a follow-up keypress
+    // that would send "\r".
+    expect(down.handled).toBe(true);
     expect(down.defaultPrevented).toBe(true);
 
     const sent = (h.sockets[0]!.send as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => String(c[0]));
     expect(sent).toEqual(["\x1b[13;2u"]);
   });
 
-  it("container copy event writes the xterm selection to clipboardData (desktop Edit-menu fallback)", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+  it("container copy event writes the terminal selection to clipboardData (desktop Edit-menu fallback)", async () => {
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "menu copy text";
 
     await act(async () => {
@@ -623,9 +576,9 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     expect(dt.getData("text/plain")).toBe("menu copy text");
   });
 
-  it("leaves copying from unrelated text fields alone", () => {
-    render(<Panel />);
-    h.terminals[0].selectionText = "stale terminal selection";
+  it("leaves copying from unrelated text fields alone", async () => {
+    await mountPanel();
+    FakeTerminal.instances[0].selectionText = "stale terminal selection";
     const input = document.createElement("input");
     document.body.appendChild(input);
     try {
@@ -642,14 +595,14 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     }
   });
 
-  it("leaves a copy from the find bar's input alone when xterm shows no selection", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+  it("leaves a copy from the find bar's input alone when the terminal shows no selection", async () => {
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
     const host = container.firstElementChild as HTMLElement;
-    // A drag leaves a snapshot behind; xterm then drops its own selection.
+    // A drag leaves a snapshot behind; the terminal then drops its own selection.
     term.selectionText = "stale snapshot";
     fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
     fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
@@ -671,21 +624,21 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
 });
 
 describe("terminal copy under a redrawing program (claude code over ssh)", () => {
-  // xterm stores a selection as buffer coordinates, not text. A TUI that
+  // The terminal stores a selection as buffer coordinates, not text. A TUI that
   // redraws in place (claude code's Ink renderer) rewrites the rows under the
   // selection every frame, so a later live read of getSelection() returns a
   // partial/mutated line set. The text the user saw at release must be what
   // every later copy path (Cmd+C, Edit-menu copy event) writes.
   function fireKey(init: { key: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }) {
-    const term = h.terminals[0];
+    const term = FakeTerminal.instances[0];
     const { key, ...modifiers } = init;
     const e = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
     return term._customKeyHandler!(e);
   }
 
   it("Cmd+C after a redraw writes the text selected at mouse-up, not the mutated buffer", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -702,14 +655,14 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     term.selectionText = "line one\n\n";
     await new Promise((r) => setTimeout(r, 300));
 
-    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    expect(fireKey({ key: "c", metaKey: true })).toBe(true);
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three");
   });
 
   it("Edit-menu copy event after a redraw carries the text selected at mouse-up", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -732,8 +685,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("Select All after an earlier drag copies the live selection, not the stale drag snapshot", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -751,13 +704,13 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     expect(term.selectAll).toHaveBeenCalled();
     term.selectionText = "entire buffer";
 
-    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    expect(fireKey({ key: "c", metaKey: true })).toBe(true);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("entire buffer"));
   });
 
   it("ignores onSelectionChange fired by scrollback trim (no pointer gesture) and keeps the clipboard", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -770,7 +723,7 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("keep me"));
     writeText.mockClear();
 
-    // Output scrolls: xterm adjusts the selection rows and fires
+    // Output scrolls: the terminal adjusts the selection rows and fires
     // onSelectionChange; the rows now hold rewritten content.
     term.selectionText = "keep";
     act(() => term._selectionChange?.());
@@ -779,8 +732,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("still copies a drag released outside the container via the debounced path", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -792,17 +745,17 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("released outside"));
   });
 
-  it("right-click → Copy copies the word xterm selected even though the mouse-up report cleared it (mouse-tracking app)", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+  it("right-click → Copy copies the word selected even though the mouse-up report cleared it (mouse-tracking app)", async () => {
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
     const host = container.firstElementChild as HTMLElement;
 
-    // claude code has ?1000/?1006 on: xterm's contextmenu listener selects
+    // claude code has ?1000/?1006 on: a contextmenu listener selects
     // the word under the cursor, then the button-release mouse report counts
-    // as user input and xterm clears that selection again before the user
+    // as user input and the terminal clears that selection again before the user
     // can reach the menu.
     fireEvent.mouseDown(host, { button: 2, clientX: 20, clientY: 20 });
     term.selectionText = "word";
@@ -824,8 +777,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("right-click → Copy after a scrollback trim dropped the selection still copies the dragged text", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -854,8 +807,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("a plain left click in the terminal drops the snapshot (user deselected)", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -880,8 +833,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("a key that reaches the pty drops the snapshot; bare modifiers and Cmd-combos do not", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -908,8 +861,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("right-click over the dragged range keeps the mouse-up snapshot, not the rewritten rows", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -937,8 +890,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("right-click that selects a word over a NEW range replaces the snapshot", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -964,8 +917,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("a right-button press/release never copies the word rightClickSelectsWord picked", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -983,8 +936,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("a press on the panel's own chrome leaves the snapshot alone", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -1004,7 +957,7 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     fireEvent.mouseUp(findInput, { clientX: 300, clientY: 10 });
 
     term.selectionText = "keep\n\n";
-    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    expect(fireKey({ key: "c", metaKey: true })).toBe(true);
     expect(writeText).toHaveBeenCalledWith("keep across chrome click");
   });
 
@@ -1019,10 +972,10 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
       const text = `typed over ${key.key}`;
       cleanup();
       writeText.mockClear();
-      h.terminals.length = 0;
+      FakeTerminal.instances.length = 0;
       h.sockets.length = 0;
-      const { container } = render(<Panel />);
-      const term = h.terminals[0];
+      const { container } = await mountPanel();
+      const term = FakeTerminal.instances[0];
       await act(async () => {
         h.sockets[0]?.onopen?.();
       });
@@ -1043,8 +996,8 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   });
 
   it("drops the snapshot once the selection is cleared so Ctrl+C sends SIGINT again", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
@@ -1059,7 +1012,7 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
 
     term.selectionText = "";
     act(() => term._selectionChange?.());
-    expect(fireKey({ key: "c", metaKey: true })).toBe(true);
+    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
     await new Promise((r) => setTimeout(r, 300));
     expect(writeText).not.toHaveBeenCalled();
   });
@@ -1067,15 +1020,15 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
 
 describe("terminal copy-on-selection", () => {
   it("copies the selection to the system clipboard on mouse-up (TUI parity)", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = "hello from the pty";
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
 
-    // The panel root div is xterm's fit parent and carries the onMouseUp
+    // The panel root div is the terminal host's fit parent and carries the onMouseUp
     // handler. TerminalProvider renders no DOM of its own, so it is the
     // container's first child.
     const host = container.firstElementChild as HTMLElement | null;
@@ -1091,8 +1044,8 @@ describe("terminal copy-on-selection", () => {
   });
 
   it("does not touch the clipboard on a plain click with no selection", async () => {
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
     term.selectionText = ""; // plain click: no selection
 
     await act(async () => {
@@ -1112,15 +1065,15 @@ describe("terminal copy-on-selection", () => {
 
   it("copies via the debounced onSelectionChange fallback once the selection settles", async () => {
     vi.useFakeTimers();
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
     });
 
     // Simulate a drag producing a selection, released outside the container so
-    // only the xterm onSelectionChange path fires. The mousedown marks the
+    // only the onSelectionChange path fires. The mousedown marks the
     // change as pointer-driven (trim-driven changes are ignored).
     const host = container.firstElementChild as HTMLElement;
     fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
@@ -1141,8 +1094,8 @@ describe("terminal copy-on-selection", () => {
 
   it("does not copy stale text when the selection is cleared", async () => {
     vi.useFakeTimers();
-    const { container } = render(<Panel />);
-    const term = h.terminals[0];
+    const { container } = await mountPanel();
+    const term = FakeTerminal.instances[0];
 
     await act(async () => {
       h.sockets[0]?.onopen?.();
@@ -1253,24 +1206,24 @@ describe("writeClipboardText fallback", () => {
 });
 
 // Claude Code (mouse-tracking), tmux and vim copy their own selections by
-// emitting OSC 52; over ssh it is the only copy path. xterm ignores it unless
-// a handler is registered.
+// emitting OSC 52; over ssh it is the only copy path. ghostty-web ignores it, so
+// the panel's stream scanner picks it out of the pty bytes. The tests push the
+// real escape sequence through the mocked WebSocket.
 describe("terminal OSC 52 clipboard write", () => {
-  type OscMock = { mock: { calls: Array<[number, (data: string) => boolean]> } };
-  function osc52Handler() {
-    const reg = (h.terminals[0] as unknown as { parser: { registerOscHandler: OscMock } }).parser.registerOscHandler;
-    const call = reg.mock.calls.find(([ident]) => ident === 52);
-    expect(call).toBeTruthy();
-    return call![1];
+  type FrameSocket = { onmessage: ((e: { data: unknown }) => void) | null };
+
+  /** Delivers `c;<payload>` to the panel as an OSC 52 sequence in a binary frame. */
+  function osc52(payload: string, terminator = "\x07") {
+    const frame = new TextEncoder().encode(`\x1b]52;${payload}${terminator}`).buffer;
+    (h.sockets[0] as unknown as FrameSocket).onmessage?.({ data: frame });
   }
 
   async function openPanel() {
-    const { container } = render(<Panel />);
-    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    const { container } = await mountPanel();
     await act(async () => {
       h.sockets[0].onopen?.();
     });
-    return { host: container.firstElementChild as HTMLElement, handler: osc52Handler() };
+    return { host: container.firstElementChild as HTMLElement, handler: osc52 };
   }
 
   function b64(text: string) {
@@ -1281,14 +1234,14 @@ describe("terminal OSC 52 clipboard write", () => {
 
   it("refuses a write with no user input in the terminal", async () => {
     const { handler } = await openPanel();
-    expect(handler(`c;${b64("hijack")}`)).toBe(true);
+    handler(`c;${b64("hijack")}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
   it("refuses an oversized payload even right after input", async () => {
     const { host, handler } = await openPanel();
     fireEvent.pointerDown(host);
-    expect(handler(`c;${"A".repeat(100_004)}`)).toBe(true);
+    handler(`c;${"A".repeat(100_004)}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -1296,7 +1249,7 @@ describe("terminal OSC 52 clipboard write", () => {
     const { host, handler } = await openPanel();
     fireEvent.pointerDown(host);
     fireEvent.pointerUp(window);
-    expect(handler(`c;${b64("héllo from ssh")}`)).toBe(true);
+    handler(`c;${b64("héllo from ssh")}`);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("héllo from ssh"));
   });
 
@@ -1309,7 +1262,7 @@ describe("terminal OSC 52 clipboard write", () => {
     now.mockReturnValue(9_000);
     fireEvent.pointerUp(window);
     now.mockReturnValue(10_000);
-    expect(handler(`c;${b64("slow drag")}`)).toBe(true);
+    handler(`c;${b64("slow drag")}`);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("slow drag"));
   });
 
@@ -1319,7 +1272,7 @@ describe("terminal OSC 52 clipboard write", () => {
     now.mockReturnValue(1_000);
     fireEvent.keyDown(host, { key: "c" });
     now.mockReturnValue(6_001);
-    expect(handler(`c;${b64("too late")}`)).toBe(true);
+    handler(`c;${b64("too late")}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -1327,7 +1280,7 @@ describe("terminal OSC 52 clipboard write", () => {
     const { handler } = await openPanel();
     fireEvent.pointerDown(document.body);
     fireEvent.pointerUp(window);
-    expect(handler(`c;${b64("elsewhere")}`)).toBe(true);
+    handler(`c;${b64("elsewhere")}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -1341,7 +1294,7 @@ describe("terminal OSC 52 clipboard write", () => {
     now.mockReturnValue(6_001);
     fireEvent.pointerDown(document.body);
     fireEvent.pointerUp(window);
-    expect(handler(`c;${b64("cancelled")}`)).toBe(true);
+    handler(`c;${b64("cancelled")}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -1354,22 +1307,21 @@ describe("terminal OSC 52 clipboard write", () => {
     now.mockReturnValue(6_001);
     fireEvent.pointerDown(document.body);
     fireEvent.pointerUp(window);
-    expect(handler(`c;${b64("blurred")}`)).toBe(true);
+    handler(`c;${b64("blurred")}`);
     expect(writeText).not.toHaveBeenCalled();
   });
 
   it("ignores clipboard read queries and replayed scrollback", async () => {
-    const { container } = render(<Panel />);
-    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
-    const handler = osc52Handler();
+    const { container } = await mountPanel();
+    const handler = osc52;
     fireEvent.pointerDown(container.firstElementChild as HTMLElement);
     // Before the socket opens the terminal is replaying history.
-    expect(handler(`c;${b64("old")}`)).toBe(true);
+    handler(`c;${b64("old")}`);
     await act(async () => {
       h.sockets[0].onopen?.();
     });
-    expect(handler("c;?")).toBe(true);
-    expect(handler("c;!!not-base64!!")).toBe(true);
+    handler("c;?");
+    handler("c;!!not-base64!!");
     expect(writeText).not.toHaveBeenCalled();
   });
 });

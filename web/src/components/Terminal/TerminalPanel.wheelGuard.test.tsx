@@ -2,35 +2,29 @@ import { render, act } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
+import { sendWheelReport } from "./terminalMouse";
 
 // Regression coverage for "cannot scroll the claude code that run inside the
 // terminal, only can scroll the window":
 //
-// xterm consumes the wheel gestures it can use (its own scrollback, or a mouse
-// report forwarded to the TUI that owns the mouse). Anything it leaves alone
-// used to fall through to the browser, which scrolls the nearest scrollable
-// ancestor — and in the desktop shell's WKWebView even the non-scrollable
-// document rubber-bands, so a gesture over the terminal moved the whole app
-// window instead of the terminal. The panel now swallows those leftover
-// gestures on the container, while still letting the container's own overflow
-// fallback scroll.
+// ghostty-web consumes every wheel over its host element (its own scrollback,
+// arrow keys on the alt screen, or a mouse report via terminalMouse.ts) in the
+// CAPTURE phase and stopPropagation()s. Anything over the panel's own chrome, or
+// whatever the host leaves alone, used to fall through to the browser, which
+// scrolls the nearest scrollable ancestor — and in the desktop shell's WKWebView
+// even the non-scrollable document rubber-bands, so a gesture over the terminal
+// moved the whole app window instead of the terminal. The panel swallows those
+// leftover gestures on the container, while still letting the container's own
+// overflow fallback scroll.
 //
-// The stubbed Terminal creates a child surface inside the container and installs
-// a wheel listener there that consumes the gesture the way xterm's own listener
-// does (preventDefault + stopPropagation). That keeps the real propagation
-// shape — xterm's listener deeper than the panel's guard — so these tests can
-// pin both sides of the contract.
+// The stubbed Terminal adds a <canvas> inside the host and installs a capture
+// wheel listener on the host that consumes the gesture the way ghostty-web's
+// own does (preventDefault + stopPropagation). That keeps the real propagation
+// shape — ghostty-web's listener deeper than the panel's guard — so these tests
+// can pin both sides of the contract.
 
-const h = vi.hoisted(() => ({
-  terminals: [] as Array<{
-    container: HTMLElement | null;
-    surface: HTMLElement | null;
-    wheelHandler: ((e: WheelEvent) => void) | null;
-    modes: { mouseTrackingMode: string };
-    scrollLines: ReturnType<typeof vi.fn>;
-    input: ReturnType<typeof vi.fn>;
-  }>,
-}));
+type WheelTerminal = FakeTerminal & { wheelHandler: ((e: WheelEvent) => void) | null };
 
 // terminalStore subscribes to the server's `terminal_tabs_changed` bus event;
 // the real eventBus auto-starts an SSE stream on the first on(), calling
@@ -45,78 +39,32 @@ vi.mock("@/lib/eventBus", () => ({
   },
 }));
 
-vi.mock("@xterm/xterm", () => {
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    buffer = { active: { length: 24 } };
-    modes = { mouseTrackingMode: "none" };
-    element: HTMLElement | null = null;
-    scrollLines = vi.fn();
-    input = vi.fn();
-    container: HTMLElement | null = null;
-    surface: HTMLElement | null = null;
+vi.mock("ghostty-web", async () => {
+  const mod = (await import("./ghosttyWebMock")).ghosttyWebModule();
+  class Terminal extends mod.Terminal {
     wheelHandler: ((e: WheelEvent) => void) | null = null;
-    constructor() {
-      h.terminals.push(this);
-    }
-    loadAddon = vi.fn();
-    write = vi.fn((_text: string, callback?: () => void) => callback?.());
-    reset = vi.fn();
-    focus = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onWriteParsed = vi.fn(() => ({ dispose: vi.fn() }));
-    onResize = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    dispose = vi.fn();
-    attachCustomKeyEventHandler = vi.fn(() => true);
-    open(container: HTMLElement) {
-      this.container = container;
-      // xterm builds its own surface element inside the container and hangs
-      // its wheel handling off that. A gesture xterm can use is consumed
-      // (preventDefault + stopPropagation); the panel's guard sits on the
-      // container and therefore only ever sees what xterm left behind.
-      const surface = document.createElement("div");
-      surface.className = "xterm";
-      container.appendChild(surface);
-      this.surface = surface;
-      // Real xterm exposes its root as `element`, with the cell grid in
-      // `.xterm-screen`. jsdom has no layout, so pin a 480x240 grid
-      // (24 rows -> 10px per row) starting at (0, 0).
-      const screen = document.createElement("div");
-      screen.className = "xterm-screen";
-      screen.getBoundingClientRect = () => new DOMRect(0, 0, 480, 240);
-      surface.appendChild(screen);
-      this.element = surface;
-      this.wheelHandler = (e: WheelEvent) => {
-        if (e.defaultPrevented) return;
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      surface.addEventListener("wheel", this.wheelHandler, { passive: false });
+    constructor(opts: Record<string, unknown>) {
+      super(opts);
+      const baseOpen = this.open;
+      this.open = vi.fn((host: HTMLElement) => {
+        baseOpen(host);
+        // jsdom has no layout, so pin a 480x240 grid (24 rows -> 10px per row)
+        // starting at (0, 0).
+        const canvas = document.createElement("canvas");
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, 480, 240);
+        host.appendChild(canvas);
+        this.wheelHandler = (e: WheelEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+        };
+        host.addEventListener("wheel", this.wheelHandler, { passive: false, capture: true });
+      });
     }
   }
-  return { Terminal };
+  return { ...mod, Terminal };
 });
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    onDidChangeResults = vi.fn(() => ({ dispose: vi.fn() }));
-    findNext = vi.fn();
-    findPrevious = vi.fn();
-    clearDecorations = vi.fn();
-    dispose = vi.fn();
-  },
-}));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class { dispose = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
@@ -158,17 +106,23 @@ class MockSocket {
   constructor(public url: string) {}
 }
 
-/** The panel container xterm was opened into (the wheel guard lives here). */
-function containerOf(): HTMLElement {
-  const el = h.terminals[0]?.container;
-  if (!el) throw new Error("terminal container not found");
+function termOf(): WheelTerminal {
+  const term = FakeTerminal.instances[0] as WheelTerminal | undefined;
+  if (!term) throw new Error("terminal not constructed");
+  return term;
+}
+
+/** The element ghostty-web was opened into (the real wheel target). */
+function surfaceOf(): HTMLElement {
+  const el = termOf().element;
+  if (!el) throw new Error("terminal host not found");
   return el;
 }
 
-/** The surface xterm renders inside the container (the real wheel target). */
-function surfaceOf(): HTMLElement {
-  const el = h.terminals[0]?.surface;
-  if (!el) throw new Error("terminal surface not found");
+/** The panel container (the wheel guard lives here): the host's parent. */
+function containerOf(): HTMLElement {
+  const el = surfaceOf().parentElement;
+  if (!el) throw new Error("terminal container not found");
   return el;
 }
 
@@ -182,11 +136,11 @@ function setScrollBox(
   Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true });
 }
 
-/** Drop xterm's stand-in listener: the state a gesture xterm cannot use leaves. */
+/** Drop ghostty-web's stand-in listener: the state a gesture it cannot use leaves. */
 function dropTerminalWheelListener() {
-  const term = h.terminals[0];
-  if (term?.wheelHandler && term.surface) {
-    term.surface.removeEventListener("wheel", term.wheelHandler);
+  const term = termOf();
+  if (term.wheelHandler && term.element) {
+    term.element.removeEventListener("wheel", term.wheelHandler, true);
   }
 }
 
@@ -199,7 +153,8 @@ function dispatchWheel(el: HTMLElement, deltaY: number): WheelEvent {
 }
 
 beforeEach(() => {
-  h.terminals.length = 0;
+  FakeTerminal.instances.length = 0;
+  vi.mocked(sendWheelReport).mockClear();
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("missing", { status: 404 }))));
@@ -225,8 +180,9 @@ async function mountPanel() {
     </TerminalProvider>,
   );
   await act(async () => {
-    await Promise.resolve();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
   });
+  expect(FakeTerminal.instances.length).toBe(1);
   return utils;
 }
 
@@ -235,7 +191,7 @@ describe("TerminalPanel wheel gestures stay inside the terminal", () => {
     await mountPanel();
     const container = containerOf();
     setScrollBox(container, { scrollTop: 0, clientHeight: 400, scrollHeight: 400 });
-    // Only the panel's guard is armed now — the state a gesture xterm cannot
+    // Only the panel's guard is armed now — the state a gesture ghostty-web cannot
     // use (no scrollback left, or a mouse report the running app never
     // answered) leaves behind. It must not reach the browser as a page scroll.
     dropTerminalWheelListener();
@@ -244,7 +200,7 @@ describe("TerminalPanel wheel gestures stay inside the terminal", () => {
     expect(dispatchWheel(surfaceOf(), 300).defaultPrevented).toBe(true);
   });
 
-  it("leaves a gesture xterm already consumed alone", async () => {
+  it("leaves a gesture ghostty-web already consumed alone", async () => {
     await mountPanel();
     const container = containerOf();
     setScrollBox(container, { scrollTop: 0, clientHeight: 400, scrollHeight: 400 });
@@ -255,8 +211,8 @@ describe("TerminalPanel wheel gestures stay inside the terminal", () => {
 
     const event = dispatchWheel(surfaceOf(), 300);
 
-    // The stub surface sits deeper and stopped propagation, so neither the
-    // guard nor the probe listener ran: xterm — not the page — handled it.
+    // The stub host sits deeper and stopped propagation, so neither the
+    // guard nor the probe listener ran: ghostty-web — not the page — handled it.
     expect(event.defaultPrevented).toBe(true);
     expect(seenByContainer).toEqual([]);
   });
@@ -288,12 +244,10 @@ describe("TerminalPanel wheel gestures stay inside the terminal", () => {
   });
 });
 
-// xterm 6 has no touch scrolling of its own (its Gesture class is never
-// registered on the viewport), so a one-finger drag on a phone browser did
-// nothing. Synthetic wheel events are not a way out — xterm ignores untrusted
-// ones (verified in a real browser) — so the panel drives xterm's API: cell
-// rows of drag become scrollLines, or SGR wheel reports when a TUI owns the
-// mouse.
+// ghostty-web has no touch scrolling of its own, so a one-finger drag on a phone
+// browser did nothing. Synthetic wheel events are not a way out, so the panel
+// drives the terminal's API: cell rows of drag become scrollLines, or wheel
+// reports (terminalMouse.sendWheelReport) when a TUI owns the mouse.
 function dispatchTouch(el: HTMLElement, type: string, touches: Array<{ clientX: number; clientY: number }>) {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, "touches", { value: touches });
@@ -313,7 +267,7 @@ describe("TerminalPanel touch drags scroll the terminal", () => {
   it("scrolls scrollback by whole rows, carrying the remainder (drag down scrolls up)", async () => {
     await mountPanel();
     const surface = surfaceOf();
-    const term = h.terminals[0];
+    const term = termOf();
 
     dispatchTouch(surface, "touchstart", at(100));
     dispatchTouch(surface, "touchmove", at(125)); // 25px = 2 rows + 5px carried
@@ -322,26 +276,27 @@ describe("TerminalPanel touch drags scroll the terminal", () => {
     expect(term.scrollLines).toHaveBeenCalledTimes(1);
     dispatchTouch(surface, "touchmove", at(100)); // 20px up
     expect(term.scrollLines).toHaveBeenLastCalledWith(2);
-    expect(term.input).not.toHaveBeenCalled();
+    expect(sendWheelReport).not.toHaveBeenCalled();
   });
 
-  it("sends SGR wheel reports instead when an app owns the mouse", async () => {
+  it("sends wheel reports instead when an app owns the mouse", async () => {
     await mountPanel();
     const surface = surfaceOf();
-    const term = h.terminals[0];
-    term.modes.mouseTrackingMode = "any";
+    const term = termOf();
+    term.mouseTracking = true;
 
     dispatchTouch(surface, "touchstart", at(100, 245));
     dispatchTouch(surface, "touchmove", at(70, 245)); // 30px up = 3 rows of wheel-down
-    // x=245 of 480 over 80 cols -> col 41; y=70 of 240 over 24 rows -> row 8.
-    expect(term.input).toHaveBeenCalledWith("\x1b[<65;41;8M".repeat(3), true);
+    // The cell geometry (x=245 of 480 over 80 cols -> col 41; y=70 of 240 over
+    // 24 rows -> row 8) is terminalMouse.ts's job and is covered in its own tests.
+    expect(sendWheelReport).toHaveBeenCalledWith(term, 3, 245, 70);
     expect(term.scrollLines).not.toHaveBeenCalled();
   });
 
   it("ignores multi-touch and stops after the touch ends", async () => {
     await mountPanel();
     const surface = surfaceOf();
-    const term = h.terminals[0];
+    const term = termOf();
 
     dispatchTouch(surface, "touchstart", [...at(100), ...at(100, 50)]);
     dispatchTouch(surface, "touchmove", [...at(140), ...at(140, 50)]);

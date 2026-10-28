@@ -1,7 +1,41 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTerminalSnapshot } from "./terminalSnapshot";
-import { Terminal } from "@xterm/xterm";
-import { SerializeAddon } from "@xterm/addon-serialize";
+import type { Terminal } from "ghostty-web";
+import { serializeTerminalBuffer } from "./terminalSerialize";
+import { TERMINAL_THEME_DEFAULTS } from "./terminalOptions";
+
+/** A mutable plain-text fake of ghostty-web's buffer: one string per row, default attributes. */
+function makeFakeTerm(state: { rows: string[] }): Pick<Terminal, "buffer"> {
+  const cell = (ch: string) => ({
+    getChars: () => (ch === " " ? "" : ch),
+    getWidth: () => 1,
+    getFgColor: () => TERMINAL_THEME_DEFAULTS.foreground,
+    getBgColor: () => TERMINAL_THEME_DEFAULTS.background,
+    isBold: () => 0,
+    isItalic: () => 0,
+    isUnderline: () => 0,
+    isStrikethrough: () => 0,
+    isBlink: () => 0,
+    isInverse: () => 0,
+    isInvisible: () => 0,
+    isFaint: () => 0,
+  });
+  return {
+    buffer: {
+      active: {
+        get length() {
+          return state.rows.length;
+        },
+        getLine: (y: number) => {
+          const row = state.rows[y];
+          if (row === undefined) return undefined;
+          return { length: row.length, isWrapped: false, getCell: (x: number) => (x < row.length ? cell(row[x]) : undefined) };
+        },
+        getNullCell: () => cell(" "),
+      },
+    },
+  } as unknown as Pick<Terminal, "buffer">;
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -25,8 +59,9 @@ describe("terminal snapshot scheduling", () => {
     const save = vi.fn();
     const snapshot = createTerminalSnapshot(save);
     snapshot.flush();
-    // Queuing term.write does not mark dirty. The public onWriteParsed event
-    // arrives later, including when a hidden terminal never renders.
+    // Queuing a write does not mark dirty by itself: the panel marks the
+    // snapshot after every write it performs (ghostty-web has no "write
+    // parsed" event), including for a hidden terminal that never renders.
     snapshot.flush();
     expect(save).toHaveBeenCalledTimes(1);
     snapshot.markDirty();
@@ -45,7 +80,7 @@ describe("terminal snapshot scheduling", () => {
     expect(save).toHaveBeenCalledTimes(2);
   });
 
-  it("coalesces many parsed writes into one pending snapshot", () => {
+  it("coalesces many writes into one pending snapshot", () => {
     vi.useFakeTimers();
     const save = vi.fn();
     const snapshot = createTerminalSnapshot(save);
@@ -147,48 +182,37 @@ describe("terminal snapshot scheduling", () => {
     snapshot.dispose();
   });
 
-  it("tracks real xterm parser completion and resize without rendering or truncating history", async () => {
-    const term = new Terminal({ cols: 80, rows: 24, scrollback: 100_000, allowProposedApi: true });
-    const addon = new SerializeAddon();
-    term.loadAddon(addon);
-    const save = vi.fn(() => addon.serialize({ scrollback: term.options.scrollback }));
+  it("tracks writes and resize against the serialized buffer without truncating history", () => {
+    const state = { rows: [] as string[] };
+    const term = makeFakeTerm(state);
+    const save = vi.fn(() => serializeTerminalBuffer(term, TERMINAL_THEME_DEFAULTS));
     const snapshot = createTerminalSnapshot(save);
-    const parsed = term.onWriteParsed(snapshot.markDirty);
-    const resized = term.onResize(snapshot.markDirty);
     try {
       snapshot.flush();
-      // No open()/render(): models hidden keep-alive terminals. The first
-      // flush after write still sees the old generation until parsing ends.
-      const text = "first retained line\r\n" + "history line\r\n".repeat(200) + "last retained line";
-      const completed = new Promise<void>((resolve) => {
-        const listener = term.onWriteParsed(() => { listener.dispose(); resolve(); });
-      });
-      term.write(text);
-      snapshot.flush();
-      expect(save).toHaveBeenCalledTimes(1);
-      await completed;
+      // Parsing is synchronous in ghostty-web: the panel writes, then marks dirty.
+      state.rows = ["first retained line", ...Array.from({ length: 200 }, () => "history line"), "last retained line"];
+      snapshot.markDirty();
       snapshot.flush();
       expect(save).toHaveBeenCalledTimes(2);
       expect(save.mock.results[1].value).toContain("first retained line");
       expect(save.mock.results[1].value).toContain("last retained line");
       snapshot.flush();
       expect(save).toHaveBeenCalledTimes(2);
-      term.resize(90, 30);
+      // onResize marks dirty.
+      snapshot.markDirty();
       snapshot.flush();
       expect(save).toHaveBeenCalledTimes(3);
-      term.clear();
+      // clear / reset drop the content and mark dirty by hand.
+      state.rows = ["prompt$"];
       snapshot.markDirty();
       snapshot.flush();
       expect(save.mock.results[3].value).not.toContain("first retained line");
-      term.reset();
+      state.rows = [];
       snapshot.markDirty();
       snapshot.flush();
       expect(save.mock.results[4].value).not.toContain("last retained line");
     } finally {
       snapshot.dispose();
-      parsed.dispose();
-      resized.dispose();
-      term.dispose();
     }
   });
 });

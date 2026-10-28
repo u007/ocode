@@ -13,16 +13,21 @@ import {
   X,
   Volume2,
 } from "lucide-react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
-import { SerializeAddon } from "@xterm/addon-serialize";
-import { WebglAddon } from "@xterm/addon-webgl";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import "@xterm/xterm/css/xterm.css";
-import { registerFileLinkProvider } from "./terminalLinkProvider";
+import { FitAddon, Terminal, type Ghostty } from "ghostty-web";
+import { registerFileLinkProvider, registerUrlLinkProvider } from "./terminalLinkProvider";
 import { openExternalURL } from "../../lib/externalLinks";
-import { buildTerminalOptions } from "./terminalOptions";
+import { buildTerminalOptions, TERMINAL_THEME_DEFAULTS } from "./terminalOptions";
+import { loadGhostty } from "./ghosttyRuntime";
+import { createTerminalStreamScanner, type TerminalStreamScanner } from "./terminalStream";
+import { serializeTerminalBuffer } from "./terminalSerialize";
+import { createTerminalSearch, type TerminalSearch } from "./terminalSearch";
+import {
+  clearBuiltinLinkProviders,
+  disableBuiltinMouseReporting,
+  disableBuiltinSelectionCopy,
+  setSelectionAbsolute,
+} from "./ghosttyInternals";
+import { attachMouseReporting, sendWheelReport } from "./terminalMouse";
 import { attachImeHygiene } from "./terminalImeHygiene";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
@@ -104,7 +109,7 @@ const MODIFIER_KEYS = new Set([
 // Debounce window for duplicate clipboard writes of the SAME text. In the
 // desktop shell one physical Cmd+C can legitimately take two copy paths: the
 // native Edit ▸ Copy menu role (bound to CmdOrCtrl+c, firing the WKWebView
-// `copy:` selector → a DOM copy event over the xterm selection) AND the page
+// `copy:` selector → a DOM copy event over the terminal selection) AND the page
 // keydown handled in attachCustomKeyEventHandler. Both carry identical text,
 // so the copy lands twice in clipboard managers (Maccy/Paste history). The
 // first writer arms this guard; a second write of the same text within the
@@ -113,7 +118,7 @@ const DUPLICATE_COPY_WINDOW_MS = 250;
 let lastCopyText = "";
 let lastCopyAt = 0;
 
-/** Buffer range of xterm's current selection, as a comparable string. */
+/** Buffer range of the terminal's current selection, as a comparable string. */
 function selectionRangeKey(term: Pick<Terminal, "getSelectionPosition">): string {
   const p = term.getSelectionPosition();
   return p ? `${p.start.x},${p.start.y}-${p.end.x},${p.end.y}` : "";
@@ -202,15 +207,15 @@ export async function writeClipboardText(text: string): Promise<void> {
 }
 
 /**
- * DECRST for every mouse-tracking mode xterm.js can be left in by a TUI
+ * DECRST for every mouse-tracking mode the emulator can be left in by a TUI
  * (`vim`, `tmux`, `htop`) that enabled it via DECSET and then died before
  * sending the matching disable — which is exactly what happens when a remote
- * SSH tunnel times out or crashes. Mouse modes are xterm parser state, not pty
- * state, so they survive the socket closing. Left on, xterm keeps encoding
- * every mouse move into escape sequences; after a reconnect those are written
- * into the fresh shell, which has no mouse handler and echoes them as literal
- * garbage ("mouse gibberish"). Written via term.write(), so it disables the
- * modes without clearing scrollback the way term.reset() would.
+ * SSH tunnel times out or crashes. Mouse modes are emulator parser state, not pty
+ * state, so they survive the socket closing. Left on, terminalMouse.ts keeps
+ * encoding every mouse move into escape sequences; after a reconnect those are
+ * written into the fresh shell, which has no mouse handler and echoes them as
+ * literal garbage ("mouse gibberish"). Written via term.write(), so it disables
+ * the modes without clearing scrollback the way a full reset (RIS) would.
  * ?1004 is focus reporting (not mouse), so it is deliberately excluded.
  */
 const TERMINAL_MOUSE_RESET =
@@ -228,11 +233,11 @@ const TERMINAL_MOUSE_RESET =
 const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 
 /**
- * Upper bound on history bytes replayed into xterm on (re)open. The on-disk
+ * Upper bound on history bytes replayed into the emulator on (re)open. The on-disk
  * log is unbounded (TUI redraws push a single terminal past 10 MB), and the
  * restore used to grow `scrollback` to fit every row: each page re-allocated
- * xterm's whole CircularList (O(n²) over the log), the buffer ignored the
- * user's scrollback setting, and the 30s SerializeAddon snapshot copied the
+ * the whole scrollback list (O(n²) over the log), the buffer ignored the
+ * user's scrollback setting, and the 30s serialized snapshot copied the
  * multi-MB result into localStorage — which is what drove the desktop
  * renderer past 3 GB and hung it. Replaying only the tail keeps the buffer
  * bounded by the user's scrollback; older output stays on disk.
@@ -240,7 +245,7 @@ const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
- * A single interactive terminal: one xterm.js instance bridged to one
+ * A single interactive terminal: one ghostty-web instance bridged to one
  * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
  * the server keys the shell by `id`, so a socket drop (reload, remount) only
  * detaches the shell and the next socket with the same id resumes it.
@@ -273,19 +278,20 @@ export default function TerminalPanel({
   host?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // The element ghostty-web opens into. It must be a DEDICATED inner div, never
+  // the container: open() makes its host contenteditable and appends the canvas
+  // and the hidden input textarea, and the container also holds the find bar's
+  // input and the overlays.
+  const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const serializeRef = useRef<SerializeAddon | null>(null);
   const snapshotRef = useRef<ReturnType<typeof createTerminalSnapshot> | null>(null);
-  const searchRef = useRef<SearchAddon | null>(null);
-  // WebGL renderer addon for THIS panel. Every hidden terminal tab holds a
-  // live WebGL context otherwise — each context carries GPU-side buffers for
-  // its full scrollback, and browsers cap total live contexts (~16), so a
-  // handful of background tabs can exhaust the pool and silently kill
-  // rendering in unrelated canvases. Released while the tab is hidden
-  // (canvas fallback re-renders from the same buffer, so scrollback and
-  // output are unaffected), re-created on activation.
-  const webglRef = useRef<InstanceType<typeof WebglAddon> | null>(null);
+  const searchRef = useRef<TerminalSearch | null>(null);
+  const scannerRef = useRef<TerminalStreamScanner | null>(null);
+  const resetTerminalRef = useRef<(() => void) | null>(null);
+  // Set when libghostty fails to load or the terminal fails to open: shown in
+  // the panel instead of a silently blank terminal.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const dragCounterRef = useRef(0);
   // Drag-guard for links: suppress link activation if mouse moved between
@@ -295,20 +301,19 @@ export default function TerminalPanel({
   const dragStartXRef = useRef(0);
   const dragStartYRef = useRef(0);
   // Text of the selection as it stood when the user finished selecting.
-  // xterm stores a selection as buffer coordinates, not text: a program that
+  // The terminal stores a selection as buffer coordinates, not text: a program that
   // redraws in place (claude code's Ink renderer, especially over a chunked
   // ssh stream) rewrites the rows under those coordinates every frame, so a
   // later getSelection() returns a partial/mutated line set. Every copy path
   // that runs after release (Cmd+C, Edit-menu copy event, context menu)
   // writes this snapshot instead.
   //
-  // It deliberately OUTLIVES xterm's own selection. xterm clears a selection
-  // on its own in three ways the user never asked for: a scrollback trim that
-  // pushes the selected rows off the top (a busy redraw loop does this within
-  // seconds), any "user input" — which includes the mouse-button reports a
-  // mouse-tracking program (claude code enables ?1000/?1006) receives for the
-  // very right-click that opened the context menu, so the selection is gone
-  // before Copy can be clicked — and an alt-screen switch. Only a new left
+  // It deliberately OUTLIVES the terminal's own selection, which can vanish in
+  // ways the user never asked for: a scrollback trim that pushes the selected
+  // rows off the top (a busy redraw loop does this within seconds), the
+  // mouse-button reports a mouse-tracking program (claude code enables
+  // ?1000/?1006) receives for the very right-click that opened the context
+  // menu, and an alt-screen switch. Only a new left
   // pointer gesture in the terminal, a keystroke that reaches the pty, or
   // Select All replaces or drops it.
   const selectionSnapshotRef = useRef("");
@@ -317,9 +322,9 @@ export default function TerminalPanel({
   // snapshot; a different range is a new selection (rightClickSelectsWord).
   const selectionRangeRef = useRef("");
   // True from a mousedown in the container until the resulting selection has
-  // been copied. Gates the debounced onSelectionChange copy: xterm also fires
-  // that event on scrollback trim (every scroll while a selection exists),
-  // which must not re-copy the now-rewritten rows.
+  // been copied. Gates the debounced onSelectionChange copy so a selection that
+  // changes without a pointer gesture (selectAll, a program redrawing under it)
+  // never re-copies the now-rewritten rows.
   const userSelectingRef = useRef(false);
   const copyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -328,7 +333,7 @@ export default function TerminalPanel({
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findResult, setFindResult] = useState<{ count: number; index: number }>({ count: 0, index: -1 });
-  // Mirrors `active` so the xterm event handlers (registered once at mount) can
+  // Mirrors `active` so the terminal event handlers (registered once at mount) can
   // read the live focused state without re-subscribing.
   const activeRef = useRef(active);
   // False during the initial scrollback replay; flipped true once the live pty
@@ -410,12 +415,11 @@ export default function TerminalPanel({
 
   // ── Context menu (right-click) — Supacode-style ────────────────
   // A pointer gesture in the terminal proper: left button only (the right
-  // button opens the context menu, and on mac xterm's rightClickSelectsWord
-  // has selected a word under it that must NOT be copied before the user
-  // picks a menu item), and not on the panel's own chrome. The context menu
+  // button opens the context menu and must NOT copy before the user picks a
+  // menu item), and not on the panel's own chrome. The context menu
   // is portaled to <body> but React still bubbles its events through this
   // container, and the find bar / take-over overlay render inside it; a
-  // press on any of those leaves xterm's selection untouched.
+  // press on any of those leaves the terminal's selection untouched.
   const isTerminalPress = useCallback((e: React.MouseEvent): boolean => {
     if (e.button !== 0) return false;
     const target = e.target as Element;
@@ -426,9 +430,9 @@ export default function TerminalPanel({
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    // xterm's own contextmenu listener has already run (rightClickSelectsWord
-    // on mac): a selection over a NEW range is what the user sees under the
-    // menu, so snapshot it before the mouse-up report that follows clears it.
+    // ghostty-web's own contextmenu listener has already run (it never changes
+    // the selection): a selection over a NEW range is what the user sees under
+    // the menu, so snapshot it before anything that follows can clear it.
     // A live selection over the range already snapshotted at mouse-up is the
     // same drag whose rows a redrawing program may have rewritten since; the
     // snapshot stays (see selectionSnapshotRef).
@@ -452,21 +456,31 @@ export default function TerminalPanel({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCtxMenu(null);
     };
-    const onScroll = () => setCtxMenu(null);
+    // A scroll anywhere on the page moves the terminal out from under the
+    // menu, so the menu closes. Scrolls INSIDE the terminal host are not that:
+    // ghostty-web's own contextmenu listener parks and focuses its hidden
+    // textarea on the same right-click, and that focus scrolls the textarea,
+    // whose capture-phase scroll event used to close the menu the instant it
+    // opened (a right-click that flashed an empty menu).
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && hostRef.current?.contains(e.target)) return;
+      setCtxMenu(null);
+    };
+    const onResize = () => setCtxMenu(null);
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("resize", onResize);
     };
   }, [ctxMenu]);
 
   // Text every post-release copy path writes: the snapshot taken when the
-  // user finished selecting (or right-clicked), even if xterm has since
+  // user finished selecting (or right-clicked), even if the terminal has since
   // dropped the selection on its own. Falls through to a live read only for
   // selections made without a pointer gesture (selectAll, API), which never
   // took a snapshot.
@@ -496,7 +510,9 @@ export default function TerminalPanel({
     const term = termRef.current;
     if (!term) return;
     const buffer = term.buffer.active;
-    const start = buffer.viewportY;
+    // buffer.viewportY is always 0 in ghostty-web; derive the first visible
+    // absolute row from how far the viewport is scrolled back from the bottom.
+    const start = buffer.length - term.rows - Math.floor(term.getViewportY());
     const lines = Array.from({ length: term.rows }, (_, index) => buffer.getLine(start + index)?.translateToString(true) ?? "");
     const text = sanitizeSpeechText(lines.join("\n"));
     if (text) requestSpeech(text);
@@ -553,16 +569,20 @@ export default function TerminalPanel({
   }, []);
 
   const handleClear = useCallback(() => {
+    // ghostty-web's clear() erases the screen only; ED 3 drops the scrollback
+    // too, which is what xterm's clear() did.
     termRef.current?.clear();
-    // clear/reset are synchronous and do not emit onWriteParsed.
+    termRef.current?.write("\x1b[3J");
+    // clear is synchronous and not a pty write, so mark the snapshot and the
+    // find bar's row cache by hand.
+    searchRef.current?.invalidate();
     snapshotRef.current?.markDirty();
     snapshotRef.current?.flush();
     setCtxMenu(null);
   }, []);
 
   const handleReset = useCallback(() => {
-    termRef.current?.reset();
-    snapshotRef.current?.markDirty();
+    resetTerminalRef.current?.();
     snapshotRef.current?.flush();
     setCtxMenu(null);
   }, []);
@@ -582,59 +602,40 @@ export default function TerminalPanel({
     if (sel && !findOpen) setFindQuery(sel);
     setFindOpen(true);
     // Keep dispatch for backwards compat with any external listener, but the
-    // primary find UI is now handled locally via SearchAddon.
+    // primary find UI is now handled locally via createTerminalSearch.
     window.dispatchEvent(new CustomEvent("ocode:terminal-find", { detail: { id } }));
     setCtxMenu(null);
   }, [id, findOpen]);
 
   const handleCloseFind = useCallback(() => {
     setFindOpen(false);
-    searchRef.current?.clearDecorations();
+    searchRef.current?.clear();
     setFindResult({ count: 0, index: -1 });
     termRef.current?.focus();
-  }, []);
-
-  const searchOptions = useCallback(() => {
-    // Enable decorations so matches are highlighted in the buffer and overview
-    // ruler. Colors match the dark terminal theme; they are intentionally muted
-    // to not clash with selection.
-    return {
-      decorations: {
-        matchBackground: "#facc15",
-        matchBorder: "#facc15",
-        matchOverviewRuler: "#facc15",
-        activeMatchBackground: "#f97316",
-        activeMatchBorder: "#f97316",
-        activeMatchColorOverviewRuler: "#f97316",
-      },
-    } as const;
   }, []);
 
   const handleFindNext = useCallback(() => {
     const q = findQuery;
     if (!q.trim()) return;
-    searchRef.current?.findNext(q, searchOptions());
-  }, [findQuery, searchOptions]);
+    searchRef.current?.findNext(q);
+  }, [findQuery]);
 
   const handleFindPrev = useCallback(() => {
     const q = findQuery;
     if (!q.trim()) return;
-    searchRef.current?.findPrevious(q, searchOptions());
-  }, [findQuery, searchOptions]);
+    searchRef.current?.findPrevious(q);
+  }, [findQuery]);
 
-  const handleFindQueryChange = useCallback(
-    (q: string) => {
-      setFindQuery(q);
-      if (!q.trim()) {
-        searchRef.current?.clearDecorations();
-        setFindResult({ count: 0, index: -1 });
-        return;
-      }
-      // Incremental search: highlight and jump to first match as you type.
-      searchRef.current?.findNext(q, searchOptions());
-    },
-    [searchOptions],
-  );
+  const handleFindQueryChange = useCallback((q: string) => {
+    setFindQuery(q);
+    if (!q.trim()) {
+      searchRef.current?.clear();
+      setFindResult({ count: 0, index: -1 });
+      return;
+    }
+    // Incremental search: select and jump to the first match as you type.
+    searchRef.current?.findNext(q);
+  }, []);
 
   const handleNewTerminal = useCallback(() => {
     openTerminal(projectPath, host);
@@ -706,7 +707,7 @@ export default function TerminalPanel({
   );
 
   // Fit to the container and tell the pty about the new size. No-op while the
-  // container has no layout (hidden tab), which would otherwise force xterm to
+  // container has no layout (hidden tab), which would otherwise force the terminal to
   // a degenerate 1x1 grid and wreck the shell's line wrapping.
   const initialFitDoneRef = useRef(false);
   const fitAndResize = useRef(() => {
@@ -747,19 +748,22 @@ export default function TerminalPanel({
   });
 
   // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
-  // xterm 6 never handles copy/paste shortcuts in keydown. Copy relies on
-  // the DOM `copy` event firing over a *browser text selection* — but
-  // xterm's selection is canvas-rendered with no DOM Selection, so browsers
-  // are not obliged to fire it (WKWebView in the desktop shell doesn't).
-  // And xterm's keyboard layer converts Ctrl+V to a literal 0x16 byte sent
-  // to the pty on non-mac. So the clipboard shortcuts are intercepted
-  // explicitly:
-  //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
-  //     handler also stops xterm from emitting \x03 for that keydown). No
-  //     selection → falls through so Ctrl+C still sends SIGINT.
-  //   - Cmd/Ctrl+V → return false only, to stop that \x16. The paste itself
-  //     comes from the browser's own `paste` event (see the container
-  //     listener below): the keydown must NOT read the clipboard as well, or
+  // ghostty-web does not handle copy shortcuts for us. Copy relies on the DOM
+  // `copy` event firing over a *browser text selection* — but the selection
+  // is canvas-rendered with no DOM Selection, so browsers are not obliged to
+  // fire it (WKWebView in the desktop shell doesn't). And its key encoder would
+  // turn Ctrl+C into \x03 (SIGINT) on every platform. So the clipboard
+  // shortcuts are intercepted explicitly. NOTE the key-handler convention is
+  // the inverse of xterm.js: returning true means "handled, skip the
+  // terminal AND cancel the browser default", false means "carry on":
+  //   - Cmd/Ctrl+C with a selection → copy and return true (which also stops
+  //     the \x03). No selection → false, so Ctrl+C still sends SIGINT (on mac
+  //     ghostty-web ignores meta+C itself).
+  //   - Cmd/Ctrl+V → return false WITHOUT preventDefault. ghostty-web already
+  //     skips (ctrl|meta)+KeyV before it would encode the key, and the paste
+  //     itself comes from the browser's own `paste` event (see the container
+  //     listener below): returning true would preventDefault the keydown and
+  //     kill that event, and the keydown must NOT read the clipboard either, or
   //     one Cmd/V pastes twice.
   const copyViaShortcut = useCallback(() => {
     // Gated on the VISIBLE selection, not the snapshot: once nothing is
@@ -776,12 +780,11 @@ export default function TerminalPanel({
   // Container-level `copy` listener — the desktop-shell fallback. In the
   // Wails webview the native Edit-menu Copy role can consume Cmd+C before a
   // keydown ever reaches the page; the webview then dispatches a DOM `copy`
-  // event instead. xterm listens for that on its own element, but only when
-  // it has an active selection; this parent-level listener covers the same
-  // event with the same data (skipping when xterm already handled it), so a
-  // selection is copied whichever path the OS event took. The markCopySeen
+  // event instead. This parent-level listener answers it with the selection
+  // text (skipping when something already handled it), so a selection is
+  // copied whichever path the OS event took. The markCopySeen
   // bookkeeping is what stops the double copy: it records EVERY copy of a
-  // selection passing through this container — including events xterm's own
+  // selection passing through this container — including events another
   // listener answered — so copyViaShortcut's Clipboard-API write is
   // recognized as the same copy and dropped when the keydown ALSO reaches
   // the page (engine-dependent ordering).
@@ -789,14 +792,14 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
-      // Same gate as copyViaShortcut: only a VISIBLE xterm selection claims
+      // Same gate as copyViaShortcut: only a VISIBLE terminal selection claims
       // the event. Without it a copy from the find bar's input (inside this
       // container) or the desktop Edit ▸ Copy role with nothing highlighted
       // would be answered with a stale snapshot.
       if (!termRef.current?.hasSelection()) return;
       const sel = selectedTextForCopy();
       if (!sel) return;
-      // Record this copy EVEN when xterm's element-level handler already
+      // Record this copy EVEN when an element-level handler already
       // answered it (defaultPrevented): the event is one half of a duplicate
       // pair (native menu selector + keydown for the same Cmd+C), and the
       // Clipboard-API keydown path must be suppressed for this same
@@ -814,14 +817,14 @@ export default function TerminalPanel({
   //
   // A browser's Cmd/Ctrl+V default action is to dispatch a `paste`
   // ClipboardEvent on the focused editable element, which for a terminal is
-  // xterm's hidden textarea, and xterm 6 listens for that event on BOTH the
-  // textarea and the element, pasting the clipboard itself. So the event
+  // ghostty-web's hidden textarea, and ghostty-web listens for that event
+  // itself and pastes the clipboard. So the event
   // arrives whether or not the keydown handler touches the clipboard — which
   // is exactly why the keydown handler (below) must not read it: the read and
-  // xterm's listener each pasted the same text, so one Cmd+V pasted twice.
+  // ghostty-web's listener each pasted the same text, so one Cmd+V pasted twice.
   //
-  // Owning the event here (capture phase, so it runs BEFORE xterm's own
-  // target-phase listener, and stopPropagation keeps that listener from ever
+  // Owning the event here (capture phase, so it runs BEFORE ghostty-web's own
+  // listener, and stopPropagation keeps that listener from ever
   // running) means this function is the only thing that turns a paste into
   // terminal input. It also absorbs the desktop shell's second delivery route
   // for a single physical paste — the native Edit ▸ Paste role plus the
@@ -842,7 +845,7 @@ export default function TerminalPanel({
       // would land in the shell.
       const term = termRef.current;
       if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
-      // Consume in both branches: xterm's own paste listener must never see
+      // Consume in both branches: ghostty-web's own paste listener must never see
       // the event, whether we paste it or drop it as a duplicate.
       e.preventDefault();
       e.stopPropagation();
@@ -852,6 +855,8 @@ export default function TerminalPanel({
       lastAt = now;
       // term.paste (not a raw socket write) so bracketed-paste mode is
       // honored for multiline payloads; it flows through onData to the pty.
+      // Pasting is input: it ends the selection like a typed key does.
+      if (term.hasSelection()) term.clearSelection();
       term.paste(text);
     };
     el.addEventListener("paste", onPaste, true);
@@ -863,105 +868,92 @@ export default function TerminalPanel({
   // change must still rebuild history and the socket with the new destination.
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    const termHost = hostRef.current;
+    if (!el || !termHost) return;
 
+    // Each panel loads its own libghostty-vt instance (ghosttyRuntime.ts says
+    // why it is not shared); everything below runs after it resolves.
+    // `cancelled` covers an unmount (or a project/host/id change) that lands
+    // while the load is in flight.
+    let cancelled = false;
+    let cleanup: (() => void) | null = null;
+    const setup = (ghostty: Ghostty): (() => void) => {
     const savedBuffer = loadTerminalBuffer(id);
     const term = new Terminal(
-      buildTerminalOptions({ scrollbackLines, fontFamily, fontSize, savedBuffer }),
+      buildTerminalOptions({ scrollbackLines, fontFamily, fontSize, savedBuffer, ghostty }),
     );
     const fit = new FitAddon();
     term.loadAddon(fit);
-    const serialize = new SerializeAddon();
-    term.loadAddon(serialize);
-    const search = new SearchAddon();
-    term.loadAddon(search);
+    term.open(termHost);
+    // Everything here throws on a ghostty-web internals mismatch; an opened terminal
+    // must not outlive a failed setup (render loop, listeners, wasm terminal).
+    let detachMouse: () => void;
+    try {
+      // ghostty-web copies every mouse selection to the clipboard itself, registers
+      // URL providers that window.open on ctrl/cmd-click, and reports the mouse itself.
+      // ocode owns all three (deduped copy, openExternalURL, terminalMouse.ts), so the
+      // built-ins are removed.
+      disableBuiltinSelectionCopy(term);
+      clearBuiltinLinkProviders(term);
+      disableBuiltinMouseReporting(term);
+      detachMouse = attachMouseReporting(term, termHost);
+    } catch (err) {
+      term.dispose();
+      throw err;
+    }
+    const detachImeHygiene = term.textarea ? attachImeHygiene(term.textarea) : null;
+    // Links: registerUrlLinkProvider handles http(s) URLs (e.g. Vite's localhost
+    // link) on any plain left click (ghostty-web's own only fire on ctrl/cmd+click);
+    // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
+    // and dispatches ocode:open-file to open the editor. A drag that moved is a
+    // selection, not a click (dragMovedRef). URLs route through openExternalURL
+    // so the desktop shell opens them in the OS browser instead of losing the
+    // webview to a navigation.
+    const urlLinkProvider = registerUrlLinkProvider(
+      term,
+      (uri) => {
+        if (/^https?:\/\//.test(uri)) openExternalURL(uri);
+      },
+      () => dragMovedRef.current,
+    );
+    const fileLinkProvider = registerFileLinkProvider(term, projectPath, () => dragMovedRef.current);
+    const search = createTerminalSearch(term, (row, c0, c1) => setSelectionAbsolute(term, c0, row, c1, row));
     const searchDisp = search.onDidChangeResults((e) => {
       setFindResult({ count: e.resultCount, index: e.resultIndex });
     });
-    term.open(el);
-    const detachImeHygiene = term.textarea ? attachImeHygiene(term.textarea) : null;
-    // Links: WebLinksAddon handles http(s) URLs (e.g. Vite's localhost link),
-    // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
-    // and dispatches ocode:open-file to open the editor.
-    let webLinks: InstanceType<typeof WebLinksAddon> | null = null;
-    let fileLinkProvider: { dispose(): void } | null = null;
-    try {
-      // Open http(s) URLs on any left click (the addon's default only fires on
-      // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
-      // xterm's Linkifier activates a link from its MOUSEUP listener (there is
-      // no click listener), so the event here is a mouseup, never a click — a
-      // `type === "click"` guard silently disabled every URL in the terminal.
-      // A drag that moved is a selection, not a click.
-      // Route through openExternalURL so the desktop shell opens them in the
-      // OS browser instead of losing the webview to a navigation.
-      webLinks = new WebLinksAddon((event, uri) => {
-        if ((event.type === "mouseup" || event.type === "click") && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
-          openExternalURL(uri);
-        }
-      });
-      term.loadAddon(webLinks);
-    } catch {
-      webLinks = null;
-    }
-    try {
-      fileLinkProvider = registerFileLinkProvider(term, projectPath, () => dragMovedRef.current);
-    } catch {
-      fileLinkProvider = { dispose() {} };
-    }
-    // Try WebGL renderer — GPU-accelerated, much lower memory than the canvas
-    // renderer for large scrollback buffers. Falls back to canvas if WebGL is
-    // unavailable (e.g. headless, offscreen, or unsupported browser).
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-        if (webglRef.current === webgl) webglRef.current = null;
-      });
-      term.loadAddon(webgl);
-      webglRef.current = webgl;
-    } catch { /* fall back to canvas renderer */ }
     termRef.current = term;
     registerTerminal(id, term);
     fitRef.current = fit;
-    serializeRef.current = serialize;
     searchRef.current = search;
-
-    const searchOpts = {
-      decorations: {
-        matchBackground: "#facc15",
-        matchBorder: "#facc15",
-        matchOverviewRuler: "#facc15",
-        activeMatchBackground: "#f97316",
-        activeMatchBorder: "#f97316",
-        activeMatchColorOverviewRuler: "#f97316",
-      },
-    } as const;
 
     // Custom key handler: Shift+Enter disambiguation, clipboard shortcuts
     // (copyViaShortcut/pasteFromClipboard below), Ctrl/Cmd+F for find,
     // Esc to close find, F3/Ctrl+G to navigate matches.
+    // Return convention (INVERSE of xterm.js): true = handled here, skip
+    // ghostty-web and cancel the browser default; false = let the terminal
+    // process the key.
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type !== "keydown") return true;
-      // Cmd/Ctrl+C: copy when there is a selection (blocking xterm so the
-      // keydown is never converted to \x03). With no selection fall through
-      // so Ctrl+C still sends SIGINT as usual.
+      if (ev.type !== "keydown") return false;
+      // Cmd/Ctrl+C: copy when there is a selection (handled, so the keydown is
+      // never converted to \x03). With no selection fall through so Ctrl+C
+      // still sends SIGINT as usual.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "c") {
         if (copyViaShortcut()) {
-          // Returning false only stops xterm; cancel the browser copy as well
-          // so it cannot overwrite our canvas selection with an empty one.
-          ev.preventDefault();
-          return false;
+          // Returning true also cancels the browser copy, so it cannot
+          // overwrite our canvas selection with an empty one.
+          return true;
         }
         // Ctrl+C with nothing highlighted is SIGINT: pty input (see the
         // fall-through rule at the end of this handler).
         if (!ev.metaKey) selectionSnapshotRef.current = "";
-        return true;
+        return false;
       }
-      // Cmd/Ctrl+V (and Ctrl+Shift+V): return false so xterm's keydown never
-      // converts the key into a literal \x16. Deliberately NOT preventDefault:
-      // the browser's default action (dispatching the `paste` event the
-      // container listener above owns) is what pastes. Reading the clipboard
-      // here too is the double paste — the event arrives either way.
+      // Cmd/Ctrl+V (and Ctrl+Shift+V): return false WITHOUT preventDefault.
+      // ghostty-web already skips (ctrl|meta)+KeyV before encoding the key, so
+      // no literal \x16 is sent; the browser's default action (dispatching the
+      // `paste` event the container listener above owns) is what pastes.
+      // Returning true would preventDefault the keydown and kill that event;
+      // reading the clipboard here too is the double paste.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "v") {
         // The paste is pty input: drop the snapshot as any typed key would.
         selectionSnapshotRef.current = "";
@@ -971,38 +963,41 @@ export default function TerminalPanel({
         selectionSnapshotRef.current = "";
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
-        // Returning false skips xterm's own cancel(), so the browser still
-        // fires keypress(Enter) and xterm's _keyPress turns it into "\r" —
-        // the pty then saw Shift+Enter immediately followed by Enter.
-        ev.preventDefault();
-        return false;
+        // Handled: ghostty-web must not also encode this Enter as "\r", or the
+        // pty would see Shift+Enter immediately followed by Enter.
+        return true;
       }
       if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "f") {
         const sel = term.getSelection();
         if (sel && !findOpenRef.current) setFindQuery(sel);
         setFindOpen(true);
-        return false;
+        return true;
       }
       if (ev.key === "Escape" && findOpenRef.current) {
         setFindOpen(false);
-        search.clearDecorations();
+        search.clear();
         setFindResult({ count: 0, index: -1 });
-        return false;
+        return true;
       }
       const q = findQueryRef.current;
       if (q && q.trim()) {
         if (ev.key === "F3" || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "g")) {
-          if (ev.shiftKey) search.findPrevious(q, searchOpts);
-          else search.findNext(q, searchOpts);
-          return false;
+          if (ev.shiftKey) search.findPrevious(q);
+          else search.findNext(q);
+          return true;
         }
       }
-      // A key xterm will turn into pty input ends the selection the user made
-      // (xterm clears its own on user input); drop the snapshot with it so a
-      // later Copy never resurrects text typed over. Bare modifiers and
-      // Cmd-combos (left to the browser on mac) produce no input.
-      if (!ev.metaKey && !MODIFIER_KEYS.has(ev.key)) selectionSnapshotRef.current = "";
-      return true;
+      // A key the terminal will turn into pty input ends the selection the user
+      // made; drop the snapshot with it so a later Copy never resurrects text
+      // typed over. Bare modifiers and Cmd-combos (left to the browser on mac)
+      // produce no input. ghostty-web keeps its selection across input (xterm
+      // cleared it), so clear it here too: otherwise a Select All leaves every
+      // later Ctrl+C a copy instead of SIGINT until the user clicks.
+      if (!ev.metaKey && !MODIFIER_KEYS.has(ev.key)) {
+        selectionSnapshotRef.current = "";
+        if (term.hasSelection()) term.clearSelection();
+      }
+      return false;
     });
 
     // Attention signals: the BEL control char and the common notification OSC
@@ -1018,20 +1013,20 @@ export default function TerminalPanel({
       playAlertSound();
     };
 
-    // Copy-on-selection debounce: xterm fires onSelectionChange continuously
-    // during a drag, so each event restarts the timer and the copy fires once
-    // the selection has settled (i.e. at release). A cleared selection (plain
-    // click, typing, buffer switch) must never touch the clipboard and drops
-    // the snapshot. Only a pointer-driven selection is copied here: xterm
-    // fires the same event on scrollback trim, when the rows under the
-    // selection may already hold rewritten content.
+    // Copy-on-selection debounce: each onSelectionChange restarts the timer and
+    // the copy fires once the selection has settled (i.e. at release). A cleared
+    // selection (plain click, typing, buffer switch) must never touch the
+    // clipboard and drops the snapshot. Only a pointer-driven selection is
+    // copied here (userSelectingRef): the same event also fires for selectAll
+    // and programmatic selections, and the rows under a selection may already
+    // hold rewritten content.
     const selectionDisp = term.onSelectionChange(() => {
       if (copyDebounceRef.current !== null) {
         clearTimeout(copyDebounceRef.current);
         copyDebounceRef.current = null;
       }
-      // A cleared selection leaves the snapshot alone: xterm clears on
-      // scrollback trim, mouse-report input and buffer switch, none of which
+      // A cleared selection leaves the snapshot alone: the terminal can clear
+      // on scrollback trim, mouse-report input and buffer switch, none of which
       // is the user deselecting (that is the mouse-down / keydown paths).
       if (!term.hasSelection()) return;
       if (!userSelectingRef.current) return;
@@ -1041,41 +1036,17 @@ export default function TerminalPanel({
       }, 150);
     });
 
-    const bellDisp = term.onBell(onAttention);
     // OSC 0/2 window title from the running program (claude code, the ocode
     // TUI, shells with a title-setting prompt) becomes the tab name unless
     // the user renamed the tab. Titles replayed from restored scrollback are
     // fine to apply: they are the program's last known title.
-    // xterm normally exposes OSC 0/2 through onTitleChange. Register the
-    // parser handlers as well so titles are captured even when a terminal is
-    // hidden in the background. This also covers terminals whose title is
-    // restored/replayed before xterm emits its public title event.
     const applyProgramTitle = (title: string) => setOscTitle(projectPath, id, title, host);
-    const titleDisp = term.onTitleChange(applyProgramTitle);
-    const osc0TitleDisp = term.parser.registerOscHandler(0, (title) => {
-      applyProgramTitle(title);
-      return true;
-    });
-    const osc2TitleDisp = term.parser.registerOscHandler(2, (title) => {
-      applyProgramTitle(title);
-      return true;
-    });
-    const osc9Disp = term.parser.registerOscHandler(9, () => {
-      onAttention();
-      return true;
-    });
-    const osc777Disp = term.parser.registerOscHandler(777, () => {
-      onAttention();
-      return true;
-    });
-    const osc99Disp = term.parser.registerOscHandler(99, () => {
-      onAttention();
-      return true;
-    });
+
     // OSC 52 clipboard write. Claude Code (mouse-tracking mode), tmux and vim
     // handle a drag-selection themselves and "copy" it by emitting
     // ESC ] 52 ; <targets> ; <base64> BEL — the only copy path that works
-    // through ssh. xterm.js ignores it unless handled. Write-only: a "?" query
+    // through ssh. ghostty-web ignores it, so the stream scanner (below)
+    // hands it to handleOsc52. Write-only: a "?" query
     // would let remote programs read the local clipboard, so it is refused.
     // Replayed scrollback (readyRef false) must not overwrite the clipboard.
     // Hijack guard: a program that merely prints (`cat hostile`, a remote host)
@@ -1109,19 +1080,20 @@ export default function TerminalPanel({
     window.addEventListener("pointerup", onInputPointerUp, true);
     window.addEventListener("pointercancel", onInputPressCancel, true);
     window.addEventListener("blur", onInputPressCancel);
-    const osc52Disp = term.parser.registerOscHandler(52, (data) => {
-      if (!readyRef.current) return true;
+    // `data` is "targets;base64", exactly the payload the stream scanner yields.
+    const handleOsc52 = (data: string) => {
+      if (!readyRef.current) return;
       const sep = data.indexOf(";");
-      if (sep < 0) return true;
+      if (sep < 0) return;
       const payload = data.slice(sep + 1);
-      if (payload === "?" || payload === "") return true;
+      if (payload === "?" || payload === "") return;
       if (payload.length > OSC52_MAX_PAYLOAD_CHARS) {
         console.warn("Terminal OSC 52 payload exceeds size cap; clipboard write refused");
-        return true;
+        return;
       }
       if (performance.now() - lastUserInputAt > OSC52_INPUT_WINDOW_MS) {
         console.warn("Terminal OSC 52 write without recent user input refused");
-        return true;
+        return;
       }
       let text: string;
       try {
@@ -1129,36 +1101,84 @@ export default function TerminalPanel({
         text = new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
       } catch (err) {
         console.warn("Terminal OSC 52 payload was not valid base64:", err);
-        return true;
+        return;
       }
       void writeClipboardText(text);
-      return true;
-    });
+    };
 
-    // onWriteParsed runs even for hidden keep-alive terminals, unlike render
-    // events. Never acknowledge queued bytes before xterm has parsed them.
+    // Attention, title and clipboard signals come from OUR scan of the pty byte
+    // stream, not from ghostty-web's own events: term.onBell fires when a
+    // written chunk contains BEL ANYWHERE, including the BEL that terminates an
+    // OSC title string (so every title change would ring the bell);
+    // term.onTitleChange sees OSC 0/1/2 only inside a single chunk, so a title
+    // split across two frames is lost; and there is no OSC handler API at all
+    // (xterm's parser.registerOscHandler). The scanner is stateful across
+    // chunks, so split sequences are handled, and it runs in the hidden
+    // background tab too because it is fed from the socket, not from rendering.
+    const scanner = createTerminalStreamScanner({
+      onOsc: (code, payload) => {
+        if (code === 0 || code === 2) applyProgramTitle(payload);
+        else if (code === 9 || code === 777 || code === 99) onAttention();
+        else if (code === 52) handleOsc52(payload);
+      },
+      onBell: onAttention,
+    });
+    scannerRef.current = scanner;
+
+    // Parsing is synchronous, so the snapshot is marked dirty by hand after
+    // every write instead of from a "write parsed" event (ghostty-web has none).
+    // Never acknowledge queued bytes before they have been written.
     const snapshot = createTerminalSnapshot(() => {
-      saveTerminalBuffer(id, serialize.serialize({ scrollback: term.options.scrollback }), term.cols, term.rows);
+      saveTerminalBuffer(id, serializeTerminalBuffer(term, TERMINAL_THEME_DEFAULTS), term.cols, term.rows);
     });
     snapshotRef.current = snapshot;
-    const parsedDisp = term.onWriteParsed?.(snapshot.markDirty);
-    const resizeDisp = term.onResize?.(snapshot.markDirty);
+    // EVERY pty-originated write goes through here so the scanner sees it.
+    const writeOutput = (text: string) => {
+      search.invalidate();
+      scanner.scan(text);
+      term.write(text);
+      snapshot.markDirty();
+    };
+    // Banners ocode writes itself: shown on screen, never scanned.
+    const writeBanner = (text: string) => {
+      search.invalidate();
+      term.write(text);
+      snapshot.markDirty();
+    };
+    // A full reset is RIS (ESC c), parsed in place, never term.reset():
+    // ghostty-web's reset() frees the wasm terminal and recreates it, which drops the
+    // selection manager and link cache state out from under the panel. RIS clears
+    // screen, scrollback and modes the way xterm's reset() did.
+    const resetTerminal = () => {
+      search.invalidate();
+      term.write("\x1bc");
+      scanner.reset();
+      snapshot.markDirty();
+    };
+    resetTerminalRef.current = resetTerminal;
+    const resizeDisp = term.onResize(() => {
+      // A resize reflows the buffer, so the find bar's cached row text is stale too.
+      search.invalidate();
+      snapshot.markDirty();
+    });
     const onSnapshotPointerDown = (event: PointerEvent) => {
       if (event.button === 0) snapshot.beginSelection();
     };
-    el.addEventListener("wheel", snapshot.input, { passive: true });
+    // Capture phase: ghostty-web's wheel handler on the terminal host runs in
+    // capture and always stopPropagation()s, so a bubble-phase listener on this
+    // ancestor would never fire.
+    const snapshotWheelOptions = { passive: true, capture: true } as const;
+    el.addEventListener("wheel", snapshot.input, snapshotWheelOptions);
     // A wheel gesture over the terminal must never scroll the app chrome.
-    // xterm consumes the wheels it can use (its own scrollback, or a mouse
-    // report forwarded to the running app); anything it leaves alone is handed
-    // to the browser, which then scrolls the nearest scrollable ancestor. In
+    // ghostty-web preventDefaults and consumes every wheel over the terminal
+    // host itself (scrollback, arrow keys on the alt screen, or a mouse report
+    // via terminalMouse.ts), so this guard now only sees wheels over the
+    // panel's own chrome (find bar, overlays) and the container's padding. In
     // the desktop shell (WKWebView) even the non-scrollable document
-    // rubber-bands, so those leftover gestures moved the whole app window
-    // instead of the terminal. Swallow them here, while still letting this
-    // container's own overflow fallback scroll (a terminal taller than its box,
-    // e.g. between a font-size change and the next fit). Registered on the
-    // container rather than .xterm, and non-passive, so it runs after xterm's
-    // own handlers — those stop propagation whenever they consume, so this
-    // listener only ever sees gestures xterm ignored.
+    // rubber-bands, so those leftover gestures would move the whole app window.
+    // Swallow them here, while still letting this container's own overflow
+    // fallback scroll (a terminal taller than its box, e.g. between a
+    // font-size change and the next fit). Bubble phase and non-passive.
     const onWheelGuard = (event: WheelEvent) => {
       if (event.defaultPrevented) return;
       const maxScrollTop = el.scrollHeight - el.clientHeight;
@@ -1168,14 +1188,13 @@ export default function TerminalPanel({
       event.preventDefault();
     };
     el.addEventListener("wheel", onWheelGuard, { passive: false });
-    // xterm 6 dropped touch scrolling: it bundles VS Code's touch Gesture but
-    // never registers the viewport as a target, so a finger drag on a phone or
-    // tablet (mobile browser pointed at a shared desktop server) does nothing.
-    // Synthetic wheel events cannot stand in for it: xterm ignores untrusted
-    // ones. Drive it through the API instead — whole cell rows of drag become
-    // `scrollLines`, or, when a TUI owns the mouse (mouse tracking on), one SGR
-    // wheel report per row sent to the app. The container is `touch-none`, so
-    // the browser never claims the pan and these listeners can stay passive.
+    // ghostty-web has no touch scrolling, so a finger drag on a phone or
+    // tablet (mobile browser pointed at a shared desktop server) would do
+    // nothing. Synthetic wheel events cannot stand in for it. Drive it through
+    // the API instead — whole cell rows of drag become `scrollLines`, or, when
+    // a TUI owns the mouse (mouse tracking on), one wheel report per row sent
+    // to the app. The container is `touch-none`, so the browser never claims
+    // the pan and these listeners can stay passive.
     let touchY: number | null = null;
     let touchRemainder = 0;
     const onTouchStart = (event: TouchEvent) => {
@@ -1183,10 +1202,10 @@ export default function TerminalPanel({
       touchRemainder = 0;
     };
     const onTouchMove = (event: TouchEvent) => {
-      const screen = term.element?.querySelector(".xterm-screen");
-      if (touchY === null || event.touches.length !== 1 || !screen) return;
+      const canvas = termHost.querySelector("canvas");
+      if (touchY === null || event.touches.length !== 1 || !canvas) return;
       const touch = event.touches[0];
-      const rect = screen.getBoundingClientRect();
+      const rect = canvas.getBoundingClientRect();
       const cellHeight = rect.height / term.rows;
       touchRemainder += touchY - touch.clientY;
       touchY = touch.clientY;
@@ -1194,14 +1213,11 @@ export default function TerminalPanel({
       const rows = Math.trunc(touchRemainder / cellHeight);
       if (rows === 0) return;
       touchRemainder -= rows * cellHeight;
-      if (term.modes.mouseTrackingMode === "none") {
+      if (!term.hasMouseTracking()) {
         term.scrollLines(rows);
         return;
       }
-      const col = Math.min(term.cols, Math.max(1, Math.floor(((touch.clientX - rect.left) / rect.width) * term.cols) + 1));
-      const row = Math.min(term.rows, Math.max(1, Math.floor((touch.clientY - rect.top) / cellHeight) + 1));
-      const report = `\x1b[<${rows < 0 ? 64 : 65};${col};${row}M`;
-      term.input(report.repeat(Math.abs(rows)), true);
+      sendWheelReport(term, rows, touch.clientX, touch.clientY);
     };
     const onTouchEnd = () => {
       touchY = null;
@@ -1244,7 +1260,7 @@ export default function TerminalPanel({
     // timer is armed just moves it to the window's end.
     const waitForRemoteHost = (waitMs: number, next: () => void) => {
       if (reconnectTimerRef.current === null) {
-        term.write(
+        writeBanner(
           "\r\n\x1b[33m[remote host unreachable — next attempt in " +
             Math.ceil(waitMs / 1000) +
             "s]\x1b[0m\r\n",
@@ -1361,7 +1377,7 @@ export default function TerminalPanel({
         for (let i = 0; i < 4 && pendingChunks.length > 0; i++) {
           const chunk = pendingChunks.shift()!;
           pendingBytes -= chunk.length;
-          term.write(chunk);
+          writeOutput(chunk);
         }
         if (pendingChunks.length > 0) {
           chunkRafId = requestAnimationFrame(flushChunks);
@@ -1379,7 +1395,7 @@ export default function TerminalPanel({
         while (pendingChunks.length > 0) {
           const chunk = pendingChunks.shift()!;
           pendingBytes -= chunk.length;
-          term.write(chunk);
+          writeOutput(chunk);
         }
         outputDropped = false;
         return pendingBytes === 0 && pendingChunks.length === 0;
@@ -1417,26 +1433,25 @@ export default function TerminalPanel({
               //   - a history-cursor reattach (desktop app restart with a
               //     remote workspace), where the replayed scrollback re-applied
               //     a dead TUI's DECSET.
-              // Either way xterm would keep encoding mouse moves into escape
+              // Either way the emulator would keep encoding mouse moves into escape
               // sequences the bare shell echoes as garbage. A plain resumed
               // attach (transient blip, in-memory replay, app still alive) is
               // left untouched so an app that still owns the mouse keeps it.
-              term.write(TERMINAL_MOUSE_RESET);
+              writeBanner(TERMINAL_MOUSE_RESET);
             }
             if (msg.resumed && !serverHistoryRestored) {
               // A cursor attach replays only bytes after the REST snapshot, so
-              // the restored xterm buffer must stay intact. The old no-cursor
+              // the restored terminal buffer must stay intact. The old no-cursor
               // attach path still clears localStorage fallback before capped
               // replay.
-              term.reset();
-              snapshot.markDirty();
+              resetTerminal();
             }
           }
           return;
         }
         const decoded = terminalDecoder.decode(new Uint8Array(ev.data as ArrayBuffer), { stream: true });
         if (decoded.length < CHUNK_THRESHOLD && pendingChunks.length === 0) {
-          term.write(decoded);
+          writeOutput(decoded);
           return;
         }
         for (let i = 0; i < decoded.length; i += CHUNK_SIZE) {
@@ -1444,7 +1459,7 @@ export default function TerminalPanel({
           if (pendingBytes + chunk.length > PENDING_CHUNK_CAP) {
             if (!outputDropped) {
               outputDropped = true;
-              term.write("\r\n\x1b[33m[terminal output truncated while rendering]\x1b[0m\r\n");
+              writeBanner("\r\n\x1b[33m[terminal output truncated while rendering]\x1b[0m\r\n");
             }
             break;
           }
@@ -1456,7 +1471,7 @@ export default function TerminalPanel({
       nextSocket.onerror = () => {
         if (disposed || socketRef.current !== nextSocket) return;
         console.error("terminal: websocket error on", url);
-        term.write("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
+        writeBanner("\r\n\x1b[31m[terminal connection error]\x1b[0m\r\n");
       };
       nextSocket.onclose = (ev) => {
         // The panel unmounted (tab/project closed): never reconnect. The
@@ -1471,73 +1486,69 @@ export default function TerminalPanel({
         // final save: WebSocket frames are decoded into pendingChunks and
         // painted via requestAnimationFrame, so without this the save would
         // capture only whatever happened to be rendered when the socket
-        // closed. xterm.write queues its own async parse, so await its
-        // callback before serializing — that is what guarantees the saved
-        // buffer contains the complete last output.
+        // closed. Writes are parsed synchronously, so once the flush and the
+        // decoder remainder are written the saved buffer holds the complete
+        // last output.
         flushChunksSync();
-        const finalize = () => {
-          if (takeoverRef.current) {
-            // Another client owns this terminal now. Show the takeover state
-            // and reconnect NOTHING: both auto-reconnect paths would take the
-            // slot back, and the two clients would ping-pong. The user takes it
-            // back deliberately via the button.
-            // takeoverRef STAYS set for the lifetime of the takeover state —
-            // it is the guard onWake reads. It is cleared only by the Take over
-            // button or by a successful reopen, so clearing it here would let
-            // the next wake steal the terminal straight back.
-            takenOverRef.current = true;
-            reconnectingRef.current = false;
-            setTakenOver(true);
-            term.write(
-              "\r\n\x1b[33m[another client took over this terminal — reconnecting is paused]\x1b[0m\r\n",
-            );
-            doSave();
-            return;
-          }
-          if (manualCloseRef.current || (ev.wasClean && ev.code === 1000)) {
-            // Intentional close (user tab close, server kill) or natural
-            // shell exit: session is definitively over — show ended banner,
-            // no reconnect. A clean 1000 close with no manual flag means
-            // the pty read loop ended (the shell itself exited); reconnecting
-            // here would spawn a fresh shell under a different id.
-            term.write("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n", () => {
-              // The server persists the full pty transcript to history before
-              // it closes this socket (exit teardown syncs/closes the log
-              // first), so the rendered buffer on screen IS the complete last
-              // output. Save it synchronously: desktop quit tears down the
-              // webview right after the server drains the shells, so the
-              // deferred idle save may never run — this is what keeps the last
-              // output in the tab after restart.
-              doSave();
-            });
-          } else {
-            // Unexpected close — attempt to reconnect with exponential
-            // backoff so a transient network blip (common with remote
-            // SSH/WSL tunnels) doesn't cost the user their terminal.
-            // This covers abnormal closures (code 1006, network drops,
-            // server crashes) and server-detected dead connections.
-            const attempt = reconnectAttemptRef.current;
-            const backoff = Math.min(1000 * Math.pow(2, attempt), 32000);
-            reconnectAttemptRef.current = attempt + 1;
-            reconnectingRef.current = true;
-            term.write(
-              "\r\n\x1b[33m[terminal connection lost — reconnecting in " +
-                (backoff / 1000).toFixed(0) +
-                "s…]\x1b[0m\r\n",
-            );
-            console.error(
-              `terminal: websocket closed unexpectedly (attempt ${attempt + 1}, reconnecting in ${(backoff / 1000).toFixed(0)}s)`,
-              ev.code,
-              ev.reason,
-            );
-            reconnectTimerRef.current = window.setTimeout(() => {
-              reconnectTimerRef.current = null;
-              connectSocket();
-            }, backoff);
-          }
-        };
-        if (remainder) term.write(remainder, () => finalize());
-        else finalize();
+        if (remainder) writeOutput(remainder);
+        if (takeoverRef.current) {
+          // Another client owns this terminal now. Show the takeover state
+          // and reconnect NOTHING: both auto-reconnect paths would take the
+          // slot back, and the two clients would ping-pong. The user takes it
+          // back deliberately via the button.
+          // takeoverRef STAYS set for the lifetime of the takeover state —
+          // it is the guard onWake reads. It is cleared only by the Take over
+          // button or by a successful reopen, so clearing it here would let
+          // the next wake steal the terminal straight back.
+          takenOverRef.current = true;
+          reconnectingRef.current = false;
+          setTakenOver(true);
+          writeBanner(
+            "\r\n\x1b[33m[another client took over this terminal — reconnecting is paused]\x1b[0m\r\n",
+          );
+          doSave();
+          return;
+        }
+        if (manualCloseRef.current || (ev.wasClean && ev.code === 1000)) {
+          // Intentional close (user tab close, server kill) or natural
+          // shell exit: session is definitively over — show ended banner,
+          // no reconnect. A clean 1000 close with no manual flag means
+          // the pty read loop ended (the shell itself exited); reconnecting
+          // here would spawn a fresh shell under a different id.
+          writeBanner("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n");
+          // The server persists the full pty transcript to history before
+          // it closes this socket (exit teardown syncs/closes the log
+          // first), so the rendered buffer on screen IS the complete last
+          // output. Save it synchronously: desktop quit tears down the
+          // webview right after the server drains the shells, so the
+          // deferred idle save may never run — this is what keeps the last
+          // output in the tab after restart.
+          doSave();
+        } else {
+          // Unexpected close — attempt to reconnect with exponential
+          // backoff so a transient network blip (common with remote
+          // SSH/WSL tunnels) doesn't cost the user their terminal.
+          // This covers abnormal closures (code 1006, network drops,
+          // server crashes) and server-detected dead connections.
+          const attempt = reconnectAttemptRef.current;
+          const backoff = Math.min(1000 * Math.pow(2, attempt), 32000);
+          reconnectAttemptRef.current = attempt + 1;
+          reconnectingRef.current = true;
+          writeBanner(
+            "\r\n\x1b[33m[terminal connection lost — reconnecting in " +
+              (backoff / 1000).toFixed(0) +
+              "s…]\x1b[0m\r\n",
+          );
+          console.error(
+            `terminal: websocket closed unexpectedly (attempt ${attempt + 1}, reconnecting in ${(backoff / 1000).toFixed(0)}s)`,
+            ev.code,
+            ev.reason,
+          );
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            connectSocket();
+          }, backoff);
+        }
       };
     };
 
@@ -1555,11 +1566,8 @@ export default function TerminalPanel({
         // Cancel the stalled fetch and attach without a history cursor — the
         // same fallback the restore-failure path uses.
         restoreController.abort();
-        if (serverHistoryPartial) {
-          term.reset();
-          snapshot.markDirty();
-        }
-        term.write(
+        if (serverHistoryPartial) resetTerminal();
+        writeBanner(
           "\r\n\x1b[33m[terminal history restore timed out; live terminal attached without restore]\x1b[0m\r\n",
         );
         connectSocket();
@@ -1583,11 +1591,8 @@ export default function TerminalPanel({
           // Progress: the restore is alive, so give it another full window.
           armRestoreTimeout();
           serverHistoryPartial = true;
-          // xterm parses writes asynchronously; wait for the page callback so
-          // at most one page is queued in the parser at a time.
-          return new Promise<void>((resolve) => {
-            term.write(text, () => resolve());
-          });
+          // Parsing is synchronous, so a page is fully applied when this returns.
+          writeOutput(text);
         },
       }).then((result) => {
         restoreSettled = true;
@@ -1605,8 +1610,8 @@ export default function TerminalPanel({
           // Only announce the fallback when there is actually a cached
           // buffer to fall back to; a brand-new terminal has nothing to restore.
           if (savedBuffer) {
-            term.write(savedBuffer.text);
-            term.write("\r\n\x1b[2m── local terminal cache fallback; server history unavailable ──\x1b[0m\r\n");
+            writeOutput(savedBuffer.text);
+            writeBanner("\r\n\x1b[2m── local terminal cache fallback; server history unavailable ──\x1b[0m\r\n");
           }
           connectSocket();
           return;
@@ -1624,13 +1629,10 @@ export default function TerminalPanel({
         // without a cursor. A resumed shell will send its capped replay, while
         // a fresh shell starts from a clean buffer; either way this avoids
         // overlapping partial output and live replay.
-        if (serverHistoryPartial) {
-          term.reset();
-          snapshot.markDirty();
-        }
+        if (serverHistoryPartial) resetTerminal();
         const message = err instanceof TerminalHistoryError ? err.message : "terminal history restore failed";
         console.error("terminal: history restore failed", err);
-        term.write(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
+        writeBanner(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
         connectSocket();
       });
     };
@@ -1649,7 +1651,7 @@ export default function TerminalPanel({
     // with {"type":"resize" as a control message and anything else as raw
     // keystrokes.
     const dataSub = term.onData((data) => {
-      // Wait for the attach handshake: mouse reports xterm still holds from a
+      // Wait for the attach handshake: mouse reports the terminal still holds from a
       // dead session must not reach the new pty before the fresh-shell reset.
       if (attachedRef.current && sock?.readyState === WebSocket.OPEN) sock.send(data);
     });
@@ -1686,9 +1688,8 @@ export default function TerminalPanel({
       clearInterval(saveInterval);
       snapshot.dispose();
       snapshotRef.current = null;
-      parsedDisp?.dispose();
-      resizeDisp?.dispose();
-      el.removeEventListener("wheel", snapshot.input);
+      resizeDisp.dispose();
+      el.removeEventListener("wheel", snapshot.input, snapshotWheelOptions);
       el.removeEventListener("wheel", onWheelGuard);
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
@@ -1715,22 +1716,16 @@ export default function TerminalPanel({
         clearTimeout(copyDebounceRef.current);
         copyDebounceRef.current = null;
       }
-      bellDisp.dispose();
-      titleDisp.dispose();
-      osc0TitleDisp.dispose();
-      osc2TitleDisp.dispose();
-      osc9Disp.dispose();
-      osc777Disp.dispose();
-      osc99Disp.dispose();
-      osc52Disp.dispose();
       searchDisp.dispose();
       search.dispose();
-      try {
-        fileLinkProvider?.dispose();
-      } catch {}
-      try {
-        webLinks?.dispose();
-      } catch {}
+      detachMouse();
+      scanner.reset();
+      scannerRef.current = null;
+      resetTerminalRef.current = null;
+      // No-ops today (ghostty-web unregisters providers only in term.dispose()),
+      // kept so a future version that returns real disposables is honoured.
+      fileLinkProvider.dispose();
+      urlLinkProvider.dispose();
       // Cancel any pending chunk writes.
       if (chunkRafId) cancelAnimationFrame(chunkRafId);
       pendingChunks.length = 0;
@@ -1746,29 +1741,37 @@ export default function TerminalPanel({
       // close kills it via DELETE /api/terminal/{id} in the terminal store.
       sock?.close();
       socketRef.current = null;
-      if (webglRef.current) {
-        try { webglRef.current.dispose(); } catch {}
-        webglRef.current = null;
-      }
       term.dispose();
       unregisterTerminal(id);
       termRef.current = null;
       fitRef.current = null;
-      serializeRef.current = null;
       searchRef.current = null;
+    };
+    };
+
+    loadGhostty()
+      .then((ghostty) => {
+        if (cancelled) return;
+        cleanup = setup(ghostty);
+        // The active-tab effect ran before the terminal existed.
+        if (activeRef.current) termRef.current?.focus();
+      })
+      .catch((err: unknown) => {
+        console.error("terminal: failed to start the ghostty-web terminal", err);
+        setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+      cleanup?.();
     };
     // Backend switches intentionally do NOT restart existing terminals:
     // the PTY is host-local and would be lost. New terminals after a switch
     // use the new apiWsPath; a full reload migrates all.
   }, [projectPath, host, id]);
 
-  // Apply scrollback changes without tearing down the pty.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    term.options.scrollback = scrollbackLines;
-    snapshotRef.current?.markDirty();
-  }, [scrollbackLines]);
+  // The scrollback setting applies to terminals opened after the change:
+  // ghostty-web 0.4.0 ignores `scrollback` once a terminal is open and has no
+  // runtime option for it (TODO.md). `scrollbackLines` is read only at mount.
 
   // Apply font changes to the live terminal in place instead of tearing down
   // the session (which would kill the pty/websocket) whenever settings change.
@@ -1782,46 +1785,12 @@ export default function TerminalPanel({
 
   // Re-fit when the tab comes back to the foreground: any resize that happened
   // while hidden was skipped because the container had no layout.
-  // Also focus the xterm terminal so the user can type immediately.
+  // Also focus the terminal so the user can type immediately.
   useEffect(() => {
     if (active) {
       fitAndResize.current();
       termRef.current?.focus();
     }
-  }, [active]);
-
-  // Release the WebGL renderer while the tab is hidden; restore it on
-  // activation. Rationale: each live WebGL context pins GPU-side buffers for
-  // its full scrollback, and browsers cap total live contexts (~16) — a
-  // handful of background terminals can exhaust the pool and silently kill
-  // rendering in unrelated canvases (the terminal titles keep updating
-  // server-side either way; only this panel's GPU renderer is affected).
-  // Disposal falls back to xterm's canvas/DOM renderer from the same buffer,
-  // so hidden tabs lose nothing visible, and titles keep flowing through the
-  // unchanged data handlers. Restoration re-runs the same try/loadAddon
-  // pattern the mount path uses; a context-loss or unsupported GPU keeps
-  // webglRef null and the canvas renderer stays.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    if (!active) {
-      const webgl = webglRef.current;
-      if (webgl) {
-        try { webgl.dispose(); } catch {}
-        webglRef.current = null;
-      }
-      return;
-    }
-    if (webglRef.current) return; // already active with a live renderer
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-        if (webglRef.current === webgl) webglRef.current = null;
-      });
-      term.loadAddon(webgl);
-      webglRef.current = webgl;
-    } catch { /* fall back to canvas renderer */ }
   }, [active]);
 
   // Allow the tab bar to focus this shell on single left-click, even when
@@ -1871,20 +1840,19 @@ export default function TerminalPanel({
   return (
     <div
       ref={containerRef}
-      // This div is xterm's fit parent, so it must stay padding-free:
-      // FitAddon subtracts only the .xterm element's own padding from the
-      // parent's computed (border-box) height, so a `p-2` here made the fitted
-      // grid up to a row taller than the visible content box — clipped by the
-      // app-level overflow-hidden with no way to reach it. The 8px padding
-      // therefore lives on .xterm itself ([&_.xterm]:p-2, same visual ring,
-      // same color: --card equals the xterm background #18181b), which makes
-      // the fit exact. overflow-y-auto is the requested "vertical scroll:
-      // auto": a scrollbar appears only when content genuinely overflows
-      // (font resize before refit, tiny windows where even one row doesn't
-      // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
-      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain touch-none [&_.xterm]:p-2"
+      // This div is the fit parent of the terminal host, so it stays
+      // padding-free: FitAddon subtracts the HOST's own CSS padding from the
+      // host's border-box size, so the 8px ring lives on the host (`p-2`, same
+      // color: --card equals the terminal background #18181b) and the fit is
+      // exact. overflow-y-auto is the requested "vertical scroll: auto": a
+      // scrollbar appears only when content genuinely overflows (font resize
+      // before refit, tiny windows where even one row doesn't fit).
+      // Horizontal overflow belongs to the terminal, hence overflow-x-hidden.
+      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain touch-none"
       onContextMenu={handleContextMenu}
-      onMouseDown={(e) => {
+      // Capture phase: under mouse tracking terminalMouse.ts stops a left press on the
+      // host, which would leave these refs stale and the link-click guard (dragMovedRef) stuck.
+      onMouseDownCapture={(e) => {
         // The context menu is portaled to <body>, but React still bubbles its
         // events through this container: a press on a menu item is not a
         // gesture in the terminal.
@@ -1917,6 +1885,16 @@ export default function TerminalPanel({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      <div ref={hostRef} className="terminal-host h-full w-full p-2" />
+      {loadError && (
+        <div
+          role="alert"
+          data-terminal-chrome=""
+          className="absolute inset-x-0 top-2 z-10 mx-auto w-fit max-w-[90%] rounded-md border border-red-500/40 bg-card/95 px-3 py-1.5 text-xs text-red-300 shadow-lg"
+        >
+          Terminal failed to start: {loadError}
+        </div>
+      )}
       {takenOver && (
         <div
           role="status"

@@ -49,33 +49,33 @@ describe("useKeyboard ⌘J pulse toggle", () => {
     // existing Ctrl+W guard: while the user is typing a command, a global
     // shortcut must not yank them out to another view.
     const onTogglePulse = vi.fn();
-    const xterm = document.createElement("div");
-    xterm.className = "xterm";
+    const termHost = document.createElement("div");
+    termHost.className = "terminal-host";
     const input = document.createElement("input");
-    xterm.appendChild(input);
-    document.body.appendChild(xterm);
+    termHost.appendChild(input);
+    document.body.appendChild(termHost);
     try {
       renderHook(() => useKeyboard({ onTogglePulse }));
       press("j", { ctrl: true, target: input });
       expect(onTogglePulse).not.toHaveBeenCalled();
     } finally {
-      xterm.remove();
+      termHost.remove();
     }
   });
 
   it("still works from the terminal on Cmd+J (macOS never sends it to the pty)", () => {
     const onTogglePulse = vi.fn();
-    const xterm = document.createElement("div");
-    xterm.className = "xterm";
+    const termHost = document.createElement("div");
+    termHost.className = "terminal-host";
     const input = document.createElement("input");
-    xterm.appendChild(input);
-    document.body.appendChild(xterm);
+    termHost.appendChild(input);
+    document.body.appendChild(termHost);
     try {
       renderHook(() => useKeyboard({ onTogglePulse }));
       press("j", { meta: true, target: input });
       expect(onTogglePulse).toHaveBeenCalledTimes(1);
     } finally {
-      xterm.remove();
+      termHost.remove();
     }
   });
 

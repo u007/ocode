@@ -436,6 +436,30 @@ func terminalHistoryCursor(r *http.Request) (int64, bool, error) {
 	return offset, true, nil
 }
 
+// terminalEnv is the environment every ocode pty shell starts with. TERM is pinned to
+// xterm-256color even though the web terminal is now libghostty-vt (ghostty-web): the
+// emulator must never advertise itself as xterm-ghostty, because remote hosts reached over
+// ssh rarely carry that terminfo entry and vim/ncurses programs then fail ("terminal not
+// fully functional"), the known Ghostty-over-ssh problem. COLORTERM=truecolor tells programs
+// the 24-bit colour libghostty renders is available. Any TERM, COLORTERM, TERM_PROGRAM,
+// TERM_PROGRAM_VERSION or GHOSTTY_* inherited from a server launched inside a Ghostty window
+// is dropped first, so the user's shell rc does not load Ghostty's shell integration (which
+// rewrites TERM and wraps ssh) into an ocode pty. The same code runs on the host for remote
+// projects (`ocode serve --remote`), so an ssh session gets the same TERM.
+func terminalEnv(base []string) []string {
+	env := make([]string, 0, len(base)+2)
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		switch {
+		case name == "TERM", name == "COLORTERM", name == "TERM_PROGRAM", name == "TERM_PROGRAM_VERSION",
+			strings.HasPrefix(name, "GHOSTTY_"):
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor")
+}
+
 // startTerminalShell pty-starts cmd (a local login shell with Dir set, or
 // an ssh/wsl.exe command for a remote project) and returns the session
 // fully wired: process registered and readLoop running. project is the
@@ -445,7 +469,7 @@ func terminalHistoryCursor(r *http.Request) (int64, bool, error) {
 // waiters only ever see a fully started shell. On failure the shell is
 // torn down so no process, pty fd, or goroutine survives.
 func (h *Handler) startTerminalShell(terminalID, project string, cmd *exec.Cmd) (*terminalSession, error) {
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = terminalEnv(os.Environ())
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {

@@ -70,11 +70,11 @@ The REST and WebSocket paths share `TextDecoder` state so a multi-byte UTF-8 seq
 
 `web/src/components/Terminal/terminalHistory.ts` validates response identity, offsets, snapshot stability, EOF metadata, base64, and byte progression. `TerminalPanel.tsx` aborts restore on unmount and guards writes after cancellation.
 
-The first-page history `404` is the only LocalStorage fallback. The bounded serialized xterm buffer is implemented in `web/src/components/Terminal/terminalPersistence.ts` with the `ocode.term.buf.` key prefix plus terminal ID; it has no expiration-timestamp protocol. The fallback is visibly marked. Other restore failures are shown and do not silently substitute truncated LocalStorage content.
+The first-page history `404` is the only LocalStorage fallback. The bounded serialized terminal buffer (`serializeTerminalBuffer`, since the move to ghostty-web) is implemented in `web/src/components/Terminal/terminalPersistence.ts` with the `ocode.term.buf.` key prefix plus terminal ID; it has no expiration-timestamp protocol. The fallback is visibly marked. Other restore failures are shown and do not silently substitute truncated LocalStorage content.
 
-History pages are loaded sequentially during restore, then the restored tail is available through normal xterm scrolling. This is bounded network paging during initialization, not lazy fetch-on-user-scroll.
+History pages are loaded sequentially during restore, then the restored tail is available through normal terminal scrolling. This is bounded network paging during initialization, not lazy fetch-on-user-scroll.
 
-Xterm scrollback stays at the user's configured line count throughout the restore; xterm evicts the oldest replayed rows itself. The earlier design grew `scrollback` per page to hold every restored row, which re-allocated xterm's whole `CircularList` on each page (O(n²) over a multi-MB log), ignored the user's scrollback setting, and made the periodic `SerializeAddon` localStorage snapshot copy a multi-MB buffer — the desktop renderer climbed past 3 GB and hung on reopening a terminal with a large log.
+Terminal scrollback stays at the user's configured line count throughout the restore; the emulator evicts the oldest replayed rows itself. The earlier xterm.js-era design grew `scrollback` per page to hold every restored row, which re-allocated xterm's whole `CircularList` on each page (O(n²) over a multi-MB log), ignored the user's scrollback setting, and made the periodic localStorage snapshot copy a multi-MB buffer — the desktop renderer climbed past 3 GB and hung on reopening a terminal with a large log.
 
 ## Validation
 

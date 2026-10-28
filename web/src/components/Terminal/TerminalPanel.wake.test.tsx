@@ -2,12 +2,12 @@ import { render, act, screen } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
 
-// xterm needs canvas/layout jsdom lacks; stub the Terminal and the addons the
-// panel constructs. The socket is a controllable fake so the test can drive an
+// ghostty-web needs canvas/layout jsdom lacks; stub the Terminal and FitAddon
+// (ghosttyWebMock.ts). The socket is a controllable fake so the test can drive an
 // unexpected close (which arms the reconnect backoff) and then a wake.
 const h = vi.hoisted(() => ({
-  terminals: [] as Array<{ write: ReturnType<typeof vi.fn> }>,
   sockets: [] as MockSocket[],
 }));
 
@@ -24,34 +24,9 @@ vi.mock("@/lib/eventBus", () => ({
   },
 }));
 
-vi.mock("@xterm/xterm", () => {
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    constructor() {
-      h.terminals.push(this);
-    }
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    focus = vi.fn();
-    reset = vi.fn();
-    dispose = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    attachCustomKeyEventHandler = vi.fn(() => true);
-  }
-  return { Terminal };
-});
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("@/api/client", () => ({
   // The open-terminal list is server state; the store hydrates from it on mount.
   api: {
@@ -104,7 +79,7 @@ class MockSocket {
 }
 
 beforeEach(() => {
-  h.terminals.length = 0;
+  FakeTerminal.instances.length = 0;
   h.sockets.length = 0;
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
@@ -134,8 +109,7 @@ async function mountAndOpen(): Promise<MockSocket> {
     </TerminalProvider>,
   );
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
   });
   expect(h.sockets.length).toBe(1);
   const first = h.sockets[0];
@@ -187,7 +161,7 @@ describe("TerminalPanel wake reconnect", () => {
     dropUnexpectedly(second);
     // Counter was reset by the wake: the banner must advertise the 1s floor,
     // not the 2s the un-reset counter would have produced.
-    const writes = h.terminals[0].write.mock.calls.map((c) => String(c[0])).join("\n");
+    const writes = FakeTerminal.instances[0].write.mock.calls.map((c) => String(c[0])).join("\n");
     expect(writes).toContain("reconnecting in 1s");
   });
 
@@ -259,7 +233,7 @@ describe("TerminalPanel takeover", () => {
 
   it("explains the takeover instead of claiming the session ended", async () => {
     await superseded();
-    const term = h.terminals[0];
+    const term = FakeTerminal.instances[0];
     const written = term.write.mock.calls.map((c) => String(c[0])).join("");
     expect(written).toContain("another client took over");
     expect(written).not.toContain("[terminal session ended]");

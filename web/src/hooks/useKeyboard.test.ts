@@ -87,20 +87,20 @@ describe("useKeyboard assistant toggle (Cmd/Ctrl+Shift+A)", () => {
   it("leaves Ctrl+Shift+A to the terminal and the code editor, which use it", () => {
     const onToggleAssistant = vi.fn();
     renderHook(() => useKeyboard({ onToggleAssistant }));
-    const xterm = document.createElement("div");
-    xterm.className = "xterm";
+    const termHost = document.createElement("div");
+    termHost.className = "terminal-host";
     const monaco = document.createElement("div");
     monaco.className = "monaco-editor";
     const inner = document.createElement("textarea");
-    xterm.appendChild(inner);
+    termHost.appendChild(inner);
     monaco.appendChild(document.createElement("textarea"));
-    document.body.append(xterm, monaco);
+    document.body.append(termHost, monaco);
 
     act(() => {
       dispatchKey("a", false, true, inner, true);
       dispatchKey("a", false, true, monaco.querySelector("textarea") ?? undefined, true);
     });
-    xterm.remove();
+    termHost.remove();
     monaco.remove();
 
     expect(onToggleAssistant).not.toHaveBeenCalled();
@@ -109,16 +109,16 @@ describe("useKeyboard assistant toggle (Cmd/Ctrl+Shift+A)", () => {
   it("still toggles from the terminal or editor on Cmd+Shift+A, which those never receive", () => {
     const onToggleAssistant = vi.fn();
     renderHook(() => useKeyboard({ onToggleAssistant }));
-    const xterm = document.createElement("div");
-    xterm.className = "xterm";
+    const termHost = document.createElement("div");
+    termHost.className = "terminal-host";
     const inner = document.createElement("textarea");
-    xterm.appendChild(inner);
-    document.body.appendChild(xterm);
+    termHost.appendChild(inner);
+    document.body.appendChild(termHost);
 
     act(() => {
       dispatchKey("a", true, false, inner, true);
     });
-    xterm.remove();
+    termHost.remove();
 
     expect(onToggleAssistant).toHaveBeenCalledTimes(1);
   });
@@ -155,7 +155,7 @@ describe("useKeyboard", () => {
     renderHook(() => useKeyboard({ onCloseSession }));
 
     const terminal = document.createElement("div");
-    terminal.className = "xterm";
+    terminal.className = "terminal-host";
     document.body.appendChild(terminal);
 
     act(() => {
@@ -174,7 +174,7 @@ describe("useKeyboard", () => {
     renderHook(() => useKeyboard({ onCloseSession }));
 
     const terminal = document.createElement("div");
-    terminal.className = "xterm";
+    terminal.className = "terminal-host";
     document.body.appendChild(terminal);
 
     act(() => {

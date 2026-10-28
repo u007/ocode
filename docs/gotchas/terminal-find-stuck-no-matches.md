@@ -11,6 +11,8 @@ tags:
 timestamp: 2026-09-21T03:47:16Z
 ---
 
+Applies to the xterm.js era (before 2026-10-28); the terminal is now ghostty-web, see concepts/web-terminal-ghostty-web.md.
+
 # Terminal find bar stuck on "No matches"
 
 ## Symptom

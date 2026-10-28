@@ -14,7 +14,7 @@ export interface TerminalTabsHandle {
    *  it. The count comes from the store after the removal, so callers never
    *  have to reconcile it against a pre-close snapshot. */
   closeActiveTerminal: () => number | null;
-  /** Focus the xterm of the given terminal id, or the currently active one if omitted. */
+  /** Focus the terminal of the given terminal id, or the currently active one if omitted. */
   focusTerminal: (id?: string) => void;
 }
 

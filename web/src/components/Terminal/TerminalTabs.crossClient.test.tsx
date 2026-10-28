@@ -14,32 +14,11 @@ import TerminalTabs from "./TerminalTabs";
  * anywhere. These tests pin the gate that prevents that.
  */
 
-// xterm needs canvas/layout jsdom lacks; the panel is stubbed. What matters is
-// whether a WebSocket is constructed at all.
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    focus = vi.fn();
-    reset = vi.fn();
-    dispose = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    attachCustomKeyEventHandler = vi.fn(() => true);
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+// ghostty-web needs canvas/layout jsdom lacks; the terminal is stubbed
+// (ghosttyWebMock.ts). What matters is whether a WebSocket is constructed at all.
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 
 const sockets: string[] = [];
 class MockSocket {

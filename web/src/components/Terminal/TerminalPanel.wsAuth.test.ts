@@ -1,22 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 
-// TerminalPanel.tsx pulls in @xterm/* packages at module scope; jsdom lacks a
-// real canvas, so mock the pieces that touch Color/canvas at import time to
-// keep test output free of "Not implemented: HTMLCanvasElement..." noise.
-// buildTerminalWsConnection itself has no xterm dependency.
-vi.mock("@xterm/xterm", () => ({ Terminal: class {} }));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class {} }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {} }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class {} }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {} }));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+// TerminalPanel.tsx imports ghostty-web at module scope; jsdom lacks a real
+// canvas, so mock it to keep test output free of canvas noise.
+// buildTerminalWsConnection itself has no terminal dependency.
+vi.mock("ghostty-web", () => ({ Terminal: class {}, FitAddon: class {}, Ghostty: class {} }));
 
 import { buildTerminalWsConnection } from "./TerminalPanel";
 
 // buildTerminalWsConnection is a pure function of its inputs (it does not call
 // authToken()/isRemoteSession() itself), so it's testable directly without
-// mounting the xterm-backed component. See Task 5 (server-side checkAuth +
+// mounting the ghostty-web-backed component. See Task 5 (server-side checkAuth +
 // HandleTerminalWS) for why remote mode can't use ?token=.
 describe("buildTerminalWsConnection", () => {
   it("uses the Sec-WebSocket-Protocol bearer token and omits ?token= in remote mode", () => {

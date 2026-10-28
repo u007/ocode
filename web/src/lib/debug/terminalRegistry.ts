@@ -1,7 +1,7 @@
-import type { Terminal } from "@xterm/xterm";
+import type { Terminal } from "ghostty-web";
 
 /**
- * Live xterm.js instances, keyed by terminal id. TerminalPanel registers on
+ * Live ghostty-web instances, keyed by terminal id. TerminalPanel registers on
  * mount and unregisters on cleanup — the registry itself does not affect
  * mounting/unmounting, it only observes it. Exists so the frontend memory
  * reporter (see lib/debug/frontendMemoryReporter.tsx) can attribute renderer

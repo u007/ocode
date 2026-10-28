@@ -12,6 +12,9 @@ tags:
   - web-ui
 timestamp: 2026-10-09T10:15:00Z
 ---
+
+Applies to the xterm.js era (before 2026-10-28); the terminal is now ghostty-web, see concepts/web-terminal-ghostty-web.md.
+
 ## Symptom
 
 Mobile browser pointed at a shared desktop server (Tailscale URL): the Terminal tab cannot be scrolled with a finger drag. Mouse wheel on desktop works.

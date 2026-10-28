@@ -108,6 +108,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [Web/Desktop Context Gauge Resolution](concepts/web-context-gauge-resolution.md) - Provider-reported context occupancy first, transcript estimate only as fallback; the shared resolution chain for status snapshots and the /context endpoint.
 - [Web/Desktop Server Locking and Liveness Rules](concepts/web-server-locking-and-liveness-rules.md) - Rules for internal/server: Handler.mu is a map lock never a work lock, lock order, pending-ask recovery, async turns, per-project subprocess bounds, SSE event registration, turn heartbeat, routes and middleware.
 - [Web/Desktop Server Project Scoping](concepts/web-server-project-scoping.md) - Project dirs are per-session not per-process: session project roots, project-scoped endpoint params, remote project proxying rules and the server-side terminal and browser tab lists.
+- [Web/Desktop Terminal on ghostty-web (libghostty-vt)](concepts/web-terminal-ghostty-web.md) - The terminal renders with ghostty-web 0.4.0 instead of xterm.js: verified library traps (no OSC handlers, bell on OSC terminators, no mouse/focus reporting, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap), the wrapper module map, behaviour changes, and the pty TERM/COLORTERM environment.
 
 # gotchas
 

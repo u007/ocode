@@ -4,18 +4,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider, useTerminalState, getProjectTerminals, terminalDisplayTitle } from "../../stores/terminalStore";
 import { playAlertSound } from "./terminalAlertSound";
 import TerminalPanel from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
 
-// xterm needs canvas/layout jsdom lacks, so the Terminal (and its addons) are
-// stubbed. The stub captures the bell + OSC handlers the panel registers so the
-// test can fire a BEL / OSC 9 / 777 / 99 the way a real pty would and assert the
-// panel raises a background-activity alert + plays the alert sound.
+// ghostty-web needs canvas/layout jsdom lacks, so the Terminal is stubbed
+// (ghosttyWebMock.ts). The bell / title / attention signals are not terminal
+// events: the panel scans the pty byte stream itself, so the tests push real
+// bytes (BEL, OSC 0/2/9/777/99) through the mocked WebSocket the way a real pty
+// would and assert the panel raises a background-activity alert + plays the
+// alert sound.
 const h = vi.hoisted(() => ({
-  terminals: [] as Array<{
-    _bell: (() => void) | null;
-    _title: ((title: string) => void) | null;
-    _osc: Record<number, (title?: string) => boolean>;
-  }>,
-  sockets: [] as Array<{ onopen: (() => void) | null; url: string }>,
+  sockets: [] as Array<{ onopen: (() => void) | null; onmessage: ((e: { data: unknown }) => void) | null; url: string }>,
 }));
 
 // terminalStore subscribes to the server's `terminal_tabs_changed` bus event;
@@ -31,47 +29,9 @@ vi.mock("@/lib/eventBus", () => ({
   },
 }));
 
-vi.mock("@xterm/xterm", () => {
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    _bell: (() => void) | null = null;
-    _title: ((title: string) => void) | null = null;
-    _osc: Record<number, (title?: string) => boolean> = {};
-    constructor() {
-      h.terminals.push(this);
-    }
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn();
-    focus = vi.fn();
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    getSelection = vi.fn(() => "");
-    onBell = vi.fn((cb: () => void) => {
-      this._bell = cb;
-      return { dispose: vi.fn() };
-    });
-    onTitleChange = vi.fn((cb: (title: string) => void) => {
-      this._title = cb;
-      return { dispose: vi.fn() };
-    });
-    parser = {
-      registerOscHandler: vi.fn((ident: number, cb: (title?: string) => boolean) => {
-        this._osc[ident] = cb;
-        return { dispose: vi.fn() };
-      }),
-    };
-    dispose = vi.fn();
-    attachCustomKeyEventHandler = vi.fn(() => true);
-  }
-  return { Terminal };
-});
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit = vi.fn(); } }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = vi.fn(() => ""); } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+vi.mock("ghostty-web", async () => (await import("./ghosttyWebMock")).ghosttyWebModule());
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 vi.mock("@/api/client", () => ({
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
@@ -151,7 +111,7 @@ function PanelHost({ initialActive = false }: { initialActive?: boolean }) {
 }
 
 beforeEach(() => {
-  h.terminals.length = 0;
+  FakeTerminal.instances.length = 0;
   h.sockets.length = 0;
   // playAlertSound is a single vi.fn() shared across every test in this file, so
   // its call count must be reset each run or assertions from earlier tests leak.
@@ -179,16 +139,31 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The panel mounts asynchronously (it awaits the libghostty wasm load, then the
+// history restore, before opening the socket), so drain microtasks until the
+// socket exists.
+async function mounted() {
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+  expect(FakeTerminal.instances.length).toBe(1);
+  expect(h.sockets.length).toBe(1);
+}
+
 // Flips readyRef true the way the live pty socket's onopen would, so a BEL baked
 // into restored scrollback can't false-alert (the panel gates on readyRef).
 async function openReady() {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  expect(h.sockets.length).toBe(1);
+  await mounted();
   act(() => {
     (h.sockets[0].onopen as (() => void) | null)?.();
+  });
+}
+
+// Delivers pty output to the panel as a binary WebSocket frame, so it goes
+// through the real stream scanner.
+function pty(text: string) {
+  act(() => {
+    h.sockets[0].onmessage?.({ data: new TextEncoder().encode(text).buffer });
   });
 }
 
@@ -202,10 +177,7 @@ describe("TerminalPanel bell/OSC detection", () => {
       </TerminalProvider>,
     );
     await openReady();
-    const term = h.terminals[0];
-    act(() => {
-      term._bell?.();
-    });
+    pty("\x07");
     expect(screen.getByTestId("alerted").textContent).toBe("t1");
     expect(playAlertSound).toHaveBeenCalledTimes(1);
   });
@@ -219,22 +191,15 @@ describe("TerminalPanel bell/OSC detection", () => {
       </TerminalProvider>,
     );
     await openReady();
-    const term = h.terminals[0];
-    act(() => {
-      term._osc[9]();
-    });
+    pty("\x1b]9;build done\x07");
     act(() => {
       vi.advanceTimersByTime(500);
     });
-    act(() => {
-      term._osc[777]();
-    });
+    pty("\x1b]777;notify;title;body\x07");
     act(() => {
       vi.advanceTimersByTime(500);
     });
-    act(() => {
-      term._osc[99]();
-    });
+    pty("\x1b]99;;hello\x1b\\");
     expect(screen.getByTestId("alerted").textContent).toBe("t1");
     // playAlertSound is mocked (no 400ms throttle), so each handler counts.
     expect(playAlertSound).toHaveBeenCalledTimes(3);
@@ -249,39 +214,19 @@ describe("TerminalPanel bell/OSC detection", () => {
       </TerminalProvider>,
     );
     await openReady();
-    const term = h.terminals[0];
-    act(() => {
-      term._bell?.();
-    });
+    pty("\x07");
     expect(screen.getByTestId("alerted").textContent).toBe("");
     expect(playAlertSound).not.toHaveBeenCalled();
     // Background the terminal, then a bell must alert.
     act(() => {
       fireEvent.click(screen.getByText("deactivate"));
     });
-    act(() => {
-      term._bell?.();
-    });
+    pty("\x07");
     expect(screen.getByTestId("alerted").textContent).toBe("t1");
     expect(playAlertSound).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards the program's OSC window title to the tab name", () => {
-    render(
-      <TerminalProvider>
-        <SeedHarness projectPath="/proj" />
-        <PanelHost initialActive={true} />
-        <AlertReader projectPath="/proj" />
-      </TerminalProvider>,
-    );
-    const term = h.terminals[0];
-    act(() => {
-      term._title?.("⦿ ocode — fix bug");
-    });
-    expect(screen.getByTestId("titles").textContent).toBe("⦿ ocode — fix bug");
-  });
-
-  it("forwards OSC 0 and OSC 2 titles while the terminal is backgrounded", () => {
+  it("does not ring the bell for the BEL that terminates an OSC title", async () => {
     render(
       <TerminalProvider>
         <SeedHarness projectPath="/proj" />
@@ -289,11 +234,37 @@ describe("TerminalPanel bell/OSC detection", () => {
         <AlertReader projectPath="/proj" />
       </TerminalProvider>,
     );
-    const term = h.terminals[0];
-    act(() => {
-      term._osc[0]?.("shell title");
-      term._osc[2]?.("running command");
-    });
+    await openReady();
+    // ghostty-web's own onBell would fire for this chunk; the scanner must not.
+    pty("\x1b]0;a title\x07");
+    expect(screen.getByTestId("alerted").textContent).toBe("");
+    expect(playAlertSound).not.toHaveBeenCalled();
+  });
+
+  it("forwards the program's OSC window title to the tab name", async () => {
+    render(
+      <TerminalProvider>
+        <SeedHarness projectPath="/proj" />
+        <PanelHost initialActive={true} />
+        <AlertReader projectPath="/proj" />
+      </TerminalProvider>,
+    );
+    await mounted();
+    pty("\x1b]0;⦿ ocode — fix bug\x07");
+    expect(screen.getByTestId("titles").textContent).toBe("⦿ ocode — fix bug");
+  });
+
+  it("forwards OSC 0 and OSC 2 titles while the terminal is backgrounded", async () => {
+    render(
+      <TerminalProvider>
+        <SeedHarness projectPath="/proj" />
+        <PanelHost initialActive={false} />
+        <AlertReader projectPath="/proj" />
+      </TerminalProvider>,
+    );
+    await mounted();
+    pty("\x1b]0;shell title\x07");
+    pty("\x1b]2;running command\x1b\\");
     expect(screen.getByTestId("titles").textContent).toBe("running command");
   });
 });

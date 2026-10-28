@@ -11,7 +11,7 @@ import (
 // frontendStatsSample is a periodic snapshot pushed by the desktop/web
 // renderer. The renderer's OS-level RSS gives no attribution to what's
 // actually retaining memory (JS heap vs GPU vs native), so the frontend
-// reports application-level counts instead: live xterm.js terminal
+// reports application-level counts instead: live ghostty-web terminal
 // instances and their total scrollback line count, chat session/message
 // totals (including the string size of message content, which is where
 // provider reasoning-continuation blobs would show up), and DOM node

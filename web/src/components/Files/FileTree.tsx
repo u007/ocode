@@ -2151,7 +2151,7 @@ export default function FileTree({
     const pane = () => treePaneRef.current;
     const isEditableTarget = (t: EventTarget | null) =>
       t instanceof Element &&
-      t.closest("input, textarea, select, [contenteditable], .monaco-editor, .xterm") !== null;
+      t.closest("input, textarea, select, [contenteditable], .monaco-editor, .terminal-host") !== null;
     const engaged = () => {
       const el = pane();
       if (!engagedRef.current || el === null) return false;

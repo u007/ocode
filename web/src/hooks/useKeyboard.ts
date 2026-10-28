@@ -62,7 +62,7 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         // pty, so it still closes the frontmost tab even when the terminal
         // has focus.
         const target = e.target as Element | null;
-        if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
+        if (!e.metaKey && target instanceof Element && target.closest(".terminal-host")) return;
         e.preventDefault();
         const h = ref.current;
         if (h.focusedKind === "browser" && h.activeBrowserId) {
@@ -77,13 +77,13 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         // out to another view while they are typing a command. Cmd+J is never
         // sent to the pty on macOS, so it still works from the terminal.
         const target = e.target as Element | null;
-        if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
+        if (!e.metaKey && target instanceof Element && target.closest(".terminal-host")) return;
         e.preventDefault();
         ref.current.onTogglePulse?.();
       }
       // Cmd/Ctrl+Shift+A. Shift is required so Cmd/Ctrl+A keeps its select-all
       // in every field, and the key is compared lowercased because Shift makes
-      // e.key "A". Ctrl+Shift+A is also the xterm and Monaco block-comment
+      // e.key "A". Ctrl+Shift+A is also the terminal and Monaco block-comment
       // combo on Linux and Windows, so on the Ctrl path an event from either
       // editor is left alone. Cmd+Shift+A reaches neither. An event another
       // handler already took is never acted on again.
@@ -95,7 +95,7 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         !e.altKey
       ) {
         const target = e.target as Element | null;
-        const inEditor = target instanceof Element && target.closest(".xterm, .monaco-editor") !== null;
+        const inEditor = target instanceof Element && target.closest(".terminal-host, .monaco-editor") !== null;
         if (!(e.ctrlKey && !e.metaKey && inEditor)) {
           e.preventDefault();
           ref.current.onToggleAssistant?.();

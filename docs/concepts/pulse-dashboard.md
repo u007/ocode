@@ -79,12 +79,13 @@ that selector, which only looks inside explicit listitems.
   place with cursor moves and almost no newlines, so the output is not split into lines.
   `usePulseTerminalScreen` (`web/src/components/Pulse/usePulseTerminals.ts`) replays the
   last 256 KiB of the terminal's log (`PULSE_TERMINAL_SCREEN_BYTES`) through
-  `restoreTerminalHistory` into a read-only `@xterm/headless` emulator sized to the pty
-  (`cols`×`rows` from the list), then reads the emulator's buffer back as lines. The
+  `restoreTerminalHistory` into a headless libghostty-vt `GhosttyTerminal` (a private wasm instance from
+  `loadGhostty`, because a shared one corrupts blank cells) sized to the pty
+  (`cols`×`rows` from the list), then reads its screen rows back as lines. The
   replay is pinned to one log snapshot, and the output is shown unwrapped at the pty's
   width. 256 KiB matches a full repaint of a live Claude Code screen; 64 KiB did not.
   The card and `terminal_screen` start the window the same way: at the first ESC in its
-  first 64 KiB page. The card's xterm keeps a wide character that reaches the last column,
+  first 64 KiB page. The card's libghostty emulator keeps a wide character that reaches the last column,
   which `terminal_screen`'s x/vt drops; see `docs/gotchas/pulse-screen-emulator-parity.md`.
   The row re-reads on the list cadence while it stays expanded, and stops when collapsed.
   A terminal with no reported size (`cols` or `rows` is `0`, no resize since its pty

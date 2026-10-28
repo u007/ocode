@@ -1,12 +1,17 @@
 import { buildPathRegex, splitPathToken, OPEN_FILE_EVENT, type OpenFileDetail } from "../../lib/fileLinks";
-import type { Terminal, IBufferLine } from "@xterm/xterm";
+import type { IDisposable, ILink, Terminal } from "ghostty-web";
 
-// Exact copy of xterm WebLinkProvider's helpers (MIT) — see
+// IBufferLine is not exported by ghostty-web; derive it from the public buffer API.
+type BufferLine = NonNullable<ReturnType<Terminal["buffer"]["active"]["getLine"]>>;
+
+// Adapted from xterm WebLinkProvider's helpers (MIT) — see
 // https://github.com/xtermjs/xterm.js/blob/master/addons/addon-web-links/src/WebLinkProvider.ts
-// Reused for file-path links so wrapping and wide-char mapping stay correct.
+// Reused for file-path and URL links so wrapping and wide-char mapping stay correct. Ported to
+// ghostty-web's buffer API: rows are 0-based absolute, getCell(x) returns the cell (or
+// undefined past the line) instead of filling one in.
 
 function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[], number] {
-  let line: IBufferLine | undefined;
+  let line: BufferLine | undefined;
   let topIdx = lineIndex;
   let bottomIdx = lineIndex;
   let length = 0;
@@ -49,7 +54,6 @@ function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[
 
 function mapStrIdx(terminal: Terminal, lineIndex: number, rowIndex: number, stringIndex: number): [number, number] {
   const buf = terminal.buffer.active;
-  const cell = buf.getNullCell();
   let start = rowIndex;
   while (stringIndex) {
     const line = buf.getLine(lineIndex);
@@ -57,7 +61,8 @@ function mapStrIdx(terminal: Terminal, lineIndex: number, rowIndex: number, stri
       return [-1, -1];
     }
     for (let i = start; i < line.length; ++i) {
-      line.getCell(i, cell);
+      const cell = line.getCell(i);
+      if (!cell) break; // past the end of the line
       const chars = cell.getChars();
       const width = cell.getWidth();
       if (width) {
@@ -71,8 +76,8 @@ function mapStrIdx(terminal: Terminal, lineIndex: number, rowIndex: number, stri
         if (i === line.length - 1 && chars === "") {
           const nxt = buf.getLine(lineIndex + 1);
           if (nxt && nxt.isWrapped) {
-            nxt.getCell(0, cell);
-            if (cell.getWidth() === 2) {
+            const first = nxt.getCell(0);
+            if (first && first.getWidth() === 2) {
               stringIndex += 1;
             }
           }
@@ -88,52 +93,93 @@ function mapStrIdx(terminal: Terminal, lineIndex: number, rowIndex: number, stri
   return [lineIndex, start];
 }
 
-function computeFileLinks(
-  bufferLineNumber: number,
-  regex: RegExp,
-  terminal: Terminal,
-  activate: (e: MouseEvent, text: string) => void,
-) {
+interface Match {
+  text: string;
+  range: ILink["range"];
+}
+
+/** Regex matches over the windowed line strings around `row` (0-based absolute), mapped back to
+ *  buffer cells. `refine` may shorten a match (e.g. strip trailing punctuation) before mapping. */
+function computeMatches(row: number, regex: RegExp, terminal: Terminal, refine?: (text: string) => string): Match[] {
   const rex = new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : regex.flags + "g");
-  const [lines, startLineIndex] = getWindowedLineStrings(bufferLineNumber - 1, terminal);
+  const [lines, startLineIndex] = getWindowedLineStrings(row, terminal);
   const line = lines.join("");
   let m: RegExpExecArray | null;
-  const result: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string; activate: (e: MouseEvent, text: string) => void }[] = [];
+  const result: Match[] = [];
   while ((m = rex.exec(line)) !== null) {
-    const text = m[0];
+    const text = refine ? refine(m[0]) : m[0];
+    if (!text) continue;
     const [startY, startX] = mapStrIdx(terminal, startLineIndex, 0, m.index);
     const [endY, endX] = mapStrIdx(terminal, startY, startX, text.length);
     if (startY === -1 || startX === -1 || endY === -1 || endX === -1) continue;
-    const range = {
-      start: { x: startX + 1, y: startY + 1 },
-      end: { x: endX, y: endY + 1 },
-    };
-    result.push({ range, text, activate });
+    // mapStrIdx's end is exclusive; ghostty-web ranges are inclusive. A link that ends exactly
+    // at a row boundary maps to column 0 of the next row, so step back to the last cell of the
+    // row it actually occupies.
+    let end = { x: endX - 1, y: endY };
+    if (endX === 0 && endY > startY) {
+      const prev = terminal.buffer.active.getLine(endY - 1);
+      if (!prev) continue;
+      end = { x: prev.length - 1, y: endY - 1 };
+    }
+    result.push({ text, range: { start: { x: startX, y: startY }, end } });
   }
   return result;
 }
 
-export function registerFileLinkProvider(terminal: Terminal, projectPath: string | undefined, guard?: () => boolean) {
-  if (typeof (terminal as unknown as { registerLinkProvider?: unknown }).registerLinkProvider !== "function") {
-    return { dispose() {} };
-  }
+// ghostty-web's registerLinkProvider returns void and only unregisters providers on
+// term.dispose(), so our disposer has nothing to undo.
+const NOOP_DISPOSABLE: IDisposable = { dispose() {} };
+
+export function registerFileLinkProvider(
+  terminal: Terminal,
+  projectPath: string | undefined,
+  guard?: () => boolean,
+): IDisposable {
   const baseRegex = buildPathRegex();
-  return (terminal as unknown as { registerLinkProvider: Terminal["registerLinkProvider"] }).registerLinkProvider({
-    provideLinks: (bufferLineNumber, cb) => {
-      const links = computeFileLinks(
-        bufferLineNumber,
-        baseRegex,
-        terminal,
-        (_e: MouseEvent, text: string) => {
-          if (!(_e.ctrlKey || _e.metaKey)) return;
+  terminal.registerLinkProvider({
+    provideLinks: (row, cb) => {
+      const links: ILink[] = computeMatches(row, baseRegex, terminal).map(({ text, range }) => ({
+        text,
+        range,
+        activate: (e: MouseEvent) => {
+          if (!(e.ctrlKey || e.metaKey)) return;
           if (guard && guard()) return;
           const { path, line } = splitPathToken(text);
           const detail: OpenFileDetail = { path, line };
           if (projectPath) detail.projectRoot = projectPath;
           window.dispatchEvent(new CustomEvent<OpenFileDetail>(OPEN_FILE_EVENT, { detail }));
         },
+      }));
+      cb(links.length ? links : undefined);
+    },
+  });
+  return NOOP_DISPOSABLE;
+}
+
+const URL_REGEX = /https?:\/\/[^\s<>"'`]+/;
+const TRAILING_PUNCTUATION = /[.,;:!?)\]}>'"]+$/;
+
+/** Plain http(s) URLs in the output. A left click opens (ctrl/cmd-click too) — that is the
+ *  existing ocode behaviour, no modifier required. `guard()` true means the pointer dragged. */
+export function registerUrlLinkProvider(
+  terminal: Terminal,
+  open: (uri: string) => void,
+  guard?: () => boolean,
+): IDisposable {
+  terminal.registerLinkProvider({
+    provideLinks: (row, cb) => {
+      const links: ILink[] = computeMatches(row, URL_REGEX, terminal, (t) => t.replace(TRAILING_PUNCTUATION, "")).map(
+        ({ text, range }) => ({
+          text,
+          range,
+          activate: (e: MouseEvent) => {
+            if (e.button !== 0 || guard?.()) return;
+            open(text);
+          },
+        }),
       );
       cb(links.length ? links : undefined);
     },
   });
+  return NOOP_DISPOSABLE;
 }

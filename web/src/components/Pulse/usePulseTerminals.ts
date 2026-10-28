@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Terminal } from "@xterm/headless";
 import { ApiError, api } from "../../api/client";
 import type { PulseTerminal } from "../../api/types";
+import { loadGhostty } from "../Terminal/ghosttyRuntime";
 import { restoreTerminalHistory } from "../Terminal/terminalHistory";
+import { ghosttyCellsToText } from "./pulseScreenText";
 
 /** How often the terminal list refreshes while the dashboard is open. */
 export const PULSE_TERMINALS_POLL_MS = 3000;
@@ -75,14 +76,14 @@ export function usePulseTerminals() {
  */
 export const PULSE_TERMINAL_SCREEN_BYTES = 256 * 1024;
 
-/** Scrollback lines the emulator keeps above the visible screen. */
+/** Scrollback lines the emulator keeps above the visible screen (only the screen is read back). */
 const PULSE_TERMINAL_SCROLLBACK = 1000;
 
 type PulseScreenRead = { kind: "missing" } | { kind: "restored"; lines: string[] };
 
 /**
  * Replays the last PULSE_TERMINAL_SCREEN_BYTES of one terminal's log into an
- * emulator of the pty's size and reads back its buffer. The restore is pinned to
+ * libghostty emulator of the pty's size and reads back its screen rows. The restore is pinned to
  * one snapshot, so the replay never mixes two states of a live log. A missing
  * log is reported as `missing`, not thrown.
  */
@@ -90,36 +91,34 @@ async function readPulseScreen(
   terminal: Pick<PulseTerminal, "id" | "project" | "cols" | "rows">,
   signal: AbortSignal,
 ): Promise<PulseScreenRead> {
-  // Reading the buffer is a proposed xterm API, so the emulator must opt in.
-  const emulator = new Terminal({
-    cols: terminal.cols,
-    rows: terminal.rows,
-    scrollback: PULSE_TERMINAL_SCROLLBACK,
-    allowProposedApi: true,
-  });
+  // The shared wasm instance (see loadGhostty); only the terminal below is per read.
+  const ghostty = await loadGhostty();
+  // The row may have collapsed while the wasm loaded; do not start a replay nobody reads.
+  signal.throwIfAborted();
+  const emulator = ghostty.createTerminal(terminal.cols, terminal.rows, { scrollbackLimit: PULSE_TERMINAL_SCROLLBACK });
   try {
     const restored = await restoreTerminalHistory({
       id: terminal.id,
       projectPath: terminal.project,
       maxBytes: PULSE_TERMINAL_SCREEN_BYTES,
       signal,
-      // Wait for each chunk to be parsed, so the buffer read below sees all of it.
-      onText: (text) => new Promise<void>((resolve) => emulator.write(text, resolve)),
+      // libghostty parses synchronously, so the buffer read below sees every chunk.
+      onText: (text) => {
+        emulator.write(text);
+      },
     });
     if (restored.kind === "missing") return { kind: "missing" };
-    const buffer = emulator.buffer.active;
     const lines: string[] = [];
-    for (let row = 0; row < buffer.length; row++) {
-      const line = buffer.getLine(row);
-      if (!line) throw new Error(`terminal screen row ${row} is outside its buffer of ${buffer.length}`);
-      // translateToString trims only unwritten cells; an explicit trailing space stays.
-      // The server's terminal_screen trims every row, so the card does too.
-      lines.push(line.translateToString(true).trimEnd());
+    for (let row = 0; row < emulator.rows; row++) {
+      const cells = emulator.getLine(row);
+      if (!cells) throw new Error(`terminal screen row ${row} is outside its ${emulator.rows} rows`);
+      // Same rules as the server's terminal_screen: every row is right-trimmed.
+      lines.push(ghosttyCellsToText(cells, (col) => emulator.getGraphemeString(row, col)));
     }
     while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     return { kind: "restored", lines };
   } finally {
-    emulator.dispose();
+    emulator.free();
   }
 }
 

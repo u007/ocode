@@ -1,17 +1,20 @@
 import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TerminalPanel from "./TerminalPanel";
+import { FakeTerminal } from "./ghosttyWebMock";
+
+// The panel mounts asynchronously (it awaits the libghostty wasm load before the
+// history restore starts), so fake-timer tests drain microtasks first.
+async function flushMount() {
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+}
 
 const h = vi.hoisted(() => ({
   events: [] as string[],
   sockets: [] as MockSocket[],
-  terminals: [] as MockTerminal[],
 }));
-
-type MockTerminal = {
-  reset: ReturnType<typeof vi.fn>;
-  write: ReturnType<typeof vi.fn>;
-};
 
 class MockSocket {
   static OPEN = 1;
@@ -30,71 +33,30 @@ class MockSocket {
   }
 }
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    buffer = { active: { length: 24 } };
-    loadAddon = vi.fn();
-    open = vi.fn();
-    write = vi.fn((_text: string, callback?: () => void) => callback?.());
-    reset = vi.fn(() => h.events.push("reset"));
-    focus = vi.fn();
-    getSelection = vi.fn(() => "");
-    onData = vi.fn(() => ({ dispose: vi.fn() }));
-    onSelectionChange = vi.fn(() => ({ dispose: vi.fn() }));
-    onBell = vi.fn(() => ({ dispose: vi.fn() }));
-    onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
-    attachCustomKeyEventHandler = vi.fn(() => true);
-    dispose = vi.fn();
-
-    constructor() {
-      h.terminals.push(this);
+// The shared fake Terminal, with a full reset (the panel writes RIS, `ESC c`, never
+// term.reset(): ghostty-web's reset() recreates the wasm terminal) also
+// recorded in `events` so a test can assert it ran before the live socket opened.
+const RIS = "\x1bc";
+vi.mock("ghostty-web", async () => {
+  const mod = (await import("./ghosttyWebMock")).ghosttyWebModule();
+  class Terminal extends mod.Terminal {
+    constructor(opts: Record<string, unknown>) {
+      super(opts);
+      const write = this.write;
+      this.write = vi.fn((data: string, cb?: () => void) => {
+        if (data === RIS) h.events.push("reset");
+        return write.call(this, data, cb);
+      });
     }
-  },
-}));
-
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit = vi.fn();
-  },
-}));
-
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    onDidChangeResults = vi.fn(() => ({ dispose: vi.fn() }));
-    findNext = vi.fn();
-    findPrevious = vi.fn();
-    clearDecorations = vi.fn();
-    dispose = vi.fn();
-  },
-}));
-
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize = vi.fn(() => "");
-  },
-}));
-
-vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: class {
-    onContextLoss = vi.fn();
-    dispose = vi.fn();
-  },
-}));
-
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {
-    dispose = vi.fn();
-  },
-}));
-
-vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+  }
+  return { ...mod, Terminal };
+});
+vi.mock("./ghosttyInternals", async () => (await import("./ghosttyWebMock")).ghosttyInternalsMock());
+vi.mock("./terminalMouse", async () => (await import("./ghosttyWebMock")).terminalMouseMock());
 
 vi.mock("./terminalLinkProvider", () => ({
   registerFileLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+  registerUrlLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
 }));
 
 vi.mock("@/api/client", () => ({
@@ -144,7 +106,7 @@ function jsonResponse(body: unknown): Response {
 beforeEach(() => {
   h.events.length = 0;
   h.sockets.length = 0;
-  h.terminals.length = 0;
+  FakeTerminal.instances.length = 0;
   window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
@@ -174,7 +136,8 @@ describe("TerminalPanel history restore handoff", () => {
     await waitFor(() => expect(h.sockets).toHaveLength(1));
 
     expect(h.sockets[0].url).toContain("history_offset=11");
-    expect(h.terminals[0].reset).not.toHaveBeenCalled();
+    expect(FakeTerminal.instances[0].reset).not.toHaveBeenCalled();
+    expect(FakeTerminal.instances[0].write).not.toHaveBeenCalledWith(RIS);
     expect(h.events).toEqual(["socket"]);
     unmount();
   });
@@ -193,7 +156,8 @@ describe("TerminalPanel history restore handoff", () => {
 
     await waitFor(() => expect(h.sockets).toHaveLength(1));
 
-    expect(h.terminals[0].reset).toHaveBeenCalledTimes(1);
+    expect(FakeTerminal.instances[0].reset).not.toHaveBeenCalled();
+    expect(h.events.filter((e) => e === "reset")).toHaveLength(1);
     expect(h.sockets[0].url).not.toContain("history_offset=");
     expect(h.events.indexOf("reset")).toBeLessThan(h.events.indexOf("socket"));
     unmount();
@@ -212,7 +176,7 @@ describe("TerminalPanel history restore handoff", () => {
 
     await waitFor(() => expect(h.sockets).toHaveLength(1));
 
-    const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+    const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
     expect(writes).toContain("cached terminal output");
     expect(writes).toContain("── local terminal cache fallback; server history unavailable ──");
     expect(h.sockets[0].url).not.toContain("history_offset=");
@@ -228,7 +192,7 @@ describe("TerminalPanel history restore handoff", () => {
 
     await waitFor(() => expect(h.sockets).toHaveLength(1));
 
-    const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+    const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
     expect(writes).not.toContain("local terminal cache fallback");
     expect(h.sockets[0].url).not.toContain("history_offset=");
     unmount();
@@ -254,11 +218,11 @@ describe("TerminalPanel history restore handoff", () => {
     h.sockets[0].onmessage?.({ data: new TextEncoder().encode(finalOutput).buffer });
     h.sockets[0].onclose?.({ wasClean: true, code: 1000, reason: "" });
 
-    // xterm.write is async (mock invokes the callback synchronously, real
-    // xterm defers it); wait for the save the close handler schedules.
+    // ghostty-web parses synchronously, so the close handler's save has already
+    // run; waitFor keeps the assertion robust against scheduling.
     await waitFor(() => expect(window.localStorage.getItem("ocode.term.buf.t1")).not.toBeNull());
 
-    const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+    const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
     expect(writes).toContain("FINAL-");
     expect(writes).toContain("[terminal session ended]");
     const saved = window.localStorage.getItem("ocode.term.buf.t1");
@@ -281,6 +245,7 @@ describe("TerminalPanel history restore timeout", () => {
         <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
       );
 
+      await flushMount();
       // Restore is still pending: the socket must not be open yet.
       expect(h.sockets).toHaveLength(0);
 
@@ -290,7 +255,7 @@ describe("TerminalPanel history restore timeout", () => {
       });
 
       expect(h.sockets).toHaveLength(1);
-      const writes = h.terminals[0].write.mock.calls.map(([text]) => String(text)).join("");
+      const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
       expect(writes).toContain("restore timed out");
       unmount();
     } finally {
@@ -316,6 +281,7 @@ describe("TerminalPanel history restore timeout", () => {
         <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
       );
 
+      await flushMount();
       await act(async () => {
         vi.advanceTimersByTime(15000);
         await Promise.resolve();

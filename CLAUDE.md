@@ -16,6 +16,13 @@ two when both exist, so a second file would never be seen. Do not recreate it.
 - Charm TUI (Bubble Tea, Lipgloss v2 — note v2 wraps each rune in its own
   SGR sequence; substring assertions on rendered output need `stripANSI` from
   `internal/tui/selection.go`)
+- Web/desktop terminal emulator: `ghostty-web` (libghostty-vt wasm, canvas 2D), installed from the vendored
+  tarball `web/vendor/ghostty-web-0.4.0-<sha>.tgz` built from the `u007/ghostty-web` `security-fixes` fork by
+  `web/scripts/pack-ghostty-web.sh`, never from npm. The fork is upstream main after 0.4.0, so it
+  reports the mouse itself (removed after `open()`, ocode's `terminalMouse.ts` is the only sender),
+  has no OSC handler API, rings `onBell` on OSC terminators, and copies selections itself; ocode's
+  wrappers live in `web/src/components/Terminal/` (`terminalStream.ts`, `terminalMouse.ts`,
+  `ghosttyInternals.ts`). Details: `docs/concepts/web-terminal-ghostty-web.md`.
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus the
   `opencode-go` (DeepSeek) and Minimax routes
 - `typesafe` (TypeSafe AI System One, model `jev-latest`) is **decision-only**:

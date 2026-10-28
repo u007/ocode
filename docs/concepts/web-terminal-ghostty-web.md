@@ -1,0 +1,67 @@
+---
+type: Concept
+title: Web/Desktop Terminal on ghostty-web (libghostty-vt)
+description: The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
+resource: web/src/components/Terminal/TerminalPanel.tsx
+tags:
+  - terminal
+  - ghostty-web
+  - libghostty
+  - web
+  - desktop
+  - pulse
+timestamp: 2026-10-28T04:00:00Z
+---
+# Web/Desktop Terminal on ghostty-web
+
+Applies from 2026-10-28. Earlier xterm.js behaviour is recorded only in the gotchas marked historical.
+
+The terminal panel uses `Terminal` and `FitAddon` from `ghostty-web` (libghostty-vt compiled to wasm, drawn on a canvas 2D), installed from ocode's fork rather than npm (see "Dependency source"). The ~400 KB wasm is embedded in the JS bundle as a `data:` URL, so there is no asset or MIME concern. Pulse reads terminal screens with the headless `GhosttyTerminal` from the same package.
+
+## Dependency source
+
+`web/package.json` pins `ghostty-web` to `file:vendor/ghostty-web-0.4.0-<sha>.tgz`, a tarball built from the `security-fixes` branch of [u007/ghostty-web](https://github.com/u007/ghostty-web), a fork of coder/ghostty-web based on upstream main after the 0.4.0 release (so it also carries upstream's mouse tracking, PR #106, which the npm 0.4.0 package lacked). The fork publishes no npm package and commits no `dist/`, and its wasm build needs Zig plus the ghostty submodule, so pnpm cannot install it from git; the checked-in tarball is what every checkout and CI installs. On top of upstream 0.4.0 the branch carries: pasted control characters replaced with spaces as native Ghostty does (CVE-2026-26982, upstream PR #193), OSC 8 links limited to http(s) plus a `linkHandler` option (PR #194), window titles stripped of control characters and capped at 255 bytes (PR #195), the inlined wasm decoded in memory instead of fetched so a strict CSP works (PR #196), zero-initialized wasm page buffers (PR #142, see the heap trap below), and dependency CVE bumps. To update: commit in the fork checkout, run `bun run build:wasm` there once (needs Zig), then `web/scripts/pack-ghostty-web.sh <fork-dir>`, point `package.json` at the printed tarball, run `pnpm install`, and delete the old tarball.
+
+## Traps of ghostty-web 0.4.0
+
+- **Load the wasm yourself.** `new Terminal` throws unless `options.ghostty` is passed or `init()` ran. ocode never calls `init()`; `ghosttyRuntime.ts` loads `Ghostty` and the panel passes it as `options.ghostty`.
+- **Unzeroed wasm heap in upstream 0.4.0 (measured 2026-10-28).** Once any terminal in a `Ghostty` instance had been freed, a later terminal in the same instance read garbage codepoints and stale wide characters from cells it never wrote. On the Pulse parity fixtures one shared instance corrupted 9 of 20 cases and a fresh instance per terminal rendered all 20; it reproduces in plain Node. The stale data is in the terminal's own page memory, so zeroing the viewport export buffer does not help. The vendored fork zero-initializes page buffers (upstream PR #142) and the same probe shows 0 of 20 corrupt with a shared instance, so every panel and every Pulse screen read now shares the one instance `loadGhostty()` caches (a failed load is not cached). The panel still never calls `Terminal.reset()`, which frees and recreates the wasm terminal and drops the selection and link state under the panel: a full reset is written as RIS (`ESC c`), and Clear writes `ESC [3J` after `clear()` to drop the scrollback.
+- **No OSC handler API.** There is no `parser`. Titles and OSC 9/777/99/52 come from `terminalStream.ts`, which scans the byte stream.
+- **Bell on OSC terminators.** `onBell` fires when a written chunk contains `\x07` anywhere, including the BEL ending `ESC ] 0 ; title BEL`. `onTitleChange` only sees OSC 0/1/2 inside one chunk. Neither is used.
+- **`write` parses synchronously.** The callback is deferred with `requestAnimationFrame` and never fires in a hidden tab. Never await it. Every write also scrolls a scrolled-up viewport to the bottom.
+- **Built-in mouse reporting, but not the one ocode needs.** The fork's `InputHandler` listens for mousedown/mouseup/mousemove/wheel on the host and sends SGR/X10 reports when the program tracks the mouse. It sends no focus reports (1004), reports shift/alt presses that ocode reserves for selecting text under a mouse-owning program, reports every wheel pixel delta, and only sees releases inside the host. `disableBuiltinMouseReporting` (ghosttyInternals.ts) removes those four listeners after `open()`, and `terminalMouse.ts` is the single sender of SGR and X10 reports and `CSI I`/`CSI O`. The npm 0.4.0 release had no mouse reporting at all; with the fork, leaving both in place sends every release, motion and wheel report twice.
+- **Built-in copy-on-select.** The selection manager copies on mouseup and double-click itself. ocode owns copy (dedupe against Cmd+C and Edit > Copy, desktop native clipboard), so `disableBuiltinSelectionCopy` replaces that path.
+- **Built-in link providers `window.open` on ctrl/cmd-click.** They are removed (`clearBuiltinLinkProviders`) and ocode registers its own. `registerLinkProvider` returns nothing; providers live until `dispose()`.
+- **Custom key handler convention is inverted from xterm.js.** Returning `true` means handled: skip ghostty-web and `preventDefault`. Cmd/Ctrl+V must return `false`, or the browser `paste` event dies.
+- **The host element becomes `contenteditable`.** `open()` needs a dedicated inner div (`.terminal-host`), never the panel container that also holds the find bar.
+- **Wheel is captured at the host.** `handleWheel` calls `stopPropagation`, so ancestor wheel listeners need `capture: true`.
+- **Option changes after `open()`.** Only `cursorBlink`, `cursorStyle`, `fontSize`, `fontFamily`, `cols`, `rows` apply live. `scrollback` and `theme` do not.
+- **`select(col,row,len)` is wrong when scrollback exists.** Use `setSelectionAbsolute` from `ghosttyInternals.ts`.
+- **`buffer.active.viewportY` is always 0.** Use `getViewportY()`.
+
+## Module map (`web/src/components/Terminal/`)
+
+| Module | Role |
+| --- | --- |
+| `ghosttyRuntime.ts` | `loadGhostty()`: the one shared wasm instance, loaded on first use |
+| `terminalStream.ts` | Byte-stream scanner: OSC code/payload and real bells |
+| `terminalSerialize.ts` | Buffer to SGR text for the localStorage snapshot |
+| `terminalSearch.ts` | Plain case-insensitive find, no all-matches highlight; row text cached until the panel's next write (`invalidate()`) |
+| `ghosttyInternals.ts` | The only file touching private ghostty-web members; throws if the vendored build's shape changed |
+| `terminalMouse.ts` | Mouse and focus reporting; shift or alt drag selects under a mouse-owning program |
+| `terminalLinkProvider.ts` | File `path:line` and URL providers on the ghostty-web link API |
+| `terminalOptions.ts` | `ITerminalOptions` and the theme defaults used by the serializer |
+
+Pulse: `usePulseTerminals.ts` replays the log into a headless `GhosttyTerminal` and `pulseScreenText.ts` (`ghosttyCellsToText`) converts rows to text. It passes the shared fixture `internal/server/testdata/pulse_screen_parity.json` against the real wasm.
+
+## Behaviour changes versus xterm.js
+
+- Output always scrolls the viewport to the bottom.
+- The scrollback setting applies to terminals opened after the change.
+- Find has no all-matches highlight.
+- Under a program that owns the mouse, text selection is shift+drag or alt+drag on every platform.
+- The WebGL renderer is gone; rendering is canvas 2D.
+
+## Pty environment
+
+`terminalEnv` in `internal/server/handler_terminal.go` starts every pty shell with `TERM=xterm-256color` and `COLORTERM=truecolor`. `TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION` and `GHOSTTY_*` inherited from a server launched inside Ghostty are dropped first, so the user's rc does not load Ghostty shell integration and ssh hosts without the `xterm-ghostty` terminfo entry keep working. Remote projects run the same code on the host.

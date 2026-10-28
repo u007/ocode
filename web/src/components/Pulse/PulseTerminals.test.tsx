@@ -22,7 +22,8 @@ vi.mock("../Terminal/terminalHistory", async (importOriginal) => ({
 }));
 function logHolds(text: string) {
   mockRestore.mockImplementation(async (opts: { onText: (t: string) => Promise<void> | void }) => {
-    await opts.onText(text);
+    // The real restore never hands onText an empty chunk (libghostty rejects a zero-length write).
+    if (text) await opts.onText(text);
     return { kind: "restored", snapshotEnd: text.length, state: "active" };
   });
 }
@@ -191,17 +192,14 @@ describe("PulseTerminals", () => {
   });
 
   it("treats a terminal with no saved log as no output, and checks again on the next tick", async () => {
-    // Only the polling interval is faked: the emulator's write callback is
-    // scheduled with setTimeout and would never fire under fake timers.
+    // Only the polling interval is faked: the wasm load resolves on real async I/O.
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     mockList.mockResolvedValue(page([term({ id: "term-anon", running: false, command: "zsh" })]));
     mockRestore.mockResolvedValue({ kind: "missing", snapshotEnd: 0 });
     render(<PulseTerminals />);
     await act(async () => {});
     fireEvent.click(within(screen.getByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
-    await act(async () => {});
-
-    expect(screen.getByText("No saved output for this terminal.")).toBeInTheDocument();
+    expect(await screen.findByText("No saved output for this terminal.")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(console.error).not.toHaveBeenCalled();
 
@@ -222,13 +220,12 @@ describe("PulseTerminals", () => {
     render(<PulseTerminals />);
     await act(async () => {});
     fireEvent.click(within(screen.getByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
-    await act(async () => {});
-    expect(screen.getByRole("alert")).toHaveTextContent("Reading output failed: connection reset");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Reading output failed: connection reset");
 
     await act(async () => {
       vi.advanceTimersByTime(PULSE_TERMINALS_POLL_MS);
     });
-    // The emulator finishes parsing on a real timer, so wait for the clear.
+    // The wasm load finishes on real async I/O, so wait for the clear.
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.getByTestId("pulse-terminal-output")).toHaveTextContent("back online");
   });

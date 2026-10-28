@@ -6,6 +6,10 @@
 
 
 
+## 2026-10-28
+
+* **Creation**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+
 ## 2026-10-27
 
 * **Update**: Files Tab Clipboard (Cut / Copy / Paste) ([concepts/files-tab-clipboard.md](/concepts/files-tab-clipboard.md))

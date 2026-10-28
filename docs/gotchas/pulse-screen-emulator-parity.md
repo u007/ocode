@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Two Terminal Emulators Render The Pulse Screen And Disagree
-description: The Pulse dashboard card replays a terminal log through @xterm/headless; the terminal_screen tool replays it through charmbracelet/x/vt. A 22-case parity run found three disagreements. Two are x/vt bugs and one is a window-start rule that differs between the two paths. Records the decision to keep the card on xterm, the fixes that followed, and the one open gap.
+description: The Pulse dashboard card replays a terminal log through libghostty-vt (ghostty-web; it was @xterm/headless before 2026-10-28); the terminal_screen tool replays it through charmbracelet/x/vt. A 22-case parity run found three disagreements. Two are x/vt bugs and one is a window-start rule that differs between the two paths. Records the decision to keep the card on xterm, the fixes that followed, and the one open gap.
 tags:
   - gotcha
   - pulse
@@ -59,9 +59,13 @@ comparing the visible rows only. Result: 18 agree. The 4 that do not:
 `real_term726_200x61` (the Claude Code log, 200×61) agrees on the visible screen, but its
 two windows start at different bytes (the card starts after a newline, the tool at an ESC).
 
+## Update 2026-10-28: the card is now libghostty-vt
+
+The card side moved from `@xterm/headless` to ghostty-web's headless `GhosttyTerminal`. All 22 shared fixtures render identically on the real wasm. All reads share one wasm instance (`loadGhostty`): with upstream ghostty-web 0.4.0, which left recycled wasm heap unzeroed, a shared instance failed 9 cases with garbage in never-written cells and stale wide characters; the vendored u007/ghostty-web fork zero-initializes page buffers and passes all cases on the shared instance. See `concepts/web-terminal-ghostty-web.md`. References to xterm below describe the emulator at decision time.
+
 ## Decision
 
-Option B: keep both emulators. The card stays on `@xterm/headless`, the tool stays on x/vt,
+Option B: keep both emulators. The card stays on its own browser emulator (`@xterm/headless` when this was decided, libghostty-vt since 2026-10-28), the tool stays on x/vt,
 and the two are brought into line where they can be.
 
 Option B, in full (done, except the wide-character gap):
