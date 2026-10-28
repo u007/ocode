@@ -1,7 +1,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRemoteHostStatus, __resetRemoteHostStatusForTests } from "./useRemoteHostStatus";
-import { REMOTE_HOST_RETRY_MS } from "../lib/remoteHostGate";
+import {
+  noteRemoteHostUnreachable,
+  REMOTE_HOST_RETRY_MS,
+  remoteHostRetryInMs,
+} from "../lib/remoteHostGate";
 
 const mockStatus = vi.fn();
 const mockConnect = vi.fn();
@@ -48,6 +52,25 @@ describe("useRemoteHostStatus", () => {
     expect(mockStatus).toHaveBeenCalledWith("h");
   });
 
+  it("clears a retry window as soon as a status poll reports the host connected", async () => {
+    mockStatus.mockResolvedValue(base);
+    renderHook(() => useRemoteHostStatus("h", true));
+    await waitFor(() => expect(mockStatus).toHaveBeenCalledTimes(1));
+
+    // A transient failure armed the host-wide window. Every ordinary read is
+    // skipped while it is armed, so the status probe is the only thing that can
+    // notice the host recovered — and it must do so without waiting out the
+    // whole window.
+    noteRemoteHostUnreachable("h");
+    expect(remoteHostRetryInMs("h")).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const handler of reconnectHandlers) handler();
+    });
+    await waitFor(() => expect(remoteHostRetryInMs("h")).toBe(0));
+    expect(mockStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("refetches on eventBus reconnect", async () => {
     mockStatus.mockResolvedValue(base);
     renderHook(() => useRemoteHostStatus("h", true));
@@ -57,37 +80,42 @@ describe("useRemoteHostStatus", () => {
   });
 
   // The periodic poll goes through the shared per-host queue. After a failed
-  // poll the host is left alone for the retry window, so the poll must not ask
-  // again until the window expires.
-  it("stops polling a host that failed until the retry window expires", async () => {
+  // poll the host is left alone for the retry window. The status endpoint is
+  // still probed (it is an in-memory registry read, and it is the only way the
+  // window can close early), but a probe that reports DISCONNECTED must leave
+  // the window armed, and ordinary reads stay skipped until it expires.
+  it("keeps a failed host's window armed while the status probe reports disconnected", async () => {
     vi.useFakeTimers();
     try {
       // A 502 is how the proxy reports an unreachable host; only that opens the window.
       mockStatus.mockRejectedValueOnce(Object.assign(new Error("remote connect failed"), { status: 502 }));
-      mockStatus.mockResolvedValue(base);
+      mockStatus.mockResolvedValue({ ...base, connected: false });
       renderHook(() => useRemoteHostStatus("h", true));
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
       });
       expect(mockStatus).toHaveBeenCalledTimes(1);
+      expect(remoteHostRetryInMs("h")).toBeGreaterThan(0);
 
-      // A poll inside the retry window must not reach the host.
+      // A poll inside the retry window probes status (cheap), sees it is still
+      // disconnected, and leaves the window armed.
       await act(async () => {
         vi.advanceTimersByTime(30_000);
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(mockStatus).toHaveBeenCalledTimes(1);
+      expect(remoteHostRetryInMs("h")).toBeGreaterThan(0);
 
       // Once the window expires, the poll asks again. Advancing by the whole
-      // window crosses two 30s poll ticks, so the host is asked twice more.
+      // window crosses two 30s poll ticks, so the host is asked again.
+      const callsDuringWindow = mockStatus.mock.calls.length;
       await act(async () => {
         vi.advanceTimersByTime(REMOTE_HOST_RETRY_MS);
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(mockStatus.mock.calls.length).toBeGreaterThan(1);
+      expect(mockStatus.mock.calls.length).toBeGreaterThan(callsDuringWindow);
     } finally {
       vi.useRealTimers();
     }

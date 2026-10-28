@@ -8,6 +8,7 @@
 
 ## 2026-10-28
 
+* **Update**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
 * **Creation**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 * **Update**: Main model pick is per chat; only no-session/draft picks set the global default ([gotchas/main-model-pick-also-sets-global-default.md](/gotchas/main-model-pick-also-sets-global-default.md))
 * **Creation**: Main model pick is per chat; only no-session/draft picks set the global default ([docs/gotchas/main-model-pick-also-sets-global-default.md](/docs/gotchas/main-model-pick-also-sets-global-default.md))

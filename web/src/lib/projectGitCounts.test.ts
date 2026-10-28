@@ -7,6 +7,7 @@ import {
   __resetProjectGitCountsForTests,
   useProjectGitCounts,
 } from "./projectGitCounts";
+import { remoteHostRetryInMs } from "./remoteHostGate";
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 // api.getGitStatus is the only client call the store makes; eventBus is
@@ -16,6 +17,10 @@ const apiFake = vi.hoisted(() => ({
   calls: [] as Array<{ project?: string; host?: string }>,
   status: null as GitStatus | null,
   failNext: false,
+  // The error a `failNext` read rejects with. Defaults to a plain Error (the
+  // host answered: NOT an unreachable host); a test that wants the retry
+  // window set a TypeError or a 502 ApiError-shaped error.
+  failNextError: null as unknown,
   // When holdAll is set, requests stay pending until release() — a stand-in
   // for an unreachable remote host holding its request for the ssh timeout.
   holdAll: false,
@@ -28,7 +33,7 @@ vi.mock("../api/client", () => ({
       apiFake.calls.push({ project, host });
       if (apiFake.failNext) {
         apiFake.failNext = false;
-        return Promise.reject(new Error("git status unavailable"));
+        return Promise.reject(apiFake.failNextError ?? new Error("git status unavailable"));
       }
       if (apiFake.holdAll) {
         return new Promise((resolve) => {
@@ -114,6 +119,7 @@ beforeEach(() => {
   apiFake.calls.length = 0;
   apiFake.status = null;
   apiFake.failNext = false;
+  apiFake.failNextError = null;
   apiFake.holdAll = false;
   apiFake.held.length = 0;
   busFake.handlers.clear();
@@ -315,6 +321,8 @@ describe("useProjectGitCounts", () => {
   it("leaves a remote host that failed alone for the retry window, then asks again", async () => {
     vi.useFakeTimers();
     apiFake.failNext = true;
+    // Only an unreachable host opens the window: a 502 or a network TypeError.
+    apiFake.failNextError = new TypeError("Failed to fetch");
     renderHook(() => useProjectGitCounts("/a", "devbox"));
     await flush();
     expect(apiFake.calls.length).toBe(1);
@@ -330,6 +338,28 @@ describe("useProjectGitCounts", () => {
     });
     await flush();
     expect(apiFake.calls.length).toBe(2);
+  });
+
+  it("does not blacklist the whole host when a project read fails for a non-host reason", async () => {
+    vi.useFakeTimers();
+    apiFake.failNext = true;
+    // The host ANSWERED: a 404/403/unknown-project is not an unreachable host,
+    // so it must not arm the host-wide retry window. Regressing this froze
+    // every terminal and panel on the host for two minutes after one bad
+    // project read (TODO.md W: projectGitCounts blacklists the whole host).
+    apiFake.failNextError = Object.assign(new Error("unknown project"), { status: 400 });
+    renderHook(() => useProjectGitCounts("/a", "devbox"));
+    await flush();
+    expect(apiFake.calls.length).toBe(1);
+    expect(remoteHostRetryInMs("devbox")).toBe(0);
+
+    // The very next tick asks again — no window was armed.
+    await act(async () => {
+      vi.advanceTimersByTime(GIT_COUNTS_POLL_MS);
+    });
+    await flush();
+    expect(apiFake.calls.length).toBe(2);
+    expect(remoteHostRetryInMs("devbox")).toBe(0);
   });
 
   it("re-probes a directory that is not a repo only every 5 minutes", async () => {

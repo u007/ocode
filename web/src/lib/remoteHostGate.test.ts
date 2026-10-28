@@ -186,6 +186,139 @@ describe("withRemoteRead slot hand-off", () => {
   });
 });
 
+describe("withRemoteRead probeWhileRetrying", () => {
+  beforeEach(() => {
+    __resetRemoteReadGatesForTests();
+  });
+
+  it("runs the probe while the window is armed and leaves the window alone", async () => {
+    noteRemoteHostUnreachable("dev@box");
+    expect(remoteHostRetryInMs("dev@box")).toBeGreaterThan(0);
+
+    const probe = vi.fn(async () => true);
+    await expect(
+      withRemoteRead("dev@box", "status", probe, { probeWhileRetrying: true }),
+    ).resolves.toBe(true);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    // The probe observed the host; it did not judge it, so the window is still
+    // open and an ordinary read is still skipped.
+    expect(remoteHostRetryInMs("dev@box")).toBeGreaterThan(0);
+    const normal = vi.fn(async () => true);
+    await expect(withRemoteRead("dev@box", "/proj", normal)).resolves.toBe(false);
+    expect(normal).not.toHaveBeenCalled();
+  });
+
+  it("does not open the window when a probe fails", async () => {
+    const probe = vi.fn(async () => false);
+    await expect(
+      withRemoteRead("dev@box", "status", probe, { probeWhileRetrying: true }),
+    ).resolves.toBe(false);
+    expect(remoteHostRetryInMs("dev@box")).toBe(0);
+  });
+
+  it("keeps probes and rejects ordinary waiters when the window arms mid-queue", async () => {
+    const host = "dev@box";
+    const holdStarted = deferred<void>();
+    const hold = deferred<boolean>();
+    const held = withRemoteRead(host, "/hold", () => {
+      holdStarted.resolve();
+      return hold.promise;
+    });
+    await holdStarted.promise;
+
+    // Queue both kinds behind the holder, in mixed order.
+    const plain = vi.fn(async () => true);
+    const queuedPlain = withRemoteRead(host, "/plain", plain);
+    const probe = vi.fn(async () => true);
+    const queuedProbe = withRemoteRead(host, "/probe", probe, { probeWhileRetrying: true });
+    const plain2 = vi.fn(async () => true);
+    const queuedPlain2 = withRemoteRead(host, "/plain2", plain2);
+
+    // The holder FAILS, so drain arms the window and rebuilds the queue with
+    // the probe only: ordinary waiters are dropped, the probe keeps its place.
+    hold.resolve(false);
+
+    await expect(held).resolves.toBe(false);
+    await expect(queuedPlain).resolves.toBe(false);
+    await expect(queuedPlain2).resolves.toBe(false);
+    expect(plain).not.toHaveBeenCalled();
+    expect(plain2).not.toHaveBeenCalled();
+    await expect(queuedProbe).resolves.toBe(true);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    // Nothing is wedged afterwards: an ordinary read is still skipped while the
+    // window is open, and a fresh probe still runs.
+    const after = vi.fn(async () => true);
+    await expect(withRemoteRead(host, "/after", after)).resolves.toBe(false);
+    expect(after).not.toHaveBeenCalled();
+    const laterProbe = vi.fn(async () => true);
+    await expect(
+      withRemoteRead(host, "/probe-later", laterProbe, { probeWhileRetrying: true }),
+    ).resolves.toBe(true);
+    expect(laterProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs queued probes one at a time", async () => {
+    const host = "dev@box";
+    noteRemoteHostUnreachable(host);
+
+    const firstStarted = deferred<void>();
+    const firstDone = deferred<boolean>();
+    const first = withRemoteRead(
+      host,
+      "/probe-1",
+      () => {
+        firstStarted.resolve();
+        return firstDone.promise;
+      },
+      { probeWhileRetrying: true },
+    );
+    await firstStarted.promise;
+
+    const secondFn = vi.fn(async () => true);
+    const second = withRemoteRead(host, "/probe-2", secondFn, { probeWhileRetrying: true });
+    await Promise.resolve();
+    expect(secondFn).not.toHaveBeenCalled();
+
+    firstDone.resolve(true);
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+    expect(secondFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not park a queued probe when an ordinary read is granted just before the window arms", async () => {
+    const host = "dev@box";
+    const holdStarted = deferred<void>();
+    const hold = deferred<boolean>();
+    const held = withRemoteRead(host, "/hold", () => {
+      holdStarted.resolve();
+      return hold.promise;
+    });
+    await holdStarted.promise;
+
+    const plain = vi.fn(async () => true);
+    const queuedPlain = withRemoteRead(host, "/plain", plain);
+    const probe = vi.fn(async () => true);
+    const queuedProbe = withRemoteRead(host, "/probe", probe, { probeWhileRetrying: true });
+
+    // The holder finishes OK, so drain grants the slot to the ordinary read.
+    hold.resolve(true);
+    await Promise.resolve();
+    // The window arms before that read's continuation runs; its continuation
+    // takes the `!probe && retryAt` branch, frees the slot and returns.
+    noteRemoteHostUnreachable(host);
+
+    await expect(held).resolves.toBe(true);
+    await expect(queuedPlain).resolves.toBe(false);
+    expect(plain).not.toHaveBeenCalled();
+
+    // The queued probe must still get its turn with NO further read arriving.
+    await expect(queuedProbe).resolves.toBe(true);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+});
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {

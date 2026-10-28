@@ -62,6 +62,11 @@ type syncFrame struct {
 // oversized payload before it's ever unmarshaled.
 const maxSyncPayloadBytes = 32 << 20 // 32 MiB
 
+// globalConfigDirFn is config.GlobalConfigDir, overridable in tests so
+// BuildSyncPayload can be driven against a temp config dir (the round-trip test
+// must never read the developer's real ocodeconfig.json).
+var globalConfigDirFn = config.GlobalConfigDir
+
 // BuildSyncPayload reads the local auth-profile store and the two global
 // config files (opencode.json, ocodeconfig.json), skipping any that don't
 // exist — a fresh machine with no saved profiles yet is not an error, the
@@ -87,7 +92,7 @@ func BuildSyncPayload() (SyncPayload, error) {
 		}
 	}
 
-	if cfgDir, err := config.GlobalConfigDir(); err == nil {
+	if cfgDir, err := globalConfigDirFn(); err == nil {
 		for _, name := range []string{"opencode.json", "ocodeconfig.json"} {
 			if f, ok, err := readSyncFile(SyncDirConfig, filepath.Join(cfgDir, name)); err != nil {
 				return SyncPayload{}, err
@@ -172,36 +177,66 @@ func stripMachineLocalConfig(name string, content []byte) []byte {
 // whole file), which is worse than the original bug: the host would lose its own
 // `extra_allowed_paths` grants and ask for paths the user already approved.
 //
-// The destination wins for these keys because it is the only machine that can
-// evaluate them. A missing destination (fresh host) leaves the content untouched;
-// an unparseable destination does too — failing the credential sync over a
-// foreign config is not worth it, and the previous behaviour (write as-is) is
-// the fallback.
-func preserveMachineLocalConfig(name string, content []byte, destPath string) []byte {
+// FAIL CLOSED. The destination wins for these keys because it is the only
+// machine that can evaluate them, so a destination this function cannot read or
+// parse is an error and the write is ABORTED — writing the frame over it is
+// exactly the data loss this guards against.
+//
+// Every FRAME-side problem (empty, `null`, or not a JSON object) instead KEEPS
+// the destination's bytes and only logs: the frame is the sender's own file, so
+// keeping the host's copy loses nothing, and a hard error there would abort the
+// whole sync (RemoteWorkspace.Connect treats a sync error as fatal) and let one
+// corrupt local config brick every remote connect.
+//
+// So the non-error exits are: no machine-local keys for this file, a missing
+// (fresh host) or empty destination (nothing to lose yet), and any FRAME-side
+// problem (keep the destination).
+func preserveMachineLocalConfig(name string, content []byte, destPath string) ([]byte, error) {
 	keys := machineLocalConfigKeys[name]
-	if len(keys) == 0 || len(bytes.TrimSpace(content)) == 0 {
-		return content
+	if len(keys) == 0 {
+		return content, nil
 	}
+	// The destination is read BEFORE the empty-frame check: an empty local
+	// config used to take the early return above and be written over the
+	// host's file, erasing the very grants this function exists to keep.
 	existing, err := os.ReadFile(destPath)
 	if err != nil {
-		// A missing destination is the normal fresh-host case: nothing to
-		// preserve, so no log line. Any other read error is worth surfacing.
-		if !os.IsNotExist(err) {
-			log.Printf("sync: preserve machine-local keys: read %s: %v (writing frame as-is)", destPath, err)
+		if os.IsNotExist(err) {
+			return content, nil // fresh host: no destination, nothing to preserve
 		}
-		return content
+		log.Printf("sync: preserve machine-local keys: read %s: %v (refusing the write)", destPath, err)
+		return nil, fmt.Errorf("read destination %s: %w", destPath, err)
 	}
 	if len(bytes.TrimSpace(existing)) == 0 {
-		return content
+		return content, nil
+	}
+	// An empty frame carries no JSON object at all, so writing it would erase
+	// the whole destination. Keep the destination's own bytes instead: writing
+	// a file's current content back is a no-op, and it protects the grants.
+	if len(bytes.TrimSpace(content)) == 0 {
+		log.Printf("sync: preserve machine-local keys: frame for %s is empty; keeping the destination as-is", destPath)
+		return existing, nil
 	}
 	var incoming, current map[string]json.RawMessage
 	if err := json.Unmarshal(content, &incoming); err != nil {
-		log.Printf("sync: preserve machine-local keys: frame content is not a JSON object: %v (writing as-is)", err)
-		return content
+		// FRAME-side problem: the LOCAL config is not a JSON object. That is the
+		// sender's file, so keeping the host's destination loses nothing, while
+		// erroring here would abort the whole sync and let one corrupt local
+		// config brick every remote connect. stripMachineLocalConfig documents
+		// the same policy ("failing the sync over it would be a regression").
+		// DESTINATION-side failures below stay hard errors.
+		log.Printf("sync: preserve machine-local keys: frame for %s is not a JSON object: %v; keeping the destination as-is", destPath, err)
+		return existing, nil
+	}
+	// `null` unmarshals into a nil map with NO error, so the merge below would
+	// panic assigning into it. Same treatment as an empty frame.
+	if incoming == nil {
+		log.Printf("sync: preserve machine-local keys: frame for %s is null; keeping the destination as-is", destPath)
+		return existing, nil
 	}
 	if err := json.Unmarshal(existing, &current); err != nil {
-		log.Printf("sync: preserve machine-local keys: destination %s is not a JSON object: %v (writing frame as-is)", destPath, err)
-		return content
+		log.Printf("sync: preserve machine-local keys: destination %s is not a JSON object: %v (refusing the write)", destPath, err)
+		return nil, fmt.Errorf("destination %s is not a JSON object: %w", destPath, err)
 	}
 	added := false
 	for _, k := range keys {
@@ -216,14 +251,14 @@ func preserveMachineLocalConfig(name string, content []byte, destPath string) []
 		added = true
 	}
 	if !added {
-		return content
+		return content, nil
 	}
 	out, err := json.MarshalIndent(incoming, "", "  ")
 	if err != nil {
-		log.Printf("sync: preserve machine-local keys: re-marshal failed: %v (writing frame as-is)", err)
-		return content
+		log.Printf("sync: preserve machine-local keys: re-marshal %s failed: %v (refusing the write)", destPath, err)
+		return nil, fmt.Errorf("re-marshal %s: %w", destPath, err)
 	}
-	return append(out, '\n')
+	return append(out, '\n'), nil
 }
 
 func ocodeAuthProfilesPath() (string, error) {
@@ -320,7 +355,13 @@ func WritePayload(p SyncPayload) error {
 		}
 		content := f.Content
 		if f.Dir == SyncDirConfig {
-			content = preserveMachineLocalConfig(f.Name, f.Content, destPath)
+			merged, perr := preserveMachineLocalConfig(f.Name, f.Content, destPath)
+			if perr != nil {
+				// Abort the whole write: a config we cannot merge must not be
+				// replaced, or the host loses the very grants this guards.
+				return fmt.Errorf("refusing to overwrite %s: %w", destPath, perr)
+			}
+			content = merged
 		}
 		if err := writeFileMode(destPath, content, mode); err != nil {
 			return fmt.Errorf("write %s: %w", destPath, err)

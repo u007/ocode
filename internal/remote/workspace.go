@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/u007/ocode/internal/tool"
@@ -75,6 +76,20 @@ func generateWorkspaceID() string {
 	return hex.EncodeToString(b)
 }
 
+// syncFailureHint makes an opaque remote sync failure actionable, and returns
+// the error unchanged otherwise. The config-preservation refusal is the one sync
+// failure a user can fix themselves, and since Connect treats ANY sync error as
+// fatal it would otherwise 502 every request with no way forward.
+func syncFailureHint(host string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		return err
+	}
+	return fmt.Errorf(
+		"%w — the host's config could not be merged, so the sync was REFUSED rather than erasing its extra_allowed_paths grants; fix it on %s (chown/chmod ~/.config/opencode/ocodeconfig.json), or delete that file to resync it from this machine",
+		err, host,
+	)
+}
+
 // Connect establishes the remote workspace: provisions the binary,
 // syncs credentials, starts or reuses the remote server, and establishes
 // the SSH tunnel (skipped for WSL — Windows forwards WSL2 localhost
@@ -89,6 +104,7 @@ func (rw *RemoteWorkspace) Connect() error {
 	// a sync failure blocks the turn with a logged error.
 	progress := NewProgress(io.Discard, "sync")
 	if err := runSyncStage(progress, rw.Transport, rw.Target.String(), version.Version, false); err != nil {
+		err = syncFailureHint(rw.Target.String(), err)
 		log.Printf("sync credentials to %s: %v", rw.Target.String(), err)
 		return fmt.Errorf("sync credentials to %s: %w", rw.Target.String(), err)
 	}

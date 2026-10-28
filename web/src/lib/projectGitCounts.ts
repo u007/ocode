@@ -4,6 +4,7 @@ import type { GitStatus } from "../api/types";
 import { eventBus, type BusEnvelope } from "./eventBus";
 import {
   __resetRemoteReadGatesForTests,
+  isHostUnreachable,
   withRemoteRead,
 } from "./remoteHostGate";
 
@@ -152,7 +153,12 @@ function refresh(entry: Entry): Promise<void> {
       return true;
     } catch (err) {
       console.error(`project git counts for ${entry.project} failed:`, err);
-      return false;
+      // Only an unreachable host (502 / network TypeError) opens the retry
+      // window. A 404, 403, or any other answer means the host is alive, so
+      // keep the last-known counts and do not arm the 2-minute window —
+      // otherwise a single non-repo / unknown-project failure would freeze
+      // every terminal and panel on that host for two minutes.
+      return isHostUnreachable(err) ? false : true;
     }
   };
 

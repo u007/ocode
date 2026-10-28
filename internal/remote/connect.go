@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -184,6 +185,11 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 		progress.Start("sync", "credentials synced")
 		progress.Warn("skipped (--no-sync)")
 	} else if err := runSyncStage(progress, transport, opts.Target.String(), ver, false); err != nil {
+		// Deliberately non-fatal here: the CLI proceeds with an out-of-date or
+		// partially synced host and the user can fix it, whereas a web/desktop
+		// session cannot (RemoteWorkspace.Connect makes it fatal). runSyncStage
+		// already surfaced err, including the remote's stderr, through
+		// progress.Warn — this only discards the RETURN value.
 		_ = err
 	}
 
@@ -513,7 +519,13 @@ func runSyncStage(progress *Progress, transport Transport, hostKey, ver string, 
 		if err == nil {
 			err = fmt.Errorf("exit %d", res.ExitCode)
 		}
-		progress.Warn(fmt.Sprintf("remote-receive-config failed: %v: %s", err, res.Stderr))
+		// Fold the remote's stderr in. It is where the actionable reason lives
+		// (e.g. the receiver refusing to overwrite a config it cannot merge), and
+		// returning a bare "exit 1" left the caller unable to say anything useful.
+		if stderr := strings.TrimSpace(res.Stderr); stderr != "" {
+			err = fmt.Errorf("%w: %s", err, stderr)
+		}
+		progress.Warn(fmt.Sprintf("remote-receive-config failed: %v", err))
 		return err
 	}
 

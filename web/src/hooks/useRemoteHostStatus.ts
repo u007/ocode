@@ -74,6 +74,11 @@ function fetchStatus(entry: RemoteHostEntry, showLoading: boolean): Promise<bool
     .then((s) => {
       entry.status = s;
       entry.error = null;
+      // A connected status read is proof the host is back: close any retry
+      // window a transient failure armed. Without this, the window blocks the
+      // very reads that could observe recovery, so a host that comes back can
+      // stay "unreachable" for the whole retry window.
+      if (s.connected) noteRemoteHostReachable(entry.host);
       return true;
     })
     .catch((err) => {
@@ -100,9 +105,13 @@ function fetchStatus(entry: RemoteHostEntry, showLoading: boolean): Promise<bool
  * just answered fine.
  */
 function pollStatus(entry: RemoteHostEntry): Promise<void> {
-  return withRemoteRead(entry.host, "status", () => fetchStatus(entry, false)).then(
-    () => undefined,
-  );
+  // The status endpoint is an in-memory registry read, so it is safe to probe
+  // even while the host is inside its retry window. That is the only way the
+  // window can close before it expires: every OTHER read is skipped while it is
+  // armed, so nothing else would ever observe the host recovering.
+  return withRemoteRead(entry.host, "status", () => fetchStatus(entry, false), {
+    probeWhileRetrying: true,
+  }).then(() => undefined);
 }
 
 function ensureEntry(host: string): RemoteHostEntry {
