@@ -329,11 +329,18 @@ func (h *Handler) gatherDiskPulseInputs(now time.Time) []PulseInput {
 }
 
 func pulseTodoFromSummary(sum tool.TodoSummary) *PulseTodo {
+	return &PulseTodo{Revision: sum.Revision, Done: sum.Done, Total: sum.Total, Current: sum.Current, Items: pulseTodoItems(sum)}
+}
+
+func pulseTodoItems(sum tool.TodoSummary) []PulseTodoItem {
 	items := make([]PulseTodoItem, 0, len(sum.Items))
 	for _, it := range sum.Items {
-		items = append(items, PulseTodoItem{Text: it.Text, State: it.State})
+		items = append(items, PulseTodoItem{
+			ID: it.ID, Text: it.Text, State: it.State, Deps: it.Deps, Blocked: it.Blocked,
+			Started: it.Started, Finished: it.Finished, RunID: it.RunID, Result: it.Result,
+		})
 	}
-	return &PulseTodo{Done: sum.Done, Total: sum.Total, Current: sum.Current, Items: items}
+	return items
 }
 
 // pulseTailAsk reports the interaction blocking a turn, or nil. It reads the

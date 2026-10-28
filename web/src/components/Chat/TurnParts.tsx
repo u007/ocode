@@ -1,4 +1,4 @@
-import { memo, useRef, useSyncExternalStore } from "react";
+import { memo, useRef, useSyncExternalStore, type ComponentProps } from "react";
 import { CheckCircle2 } from "lucide-react";
 import type { MessageImage, QuestionAnswerPayload } from "@/api/types";
 import { isInlineSafeMediaType } from "../Preview/blobPreview";
@@ -9,6 +9,8 @@ import { useChatDisplay } from "./chatDisplayContext";
 import { renderedCopyText } from "../../lib/copyText";
 import { SpeakButton, type SpeakAction } from "../Speech/SpeakButton";
 import { BlockCopyControl } from "./BlockCopyControl";
+import { useAgentRuns } from "../../hooks/useAgentRuns";
+import RunNode from "../Agents/RunNode";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
 
@@ -305,7 +307,7 @@ export function QuestionAnswerBlock({
 // `live` array reference, which re-renders ChatPanel's `live.map(...)` and
 // would otherwise re-invoke every already-completed ToolBlock in the current
 // turn (each re-running its HighlightedCode effect) on every single token.
-export const ToolBlock = memo(function ToolBlock({
+const PlainToolBlock = memo(function PlainToolBlock({
   tool,
   command,
   output,
@@ -561,3 +563,59 @@ export const ToolBlock = memo(function ToolBlock({
     </div>
   );
 });
+
+type PlainToolBlockProps = ComponentProps<typeof PlainToolBlock>;
+
+// ToolBlock renders one tool call. A `task`/`agent` call whose dispatched run
+// is live in this process renders that run inline (collapsed, expandable to its
+// transcript); every other call, and a task call replayed after a restart
+// (no in-memory run), renders the plain block. Only the task/agent branch
+// subscribes to the run tree, so other blocks never re-render on a runs tick.
+export const ToolBlock = memo(function ToolBlock({
+  toolCallId,
+  sessionId,
+  ...block
+}: PlainToolBlockProps & {
+  /** This call's id, matched against a run's `toolCallId`. */
+  toolCallId?: string;
+  sessionId?: string;
+}) {
+  if ((block.tool === "task" || block.tool === "agent") && toolCallId && sessionId) {
+    return <TaskToolBlock sessionId={sessionId} toolCallId={toolCallId} block={block} />;
+  }
+  return <PlainToolBlock {...block} />;
+});
+
+function TaskToolBlock({
+  sessionId,
+  toolCallId,
+  block,
+}: {
+  sessionId: string;
+  toolCallId: string;
+  block: PlainToolBlockProps;
+}) {
+  const { runs } = useAgentRuns(sessionId);
+  const run = runs.find((r) => r.toolCallId === toolCallId);
+  if (!run) return <PlainToolBlock {...block} />;
+  return (
+    <div className="mb-3 flex justify-start">
+      <div className="w-full max-w-[95%] rounded-lg border border-amber-700/40 bg-amber-950/20 px-1 py-1 md:max-w-[80%]">
+        <RunNode
+          run={run}
+          depth={0}
+          defaultOpen={false}
+          renderReasoning={({ text, blockKey, isLatest, answerStarted }) => (
+            <ThinkingBlock
+              key={blockKey}
+              text={text}
+              blockKey={blockKey}
+              isLatest={isLatest}
+              answerStarted={answerStarted}
+            />
+          )}
+        />
+      </div>
+    </div>
+  );
+}

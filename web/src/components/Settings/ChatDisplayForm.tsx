@@ -3,6 +3,7 @@ import type {
   ChatDisplayOverride,
   ChatDisplayPolicy,
   ChatLatestThinkingOverride,
+  ChatPlanPanelSetting,
   ChatVerbosityPreset,
 } from "@/api/types";
 import {
@@ -12,7 +13,8 @@ import {
   useChatVerbosity,
 } from "@/lib/chatVerbosity";
 
-type OverrideKey = keyof typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides;
+// plan_panel is a different kind of setting (initial plan panel size), edited by its own select.
+type OverrideKey = Exclude<keyof typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides, "plan_panel">;
 
 const PRESETS: Array<{ id: ChatVerbosityPreset; label: string; description: string }> = [
   { id: "full", label: "Full", description: "Show everything (current default)." },
@@ -49,6 +51,13 @@ const OVERRIDE_OPTIONS: Array<{ value: ChatDisplayOverride; label: string }> = [
 const LATEST_THINKING_OPTIONS: Array<{ value: ChatLatestThinkingOverride; label: string }> = [
   ...OVERRIDE_OPTIONS,
   { value: "auto", label: "Auto — collapse once the answer starts" },
+];
+
+const PLAN_PANEL_OPTIONS: Array<{ value: ChatPlanPanelSetting; label: string }> = [
+  { value: "collapsed", label: "Collapsed" },
+  { value: "5", label: "Open, first 5 items" },
+  { value: "10", label: "Open, first 10 items" },
+  { value: "all", label: "Open, all items" },
 ];
 
 /**
@@ -203,6 +212,26 @@ export default function ChatDisplayForm() {
             </select>
           </label>
         ))}
+        <label className="flex items-center justify-between gap-3 text-xs">
+          <span className="text-foreground">Plan panel</span>
+          <select
+            aria-label="Plan panel"
+            className="rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
+            value={overrides.plan_panel}
+            onChange={(event) =>
+              setOverrides((current) => ({
+                ...current,
+                plan_panel: event.target.value as ChatPlanPanelSetting,
+              }))
+            }
+          >
+            {PLAN_PANEL_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-border pt-4">

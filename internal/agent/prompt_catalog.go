@@ -104,6 +104,13 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     networkGuardInstructions,
 		},
 		{
+			Key:         "plan",
+			Label:       "Plan then execute",
+			Description: "Fragment that asks primary agents to write a todo plan before multi-step work, work it item by item, and delegate self-contained items with task(todo_item).",
+			Kind:        PromptKindMainAgent,
+			Builtin:     planExecutePromptContent,
+		},
+		{
 			Key:         "recap",
 			Label:       "Recap",
 			Description: "Fragment that asks primary agents to close a turn that did work with a short recap for the user.",

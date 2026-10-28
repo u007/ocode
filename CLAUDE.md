@@ -448,8 +448,14 @@ injection details: `docs/concepts/persistent-todo-plan.md`. Invariants:
   makes the guard vacuous.
 - **Strict parse, never silent reset:** a file that fails to parse refuses writes
   and surfaces the error; legacy headerless content must still parse.
+- **The plan fragment (`[ocode:plan]`, `planExecutePromptContent`) is static, primary-only
+  and sits directly after recap** in `BasePromptMessages`; never make it vary per turn.
 - **Re-anchor injection is user-role, never system-role** (`injectTodoTail`), and only
   when an open item exists, so the cached prefix stays byte-stable.
+- **Deps block `in_progress`/`done`** (`t3 is blocked by t1`), on `todo_update` and on a
+  `todowrite` rewrite alike. The `task` tool's `todo_item` link is a system mutation
+  (`LinkTodoItemToRun`/`FinishTodoItemRun`) that needs no cited revision and is refused
+  from a sub-agent dispatcher; item detail lines are in `docs/concepts/persistent-todo-plan.md`.
 - `ResetTodoState` clears memory only; it must not delete the outgoing session's file.
 
 ## Sub-agent transcripts: `OnSubAgentMessage` + child sessions

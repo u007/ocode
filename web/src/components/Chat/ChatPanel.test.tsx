@@ -2104,6 +2104,7 @@ describe("ChatPanel latest thinking under the auto policy", () => {
       tool_calls: "preset",
       tool_output: "preset",
       activity_notices: "preset",
+      plan_panel: "5",
     },
   });
 

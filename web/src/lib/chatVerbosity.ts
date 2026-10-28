@@ -5,6 +5,7 @@ import type {
   ChatDisplayOverride,
   ChatDisplayPolicy,
   ChatLatestThinkingOverride,
+  ChatPlanPanelSetting,
   ChatVerbosityConfig,
   ChatVerbosityPreset,
   ChatVerbosityResponse,
@@ -12,6 +13,7 @@ import type {
 
 export const CHAT_VERBOSITY_PRESETS: readonly ChatVerbosityPreset[] = ["full", "balanced", "quiet"];
 export const CHAT_DISPLAY_OVERRIDES: readonly ChatDisplayOverride[] = ["preset", "expanded", "collapsed"];
+export const CHAT_PLAN_PANEL_SETTINGS: readonly ChatPlanPanelSetting[] = ["collapsed", "5", "10", "all"];
 
 export const DEFAULT_CHAT_VERBOSITY_CONFIG: ChatVerbosityConfig = {
   preset: "full",
@@ -21,6 +23,7 @@ export const DEFAULT_CHAT_VERBOSITY_CONFIG: ChatVerbosityConfig = {
     tool_calls: "preset",
     tool_output: "preset",
     activity_notices: "preset",
+    plan_panel: "5",
   },
 };
 
@@ -52,6 +55,10 @@ function isOverride(value: unknown): value is ChatDisplayOverride {
 
 function isLatestThinkingOverride(value: unknown): value is ChatLatestThinkingOverride {
   return isOverride(value) || value === "auto";
+}
+
+function isPlanPanelSetting(value: unknown): value is ChatPlanPanelSetting {
+  return CHAT_PLAN_PANEL_SETTINGS.includes(value as ChatPlanPanelSetting);
 }
 
 function errorMessage(error: unknown): string {
@@ -91,6 +98,7 @@ export function normalizeChatVerbosityConfig(input?: ConfigInput | null): ChatVe
       tool_calls: (overrides.tool_calls || "preset") as ChatDisplayOverride,
       tool_output: (overrides.tool_output || "preset") as ChatDisplayOverride,
       activity_notices: (overrides.activity_notices || "preset") as ChatDisplayOverride,
+      plan_panel: (overrides.plan_panel || "5") as ChatPlanPanelSetting,
     },
   };
 }
@@ -101,7 +109,12 @@ function assertValidConfig(config: ChatVerbosityConfig): void {
   }
   for (const [name, value] of Object.entries(config.overrides)) {
     // `auto` is only meaningful for latest thinking; every other category rejects it.
-    const valid = name === "latest_thinking" ? isLatestThinkingOverride(value) : isOverride(value);
+    const valid =
+      name === "plan_panel"
+        ? isPlanPanelSetting(value)
+        : name === "latest_thinking"
+          ? isLatestThinkingOverride(value)
+          : isOverride(value);
     if (!valid) {
       throw new Error(`Invalid chat display override for ${name}: ${String(value)}`);
     }
@@ -167,6 +180,7 @@ const CHAT_OVERRIDE_KEYS = new Set<keyof ChatVerbosityConfig["overrides"]>([
   "tool_calls",
   "tool_output",
   "activity_notices",
+  "plan_panel",
 ]);
 
 function assertResponseShape(value: unknown): asserts value is ChatVerbosityResponse {

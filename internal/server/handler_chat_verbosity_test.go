@@ -120,3 +120,19 @@ func TestHandleSetChatVerbosityConfigAcceptsAutoForLatestThinking(t *testing.T) 
 		t.Fatalf("in-memory latest_thinking = %q, want auto", got.Overrides.LatestThinking)
 	}
 }
+
+func TestHandleSetChatVerbosityConfigPlanPanel(t *testing.T) {
+	h := testConfigHandler(t)
+	put := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.HandleSetChatVerbosityConfig(w, httptest.NewRequest(http.MethodPut, "/api/config/ocode/chat-verbosity", strings.NewReader(body)))
+		return w
+	}
+	if w := put(`{"preset":"full","overrides":{"plan_panel":"7"}}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("plan_panel=7 status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+	w := put(`{"preset":"full","overrides":{"plan_panel":"10"}}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"plan_panel":"10"`) {
+		t.Fatalf("plan_panel=10 status = %d, body=%s", w.Code, w.Body.String())
+	}
+}

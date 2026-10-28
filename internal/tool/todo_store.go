@@ -59,6 +59,9 @@ import (
 //	- [ ] t1 First item
 //	- [•] t2 Second item
 //	- [✓] t3 Third item
+//
+// An item may carry indented detail lines (deps, started, finished, run,
+// result); see todo_meta.go.
 
 type todoStore struct {
 	mu       sync.RWMutex
@@ -109,6 +112,13 @@ type todoItem struct {
 	status string // " ", "•", "✓"
 	id     string // stable id, e.g. "t1"; "" when not yet assigned
 	text   string
+
+	// Optional detail, serialized as continuation lines (todo_meta.go).
+	deps     []string // ids of items that must be done first
+	started  string   // RFC3339, stamped when the item first goes in_progress
+	finished string   // RFC3339, stamped when the item first goes done
+	run      string   // agent run id linked by the task tool
+	result   string   // one-line outcome
 }
 
 // parseTodoItems parses the item body of a todo list (lines after the header).
@@ -121,6 +131,15 @@ func parseTodoItems(body string, requireIDs bool) ([]todoItem, error) {
 	for _, rawLine := range strings.Split(body, "\n") {
 		line := strings.TrimRight(rawLine, "\r")
 		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if isTodoDetailLine(line) {
+			if len(items) == 0 {
+				return nil, fmt.Errorf("line %q: detail line before any item", line)
+			}
+			if err := applyTodoDetail(&items[len(items)-1], line); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		m := todoItemLineRe.FindStringSubmatch(line)
@@ -162,7 +181,7 @@ func serializeTodo(revision int, items []todoItem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Todo (revision %d)\n\n", revision)
 	for _, it := range items {
-		fmt.Fprintf(&b, "- [%s] %s %s\n", it.status, it.id, it.text)
+		writeTodoItem(&b, it, true)
 	}
 	return b.String()
 }
@@ -171,7 +190,7 @@ func serializeTodo(revision int, items []todoItem) string {
 func serializeItems(items []todoItem) string {
 	var b strings.Builder
 	for _, it := range items {
-		fmt.Fprintf(&b, "- [%s] %s %s\n", it.status, it.id, it.text)
+		writeTodoItem(&b, it, true)
 	}
 	return b.String()
 }
@@ -468,7 +487,9 @@ func TodoState() string {
 	if ses.parseErr != nil {
 		return fmt.Sprintf("! todo file unreadable: %v", ses.parseErr)
 	}
-	return stripTodoHeader(ses.content)
+	// Item lines only: the sidebar has no room for the detail lines, which
+	// stay in the file.
+	return dropTodoDetail(stripTodoHeader(ses.content))
 }
 
 // SetTodoState sets the current session's in-memory copy without touching
@@ -593,6 +614,13 @@ func staleTodoError(sessionID string, cited, current int, currentItems []todoIte
 // unconditionally: there is no override flag, the rejection text is the fix
 // (use todo_update for status changes).
 func todoWrite(scope TodoScope, citedRevision int, todoText string, store *snapshot.Store, tcID string) (string, error) {
+	wrote := false
+	// Registered before the lock so it runs after the unlock.
+	defer func() {
+		if wrote {
+			notifyTodoWritten(scope)
+		}
+	}()
 	todoStoreState.mu.Lock()
 	defer todoStoreState.mu.Unlock()
 	root, cur := scope.ProjectRoot, scope.SessionID
@@ -643,7 +671,19 @@ func todoWrite(scope TodoScope, citedRevision int, todoText string, store *snaps
 		// existing item it matches by text (so a reorder keeps t1 pointing at
 		// the same item), then fill the genuinely new ones.
 		inheritTodoIDs(existing, newItems)
+		mergeTodoDetail(existing, newItems)
+		// Deps are checked against the ids present NOW; checking after
+		// assignTodoIDs would bind a dep on "t5" to whichever new item gets t5.
+		if derr := checkRewriteDeps(newItems); derr != nil {
+			return derr
+		}
 		assignTodoIDs(newItems)
+		if derr := validateTodoDeps(newItems); derr != nil {
+			return derr
+		}
+		if terr := applyRewriteTransitions(existing, newItems); terr != nil {
+			return terr
+		}
 
 		newRev := fileRev + 1
 		if !fileExists {
@@ -658,6 +698,7 @@ func todoWrite(scope TodoScope, citedRevision int, todoText string, store *snaps
 			content:  serializeTodo(newRev, newItems),
 		}
 		out = fmt.Sprintf("Successfully updated todo list (revision %d)", newRev)
+		wrote = true
 		return nil
 	})
 	if err != nil {
@@ -735,78 +776,36 @@ const (
 	todoOpEditText    = "edit_text"
 	todoOpAppend      = "append"
 	todoOpInsertAfter = "insert_after"
+	todoOpSetDeps     = "set_deps"
+	todoOpSetResult   = "set_result"
 )
+
+// todoOpArgs are the inputs of one todo_update call. Deps is a pointer so an
+// absent field (an error for set_deps) differs from an empty list (clears).
+type todoOpArgs struct {
+	Op, ItemID, Status, Text, Result string
+	Deps                             *[]string
+}
 
 // todoUpdate applies a targeted mutation by item id. Every mutation must cite
 // the revision it was based on; a stale citation is rejected with the current
 // content.
-func todoUpdate(scope TodoScope, citedRevision int, op, itemID, status, text string, store *snapshot.Store, tcID string) (string, error) {
-	todoStoreState.mu.Lock()
-	defer todoStoreState.mu.Unlock()
-	root, cur := scope.ProjectRoot, scope.SessionID
-
-	// Ensure the lock's directory exists before opening the lock file.
-	if err := os.MkdirAll(todoDir(root), 0o755); err != nil {
-		return "", err
-	}
-
-	// One lock hold for read → verify revision → apply → write, for the same
-	// reason as todoWrite: a lock released between the read and the write
-	// does not prevent two processes from both writing revision N+1.
-	var out string
-	err := filelock.WithFileLock(todoLockPath(root), func() error {
-		fileRev, fileItems, fileExists, rerr := readTodoFile(root, cur)
-		if rerr != nil {
-			return rerr
-		}
-		if fileExists && fileRev != citedRevision {
-			return staleTodoError(cur, citedRevision, fileRev, fileItems)
-		}
-		if !fileExists && citedRevision != 0 {
-			return fmt.Errorf("todo update rejected: no todo file exists for this session yet (cited revision %d); run todoread to get the current state", citedRevision)
-		}
-
-		newItems := baseItems(cur, fileExists, fileItems)
-		assignTodoIDs(newItems)
-
-		res, aerr := applyTodoOp(newItems, op, itemID, status, text)
-		if aerr != nil {
-			return aerr
-		}
-		newItems = res
-
-		newRev := fileRev + 1
-		if !fileExists {
-			newRev = 1
-		}
-		if werr := writeTodoFile(root, cur, newRev, newItems, store, tcID); werr != nil {
-			return werr
-		}
-		todoStoreState.sessions[cur] = &todoSession{
-			revision: newRev,
-			content:  serializeTodo(newRev, newItems),
-		}
-		out = fmt.Sprintf("Successfully updated todo list (revision %d)", newRev)
-		return nil
+func todoUpdate(scope TodoScope, citedRevision int, args todoOpArgs, store *snapshot.Store, tcID string) (string, error) {
+	newRev, err := mutateTodo(scope, &citedRevision, "todo update", store, tcID, func(items []todoItem) ([]todoItem, error) {
+		return applyTodoOp(items, args)
 	})
 	if err != nil {
 		return "", err
 	}
-	return out, nil
+	return fmt.Sprintf("Successfully updated todo list (revision %d)", newRev), nil
 }
 
 // applyTodoOp applies one targeted mutation to items and returns the new
 // slice. Split out of todoUpdate so the whole read-verify-apply-write
 // sequence can sit inside a single file-lock hold.
-func applyTodoOp(newItems []todoItem, op, itemID, status, text string) ([]todoItem, error) {
-	findIdx := func(id string) int {
-		for i, it := range newItems {
-			if it.id == id {
-				return i
-			}
-		}
-		return -1
-	}
+func applyTodoOp(newItems []todoItem, args todoOpArgs) ([]todoItem, error) {
+	op, itemID, status, text := args.Op, args.ItemID, args.Status, args.Text
+	findIdx := func(id string) int { return findTodoItem(newItems, id) }
 
 	switch op {
 	case todoOpSetStatus:
@@ -818,13 +817,45 @@ func applyTodoOp(newItems []todoItem, op, itemID, status, text string) ([]todoIt
 		if idx < 0 {
 			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
 		}
-		newItems[idx].status = canon
+		result, err := modelTodoResult(args.Result)
+		if err != nil {
+			return nil, err
+		}
+		if err := setTodoStatus(newItems, idx, canon); err != nil {
+			return nil, fmt.Errorf("todo_update: %w", err)
+		}
+		if result != "" {
+			newItems[idx].result = result
+		}
 	case todoOpEditText:
 		idx := findIdx(itemID)
 		if idx < 0 {
 			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
 		}
 		newItems[idx].text = text
+	case todoOpSetDeps:
+		idx := findIdx(itemID)
+		if idx < 0 {
+			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+		}
+		if args.Deps == nil {
+			return nil, fmt.Errorf("todo_update: set_deps requires deps (an empty array clears them)")
+		}
+		deps, err := parseTodoDepsInput(*args.Deps)
+		if err != nil {
+			return nil, err
+		}
+		newItems[idx].deps = deps
+	case todoOpSetResult:
+		idx := findIdx(itemID)
+		if idx < 0 {
+			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+		}
+		result, err := modelTodoResult(text)
+		if err != nil {
+			return nil, err
+		}
+		newItems[idx].result = result
 	case todoOpAppend:
 		if strings.TrimSpace(text) == "" {
 			return nil, fmt.Errorf("todo_update: append requires non-empty text")
@@ -859,7 +890,7 @@ func applyTodoOp(newItems []todoItem, op, itemID, status, text string) ([]todoIt
 		newItems = append(newItems[:idx+1], rest...)
 		assignTodoIDs(newItems)
 	default:
-		return nil, fmt.Errorf("todo_update: unknown op %q (want set_status, edit_text, append, insert_after)", op)
+		return nil, fmt.Errorf("todo_update: unknown op %q (want set_status, edit_text, append, insert_after, set_deps, set_result)", op)
 	}
 
 	return newItems, nil
@@ -873,13 +904,13 @@ type TodoWriteTool struct{}
 
 func (t TodoWriteTool) Name() string { return "todowrite" }
 func (t TodoWriteTool) Description() string {
-	return "Create or rewrite the current session todo list. Replaces the entire list, so use todo_update for targeted changes. Include the revision returned by todoread; a stale revision is rejected. Item lines: \"- [ ] text\", \"- [•] text\", or \"- [✓] text\". Completed items may never be dropped by a rewrite."
+	return "Create or rewrite the current session todo list. Replaces the entire list, so use todo_update for targeted changes. Include the revision returned by todoread; a stale revision is rejected. Item lines: \"- [ ] text\", \"- [•] text\", or \"- [✓] text\". Completed items may never be dropped by a rewrite. Items may carry indented detail lines (deps, started, finished, run, result); echoed ids keep their detail."
 }
 func (t TodoWriteTool) Parallel() bool { return false }
 func (t TodoWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todowrite",
-		"description": "Create or rewrite the current session todo list. Replaces the entire list, so use todo_update for targeted changes. Include the revision returned by todoread; a stale revision is rejected. Item lines: \"- [ ] text\", \"- [•] text\", or \"- [✓] text\". Completed items may never be dropped by a rewrite.",
+		"description": "Create or rewrite the current session todo list. Replaces the entire list, so use todo_update for targeted changes. Include the revision returned by todoread; a stale revision is rejected. Item lines: \"- [ ] text\", \"- [•] text\", or \"- [✓] text\". Completed items may never be dropped by a rewrite. Items may carry indented detail lines (deps, started, finished, run, result); echoed ids keep their detail.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -965,7 +996,7 @@ func (t TodoUpdateTool) Parallel() bool { return false }
 func (t TodoUpdateTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todo_update",
-		"description": "Apply a targeted update to one todo item by its id. Ops: set_status (status: pending|in_progress|done), edit_text (text), append (text, new item at end), insert_after (item_id + text, new item after the anchor). Every call must cite the revision from the most recent todoread; a stale revision is rejected.",
+		"description": "Apply a targeted update to one todo item by its id. Ops: set_status (status: pending|in_progress|done, optional result; in_progress/done are refused while a dependency is not done), edit_text (text), append (text, new item at end), insert_after (item_id + text, new item after the anchor), set_deps (item_id + deps: ids this item waits for; [] clears), set_result (item_id + text, one line). Every call must cite the revision from the most recent todoread; a stale revision is rejected.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -975,7 +1006,7 @@ func (t TodoUpdateTool) Definition() map[string]interface{} {
 				},
 				"op": map[string]interface{}{
 					"type":        "string",
-					"description": "set_status | edit_text | append | insert_after",
+					"description": "set_status | edit_text | append | insert_after | set_deps | set_result",
 				},
 				"item_id": map[string]interface{}{
 					"type":        "string",
@@ -987,7 +1018,16 @@ func (t TodoUpdateTool) Definition() map[string]interface{} {
 				},
 				"text": map[string]interface{}{
 					"type":        "string",
-					"description": "New text for edit_text, or the new item's text for append/insert_after.",
+					"description": "New text for edit_text, or the new item's text for append/insert_after, or the one-line result for set_result.",
+				},
+				"deps": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "For set_deps: ids of the items this item depends on. Replaces the list; an empty array clears it.",
+				},
+				"result": map[string]interface{}{
+					"type":        "string",
+					"description": "For set_status: optional one-line result recorded in the same update.",
 				},
 			},
 			"required": []string{"revision", "op"},
@@ -1005,11 +1045,13 @@ func (t TodoUpdateTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (s
 
 func (t TodoUpdateTool) execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
-		Revision int    `json:"revision"`
-		Op       string `json:"op"`
-		ItemID   string `json:"item_id"`
-		Status   string `json:"status"`
-		Text     string `json:"text"`
+		Revision int       `json:"revision"`
+		Op       string    `json:"op"`
+		ItemID   string    `json:"item_id"`
+		Status   string    `json:"status"`
+		Text     string    `json:"text"`
+		Deps     *[]string `json:"deps"`
+		Result   string    `json:"result"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -1020,7 +1062,7 @@ func (t TodoUpdateTool) execute(ctx context.Context, args json.RawMessage) (stri
 	}
 	store := snapshot.FromContext(ctx)
 	tcID := snapshot.ToolCallIDFromContext(ctx)
-	return todoUpdate(scope, params.Revision, params.Op, params.ItemID, params.Status, params.Text, store, tcID)
+	return todoUpdate(scope, params.Revision, todoOpArgs{Op: params.Op, ItemID: params.ItemID, Status: params.Status, Text: params.Text, Result: params.Result, Deps: params.Deps}, store, tcID)
 }
 
 // TodoSnapshotItem is one open todo item exposed to the auto-continue judge.
@@ -1037,7 +1079,8 @@ type TodoSnapshotItem struct {
 // status) so a judge can reason about a specific item.
 type TodoSnapshot struct {
 	Revision     int
-	Content      string // canonical serialized items (no header), or ""
+	Content      string   // canonical serialized items (no header), or ""
+	Blocked      []string // open items waiting on open deps, as "t3 by t1, t2"; kept out of Content so it stays valid plan grammar
 	HasOpenItems bool
 	OpenItems    []TodoSnapshotItem
 }
@@ -1066,15 +1109,22 @@ func ReadTodoSnapshot(scope TodoScope) TodoSnapshot {
 			openItems = append(openItems, TodoSnapshotItem{ID: it.id, Text: it.text, Status: state})
 		}
 	}
-	return TodoSnapshot{Revision: rev, Content: serializeItems(items), HasOpenItems: open, OpenItems: openItems}
+	return TodoSnapshot{Revision: rev, Content: serializeItemsForAnchor(items), Blocked: blockedAnchorNotes(items), HasOpenItems: open, OpenItems: openItems}
 }
 
 // TodoSummaryItem is one todo line reduced to what a cross-session dashboard
 // needs: the text plus a normalized state word. The raw status marker (" ",
 // "•", "✓") stays an internal detail of the file grammar.
 type TodoSummaryItem struct {
-	Text  string
-	State string // "pending" | "in_progress" | "done"
+	ID       string
+	Text     string
+	State    string   // "pending" | "in_progress" | "done"
+	Deps     []string // ids that must be done first
+	Blocked  bool     // not done and at least one dep is not done
+	Started  string   // RFC3339, "" until first in_progress
+	Finished string   // RFC3339, "" until done
+	RunID    string   // agent run linked by the task tool
+	Result   string   // one-line outcome
 }
 
 // TodoSummary is a per-session todo plan reduced to counts plus the item list.
@@ -1083,10 +1133,11 @@ type TodoSummaryItem struct {
 // session's plan without mutating or depending on the shared in-memory cache
 // (which is keyed by session id alone).
 type TodoSummary struct {
-	Done    int
-	Total   int
-	Current string // text of the first in-progress item, "" when none
-	Items   []TodoSummaryItem
+	Revision int // plan file header revision, so a reader can order frames
+	Done     int
+	Total    int
+	Current  string // text of the first in-progress item, "" when none
+	Items    []TodoSummaryItem
 }
 
 // ReadTodoSummary reads <projectRoot>/.ocode/todo/<sessionID>.md and summarizes
@@ -1114,12 +1165,12 @@ func ReadTodoSummary(projectRoot, sessionID string) (TodoSummary, bool, error) {
 	// Same strict on-disk grammar readTodoFile uses: a todo file always carries
 	// the revision header and per-item ids, so a file without them is corrupt
 	// rather than a lenient legacy body.
-	_, items, err := parseTodoDoc(string(data))
+	rev, items, err := parseTodoDoc(string(data))
 	if err != nil {
 		return TodoSummary{}, true, fmt.Errorf("todo file %s failed to parse: %w", path, err)
 	}
-	sum := TodoSummary{Total: len(items)}
-	for _, it := range items {
+	sum := TodoSummary{Revision: rev, Total: len(items)}
+	for i, it := range items {
 		state := "pending"
 		switch it.status {
 		case "✓":
@@ -1131,7 +1182,11 @@ func ReadTodoSummary(projectRoot, sessionID string) (TodoSummary, bool, error) {
 				sum.Current = it.text
 			}
 		}
-		sum.Items = append(sum.Items, TodoSummaryItem{Text: it.text, State: state})
+		sum.Items = append(sum.Items, TodoSummaryItem{
+			ID: it.id, Text: it.text, State: state, Deps: it.deps,
+			Blocked: it.status != "✓" && len(openTodoDeps(items, i)) > 0,
+			Started: it.started, Finished: it.finished, RunID: it.run, Result: it.result,
+		})
 	}
 	return sum, true, nil
 }

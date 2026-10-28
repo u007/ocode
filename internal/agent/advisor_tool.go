@@ -324,6 +324,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
 	advisorAgent.toolBatchDelay = 0
 	advisorAgent.SetRecapPromptEnabled(false)
+	advisorAgent.SetPlanPromptEnabled(false)
 	// The advisor's advice is injected into the PARENT's context as a
 	// user-role message, so a raw <ocode:suggestions> block would land in the
 	// parent's prompt and could prompt the model to emit another one. Opt out,

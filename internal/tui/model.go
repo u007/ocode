@@ -2140,7 +2140,7 @@ func renderSidebarTodo(todo string, width int) []string {
 		if ok && (marker == "~" || marker == "-") {
 			prefix = todoInProgressStyle.Render("› ")
 		}
-		styled = append(styled, prefix+styleTodoLine(line))
+		styled = append(styled, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(prefix+styleTodoLine(line)))
 	}
 
 	total := done + active + pending

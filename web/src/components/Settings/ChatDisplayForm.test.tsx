@@ -30,6 +30,7 @@ const balancedConfig: ChatVerbosityConfig = {
     tool_calls: "expanded" as const,
     tool_output: "preset" as const,
     activity_notices: "expanded" as const,
+    plan_panel: "5" as const,
   },
 };
 
@@ -137,6 +138,7 @@ describe("ChatDisplayForm", () => {
         tool_calls: "collapsed",
         tool_output: "collapsed",
         activity_notices: "collapsed",
+        plan_panel: "5",
       },
     });
 
@@ -149,8 +151,25 @@ describe("ChatDisplayForm", () => {
           tool_calls: "expanded",
           tool_output: "collapsed",
           activity_notices: "expanded",
+          plan_panel: "5",
         },
       }),
+    );
+  });
+
+  it("offers the plan panel setting and saves the chosen value", async () => {
+    mockSet.mockResolvedValue(balancedConfig);
+    render(<ChatDisplayForm />);
+    const select = (await screen.findByLabelText("Plan panel")) as HTMLSelectElement;
+    expect(select.value).toBe("5");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["collapsed", "5", "10", "all"]);
+
+    fireEvent.change(select, { target: { value: "all" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(mockSet).toHaveBeenCalledWith(
+        expect.objectContaining({ overrides: expect.objectContaining({ plan_panel: "all" }) }),
+      ),
     );
   });
 
@@ -204,6 +223,7 @@ describe("ChatDisplayForm", () => {
         tool_calls: "preset",
         tool_output: "preset",
         activity_notices: "preset",
+        plan_panel: "5",
       },
     });
     render(<ChatDisplayForm />);

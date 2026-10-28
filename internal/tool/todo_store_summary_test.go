@@ -3,6 +3,7 @@ package tool
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -38,15 +39,15 @@ func TestReadTodoSummaryCountsAndOrder(t *testing.T) {
 		t.Errorf("Current = %q, want %q", sum.Current, "wire the store")
 	}
 	want := []TodoSummaryItem{
-		{Text: "read the spec", State: "done"},
-		{Text: "wire the store", State: "in_progress"},
-		{Text: "add the test", State: "pending"},
+		{ID: "t1", Text: "read the spec", State: "done"},
+		{ID: "t2", Text: "wire the store", State: "in_progress"},
+		{ID: "t3", Text: "add the test", State: "pending"},
 	}
 	if len(sum.Items) != len(want) {
 		t.Fatalf("Items = %d, want %d (%+v)", len(sum.Items), len(want), sum.Items)
 	}
 	for i, w := range want {
-		if sum.Items[i] != w {
+		if !reflect.DeepEqual(sum.Items[i], w) {
 			t.Errorf("Items[%d] = %+v, want %+v", i, sum.Items[i], w)
 		}
 	}
@@ -119,5 +120,62 @@ func TestReadTodoSummaryIsScopedToGivenRoot(t *testing.T) {
 	}
 	if sumB.Total != 2 {
 		t.Errorf("rootB total = %d, want 2", sumB.Total)
+	}
+}
+
+func TestReadTodoSummaryCarriesDetail(t *testing.T) {
+	root := t.TempDir()
+	writeTodoFileAt(t, root, "ses_1", "# Todo (revision 2)\n- [•] t1 build\n  started: 2026-10-28T20:41:02+08:00\n  run: agent-run-4\n- [ ] t2 test\n  deps: t1\n- [✓] t3 ship\n  deps: t1\n  finished: 2026-10-28T20:44:10+08:00\n  result: shipped\n")
+	sum, _, err := ReadTodoSummary(root, "ses_1")
+	if err != nil {
+		t.Fatalf("ReadTodoSummary: %v", err)
+	}
+	if got := sum.Items[0]; got.RunID != "agent-run-4" || got.Started == "" || got.Blocked {
+		t.Errorf("item 0 = %+v, want run id, started, not blocked", got)
+	}
+	if got := sum.Items[1]; !got.Blocked || len(got.Deps) != 1 || got.Deps[0] != "t1" {
+		t.Errorf("item 1 = %+v, want blocked by t1", got)
+	}
+	if got := sum.Items[2]; got.Blocked || got.Result != "shipped" || got.Finished == "" {
+		t.Errorf("item 2 = %+v, a done item is never blocked and keeps its result", got)
+	}
+}
+
+func TestOnTodoWrittenFiresAfterEveryWriteOutsideLocks(t *testing.T) {
+	root := t.TempDir()
+	scope := TodoScope{ProjectRoot: root, SessionID: "ses_hook"}
+	var got []TodoScope
+	OnTodoWritten(func(s TodoScope) {
+		// Taking the store lock proves the hook runs after it is released.
+		todoStoreState.mu.Lock()
+		todoStoreState.mu.Unlock() //nolint:staticcheck
+		if s == scope {
+			got = append(got, s)
+		}
+	})
+	if _, err := todoWrite(scope, 0, "- [ ] one\n- [ ] two", nil, ""); err != nil {
+		t.Fatalf("todoWrite: %v", err)
+	}
+	rev := 1
+	if _, err := mutateTodo(scope, &rev, "todo update", nil, "", func(items []todoItem) ([]todoItem, error) { return items, nil }); err != nil {
+		t.Fatalf("mutateTodo: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("hook fired %d times, want 2 (todowrite + targeted mutation)", len(got))
+	}
+	stale := 1
+	if _, err := mutateTodo(scope, &stale, "todo update", nil, "", func(items []todoItem) ([]todoItem, error) { return items, nil }); err == nil {
+		t.Fatal("stale mutation unexpectedly succeeded")
+	}
+	if len(got) != 2 {
+		t.Errorf("hook fired on a rejected write: %d calls", len(got))
+	}
+}
+
+func TestDropTodoDetailMarksBlockedItems(t *testing.T) {
+	in := "- [✓] t1 a\n  finished: 2026-10-28T20:44:10+08:00\n- [ ] t2 b\n  deps: t1\n- [ ] t3 c\n  deps: t2\n  run: r1\n"
+	want := "- [✓] t1 a\n- [ ] t2 b\n- [ ] t3 (blocked) c\n"
+	if got := dropTodoDetail(in); got != want {
+		t.Errorf("dropTodoDetail =\n%q\nwant\n%q", got, want)
 	}
 }

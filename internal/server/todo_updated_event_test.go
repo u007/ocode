@@ -1,14 +1,20 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // waitForTodoUpdated drains sub until a todo_updated envelope for sessionID
@@ -30,8 +36,7 @@ func waitForTodoUpdated(t *testing.T, sub chan Envelope, sessionID string) Envel
 
 // driveToolMessages feeds wireHeadlessAgentCallbacks the two-message sequence a
 // real turn produces for one tool call: the assistant message declaring the
-// call, then the tool result. The map the callback builds from the assistant
-// ToolCalls is the only way it can learn which tool a ToolID refers to.
+// call, then the tool result. Used to prove non-plan results publish nothing.
 func driveToolMessages(t *testing.T, h *Handler, sessionID, callID, toolName string) {
 	t.Helper()
 	ag := &agent.Agent{}
@@ -67,7 +72,12 @@ func TestTodoUpdatedEventCarriesSummary(t *testing.T) {
 	sub := h.bus.Subscribe(nil)
 	defer h.bus.Unsubscribe(sub)
 
-	driveToolMessages(t, h, id, "call_1", "todowrite")
+	// A real plan write fires the store hook; no tool-result message is driven.
+	ctx := tool.WithTodoScope(context.Background(), tool.TodoScope{ProjectRoot: proj, SessionID: id})
+	args, _ := json.Marshal(map[string]any{"revision": 2, "todoText": "- [✓] first\n- [•] second\n- [ ] third"})
+	if _, err := (tool.TodoWriteTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("todowrite: %v", err)
+	}
 
 	env := waitForTodoUpdated(t, sub, id)
 	if env.Project != proj {
@@ -87,6 +97,9 @@ func TestTodoUpdatedEventCarriesSummary(t *testing.T) {
 	if data.Done != 1 || data.Total != 3 {
 		t.Errorf("Done/Total = %d/%d, want 1/3", data.Done, data.Total)
 	}
+	if data.Revision != 3 {
+		t.Errorf("Revision = %d, want 3 (the file was at 2 and the write bumped it)", data.Revision)
+	}
 	if data.Current != "second" {
 		t.Errorf("Current = %q, want %q", data.Current, "second")
 	}
@@ -99,10 +112,37 @@ func TestTodoUpdatedEventCarriesSummary(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatalf("unmarshal generic: %v", err)
 	}
-	for _, key := range []string{"session_id", "done", "total", "current", "items"} {
+	for _, key := range []string{"session_id", "revision", "done", "total", "current", "items"} {
 		if _, ok := wire[key]; !ok {
 			t.Errorf("wire payload missing %q: %v", key, wire)
 		}
+	}
+}
+
+func TestTodoUpdatedPushedForTaskLinkAndCarriesDetail(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	writeSessionTodoFile(t, proj, id, "# Todo (revision 1)\n- [ ] t1 build\n- [ ] t2 test\n  deps: t1\n")
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	if _, err := tool.LinkTodoItemToRun(tool.TodoScope{ProjectRoot: proj, SessionID: id}, "t1", "agent-run-4"); err != nil {
+		t.Fatalf("LinkTodoItemToRun: %v", err)
+	}
+	env := waitForTodoUpdated(t, sub, id)
+	raw, _ := json.Marshal(env.Data)
+	var data TodoUpdatedEvent
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(data.Items) != 2 || data.Items[0].RunID != "agent-run-4" || data.Items[0].State != "in_progress" {
+		t.Errorf("item 0 = %+v, want in_progress linked to agent-run-4", data.Items)
+	}
+	if !data.Items[1].Blocked || len(data.Items[1].Deps) != 1 || data.Items[1].Deps[0] != "t1" {
+		t.Errorf("item 1 = %+v, want blocked by t1", data.Items[1])
 	}
 }
 
@@ -170,5 +210,65 @@ func TestTodoUpdatedIsSessionScoped(t *testing.T) {
 	}
 	if liveFrameEvents["todo_updated"] {
 		t.Error(`"todo_updated" must NOT be in liveFrameEvents — it is a momentary reading, replaying it after a reconnect would show a stale plan`)
+	}
+}
+
+func TestHandleGetSessionTodoMatchesEventShape(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	writeSessionTodoFile(t, proj, id, "# Todo (revision 1)\n- [•] t1 build\n- [ ] t2 test\n  deps: t1\n")
+
+	rec := httptest.NewRecorder()
+	h.HandleGetSessionTodo(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+id+"/todo", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	var got TodoUpdatedEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want, found, err := readTodoUpdatedEvent(proj, id)
+	if err != nil || !found {
+		t.Fatalf("readTodoUpdatedEvent found=%v err=%v", found, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("endpoint = %+v, event helper = %+v", got, want)
+	}
+	if got.Total != 2 || len(got.Items) != 2 || !got.Items[1].Blocked {
+		t.Errorf("got %+v, want 2 items with t2 blocked", got)
+	}
+}
+
+func TestHandleGetSessionTodoWithoutPlanIsEmpty(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+
+	rec := httptest.NewRecorder()
+	h.HandleGetSessionTodo(rec, httptest.NewRequest(http.MethodGet, "/api/sessions/"+id+"/todo", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	items, ok := wire["items"].([]any)
+	if !ok || len(items) != 0 || wire["total"] != float64(0) || wire["session_id"] != id {
+		t.Errorf("wire = %v, want empty items array, total 0, session_id %s", wire, id)
+	}
+}
+
+func TestBuildRunDTOCarriesToolCallID(t *testing.T) {
+	dto := buildRunDTO(&agent.AgentRun{ID: "agent-run-1", ToolCallID: "call_9"})
+	if dto.ToolCallID != "call_9" {
+		t.Errorf("ToolCallID = %q, want call_9", dto.ToolCallID)
+	}
+	raw, _ := json.Marshal(dto)
+	if !strings.Contains(string(raw), `"toolCallId":"call_9"`) || strings.Contains(string(raw), "todoItem") {
+		t.Errorf("wire = %s, want toolCallId present and todoItem omitted when unlinked", raw)
 	}
 }

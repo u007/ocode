@@ -75,16 +75,24 @@ type PulseTask struct {
 
 // PulseTodoItem is one plan line with its state normalized to a word.
 type PulseTodoItem struct {
-	Text  string `json:"text"`
-	State string `json:"state"` // "pending" | "in_progress" | "done"
+	ID       string   `json:"id,omitempty"`
+	Text     string   `json:"text"`
+	State    string   `json:"state"` // "pending" | "in_progress" | "done"
+	Deps     []string `json:"deps,omitempty"`
+	Blocked  bool     `json:"blocked,omitempty"`
+	Started  string   `json:"started,omitempty"`  // RFC 3339
+	Finished string   `json:"finished,omitempty"` // RFC 3339
+	RunID    string   `json:"run_id,omitempty"`
+	Result   string   `json:"result,omitempty"`
 }
 
 // PulseTodo is a session's current plan.
 type PulseTodo struct {
-	Done    int             `json:"done"`
-	Total   int             `json:"total"`
-	Current string          `json:"current"`
-	Items   []PulseTodoItem `json:"items"`
+	Revision int             `json:"revision"` // plan file revision, so a todo_updated frame older than this row's plan is dropped
+	Done     int             `json:"done"`
+	Total    int             `json:"total"`
+	Current  string          `json:"current"`
+	Items    []PulseTodoItem `json:"items"`
 }
 
 // PulseAsk is the interaction blocking a turn.

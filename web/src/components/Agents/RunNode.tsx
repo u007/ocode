@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import type { AgentRun, AgentRunMessage } from "../../api/types";
 import ScrollNavButtons from "../common/ScrollNavButtons";
 import { useStickToBottom } from "../../hooks/useStickToBottom";
+import { useNow } from "../../hooks/useNow";
 
 // statusStyles maps a run status to its dot, glow and accent-bar treatment.
 export function statusStyles(status: string): { dot: string; bar: string; text: string } {
@@ -35,6 +36,23 @@ export function elapsed(startedAt: string, endedAt?: string): string {
   return `${m}m${Math.round(s % 60)}s`;
 }
 
+// Elapsed is the only subscriber to the shared one-second ticker, so a running
+// row's time advances between run-tree updates without re-rendering RunNode or
+// its transcript.
+export function Elapsed({ startedAt, endedAt, running }: { startedAt: string; endedAt?: string; running: boolean }) {
+  return running && !endedAt ? <LiveElapsed startedAt={startedAt} /> : <ElapsedText startedAt={startedAt} endedAt={endedAt} />;
+}
+
+function LiveElapsed({ startedAt }: { startedAt: string }) {
+  useNow(1000);
+  return <ElapsedText startedAt={startedAt} />;
+}
+
+function ElapsedText({ startedAt, endedAt }: { startedAt: string; endedAt?: string }) {
+  const dur = elapsed(startedAt, endedAt);
+  return dur ? <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span> : null;
+}
+
 // childSummary mirrors the TUI's "N sub · M running" badge.
 export function childSummary(children: AgentRun[]): string {
   if (children.length === 0) return "";
@@ -60,8 +78,18 @@ const roleChip: Record<string, string> = {
   system: "bg-accent/40 text-muted-foreground",
 };
 
+/** One reasoning entry of a run transcript, handed to `renderReasoning`. */
+export interface RunReasoning {
+  text: string;
+  blockKey: string;
+  isLatest: boolean;
+  answerStarted: boolean;
+}
+
 // messageLine renders one transcript entry as a chip-prefixed row.
-function messageLine(msg: AgentRunMessage, i: number) {
+// `reasoning`, when given, renders the entry's reasoning instead of the
+// built-in "Thinking" box.
+function messageLine(msg: AgentRunMessage, i: number, reasoning?: (text: string) => ReactNode) {
   const label = msg.role === "user" ? "task" : msg.role === "assistant" ? "agent" : msg.role;
   return (
     <div key={i} className="space-y-1 text-xs leading-relaxed">
@@ -87,7 +115,8 @@ function messageLine(msg: AgentRunMessage, i: number) {
           ))}
         </div>
       </div>
-      {msg.reasoningContent && (
+      {msg.reasoningContent && reasoning && reasoning(msg.reasoningContent)}
+      {msg.reasoningContent && !reasoning && (
         <div className="ml-[1.75rem] max-h-40 overflow-y-auto overscroll-contain rounded-md border border-border/60 bg-card/50 px-2 py-1.5">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             Thinking
@@ -113,12 +142,18 @@ interface RunNodeProps {
   // spawned agent starts as one compact summary row until the user expands
   // it; detail views (AgentsPanel) keep the expanded default.
   defaultOpen?: boolean;
+  // renderReasoning, when given, renders every transcript entry's reasoning
+  // (and is passed down to nested runs). The inline chat card uses it to show
+  // child thinking through the chat's own thinking component and setting; the
+  // rail omits it and keeps the built-in box.
+  renderReasoning?: (reasoning: RunReasoning) => ReactNode;
 }
 
 // RunNode is one run row, individually expandable to reveal its messages and
 // nested sub-agent runs (recursively).
-export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }: RunNodeProps) {
+export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true, renderReasoning }: RunNodeProps) {
   const [open, setOpen] = useState(defaultOpen);
+  const running = run.status === "running";
   // The expanded transcript is a bounded scroll box that content streams into,
   // so it follows the tail while the reader is at the bottom ("once at the
   // bottom, auto scroll") and stops the moment they scroll up to read. Passing
@@ -128,10 +163,13 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const stick = useStickToBottom(messagesRef, open ? run.messages : undefined);
   const summary = childSummary(run.children);
+  let lastReasoning = -1;
+  run.messages.forEach((m, i) => {
+    if (m.reasoningContent) lastReasoning = i;
+  });
   const hasResult = Boolean(run.result?.trim());
   const hasDetail = run.messages.length > 0 || run.children.length > 0 || hasResult;
   const s = statusStyles(run.status);
-  const dur = elapsed(run.startedAt, run.endedAt);
 
   return (
     <div className={depth > 0 ? "border-l border-border/80 pl-2.5" : ""}>
@@ -166,6 +204,11 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
           <span className="shrink-0 truncate font-mono text-[11px] text-muted-foreground">{run.model}</span>
         )}
         <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
+        {run.todoItem && (
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            {run.todoItem}
+          </span>
+        )}
         {run.contract && run.contract.checked && !run.contract.satisfied && (
           run.contract.checkFailed ? (
             // Verification itself failed (timeout / LLM error / unparseable
@@ -203,7 +246,12 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
               {summary}
             </span>
           )}
-          {dur && <span className="font-mono text-[10px] tabular-nums text-foreground">{dur}</span>}
+          {run.messages.length > 0 && (
+            <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+              {run.messages.length} msg
+            </span>
+          )}
+          <Elapsed startedAt={run.startedAt} endedAt={run.endedAt} running={running} />
         </span>
       </button>
 
@@ -222,7 +270,23 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
                 data-testid="agent-transcript"
                 className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-card/70 p-2 ring-1 ring-inset ring-ring/80"
               >
-                {run.messages.map((m, i) => messageLine(m, i))}
+                {run.messages.map((m, i) =>
+                  messageLine(
+                    m,
+                    i,
+                    renderReasoning &&
+                      ((text) =>
+                        renderReasoning({
+                          text,
+                          blockKey: `run:${run.id}:${i}:thinking`,
+                          // The latest reasoning of a live run follows the chat's
+                          // latest-thinking rule; the answer has started once that
+                          // entry has text or anything came after it.
+                          isLatest: running && i === lastReasoning,
+                          answerStarted: Boolean(m.content.trim()) || i < run.messages.length - 1,
+                        })),
+                  ),
+                )}
               </div>
               <ScrollNavButtons
                 scrollRef={messagesRef}
@@ -249,6 +313,7 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true }
               depth={depth + 1}
               defaultOpen={defaultOpen}
               onOpenDetail={onOpenDetail}
+              renderReasoning={renderReasoning}
             />
           ))}
         </div>

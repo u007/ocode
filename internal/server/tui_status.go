@@ -182,16 +182,12 @@ type AgentActivityEvent struct {
 	ActiveAgents []string             `json:"active_agents,omitempty"`
 }
 
-// TodoUpdatedItem is one todo line as published on the todo_updated event.
-// State is the normalized word ("pending" | "in_progress" | "done"), never the
-// file's raw status marker.
-type TodoUpdatedItem struct {
-	Text  string `json:"text"`
-	State string `json:"state"`
-}
+// TodoUpdatedItem is one todo line as published on the todo_updated event:
+// the same shape the Pulse rows carry.
+type TodoUpdatedItem = PulseTodoItem
 
-// TodoUpdatedEvent carries a session's todo plan after a todowrite call
-// rewrote it. It exists because a cross-project dashboard watches sessions it
+// TodoUpdatedEvent carries a session's todo plan after any plan write
+// changed it. It exists because a cross-project dashboard watches sessions it
 // has no tab open for, and re-reading every project's todo file on a poll is
 // both slow and stale-prone; this pushes the authoritative post-write state.
 //
@@ -201,6 +197,7 @@ type TodoUpdatedItem struct {
 // recover on their next /api/pulse fetch.
 type TodoUpdatedEvent struct {
 	SessionID string            `json:"session_id"`
+	Revision  int               `json:"revision"` // plan file revision; receivers drop a frame older than the one they hold
 	Done      int               `json:"done"`
 	Total     int               `json:"total"`
 	Current   string            `json:"current"`

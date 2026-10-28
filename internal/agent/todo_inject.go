@@ -43,6 +43,9 @@ func (a *Agent) injectTodoTail(base []Message) []Message {
 	fmt.Fprintf(&b, "%s\n\n", todoMarker)
 	fmt.Fprintf(&b, "Current plan (revision %d). The list is on disk at .ocode/todo/<session-id>.md; use todoread for the canonical copy before any mutation, and re-run todowrite/todo_update to keep the file in sync.\n\n", snap.Revision)
 	b.WriteString(snap.Content)
+	if len(snap.Blocked) > 0 {
+		fmt.Fprintf(&b, "Blocked: %s\n", strings.Join(snap.Blocked, "; "))
+	}
 	out := make([]Message, 0, len(base)+1)
 	out = append(out, base...)
 	out = append(out, Message{Role: "user", Content: strings.TrimRight(b.String(), "\n")})

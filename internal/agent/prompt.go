@@ -23,6 +23,7 @@ const (
 	promptNotesMarker          = "[ocode:notes]"
 	promptDocPromptMarker      = "[ocode:doc_prompt]"
 	promptRecapMarker          = "[ocode:recap]"
+	promptPlanMarker           = "[ocode:plan]"
 	promptSystemOverrideMarker = "[ocode:system_override]"
 	// promptSuggestionsMarker labels the suggested-responses prompt fragment.
 	// It is distinct from the in-text block markers in suggestions.go
@@ -84,6 +85,21 @@ Sections, in this order:
 Rules: the point that matters most goes first. Say what it MEANS, not what happened. Report status honestly — a blocked or unvalidated item is stated as such, never smoothed over.
 
 Skip the block entirely for conversational turns, one-line answers, and turns that only ran tools. No recap about nothing.`
+
+// planExecutePromptContent teaches the agent to write a todo plan before
+// multi-step work, work it item by item, and delegate self-contained items
+// with task(todo_item=tN). Static const in the cached system-role prefix: it
+// must never vary per turn (see append_stable.go). PRIMARY agents only; the
+// same helpers that turn recap off turn it off (SetPlanPromptEnabled).
+const planExecutePromptContent = `## Plan then execute
+
+For any request that needs three or more steps or touches two or more files, write the plan BEFORE the first edit: call todowrite with one item per step, in order. When an item cannot start until another finishes, record that with todo_update set_deps; a blocked item cannot be started and the harness rejects it.
+
+Work one item at a time. Set it in_progress before you start, and set it done with a one-line result the moment it is verified. Never batch status updates at the end. When the work reveals a new step, append it or insert it after its anchor; never drop items.
+
+Delegate an item with task(todo_item=tN) when it is self-contained, when answering it means reading across many files, or when it would pour large tool output (test logs, grep sweeps, long files) into this conversation. The child runs in its own context and you receive only its final report; the harness marks the item in_progress when the child starts and writes the first line of its report back as the item's result. Brief the child like a peer: a short description (it labels the task card), the goal, what you already ruled out, and the files worth reading. Do not delegate a lookup whose target you already know, or an edit of a few lines.
+
+Skip the plan for one-step requests, questions and conversational turns.`
 
 // suggestedResponsesPromptContent teaches the agent to end its reply with a
 // machine-readable block of follow-up options the user can click.
@@ -233,6 +249,11 @@ func (a *Agent) BasePromptMessages() []Message {
 	// are static, so the ordering is stable for the cached prefix.
 	if a.RecapPromptEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + config.ApplyPromptOverride("recap", recapPromptContent)})
+	}
+	// Plan-then-execute contract sits directly after recap. Static, so the
+	// ordering is stable for the cached prefix.
+	if a.PlanPromptEnabled() {
+		msgs = append(msgs, Message{Role: "system", Content: promptPlanMarker + "\n" + config.ApplyPromptOverride("plan", planExecutePromptContent)})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {

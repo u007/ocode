@@ -37,6 +37,11 @@ type agentRunDTO struct {
 	EndedAt      *time.Time `json:"endedAt,omitempty"`
 	InputTokens  int64      `json:"inputTokens"`
 	OutputTokens int64      `json:"outputTokens"`
+	// ToolCallID is the task tool call that dispatched the run, so the web chat
+	// can render the run inline where that call sits. TodoItem is the plan item
+	// the dispatch linked to (todo_item). Both are omitted when unknown.
+	ToolCallID string `json:"toolCallId,omitempty"`
+	TodoItem   string `json:"todoItem,omitempty"`
 	// Contract is the output-contract verdict, present only when the
 	// dispatch carried an expected_output contract (checked). satisfied is
 	// false when the result did not meet the contract after the single
@@ -73,6 +78,8 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		StartedAt:    r.StartedAt,
 		InputTokens:  in,
 		OutputTokens: out,
+		ToolCallID:   r.ToolCallID,
+		TodoItem:     r.TodoItem(),
 		Messages:     []runMessageDTO{},
 		Children:     []agentRunDTO{},
 	}

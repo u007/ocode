@@ -61,6 +61,7 @@ type AgentRun struct {
 	ToolCallID string                // the originating task tool_call id (best-effort; empty if unknown)
 	Dispatcher string                // identity of the agent that dispatched this run
 	SessionID  string                // child session id the run's transcript is persisted under (childSessionID); empty when no parent session is known
+	todoItem   string                // plan item this run is linked to (task tool todo_item); "" when unlinked
 
 	mu           sync.Mutex
 	transcript   []Message
@@ -212,6 +213,21 @@ func (r *AgentRun) awaitTeardown(timeout time.Duration) {
 	case <-ch:
 	case <-time.After(timeout):
 	}
+}
+
+// TodoItem returns the plan item id this run is linked to, or "" when unlinked.
+// The run is already visible in the registry when the link is set, so both
+// sides go through mu.
+func (r *AgentRun) TodoItem() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.todoItem
+}
+
+func (r *AgentRun) setTodoItem(id string) {
+	r.mu.Lock()
+	r.todoItem = id
+	r.mu.Unlock()
 }
 
 // ModelLabel returns "provider/model" (or just "model" when no provider) for

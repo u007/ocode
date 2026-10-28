@@ -316,6 +316,24 @@ describe("pulseStore live event updates", () => {
     expect(b?.current_task).toEqual({ kind: "todo", text: "wire the store" });
   });
 
+  it("todo_updated drops a frame older than the plan the row holds", async () => {
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+    const frame = (revision: number, current: string) => ({
+      session_id: "b",
+      revision,
+      done: 0,
+      total: 1,
+      current,
+      items: [{ text: current, state: "in_progress" }],
+    });
+    emit("todo_updated", "b", frame(4, "four"));
+    emit("todo_updated", "b", frame(3, "stale"));
+    expect(latest.rows.find((r) => r.session_id === "b")?.todo?.current).toBe("four");
+    emit("todo_updated", "b", frame(5, "five"));
+    expect(latest.rows.find((r) => r.session_id === "b")?.todo?.current).toBe("five");
+  });
+
   it("todo_updated does not add a task line to a needs-you row", async () => {
     mount();
     await waitFor(() => expect(latest.rows).toHaveLength(2));

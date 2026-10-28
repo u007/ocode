@@ -30,6 +30,7 @@ import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
 import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
+import PlanPanel from "./components/Chat/PlanPanel";
 import { BtwPanel } from "./components/Chat/BtwPanel";
 import DBPanel from "./components/Layout/DBPanel";
 import AgentsPanel from "./components/Agents/AgentsPanel";
@@ -1889,6 +1890,11 @@ function HomeApp() {
                                 onContinueInterrupted={stableHandleContinueInterrupted}
                               />
                             </div>
+                            <PlanPanel
+                              sessionId={tab.id}
+                              host={resolveSessionHost(projectState, tab.id)}
+                              onOpenRun={(runId) => openAgentDetail(tab.id, runId)}
+                            />
                             <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
                             {isActive && (
                               <BtwPanel

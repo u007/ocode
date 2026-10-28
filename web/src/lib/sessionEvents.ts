@@ -2,7 +2,7 @@ import { pulseEventSink } from "../stores/pulseStore";
 import { api } from "../api/client";
 import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState, type SessionSlice } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
-import type { Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent } from "../api/types";
+import type { Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent, TodoUpdatedEvent } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
@@ -24,6 +24,7 @@ import {
 } from "./compactionState";
 import { clearSessionActivity, setSkillActivity } from "./commandActivity";
 import { closeBtw, rekeyBtw } from "./btwStore";
+import { rekeySessionPlan, setSessionPlan } from "./sessionPlan";
 import { skillNameFromArgs } from "../components/Chat/toolHint";
 
 /**
@@ -401,6 +402,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyInputHistory(oldId, newId);
       rekeySidePaneState(oldId, newId);
       rekeyBtw(oldId, newId);
+      rekeySessionPlan(oldId, newId);
       rekeyPendingRewind(r.hostFor?.(oldId), oldId, r.hostFor?.(newId), newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
@@ -712,6 +714,9 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.dispatch({ type: "SET_SUGGESTIONS", sessionId, suggestions });
         return;
       }
+      case "todo_updated":
+        setSessionPlan(sessionId, data as TodoUpdatedEvent);
+        return;
       case "discovery":
         // Discovery attach notice ("Discovered: …"), mirrored from the TUI's
         // transient transcript notice. Flush buffered deltas first so the

@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   AgentInfo,
   AgentRun,
+  TodoUpdatedEvent,
   GitStatus,
   GitDiffFile,
   GitCommit,
@@ -1365,6 +1366,12 @@ export const api = {
   // Session goal (/goal): a condition the session keeps working toward. PUT
   // returns the kickoff prompt that starts the first turn; the server rejects
   // an empty or overlong (>4000 chars) condition with a 400.
+  getSessionTodo: (sessionId: string, host?: string) =>
+    fetchJSON<TodoUpdatedEvent>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/todo`,
+      undefined,
+      host,
+    ),
   getSessionGoal: (sessionId: string, host?: string) =>
     fetchJSON<SessionGoal>(
       `/api/sessions/${encodeURIComponent(sessionId)}/goal`,

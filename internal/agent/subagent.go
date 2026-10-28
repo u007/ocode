@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/notebus"
+	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -30,7 +32,8 @@ type SubAgentSpec struct {
 
 const generalSubAgentPrompt = "You are a general-purpose sub-agent. Complete the task efficiently and return the final result. " +
 	"Use a User Expectation Checklist for multi-step work, validate each checklist item with the strongest practical check available, and iterate if validation fails. " +
-	"Be concise in your output and include checklist status, validation performed, and remaining gaps."
+	"Be concise in your output and include checklist status, validation performed, and remaining gaps. " +
+	"Report format: the FIRST line is one sentence stating the outcome (it is copied into the caller's plan). Then DONE: what you produced, files changed one per line. VERIFIED: the checks you ran and their results. GAPS: what is unverified or blocked. Never pad; a blocked item is reported as blocked."
 
 const exploreSubAgentPrompt = `You are explore, a read-only codebase navigator. Your job is to locate code and answer "where/how/what" questions about THIS repository — never modify it.
 
@@ -220,7 +223,7 @@ func (t TaskTool) Definition() map[string]interface{} {
 
 	return map[string]interface{}{
 		"name":        "task",
-		"description": "Spawn a sub-agent with a specific scope to handle a task autonomously. Available agents: " + strings.Join(subAgentDescs, ", "),
+		"description": "Run a sub-agent in its own context and return ONLY its final report; its tool calls and transcript never enter this conversation. Set description (labels the task card) and todo_item (links it to a plan item). Available agents: " + strings.Join(subAgentDescs, ", "),
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -270,6 +273,10 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional output contract: a short natural-language description of the shape or content the result must have (e.g. \"the full list of affected files, one path per line\"). When set, the sub-agent's final result is verified against it before being returned, and retried once in place if it does not match. If omitted, the agent's own expected_output frontmatter (if any) applies; with neither, no verification is performed.",
 				},
+				"todo_item": map[string]interface{}{
+					"type":        "string",
+					"description": "Link this dispatch to a plan item (a tN id from todoread). The item is marked in_progress with this run id when the sub-agent starts and its result summary is written back when it finishes: done on success, left in_progress with a FAILED:/CANCELLED: result otherwise. Rejected if the item does not exist or is blocked by unfinished deps.",
+				},
 				"id": map[string]interface{}{
 					"type":        "string",
 					"description": "Optional caller-chosen label for this dispatch, unique within the parallel batch. Combined with depends_on this batch becomes a DAG: a node that names another node's id in depends_on will not start until the named predecessor completes successfully, and the predecessor's final result is prepended to the child's context. Omit both fields to take the legacy flat parallel fan-out path.",
@@ -299,9 +306,18 @@ type taskToolParams struct {
 	ExpectedOutput     string   `json:"expected_output"`
 	DAGID              string   `json:"id"`
 	DAGDeps            []string `json:"depends_on"`
+	TodoItem           string   `json:"todo_item"`
 }
 
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx is Execute bound to ctx. The agent loop prefers it over Execute,
+// and it carries the originating tool_call id (snapshot.ToolCallIDFromContext)
+// that the run records as ToolCallID, so the inline chat card can find its run.
+func (t TaskTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	toolCallID := snapshot.ToolCallIDFromContext(ctx)
 	var params taskToolParams
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -318,7 +334,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	if params.ResumeTaskID != "" {
-		return t.executeResume(params)
+		return t.executeResume(params, toolCallID)
+	}
+	// Reject an unlinkable todo_item before anything is spawned.
+	if params.TodoItem != "" {
+		if err := t.todoLinkPreflight(params.TodoItem); err != nil {
+			return "", err
+		}
 	}
 
 	spec := t.findAgent(params.Agent)
@@ -426,11 +448,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
 	subAgent.toolBatchDelay = 0
+	subAgent.isSubAgent = true
 	// A child's final result is returned to the parent as a tool result, not
 	// rendered as a user-facing response, and the child only sees the dispatch
 	// prompt — never the whole conversation. A recap block here would be noise
 	// in the parent's transcript and factually wrong, so opt out explicitly.
 	subAgent.SetRecapPromptEnabled(false)
+	subAgent.SetPlanPromptEnabled(false)
 	// The suggestions block is a MAIN-agent affordance: it rides in the
 	// assistant's own output and is rendered as one-click chips under the
 	// composer. A child's reply is returned to the parent as a TOOL RESULT,
@@ -633,6 +657,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// Background mode
 	if params.RunInBackground && t.runs != nil {
 		run := t.runs.New(spec.Name)
+		run.ToolCallID = toolCallID
 		run.Background = true
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
@@ -641,6 +666,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			run.Dispatcher = t.mainAgent.spec.Name
 		}
 		attachRunTranscript(run)
+		if err := t.linkRunToTodo(params.TodoItem, run, subAgent); err != nil {
+			return "", err
+		}
 
 		activeTransferred = true
 		return t.runBackgroundDispatch(spec.Name, subAgent, run, subAgentMsgs, "started", releaseActive), nil
@@ -650,6 +678,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	var run *AgentRun
 	if t.runs != nil {
 		run = t.runs.New(spec.Name)
+		run.ToolCallID = toolCallID
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
 		run.Cancel = subAgent.Cancel
@@ -657,6 +686,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			run.Dispatcher = t.mainAgent.spec.Name
 		}
 		attachRunTranscript(run)
+		if err := t.linkRunToTodo(params.TodoItem, run, subAgent); err != nil {
+			return "", err
+		}
 	}
 
 	activeTransferred = true
@@ -718,7 +750,7 @@ func (t TaskTool) resumeEligibleRun(taskID string) (*AgentRun, string, error) {
 // prompt. It reuses the original *Agent (run.Sub) and its full prior
 // transcript instead of constructing a fresh subagent, so tools, permissions,
 // and conversation history all carry over unchanged.
-func (t TaskTool) executeResume(params taskToolParams) (string, error) {
+func (t TaskTool) executeResume(params taskToolParams, toolCallID string) (string, error) {
 	run, specName, err := t.resumeEligibleRun(params.ResumeTaskID)
 	if err != nil {
 		return "", err
@@ -754,6 +786,17 @@ func (t TaskTool) executeResume(params taskToolParams) (string, error) {
 
 	if !run.beginResume() {
 		return fmt.Sprintf("Error: task %s changed state and can no longer be resumed (currently %s).", params.ResumeTaskID, run.statusValue()), nil
+	}
+
+	// The latest call owns the inline chat card.
+	run.ToolCallID = toolCallID
+
+	// A run linked to a plan item takes the item back to in_progress. Linked
+	// only after beginResume succeeded, so a lost race leaves the item (and its
+	// result) untouched; a refusal (the item became blocked) finishes the
+	// resumed run through the same teardown a failed first link uses.
+	if err := t.linkRunToTodo(run.TodoItem(), run, subAgent); err != nil {
+		return "", err
 	}
 
 	// Build the follow-up message(s) the same way a fresh dispatch builds its
@@ -833,6 +876,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		release, aerr := runs.AcquireForRun(run, stopCh)
 		if aerr != nil {
 			run.tryFinishCancelled()
+			t.recordTodoOutcome(run, "", aerr)
 			runs.notifyDone(run)
 			return
 		}
@@ -849,16 +893,19 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// with the final slot admission, including when the limit is unlimited.
 		if run.statusValue() == RunCancelled || isClosed(stopCh) {
 			run.tryFinishCancelled()
+			t.recordTodoOutcome(run, "", fmt.Errorf("cancelled while queued"))
 			runs.notifyDone(run)
 			return
 		}
 		if !run.beginExecution() {
+			t.recordTodoOutcome(run, "", fmt.Errorf("cancelled while queued"))
 			runs.notifyDone(run)
 			return
 		}
 
 		result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 		if err != nil {
+			t.recordTodoOutcome(run, "", err)
 			run.finishErr(err.Error())
 			t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunFailed))
 			runs.notifyDone(run)
@@ -873,6 +920,11 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// resp is reassigned by the retry so the persisted child session
 		// reflects the final transcript.
 		result, resp, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
+		// Before finishOK closes run.Done(): a poller that sees "done" must
+		// also see the written-back plan item.
+		if note := t.recordTodoOutcome(run, result, nil); note != "" {
+			result += "\n\n" + note
+		}
 		run.finishOK(result)
 		t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunDone))
 		runs.notifyDone(run)
@@ -921,17 +973,20 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 		release, aerr := t.runs.AcquireForRun(run, stopCh)
 		if aerr != nil {
 			run.tryFinishCancelled()
+			t.recordTodoOutcome(run, "", aerr)
 			t.runs.notifyDone(run)
 			return "", aerr
 		}
 		if run.statusValue() == RunCancelled || isClosed(stopCh) {
 			release()
 			run.tryFinishCancelled()
+			t.recordTodoOutcome(run, "", fmt.Errorf("cancelled while queued"))
 			t.runs.notifyDone(run)
 			return "", fmt.Errorf("task cancelled while queued")
 		}
 		if !run.beginExecution() {
 			release()
+			t.recordTodoOutcome(run, "", fmt.Errorf("cancelled while queued"))
 			t.runs.notifyDone(run)
 			return "", fmt.Errorf("task cancelled while queued")
 		}
@@ -941,6 +996,7 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 	if err != nil {
 		if run != nil {
+			t.recordTodoOutcome(run, "", err)
 			run.finishErr(err.Error())
 			t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunFailed))
 			t.runs.notifyDone(run)
@@ -960,6 +1016,9 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 
 	sessionID := ""
 	if run != nil {
+		if note := t.recordTodoOutcome(run, result, nil); note != "" {
+			result += "\n\n" + note
+		}
 		run.finishOK(result)
 		sessionID = run.SessionID
 		t.persistChild(run, append(append([]Message(nil), messages...), resp...), string(RunDone))
@@ -969,6 +1028,66 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
 	}
 	return result, nil
+}
+
+// todoLinkPreflight checks, before anything is spawned, that a dispatch may be
+// linked to plan item itemID: a registry to take the run id from, a main-agent
+// dispatcher (the plan has one writer), and an existing, unblocked item.
+func (t TaskTool) todoLinkPreflight(itemID string) error {
+	if t.mainAgent == nil || t.runs == nil {
+		return fmt.Errorf("todo_item %s: linking needs the agent run registry for the run id", itemID)
+	}
+	if t.mainAgent.isSubAgent {
+		return fmt.Errorf("todo_item %s: only the main agent may link a dispatch to the plan; report the outcome to your dispatcher instead", itemID)
+	}
+	return tool.CheckTodoItemDispatchable(t.mainAgent.todoScope(), itemID)
+}
+
+// linkRunToTodo marks the plan item in_progress with run's id. On failure
+// (the preflight passed, so a race or a disk error) it tears the just-built
+// sub-agent down and finishes the run, so nothing is left running unlinked.
+func (t TaskTool) linkRunToTodo(itemID string, run *AgentRun, subAgent *Agent) error {
+	if itemID == "" {
+		return nil
+	}
+	if _, err := tool.LinkTodoItemToRun(t.mainAgent.todoScope(), itemID, run.ID); err != nil {
+		subAgent.closeSessionTools()
+		subAgent.shutdownTransient()
+		run.markTeardownDone()
+		run.finishErr(err.Error())
+		t.runs.notifyDone(run)
+		return err
+	}
+	run.setTodoItem(itemID)
+	return nil
+}
+
+// recordTodoOutcome writes a linked run's outcome back to its plan item: done
+// on success, otherwise left in_progress with a FAILED:/CANCELLED: result. It
+// returns a note for the dispatcher, or "" when the run is not linked. A
+// write-back failure is logged and reported in the note, never turned into a
+// task failure, so the child's output is not lost.
+func (t TaskTool) recordTodoOutcome(run *AgentRun, result string, runErr error) string {
+	if run == nil || run.todoItem == "" {
+		return ""
+	}
+	outcome, text := tool.TodoRunDone, result
+	if runErr != nil {
+		outcome, text = tool.TodoRunFailed, runErr.Error()
+	}
+	if run.statusValue() == RunCancelled || (runErr != nil && isClosed(t.mainAgent.StopCh())) {
+		outcome = tool.TodoRunCancelled
+	}
+	rev, err := tool.FinishTodoItemRun(t.mainAgent.todoScope(), run.todoItem, run.ID, outcome, text)
+	if err != nil {
+		t.mainAgent.emitDebug("TODO", fmt.Sprintf("write back run %s to plan item %s: %v", run.ID, run.todoItem, err))
+		return fmt.Sprintf("(Todo item %s was not updated: %v)", run.todoItem, err)
+	}
+	state := "left in_progress"
+	if outcome == tool.TodoRunDone {
+		state = "marked done"
+	}
+	return fmt.Sprintf("(Todo item %s %s; the plan is now at revision %d)", run.todoItem, state, rev)
 }
 
 // parentSessionID is the session the dispatching agent runs under; child

@@ -186,6 +186,8 @@ export type ChatVerbosityPreset = "full" | "balanced" | "quiet";
 export type ChatDisplayOverride = "preset" | "expanded" | "collapsed";
 /** Latest thinking adds `auto`: expanded until the answer starts, then collapsed. */
 export type ChatLatestThinkingOverride = ChatDisplayOverride | "auto";
+/** How the chat's plan panel starts: folded, or open showing at most N rows (or all). */
+export type ChatPlanPanelSetting = "collapsed" | "5" | "10" | "all";
 
 export interface ChatVerbosityOverrides {
   older_thinking: ChatDisplayOverride;
@@ -193,6 +195,7 @@ export interface ChatVerbosityOverrides {
   tool_calls: ChatDisplayOverride;
   tool_output: ChatDisplayOverride;
   activity_notices: ChatDisplayOverride;
+  plan_panel: ChatPlanPanelSetting;
 }
 
 export interface ChatVerbosityConfig {
@@ -957,6 +960,10 @@ export interface AgentRun {
   endedAt?: string;
   inputTokens: number;
   outputTokens: number;
+  /** The task tool call that dispatched this run; absent when unknown. */
+  toolCallId?: string;
+  /** Plan item id this run is linked to (the task call's todo_item). */
+  todoItem?: string;
   // Contract is the output-contract verdict, present only when the dispatch
   // carried an expected_output contract. satisfied=false means the result did
   // not meet the contract after the single retry. checkFailed distinguishes
@@ -1477,11 +1484,26 @@ export interface PulseTask {
 }
 
 export interface PulseTodoItem {
+  id?: string;
   text: string;
   state: PulseTodoState;
+  /** Ids of items that must be done first. */
+  deps?: string[];
+  /** Not done and at least one dep is not done; derived by the server. */
+  blocked?: boolean;
+  /** RFC 3339. */
+  started?: string;
+  /** RFC 3339. */
+  finished?: string;
+  /** Agent run the task tool linked to this item. */
+  run_id?: string;
+  /** One-line outcome. */
+  result?: string;
 }
 
 export interface PulseTodo {
+  /** Plan file revision of this snapshot. */
+  revision: number;
   done: number;
   total: number;
   current: string;
@@ -1524,6 +1546,8 @@ export interface PulsePage {
 /** SSE `todo_updated` payload: a session's plan right after a todowrite. */
 export interface TodoUpdatedEvent {
   session_id: string;
+  /** Plan file revision; a frame older than the one already held is dropped. */
+  revision: number;
   done: number;
   total: number;
   current: string;

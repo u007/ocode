@@ -1,14 +1,14 @@
 ---
 type: Concept
 title: Persistent Todo Plan (todowrite / todoread / todo_update)
-description: Per-session durable todo plan file format, revision-token concurrency, destructive-replacement guard, cache-safe user-role re-anchor injection, and resume semantics.
+description: Per-session durable todo plan file format (with deps, timestamps and the task-tool run link), revision-token concurrency, destructive-replacement guard, cache-safe user-role re-anchor injection, and resume semantics.
 resource: CLAUDE.md
 tags:
   - todo
   - agent
   - concurrency
   - prompt-cache
-timestamp: 2026-09-30T07:37:09Z
+timestamp: 2026-10-28T12:00:00Z
 ---
 # Persistent Todo Plan (todowrite / todoread / todo_update)
 
@@ -28,6 +28,66 @@ across long runs and post-compaction turns. The store lives in
   ```
   Every item carries a stable `tN` id so targeted updates can land without a
   full rewrite. The revision is the file's optimistic-concurrency token.
+- **Item detail (continuation lines).** An item may be followed by indented
+  lines, two spaces + `key: value`, each key at most once, always serialized in
+  this order (`internal/tool/todo_meta.go`):
+  ```
+  - [✓] t3 Third item
+    deps: t1, t2
+    started: 2026-10-28T20:41:02+08:00
+    finished: 2026-10-28T20:44:10+08:00
+    run: agent-run-4
+    result: Added the parser and 6 tests; go test ./internal/tool passes.
+  ```
+  `deps` = comma-separated item ids; `started`/`finished` = RFC3339 (kept as the
+  validated string so a round trip is byte-identical); `run` = the agent run id;
+  `result` = one line. Unknown keys, malformed values, duplicate keys and a
+  detail line before the first item are parse errors (strict parse). Files with
+  no detail lines are the legacy grammar and parse unchanged. The parser lives in
+  `parseTodoItems`, so the legacy-metadata path (`SetTodoState`) accepts detail
+  lines too. The TUI sidebar shows item lines only (`TodoState` drops detail
+  lines); `todoread` shows everything; the re-anchor shows item lines plus a
+  `blocked by …` note under an open item whose deps are open.
+- **Dependencies.** Checked on every write (`validateTodoDeps`): each dep must
+  exist, no self-reference, no cycle; the error names the ids. `set_status`
+  `in_progress` or `done` is refused while a dep is not done (`t3 is blocked by
+  t1, t2`); `pending` is always allowed. A `todowrite` applies the same rule to
+  every item whose status it changes (`applyRewriteTransitions`), so a rewrite is
+  not a back door; an unchanged item is never re-checked. In a `todowrite`, deps
+  may only name ids already in the list (echoed or inherited by text): ids for
+  new items are assigned afterwards, so a dep on one would bind to whichever item
+  receives that id. Order is guard, `inheritTodoIDs`, `mergeTodoDetail`,
+  `checkRewriteDeps`, `assignTodoIDs`, then `validateTodoDeps`.
+- **Timestamps** are stamped by the store with `todoNow` (replaceable in tests):
+  `started` on the first transition to `in_progress`, `finished` on the first
+  transition to `done`. They are stamped once and never cleared, including by a
+  status change back to pending.
+- **`todo_update` ops** beyond the originals: `set_deps` (`item_id` + `deps`;
+  `[]` clears, an absent `deps` is an error) and `set_result` (`item_id` + one
+  line of `text`). `set_status` takes an optional `result`. All still cite the
+  revision. A rewrite that echoes an item's id keeps its detail fields unless the
+  rewrite sets them (`mergeTodoDetail`).
+- **`task` tool link (`todo_item`).** `task` takes an optional `todo_item` (a `tN`
+  id). Before anything is spawned `todoLinkPreflight` requires a run registry, a
+  main-agent dispatcher (`Agent.isSubAgent` is false) and an existing, unblocked
+  item. Once the run exists `linkRunToTodo` marks the item `in_progress`, records
+  the run id and stamps `started` (`tool.LinkTodoItemToRun`). When the run ends,
+  every exit of `runSyncDispatch` and `runBackgroundDispatch` (so also the
+  wait-timeout and resume paths) calls `recordTodoOutcome` before the run's
+  `Done()` closes: the first line of the child's result, capped at 300 runes
+  with `…`, is written to `result`; success also sets `done` and stamps
+  `finished`; failure or cancellation leaves `in_progress` with a `FAILED: ` /
+  `CANCELLED: ` prefix and the main agent decides what next. A resume re-links
+  the run's item first. A write-back failure is logged and appended to the task
+  result as a note; it never replaces the child's output.
+- **These are system mutations, not model writes** (`systemMutateTodo`): same
+  flock and read → apply → validate → write sequence (`mutateTodo`, shared with
+  `todo_update`), but no cited revision, because the harness is recording what
+  it did rather than acting on a read of the plan. The main agent stays the only
+  writer: `TaskTool` refuses `todo_item` when its dispatcher is a sub-agent, and
+  a finish for a run the item is no longer linked to is refused. Each linked
+  dispatch bumps the revision, so the model's next write may be rejected as stale
+  and must `todoread` first; the task result names the new revision.
 - **Every plan is addressed by a `TodoScope` (project root + session id),
   never by a process-global "current" session.** The agent builds the scope
   from its own `WorkDir` (enclosing project root via `tool.TodoProjectRootFor`;
@@ -140,3 +200,68 @@ across long runs and post-compaction turns. The store lives in
   `TodoProjectRootFor(m.workDir)`, the server's `HandleResetSessionID` passes
   the session's project root. A plan left under the deleted id would read as
   "No todo list found" on the next turn.
+
+## Live updates and surfaces
+
+Plan writes push, not tool names. Every successful plan file write (`todowrite`,
+`todo_update`, and the `task` link write-back `LinkTodoItemToRun` /
+`FinishTodoItemRun`) calls the hooks registered with `tool.OnTodoWritten`, after
+the file lock and `todoStoreState.mu` are released. The web server registers one
+hook in `NewHandler` that dispatches `publishTodoUpdated` through `crashguard.Go`.
+Pulse rows and the `todo_updated` event carry per-item `id`, `deps`, `blocked`
+(derived: not done and a dep not done), `started`, `finished`, `run_id` and
+`result`, each omitted when empty. The Pulse card and focus pane show one muted
+line per item: "blocked by …", "running as <run_id>", or the result. The TUI
+sidebar reads the in-memory copy that every write already updates; it marks a
+blocked open item with `(blocked) ` after its id, never shows results, and clamps
+each row to one line.
+
+**Chat surfaces (web/desktop).** `PlanPanel` (`web/src/components/Chat/`) sits
+above the agent rail. It loads from `GET /api/sessions/{id}/todo`, which returns
+the `todo_updated` payload from the shared `readTodoUpdatedEvent` helper, then
+follows the `todo_updated` event into `sessionPlan.ts` and reseeds on reconnect.
+The chat display setting `plan_panel` (`collapsed` | `5` | `10` | `all`, default
+`5`, under `chat_verbosity.overrides`, edited in Settings → Chat display) sets
+only the panel's initial state: a number starts it open with that many rows, open
+items first, with a "+N more" toggle; the user's per-session fold always wins. A
+`task`/`agent` call renders its run inline in the chat by matching the run's
+`toolCallId`: collapsed by default with a live summary (agent, status, message
+count, elapsed, plan item), expandable to the streaming transcript with
+tail-follow, and child thinking routed through `ThinkingBlock` so it obeys the
+chat's thinking setting. With no in-memory run (a transcript replayed after a
+restart) the call renders as a plain tool block.
+
+**Review fixes (2026-10-28).** The re-anchor block lists plan item lines only, so
+echoing it into `todowrite` parses. Open items waiting on open dependencies appear
+on one separate line after the list, `Blocked: t3 by t1, t2` (entries joined by
+`; `), and nothing when none are blocked. `todo_updated`,
+`GET /api/sessions/{id}/todo` and the Pulse todo carry `revision` from the plan
+file header. The server publishes each write from its own goroutine, so both web
+stores drop a frame whose revision is lower than the one held; equal or higher
+replaces. `task` with `todo_item` refuses a done item ("already done; pick an open
+item or append a new one"); resume may still reopen its own item, and links it only
+after `beginResume` succeeds. Every run records its originating tool call id
+(`ToolCallID`, set through `TaskTool.ExecuteCtx`), which the inline chat card uses
+to find its run. A failed or cancelled run's item shows its `FAILED:` /
+`CANCELLED:` result line, never "running as".
+
+## Prompt
+
+The model is told to use the plan by a static system fragment,
+`planExecutePromptContent` in `internal/agent/prompt.go`, marker
+`[ocode:plan]`. It asks for a `todowrite` plan before work of three or more
+steps or two or more files, one item `in_progress` at a time with a one-line
+result on `done`, `todo_update set_deps` for ordering, and `task(todo_item=tN)`
+for self-contained or output-heavy items.
+
+- **Placement:** directly after the recap fragment in `BasePromptMessages`.
+  It is a const, so the cached prefix stays byte-stable; never make it vary per
+  turn.
+- **Gate:** primary agents only. `Agent.PlanPromptEnabled` defaults on in
+  `NewAgent`; task sub-agents, ask helpers and the advisor call
+  `SetPlanPromptEnabled(false)` beside their recap opt-out.
+- **Override key:** `plan` (`PromptCatalog`, so the settings prompt editor
+  picks it up). The override text is appended via `config.ApplyPromptOverride`.
+- **Report contract:** the `general` sub-agent's prompt makes the first line of
+  its report a one-sentence outcome, because the harness copies that line (cap
+  300 characters) into the linked item's `result`.

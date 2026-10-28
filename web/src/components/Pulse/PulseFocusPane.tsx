@@ -10,6 +10,7 @@ import {
   PulseStream,
   STATUS_META,
   TODO_MARK,
+  TodoItemDetail,
   jumpTargetFor,
   usePulseElapsed,
 } from "./PulseCard";
@@ -210,10 +211,11 @@ export function PulseFocusPane({ row, onClose }: { row: PulseRow; onClose: () =>
           {row.todo.items.map((item, i) => (
             <span
               key={`${i}-${item.text}`}
-              className={cn("text-xs", item.state === "done" && "text-muted-foreground line-through")}
+              className={cn("text-xs", item.state === "done" && "text-muted-foreground")}
             >
               <span aria-hidden>{TODO_MARK[item.state]} </span>
-              {item.text}
+              <span className={cn(item.state === "done" && "line-through")}>{item.text}</span>
+              <TodoItemDetail item={item} />
             </span>
           ))}
         </div>

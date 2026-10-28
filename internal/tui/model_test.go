@@ -8606,3 +8606,15 @@ func TestHandleModelCmdRejectedDuringNewSessionPending(t *testing.T) {
 func tuiTodoCtx(sessionID string) context.Context {
 	return tool.WithTodoScope(context.Background(), tool.TodoScope{ProjectRoot: tool.TodoProjectRoot(), SessionID: sessionID})
 }
+
+func TestRenderSidebarTodoClampsRowsToOneLine(t *testing.T) {
+	todo := "- [✓] t1 done thing\n- [ ] t2 (blocked) " + strings.Repeat("long ", 20) + "\n"
+	for _, r := range renderSidebarTodo(todo, 30) {
+		if h := lipgloss.Height(r); h != 1 {
+			t.Fatalf("row %q is %d lines tall, want 1", stripANSI(r), h)
+		}
+	}
+	if view := stripANSI(strings.Join(renderSidebarTodo(todo, 30), "\n")); !strings.Contains(view, "(blocked)") {
+		t.Fatalf("blocked marker lost to the clamp: %q", view)
+	}
+}

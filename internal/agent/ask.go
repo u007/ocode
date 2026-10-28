@@ -221,6 +221,7 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	child := NewAgent(client, tools, a.config, a.lspMgr)
 	child.toolBatchDelay = 0
 	child.SetRecapPromptEnabled(false)
+	child.SetPlanPromptEnabled(false)
 	// A side query's answer is injected back into the parent's context, so a
 	// raw suggestions block would end up in the parent's prompt. Opt out, like
 	// the recap fragment above.

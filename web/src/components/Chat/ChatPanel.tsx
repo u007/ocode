@@ -1192,7 +1192,11 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
   useEffect(() => {
     const el = scrollRef.current;
     const list = listContainerRef.current;
-    if (!el || !list) return;
+    // The live block grows with no store update when something inside it
+    // updates itself (an inline sub-agent card streaming its transcript), so it
+    // is observed too; the pin below stays the only scroll writer.
+    const liveEl = liveBlockRef.current;
+    if (!el || (!list && !liveEl)) return;
     let raf = 0;
     const pin = () => {
       if (!atBottomRef.current) return;
@@ -1211,12 +1215,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
       });
     };
     const ro = new ResizeObserver(pin);
-    ro.observe(list);
+    if (list) ro.observe(list);
+    if (liveEl) ro.observe(liveEl);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [hasList]);
+  }, [hasList, hasLiveBlock]);
 
   // Toggle the find bar with Ctrl/Cmd+F. Local to this tab: each ChatPanel
   // instance is only visible while its tab is active (App.tsx CSS-hides the
@@ -1911,6 +1916,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             command={tc.function.arguments}
                             output={resultContent}
                             images={resultImages}
+                            toolCallId={tc.id}
+                            sessionId={sessionId}
                             highlight={highlight}
                             onOpenQuestion={
                               pendingQuestion
@@ -2010,6 +2017,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                   command={part.command}
                   stream={part.stream}
                   output={part.output}
+                  toolCallId={part.callId}
+                  sessionId={sessionId}
                   // Mid-turn the ask's tool card lives ONLY in the live buffer
                   // (the committed snapshot lands at turn end, and an ask pauses
                   // the turn), so without this an X/Escape hide leaves no reopen

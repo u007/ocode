@@ -303,7 +303,10 @@ export function applyPulseEvent(
     case "todo_updated": {
       const t = data as TodoUpdatedEvent | null;
       if (!t) return null;
+      // Frames can arrive out of order; a plan older than the one the row holds is stale.
+      if (row.todo && t.revision < row.todo.revision) return null;
       const todo = {
+        revision: t.revision,
         done: t.done ?? 0,
         total: t.total ?? 0,
         current: t.current ?? "",

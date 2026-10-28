@@ -562,6 +562,10 @@ type Agent struct {
 	// the agent's own advisorEnabled. Sub-agents set this to point at the parent agent's
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
+	// isSubAgent marks an agent built by TaskTool for a dispatch. The plan has
+	// one writer, the main agent, so the task tool's todo_item link (a system
+	// write to the plan) is refused when its dispatcher is a sub-agent.
+	isSubAgent bool
 	// advisorInFlight is the root guard for this logical session. Rebuilt agents
 	// and child agents inherit the root pointer through parentAdvisorInFlight;
 	// unrelated sessions get independent guards.
@@ -827,6 +831,7 @@ type Agent struct {
 	memoryEnabled      bool // whether memory prompt injection is active
 	docPromptEnabled   bool // whether doc-first development prompt is injected
 	recapPromptEnabled bool // whether the recap system-prompt fragment is injected
+	planPromptEnabled  bool // whether the plan-then-execute system-prompt fragment is injected
 	// suggestedResponsesEnabled gates the suggested-responses prompt fragment.
 	// Read once at construction (like the other prompt gates) so the cached
 	// system prefix stays byte-stable within a session.
@@ -1267,6 +1272,18 @@ func (a *Agent) RecapPromptEnabled() bool {
 	return a.recapPromptEnabled
 }
 
+// SetPlanPromptEnabled toggles injection of the plan-then-execute fragment.
+// Default is true for a primary agent; sub-agents, ask helpers and the advisor
+// turn it off for the same reasons as the recap fragment.
+func (a *Agent) SetPlanPromptEnabled(enabled bool) {
+	a.planPromptEnabled = enabled
+}
+
+// PlanPromptEnabled reports whether the plan-then-execute fragment is injected.
+func (a *Agent) PlanPromptEnabled() bool {
+	return a.planPromptEnabled
+}
+
 // getPreloadedContext returns the cached context under read lock.
 func (a *Agent) getPreloadedContext() string {
 	a.preloadedContextMu.RLock()
@@ -1438,6 +1455,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// turn (prompt-cache stability, see append_stable.go). Helper agents
 	// constructed from the same NewAgent opt out explicitly.
 	a.recapPromptEnabled = true
+	a.planPromptEnabled = true
 	a.attachComputerDriver()
 	return a
 }
@@ -1539,14 +1557,19 @@ func (t AgentTool) Definition() map[string]interface{} {
 func (t AgentTool) Parallel() bool { return true }
 
 func (t AgentTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx forwards ctx so the dispatched run learns its tool_call id.
+func (t AgentTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	if t.mainAgent == nil {
 		return "", fmt.Errorf("no main agent configured")
 	}
 	if task, ok := t.mainAgent.tools["task"].(*TaskTool); ok {
-		return task.Execute(args)
+		return task.ExecuteCtx(ctx, args)
 	}
 	task := &TaskTool{mainAgent: t.mainAgent, registry: DefaultAgentRegistry, runs: t.mainAgent.runs}
-	return task.Execute(args)
+	return task.ExecuteCtx(ctx, args)
 }
 
 func (a *Agent) Step(messages []Message) ([]Message, error) {

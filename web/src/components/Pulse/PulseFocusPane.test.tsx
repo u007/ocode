@@ -98,6 +98,7 @@ describe("PulseFocusPane header", () => {
       <PulseFocusPane
         row={makeRow({
           todo: {
+            revision: 1,
             done: 1,
             total: 2,
             current: "second",
@@ -115,6 +116,33 @@ describe("PulseFocusPane header", () => {
     expect(within(todo).getByText("first")).toBeInTheDocument();
     expect(within(todo).getByText("☑")).toBeInTheDocument();
     expect(within(todo).getByText("▸")).toBeInTheDocument();
+  });
+
+  it("shows blocked, running and result detail under plan items", () => {
+    render(
+      <PulseFocusPane
+        row={makeRow({
+          todo: {
+            revision: 1,
+            done: 1,
+            total: 3,
+            current: "build",
+            items: [
+              { id: "t1", text: "build", state: "in_progress", run_id: "agent-run-4" },
+              { id: "t2", text: "test", state: "pending", deps: ["t1"], blocked: true },
+              { id: "t3", text: "plan", state: "done", result: "Wrote the spec." },
+            ],
+          },
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    const todo = screen.getByTestId("pulse-focus-todo");
+    expect(within(todo).getByText("running as agent-run-4")).toBeInTheDocument();
+    expect(within(todo).getByText("blocked by t1")).toBeInTheDocument();
+    expect(within(todo).getByText("Wrote the spec.")).toBeInTheDocument();
+    expect(within(todo).getAllByTestId("pulse-todo-detail")).toHaveLength(3);
   });
 });
 

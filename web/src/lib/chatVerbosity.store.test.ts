@@ -29,6 +29,7 @@ const fullConfig = {
     tool_calls: "preset" as const,
     tool_output: "preset" as const,
     activity_notices: "preset" as const,
+    plan_panel: "5" as const,
   },
 };
 

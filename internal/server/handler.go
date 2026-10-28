@@ -23,6 +23,7 @@ import (
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/monaco"
@@ -784,6 +785,12 @@ func NewHandler() *Handler {
 	} else {
 		h.vault = vault.New(filepath.Join(dataDir, "browse", "vault.json"))
 	}
+	// Every plan write (todowrite, todo_update, the task link write-back)
+	// pushes the plan. The hook runs on the writer's goroutine, so hand the
+	// file read and bus publish to another one.
+	tool.OnTodoWritten(func(scope tool.TodoScope) {
+		crashguard.Go(func() { h.publishTodoUpdated(scope.SessionID) })
+	})
 	return h
 }
 
@@ -937,14 +944,6 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 // in headless mode), the tool branch emits a `permission` frame so a connected
 // browser can render the approve/deny dialog.
 func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) {
-	// toolNames maps a tool call id to its name for the current turn. A tool
-	// result message carries only ToolID, so this map — built from the
-	// assistant message that declared the calls — is the only way to recognize
-	// a todowrite result and push the updated plan. Entries are consumed when
-	// the matching result arrives; a result for an id never seen here is
-	// ignored rather than guessed at.
-	toolNames := map[string]string{}
-
 	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
 	// "reasoning" → "thinking", "text" → "text".
 	ag.OnDelta = func(kind, text string) {
@@ -1031,13 +1030,7 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			return
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			// A turn whose calls were interrupted (cancel, ask) leaves ids with
-			// no result behind. Reset rather than grow without bound.
-			if len(toolNames) > todoToolNameMapCap {
-				clear(toolNames)
-			}
 			for _, tc := range m.ToolCalls {
-				toolNames[tc.ID] = tc.Function.Name
 				h.broadcastEvent(SSEEvent{
 					SessionID: sessionID,
 					Event:     "tool_start",
@@ -1091,25 +1084,14 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 					Data:      newPermissionEvent(m.ToolID, req),
 				})
 			}
-			if tool, declared := toolNames[m.ToolID]; declared {
-				delete(toolNames, m.ToolID)
-				if tool == "todowrite" {
-					h.publishTodoUpdated(sessionID)
-				}
-			}
 		}
 	}
 }
 
-// todoToolNameMapCap bounds the unconsumed tool-id map in
-// wireHeadlessAgentCallbacks. Results consume their entry, so the map only
-// grows for calls that never reported a result; the cap turns a pathological
-// long session into a cheap reset instead of unbounded per-session growth.
-const todoToolNameMapCap = 512
-
 // publishTodoUpdated reads the session's todo plan off disk and publishes it as
-// a todo_updated event. Called right after a todowrite result, so the file is
-// the post-write state and no separate revision tracking is needed.
+// a todo_updated event. Called from the tool.OnTodoWritten hook after every
+// successful plan write, so the file is the post-write state and no separate
+// revision tracking is needed.
 func (h *Handler) publishTodoUpdated(sessionID string) {
 	entry, ok := h.sessions.SnapshotEntry(sessionID)
 	if !ok || entry.ProjectRoot == "" {
@@ -1119,7 +1101,7 @@ func (h *Handler) publishTodoUpdated(sessionID string) {
 		// still on disk, and the dashboard's next fetch reads it directly.
 		return
 	}
-	sum, found, err := tool.ReadTodoSummary(entry.ProjectRoot, sessionID)
+	ev, found, err := readTodoUpdatedEvent(entry.ProjectRoot, sessionID)
 	if err != nil {
 		// A corrupt plan must not fail the turn, but it must be reported —
 		// a silently missing event is indistinguishable on the dashboard from
@@ -1130,17 +1112,25 @@ func (h *Handler) publishTodoUpdated(sessionID string) {
 	if !found {
 		return
 	}
-	items := make([]TodoUpdatedItem, 0, len(sum.Items))
-	for _, it := range sum.Items {
-		items = append(items, TodoUpdatedItem{Text: it.Text, State: it.State})
+	h.publishBusEvent("todo_updated", sessionID, ev)
+}
+
+// readTodoUpdatedEvent builds the todo_updated payload from the plan on disk.
+// The SSE publisher and GET /api/sessions/{id}/todo both call it so the two
+// shapes cannot drift. found is false when the session has no plan.
+func readTodoUpdatedEvent(projectRoot, sessionID string) (TodoUpdatedEvent, bool, error) {
+	sum, found, err := tool.ReadTodoSummary(projectRoot, sessionID)
+	if err != nil || !found {
+		return TodoUpdatedEvent{}, false, err
 	}
-	h.publishBusEvent("todo_updated", sessionID, TodoUpdatedEvent{
+	return TodoUpdatedEvent{
 		SessionID: sessionID,
+		Revision:  sum.Revision,
 		Done:      sum.Done,
 		Total:     sum.Total,
 		Current:   sum.Current,
-		Items:     items,
-	})
+		Items:     pulseTodoItems(sum),
+	}, true, nil
 }
 
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {

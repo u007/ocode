@@ -61,6 +61,7 @@ function displayValue(
         tool_calls: withOverride(overrides.tool_calls) as ChatDisplayOverride,
         tool_output: withOverride(overrides.tool_output) as ChatDisplayOverride,
         activity_notices: withOverride(overrides.activity_notices) as ChatDisplayOverride,
+        plan_panel: "5",
       },
     },
     policy,

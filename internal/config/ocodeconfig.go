@@ -479,6 +479,14 @@ const (
 	// ChatDisplayAuto is valid only for latest_thinking: expanded while the
 	// turn has no answer text yet, collapsed once answer text starts.
 	ChatDisplayAuto = "auto"
+
+	// plan_panel is not an expanded/collapsed override: it chooses how the
+	// chat's plan panel starts. "collapsed" starts folded; a number starts open
+	// showing at most that many rows; "all" starts open with every row.
+	ChatPlanPanelCollapsed = "collapsed"
+	ChatPlanPanel5         = "5"
+	ChatPlanPanel10        = "10"
+	ChatPlanPanelAll       = "all"
 )
 
 // ChatVerbosityOverrides controls individual rendered message categories. An
@@ -491,6 +499,7 @@ type ChatVerbosityOverrides struct {
 	ToolCalls       string `json:"tool_calls"`
 	ToolOutput      string `json:"tool_output"`
 	ActivityNotices string `json:"activity_notices"`
+	PlanPanel       string `json:"plan_panel"`
 }
 
 // ChatVerbosityConfig stores the user's presentation intent. It never changes
@@ -551,6 +560,7 @@ func defaultChatVerbosityConfig() ChatVerbosityConfig {
 			ToolCalls:       ChatDisplayPreset,
 			ToolOutput:      ChatDisplayPreset,
 			ActivityNotices: ChatDisplayPreset,
+			PlanPanel:       ChatPlanPanel5,
 		},
 	}
 }
@@ -581,6 +591,9 @@ func (c ChatVerbosityConfig) withDefaults() ChatVerbosityConfig {
 	if c.Overrides.ActivityNotices == "" {
 		c.Overrides.ActivityNotices = ChatDisplayPreset
 	}
+	if c.Overrides.PlanPanel == "" {
+		c.Overrides.PlanPanel = ChatPlanPanel5
+	}
 	return c
 }
 
@@ -605,6 +618,14 @@ func validChatDisplayOverride(value string) bool {
 // chatOverrideAllowed checks one category's value. Only latest_thinking also
 // accepts "auto"; widening the shared check would let tool_calls="auto" through.
 func chatOverrideAllowed(name, value string) bool {
+	if name == "plan_panel" {
+		switch value {
+		case ChatPlanPanelCollapsed, ChatPlanPanel5, ChatPlanPanel10, ChatPlanPanelAll:
+			return true
+		default:
+			return false
+		}
+	}
 	if validChatDisplayOverride(value) {
 		return true
 	}
@@ -613,6 +634,9 @@ func chatOverrideAllowed(name, value string) bool {
 
 // chatOverrideChoices lists the legal values for one category in error messages.
 func chatOverrideChoices(name string) string {
+	if name == "plan_panel" {
+		return fmt.Sprintf("%q, %q, %q, or %q", ChatPlanPanelCollapsed, ChatPlanPanel5, ChatPlanPanel10, ChatPlanPanelAll)
+	}
 	if name == "latest_thinking" {
 		return fmt.Sprintf("%q, %q, %q, or %q", ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed, ChatDisplayAuto)
 	}
@@ -634,6 +658,8 @@ func chatVerbosityOverrideField(dst *ChatVerbosityOverrides, name string) *strin
 		return &dst.ToolOutput
 	case "activity_notices":
 		return &dst.ActivityNotices
+	case "plan_panel":
+		return &dst.PlanPanel
 	default:
 		return nil
 	}
@@ -655,6 +681,7 @@ func (c ChatVerbosityConfig) Validate() error {
 		{"tool_calls", c.Overrides.ToolCalls},
 		{"tool_output", c.Overrides.ToolOutput},
 		{"activity_notices", c.Overrides.ActivityNotices},
+		{"plan_panel", c.Overrides.PlanPanel},
 	}
 	for _, override := range overrides {
 		if !chatOverrideAllowed(override.name, override.value) {

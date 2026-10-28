@@ -314,6 +314,8 @@ function MessageBubble({
             tool={tc.function.name}
             command={tc.function.arguments}
             output=""
+            toolCallId={tc.id}
+            sessionId={sessionId}
             highlight={highlight}
             callKey={`${baseKey}:call:${tc.id}`}
             outputKey={`${baseKey}:output:${tc.id}`}

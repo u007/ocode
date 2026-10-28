@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import RunNode from "./RunNode";
 import type { AgentRun, AgentRunMessage } from "../../api/types";
@@ -332,6 +332,39 @@ describe("RunNode transcript scrolling", () => {
       else Reflect.deleteProperty(proto, "clientHeight");
       if (dScrollTop) Object.defineProperty(proto, "scrollTop", dScrollTop);
       else Reflect.deleteProperty(proto, "scrollTop");
+    }
+  });
+
+  it("ticks a running run's elapsed time without re-rendering its transcript", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-06T10:00:00.000Z"));
+      let renders = 0;
+      const running: AgentRun = {
+        ...baseRun,
+        status: "running",
+        endedAt: undefined,
+        messages: [{ role: "assistant", content: "working", reasoningContent: "thinking" }],
+      };
+      render(
+        <RunNode
+          run={running}
+          depth={0}
+          renderReasoning={() => {
+            renders++;
+            return null;
+          }}
+        />,
+      );
+      expect(screen.getByText("0ms")).toBeInTheDocument();
+      const before = renders;
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByText("3.0s")).toBeInTheDocument();
+      expect(renders).toBe(before);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

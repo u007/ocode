@@ -248,6 +248,7 @@ describe("PulseCard todo progress", () => {
       <PulseCard
         row={makeRow({
           todo: {
+            revision: 1,
             done: 2,
             total: 4,
             current: "wire the overlay",
@@ -282,7 +283,7 @@ describe("PulseCard compact mode", () => {
       <PulseCard
         row={makeRow({
           child_count: 2,
-          todo: { done: 1, total: 2, current: "x", items: [{ text: "x", state: "in_progress" }] },
+          todo: { revision: 1, done: 1, total: 2, current: "x", items: [{ text: "x", state: "in_progress" }] },
         })}
         compact
       />,
@@ -341,7 +342,7 @@ describe("PulseCard streams a live row on the card itself", () => {
     render(
       <PulseCard
         row={makeRow({
-          todo: { done: 1, total: 2, current: "x", items: [{ text: "x", state: "in_progress" }] },
+          todo: { revision: 1, done: 1, total: 2, current: "x", items: [{ text: "x", state: "in_progress" }] },
         })}
         compact={false}
       />,
@@ -822,6 +823,7 @@ describe("PulseCard overlay", () => {
       <PulseCard
         row={makeRow({
           todo: {
+            revision: 1,
             done: 1,
             total: 3,
             current: "two",
@@ -1081,6 +1083,7 @@ describe("PulseCard hover overlay is never empty", () => {
           status: "idle",
           current_task: { kind: "todo", text: "second" },
           todo: {
+            revision: 1,
             done: 0,
             total: 1,
             current: "second",

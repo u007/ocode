@@ -1,5 +1,20 @@
 # TODO
 
+## Open: todo plan deps and task link follow-ups (2026-10-28)
+
+Phases 1 to 4 (store and tools, prompt, push and Pulse view, chat inline card and plan panel; `docs/concepts/persistent-todo-plan.md`) are done. Deferred:
+
+- **`tool.OnTodoWritten` has no unregister**, so each `NewHandler` leaves a hook behind. Harmless in production (one handler; a dead handler's publish finds no session and returns). Add an unregister return if a second long-lived handler ever exists.
+- **The Pulse `TodoItemDetail` shows the linked `run_id` as plain text.** Make it a link when Pulse gets an agent-run drill-in.
+- **Chat bottom pin vs inline agent card.** No test that the chat's bottom pin follows growth of an inline agent card in the live block, nor that a reader who scrolled up is not pulled back. `ChatPanel` tests need virtualizer plumbing for it.
+- **Nested `ThinkingBlock` inside the inline card** brings its own margin and width limits; not checked in a real browser.
+- **`PlanPanel` imports `TodoItemDetail` and `TODO_MARK` from `PulseCard.tsx`.** Move them to a shared module so the chat does not pull Pulse internals.
+- **One runs seed per task block.** Each inline task card calls `useAgentRuns`; a replayed transcript can issue one `/api/agents/runs` fetch per block before the cache fills. Share one seed per session.
+- **Inline card has no drill-in.** `onOpenDetail` is not reachable from `ToolBlock`, so the card's run name cannot open the full transcript (the plan panel's "running as" does, via `openAgentDetail`). The card's expanded state is local and resets on remount.
+- **Plan fragment is not gated per model family.** `planExecutePromptContent` (`[ocode:plan]`, phase 2) goes to every primary agent. Weaker providers may follow delegation prompts poorly; not measured. Gate the wording per family only if a measurement shows it.
+- **A cancellation mid-run is covered by a unit test of `recordTodoOutcome`, not by a live Stop.** Verify in the TUI and desktop that Stop on a linked dispatch leaves the item `in_progress` with `CANCELLED:`.
+- **Docs anchors into `subagent.go`, `agent.go` and `agent_runs.go` shifted again** (`subagent.go` about +90 lines before `parentSessionID`, `agent.go` +4 near line 565, `agent_runs.go` +1). Folds into the anchor re-derivation item below; not re-derived here.
+
 ## Open: browser agent tool follow-ups (2026-10-27)
 
 The agent tool (`docs/concepts/browser-agent-tools.md`) drives this machine's browser tabs: the project's strip tabs and tabs it opens. Remote-project sessions run on their host and drive that host's Chrome. Deliberately deferred:

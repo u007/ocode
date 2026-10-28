@@ -57,6 +57,18 @@ describe("chat verbosity policy", () => {
     }
   });
 
+  it("defaults plan_panel to 5 and accepts only its closed set", () => {
+    expect(normalizeChatVerbosityConfig({ preset: "full" }).overrides.plan_panel).toBe("5");
+    for (const value of ["collapsed", "5", "10", "all"] as const) {
+      expect(() => resolveChatDisplayPolicy({ preset: "full", overrides: { plan_panel: value } })).not.toThrow();
+    }
+    for (const value of ["preset", "expanded", "7"]) {
+      expect(() =>
+        resolveChatDisplayPolicy({ preset: "full", overrides: { plan_panel: value as "all" } }),
+      ).toThrow(`Invalid chat display override for plan_panel: ${value}`);
+    }
+  });
+
   it("applies independent overrides while preserving latest thinking", () => {
     // The preset cell is collapsed for both, so each override here re-opens a
     // collapsed default and collapses an expanded one — override precedence in

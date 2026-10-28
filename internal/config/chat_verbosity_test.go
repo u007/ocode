@@ -297,3 +297,64 @@ func TestSaveOcodeChatVerbosityRejectsInvalidWithoutRewrite(t *testing.T) {
 		t.Fatal("invalid save rewrote ocodeconfig.json")
 	}
 }
+
+func TestChatVerbosityPlanPanelDefaultsToFive(t *testing.T) {
+	if got := defaultChatVerbosityConfig().Overrides.PlanPanel; got != "5" {
+		t.Errorf("default plan_panel = %q, want 5", got)
+	}
+	if got := NormalizeChatVerbosityConfig(ChatVerbosityConfig{}).Overrides.PlanPanel; got != "5" {
+		t.Errorf("omitted plan_panel normalizes to %q, want 5", got)
+	}
+}
+
+func TestChatVerbosityPlanPanelValidation(t *testing.T) {
+	for _, ok := range []string{"collapsed", "5", "10", "all"} {
+		cfg := ChatVerbosityConfig{Preset: "full", Overrides: ChatVerbosityOverrides{PlanPanel: ok}}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("plan_panel %q: Validate() = %v, want nil", ok, err)
+		}
+	}
+	// "preset" and "expanded" are valid for the other categories but not here.
+	for _, bad := range []string{"preset", "expanded", "7", "auto", "ALL"} {
+		cfg := ChatVerbosityConfig{Preset: "full", Overrides: ChatVerbosityOverrides{PlanPanel: bad}}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("plan_panel %q: Validate() = nil, want error", bad)
+		}
+	}
+}
+
+func TestChatVerbosityPlanPanelRoundTrip(t *testing.T) {
+	chdirTempForConfigTest(t)
+	setHomeTree(t, t.TempDir())
+
+	seed := defaultOcodeConfig()
+	seed.ChatVerbosity = ChatVerbosityConfig{Preset: "full", Overrides: ChatVerbosityOverrides{PlanPanel: "all"}}
+	if err := SaveOcodeConfig(&seed); err != nil {
+		t.Fatalf("SaveOcodeConfig() error = %v", err)
+	}
+	got, err := LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy() error = %v", err)
+	}
+	if got.ChatVerbosity.Overrides.PlanPanel != "all" {
+		t.Errorf("plan_panel = %q, want all", got.ChatVerbosity.Overrides.PlanPanel)
+	}
+}
+
+func TestChatVerbosityConfigFileRejectsInvalidPlanPanel(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	setHomeTree(t, tmp)
+
+	dir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := `{"chat_verbosity":{"preset":"full","overrides":{"plan_panel":"7"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "ocodeconfig.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadOcodeConfigCopy(); err == nil {
+		t.Fatal("LoadOcodeConfigCopy() = nil, want invalid plan_panel error")
+	}
+}

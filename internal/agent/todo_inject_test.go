@@ -122,3 +122,42 @@ func mustRawJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+func TestInjectTodoTailNotesBlockedItems(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-blocked")
+	writeAgentTodo(t, a, "- [ ] first\n- [ ] second\n- [ ] third")
+	setDeps(t, a, "t2", "t1")
+	setDeps(t, a, "t3", "t1", "t2")
+
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	tail := out[len(out)-1]
+	if tail.Role != "user" || !strings.Contains(tail.Content, "- [ ] t3 third\nBlocked: t2 by t1; t3 by t1, t2") {
+		t.Fatalf("blocked line must follow the list:\n%s", tail.Content)
+	}
+	if strings.Contains(tail.Content, "  blocked by") {
+		t.Fatalf("no non-grammar line inside the list:\n%s", tail.Content)
+	}
+
+	// A model that echoes the shown list into todowrite must not hit a parse error.
+	var list []string
+	for _, l := range strings.Split(tail.Content, "\n") {
+		if strings.HasPrefix(l, "- [") {
+			list = append(list, l)
+		}
+	}
+	snap := tool.ReadTodoSnapshot(a.todoScope())
+	args := mustRawJSON(t, map[string]any{"revision": snap.Revision, "todoText": strings.Join(list, "\n")})
+	ctx := tool.WithTodoScope(context.Background(), a.todoScope())
+	if _, err := (tool.TodoWriteTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("echoed plan rejected: %v", err)
+	}
+}
+
+func TestInjectTodoTailOmitsBlockedLineWhenNothingBlocked(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-unblocked")
+	writeAgentTodo(t, a, "- [ ] first")
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	if strings.Contains(out[len(out)-1].Content, "Blocked:") {
+		t.Fatalf("unexpected blocked line:\n%s", out[len(out)-1].Content)
+	}
+}

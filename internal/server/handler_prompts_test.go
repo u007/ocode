@@ -51,8 +51,8 @@ func TestListPromptOverridesReturnsCatalogSorted(t *testing.T) {
 	h := promptsTestHandler(t)
 
 	rows := listPromptRows(t, h)
-	if len(rows) != 20 {
-		t.Fatalf("got %d prompts, want 20", len(rows))
+	if len(rows) != 21 {
+		t.Fatalf("got %d prompts, want 21", len(rows))
 	}
 	if !sort.SliceIsSorted(rows, func(i, j int) bool { return rows[i].Key < rows[j].Key }) {
 		t.Errorf("prompts not sorted by key")

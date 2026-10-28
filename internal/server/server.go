@@ -319,6 +319,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleClearSessionThinkingBudget))
+	s.mux.HandleFunc("GET /api/sessions/{id}/todo", s.authMiddleware(s.handleGetSessionTodo))
 	s.mux.HandleFunc("GET /api/sessions/{id}/goal", s.authMiddleware(s.handleGetSessionGoal))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/goal", s.authMiddleware(s.handleSetSessionGoal))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/goal", s.authMiddleware(s.handleClearSessionGoal))
@@ -1847,6 +1848,10 @@ func (s *Server) handleSetSessionThinkingBudget(w http.ResponseWriter, r *http.R
 func (s *Server) handleClearSessionThinkingBudget(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleClearSessionThinkingBudget(w, r, id)
+}
+
+func (s *Server) handleGetSessionTodo(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetSessionTodo(w, r, r.PathValue("id"))
 }
 
 func (s *Server) handleGetSessionGoal(w http.ResponseWriter, r *http.Request) {
