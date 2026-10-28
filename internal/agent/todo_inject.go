@@ -46,8 +46,78 @@ func (a *Agent) injectTodoTail(base []Message) []Message {
 	if len(snap.Blocked) > 0 {
 		fmt.Fprintf(&b, "Blocked: %s\n", strings.Join(snap.Blocked, "; "))
 	}
+	b.WriteString("\n")
+	b.WriteString(todoStatusDirective(snap))
 	out := make([]Message, 0, len(base)+1)
 	out = append(out, base...)
 	out = append(out, Message{Role: "user", Content: strings.TrimRight(b.String(), "\n")})
+	return out
+}
+
+// todoStatusDirective is the action line appended after the plan. The list
+// alone says WHAT the plan is, not what to do with it; observed long sessions
+// write the plan once and then never call todo_update, so every item stays
+// pending and the sidebar never shows current work. The directive names the
+// exact call (including the revision the model must cite) for the next status
+// transition. It is derived only from the snapshot, so an unchanged plan
+// produces a byte-identical block — the user-role suffix must stay stable for
+// prompt caching.
+func todoStatusDirective(snap tool.TodoSnapshot) string {
+	var inProgress []string
+	for _, it := range snap.OpenItems {
+		if it.Status == "in_progress" {
+			inProgress = append(inProgress, it.ID)
+		}
+	}
+	if len(inProgress) > 0 {
+		subject := fmt.Sprintf("%s is", inProgress[0])
+		if len(inProgress) > 1 {
+			subject = strings.Join(inProgress, ", ") + " are"
+		}
+		return fmt.Sprintf(
+			"Plan status: %s in_progress. As soon as an item is verified, run todo_update {\"revision\": %d, \"op\": \"set_status\", \"item_id\": %q, \"status\": \"done\", \"result\": \"<one-line outcome>\"}, then mark the next item in_progress before starting it. Never batch status updates.\n",
+			subject, snap.Revision, inProgress[0],
+		)
+	}
+	blocked := blockedTodoIDs(snap.Blocked)
+	for _, it := range snap.OpenItems {
+		if blocked[it.ID] {
+			continue
+		}
+		return fmt.Sprintf(
+			"Plan status: no plan item is in_progress. Before your next tool call, run todo_update {\"revision\": %d, \"op\": \"set_status\", \"item_id\": %q, \"status\": \"in_progress\"}. Next ready item %s: %s. Never batch status updates.\n",
+			snap.Revision, it.ID, it.ID, oneLineTodoText(it.Text),
+		)
+	}
+	// Defensive: every open item waits on another open item, which the store's
+	// cycle check rejects at write time, so this is not reachable through the
+	// tools. Name no target rather than recommend one that cannot start.
+	return "Plan status: no ready plan item. Re-read the plan with todoread and clear a blocked item's dependencies before starting work.\n"
+}
+
+// oneLineTodoText keeps model-written plan text from breaking the directive:
+// newlines and runs of whitespace collapse to single spaces, and very long text
+// is truncated by rune count (never mid-byte).
+func oneLineTodoText(text string) string {
+	flat := strings.Join(strings.Fields(text), " ")
+	const maxRunes = 120
+	runes := []rune(flat)
+	if len(runes) <= maxRunes {
+		return flat
+	}
+	return string(runes[:maxRunes]) + "…"
+}
+
+// blockedTodoIDs extracts the ids from TodoSnapshot.Blocked notes ("t3 by t1,
+// t2"), so the start directive never recommends an item the store will refuse
+// to move to in_progress.
+func blockedTodoIDs(notes []string) map[string]bool {
+	out := make(map[string]bool, len(notes))
+	for _, note := range notes {
+		id, _, ok := strings.Cut(note, " by ")
+		if ok && id != "" {
+			out[id] = true
+		}
+	}
 	return out
 }

@@ -161,3 +161,89 @@ func TestInjectTodoTailOmitsBlockedLineWhenNothingBlocked(t *testing.T) {
 		t.Fatalf("unexpected blocked line:\n%s", out[len(out)-1].Content)
 	}
 }
+
+func TestInjectTodoTailDirectsStartingAnItem(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-start")
+	writeAgentTodo(t, a, "- [ ] first\n- [ ] second")
+
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	tail := out[len(out)-1].Content
+
+	if !strings.Contains(tail, "no plan item is in_progress") {
+		t.Fatalf("missing the start directive:\n%s", tail)
+	}
+	for _, want := range []string{"todo_update", `"item_id": "t1"`, `"status": "in_progress"`, `"revision": 1`, "t1: first"} {
+		if !strings.Contains(tail, want) {
+			t.Errorf("start directive missing %q:\n%s", want, tail)
+		}
+	}
+}
+
+func TestInjectTodoTailDirectsFinishingTheCurrentItem(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-finish")
+	writeAgentTodo(t, a, "- [•] first\n- [ ] second")
+
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	tail := out[len(out)-1].Content
+
+	for _, want := range []string{"t1 is in_progress", "todo_update", `"item_id": "t1"`, `"status": "done"`, `"result"`, "before starting"} {
+		if !strings.Contains(tail, want) {
+			t.Errorf("finish directive missing %q:\n%s", want, tail)
+		}
+	}
+}
+
+func TestInjectTodoTailRecommendsAReadyItemNotABlockedOne(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-ready")
+	writeAgentTodo(t, a, "- [ ] blocked\n- [ ] ready")
+
+	snap := tool.ReadTodoSnapshot(a.todoScope())
+	ctx := tool.WithTodoScope(context.Background(), a.todoScope())
+	args := mustRawJSON(t, map[string]any{
+		"revision": snap.Revision,
+		"op":       "set_deps",
+		"item_id":  "t1",
+		"deps":     []string{"t2"},
+	})
+	if _, err := (tool.TodoUpdateTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("set_deps: %v", err)
+	}
+
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	tail := out[len(out)-1].Content
+	if !strings.Contains(tail, `"item_id": "t2"`) {
+		t.Fatalf("expected the ready item t2 to be recommended:\n%s", tail)
+	}
+	if strings.Contains(tail, `"item_id": "t1"`) {
+		t.Fatalf("a blocked item must not be recommended:\n%s", tail)
+	}
+}
+
+func TestInjectTodoTailIsStableForAnUnchangedPlan(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-stable")
+	writeAgentTodo(t, a, "- [ ] first")
+
+	first := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	second := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	if first[len(first)-1].Content != second[len(second)-1].Content {
+		t.Fatalf("unchanged plan produced different tails:\n--- first\n%s\n--- second\n%s", first[len(first)-1].Content, second[len(second)-1].Content)
+	}
+}
+
+func TestInjectTodoTailDirectiveCarriesTheCurrentRevision(t *testing.T) {
+	a := todoTestAgent(t, "ses-inject-rev")
+	writeAgentTodo(t, a, "- [ ] first")
+	ctx := tool.WithTodoScope(context.Background(), a.todoScope())
+
+	snap := tool.ReadTodoSnapshot(a.todoScope())
+	args := mustRawJSON(t, map[string]any{"revision": snap.Revision, "op": "set_status", "item_id": "t1", "status": "in_progress"})
+	if _, err := (tool.TodoUpdateTool{}).ExecuteCtx(ctx, args); err != nil {
+		t.Fatalf("set_status: %v", err)
+	}
+
+	out := a.injectTodoTail([]Message{{Role: "user", Content: "go"}})
+	tail := out[len(out)-1].Content
+	if !strings.Contains(tail, `"revision": 2`) {
+		t.Fatalf("directive must cite the post-update revision:\n%s", tail)
+	}
+}

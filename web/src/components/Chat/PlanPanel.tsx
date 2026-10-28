@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, ListChecks } from "lucide-react";
-import { api } from "../../api/client";
-import { eventBus } from "../../lib/eventBus";
 import { cn } from "../../lib/utils";
 import { useChatVerbosity } from "../../lib/chatVerbosity";
-import { getSessionPlan, setSessionPlan, useSessionPlan } from "../../lib/sessionPlan";
+import { useSessionPlanLive } from "../../hooks/useSessionPlanLive";
 import { TODO_MARK, TodoItemDetail } from "../Pulse/PulseCard";
 import {
   loadPlanPanelCollapsed,
@@ -27,7 +25,7 @@ interface PlanPanelProps {
 // 5 / 10 / all rows. The user's own fold/unfold is remembered per session and
 // always wins.
 export default function PlanPanel({ sessionId, host, onOpenRun }: PlanPanelProps) {
-  const plan = useSessionPlan(sessionId);
+  const plan = useSessionPlanLive(sessionId, host);
   const setting = useChatVerbosity().config.overrides.plan_panel;
   const [choice, setChoice] = useState(() => loadPlanPanelCollapsed(sessionId));
   const [showAll, setShowAll] = useState(false);
@@ -40,33 +38,6 @@ export default function PlanPanel({ sessionId, host, onOpenRun }: PlanPanelProps
     });
   }, [sessionId]);
   const collapsed = choice ?? setting === "collapsed";
-
-  // A `new-*` id is a temp tab, not a session yet: nothing on the server.
-  const realSessionId = sessionId.startsWith("new-") ? null : sessionId;
-  useEffect(() => {
-    if (!realSessionId) return;
-    let cancelled = false;
-    // The initial load must not overwrite a newer todo_updated that arrived
-    // while the request was in flight; a reseed after a reconnect must, since
-    // events published while disconnected are not replayed.
-    const load = (replace: boolean) => {
-      api
-        .getSessionTodo(realSessionId, host)
-        .then((next) => {
-          if (cancelled) return;
-          if (replace || getSessionPlan(realSessionId) === undefined) setSessionPlan(realSessionId, next);
-        })
-        .catch((err) => {
-          console.warn("failed to fetch session plan", err);
-        });
-    };
-    load(false);
-    const offReconnect = eventBus.onReconnect(() => load(true));
-    return () => {
-      cancelled = true;
-      offReconnect();
-    };
-  }, [realSessionId, host]);
 
   if (!plan || plan.items.length === 0) return null;
 
