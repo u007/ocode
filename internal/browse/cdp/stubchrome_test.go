@@ -26,6 +26,8 @@ type stubChrome struct {
 	// beforeReply, when set, runs after a command is recorded and before its
 	// reply is written — lets a test inject events that race the reply.
 	beforeReply func(method, sessionID string)
+	// overrides replaces the canned reply for a method (see SetResult).
+	overrides map[string]any
 }
 
 // newStubChrome creates a pipe pair and a Conn. The returned conn is what
@@ -45,6 +47,17 @@ func (s *stubChrome) Close() {
 	_ = s.conn.Close()
 	_ = s.rCh.Close()
 	_ = s.wCh.Close()
+}
+
+// SetResult makes every later reply to method carry result instead of the
+// canned default. Methods without an override keep their existing replies.
+func (s *stubChrome) SetResult(method string, result any) {
+	s.callsMu.Lock()
+	defer s.callsMu.Unlock()
+	if s.overrides == nil {
+		s.overrides = map[string]any{}
+	}
+	s.overrides[method] = result
 }
 
 func (s *stubChrome) Calls() []stubCall {
@@ -108,6 +121,9 @@ func (s *stubChrome) handleFrame(frame []byte) {
 
 		// Build canned result
 		var result any
+		s.callsMu.Lock()
+		override, hasOverride := s.overrides[msg.Method]
+		s.callsMu.Unlock()
 		switch msg.Method {
 		case "Target.createBrowserContext":
 			result = map[string]string{"browserContextId": jsonBrowserContextID(seq)}
@@ -119,6 +135,9 @@ func (s *stubChrome) handleFrame(frame []byte) {
 			result = map[string]any{"browserContextIds": []string{}}
 		default:
 			result = map[string]any{}
+		}
+		if hasOverride {
+			result = override
 		}
 		if s.beforeReply != nil {
 			s.beforeReply(msg.Method, msg.SessionID)

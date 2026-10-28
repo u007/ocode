@@ -604,7 +604,7 @@ Always allow:  read, glob, grep, rgrep, list, lsp, lsp_diagnostics, skill,
 Default allow: write, edit, multiedit, multi_file_edit, replace_lines,
               apply_patch, format, imagegen
 
-Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
+Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*, computer, browser
 ```
 
 Override per-tool in `ocodeconfig.json`:
@@ -624,6 +624,16 @@ for actions, permissions, platform prerequisites, limitations, and privacy
 details. macOS requires Screen Recording and Accessibility grants; Linux uses
 `xdotool`/`scrot` on X11 or `ydotool`/`grim` on supported wlroots Wayland
 compositors; Windows requires PowerShell on `PATH`.
+
+## Browser tool
+
+Sessions served by an ocode server that starts the embedded browser (the desktop
+app, `ocode serve`, the TUI's `/rc` server) give the agent a `browser` tool over
+the embedded Chrome tabs of the project: list the tabs, screenshot, read the page (snapshot,
+find, text), and act (click, fill, pick, fill_form, upload, wait). Read actions
+are allowed; every action that changes a page asks. Screenshots, page text and
+logs are untrusted page data and go through the inbound-content guard. The TUI's
+own chat agent does not get the tool, only sessions on its `/rc` server do. See [docs/concepts/browser-agent-tools.md](../../docs/concepts/browser-agent-tools.md).
 
 ## 11. Secret Redaction (`/mask`)
 

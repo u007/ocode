@@ -47,6 +47,38 @@ describe("AssistantText markdown code rendering", () => {
       false,
     );
   });
+
+  it("soft-wraps fenced blocks instead of scrolling them horizontally", () => {
+    const long = "x".repeat(400);
+    const { container } = render(
+      <AssistantText content={"```\n" + long + "\nsecond\n```"} />,
+    );
+    const pre = container.querySelector("pre")!;
+    expect(pre.className).toContain("whitespace-pre-wrap");
+    expect(pre.className).toContain("break-words");
+    expect(pre.className).toContain("[overflow-wrap:anywhere]");
+    expect(pre.className).not.toContain("overflow-x-auto");
+  });
+
+  it("wraps markdown tables to the bubble width instead of scrolling", () => {
+    const { container } = render(
+      <AssistantText content={"| a | b |\n| --- | --- |\n| " + "x".repeat(200) + " | y |"} />,
+    );
+    // The table wrapper no longer owns a horizontal scroll container.
+    const wrapper = container.querySelector("table")!.parentElement!;
+    expect(wrapper.className).not.toContain("overflow-x-auto");
+    const cell = container.querySelector("td")!;
+    expect(cell.className).toContain("[overflow-wrap:anywhere]");
+  });
+
+  it("wraps long unbroken prose tokens inside the bubble", () => {
+    const { container } = render(
+      <AssistantText content={"see " + "a".repeat(300)} />,
+    );
+    const prose = container.querySelector(".prose")!;
+    expect(prose.className).toContain("break-words");
+    expect(prose.className).toContain("[overflow-wrap:anywhere]");
+  });
 });
 
 // Regression for the "selection flickers to other places while dragging"

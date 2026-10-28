@@ -28,7 +28,7 @@ different thing from every other allowlist this server keeps.
 | `cfg.Ocode.ExtraAllowedPaths` | the file surfaces **and the agent's tool scope** | global config, persistent |
 | **editor grants** (`fileGrantStore`) | the file editor/preview surfaces **only** | in-memory, per server process |
 
-`handler.go:273` carries the field; `handler_file_grants.go:41` defines the
+`handler.go:278` carries the field; `handler_file_grants.go:41` defines the
 store; `handler_file_grants.go:143` lazily creates it.
 
 ### Why grants are NOT `extra_allowed_paths`

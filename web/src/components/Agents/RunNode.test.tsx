@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import RunNode from "./RunNode";
-import type { AgentRun } from "../../api/types";
+import type { AgentRun, AgentRunMessage } from "../../api/types";
 
 const baseRun: AgentRun = {
   id: "run-1",
@@ -156,5 +156,182 @@ describe("RunNode", () => {
   it("shows no contract badge when no contract applies", () => {
     render(<RunNode run={baseRun} depth={0} />);
     expect(screen.queryByText("contract ✗")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Expanded transcript: bounded scroll box with top/bottom affordances that
+// follows the tail while the reader stays at the bottom.
+// ---------------------------------------------------------------------------
+
+function msg(content: string): AgentRunMessage {
+  return { role: "assistant", content };
+}
+
+function liveRun(messages: AgentRunMessage[]): AgentRun {
+  return { ...baseRun, status: "running", endedAt: undefined, messages };
+}
+
+/** Give the transcript controllable metrics; jsdom has no layout engine. */
+function makeScrollable(el: HTMLElement, scrollHeight: number, clientHeight: number) {
+  let top = 0;
+  let height = scrollHeight;
+  Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => height });
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: clientHeight });
+  Object.defineProperty(el, "scrollTop", {
+    configurable: true,
+    get: () => top,
+    set: (v: number) => {
+      top = v;
+    },
+  });
+  // jsdom's Element may or may not expose scrollTo; pin the fallback path the
+  // affordances use so a click is observable as a scrollTop write.
+  Object.defineProperty(el, "scrollTo", { configurable: true, value: undefined });
+  return {
+    setTop: (v: number) => {
+      top = v;
+    },
+    getTop: () => top,
+    setScrollHeight: (h: number) => {
+      height = h;
+    },
+  };
+}
+
+function transcript(): HTMLElement {
+  return screen.getByTestId("agent-transcript");
+}
+
+function scrollToBottomButton() {
+  return screen.queryByRole("button", { name: "Scroll to bottom" });
+}
+
+function scrollToTopButton() {
+  return screen.queryByRole("button", { name: "Scroll to top" });
+}
+
+describe("RunNode transcript scrolling", () => {
+  it("pins the expanded transcript to the newest entry and follows appends", () => {
+    const { rerender } = render(<RunNode run={liveRun([msg("first")])} depth={0} />);
+    const m = makeScrollable(transcript(), 600, 200);
+
+    // New content while at the bottom keeps the newest entry in view.
+    rerender(<RunNode run={liveRun([msg("first"), msg("second")])} depth={0} />);
+    expect(m.getTop()).toBe(600);
+
+    m.setScrollHeight(700);
+    rerender(
+      <RunNode run={liveRun([msg("first"), msg("second"), msg("third")])} depth={0} />,
+    );
+    expect(m.getTop()).toBe(700);
+  });
+
+  it("stops following once the reader scrolls up, and offers scroll-to-bottom", () => {
+    const { rerender } = render(<RunNode run={liveRun([msg("first")])} depth={0} />);
+    const m = makeScrollable(transcript(), 600, 200);
+    rerender(<RunNode run={liveRun([msg("first"), msg("second")])} depth={0} />);
+    expect(m.getTop()).toBe(600);
+
+    m.setTop(120);
+    fireEvent.scroll(transcript());
+
+    m.setScrollHeight(700);
+    rerender(
+      <RunNode run={liveRun([msg("first"), msg("second"), msg("third")])} depth={0} />,
+    );
+
+    // The reader's position is respected; the affordance offers the tail back.
+    expect(m.getTop()).toBe(120);
+    expect(scrollToBottomButton()).toBeInTheDocument();
+  });
+
+  it("resumes following the moment scroll-to-bottom is clicked, before the scroll event lands", () => {
+    const { rerender } = render(<RunNode run={liveRun([msg("first")])} depth={0} />);
+    const m = makeScrollable(transcript(), 600, 200);
+    rerender(<RunNode run={liveRun([msg("first"), msg("second")])} depth={0} />);
+    m.setTop(120);
+    fireEvent.scroll(transcript());
+
+    fireEvent.click(scrollToBottomButton()!);
+    expect(m.getTop()).toBe(600);
+
+    // A smooth scroll reports back asynchronously (and jsdom never fires the
+    // event at all). The click must re-arm the follow itself, or an update
+    // arriving mid-animation is dropped and the reader is left short of the
+    // tail with the button still showing.
+    m.setScrollHeight(720);
+    rerender(
+      <RunNode run={liveRun([msg("first"), msg("second"), msg("third")])} depth={0} />,
+    );
+    expect(m.getTop()).toBe(720);
+  });
+
+  it("offers scroll-to-top only after the reader leaves the top", () => {
+    render(<RunNode run={liveRun([msg("first")])} depth={0} />);
+    const el = transcript();
+    makeScrollable(el, 600, 200);
+    fireEvent.scroll(el);
+
+    // parked at the top: only the "down" affordance makes sense
+    expect(scrollToTopButton()).toBeNull();
+    expect(scrollToBottomButton()).toBeInTheDocument();
+
+    const m = makeScrollable(el, 600, 200);
+    m.setTop(300);
+    fireEvent.scroll(el);
+    expect(scrollToTopButton()).toBeInTheDocument();
+
+    fireEvent.click(scrollToTopButton()!);
+    expect(m.getTop()).toBe(0);
+  });
+
+  it("renders no nav buttons when the transcript fits its box", () => {
+    render(<RunNode run={liveRun([msg("first")])} depth={0} />);
+    makeScrollable(transcript(), 300, 300);
+    fireEvent.scroll(transcript());
+
+    expect(scrollToTopButton()).toBeNull();
+    expect(scrollToBottomButton()).toBeNull();
+  });
+
+  it("pins to the tail as soon as a collapsed card is expanded", () => {
+    // The transcript only exists after the expand click, so the follow effect
+    // must observe it in that same commit. jsdom has no layout engine, so the
+    // metrics have to be visible on the prototype BEFORE the element mounts —
+    // stubbing the node after the fact would let the effect run against zeros
+    // and the assertion would pass for the wrong reason.
+    const proto = HTMLElement.prototype;
+    const dScrollHeight = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+    const dClientHeight = Object.getOwnPropertyDescriptor(proto, "clientHeight");
+    const dScrollTop = Object.getOwnPropertyDescriptor(proto, "scrollTop");
+    let top = 0;
+    Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => 600 });
+    Object.defineProperty(proto, "clientHeight", { configurable: true, get: () => 200 });
+    Object.defineProperty(proto, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+    });
+    try {
+      render(
+        <RunNode run={liveRun([msg("first"), msg("second")])} depth={0} defaultOpen={false} />,
+      );
+      expect(screen.queryByTestId("agent-transcript")).toBeNull();
+
+      fireEvent.click(screen.getByText("code-reviewer"));
+
+      expect(screen.getByTestId("agent-transcript")).toBeInTheDocument();
+      expect(top).toBe(600);
+    } finally {
+      if (dScrollHeight) Object.defineProperty(proto, "scrollHeight", dScrollHeight);
+      else Reflect.deleteProperty(proto, "scrollHeight");
+      if (dClientHeight) Object.defineProperty(proto, "clientHeight", dClientHeight);
+      else Reflect.deleteProperty(proto, "clientHeight");
+      if (dScrollTop) Object.defineProperty(proto, "scrollTop", dScrollTop);
+      else Reflect.deleteProperty(proto, "scrollTop");
+    }
   });
 });

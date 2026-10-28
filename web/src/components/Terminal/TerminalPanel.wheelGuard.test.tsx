@@ -118,6 +118,11 @@ vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); on
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class { dispose = vi.fn(); } }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
+  // TerminalPanel mounts the voice recorder; its lifecycle reads these.
+  api: {
+    prewarmSpeech: () => Promise.resolve(true),
+    cancelPrewarmSpeech: () => Promise.resolve(true),
+  },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",

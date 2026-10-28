@@ -4,11 +4,22 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+/** An image attached to a transcript message: a tool result's screenshot, or a
+ *  user attachment. `data` is bare base64 (no data: prefix). */
+export interface MessageImage {
+  mime_type: string;
+  data: string;
+  path?: string;
+}
+
 export interface Message {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  /** Images the tool result carried for a vision model (e.g. a browser
+   *  screenshot). Serialised from agent.Message.Images. */
+  images?: MessageImage[];
   reasoning_content?: string;
   /** Durable per-session sequence stamped on user-role messages by the
    *  server, identical on the persisted copy and the `user_message` SSE echo.

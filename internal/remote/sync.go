@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,8 +119,17 @@ func BuildSyncPayload() (SyncPayload, error) {
 // with `fork/exec /bin/zsh: no such file or directory`. The remote resolves its
 // own shell instead (remote.ShellProbeCommand / remote.LoginShellScript), so the key
 // is dropped rather than translated.
+//
+// `extra_allowed_paths` is the same class of value: absolute paths that exist on
+// ONE machine. Pushing them is not merely useless on the other host (macOS
+// `/Users/...` entries on a Linux box match nothing) — because WritePayload
+// replaces the whole file, it silently REVOKES every path grant the user made on
+// that host, so a remote session asks forever no matter how often the path is
+// re-granted there. WritePayload therefore re-attaches the destination's own
+// value (preserveMachineLocalConfig) so the key is owned by the machine it
+// describes.
 var machineLocalConfigKeys = map[string][]string{
-	"ocodeconfig.json": {"terminal_shell"},
+	"ocodeconfig.json": {"terminal_shell", "extra_allowed_paths"},
 }
 
 // stripMachineLocalConfig removes machineLocalConfigKeys[name] from a synced
@@ -150,6 +160,67 @@ func stripMachineLocalConfig(name string, content []byte) []byte {
 	}
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
+		return content
+	}
+	return append(out, '\n')
+}
+
+// preserveMachineLocalConfig re-attaches the machine-local keys that
+// stripMachineLocalConfig removed on the sender, taking their values from the
+// destination file that is about to be replaced. Without this, a stripped key
+// would be ERASED on the receiver (WritePayload writes the frame's bytes as the
+// whole file), which is worse than the original bug: the host would lose its own
+// `extra_allowed_paths` grants and ask for paths the user already approved.
+//
+// The destination wins for these keys because it is the only machine that can
+// evaluate them. A missing destination (fresh host) leaves the content untouched;
+// an unparseable destination does too — failing the credential sync over a
+// foreign config is not worth it, and the previous behaviour (write as-is) is
+// the fallback.
+func preserveMachineLocalConfig(name string, content []byte, destPath string) []byte {
+	keys := machineLocalConfigKeys[name]
+	if len(keys) == 0 || len(bytes.TrimSpace(content)) == 0 {
+		return content
+	}
+	existing, err := os.ReadFile(destPath)
+	if err != nil {
+		// A missing destination is the normal fresh-host case: nothing to
+		// preserve, so no log line. Any other read error is worth surfacing.
+		if !os.IsNotExist(err) {
+			log.Printf("sync: preserve machine-local keys: read %s: %v (writing frame as-is)", destPath, err)
+		}
+		return content
+	}
+	if len(bytes.TrimSpace(existing)) == 0 {
+		return content
+	}
+	var incoming, current map[string]json.RawMessage
+	if err := json.Unmarshal(content, &incoming); err != nil {
+		log.Printf("sync: preserve machine-local keys: frame content is not a JSON object: %v (writing as-is)", err)
+		return content
+	}
+	if err := json.Unmarshal(existing, &current); err != nil {
+		log.Printf("sync: preserve machine-local keys: destination %s is not a JSON object: %v (writing frame as-is)", destPath, err)
+		return content
+	}
+	added := false
+	for _, k := range keys {
+		if _, ok := incoming[k]; ok {
+			continue // the frame carries a value; never overwrite it here
+		}
+		v, ok := current[k]
+		if !ok {
+			continue
+		}
+		incoming[k] = v
+		added = true
+	}
+	if !added {
+		return content
+	}
+	out, err := json.MarshalIndent(incoming, "", "  ")
+	if err != nil {
+		log.Printf("sync: preserve machine-local keys: re-marshal failed: %v (writing frame as-is)", err)
 		return content
 	}
 	return append(out, '\n')
@@ -247,7 +318,11 @@ func WritePayload(p SyncPayload) error {
 		if f.Dir == SyncDirHome {
 			mode = homeFileMode(f.Mode)
 		}
-		if err := writeFileMode(destPath, f.Content, mode); err != nil {
+		content := f.Content
+		if f.Dir == SyncDirConfig {
+			content = preserveMachineLocalConfig(f.Name, f.Content, destPath)
+		}
+		if err := writeFileMode(destPath, content, mode); err != nil {
 			return fmt.Errorf("write %s: %w", destPath, err)
 		}
 	}

@@ -30,14 +30,14 @@ completion messages. This guard breaks that runaway loop.
 
 ## How it works (verified in source)
 
-- `internal/agent/agent.go:388` defines `const subagentDispatchLimit = 3`.
-- `Agent.NoteSubagentDispatch(name)` (`internal/agent/agent.go:987`) increments
+- `internal/agent/agent.go:1043` defines `const subagentDispatchLimit = 3`.
+- `Agent.NoteSubagentDispatch(name)` (`internal/agent/agent.go:1048`) increments
   a counter keyed by the **agent name** for consecutive identical dispatches.
   A different name resets the counter to 1 for that name.
 - `TaskTool.Execute` (`internal/agent/subagent.go:257-265`) refuses dispatch
   when `count > subagentDispatchLimit` — i.e. the **4th** consecutive identical
   launch with no intervening user input.
-- `Agent.ResetSubagentDispatch` (`internal/agent/agent.go:1002`) clears the
+- `Agent.ResetSubagentDispatch` (`internal/agent/agent.go:1063`) clears the
   counter. It is called from the TUI on every new user message
   (`internal/tui/model.go`, `commands.go`, `doc_sync.go`, `learn.go`), so
   legitimate repeated dispatches **across turns** are always allowed.

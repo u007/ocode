@@ -185,6 +185,33 @@ func extractEgressTargets(toolName string, args json.RawMessage) []egressTarget 
 			Host:     host,
 			Loopback: host != "" && (isLocalhostDomain(host) || (isPrivateLANHost(host) && lanTargetIsPlain(raw))),
 		}}
+	case "browser":
+		// Only navigate and open send a request to a URL the model chose. Other
+		// browser actions act on a page that is already loaded.
+		var p struct {
+			Action string `json:"action"`
+			URL    string `json:"url"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			// intentionally not logged: the browser tool rejects arguments it cannot
+			// parse before any navigation, so there is no egress to guard here.
+			return nil
+		}
+		if p.Action != "navigate" && p.Action != "open" {
+			return nil
+		}
+		raw := strings.TrimSpace(p.URL)
+		if raw == "" {
+			return nil
+		}
+		host := extractDomainFromURL(raw)
+		return []egressTarget{{
+			Tool:     toolName,
+			Kind:     egressKindURL,
+			Value:    networkGuardClip(raw),
+			Host:     host,
+			Loopback: host != "" && (isLocalhostDomain(host) || (isPrivateLANHost(host) && lanTargetIsPlain(raw))),
+		}}
 	case "websearch":
 		var p struct {
 			Query string `json:"query"`

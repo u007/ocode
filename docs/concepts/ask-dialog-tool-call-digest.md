@@ -64,7 +64,7 @@ The server resolves the **authoritative** pending ask from the session transcrip
 
 ## Model resolution
 
-`toolDigestClient` (`internal/agent/tool_digest.go:203`) picks the small model when `SmallModelRuntimeEnabled()`; the fallback (`internal/agent/agent.go:3413`, `smallModelOrMainClient`) is a no-thinking copy of the main client. The fallback to the main model is deliberate (`docs/concepts/compaction-cancellation.md` notes the same resolution for compaction): a slow local small model is supported, but the feature must work even when none is configured, rather than silently disabling itself.
+`toolDigestClient` (`internal/agent/tool_digest.go:203`) picks the small model when `SmallModelRuntimeEnabled()`; the fallback (`internal/agent/agent.go:3417`, `smallModelOrMainClient`) is a no-thinking copy of the main client. The fallback to the main model is deliberate (`docs/concepts/compaction-cancellation.md` notes the same resolution for compaction): a slow local small model is supported, but the feature must work even when none is configured, rather than silently disabling itself.
 
 The call is non-blocking in the TUI (`tea.Cmd`, guarded by `permDigestSeq`, `internal/tui/model.go:723`); a queued (not promoted) ask does not clear the current digest.
 

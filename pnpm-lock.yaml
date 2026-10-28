@@ -1,0 +1,22 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      example-pkg:
+        specifier: ^1.1.5
+        version: 1.1.5
+
+packages:
+
+  example-pkg@1.1.5:
+    resolution: {integrity: sha512-s6zKGcpNhxBOSZP/HSZYl6ZmnViMNnZaqDGqnClkTQ4NTyDPz7ZrpMDVCsfz+5+gTrvrciGqdtAz5hoNB9D7EQ==}
+
+snapshots:
+
+  example-pkg@1.1.5: {}

@@ -156,7 +156,7 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		if err != nil {
 			return "", fmt.Errorf("computer: screenshot seed failed: %w", err)
 		}
-		_, iw2, ih2, err := scalePNG(rawPNG, ComputerMaxImageSide)
+		_, iw2, ih2, err := ScalePNG(rawPNG, ComputerMaxImageSide)
 		if err != nil {
 			return "", fmt.Errorf("computer: scale seed failed: %w", err)
 		}
@@ -187,7 +187,7 @@ func (t *ComputerTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 		if err != nil {
 			return "", fmt.Errorf("computer: screenshot: %w", err)
 		}
-		scaled, iw2, ih2, err := scalePNG(rawPNG, ComputerMaxImageSide)
+		scaled, iw2, ih2, err := ScalePNG(rawPNG, ComputerMaxImageSide)
 		if err != nil {
 			return "", fmt.Errorf("computer: scale: %w", err)
 		}
@@ -392,10 +392,10 @@ func validateCoord(x, y, imgW, imgH int) error {
 	return nil
 }
 
-// scalePNG downscales a PNG so its longest side is at most maxSide.
+// ScalePNG downscales a PNG so its longest side is at most maxSide.
 // If the image is already within bounds, the original bytes are
 // returned unchanged.
-func scalePNG(raw []byte, maxSide int) (out []byte, w, h int, err error) {
+func ScalePNG(raw []byte, maxSide int) (out []byte, w, h int, err error) {
 	img, err := png.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, 0, 0, err

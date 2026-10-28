@@ -1,8 +1,11 @@
 # Speech-to-text (voice input)
 
 Dictate a chat message in the TUI, the web UI, or the desktop app. The transcript
-is sent as the next message automatically. The model is chosen once in Settings
-(web/desktop) or with `/voice model <id>` (TUI).
+is inserted into the composer at the cursor and never sent: review it, then press
+Enter. On web and desktop a highlighted section (or the whole draft) is replaced
+by the transcript; the TUI composer has no persistent selection, so it always
+inserts at the cursor. The model is chosen once in Settings (web/desktop) or with
+`/voice model <id>` (TUI).
 
 ## Model catalog
 
@@ -114,17 +117,19 @@ Rules:
 - **Browser (web and desktop)**: `MediaRecorder` on `getUserMedia`. The blob is
   uploaded to `POST /api/stt/transcribe`. The mic button in the chat composer has
   a dual interaction: a quick press-and-release starts recording (traditional click
-  to start, then click again to stop and send); holding the button past
+  to start, then click again to stop and insert the transcript); holding the button past
   `VOICE_HOLD_THRESHOLD_MS` (default 2000 ms) locks continuous mode, where release
   does *not* stop the recording — the user clicks the button again (it reads as a
-  red stop square) to stop and submit the transcript. Keyboard users can press
+  red stop square) to stop and insert the transcript. Keyboard users can press
   Enter or Space the same way (keydown arms, keyup acts). The TUI keeps its
   `ctrl+x v` toggle, since terminals do not reliably report key release.
   The macOS `.app` needs `NSMicrophoneUsageDescription` in the `Info.plist` written
   by `scripts/bundle-macos.sh`; without it macOS denies the mic and `getUserMedia`
   fails with `NotAllowedError` with no prompt. Wails v3 beta.12 has no darwin
-  media-capture permission delegate (Linux does); if the prompt still does not
-  appear after a rebuild, a `WKUIDelegate` handler is the next step (see TODO.md).
+  media-capture delegate, so WebKit would show its own "localhost would like to
+  use your microphone" prompt before the macOS one. `cmd/ocode-desktop/native_darwin.m`
+  adds a `WebviewWindowDelegate` category that grants the WebKit-level request, leaving
+  the macOS system prompt as the single gate.
 - **TUI**: `stt.StartRecording` runs `arecord` (Linux, if installed) or `ffmpeg`
   (Linux pulse, macOS avfoundation, Windows dshow) to a 16 kHz mono WAV. Output is
   captured, never inherited, so nothing paints over the alt-screen.

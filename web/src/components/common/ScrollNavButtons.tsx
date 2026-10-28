@@ -4,6 +4,9 @@ import { ArrowDown, ArrowUp } from "lucide-react";
 /** Distance (px) from an edge within which that edge counts as reached. */
 const EDGE_THRESHOLD = 24;
 
+/** Which edge a nav button jumped to. */
+export type ScrollNavEdge = "top" | "bottom";
+
 export interface ScrollNavButtonsProps {
   /** The scrollable element these buttons drive. */
   scrollRef: RefObject<HTMLElement | null>;
@@ -11,6 +14,19 @@ export interface ScrollNavButtonsProps {
   watch?: unknown;
   /** Extra classes merged onto the floating button column. */
   className?: string;
+  /**
+   * `sm` shrinks the pair for a small nested surface (an agent card's
+   * transcript inside the chat-bottom rail), where the default 36px circles
+   * would cover most of the box.
+   */
+  size?: "default" | "sm";
+  /**
+   * Notified after a button scrolled the surface. Lets the owner realign its
+   * follow intent (useStickToBottom) with the jump: a smooth scroll to the
+   * bottom resumes tailing immediately instead of after the animation, and a
+   * jump to the top stops an incoming update from snapping back down.
+   */
+  onNavigate?: (edge: ScrollNavEdge) => void;
 }
 
 /**
@@ -33,7 +49,13 @@ export interface ScrollNavButtonsProps {
  * `pointer-events-none` with `pointer-events-auto` on the buttons so the
  * unused gap between them never swallows clicks meant for the content below.
  */
-export default function ScrollNavButtons({ scrollRef, watch, className }: ScrollNavButtonsProps) {
+export default function ScrollNavButtons({
+  scrollRef,
+  watch,
+  className,
+  size = "default",
+  onNavigate,
+}: ScrollNavButtonsProps) {
   const [atTop, setAtTop] = useState(true);
   const [atBottom, setAtBottom] = useState(true);
 
@@ -76,17 +98,23 @@ export default function ScrollNavButtons({ scrollRef, watch, className }: Scroll
       } else {
         el.scrollTop = top;
       }
+      onNavigate?.(edge);
     },
-    [scrollRef],
+    [scrollRef, onNavigate],
   );
 
   if (atTop && atBottom) return null;
 
+  const compact = size === "sm";
+  const columnClass = compact ? "bottom-2 right-2 gap-1" : "bottom-4 right-4 gap-2";
+  const buttonClass = compact
+    ? "pointer-events-auto flex h-6 w-6 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent/90"
+    : "pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent/90";
+  const iconClass = compact ? "h-3.5 w-3.5" : "h-4 w-4";
+
   return (
     <div
-      className={`pointer-events-none absolute bottom-4 right-4 z-10 flex flex-col gap-2 ${
-        className ?? ""
-      }`}
+      className={`pointer-events-none absolute z-10 flex flex-col ${columnClass} ${className ?? ""}`}
     >
       {!atTop && (
         <button
@@ -94,9 +122,9 @@ export default function ScrollNavButtons({ scrollRef, watch, className }: Scroll
           onClick={() => scrollTo("top")}
           title="Scroll to top"
           aria-label="Scroll to top"
-          className="pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent/90"
+          className={buttonClass}
         >
-          <ArrowUp className="h-4 w-4" />
+          <ArrowUp className={iconClass} />
         </button>
       )}
       {!atBottom && (
@@ -105,9 +133,9 @@ export default function ScrollNavButtons({ scrollRef, watch, className }: Scroll
           onClick={() => scrollTo("bottom")}
           title="Scroll to bottom"
           aria-label="Scroll to bottom"
-          className="pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-lg transition-colors hover:bg-accent/90"
+          className={buttonClass}
         >
-          <ArrowDown className="h-4 w-4" />
+          <ArrowDown className={iconClass} />
         </button>
       )}
     </div>

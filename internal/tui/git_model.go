@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gen2brain/beeep"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/gitexec"
 )
@@ -461,6 +462,28 @@ func (m *gitModel) gitRun(args ...string) (string, error) {
 // environment, to prove GIT_OPTIONAL_LOCKS=0 reaches the child.
 var gitBinary = "git"
 
+// gitPullStrategy resolves the reconcile flag for `git pull` from Settings → Git
+// (config.GitConfig). It is a var so tests can stub it, and it reads the config
+// at action time so a settings change applies to the NEXT pull without
+// restarting the TUI — the model's cached config snapshot may predate the save.
+// A missing or unreadable config falls back to the documented rebase default.
+var gitPullStrategy = func() string {
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		return config.GitConfig{}.PullFlag()
+	}
+	return gitPullFlagFromConfig(cfg)
+}
+
+// gitPullFlagFromConfig is the actual mapping, split out so it is testable
+// without writing a config file into the test home.
+func gitPullFlagFromConfig(cfg *config.OcodeConfig) string {
+	if cfg == nil {
+		return config.GitConfig{}.PullFlag()
+	}
+	return cfg.Git.PullFlag()
+}
+
 // runGit executes one git command under ctx and returns its stdout with
 // trailing newlines trimmed.
 //
@@ -718,8 +741,12 @@ func (m *gitModel) cmdNetworkOp(op string, args ...string) tea.Cmd {
 		beforeAhead, beforeBehind := aheadBehindCountsIn(workDir)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd := exec.CommandContext(ctx, gitBinary, args...)
 		cmd.Dir = workDir
+		// A pull merges or rebases, which writes the index, so the child must
+		// not take the OPTIONAL index lock ocode's own probes are designed to
+		// avoid (CLAUDE.md: gitexec.Env for every lock-capable git call).
+		cmd.Env = gitexec.Env()
 		// CombinedOutput captures both stdout and stderr; git reports
 		// network/auth failures on stderr, so Output() alone would surface
 		// only "exit status 128" and lose the actionable message.
@@ -1610,7 +1637,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	case "ctrl+p":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "pulling..."
-			return m, m.cmdNetworkOp("pull", "pull")
+			// The reconcile flag is always explicit (Settings → Git): a
+			// divergent pull must never depend on the repo's git config.
+			return m, m.cmdNetworkOp("pull", "pull", gitPullStrategy())
 		}
 
 	case "ctrl+o":

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
@@ -1989,7 +1990,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "sqlite_exec"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "browser", "sqlite_exec"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	// No bash prefixes are banned by default — bans are opt-in via
@@ -2075,6 +2076,13 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 }
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
+	// A browser URL that may never be opened is refused before any mode
+	// shortcut, so YOLO, sandbox and locked all see the same refusal.
+	if toolName == "browser" {
+		if dec, refused := pm.browserURLRefusal(args); refused {
+			return dec
+		}
+	}
 	pm.refreshFileRules()
 	pm.emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
 	if toolName == "read" {
@@ -2466,6 +2474,47 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			}
 			return PermissionDecision{Level: level}
 		}
+	}
+
+	// Browser tool: the observe actions (tabs, screenshot, text, scroll,
+	// snapshot, find, wait, console, network) read the page or move the view,
+	// so they are allowed unless the user denied the tool. Every other action
+	// (click, type, fill, check, uncheck, select, pick, fill_form, upload, key,
+	// navigate, open, back, forward, reload) can change page state, send a
+	// request or read a local file, and follows the rule. An unknown or missing
+	// action takes the rule path.
+	//
+	// Deliberately unlike every other in-workdir tool, the browser block returns
+	// before sandbox's auto-allow carve-out: a mutating browser action always
+	// asks (then may go to the auto-judge), because the OS write-wall confines
+	// files, not what a click sends to a page.
+	if toolName == "browser" {
+		var params struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			pm.emitDebug("perm", fmt.Sprintf("Decide: browser arguments unparseable, treated as an unknown action (tool=browser): %v", err))
+			params.Action = ""
+		}
+		level := pm.Check(toolName)
+		if browserObserveActions[params.Action] {
+			if level == PermissionDeny {
+				pm.emitDebug("perm", "Decide DENY (browser observe): action="+params.Action)
+				return PermissionDecision{Level: level, DenyReason: "permissions.tools.browser = deny"}
+			}
+			pm.emitDebug("perm", "Decide ALLOW (browser observe): action="+params.Action)
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		pm.emitDebug("perm", fmt.Sprintf("Decide %s (browser action): action=%s", level, params.Action))
+		if level == PermissionAsk {
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool.browser", Command: browserAction(pm, args),
+			}}
+		}
+		if level == PermissionDeny {
+			return PermissionDecision{Level: level, DenyReason: "permissions.tools.browser = deny"}
+		}
+		return PermissionDecision{Level: level}
 	}
 
 	// Window tool: listing is observational; every other action changes
@@ -5649,6 +5698,160 @@ func bashCommand(args json.RawMessage) string {
 		return ""
 	}
 	return strings.TrimSpace(params.Command)
+}
+
+// browserObserveActions are the browser tool actions allowed without asking here.
+// The static layer cannot see the page, so browserDecision still asks before a
+// read (see browserUserTabReadActions) of a tab the agent did not open.
+// Scroll is included on purpose: it only moves the viewport and changes no page
+// state or request. Typed text is never echoed into the permission dialog.
+var browserObserveActions = map[string]bool{
+	"tabs": true, "screenshot": true, "text": true, "scroll": true,
+	"snapshot": true, "find": true, "wait": true, "console": true, "network": true,
+}
+
+// browserURLRefusal denies a browser navigate or open whose URL is refused
+// outright by tool.BrowserURLDenyReason. The deny is HardDeny: no judge can
+// turn it into an allow. Loopback and LAN hosts are not refused here: the
+// network guard judges them, as it does for webfetch.
+func (pm *PermissionManager) browserURLRefusal(args json.RawMessage) (PermissionDecision, bool) {
+	var params struct {
+		Action string `json:"action"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		// intentionally not logged: the browser tool rejects the same unparseable
+		// arguments before it touches Chrome, so there is no URL to refuse here.
+		return PermissionDecision{}, false
+	}
+	if params.Action != "navigate" && params.Action != "open" {
+		return PermissionDecision{}, false
+	}
+	reason := tool.BrowserURLDenyReason(params.URL)
+	if reason == "" {
+		return PermissionDecision{}, false
+	}
+	pm.emitDebug("perm", "Decide DENY (browser url): "+reason)
+	return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: reason}, true
+}
+
+// browserAction builds a one-line summary of a browser tool call for the
+// permission dialog, e.g. "navigate https://example.com" or "click at 412,300".
+func browserAction(pm *PermissionManager, args json.RawMessage) string {
+	var params struct {
+		Action string   `json:"action"`
+		Tab    string   `json:"tab"`
+		X      *int     `json:"x"`
+		Y      *int     `json:"y"`
+		Text   string   `json:"text"`
+		Value  string   `json:"value"`
+		Key    string   `json:"key"`
+		URL    string   `json:"url"`
+		Target string   `json:"target"`
+		Fields []any    `json:"fields"`
+		Files  []string `json:"files"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		pm.emitDebug("perm", fmt.Sprintf("browserAction: arguments unparseable, summary is the bare tool name (tool=browser): %v", err))
+		return "browser"
+	}
+	summary := params.Action
+	switch params.Action {
+	case "close":
+		summary = "close tab"
+	case "navigate":
+		summary = "navigate " + params.URL
+	case "open":
+		summary = "open tab"
+		if params.URL != "" {
+			summary = "open tab at " + params.URL
+		}
+	case "fill", "select":
+		// A filled value may be a password: only its length is shown.
+		summary = fmt.Sprintf("%s %q (%d characters)", params.Action, params.Target, utf8.RuneCountInString(params.Value))
+	case "pick":
+		summary = fmt.Sprintf("pick %q option %q", params.Target, params.Text)
+	case "check", "uncheck":
+		summary = fmt.Sprintf("%s %q", params.Action, params.Target)
+	case "wait":
+		summary = "wait for " + params.Target
+		if params.Text != "" {
+			summary = "wait for text " + params.Text
+		}
+	case "fill_form":
+		summary = fmt.Sprintf("fill_form (%d fields)", len(params.Fields))
+		if files := browserFormFiles(pm, params.Fields); len(files) > 0 {
+			summary += ", upload " + browserFilesSummary(pm, files)
+		}
+	case "upload":
+		summary = "upload " + browserFilesSummary(pm, params.Files)
+	case "click":
+		if params.Target != "" {
+			summary = fmt.Sprintf("click %q", params.Target)
+		} else if params.X != nil && params.Y != nil {
+			summary = fmt.Sprintf("click at %d,%d", *params.X, *params.Y)
+		}
+	case "type":
+		summary = fmt.Sprintf("type %d characters", utf8.RuneCountInString(params.Text))
+		if params.Target != "" {
+			summary += fmt.Sprintf(" into %q", params.Target)
+		}
+	case "key":
+		summary = "key " + params.Key
+	}
+	if params.Tab != "" {
+		summary += " (tab " + params.Tab + ")"
+	}
+	if summary == "" {
+		return "browser"
+	}
+	return summary
+}
+
+// browserFilesSummary lists the files a browser action would read from disk and
+// flags those outside the allowed roots.
+func browserFilesSummary(pm *PermissionManager, files []string) string {
+	outside := 0
+	for _, f := range files {
+		if !pm.IsPathWithinAllowedRoots(f) {
+			outside++
+		}
+	}
+	summary := fmt.Sprintf("%d file(s): %s", len(files), strings.Join(files, ", "))
+	if outside > 0 {
+		summary += fmt.Sprintf(" (%d outside allowed roots)", outside)
+	}
+	return summary
+}
+
+// browserFormFiles returns the paths fill_form may set on file inputs. The
+// permission layer cannot see the page, so it cannot tell a file input from a
+// text input, and the CDP layer takes a plain string as a path on a file input.
+// So: every string in an array value is a path (only a file input takes an
+// array), and a plain string value is a path only when it names an existing
+// regular file. Typed text such as a password is therefore never listed unless
+// it is also a file on disk.
+func browserFormFiles(pm *PermissionManager, fields []any) []string {
+	var files []string
+	for _, f := range fields {
+		m, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch v := m["value"].(type) {
+		case []any:
+			for _, e := range v {
+				if s, ok := e.(string); ok {
+					files = append(files, s)
+				}
+			}
+		case string:
+			if info, err := os.Stat(pm.anchorToWorkDir(v)); err == nil && info.Mode().IsRegular() {
+				files = append(files, v)
+			}
+		}
+	}
+	return files
 }
 
 // computerAction builds a one-line summary of a computer tool call

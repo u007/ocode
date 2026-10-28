@@ -12,6 +12,10 @@ import {
   Plus,
   X,
   Volume2,
+  Mic,
+  MicOff,
+  Square,
+  Loader2,
 } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -38,6 +42,9 @@ import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus"
 import { requestSpeech } from "../Speech/SpeechProvider";
 import { sanitizeSpeechText } from "../Speech/speechUtils";
 import { writeDesktopClipboard } from "@/lib/wails";
+import { reportActionErrorMessage } from "@/lib/actionErrors";
+import ConfirmDialog from "@/components/common/ConfirmDialog";
+import { useTerminalVoice, voiceUnavailableMessage } from "./useTerminalVoice";
 
 /**
  * Builds the URL and WebSocket subprotocols for /api/terminal/ws. In remote
@@ -113,10 +120,17 @@ const DUPLICATE_COPY_WINDOW_MS = 250;
 let lastCopyText = "";
 let lastCopyAt = 0;
 
-/** Buffer range of xterm's current selection, as a comparable string. */
-function selectionRangeKey(term: Pick<Terminal, "getSelectionPosition">): string {
-  const p = term.getSelectionPosition();
-  return p ? `${p.start.x},${p.start.y}-${p.end.x},${p.end.y}` : "";
+type SelectionRange = NonNullable<ReturnType<Terminal["getSelectionPosition"]>>;
+
+/**
+ * True when `inner` lies inside `outer` in buffer order. An unknown range
+ * (no selection position) is inside only another unknown range, which keeps
+ * the pre-existing "same range" behaviour for selections xterm cannot place.
+ */
+function selectionWithin(inner: SelectionRange | undefined, outer: SelectionRange | undefined): boolean {
+  if (!inner || !outer) return !inner && !outer;
+  const notAfter = (a: SelectionRange["start"], b: SelectionRange["start"]) => a.y < b.y || (a.y === b.y && a.x <= b.x);
+  return notAfter(outer.start, inner.start) && notAfter(inner.end, outer.end);
 }
 
 function isDuplicateCopy(text: string): boolean {
@@ -312,10 +326,14 @@ export default function TerminalPanel({
   // pointer gesture in the terminal, a keystroke that reaches the pty, or
   // Select All replaces or drops it.
   const selectionSnapshotRef = useRef("");
-  // Buffer range of the snapshotted selection (see selectionRangeKey). A
-  // right-click over the SAME range is the mutated-rows case and keeps the
-  // snapshot; a different range is a new selection (rightClickSelectsWord).
-  const selectionRangeRef = useRef("");
+  // Buffer range of the snapshotted selection (see selectionWithin). A
+  // right-click whose selection lies INSIDE that range keeps the snapshot:
+  // either it is the same drag whose rows were rewritten, or a
+  // mouse-tracking program's button report cleared the drag and xterm's
+  // rightClickSelectsWord picked one word out of it — the user right-clicked
+  // what they had highlighted, so Copy/Play must act on all of it. A
+  // selection outside the range is a new one and replaces the snapshot.
+  const selectionRangeRef = useRef<SelectionRange | undefined>(undefined);
   // True from a mousedown in the container until the resulting selection has
   // been copied. Gates the debounced onSelectionChange copy: xterm also fires
   // that event on scrollback trim (every scroll while a selection exists),
@@ -354,6 +372,10 @@ export default function TerminalPanel({
   const takeoverRef = useRef(false);
   const [takenOver, setTakenOver] = useState(false);
   const takenOverRef = useRef(false);
+  // Rendered form of attachedRef: true once the server's attach frame arrives on
+  // the live socket, cleared when that socket goes away. Gates the voice button,
+  // since term.paste (like every keystroke) is dropped until the handshake is done.
+  const [shellReady, setShellReady] = useState(false);
   /** The effect's connectSocket, reachable from the Take over button (which
    *  renders outside the effect). Set when the socket effect runs. */
   const connectSocketRef = useRef<(() => void) | null>(null);
@@ -408,6 +430,30 @@ export default function TerminalPanel({
     }
   }, [projectPath, host]);
 
+  // Voice input: the transcript is pasted as ONE paste, never sent. The send
+  // rule is the same as the chat composer's: the user reviews it and presses Return.
+  const insertVoiceTranscript = useCallback((text: string) => {
+    const term = termRef.current;
+    const sock = socketRef.current;
+    // Re-checked here, not when recording started: transcription takes seconds
+    // and the socket may have dropped meanwhile. term.paste goes through onData,
+    // which silently drops input without an attached, open socket.
+    if (!term || !attachedRef.current || !sock || sock.readyState !== WebSocket.OPEN) {
+      console.warn("terminal: voice transcript not inserted, terminal is not connected");
+      reportActionErrorMessage(
+        `Terminal is not connected, so the voice transcript was not inserted. Transcript: ${text}`,
+      );
+      return;
+    }
+    // Newlines would reach an app without bracketed paste as separate Returns,
+    // which runs each line. Keep the transcript on one line. Control characters
+    // are removed too: ESC (0x1b), 0x03 and 0x04 would otherwise be interpreted
+    // by the shell, and this text is model output, not something the user typed.
+    term.paste(text.replace(/\s*[\u0000-\u001f\u007f]+\s*/g, " ").trim());
+    term.focus();
+  }, []);
+  const voice = useTerminalVoice(insertVoiceTranscript);
+
   // ── Context menu (right-click) — Supacode-style ────────────────
   // A pointer gesture in the terminal proper: left button only (the right
   // button opens the context menu, and on mac xterm's rightClickSelectsWord
@@ -427,16 +473,17 @@ export default function TerminalPanel({
     e.preventDefault();
     e.stopPropagation();
     // xterm's own contextmenu listener has already run (rightClickSelectsWord
-    // on mac): a selection over a NEW range is what the user sees under the
-    // menu, so snapshot it before the mouse-up report that follows clears it.
-    // A live selection over the range already snapshotted at mouse-up is the
-    // same drag whose rows a redrawing program may have rewritten since; the
-    // snapshot stays (see selectionSnapshotRef).
+    // on mac): a selection OUTSIDE the snapshotted range is what the user
+    // sees under the menu, so snapshot it before the mouse-up report that
+    // follows clears it. A live selection inside the range snapshotted at
+    // mouse-up is that drag — its rows possibly rewritten since, or reduced
+    // to the one word xterm re-selected after a mouse report cleared it —
+    // and the snapshot stays (see selectionRangeRef).
     const term = termRef.current;
     if (term) {
       const live = term.getSelection();
-      const range = selectionRangeKey(term);
-      if (live && (!selectionSnapshotRef.current || range !== selectionRangeRef.current)) {
+      const range = term.getSelectionPosition();
+      if (live && (!selectionSnapshotRef.current || !selectionWithin(range, selectionRangeRef.current))) {
         selectionSnapshotRef.current = live;
         selectionRangeRef.current = range;
       }
@@ -539,7 +586,7 @@ export default function TerminalPanel({
     const sel = term?.getSelection() ?? "";
     if (!term || !sel) return false;
     selectionSnapshotRef.current = sel;
-    selectionRangeRef.current = selectionRangeKey(term);
+    selectionRangeRef.current = term.getSelectionPosition();
     void writeClipboardText(sel);
     return true;
   }, []);
@@ -1323,6 +1370,7 @@ export default function TerminalPanel({
       // counter on every call would pin the backoff at its 1s floor and hammer
       // an unreachable remote. onopen resets it once a socket actually opens.
       attachedRef.current = false;
+      setShellReady(false);
 
       connectSocketRef.current = () => connectSocket();
       nextSocket.onopen = () => {
@@ -1410,6 +1458,7 @@ export default function TerminalPanel({
           if (msg.type === "attach") {
             // The handshake is done: from here term.onData may drive the pty.
             attachedRef.current = true;
+            setShellReady(true);
             if (!msg.resumed || isHistoryAttach) {
               // Stale mouse modes survive two ways:
               //   - a fresh shell (previous session gone: remote SSH timeout/
@@ -1466,6 +1515,7 @@ export default function TerminalPanel({
         // replaced deliberately, and reconnecting from it would start the
         // two-socket ping-pong the supersede path exists to stop.
         if (disposed || socketRef.current !== nextSocket) return;
+        setShellReady(false);
         const remainder = terminalDecoder.decode();
         // Flush every queued render chunk BEFORE the ended banner and the
         // final save: WebSocket frames are decoded into pendingChunks and
@@ -1868,7 +1918,20 @@ export default function TerminalPanel({
       ]
     : [];
 
+  const voiceLabel =
+    voice.state === "recording"
+      ? "Stop recording"
+      : voice.state === "transcribing"
+        ? "Transcribing voice input"
+        : "Start voice input";
+  const voiceTitle = !voice.supported
+    ? voiceUnavailableMessage()
+    : voice.state === "idle" && !shellReady
+      ? "Terminal is not connected"
+      : voiceLabel;
+
   return (
+    <>
     <div
       ref={containerRef}
       // This div is xterm's fit parent, so it must stay padding-free:
@@ -1988,6 +2051,60 @@ export default function TerminalPanel({
           </div>,
           document.body,
         )}
+      {/* data-terminal-chrome keeps a tap on the mic from reading as a terminal
+          press (it would reset the selection snapshot and arm copy-on-select).
+          mousedown is cancelled so focus stays in the terminal and the phone
+          keyboard does not drop. aria-disabled, not disabled, when recording is
+          unsupported: a native disabled button swallows the tap that explains why. */}
+      <div data-terminal-chrome="" className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
+        {voice.state !== "idle" && (
+          <span role="status" className="rounded-md border border-border bg-card/95 px-2 py-1 text-xs text-muted-foreground shadow-lg">
+            {voice.state === "recording"
+              ? "Recording… tap to stop"
+              : voice.installing
+                ? "Installing voice dependencies… this can take several minutes"
+                : "Transcribing…"}
+          </span>
+        )}
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={voice.toggle}
+          disabled={voice.state === "transcribing" || (voice.state === "idle" && !shellReady)}
+          aria-disabled={!voice.supported || undefined}
+          aria-pressed={voice.state === "recording"}
+          aria-label={voiceLabel}
+          title={voiceTitle}
+          className={`flex h-11 w-11 items-center justify-center rounded-full border shadow-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${
+            voice.state === "recording"
+              ? "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              : "border-border bg-card/95 text-foreground hover:bg-accent hover:text-accent-foreground"
+          } ${voice.supported ? "" : "opacity-50"}`}
+        >
+          {voice.state === "transcribing" ? (
+            <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+          ) : voice.state === "recording" ? (
+            <Square aria-hidden="true" className="h-5 w-5" />
+          ) : voice.supported ? (
+            <Mic aria-hidden="true" className="h-5 w-5" />
+          ) : (
+            <MicOff aria-hidden="true" className="h-5 w-5" />
+          )}
+        </button>
+      </div>
     </div>
+    {/* Outside the container on purpose: React bubbles a portal's events up
+        through this tree, so a click in the dialog would otherwise hit the
+        container's mousedown/mouseup (selection reset, copy-on-select). */}
+    <ConfirmDialog
+      open={voice.installAsk !== null}
+      title="Install voice dependencies?"
+      description={`${voice.installAsk?.message ?? ""}. This can take several minutes.`}
+      confirmLabel="Install"
+      confirmVariant="default"
+      onConfirm={async () => voice.answerInstall(true)}
+      onCancel={() => voice.answerInstall(false)}
+    />
+    </>
   );
 }

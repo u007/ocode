@@ -740,15 +740,16 @@ func TestCmdNetworkOpErrorKeepsFailureLabel(t *testing.T) {
 
 // TestGitNetworkKeysRunNoGitInHandler pins that ctrl+g/ctrl+p/ctrl+o build their
 // Cmd without spawning git. The before ahead/behind counts must run inside the
-// Cmd, so the key handler returns before any git child process exists.
+// Cmd, so the key handler returns before any git child process exists. The op
+// itself now runs through gitBinary too, so the stub sees all three calls.
 func TestGitNetworkKeysRunNoGitInHandler(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX shell stub for git")
 	}
-	cases := []struct{ key, op string }{
-		{"ctrl+g", "fetch"},
-		{"ctrl+p", "pull"},
-		{"ctrl+o", "push"},
+	cases := []struct{ key, op, want string }{
+		{"ctrl+g", "fetch", "nothing fetched"},
+		{"ctrl+p", "pull", "nothing to pull"},
+		{"ctrl+o", "push", "nothing to push"},
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
@@ -772,21 +773,22 @@ func TestGitNetworkKeysRunNoGitInHandler(t *testing.T) {
 				t.Fatalf("%s: git ran synchronously inside the key handler (stat err=%v)", c.key, err)
 			}
 
-			// The network op itself runs real git in a non-repo dir, so it fails
-			// fast; the two before-count rev-list calls must have run first.
+			// Every git child is stubbed, so the sequence inside the Cmd is:
+			// two before-count rev-list calls, the network op, two after-count
+			// rev-list calls (ahead + behind on each side).
 			gs, ok := cmd().(gitStatusMsg)
 			if !ok {
 				t.Fatalf("%s: expected gitStatusMsg from Cmd", c.key)
 			}
-			if !strings.HasPrefix(gs.text, c.op+" failed") {
-				t.Fatalf("%s: expected %q prefix, got %q", c.key, c.op+" failed", gs.text)
+			if gs.text != c.want {
+				t.Fatalf("%s: expected %q, got %q", c.key, c.want, gs.text)
 			}
 			b, err := os.ReadFile(logPath)
 			if err != nil {
 				t.Fatalf("%s: before counts did not run inside the Cmd: %v", c.key, err)
 			}
-			if got := strings.Count(string(b), "call"); got != 2 {
-				t.Fatalf("%s: want 2 rev-list calls inside the Cmd, got %d", c.key, got)
+			if got := strings.Count(string(b), "call"); got != 5 {
+				t.Fatalf("%s: want 5 git calls (2 before counts, op, 2 after counts) inside the Cmd, got %d", c.key, got)
 			}
 		})
 	}

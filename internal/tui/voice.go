@@ -22,8 +22,8 @@ import (
 )
 
 // Voice input: ctrl+x v starts the microphone, ctrl+x v again stops it, the
-// clip is transcribed on a tea.Cmd and the transcript is submitted as the next
-// chat message through the same path as pressing Enter.
+// clip is transcribed on a tea.Cmd and the transcript is inserted at the chat
+// composer's cursor, never sent: the user reviews it and presses Enter.
 //
 // The recorder and transcriber are package vars so tests never touch a real
 // microphone or a real transcription backend.
@@ -97,6 +97,13 @@ type voiceState struct {
 	// gen identifies the current recording. A partial result carries the gen
 	// it was started for and is dropped when it no longer matches.
 	gen int
+	// sessionID is the session the dictation started in. The transcript is
+	// dropped (with a note) when the user has switched sessions by the time it
+	// arrives, so a spoken message never lands in another chat.
+	sessionID string
+	// startAbort is closed when the start command must not keep the recorder it
+	// opened (quit during voiceStarting). Nil when no start is in flight.
+	startAbort chan struct{}
 	// partial is the latest live transcript of the current recording, one
 	// ASCII line. partialBusy is true while a partial decode is in flight.
 	partial     string
@@ -188,11 +195,6 @@ func (m model) voiceKeyAllowed() bool {
 	return m.chatComposerFree() && !m.modalOpen()
 }
 
-// voiceCanSubmit gates auto-submission of a finished transcript.
-func (m model) voiceCanSubmit() bool {
-	return m.chatComposerFree() && !m.modalOpen() && !m.leaderActive
-}
-
 // toggleVoice is the ctrl+x v state machine. Only idle and recording have an
 // action; the in-flight phases only report that they are busy.
 func (m *model) toggleVoice() tea.Cmd {
@@ -219,6 +221,12 @@ func (m *model) toggleVoice() tea.Cmd {
 func (m *model) startVoice() tea.Cmd {
 	m.voice.phase = voiceStarting
 	m.voice.note = ""
+	m.voice.sessionID = m.sessionID
+	// Closing this channel aborts a start whose recorder has not been handed
+	// back yet (quit). Nothing else can reach the recorder once the program has
+	// stopped rendering, so the command itself must clean up.
+	abort := make(chan struct{})
+	m.voice.startAbort = abort
 	return func() tea.Msg {
 		opts := voiceOptions()
 		st := voiceStatusFor(opts)
@@ -235,6 +243,16 @@ func (m *model) startVoice() tea.Cmd {
 		rec, err := voiceStart(voiceDir())
 		if err == nil && rec == nil {
 			err = errors.New("no microphone recorder")
+		}
+		// Quit may have happened while the recorder was opening. No Update runs
+		// after Quit, so this is the only place that can release the microphone.
+		select {
+		case <-abort:
+			if rec != nil {
+				rec.Cancel()
+			}
+			return voiceStartedMsg{}
+		default:
 		}
 		if err == nil {
 			// Load the model in the background while the user is already
@@ -262,6 +280,7 @@ func (m *model) onVoiceStarted(msg voiceStartedMsg) tea.Cmd {
 		}
 		return nil
 	}
+	m.voice.startAbort = nil
 	if msg.err != nil {
 		m.voice.phase = voiceIdle
 		m.voice.note = msg.err.Error()
@@ -289,6 +308,14 @@ func voicePartialTick(gen int) tea.Cmd {
 func (m *model) onVoicePartialTick(msg voicePartialTickMsg) tea.Cmd {
 	if m.voice.phase != voiceRecording || msg.gen != m.voice.gen || m.voice.partialBusy || m.voice.rec == nil {
 		return nil
+	}
+	// The recording belongs to the session it started in. A tick is the only
+	// periodic hook an in-flight dictation has, so it is where a session switch
+	// stops the microphone instead of letting it record into another chat.
+	if m.voice.sessionID != "" && m.sessionID != "" && m.voice.sessionID != m.sessionID {
+		cmd := m.cancelVoice()
+		m.voice.note = "dictation stopped: the session changed"
+		return cmd
 	}
 	m.voice.partialBusy = true
 	rec := m.voice.rec
@@ -353,8 +380,8 @@ func voicePartialLine(text string) string {
 // words, wrapped to voicePartialShown cells and cut to one line.
 func voicePartialShownText(partial string) string {
 	tail := partial
-	if len(tail) > voicePartialShown {
-		tail = tail[len(tail)-voicePartialShown:]
+	if r := []rune(tail); len(r) > voicePartialShown {
+		tail = string(r[len(r)-voicePartialShown:])
 	}
 	out := lipgloss.NewStyle().Width(voicePartialShown).MaxHeight(1).Render(tail)
 	return strings.TrimRight(out, " ")
@@ -391,6 +418,7 @@ func (m *model) cancelVoice() tea.Cmd {
 	m.voice.note = "recording cancelled"
 	m.voice.partial = ""
 	m.voice.partialBusy = false
+	m.voice.sessionID = ""
 	// The prewarm existed only for this recording. Stop a load that is still in
 	// progress rather than leaving ~2 GB resident for a clip nobody will
 	// transcribe; a load that already finished is left warm for the next
@@ -415,6 +443,10 @@ func (m *model) abortVoice() {
 	if m.voice.rec != nil {
 		m.voice.rec.Cancel()
 	}
+	if m.voice.startAbort != nil {
+		close(m.voice.startAbort)
+		m.voice.startAbort = nil
+	}
 	m.voice.rec = nil
 	m.voice.phase = voiceIdle
 	m.voice.partial = ""
@@ -424,28 +456,28 @@ func (m *model) abortVoice() {
 	voiceCancelPrewarm()
 }
 
-// submitVoiceTranscript sends a finished transcript through the chat Enter
-// path. The user's draft is set aside for the duration and restored after, so
-// a dictation never eats text they were typing.
-func (m model) submitVoiceTranscript(text string) (tea.Model, tea.Cmd) {
+// insertVoiceTranscript puts a finished transcript at the composer's cursor for
+// the user to review; Enter sends it. The draft on either side of the cursor is
+// kept, and a space separates the transcript from a non-blank neighbour.
+func (m model) insertVoiceTranscript(text string) (tea.Model, tea.Cmd) {
 	m.voice.note = ""
-	if !m.voiceCanSubmit() {
-		if strings.TrimSpace(m.input.Value()) == "" {
-			m.input.SetValue(text)
-			m.voice.note = "a dialog is open; transcript is in the input, press enter to send"
-		} else {
-			m.voice.note = "a dialog is open and the input has a draft; transcript dropped"
-		}
+	origin := m.voice.sessionID
+	m.voice.sessionID = ""
+	if origin != "" && m.sessionID != "" && origin != m.sessionID {
+		m.voice.note = "voice transcript dropped: the session changed while recording"
 		return m, nil
 	}
-	draft := m.input.Value()
-	m.input.SetValue(text)
-	next, cmd := m.handleChatKeys(tea.KeyPressMsg{Code: tea.KeyEnter}, nil, nil)
-	out := voiceModelOf(next)
-	if draft != "" && out.input.Value() == "" {
-		out.input.SetValue(draft)
+	runes := []rune(strings.Split(m.input.Value(), "\n")[m.input.Line()])
+	col := m.input.Column()
+	insert := text
+	if col > 0 && !unicode.IsSpace(runes[col-1]) {
+		insert = " " + insert
 	}
-	return out, cmd
+	if col < len(runes) && !unicode.IsSpace(runes[col]) {
+		insert += " "
+	}
+	m.input.InsertString(insert)
+	return m, nil
 }
 
 func voiceModelOf(v tea.Model) model {
@@ -533,7 +565,7 @@ func (m *model) handleVoiceCmd(args []string) {
 				availability = "unavailable: " + mi.Reason
 			}
 		}
-		reply("Voice input: ctrl+x v starts and stops recording; the transcript is sent as your next message.",
+		reply("Voice input: ctrl+x v starts and stops recording; the transcript is inserted at the cursor, and enter sends it.",
 			"Model: "+selected,
 			"Model status: "+availability,
 			"Microphone: "+mic,

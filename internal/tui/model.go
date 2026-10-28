@@ -3667,7 +3667,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.voice.note = "nothing heard"
 			return m, nil
 		}
-		return m.submitVoiceTranscript(text)
+		return m.insertVoiceTranscript(text)
 	case voiceCancelledMsg:
 		return m, nil
 	case chatSearchFlashExpiredMsg:

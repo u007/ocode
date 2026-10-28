@@ -1,6 +1,7 @@
 import { memo, useRef, useSyncExternalStore } from "react";
 import { CheckCircle2 } from "lucide-react";
-import type { QuestionAnswerPayload } from "@/api/types";
+import type { MessageImage, QuestionAnswerPayload } from "@/api/types";
+import { isInlineSafeMediaType } from "../Preview/blobPreview";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
@@ -308,6 +309,7 @@ export const ToolBlock = memo(function ToolBlock({
   tool,
   command,
   output,
+  images,
   stream,
   highlight = "",
   onOpenQuestion,
@@ -319,6 +321,10 @@ export const ToolBlock = memo(function ToolBlock({
   tool: string;
   command?: string;
   output?: string;
+  /** Images the tool result carried (a browser or computer screenshot). Shown
+   *  inside the output region, so the output disclosure governs them. Only
+   *  inline-safe raster types render. */
+  images?: MessageImage[];
   /** Incremental output while the tool is still running. Shown only until the
    *  authoritative `output` arrives, which then replaces it. */
   stream?: string;
@@ -417,13 +423,13 @@ export const ToolBlock = memo(function ToolBlock({
   const showCommandBlock =
     bashCommand !== "" &&
     (bashCommand.includes("\n") || bashCommand.length > BASH_COMMAND_INLINE_BUDGET);
-  // Bash output is command-line text (tables, logs, paths): keep source lines
-  // intact and scroll horizontally instead of soft-wrapping, which destroys
-  // column alignment. Every other tool keeps the existing wrap behavior.
-  const noWrapCode = tool === "bash";
-  const codeBoxClass = noWrapCode
-    ? "overflow-x-auto whitespace-pre"
-    : "whitespace-pre-wrap break-words";
+  // Every tool (bash included) SOFT-WRAPS. Bash output used to keep source lines
+  // intact and scroll horizontally, but inside a chat bubble a wide table/log
+  // row then hid behind an inner horizontal scrollbar and the pane never showed
+  // the whole line; wrapping at the bubble width is what the transcript reader
+  // expects. `[overflow-wrap:anywhere]` breaks unbroken tokens so a long path
+  // cannot widen the block.
+  const codeBoxClass = "whitespace-pre-wrap break-words [overflow-wrap:anywhere]";
   return (
     <div className="mb-3 flex justify-start">
       <div
@@ -513,8 +519,7 @@ export const ToolBlock = memo(function ToolBlock({
         )}
         {output !== undefined && output !== "" && outputOpen && (
           <div className="rounded bg-card/70 p-2" data-copy-content="">
-            <div className={`font-mono text-[11px] text-muted-foreground ${noWrapCode ? "overflow-x-auto" : "whitespace-pre"}`}>
-              <div className={noWrapCode ? "w-max min-w-full" : undefined}>
+            <div className="font-mono text-[11px] text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
               {(visibleOutput ?? "").split("\n").map((line, i) => {
                 const colorClass = !isDiffOutput
                   ? "text-muted-foreground"
@@ -526,11 +531,10 @@ export const ToolBlock = memo(function ToolBlock({
                 return (
                   <div key={i} className={`flex ${colorClass}`}>
                     <span className="select-none text-neutral-600 w-10 text-right pr-2 shrink-0 text-[10px] leading-4">{isDiffOutput ? String(i + 1) : ""}</span>
-                    <span className={noWrapCode ? "whitespace-pre" : "whitespace-pre-wrap break-words"}>{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
+                    <span className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
                   </div>
                 );
               })}
-              </div>
             </div>
             {collapsible && (
               <button
@@ -543,6 +547,14 @@ export const ToolBlock = memo(function ToolBlock({
                   : `… ${hiddenLineCount} earlier lines · click to expand`}
               </button>
             )}
+            {images?.filter((img) => isInlineSafeMediaType(img.mime_type)).map((img, i) => (
+              <img
+                key={i}
+                src={`data:${img.mime_type};base64,${img.data}`}
+                alt={`${tool} result image ${i + 1}`}
+                className="mt-2 block max-w-full rounded border border-border"
+              />
+            ))}
           </div>
         )}
       </div>

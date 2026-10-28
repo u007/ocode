@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strconv"
@@ -171,6 +172,16 @@ const DefaultScreencastQuality = 85
 // Manager owns the single Chrome process and per-stateKey targets.
 type Manager struct {
 	opts ManagerOptions
+
+	// attachMu serializes target creation: the panel's Attach (which may replace
+	// a target's FrameSink) and the headless attaches an agent tool makes. It is
+	// held across target creation and sink replacement, so an EnsureHeadless and
+	// an Attach for the same stateKey can never both create a target or let the
+	// headless path touch the panel's sink. It is NOT held across a Chrome
+	// launch: each entry point runs ensureChrome first (launchMu serializes the
+	// launch itself), so a slow launch for one project does not block every
+	// attach in the process. Lock order: attachMu before mu, never the reverse.
+	attachMu sync.Mutex
 
 	mu sync.Mutex
 	// launchMu serializes concurrent ensureChrome callers so two Attach
@@ -699,9 +710,73 @@ func (m *Manager) emitTargetTitle(targetID, targetType, title, url string) {
 	m.emitTitle(TitleEvent{StateKey: key, Title: title, URL: url})
 }
 
+// preflightChrome launches Chrome before attachMu is taken, so a slow launch for
+// one project does not serialize every attach in the process. The launch itself
+// is still serialized by launchMu. attachLocked keeps its own ensureChrome call:
+// with the pre-flight it is a fast no-op that still guarantees m.conn is set
+// under attachMu when a target is created.
+func (m *Manager) preflightChrome(ctx context.Context, stateKey string) error {
+	if err := m.ensureChrome(ctx); err != nil {
+		if errors.Is(err, ErrChromeNotFound) || errors.Is(err, ErrUnsupportedPlatform) {
+			if m.opts.EmitNav != nil {
+				m.opts.EmitNav(NavEvent{StateKey: stateKey, Error: err.Error()})
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 // Attach lazily launches Chrome, creates context+target for the key if absent,
 // replaces sink, restarts screencast.
 func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (*Target, error) {
+	if err := m.preflightChrome(ctx, stateKey); err != nil {
+		return nil, err
+	}
+	m.attachMu.Lock()
+	defer m.attachMu.Unlock()
+	return m.attachLocked(ctx, stateKey, sink)
+}
+
+// EnsureHeadless returns the live target for stateKey, attaching one with no
+// FrameSink when none exists. created reports whether this call attached it.
+// An existing target is returned untouched: its sink, and so the panel's
+// screencast, is never replaced. The check and the attach happen under
+// attachMu, so a concurrent Attach for the same key cannot race it.
+func (m *Manager) EnsureHeadless(ctx context.Context, stateKey string) (t *Target, created bool, err error) {
+	if err := m.preflightChrome(ctx, stateKey); err != nil {
+		return nil, false, err
+	}
+	m.attachMu.Lock()
+	defer m.attachMu.Unlock()
+	if existing, ok := m.LookupTarget(stateKey); ok {
+		return existing, false, nil
+	}
+	t, err = m.attachLocked(ctx, stateKey, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return t, true, nil
+}
+
+// OpenHeadless creates a new headless tab under a fresh stateKey and returns
+// that key with its target. It has no FrameSink, so no panel shows it.
+func (m *Manager) OpenHeadless(ctx context.Context) (*Target, string, error) {
+	stateKey := "tab:" + newTabID()
+	if err := m.preflightChrome(ctx, stateKey); err != nil {
+		return nil, "", err
+	}
+	m.attachMu.Lock()
+	defer m.attachMu.Unlock()
+	t, err := m.attachLocked(ctx, stateKey, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return t, stateKey, nil
+}
+
+// attachLocked is Attach's body. The caller holds attachMu.
+func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameSink) (*Target, error) {
 	if err := m.ensureChrome(ctx); err != nil {
 		if errors.Is(err, ErrChromeNotFound) || errors.Is(err, ErrUnsupportedPlatform) {
 			if m.opts.EmitNav != nil {
@@ -717,9 +792,11 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 		existing.mu.Lock()
 		existing.sink = sink
 		existing.mu.Unlock()
-		// Restart screencast
 		m.mu.Unlock()
-		_ = existing.restartScreencast(ctx)
+		// Only a panel sink reads frames, so only a sink starts the screencast.
+		if sink != nil {
+			_ = existing.restartScreencast(ctx)
+		}
 		return existing, nil
 	}
 	m.mu.Unlock()
@@ -816,7 +893,11 @@ func (m *Manager) Attach(ctx context.Context, stateKey string, sink FrameSink) (
 	// Setup per-target event handlers + screencast
 	t.startHandlers()
 	t.startFileChooser()
-	_ = t.restartScreencast(ctx)
+	// A headless target has no sink to read frames: Chrome would stream them
+	// into nothing, so the screencast starts only with a panel sink.
+	if sink != nil {
+		_ = t.restartScreencast(ctx)
+	}
 
 	m.mu.Lock()
 	m.targets[stateKey] = t
@@ -905,11 +986,34 @@ func (m *Manager) isTrusted(stateKey, hostname, hostport string) bool {
 
 // Revoke closes target + disposes context; no-op if absent.
 func (m *Manager) Revoke(stateKey string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := m.closeTarget(ctx, stateKey)
+	if err != nil && !errors.Is(err, ErrNoTarget) && m.opts.Log != nil {
+		m.opts.Log.Printf("browse cdp: revoke %s: %v", stateKey, err)
+	}
+}
+
+// CloseTarget closes stateKey's tab for good: its Chrome target and, unless the
+// tab shares its opener's browser context, that context too. The tab is removed
+// from the manager first, so a later EnsureHeadless for the key attaches a fresh
+// one. An absent key is an error wrapping ErrNoTarget, and Chrome is not called.
+// ctx bounds the Chrome calls.
+func (m *Manager) CloseTarget(ctx context.Context, stateKey string) error {
+	m.attachMu.Lock()
+	defer m.attachMu.Unlock()
+	return m.closeTarget(ctx, stateKey)
+}
+
+// closeTarget unlinks stateKey's target, tears it down in Chrome, and arms the
+// idle shutdown when no target remains. Every Chrome error is returned, joined,
+// after the teardown has run as far as it can.
+func (m *Manager) closeTarget(ctx context.Context, stateKey string) error {
 	m.mu.Lock()
 	t, ok := m.targets[stateKey]
 	if !ok {
 		m.mu.Unlock()
-		return
+		return fmt.Errorf("close %s: %w", stateKey, ErrNoTarget)
 	}
 	delete(m.targets, stateKey)
 	delete(m.trusted, stateKey)
@@ -922,41 +1026,50 @@ func (m *Manager) Revoke(stateKey string) {
 	t.Detach()
 	t.stopHandlers()
 	t.releaseTopLevelHost()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var errs []error
 	if conn != nil {
-		_ = conn.Call(ctx, "", "Target.closeTarget", map[string]string{"targetId": t.targetID}, nil)
+		if err := conn.Call(ctx, "", "Target.closeTarget", map[string]string{"targetId": t.targetID}, nil); err != nil {
+			errs = append(errs, fmt.Errorf("Target.closeTarget %s: %w", t.targetID, err))
+		}
 		if !t.sharedContext {
-			_ = conn.Call(ctx, "", "Target.disposeBrowserContext", map[string]string{"browserContextId": t.browserContextID}, nil)
+			if err := conn.Call(ctx, "", "Target.disposeBrowserContext", map[string]string{"browserContextId": t.browserContextID}, nil); err != nil {
+				errs = append(errs, fmt.Errorf("Target.disposeBrowserContext %s: %w", t.browserContextID, err))
+			}
 		}
 	}
 
-	m.mu.Lock()
 	if needIdle {
-		if m.idleTimer != nil {
-			m.idleTimer.Stop()
-		}
-		timeout := m.opts.IdleTimeout
-		m.idleTimer = time.AfterFunc(timeout, func() {
-			m.mu.Lock()
-			conn := m.conn
-			cfn := m.cleanup
-			should := len(m.targets) == 0 && m.conn != nil && m.cleanup != nil
-			if should {
-				m.cleanup = nil
-				m.conn = nil
-				m.exited = nil
-			}
-			m.mu.Unlock()
-			if should {
-				bctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_ = conn.Call(bctx, "", "Browser.close", nil, nil)
-				cancel()
-				cfn()
-			}
-		})
+		m.mu.Lock()
+		m.armIdleLocked()
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
+	return errors.Join(errs...)
+}
+
+// armIdleLocked starts the idle shutdown timer. When it fires with no target
+// left, Chrome is closed. The caller holds m.mu.
+func (m *Manager) armIdleLocked() {
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+	}
+	m.idleTimer = time.AfterFunc(m.opts.IdleTimeout, func() {
+		m.mu.Lock()
+		conn := m.conn
+		cfn := m.cleanup
+		should := len(m.targets) == 0 && m.conn != nil && m.cleanup != nil
+		if should {
+			m.cleanup = nil
+			m.conn = nil
+			m.exited = nil
+		}
+		m.mu.Unlock()
+		if should {
+			bctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = conn.Call(bctx, "", "Browser.close", nil, nil)
+			cancel()
+			cfn()
+		}
+	})
 }
 
 // Close shuts down Chrome via Browser.close, waits for exit bounded by ctx, closes proxy, removes temp dir (via cleanup).
@@ -1032,6 +1145,17 @@ func (m *Manager) TargetKeys() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// LookupTarget returns the live target for stateKey without touching its
+// FrameSink, so an agent tool can drive a tab the user is viewing without
+// stealing its screencast. Unlike Attach it never creates a target: a tab
+// that was never attached in Chrome mode reports false.
+func (m *Manager) LookupTarget(stateKey string) (*Target, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.targets[stateKey]
+	return t, ok
 }
 
 // TargetPerf snapshots every target's Performance metrics, keyed by stateKey.

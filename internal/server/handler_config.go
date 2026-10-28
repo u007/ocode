@@ -1470,6 +1470,55 @@ func (h *Handler) HandleSetCommitMsgConfig(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// HandleGetGitConfig reports the shared git behaviour block (Settings → Git).
+func (h *Handler) HandleGetGitConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.GitConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.Git
+	}
+	h.mu.Unlock()
+	cfg = config.NormalizeGitConfig(cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pull_strategy": cfg.PullStrategy,
+	})
+}
+
+// HandleSetGitConfig persists the shared git behaviour block. The strategy is
+// always one of "rebase" (default) or "merge"; an omitted or unknown value is
+// rejected rather than silently persisted as the default.
+func (h *Handler) HandleSetGitConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PullStrategy string `json:"pull_strategy"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.PullStrategy == "" {
+		writeError(w, http.StatusBadRequest, "pull_strategy is required")
+		return
+	}
+	cfg := config.GitConfig{PullStrategy: req.PullStrategy}
+	if err := cfg.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg = config.NormalizeGitConfig(cfg)
+	if err := config.SaveOcodeGitConfig(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Git = cfg
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pull_strategy": cfg.PullStrategy,
+	})
+}
+
 // HandleGetCompactConfig reports the auto-compact settings block.
 func (h *Handler) HandleGetCompactConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()

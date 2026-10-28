@@ -3,7 +3,7 @@
 package main
 
 /*
-#cgo LDFLAGS: -framework Foundation
+#cgo LDFLAGS: -framework Foundation -framework WebKit
 void ocode_disablePressAndHold(void);
 */
 import "C"

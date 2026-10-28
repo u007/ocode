@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/gitexec"
 	"github.com/u007/ocode/internal/remote"
 )
 
@@ -234,7 +236,11 @@ func runGitNetwork(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	sshCommand := nonInteractiveSSHCommand(os.Getenv("GIT_SSH_COMMAND"))
-	cmd.Env = append(os.Environ(),
+	// gitexec.Env (not os.Environ) keeps the pull from taking git's OPTIONAL
+	// index lock, so ocode's own git traffic cannot make the user's `git add`
+	// fail with "index.lock: File exists". Only optional locks are skipped;
+	// the index write a merge/rebase needs is mandatory and still taken.
+	cmd.Env = append(gitexec.Env(),
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_EDITOR=true",
 		"GIT_SEQUENCE_EDITOR=true",
@@ -299,29 +305,51 @@ func (h *Handler) gitFetchLocal(w http.ResponseWriter, r *http.Request) {
 	writeLocalGitStatus(w, dir)
 }
 
-// HandleGitPull merges the configured upstream into the current branch.
+// gitPullFlag is the reconcile flag appended to `git pull`. ocode always
+// answers git's merge-vs-rebase question explicitly (Settings → Git, backed by
+// config.GitConfig) instead of leaving it to the repository's git config,
+// because git >= 2.33 aborts a divergent pull outright when neither
+// pull.rebase, pull.ff nor branch.<name>.rebase says how to reconcile.
+//
+// Computed before any git/lock work so the read never overlaps a held h.mu.
+func (h *Handler) gitPullFlag() string {
+	h.mu.Lock()
+	cfg := config.GitConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.Git
+	}
+	h.mu.Unlock()
+	return cfg.PullFlag()
+}
+
+// HandleGitPull merges or rebases the configured upstream into the current
+// branch. The reconcile strategy comes from Settings → Git and is always passed
+// explicitly, so the same behaviour applies to a remote project (where the flag
+// travels in the remote command) and cannot be overridden by that host's git
+// config.
 func (h *Handler) HandleGitPull(w http.ResponseWriter, r *http.Request) {
+	flag := h.gitPullFlag()
 	if host := hostParam(r); host != "" {
 		rw, ok := h.remoteGitDirForMutation(w, r, host)
 		if !ok {
 			return
 		}
-		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "pull")); err != nil {
+		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, "pull", flag)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git pull failed: "+err.Error())
 			return
 		}
 		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
-	h.gitPullLocal(w, r)
+	h.gitPullLocal(w, r, flag)
 }
 
-func (h *Handler) gitPullLocal(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) gitPullLocal(w http.ResponseWriter, r *http.Request, flag string) {
 	dir, ok := h.gitDirForMutation(w, r)
 	if !ok {
 		return
 	}
-	if err := runGitNetwork(r.Context(), dir, "pull"); err != nil {
+	if err := runGitNetwork(r.Context(), dir, "pull", flag); err != nil {
 		writeError(w, http.StatusInternalServerError, "git pull failed: "+err.Error())
 		return
 	}

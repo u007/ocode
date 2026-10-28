@@ -213,7 +213,10 @@ type Handler struct {
 	// tabs and URLs. Nil when the data dir could not be resolved; its handlers
 	// then 500 rather than silently losing the state.
 	browserTabsStore *browsertabs.Store
-	monaco           *monaco.Store
+	// browseSurfaces gives the browser agent tool this server's Chrome. Set once
+	// by EnableBrowse, before Serve. Nil means no browser tool is registered.
+	browseSurfaces browserSurfaces
+	monaco         *monaco.Store
 	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
 	// nil when the data dir could not be resolved (its handlers then 500).
 	// vaultGrants records which client surfaces have unlocked it; guarded by
@@ -1260,27 +1263,36 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		sid = session.NewSessionID()
 		createdSession = true
 		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
-		// Persist an explicitly-requested model and/or permission mode as this
-		// session's overrides at creation time (before any turn), so a "new chat
-		// with model X / yolo" pick survives resume/restart instead of silently
-		// falling back to the global defaults. Later saves pass nil metadata and
-		// the sqlite append preserves this row. Sessions created without an
-		// explicit value get no override and keep following the config default.
+		// Persist the model and/or permission mode as this session's overrides at
+		// creation time (before any turn), so a "new chat with model X / yolo"
+		// pick survives resume/restart instead of silently falling back to the
+		// global defaults. Later saves pass nil metadata and the sqlite append
+		// preserves this row.
+		//
+		// The model is pinned even when the request did not name one: `model` is
+		// then the process-wide default in effect at creation, and every chat
+		// must keep the model it started on. Without the pin the chat followed
+		// the config default forever, so picking a new model (for a later chat)
+		// retroactively changed every existing chat — the "switch chat and it
+		// uses the last switched model" report.
 		meta := map[string]any{}
-		if req.Model != "" {
-			meta["model"] = req.Model
-		}
+		meta["model"] = model
 		if req.PermissionMode != "" {
 			if mode, ok := normalizePermissionMode(req.PermissionMode); ok {
 				meta[permissionModeMetadataKey] = string(mode)
 			}
 		}
-		if len(meta) > 0 {
-			if err := h.saveSession(sid, "", nil, meta); err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
+		if err := h.saveSession(sid, "", nil, meta); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
+	}
+
+	if !createdSession {
+		// A chat created before every session was pinned has no override: freeze
+		// the model this turn actually runs (recovered from the usage ledger when
+		// possible) so it stops tracking the process-wide default.
+		h.pinSessionModel(sid, model)
 	}
 
 	opts := turnOptions{sessionStarted: createdSession, requestID: req.RequestID}
@@ -1607,6 +1619,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		model := h.effectiveSessionModel(id)
+		h.pinSessionModel(id, model)
 		job, err := h.dispatchTurnWithRewind(id, model, req.Content, turnOptions{}, req.RewindToken)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -1705,6 +1718,8 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// window's active profile or the configured model changed since this
 	// agent was built, rebuild it before the next turn.
 	desiredModel := h.effectiveSessionModel(id)
+	// Freeze a legacy chat's model on its first turn (see pinSessionModel).
+	h.pinSessionModel(id, desiredModel)
 	if reb, err := h.reconcileProfileAgent(id, as, desiredModel); err != nil {
 		h.publishTurnError(id, err, "profile")
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))

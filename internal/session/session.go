@@ -2148,6 +2148,31 @@ func claudeContentText(raw json.RawMessage) string {
 	return strings.Join(out, "\n\n")
 }
 
+// ReadMetadataForDir returns the stored metadata of session id under
+// projectRoot's storage dir without loading its transcript. It is the read-only
+// counterpart of UpdateMetadataForDir: a .sqlite session answers from one
+// SELECT, while legacy .json/.ojsonl sessions fall back to a normal load. Callers
+// that resolve a model from metadata on a hot path (every status poll) should
+// use this instead of a full LoadForDir.
+func ReadMetadataForDir(projectRoot, id string) (map[string]any, error) {
+	id = CanonicalID(id)
+	dir, err := GetStorageDirForPath(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	if fileExists(sqliteSessionPath(dir, id)) {
+		return readSqliteMetadata(dir, id)
+	}
+	s, err := loadFromDir(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.Metadata == nil {
+		return map[string]any{}, nil
+	}
+	return s.Metadata, nil
+}
+
 // UpdateMetadataForDir applies mutate to the stored metadata of session id
 // under projectRoot's storage dir and persists only that: for a .sqlite
 // session it rewrites the meta row's metadata_json in one immediate

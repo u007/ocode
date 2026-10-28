@@ -73,6 +73,11 @@ vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = v
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
+  // TerminalPanel mounts the voice recorder; its lifecycle reads these.
+  api: {
+    prewarmSpeech: () => Promise.resolve(true),
+    cancelPrewarmSpeech: () => Promise.resolve(true),
+  },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),

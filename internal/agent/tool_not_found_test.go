@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestUnknownToolReturnsNotFoundWithoutPermissionAsk(t *testing.T) {
 		json.RawMessage(`{"arg": }`),
 	}
 	for _, args := range cases {
-		res, _, err := a.handleToolCallWithImages("definitely_not_a_tool", args, nil, "")
+		res, _, err := a.handleToolCallWithImages(context.Background(), "definitely_not_a_tool", args, nil, "")
 
 		if err != nil {
 			t.Fatalf("unknown tool returned a Go error %v; want a normal tool result", err)

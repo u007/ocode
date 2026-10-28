@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -334,6 +335,158 @@ func (s *Server) Configure(opts Options) { s.initManager(opts) }
 
 // SetCDPManager installs a fake manager for tests.
 func (s *Server) SetCDPManager(m chromeManager) { s.cdp = m }
+
+// headlessAttacher is the attach the real Chrome manager provides for agent
+// tools. It is deliberately not part of chromeManager, so test fakes need not
+// implement it; a manager without it makes the agent accessors fail loudly.
+type headlessAttacher interface {
+	EnsureHeadless(ctx context.Context, stateKey string) (*cdp.Target, bool, error)
+	OpenHeadless(ctx context.Context) (*cdp.Target, string, error)
+	CloseTarget(ctx context.Context, stateKey string) error
+}
+
+// agentLoadCap bounds the wait for a navigated page to reach readyState
+// "complete". A var so the timeout path is testable without a full 10s wait.
+var agentLoadCap = 10 * time.Second
+
+// agentLoadPoll is the readyState poll interval while a page loads.
+const agentLoadPoll = 100 * time.Millisecond
+
+// agentCleanupTimeout bounds the CloseTarget that discards a blank tab whose
+// first navigation failed.
+const agentCleanupTimeout = 5 * time.Second
+
+// discardAttachedTarget closes the headless target an AgentTarget call
+// attached when the call will not return it. The caller's ctx is frequently the
+// reason the call failed (Stop, a turn deadline), so the close runs on a fresh
+// bounded context; otherwise it would be cancelled before it could run.
+func discardAttachedTarget(ctx context.Context, ha headlessAttacher, stateKey string) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCleanupTimeout)
+	defer cancel()
+	if err := ha.CloseTarget(cctx, stateKey); err != nil {
+		return fmt.Errorf("browse: discard blank tab %s: %w", stateKey, err)
+	}
+	return nil
+}
+
+// AgentTarget returns the live Chrome target for stateKey, attaching it
+// headless when no target exists yet (a tab restored after a restart, or one
+// never shown in Chrome mode). url is the tab's stored URL; it is loaded only
+// into a target this call attaches, so a page the user is already viewing is
+// never navigated. The attach never replaces an existing target's FrameSink.
+//
+// After a load, the call waits for the document to reach readyState
+// "complete", up to agentLoadCap. A page still loading at the cap is not an
+// error: the returned note says so, and the target is returned anyway. If the
+// navigation itself fails, the blank tab is closed again and an error returned.
+func (s *Server) AgentTarget(ctx context.Context, stateKey, url string) (*cdp.Target, string, error) {
+	ha, err := s.headlessAttacher()
+	if err != nil {
+		return nil, "", err
+	}
+	t, created, err := ha.EnsureHeadless(ctx, stateKey)
+	if err != nil {
+		return nil, "", err
+	}
+	if !created || !(strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")) {
+		return t, "", nil
+	}
+	if err := t.Navigate(ctx, url); err != nil {
+		navErr := fmt.Errorf("browse: load stored url into %s: %w", stateKey, err)
+		if cerr := discardAttachedTarget(ctx, ha, stateKey); cerr != nil {
+			return nil, "", errors.Join(navErr, cerr)
+		}
+		return nil, "", navErr
+	}
+	loaded, err := waitForLoad(ctx, t)
+	if err != nil {
+		waitErr := fmt.Errorf("browse: wait for %s to load %s: %w", stateKey, url, err)
+		// The load never completed — Stop, a turn deadline, or a CDP error —
+		// so the target this call attached has no sink and no owner. Leaving it
+		// registered would keep Chrome alive for the rest of the process
+		// (armIdleLocked never fires while a target exists).
+		if cerr := discardAttachedTarget(ctx, ha, stateKey); cerr != nil {
+			return nil, "", errors.Join(waitErr, cerr)
+		}
+		return nil, "", waitErr
+	}
+	if !loaded {
+		return t, fmt.Sprintf("the page did not finish loading within %s; take a screenshot to check it", agentLoadCap), nil
+	}
+	return t, "", nil
+}
+
+// waitForLoad polls the top document's readyState until it is "complete". When
+// agentLoadCap passes first it reports false with no error. A cancelled ctx
+// ends the wait with ctx's error.
+func waitForLoad(ctx context.Context, t *cdp.Target) (bool, error) {
+	capCtx, cancel := context.WithTimeout(ctx, agentLoadCap)
+	defer cancel()
+	for {
+		state, err := t.ReadyState(capCtx)
+		if err != nil {
+			if capCtx.Err() != nil && ctx.Err() == nil {
+				return false, nil
+			}
+			return false, err
+		}
+		if state == "complete" {
+			return true, nil
+		}
+		select {
+		case <-capCtx.Done():
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			return false, nil
+		case <-time.After(agentLoadPoll):
+		}
+	}
+}
+
+// CloseAgentTab closes an agent-opened tab for good: its Chrome target, and its
+// browser context unless the tab shares its opener's. A later AgentTarget for
+// the key attaches a fresh tab.
+func (s *Server) CloseAgentTab(ctx context.Context, stateKey string) error {
+	ha, err := s.headlessAttacher()
+	if err != nil {
+		return err
+	}
+	if err := ha.CloseTarget(ctx, stateKey); err != nil {
+		return fmt.Errorf("browse: close %s: %w", stateKey, err)
+	}
+	return nil
+}
+
+// OpenAgentTab opens a new headless tab for an agent, navigated to url when it
+// is non-empty, and returns its stateKey. No panel shows it.
+func (s *Server) OpenAgentTab(ctx context.Context, url string) (string, error) {
+	ha, err := s.headlessAttacher()
+	if err != nil {
+		return "", err
+	}
+	t, stateKey, err := ha.OpenHeadless(ctx)
+	if err != nil {
+		return "", err
+	}
+	if url != "" {
+		if err := t.Navigate(ctx, url); err != nil {
+			return stateKey, fmt.Errorf("browse: open %s at %s: %w", stateKey, url, err)
+		}
+	}
+	return stateKey, nil
+}
+
+func (s *Server) headlessAttacher() (headlessAttacher, error) {
+	if s.cdp == nil {
+		return nil, errors.New("browse: chrome manager is not configured")
+	}
+	ha, ok := s.cdp.(headlessAttacher)
+	if !ok {
+		return nil, errors.New("browse: chrome manager does not support headless attach")
+	}
+	return ha, nil
+}
 
 // SetScreencastQuality updates the CDP screencast JPEG quality live.
 // Existing targets pick it up on their next restartScreencast (resize,

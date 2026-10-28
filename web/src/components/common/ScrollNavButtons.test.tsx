@@ -3,12 +3,18 @@ import { useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ScrollNavButtons from "./ScrollNavButtons";
 
-function Harness() {
+function Harness({
+  size,
+  onNavigate,
+}: {
+  size?: "default" | "sm";
+  onNavigate?: (edge: "top" | "bottom") => void;
+} = {}) {
   const ref = useRef<HTMLDivElement>(null);
   return (
     <div className="relative h-[300px]">
       <div ref={ref} data-testid="scroller" className="h-full overflow-y-auto" />
-      <ScrollNavButtons scrollRef={ref} />
+      <ScrollNavButtons scrollRef={ref} size={size} onNavigate={onNavigate} />
     </div>
   );
 }
@@ -136,5 +142,33 @@ describe("ScrollNavButtons", () => {
     });
 
     expect(scrollToBottomButton()).toBeInTheDocument();
+  });
+
+  it("reports which edge a jump targeted", () => {
+    const onNavigate = vi.fn();
+    render(<Harness onNavigate={onNavigate} />);
+    const el = scroller();
+    const m = makeScrollable(el, 5000, 600);
+    Object.defineProperty(el, "scrollTo", { configurable: true, value: undefined });
+    m.setTop(2400);
+    fireEvent.scroll(el);
+
+    fireEvent.click(scrollToTopButton()!);
+    expect(onNavigate).toHaveBeenLastCalledWith("top");
+
+    fireEvent.click(scrollToBottomButton()!);
+    expect(onNavigate).toHaveBeenLastCalledWith("bottom");
+  });
+
+  it("renders a compact pair for a small nested surface", () => {
+    render(<Harness size="sm" />);
+    const el = scroller();
+    const m = makeScrollable(el, 5000, 600);
+    m.setTop(2400);
+    fireEvent.scroll(el);
+
+    // 36px circles would cover most of an agent card's transcript box.
+    expect(scrollToTopButton()).toHaveClass("h-6", "w-6");
+    expect(scrollToBottomButton()).toHaveClass("h-6", "w-6");
   });
 });

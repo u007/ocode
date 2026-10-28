@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "../../lib/utils";
 import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../lib/jumpToSession";
 import { usePulseTail, type PulseTail } from "./usePulseTail";
-import { useStickToBottom } from "./useStickToBottom";
+import { useStickToBottom } from "../../hooks/useStickToBottom";
 import { setPulseFocus } from "../../stores/pulseStore";
 import { setStreamTall, useStreamTall } from "./pulseStreamPrefs";
 import { setPulsePinned, usePulsePinned } from "./pulseViewStore";

@@ -111,7 +111,7 @@ func runMsg(t *testing.T, m model, cmd tea.Cmd) model {
 	return next.(model)
 }
 
-func TestVoiceCtrlXVStartsThenStopsAndSubmits(t *testing.T) {
+func TestVoiceCtrlXVStartsThenStopsAndInserts(t *testing.T) {
 	s := stubVoice(t, availableStatus())
 	m := newVoiceTestModel()
 
@@ -138,14 +138,14 @@ func TestVoiceCtrlXVStartsThenStopsAndSubmits(t *testing.T) {
 	}
 	m = runMsg(t, m, cmd)
 
-	if !m.hasDelayedChatInput() {
-		t.Fatal("transcript was not submitted through the chat Enter path")
+	if m.hasDelayedChatInput() {
+		t.Fatal("transcript was sent; it must only be inserted")
 	}
-	if got := m.takeDelayedChatInput(); got != "hello" {
-		t.Fatalf("submitted %q, want %q", got, "hello")
+	if got := m.input.Value(); got != "hello" {
+		t.Fatalf("composer = %q, want %q", got, "hello")
 	}
 	if m.voice.phase != voiceIdle {
-		t.Fatalf("phase after submit = %v, want idle", m.voice.phase)
+		t.Fatalf("phase after insert = %v, want idle", m.voice.phase)
 	}
 }
 
@@ -186,18 +186,34 @@ func TestVoiceEmptyTranscriptDoesNotSubmit(t *testing.T) {
 	}
 }
 
-func TestVoiceTranscriptKeepsDraft(t *testing.T) {
-	stubVoice(t, availableStatus())
-	m := newVoiceTestModel()
-	m.input.SetValue("half typed")
-	m.voice.phase = voiceTranscribing
-
-	m = runMsg(t, m, func() tea.Msg { return voiceTranscribedMsg{text: "hello"} })
-	if got := m.takeDelayedChatInput(); got != "hello" {
-		t.Fatalf("submitted %q, want %q", got, "hello")
+func TestVoiceTranscriptInsertsAtCursor(t *testing.T) {
+	cases := []struct {
+		name  string
+		draft string
+		col   int
+		want  string
+	}{
+		{name: "empty composer", draft: "", col: 0, want: "hello"},
+		{name: "caret at end", draft: "half typed", col: 10, want: "half typed hello"},
+		{name: "caret mid-text", draft: "half typed", col: 4, want: "half hello typed"},
+		{name: "caret after a space", draft: "half ", col: 5, want: "half hello"},
 	}
-	if got := m.input.Value(); got != "half typed" {
-		t.Fatalf("draft after submit = %q, want it restored", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubVoice(t, availableStatus())
+			m := newVoiceTestModel()
+			m.input.SetValue(tc.draft)
+			m.input.SetCursorColumn(tc.col)
+			m.voice.phase = voiceTranscribing
+
+			m = runMsg(t, m, func() tea.Msg { return voiceTranscribedMsg{text: "hello"} })
+			if got := m.input.Value(); got != tc.want {
+				t.Fatalf("composer = %q, want %q", got, tc.want)
+			}
+			if m.hasDelayedChatInput() {
+				t.Fatal("transcript was sent; it must only be inserted")
+			}
+		})
 	}
 }
 
@@ -661,5 +677,108 @@ func TestVoicePrewarmsOnStart(t *testing.T) {
 	}
 	if m.voice.note != "" {
 		t.Fatalf("note = %q, want no user-visible message", m.voice.note)
+	}
+}
+
+// TestVoiceStopsWhenSessionChanges pins that an in-flight dictation follows the
+// session it started in: the next tick (the only periodic hook) stops the
+// microphone instead of recording into another chat.
+func TestVoiceStopsWhenSessionChanges(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	m := newVoiceTestModel()
+	m.sessionID = "ses_a"
+	m, cmd := press(t, m, voiceKey("ctrl+x"))
+	m, cmd = press(t, m, voiceKey("v"))
+	if cmd == nil || m.voice.phase != voiceStarting {
+		t.Fatalf("phase=%v, want starting", m.voice.phase)
+	}
+	m = runMsg(t, m, cmd)
+	if m.voice.phase != voiceRecording || m.voice.sessionID != "ses_a" {
+		t.Fatalf("phase=%v session=%q, want recording in ses_a", m.voice.phase, m.voice.sessionID)
+	}
+
+	m.sessionID = "ses_b"
+	cancelCmd := m.onVoicePartialTick(voicePartialTickMsg{gen: m.voice.gen})
+	if cancelCmd == nil {
+		t.Fatal("a session switch did not stop the recording")
+	}
+	if m.voice.phase != voiceIdle {
+		t.Fatalf("phase=%v, want idle after the session changed", m.voice.phase)
+	}
+	if !strings.Contains(m.voice.note, "session changed") {
+		t.Fatalf("note=%q, want the session-change explanation", m.voice.note)
+	}
+	cancelCmd()
+	if s.rec.cancels != 1 {
+		t.Fatalf("recorder cancels=%d, want 1", s.rec.cancels)
+	}
+}
+
+// TestVoiceTranscriptDroppedAfterSessionSwitch pins the second half: a
+// transcription that lands after the switch never reaches the new chat's
+// composer.
+func TestVoiceTranscriptDroppedAfterSessionSwitch(t *testing.T) {
+	m := newVoiceTestModel()
+	m.voice.sessionID = "ses_a"
+	m.voice.phase = voiceIdle
+	m.sessionID = "ses_b"
+
+	next, _ := m.insertVoiceTranscript("spoken words")
+	got := next.(model)
+	if v := got.input.Value(); v != "" {
+		t.Fatalf("composer = %q, want the transcript dropped", v)
+	}
+	if !strings.Contains(got.voice.note, "dropped") {
+		t.Fatalf("note=%q, want a dropped-transcript notice", got.voice.note)
+	}
+}
+
+// TestVoiceQuitDuringStartReleasesRecorder pins that a quit racing the recorder
+// open does not leak the microphone: no Update runs after Quit, so the start
+// command itself must cancel the recorder it just opened.
+func TestVoiceQuitDuringStartReleasesRecorder(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	m := newVoiceTestModel()
+	m, cmd := press(t, m, voiceKey("ctrl+x"))
+	m, cmd = press(t, m, voiceKey("v"))
+	if cmd == nil || m.voice.phase != voiceStarting {
+		t.Fatalf("phase=%v, want starting", m.voice.phase)
+	}
+
+	m.abortVoice()
+
+	var started *voiceStartedMsg
+	var walk func(tea.Msg)
+	walk = func(msg tea.Msg) {
+		switch v := msg.(type) {
+		case voiceStartedMsg:
+			started = &v
+		case tea.BatchMsg:
+			for _, c := range v {
+				if c != nil {
+					walk(c())
+				}
+			}
+		}
+	}
+	walk(cmd())
+
+	if started == nil {
+		t.Fatal("the start command produced no voiceStartedMsg")
+	}
+	if started.rec != nil {
+		t.Fatal("the recorder survived a quit during start")
+	}
+	if s.rec.cancels != 1 {
+		t.Fatalf("recorder cancels=%d, want 1", s.rec.cancels)
+	}
+}
+
+// TestVoicePartialShownTextKeepsValidUTF8 pins the status-row cut: it counts
+// runes, so a non-ASCII partial is not split mid-character.
+func TestVoicePartialShownTextKeepsValidUTF8(t *testing.T) {
+	line := voicePartialShownText(strings.Repeat("中文", 60))
+	if !utf8.ValidString(line) {
+		t.Fatalf("partial status line is invalid UTF-8: %q", line)
 	}
 }

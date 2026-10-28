@@ -5,6 +5,7 @@ package usage
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -359,6 +360,111 @@ func SessionSpend(sessionID string) (float64, error) {
 		return 0, fmt.Errorf("usage: scan records file: %w", err)
 	}
 	return total, nil
+}
+
+// Last-model index. The ledger is append-only and every record carries the
+// model that produced it, so the newest record attributed to a session id is
+// the model that chat actually last ran. effectiveSessionModel consults this
+// for sessions that predate per-session model pinning: their transcript
+// metadata carries no override, and without this fallback switching back to
+// such a chat runs whatever the process-wide default has become since.
+//
+// Incremental like queryCached: only complete lines appended since the previous
+// call are parsed, so a status poll that asks about one session never re-reads
+// the (multi-megabyte) file. Keyed by path so a data-dir change starts clean.
+var (
+	lastModelMu     sync.Mutex
+	lastModelPath   string
+	lastModelOffset int64
+	lastModelBySID  map[string]string
+)
+
+// LastModelForSession returns the provider-qualified model id from the newest
+// usage record attributed to sessionID, or "" when the ledger has no record for
+// it (legacy rows carry no attribution, a session that never ran a turn, or a
+// surface — the TUI — that records usage without a session id).
+func LastModelForSession(sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", nil
+	}
+	path, err := recordsPath()
+	if err != nil {
+		return "", err
+	}
+	lastModelMu.Lock()
+	defer lastModelMu.Unlock()
+	if lastModelBySID == nil || path != lastModelPath {
+		lastModelPath, lastModelOffset, lastModelBySID = path, 0, map[string]string{}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("usage: open records file: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("usage: stat records file: %w", err)
+	}
+	if info.Size() < lastModelOffset {
+		// The ledger is append-only; a shrink means it was replaced or pruned.
+		// Rescan from the start rather than keep a stale index.
+		lastModelOffset, lastModelBySID = 0, map[string]string{}
+	}
+	if size := info.Size(); size > lastModelOffset {
+		if _, err := f.Seek(lastModelOffset, io.SeekStart); err != nil {
+			return "", fmt.Errorf("usage: seek records file: %w", err)
+		}
+		chunk := make([]byte, size-lastModelOffset)
+		if _, err := io.ReadFull(f, chunk); err != nil {
+			return "", fmt.Errorf("usage: read records file: %w", err)
+		}
+		// Consume only complete lines: a record appended while we were reading
+		// can leave a torn tail, and advancing past it would drop that record
+		// permanently. Leaving the tail for the next call keeps the index exact.
+		var consumed int64
+		for consumed < int64(len(chunk)) {
+			rest := chunk[consumed:]
+			nl := bytes.IndexByte(rest, '\n')
+			if nl < 0 {
+				break
+			}
+			consumed += int64(nl) + 1
+			line := strings.TrimSpace(string(rest[:nl]))
+			if line == "" {
+				continue
+			}
+			var rec Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				continue // skip corrupt lines, mirroring queryCached
+			}
+			if rec.SessionID == "" {
+				continue
+			}
+			if id := providerQualifiedModel(rec.Model, rec.Provider); id != "" {
+				lastModelBySID[rec.SessionID] = id
+			}
+		}
+		lastModelOffset += consumed
+	}
+	return lastModelBySID[sessionID], nil
+}
+
+// providerQualifiedModel rebuilds the canonical "provider/model" id the rest of
+// the app uses from a ledger row's bare model + provider fields. Rows written by
+// some callers already carry the prefix in Model, so it is not added twice.
+func providerQualifiedModel(model, provider string) string {
+	model = strings.TrimSpace(model)
+	provider = strings.TrimSpace(provider)
+	if model == "" {
+		return ""
+	}
+	if provider == "" || strings.HasPrefix(model, provider+"/") {
+		return model
+	}
+	return provider + "/" + model
 }
 
 // Summarize aggregates records into a Summary grouped by model.

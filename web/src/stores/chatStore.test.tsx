@@ -667,6 +667,34 @@ describe("chatStore permission dialog lifecycle", () => {
     expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
   });
 
+  it("PERMISSION_RESOLVED re-arms the running indicator while the continuation runs", () => {
+    // The approve/deny continuation runs a fresh Step on the server. If a reload
+    // or a stale turn_done cleared turnActive, the approved tool and re-Step were
+    // invisible (no running indicator) until the terminal frames landed.
+    let state = withPendingPermission();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: false });
+    expect(getSessionSlice(state, "a").turnActive).toBe(false);
+
+    state = chatReducer(state, { type: "PERMISSION_RESOLVED", sessionId: "a", requestId: "call-1" });
+    expect(getSessionSlice(state, "a").pendingPermission).toBeNull();
+    expect(getSessionSlice(state, "a").turnActive).toBe(true);
+  });
+
+  it("a stale PERMISSION_RESOLVED does not re-arm a turn it did not resolve", () => {
+    let state = withPendingPermission();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: false });
+    state = chatReducer(state, {
+      type: "PERMISSION_REQUEST",
+      sessionId: "a",
+      permission: { ...ask, tool: "delete", request_id: "call-2" },
+    });
+
+    state = chatReducer(state, { type: "PERMISSION_RESOLVED", sessionId: "a", requestId: "call-1" });
+    // A stale dismissal for call-1 must not touch call-2's dialog or turn state.
+    expect(getSessionSlice(state, "a").pendingPermission?.request_id).toBe("call-2");
+    expect(getSessionSlice(state, "a").turnActive).toBe(false);
+  });
+
   it("resurfaces a queued ask once the currently-shown one is resolved", () => {
     // Two tool calls in the same round both need approval: call-1 shows
     // first, call-2 supersedes it as the visible dialog, and answering

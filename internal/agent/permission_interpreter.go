@@ -307,6 +307,16 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	- Prefer ALLOW for straightforward local file transformations when the source
 	  only reads/writes/deletes files inside the allowed roots and has no subprocesses,
 	  network, dynamic eval/exec, or unresolved imports.
+	- A module import is NOT itself an effect: importing socket, requests, playwright
+	  or any installed library opens no connection and runs no subprocess — only a
+	  CALL does (socket.socket(/.connect(, urlopen, requests.get/post,
+	  chromium.launch, page.goto; subprocess.run/Popen, os.system, exec, eval).
+	  So a source that only imports modules and prints attributes or versions has
+	  empty reads/writes/deletes/network/subprocesses. Put an import in "unknown"
+	  ONLY when it names a module that is a FILE in the project and you could not
+	  read it with read_file (importing it runs that file's top-level code) — never
+	  merely because the module is a network-capable library. Judge the DESTINATION
+	  of a call (which host, which command and arguments), never the imported name.
 	- A heredoc or inline script is not risky by itself. Do not ask merely because
 	  the interpreter command is embedded in bash or spans multiple lines.
 	- In particular, commands like python3 <<'PYEOF' that rewrite a local project markdown file should usually be ALLOW when the effect set is fully enumerated and stays inside policy.

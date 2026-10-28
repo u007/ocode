@@ -599,36 +599,95 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 }
 
 // effectiveSessionModel returns the model that should drive the agent for the
-// given session. A per-session override persisted in the session transcript's
-// metadata (metadata["model"]) wins over the process-wide config model, which
-// is the fallback for sessions that have never picked their own. This is what
-// makes the sidebar's model a per-chat-session setting rather than one global
-// value mirrored across every open tab.
+// given session.
+//
+// Resolution order (first match wins):
+//  1. a per-session override persisted in the transcript metadata
+//     (metadata["model"]) — what a model pick in this chat writes;
+//  2. the newest model the usage ledger attributes to this chat — the recovery
+//     path for sessions created before every chat was pinned (they carry no
+//     override, and following the process-wide default meant switching back to
+//     one of them ran whatever model was picked LAST, anywhere);
+//  3. the process-wide config model — the default new chats start with.
+//
+// An explicitly cleared override is stored as metadata["model"] == "": that
+// chat deliberately follows the default (step 3) and must NOT be "recovered"
+// from the ledger, otherwise clearing a model would silently do nothing.
+// Pulse sessions skip step 2; their slot model is their configuration.
 func (h *Handler) effectiveSessionModel(id string) string {
+	followDefault := false
+	pulse := isPulseSession(id)
 	if id != "" {
 		if entry, err := h.sessions.Resolve(id); err == nil {
-			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && s.Metadata != nil {
-				if m, ok := s.Metadata["model"].(string); ok && m != "" {
-					return m
+			// Metadata-only read: this runs on every status poll, and the
+			// transcript itself is irrelevant here.
+			if md, err := session.ReadMetadataForDir(entry.ProjectRoot, id); err == nil {
+				if m, ok := md["model"].(string); ok {
+					if m != "" {
+						return m
+					}
+					followDefault = true
 				}
 			}
 		}
 	}
+	if !followDefault && !pulse && id != "" {
+		if m, err := usage.LastModelForSession(id); err != nil {
+			log.Printf("session model: usage fallback for %s: %v", id, err)
+		} else if m != "" {
+			return m
+		}
+	}
 	// SetWorkDir replaces h.cfg under h.mu. Keep the lock limited to this
-	// in-memory read; session resolution and transcript loading above must stay
-	// outside the handler map lock.
+	// in-memory read; session resolution above must stay outside the handler
+	// map lock.
 	h.mu.Lock()
 	model := ""
 	if h.cfg != nil {
 		model = h.cfg.Model
 		// The Pulse assistant follows its own slot (ocode.pulse_model) before
 		// the default chat model; a per-session override above still wins.
-		if isPulseSession(id) && h.cfg.Ocode.PulseModel != "" {
+		if pulse && h.cfg.Ocode.PulseModel != "" {
 			model = h.cfg.Ocode.PulseModel
 		}
 	}
 	h.mu.Unlock()
 	return model
+}
+
+// pinSessionModel persists model as the chat's per-session override when the
+// session has no model metadata yet. Sessions created before every chat was
+// pinned would otherwise keep following the process-wide default (or, after the
+// ledger fallback above, keep depending on the ledger file). Best-effort: a
+// failure is logged and the turn still runs with the resolved model.
+//
+// A key that is PRESENT — including the empty "explicitly follow the default"
+// sentinel written by HandleClearSessionModel — is left alone.
+func (h *Handler) pinSessionModel(id, model string) {
+	if id == "" || model == "" {
+		return
+	}
+	entry, err := h.sessions.Resolve(id)
+	if err != nil || entry.ProjectRoot == "" {
+		return
+	}
+	md, err := session.ReadMetadataForDir(entry.ProjectRoot, id)
+	if err != nil {
+		log.Printf("session model: read metadata for %s: %v", id, err)
+		return
+	}
+	if _, ok := md["model"]; ok {
+		return
+	}
+	if err := session.UpdateMetadataForDir(entry.ProjectRoot, id, func(m map[string]any) {
+		// Re-check under the write lock: a model pick may have landed between
+		// the read and here.
+		if _, ok := m["model"]; !ok {
+			m["model"] = model
+		}
+	}); err != nil {
+		log.Printf("session model: pin %s: %v", id, err)
+	}
 }
 
 // setSessionModelOverride persists (or clears, when model == "") a per-session
@@ -645,7 +704,11 @@ func (h *Handler) setSessionModelOverride(id, model string) (string, error) {
 	// session.UpdateMetadataForDir), which made every model pick 404.
 	err = session.UpdateMetadataForDir(entry.ProjectRoot, id, func(md map[string]any) {
 		if model == "" {
-			delete(md, "model")
+			// Explicit clear: keep the key with an empty value. Deleting it would
+			// make this chat indistinguishable from a legacy session that never
+			// had an override, and effectiveSessionModel would "recover" the model
+			// from the usage ledger — so clearing would silently do nothing.
+			md["model"] = ""
 		} else {
 			md["model"] = model
 		}

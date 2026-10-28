@@ -160,6 +160,16 @@ type Target struct {
 	// startFileChooser / SetFiles). nil when none is pending.
 	chooserMu sync.Mutex
 	chooser   *pendingChooser
+
+	// console and network are always-on bounded capture buffers behind
+	// ConsoleEntries/NetworkEntries. They record before and regardless of sink,
+	// so a headless target (nil sink) keeps its history.
+	console consoleLog
+	network networkLog
+
+	// frameCtx maps each child frame to its main-world execution context, for
+	// the page-DOM helpers' --frame-style calls (see pagedom_frame.go).
+	frameCtx frameContexts
 }
 
 // pendingChooser is one intercepted Page.fileChooserOpened.
@@ -351,6 +361,7 @@ func (t *Target) startHandlers() {
 	t.pendingReqs = make(map[string]*pendingReq)
 	t.completedReqs = make(map[string]*completedReq)
 	t.perfMetrics = make(map[string]float64)
+	t.startContextTracking()
 
 	go t.handleScreencast(chFrame)
 	go t.handleFrameNavigated(chNav)
@@ -478,6 +489,7 @@ func (t *Target) handleNavigatedWithinDocument(ch <-chan json.RawMessage) {
 
 func (t *Target) handleResponseReceived(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordResponseReceived(raw)
 		var ev struct {
 			RequestID string `json:"requestId"`
 			Type      string `json:"type"`
@@ -529,6 +541,7 @@ func (t *Target) handleResponseReceived(ch <-chan json.RawMessage) {
 
 func (t *Target) handleLoadingFailed(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordLoadingFailed(raw)
 		var ev struct {
 			RequestID     string `json:"requestId"`
 			Type          string `json:"type"`
@@ -604,6 +617,7 @@ func (t *Target) handleLoadingFailed(ch <-chan json.RawMessage) {
 
 func (t *Target) handleRequestWillBeSent(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordRequestWillBeSent(raw)
 		var ev struct {
 			RequestID string `json:"requestId"`
 			Request   struct {
@@ -646,6 +660,7 @@ func (t *Target) handleRequestWillBeSent(ch <-chan json.RawMessage) {
 
 func (t *Target) handleLoadingFinished(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordLoadingFinished(raw)
 		var ev struct {
 			RequestID         string  `json:"requestId"`
 			Timestamp         float64 `json:"timestamp"`
@@ -803,6 +818,7 @@ func (t *Target) getPerformanceSnapshot() map[string]float64 {
 
 func (t *Target) handleConsole(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordConsoleAPI(raw)
 		var ev struct {
 			Type string `json:"type"`
 			Args []struct {
@@ -839,6 +855,7 @@ func (t *Target) handleConsole(ch <-chan json.RawMessage) {
 
 func (t *Target) handleException(ch <-chan json.RawMessage) {
 	for raw := range ch {
+		t.recordException(raw)
 		var ev struct {
 			ExceptionDetails struct {
 				Text      string `json:"text"`
@@ -1351,6 +1368,14 @@ func (t *Target) restartScreencast(ctx context.Context) error {
 }
 
 func (t *Target) restartScreencastWith(ctx context.Context, maxW, maxH int) error {
+	// Frames go only to a FrameSink. A headless target (no panel) has none, so
+	// a resize or zoom must not start a screencast that nothing reads.
+	t.mu.Lock()
+	hasSink := t.sink != nil
+	t.mu.Unlock()
+	if !hasSink {
+		return nil
+	}
 	quality := DefaultScreencastQuality
 	if t.manager != nil {
 		quality = t.manager.effectiveQuality()

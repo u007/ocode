@@ -891,6 +891,30 @@ func mergeMetas(legacy, indexed []ocodeMeta) []ocodeMeta {
 	return append(merged, indexed...)
 }
 
+// readSqliteMetadata returns a .sqlite session's stored metadata map from one
+// SELECT, without loading (or even counting) its message rows.
+func readSqliteMetadata(dir, id string) (map[string]any, error) {
+	db, err := openSessionDB(sqliteSessionPath(dir, id))
+	if err != nil {
+		return nil, fmt.Errorf("session: open sqlite %s: %w", id, err)
+	}
+	defer db.Close()
+	var metaJSON string
+	if err := db.QueryRow(`SELECT metadata_json FROM meta WHERE id = ?`, id).Scan(&metaJSON); err != nil {
+		return nil, fmt.Errorf("session: read metadata %s: %w", id, err)
+	}
+	var metadata map[string]any
+	if metaJSON != "" && metaJSON != "null" {
+		if err := json.Unmarshal([]byte(metaJSON), &metadata); err != nil {
+			return nil, fmt.Errorf("session: unmarshal metadata %s: %w", id, err)
+		}
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	return metadata, nil
+}
+
 // updateSqliteMetadata rewrites only meta.metadata_json (and updated_at) for
 // id inside one immediate transaction. Message rows, title, and history_gen
 // are untouched. See UpdateMetadataForDir for why this must not go through

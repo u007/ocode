@@ -35,7 +35,7 @@ returned only a preamble and made no edit."*
 Not because nothing scans child transcripts — because **the parent's turn lock
 is held for the child's entire lifetime**.
 
-- `runTurn` takes `as.mu.Lock()` at `internal/server/agent_session.go:1061` and
+- `runTurn` takes `as.mu.Lock()` at `internal/server/agent_session.go:1080` and
   holds it for the whole turn (`defer as.mu.Unlock()`). A synchronous sub-agent
   dispatch blocks inside `Step` on that same goroutine
   (`internal/agent/subagent.go:871`), so the lock is held until the child ends.
@@ -53,7 +53,7 @@ child asks.
 Two more facts close the remaining gaps:
 
 - The sentinel path in `Agent.Step` is only taken when `a.OnPermissionAsk` is
-  nil (`internal/agent/agent.go:3669-3685`).
+  nil (`internal/agent/agent.go:4135`).
 - `SetSubAgentPermAsker` has exactly one real install site in the whole tree,
   `internal/tui/model.go:18842`. The server never installs one; `subagent.go:552`
   and `advisor_tool.go:358` merely propagate the parent's (nil) asker.
@@ -82,7 +82,7 @@ Two more facts close the remaining gaps:
    live outside it.
 2. **The child blocks.** That is what delivers the answer to the goroutine that
    needs it, without inventing a re-`Step` protocol that must survive
-   `shutdownTransient` (`agent.go:6003`). It mirrors the TUI's asker line for
+   `shutdownTransient` (`agent.go:6510`). It mirrors the TUI's asker line for
    line.
 3. **`livePendingAsks` merges rather than replaces.** The registry is read
    unconditionally; the existing message-scan keeps its current `TryLock`
@@ -123,10 +123,10 @@ none of that — the child's goroutine is already parked on `respCh`.
 
 | # | File | Change |
 |---|---|---|
-| 1 | `internal/agent/permissions.go:93` | Add `AgentName string \`json:"agent_name,omitempty"\`` to `PermissionRequest`. `omitempty` keeps every existing frame byte-identical — same precedent as the `Untrusted*` fields. |
+| 1 | `internal/agent/permissions.go:94` | Add `AgentName string \`json:"agent_name,omitempty"\`` to `PermissionRequest`. `omitempty` keeps every existing frame byte-identical — same precedent as the `Untrusted*` fields. |
 | 2 | `internal/agent/subagent.go:552`, `advisor_tool.go:358` | The asker is installed once on the parent and shared by every child, so the closure captures nothing per-dispatch and cannot know who is asking. Wrap it per dispatch: `if req.AgentName == "" { req.AgentName = spec.Name }`. **This is what makes attribution possible** — without it the dialog can only say "a sub-agent asked". |
 | 3 | **new** `internal/server/child_perm_asks.go` | The registry: `childPermAsks{ mu sync.Mutex; m map[string]*childPermAsk }` with `add` / `take` / `list` / `denyAll`, plus `newServerSubAgentAsker(as *agentSession)`. Registers, emits the `permission` SSE frame, then blocks on `select{respCh, parentStop, timeout}`. `respCh` buffered(1), mirroring the TUI. |
-| 4 | `internal/server/agent_session.go:437` `buildAgentSession` | Construct the registry on the `agentSession` and install the asker. Headless only. |
+| 4 | `internal/server/agent_session.go:454` `buildAgentSession` | Construct the registry on the `agentSession` and install the asker. Headless only. |
 | 5 | `internal/server/handler_session_state.go:133` `livePendingAsks` | Restructure: read the registry **always** (own mutex, works while `as.mu` is held); message-scan **only** when `TryLock` succeeds; merge. |
 | 6 | `internal/server/handler_permissions_resolve.go` | Add `AgentName` to `PermissionEvent`; project it in `newPermissionEvent`. Add a **registry-first branch to `HandleResolvePermission`, before `findPendingSession`**: the same always-allow guards (`AlwaysRuleChoiceAvailable`, `AlwaysToolChoiceAvailable`, `IsHarmfulRequest`), the same `persistAlwaysAllow(decision, permReq, as.agent.Permissions())`, the same `permission_resolved` broadcast, then deliver into `respCh`. Falls through to the existing path unchanged when the id is not in the registry. |
 | 7 | `web/…/PermissionDialog` | Render which sub-agent is asking. |
@@ -227,7 +227,7 @@ RC-bridged sessions.
 ## Known limits (deliberate)
 
 - **Parent cancellation does not reach an executing synchronous sub-agent.**
-  `Step` snapshots its own `a.StopCh()` (`agent.go:1459`), and `runSyncDispatch`
+  `Step` snapshots its own `a.StopCh()` (`agent.go:1562`), and `runSyncDispatch`
   consults the parent's channel only for queue admission (`subagent.go:899`,
   `:905`). So after an auto-deny the child keeps running its own loop until it
   finishes on its own. Today that window is "however long the child takes";

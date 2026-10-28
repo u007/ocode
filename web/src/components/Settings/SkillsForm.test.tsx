@@ -158,4 +158,27 @@ describe("SkillsForm", () => {
     release();
     await waitFor(() => expect(toggleInput("beta")).not.toBeDisabled());
   });
+
+  // jsdom has no layout engine, so this pins the CSS CONTRACT that keeps the
+  // switch intact (the ProjectSidebar narrow-row test uses the same approach).
+  // Each toggle is a flex item whose sibling column carries a `truncate`d,
+  // very wide description: without `shrink-0` the flex algorithm squeezes the
+  // 32px track down to ~19px while the absolutely-positioned knob keeps its
+  // checked offset, so the knob renders OUTSIDE the track and over the card
+  // border. And the off state must NOT be `bg-accent`, because that token
+  // follows the terminal theme's accent colour — green in many themes, i.e.
+  // identical to the `checked:bg-emerald-600` on state.
+  it("renders a non-shrinking switch with a neutral off-state track", async () => {
+    render(<SkillsForm />);
+
+    await waitFor(() => expect(screen.getByText(/2\/3 enabled/)).toBeInTheDocument());
+
+    for (const name of ["alpha", "beta", "gamma"]) {
+      const box = toggleInput(name);
+      expect(box.className).toContain("shrink-0");
+      expect(box.className).toContain("bg-muted-foreground/30");
+      expect(box.className).not.toContain("bg-accent");
+      expect(box.className).toContain("checked:bg-emerald-600");
+    }
+  });
 });

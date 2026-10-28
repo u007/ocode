@@ -1,6 +1,9 @@
 package cdp
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // windowsVirtualKeyCodes maps KeyboardEvent.code → Windows virtual key code.
 // Chrome's renderer keys its editing behaviour (delete backward, caret moves,
@@ -213,4 +216,38 @@ func keyEventParams(goos string, ev KeyEvent) map[string]any {
 		}
 	}
 	return params
+}
+
+// namedKeys are the non-printable keys the browser agent tool can press. Each
+// entry is the key-down descriptor; PressKey sends it as a down/up pair. Only
+// keys whose Code resolves a Windows virtual key code are listed, so every
+// entry goes through the same windowsVirtualKeyCode path as the panel's keys.
+// Printable text goes through Target.InsertText instead, and chords with
+// modifiers are not supported (see TODO.md).
+var namedKeys = map[string]KeyEvent{
+	"ArrowDown":  {Key: "ArrowDown", Code: "ArrowDown"},
+	"ArrowLeft":  {Key: "ArrowLeft", Code: "ArrowLeft"},
+	"ArrowRight": {Key: "ArrowRight", Code: "ArrowRight"},
+	"ArrowUp":    {Key: "ArrowUp", Code: "ArrowUp"},
+	"Backspace":  {Key: "Backspace", Code: "Backspace"},
+	"Delete":     {Key: "Delete", Code: "Delete"},
+	"End":        {Key: "End", Code: "End"},
+	"Enter":      {Key: "Enter", Code: "Enter", Text: "\r"},
+	"Escape":     {Key: "Escape", Code: "Escape"},
+	"Home":       {Key: "Home", Code: "Home"},
+	"PageDown":   {Key: "PageDown", Code: "PageDown"},
+	"PageUp":     {Key: "PageUp", Code: "PageUp"},
+	"Space":      {Key: " ", Code: "Space", Text: " "},
+	"Tab":        {Key: "Tab", Code: "Tab"},
+}
+
+// NamedKeys returns the names PressKey accepts, sorted so a tool schema built
+// from them is deterministic.
+func NamedKeys() []string {
+	names := make([]string, 0, len(namedKeys))
+	for name := range namedKeys {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

@@ -26,7 +26,7 @@
 - Test: `internal/server/handler_changes_test.go`
 
 **Interfaces:**
-- Consumes: `changes.Registry.List() []changes.FileChange` (existing, `internal/changes/changes.go:183`), `changes.FileChange` fields (`OriginalPath, Status, FirstBackupPath, Undoable, UndoAllTCID, ChangeCount, Authors, CreatedAt, UpdatedAt, LastBashCommand, LastBashExitCode`), `changes.ChangeAuthor{AgentID, AgentName, Changes}`, `changes.FileStatus` (`FileAdded=0, FileModified=1, FileDeleted=2`), `Handler.activeAgentForRuns(sessionID string) *agent.Agent` (`internal/server/handler_runs.go:93`), `agent.Agent.Changes() *changes.Registry` (`internal/agent/agent.go:333`).
+- Consumes: `changes.Registry.List() []changes.FileChange` (existing, `internal/changes/changes.go:183`), `changes.FileChange` fields (`OriginalPath, Status, FirstBackupPath, Undoable, UndoAllTCID, ChangeCount, Authors, CreatedAt, UpdatedAt, LastBashCommand, LastBashExitCode`), `changes.ChangeAuthor{AgentID, AgentName, Changes}`, `changes.FileStatus` (`FileAdded=0, FileModified=1, FileDeleted=2`), `Handler.activeAgentForRuns(sessionID string) *agent.Agent` (`internal/server/handler_runs.go:93`), `agent.Agent.Changes() *changes.Registry` (`internal/agent/agent.go:929`).
 - Produces: `type fileChangeDTO struct{...}` with JSON tags, `func buildFileChangeDTO(fc changes.FileChange) fileChangeDTO`, `func statusName(s changes.FileStatus) string`, `func (h *Handler) changesSnapshot(sessionID string) []fileChangeDTO`, `func (h *Handler) HandleListChanges(w http.ResponseWriter, r *http.Request)`. Later tasks call `h.changesSnapshot` and the DTO type.
 
 - [ ] **Step 1: Write the failing test**

@@ -85,6 +85,21 @@ export interface SlashCommandResult {
 const CHAT_INPUT_PLACEHOLDER_HINT =
   "Enter to send · Shift+Enter for newline · ↑/↓ history · / for commands · ! for shell";
 
+/**
+ * Splices a voice transcript into the composer over [start, end) and returns the
+ * new value with the caret after the inserted text. A space separates the
+ * transcript from a non-blank neighbour on either side; blank neighbours and
+ * the composer edges need none.
+ */
+function insertTranscript(value: string, start: number, end: number, text: string): { value: string; caret: number } {
+  const before = value.slice(0, start);
+  const after = value.slice(end);
+  const lead = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const trail = after.length > 0 && !/^\s/.test(after) ? " " : "";
+  const insert = `${lead}${text}${trail}`;
+  return { value: before + insert + after, caret: before.length + lead.length + text.length };
+}
+
 const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSlashCommand,
   activeEditorContext,
@@ -883,17 +898,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     : [];
   const filteredCount = filteredCommandNames.length;
 
-  // Shared send path for the Enter key, the Send button and voice input. With
-  // `voiceText`, the transcript is the message: the composer's own draft is left
-  // in place so speaking never wipes what the user had typed.
-  const submitComposer = async (voiceText?: string) => {
-    const isVoice = voiceText !== undefined;
+  // Shared send path for the Enter key and the Send button.
+  const submitComposer = async () => {
     // In-flight guard — must run before any async gap and before reading
     // `input`, so a duplicate physical submit (same tick) is dropped instead of
     // sending the same text twice. Distinct later submits (different tick, after
     // this send settles) are never blocked.
     if (submittingRef.current) return;
-    const trimmed = (isVoice ? voiceText : input).trim();
+    const trimmed = input.trim();
     if (!trimmed) return;
     submittingRef.current = true;
     // Record the submitted input for ↑/↓ recall. This is the single submit
@@ -906,11 +918,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     historyDraftRef.current = "";
     let delayedSubmission = false;
     try {
-      if (!isVoice) {
-        setInput("");
-        clearDraft(sessionTabId);
-        setShowSlashMenu(false);
-      }
+      setInput("");
+      clearDraft(sessionTabId);
+      setShowSlashMenu(false);
 
     // While a turn is busy (streaming, shell, permission, or interrupted
     // barrier), queue instead of blocking — mirrors the TUI's unified
@@ -948,8 +958,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           queueMicrotask(() => { submittingRef.current = false; });
         }
         const outcome = await pending;
-        // A rejected voice command must not overwrite a draft the user is typing.
-        if (!outcome.accepted && (!isVoice || !getDraft(sessionTabId).trim())) {
+        if (!outcome.accepted) {
           setInput(trimmed);
           setDraft(sessionTabId, trimmed);
         }
@@ -1074,15 +1083,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
 
   const handleSend = () => submitComposer();
 
-  // Transcript from voice input. If a send is still settling, keep the words in
-  // the composer instead of dropping them (submitComposer would ignore them).
+  // Transcript from voice input goes into the composer, never into a send. It
+  // replaces the highlighted selection, or sits at the caret when nothing is
+  // highlighted. The live DOM value and selection are the ones the user sees.
   const onVoiceTranscript = (text: string) => {
-    if (submittingRef.current) {
-      const current = getDraft(sessionTabId);
-      updateDraft(current.trim() ? `${current.trimEnd()} ${text}` : text);
-      return;
-    }
-    void submitComposer(text);
+    const el = textareaRef.current;
+    if (!el) throw new Error("Composer textarea is not mounted; cannot insert the transcript");
+    const inserted = insertTranscript(el.value, el.selectionStart, el.selectionEnd, text);
+    pendingCaretRef.current = { start: inserted.caret, end: inserted.caret, shift: 0 };
+    updateDraft(inserted.value);
   };
   const [voiceInstalling, setVoiceInstalling] = useState(false);
   const [voiceInstallAsk, setVoiceInstallAsk] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);
@@ -1130,6 +1139,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     // Load the model while the user is talking, so the final transcription
     // does not wait for the load. Best-effort.
     prewarm: () => api.prewarmSpeech(),
+    // Abandoning a recording must not leave the ~2 GB load resident. The
+    // cancel is process-wide (stt.CancelPrewarm), so it only ever aborts a
+    // LOAD in progress; a worker already transcribing is untouched.
+    cancelPrewarm: () => Promise.resolve(api.cancelPrewarmSpeech?.()),
   });
   const voiceRecording = voice.state === "recording";
   const voiceTranscribing = voice.state === "transcribing";
@@ -1454,7 +1467,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </span>
           {voiceRecording && voice.partialText && (
             // aria-hidden: a live preview that changes every few seconds would
-            // make the status region announce constantly. The final text is announced by the send.
+            // make the status region announce constantly. The final text lands in the composer instead.
             <span aria-hidden="true" title={voice.partialText} className="min-w-0 flex-1 truncate italic text-muted-foreground/80">
               {voice.partialText}
             </span>
@@ -1574,7 +1587,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             !voice.supported
               ? VOICE_UNAVAILABLE_MESSAGE
               : voiceRecording
-                ? "Stop recording and send"
+                ? "Stop recording and insert the transcript"
                 : voiceTranscribing
                   ? "Transcribing…"
                 : voice.holding

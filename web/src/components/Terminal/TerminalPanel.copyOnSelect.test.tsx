@@ -2,6 +2,7 @@ import { render, fireEvent, act, waitFor, screen, cleanup } from "@testing-libra
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
+import { requestSpeech } from "../Speech/SpeechProvider";
 
 // lib/wails.ts reads the desktop clipboard nonce from ?clip= once, when it is
 // first imported. vi.hoisted runs before the static imports above, so the page
@@ -93,6 +94,13 @@ vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); on
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class { dispose = vi.fn(); } }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
+  // TerminalPanel now owns a voice recorder, whose unmount cancels a model
+  // prewarm; the stub keeps that cleanup from throwing in a suite that never
+  // records.
+  api: {
+    cancelPrewarmSpeech: () => Promise.resolve(true),
+    prewarmSpeech: () => Promise.resolve(true),
+  },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   authToken: () => "tok",
@@ -961,6 +969,47 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
       await Promise.resolve();
     });
     expect(writeText).toHaveBeenCalledWith("word");
+  });
+
+  it("right-click INSIDE the dragged range keeps the whole drag when the mouse report cleared it and xterm re-selected one word", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "one two three";
+    term.selectionRange = { start: { x: 0, y: 1 }, end: { x: 13, y: 1 } };
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 120, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 120, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("one two three"));
+    writeText.mockClear();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Mouse-tracking app: the right-button press report cleared the drag, so
+    // xterm's contextmenu listener (rightClickSelectsWord) selected only the
+    // word under the cursor — a word inside the range the user highlighted.
+    fireEvent.mouseDown(host, { button: 2, clientX: 50, clientY: 12 });
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+    term.selectionText = "two";
+    term.selectionRange = { start: { x: 4, y: 1 }, end: { x: 7, y: 1 } };
+    fireEvent.contextMenu(host, { clientX: 50, clientY: 12 });
+    fireEvent.mouseUp(host, { button: 2, clientX: 50, clientY: 12 });
+
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("one two three");
+
+    fireEvent.contextMenu(host, { clientX: 50, clientY: 12 });
+    fireEvent.click(screen.getByText("Play selection").closest("button")!);
+    expect(requestSpeech).toHaveBeenCalledWith("one two three");
   });
 
   it("a right-button press/release never copies the word rightClickSelectsWord picked", async () => {

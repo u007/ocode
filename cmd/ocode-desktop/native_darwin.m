@@ -15,6 +15,7 @@
 // arrow keys, backspace holding).
 
 #import <Foundation/Foundation.h>
+#import <WebKit/WebKit.h>
 
 // ocode_disablePressAndHold turns off the accent chooser for this application
 // so held keys repeat.
@@ -30,3 +31,40 @@ void ocode_disablePressAndHold(void) {
 		[defaults setBool:NO forKey:@"ApplePressAndHoldEnabled"];
 	}
 }
+
+// WebKit asks "localhost would like to use your microphone" per origin before
+// macOS shows its own system prompt, so dictation prompted twice. Wails v3's
+// WebviewWindowDelegate (the WKUIDelegate) implements no media-capture
+// handler, so WebKit falls back to its own prompt. This category adds one that
+// grants ONLY the microphone, and ONLY to the loopback origin the desktop shell
+// serves the app from; the macOS TCC prompt (driven by
+// NSMicrophoneUsageDescription) stays the single user-facing gate.
+//
+// Do NOT widen this to every origin: OCODE_DESKTOP_DEV_URL can point the
+// webview at another host, and WKMediaCaptureType also covers the camera, which
+// no ocode feature uses. A blanket grant would silently hand both to whatever
+// page that origin serves.
+@interface WebviewWindowDelegate : NSObject
+@end
+
+@interface WebviewWindowDelegate (OcodeMediaCapture)
+@end
+
+@implementation WebviewWindowDelegate (OcodeMediaCapture)
+- (void)webView:(WKWebView *)webView
+    requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin
+                          initiatedByFrame:(WKFrameInfo *)frame
+                                      type:(WKMediaCaptureType)type
+                           decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler
+    API_AVAILABLE(macos(12.0)) {
+	NSString *host = origin.host;
+	BOOL loopback = [host isEqualToString:@"localhost"] ||
+	                [host isEqualToString:@"127.0.0.1"] ||
+	                [host isEqualToString:@"::1"];
+	if (type == WKMediaCaptureTypeMicrophone && loopback) {
+		decisionHandler(WKPermissionDecisionGrant);
+		return;
+	}
+	decisionHandler(WKPermissionDecisionDeny);
+}
+@end

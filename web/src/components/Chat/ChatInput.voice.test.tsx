@@ -73,27 +73,66 @@ afterEach(() => {
 });
 
 describe("ChatInput voice input", () => {
-  it("sends the transcript through the normal send path (auto-send, not paste)", async () => {
+  it("inserts the transcript into the empty composer and does not send it", async () => {
     const transcribe = vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "run the tests", model: "m" });
     render(<ChatInput sessionTabId={TAB} />);
 
     await recordOnce();
 
-    expect(sendMessage).toHaveBeenCalledWith("run the tests");
-    expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(transcribe).toHaveBeenCalledWith(expect.any(Blob), "recording.webm");
-    expect(textarea().value).toBe("");
+    expect(textarea().value).toBe("run the tests");
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("speaking leaves the user's typed draft in place", async () => {
+  it("inserts at the caret, keeping the typed text on both sides", async () => {
     vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "spoken words", model: "m" });
     render(<ChatInput sessionTabId={TAB} />);
     fireEvent.change(textarea(), { target: { value: "half typed" } });
+    textarea().setSelectionRange(4, 4);
 
     await recordOnce();
 
-    expect(sendMessage).toHaveBeenCalledWith("spoken words");
-    expect(textarea().value).toBe("half typed");
+    expect(textarea().value).toBe("half spoken words typed");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("replaces a highlighted section and leaves the rest of the draft alone", async () => {
+    vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "fixed", model: "m" });
+    render(<ChatInput sessionTabId={TAB} />);
+    fireEvent.change(textarea(), { target: { value: "please fix the bug now" } });
+    // Highlight "fix the bug" (indexes 7..18).
+    textarea().setSelectionRange(7, 18);
+
+    await recordOnce();
+
+    expect(textarea().value).toBe("please fixed now");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("replaces the whole draft when all of it is highlighted", async () => {
+    vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "new message", model: "m" });
+    render(<ChatInput sessionTabId={TAB} />);
+    fireEvent.change(textarea(), { target: { value: "old draft" } });
+    textarea().setSelectionRange(0, "old draft".length);
+
+    await recordOnce();
+
+    expect(textarea().value).toBe("new message");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("after inserting, Enter sends the composed message", async () => {
+    vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "from voice", model: "m" });
+    render(<ChatInput sessionTabId={TAB} />);
+    fireEvent.change(textarea(), { target: { value: "typed then" } });
+
+    await recordOnce();
+    await act(async () => {
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+    });
+    await flush();
+
+    expect(sendMessage).toHaveBeenCalledWith("typed then from voice");
   });
 
   it("shows the recording and transcribing states", async () => {
@@ -118,7 +157,8 @@ describe("ChatInput voice input", () => {
 
     await act(async () => resolve({ text: "ok", model: "m" }));
     await flush();
-    expect(sendMessage).toHaveBeenCalledWith("ok");
+    expect(textarea().value).toBe("ok");
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(screen.queryByText("Transcribing…")).toBeNull();
   });
 
@@ -195,8 +235,8 @@ describe("ChatInput voice input", () => {
     expect(screen.queryByText("almost there")).toBeNull();
     await flush();
     expect(transcribe).toHaveBeenCalledTimes(2);
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith("final words");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("final words");
   });
 
   it("cancel stops recording without transcribing or sending anything", async () => {
@@ -218,7 +258,7 @@ describe("ChatInput voice input", () => {
     expect(textarea().value).toBe("");
   });
 
-  it("holding past the threshold locks continuous recording; release does not stop, click stop sends", async () => {
+  it("holding past the threshold locks continuous recording; release does not stop, click stop inserts", async () => {
     const transcribe = vi.spyOn(api, "transcribeSpeech").mockResolvedValue({ text: "keep talking", model: "m" });
     render(<ChatInput sessionTabId={TAB} />);
 
@@ -239,7 +279,8 @@ describe("ChatInput voice input", () => {
       fireEvent.mouseUp(micButton());
     });
     await flush();
-    expect(sendMessage).toHaveBeenCalledWith("keep talking");
+    expect(textarea().value).toBe("keep talking");
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(transcribe).toHaveBeenCalledTimes(1);
   });
 

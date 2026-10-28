@@ -56,7 +56,7 @@
   }
   /*
    * The app is a single full-height SPA: the document itself is never meant to
-   * scroll (App.tsx renders `h-screen`). Without this, any gesture the web
+   * scroll (App.tsx renders `app-viewport`, i.e. `100dvh`). Without this, any gesture the web
    * content leaves to the browser — e.g. a wheel over a terminal that xterm
    * could not use — rubber-bands the whole page in the desktop shell's
    * WKWebView, which reads as "the window scrolls instead of the terminal".
@@ -145,6 +145,35 @@ html.light {
 }
 
 @layer utilities {
+  /*
+   * The app shell must fill the VISIBLE viewport, not the large one.
+   *
+   * `100vh` on mobile Chrome/Safari is the viewport with the URL bar retracted,
+   * so with the URL bar showing the shell rendered ~100px TALLER than the
+   * screen. Everything pinned to its bottom was therefore below the fold: the
+   * StatusBar and the fixed SpeechToolbar ("voice") disappeared, and the chat
+   * composer was clipped at the screen edge. `100dvh` tracks the visible
+   * height. The `100vh` line is the fallback: an engine without `dvh` support
+   * drops the invalid declaration and keeps the first one (a single `height:
+   * 100dvh` would leave the shell with no height at all there).
+   *
+   * `env(safe-area-inset-bottom)` keeps the status bar clear of the iOS home
+   * indicator / Android gesture bar. It resolves to 0 unless the page opts
+   * into `viewport-fit=cover`, so it cannot introduce a gap on desktop.
+   */
+  .app-viewport {
+    height: 100vh;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  /* An explicit @supports block, not two declarations in one rule: the build's
+     CSS minifier (Lightning CSS) DROPS the `100vh` fallback when both are in the
+     same rule, which would leave older WKWebView with no shell height at all. */
+  @supports (height: 100dvh) {
+    .app-viewport {
+      height: 100dvh;
+    }
+  }
+
   /* Hide scrollbars on horizontal tab strips while keeping them scrollable */
   .scrollbar-hide {
     -ms-overflow-style: none;

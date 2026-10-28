@@ -437,6 +437,47 @@ func TestHandleAnswerQuestionContinuationEmitsHeartbeats(t *testing.T) {
 	waitForAskContinuation(t, as)
 }
 
+// TestHandleAnswerQuestionContinuationEmitsTurnStarted is the question-side twin
+// of TestHandleResolvePermissionContinuationEmitsTurnStarted: the answer
+// continuation runs a fresh Step but never announced the turn, so a client
+// whose turnActive flag was cleared had no running indicator until the terminal
+// frames landed. turn_started must precede Step, and turn_done must follow.
+func TestHandleAnswerQuestionContinuationEmitsTurnStarted(t *testing.T) {
+	h := NewHandler()
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	if !waitForBusEvent(sub, "turn_started", 2*time.Second) {
+		t.Fatal("question continuation published no turn_started while its Step was blocked")
+	}
+	close(client.release)
+	if !waitForBusEvent(sub, "turn_done", 2*time.Second) {
+		t.Fatal("question continuation published turn_started but no matching turn_done")
+	}
+	waitForAskContinuation(t, as)
+}
+
 // TestHandleAnswerQuestionForwardsMultipleSelection verifies the RC bridge keeps
 // every selected answer for a multi-select question (it must not collapse to the
 // first selection as the old code did).

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
+import GitForm from "./GitForm";
 import CompactForm from "./CompactForm";
 import SpeechSummaryForm from "./SpeechSummaryForm";
 import AdvisorForm from "./AdvisorForm";
@@ -50,6 +51,7 @@ export type SettingsGroupId =
   | "profile-debug"
   | "model-defaults"
   | "commit-msg"
+  | "git"
   | "compact"
   | "speech-summary"
   | "chat-display"
@@ -95,6 +97,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
   { id: "commit-msg", label: "Commit Message" },
+  { id: "git", label: "Git" },
   { id: "compact", label: "Compact" },
   { id: "speech-summary", label: "Speech Summary" },
   { id: "chat-display", label: "Chat display" },
@@ -157,6 +160,8 @@ function renderGroup(id: SettingsGroupId) {
       return <ModelDefaultsForm />;
     case "commit-msg":
       return <CommitMsgForm />;
+    case "git":
+      return <GitForm />;
     case "compact":
       return <CompactForm />;
     case "speech-summary":

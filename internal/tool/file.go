@@ -301,6 +301,15 @@ func allDigits(s string) bool {
 	return true
 }
 
+// ConfinedPath is the exported form of confinedPath for callers outside this
+// package (the browser tool's upload action): it resolves p against the
+// session's project root and refuses any path outside the workspace, the
+// configured extra roots, temp directories and the caches. See confinedPath for
+// the full rules.
+func ConfinedPath(ctx context.Context, p string) (string, error) {
+	return confinedPath(ctx, p)
+}
+
 // confinedPath resolves p against the agent's working directory (the session
 // project root, supplied via WithWorkDir in the tool-execution context) and
 // verifies that the result is within the workspace, a configured extra root,

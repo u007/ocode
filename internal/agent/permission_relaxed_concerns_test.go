@@ -455,3 +455,29 @@ func TestEnforcedConcernQuestionOnlyWhenRelaxed(t *testing.T) {
 		t.Error("enforced_concern instructions embed the allow/deny rubric")
 	}
 }
+
+// Loopback + credential: the DESTINATION removes the network fact, so the
+// secrets toggle alone decides — that is the user's explicit model ("loopback
+// with secret should be allowed if the secret setting is toggled off"), and the
+// rubric says so in three places: the five-facts credential question is not a
+// fact when secrets is off, the loopback bullet says the credential is then
+// ordinary data, and the switched-off note tells the judge not to hesitate over
+// a <redacted> value. This pins the DETERMINISTIC half: given the answer the
+// live judge now produces for this shape (allow, concern secrets, 0.62 — under
+// the 0.80 floor), the toggle decides. Measured 2026-10-28 with the real config
+// (secrets off): 0.80-0.84 allow 4/4; with the same answer and nothing relaxed a
+// grant would be a bug.
+func TestLoopbackCredentialFollowsTheSecretsToggle(t *testing.T) {
+	args := json.RawMessage(`{"command":"python3 -c \"import os, requests; requests.get('http://127.0.0.1:8080/x', headers={'k': os.environ['API_KEY']})\""}`)
+	reply := typesafeReplyWithConcern("allow", 0.62, "secrets")
+
+	a, _ := relaxedJudgeAgent(t, reply, "secrets")
+	if allowed, reason, _, consulted := a.consultPermissionModel("bash", args, nil); !allowed || !consulted {
+		t.Fatalf("secrets switched off should grant the loopback call: allowed=%v consulted=%v reason=%q", allowed, consulted, reason)
+	}
+
+	b, _ := relaxedJudgeAgent(t, reply)
+	if allowed, reason, _, consulted := b.consultPermissionModel("bash", args, nil); allowed || !consulted {
+		t.Fatalf("secrets enforced must not grant the same call: allowed=%v consulted=%v reason=%q", allowed, consulted, reason)
+	}
+}

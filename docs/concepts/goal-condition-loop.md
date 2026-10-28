@@ -105,7 +105,7 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   session removes it (`ClearGoal`, `internal/agent/goal.go:179`).
 - **A human turn reactivates a paused goal** (`GoalMarkHumanTurn`, `:219`). It sets the status to
   `active` and resets `NoToolTurns`. Terminal (`met`, `impossible`) goals stay terminal. Active goals
-  are left alone. The server calls it on sync and async human entries (`agent_session.go:1804`,
+  are left alone. The server calls it on sync and async human entries (`agent_session.go:1823`,
   `:2043`). The TUI calls `markHumanTurn` at its human send points only: typed input,
   `/rc` web messages, custom command prompts and `/agent <name> <prompt>`. Auto-continue,
   goal resumes, retries and job completions never reactivate a paused goal.
@@ -116,7 +116,7 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `met` verdict closes the goal, so a finished goal is never stranded by the cap. Only a new
   `/goal <text>` starts fresh state (`SetGoal`, `:162`).
 - **A pending ask never auto-resumes.** The server skips the goal judge while the tail is an
-  unresolved permission or question ask (`agent_session.go:1299`). The TUI runs its post-turn
+  unresolved permission or question ask (`agent_session.go:1318`). The TUI runs its post-turn
   decisions only when `queueDrainBlocked()` is false (`model.go:5591`).
 - **A deferred resume waits for an idle session.** In the TUI, a `Resume` verdict that cannot fire
   right away (the session is streaming, compacting, or has a queue drain blocked) sets
@@ -133,10 +133,10 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `no_tool_turns`, `last_reason`, and `set_at` (RFC 3339). `GoalStateToMetadata` writes it;
   `GoalStateFromMetadata` (`goal.go:466`) reads it. A malformed record is rejected, and the
   rejected values are logged with the `GOAL` debug kind.
-- Written after every judged turn (`goalShouldResume`, `agent_session.go:1472`), by the server
+- Written after every judged turn (`goalShouldResume`, `agent_session.go:1491`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
   (`sessionSidebarMetadata`, `model.go:21261`).
-- Restored when a server agent is built (`agent_session.go:639`) and when a TUI session loads
+- Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads
   (`restoreSessionMetadata`, `model.go:21295`). The key is listed in `sessionOwnedMetadataKeys`
   (`model.go:21233`), so the TUI's carry-forward copy never overwrites it.
 

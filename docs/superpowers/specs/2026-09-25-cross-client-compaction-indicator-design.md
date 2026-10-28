@@ -130,7 +130,7 @@ Authoritative fields, embedded in `sessionStateResponse` from `SessionManager.St
 
 ## 7. Server: Manual Path
 
-The manual `/compact` endpoint handler (`HandleCompactSession`, `internal/server/handler.go:1889`):
+The manual `/compact` endpoint handler (`HandleCompactSession`, `internal/server/handler.go:1894`):
 
 1. Acquire the per-session agent lock (the lock that serializes turns and splices for that session).
 2. Only after acquiring it, call `beginCompaction`: **increment the counter** under the session manager lock (records `started_at` and bumps `compactionGeneration` on the 0→1 transition), then emit `compaction_started {started_at, generation}` (shared first-pass timestamp and unchanged generation when joining a group).
@@ -145,7 +145,7 @@ The manual `/compact` endpoint handler (`HandleCompactSession`, `internal/server
 | Success / `!enabled` / "nothing to compact" | `""` | `compaction_done {ok:true}` (disabled/no-op is not an error) |
 | `ErrCompactionTimeout`, **request still live** | timeout error | `/state.compaction_error` while the group drains, then `compaction_done {ok:false,error}`; HTTP **504** with retry guidance |
 | `ErrCompactionTimeout`, **request cancelled** (`r.Context().Err() != nil`) | `""` | indicator clears with `ok:true`, **no error banner**, no response written |
-| **User/Stop cancel** — `errors.Is(Err, agent.ErrCompactionCanceled)`, request live *(rev 4)* | `""` | `compaction_done {ok:true}` + HTTP **200** `{"cancelled": true, "original_len", "compacted_len"}` (`handler.go:1943-1957`); no error banner on any client |
+| **User/Stop cancel** — `errors.Is(Err, agent.ErrCompactionCanceled)`, request live *(rev 4)* | `""` | `compaction_done {ok:true}` + HTTP **200** `{"cancelled": true, "original_len", "compacted_len"}` (`handler.go:1948-1962`); no error banner on any client |
 | Other failure, **request still live** | real error | `/state.compaction_error` + `compaction_done {ok:false,error}`; HTTP 500 |
 | Other failure, **request cancelled** | `""` | indicator clears silently, no response written |
 | Bare cancellation (provider `context.Canceled`, HTTP request still live) | real error | treated as a failure — HTTP **500** (`TestCompactSessionBareCancellationRemains500`, `internal/server/compact_timeout_test.go:91`) |
@@ -156,10 +156,10 @@ Registering the pass only after lock acquisition means a queued-but-not-yet-star
 
 ## 8. Server: Automatic Path
 
-Wire the existing agent callbacks (`wireCompactCallbacks`, `internal/server/agent_session.go:2082`):
+Wire the existing agent callbacks (`wireCompactCallbacks`, `internal/server/agent_session.go:2101`):
 
 - `Agent.OnCompactStart` → `beginCompaction`: increment the counter + emit `compaction_started {started_at, generation}` (first-pass timestamp/generation if this starts the group, otherwise the group's existing values). A legacy/internal path that has no registered lifecycle row is registered on the spot so the state is still authoritative (`compaction_events.go:26`).
-- `Agent.OnCompact` (terminal callback, via `applyCompactResult`) → **always retire the pass — decrement the counter — independently of transcript application** (a `defer` runs even for malformed/stale results), then emit `compaction_done {ok, error?, generation}` only if the counter hit zero (with the aggregate error). A user-cancelled auto pass contributes an empty error here too (`agent_session.go:2088-2098`).
+- `Agent.OnCompact` (terminal callback, via `applyCompactResult`) → **always retire the pass — decrement the counter — independently of transcript application** (a `defer` runs even for malformed/stale results), then emit `compaction_done {ok, error?, generation}` only if the counter hit zero (with the aggregate error). A user-cancelled auto pass contributes an empty error here too (`agent_session.go:2107-2117`).
 
 The terminal retire must not depend on the transcript rewrite succeeding: if transcript application fails or races (including a racing manual `/compact` shrinking the transcript — the stale splice is dropped, `TestApplyCompactResultSkipsStaleSplice`), the pass still decrements (the failure itself surfaces through the normal error path and the revision convergence). The pass's error (if any) is folded into the group's retained first error before the zero-transition decides the payload. Because the async pass runs outside the agent lock, it can overlap a manual `/compact` — and, being outside the lock, its publish can interleave with the next group's start; that is exactly the reordering the generation guard absorbs.
 
