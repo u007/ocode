@@ -24,7 +24,12 @@
 /** How long a host that failed to answer is left alone before the next ask. */
 export const REMOTE_HOST_RETRY_MS = 2 * 60_000;
 
-type Waiter = { subject: string; resolve: (granted: boolean) => void };
+type Waiter = {
+  subject: string;
+  /** A cheap liveness probe may run while the host is marked down. */
+  probe: boolean;
+  resolve: (granted: boolean) => void;
+};
 
 type HostGate = {
   /** True while a read holds this host's slot. */
@@ -77,6 +82,19 @@ export function isHostConnecting(err: unknown): boolean {
   return "stage" in err.body && err.body.stage === "remote-connecting";
 }
 
+export interface RemoteReadOptions {
+  /**
+   * Run this read even while the host is inside its retry window, and never let
+   * its outcome open or clear that window (only an explicit
+   * `noteRemoteHostReachable` does). Used ONLY for a cheap liveness probe such
+   * as the host-status endpoint — an in-memory registry read on the local
+   * server with no ssh and no connect. Without it a host that comes back can
+   * never be noticed until the window expires: every read, including the one
+   * that could prove the host is healthy, is skipped while the window is armed.
+   */
+  probeWhileRetrying?: boolean;
+}
+
 /**
  * Runs `fn` under this host's read slot, waiting in line if another read of
  * the same host is in flight.
@@ -84,6 +102,8 @@ export function isHostConnecting(err: unknown): boolean {
  * `fn` resolves true when the read SUCCEEDED; a false result (or a throw)
  * counts as a failure and opens the host's retry window. The caller keeps its
  * own data handling inside `fn` — this only sequences and classifies the read.
+ * With `probeWhileRetrying` the read runs even inside the window and its
+ * outcome never changes the window (see `RemoteReadOptions`).
  *
  * Resolves false when the read was SKIPPED: the host is inside its retry
  * window, or a test reset abandoned the queue.
@@ -92,17 +112,19 @@ export async function withRemoteRead(
   host: string,
   subject: string,
   fn: () => Promise<boolean>,
+  opts?: RemoteReadOptions,
 ): Promise<boolean> {
   const gate = gateFor(host);
   const generation = gateGeneration;
-  if (gate.retryAt > Date.now()) return false;
+  const probe = opts?.probeWhileRetrying === true;
+  if (!probe && gate.retryAt > Date.now()) return false;
 
   const id = nextReadID++;
   let resolveTurn!: (granted: boolean) => void;
   const turn = new Promise<boolean>((resolve) => {
     resolveTurn = resolve;
   });
-  gate.waiters.set(id, { subject, resolve: resolveTurn });
+  gate.waiters.set(id, { subject, probe, resolve: resolveTurn });
   gate.queue.push(id);
   drain(gate);
 
@@ -112,7 +134,7 @@ export async function withRemoteRead(
 
   // A reset abandoned the slot we were granted: the gate has been rebuilt.
   if (generation !== gateGeneration) return false;
-  if (gate.retryAt > Date.now()) {
+  if (!probe && gate.retryAt > Date.now()) {
     // The host was marked unreachable after drain granted us the slot. Free it
     // without opening a new window; drain drops the rest of the queue.
     gate.running = false;
@@ -124,11 +146,26 @@ export async function withRemoteRead(
   try {
     ok = await fn();
   } catch (err) {
-    release(gate, false);
+    finish(gate, probe, false);
     throw err;
   }
-  release(gate, ok);
+  finish(gate, probe, ok);
   return ok;
+}
+
+/**
+ * Releases the slot after a read. A probe never touches the retry window: it
+ * exists to observe the host, not to judge it, so a probe of a still-down host
+ * must not extend the window and a probe of a recovered host must not clear it
+ * unless the caller explicitly calls `noteRemoteHostReachable`.
+ */
+function finish(gate: HostGate, probe: boolean, ok: boolean): void {
+  if (probe) {
+    gate.running = false;
+    drain(gate);
+    return;
+  }
+  release(gate, ok);
 }
 
 /**
@@ -204,13 +241,22 @@ function release(gate: HostGate, ok: boolean): void {
 function drain(gate: HostGate): void {
   if (gate.running) return;
   if (gate.retryAt > Date.now()) {
-    // The host just failed: everyone waiting is dropped rather than asking a
-    // host that is known to be down.
-    const pending = [...gate.waiters.values()];
-    gate.waiters.clear();
+    // The host just failed: ordinary reads are dropped rather than asking a
+    // host that is known to be down. A probe is the liveness check that can
+    // prove the host recovered, so it is allowed to run; keeping only the
+    // probes means a probe still gets its turn in arrival order.
+    const probes: number[] = [];
+    for (const id of gate.queue) {
+      const waiter = gate.waiters.get(id);
+      if (waiter?.probe) {
+        probes.push(id);
+        continue;
+      }
+      gate.waiters.delete(id);
+      waiter?.resolve(false);
+    }
     gate.queue.length = 0;
-    for (const waiter of pending) waiter.resolve(false);
-    return;
+    gate.queue.push(...probes);
   }
   while (gate.queue.length > 0) {
     const id = gate.queue.shift()!;

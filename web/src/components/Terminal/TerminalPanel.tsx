@@ -247,6 +247,14 @@ const TERMINAL_MOUSE_RESET =
 const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 
 /**
+ * How often a terminal waiting out a remote host's retry window re-checks the
+ * in-memory gate. The gate can close early (a status probe saw the host come
+ * back), and waiting the whole multi-minute window would leave the panel dead
+ * afterwards. This only reads gate state; it issues no request.
+ */
+const REMOTE_HOST_RECHECK_MS = 10_000;
+
+/**
  * Upper bound on history bytes replayed into the emulator on (re)open. The on-disk
  * log is unbounded (TUI redraws push a single terminal past 10 MB), and the
  * restore used to grow `scrollback` to fit every row: each page re-allocated
@@ -1315,8 +1323,14 @@ export default function TerminalPanel({
     // Holds the panel until a remote host's retry window closes, then runs
     // `next`. The banner prints once: a wake or restore re-entering while the
     // timer is armed just moves it to the window's end.
-    const waitForRemoteHost = (waitMs: number, next: () => void) => {
-      if (reconnectTimerRef.current === null) {
+    //
+    // Re-check at most every REMOTE_HOST_RECHECK_MS instead of sleeping the
+    // whole window. The gate can clear the window EARLY — the status probe
+    // (an in-memory registry read) sees the host recover — and a single
+    // multi-minute timeout would keep this panel dead long after the host is
+    // back. The check reads only in-memory gate state, so it costs no request.
+    const waitForRemoteHost = (waitMs: number, next: () => void, silent = false) => {
+      if (!silent && reconnectTimerRef.current === null) {
         writeBanner(
           "\r\n\x1b[33m[remote host unreachable — next attempt in " +
             Math.ceil(waitMs / 1000) +
@@ -1327,8 +1341,13 @@ export default function TerminalPanel({
       reconnectingRef.current = true;
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null;
+        const remaining = host ? remoteHostRetryInMs(host) : 0;
+        if (remaining > 0) {
+          waitForRemoteHost(remaining, next, true);
+          return;
+        }
         next();
-      }, waitMs);
+      }, Math.min(waitMs, REMOTE_HOST_RECHECK_MS));
     };
 
     const connectSocket = (historyOffset?: number) => {
