@@ -1,6 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useRemoteHostStatus, __resetRemoteHostStatusForTests } from "./useRemoteHostStatus";
+import {
+  useRemoteHostStatus,
+  __resetRemoteHostStatusForTests,
+  REMOTE_STALL_AFTER_MS,
+} from "./useRemoteHostStatus";
 import {
   noteRemoteHostUnreachable,
   REMOTE_HOST_RETRY_MS,
@@ -116,6 +120,162 @@ describe("useRemoteHostStatus", () => {
         await Promise.resolve();
       });
       expect(mockStatus.mock.calls.length).toBeGreaterThan(callsDuringWindow);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The stall guard is the escalation point the UI lacked: an attempt that only
+  // ever answers 503 "still connecting" used to look identical to progress until
+  // the server's 10-minute backstop. Ten seconds without connecting must offer
+  // a forced reconnect.
+  it("prompts a reconnect when the attempt runs past the stall window", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus.mockResolvedValue({
+        ...base,
+        connected: false,
+        connecting: true,
+        connect_started_at: Date.now(),
+      });
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.stalled).toBe(false);
+      expect(result.current.escalation).toBe("none");
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await Promise.resolve();
+      });
+      expect(result.current.stalled).toBe(true);
+      expect(result.current.escalation).toBe("reconnect");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // "Try reconnect first, restart only on a second failure": the forced retry
+  // re-arms the same window, and a SECOND stall escalates to a host restart.
+  it("escalates to restart when the forced reconnect also stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus.mockResolvedValue({
+        ...base,
+        connected: false,
+        connecting: true,
+        connect_started_at: Date.now(),
+      });
+      mockConnect.mockImplementation(async () => ({
+        ...base,
+        connected: false,
+        connecting: true,
+        connect_started_at: Date.now(),
+      }));
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await Promise.resolve();
+      });
+      expect(result.current.escalation).toBe("reconnect");
+
+      await act(async () => {
+        result.current.reconnect();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mockConnect).toHaveBeenCalledWith("h", { force: true });
+      expect(result.current.escalation).toBe("none");
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await Promise.resolve();
+      });
+      expect(result.current.escalation).toBe("restart");
+      expect(result.current.stalled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // An explicit retry that left the host's 2-minute read backoff armed would
+  // look like it did nothing: every read after it would be skipped.
+  it("clears the host's read backoff when reconnecting", async () => {
+    mockStatus.mockResolvedValue({ ...base, connected: false, connecting: true });
+    mockConnect.mockResolvedValue({ ...base, connected: false, connecting: true });
+    const { result } = renderHook(() => useRemoteHostStatus("h", true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
+
+    noteRemoteHostUnreachable("h");
+    expect(remoteHostRetryInMs("h")).toBeGreaterThan(0);
+
+    await act(async () => {
+      result.current.reconnect();
+      await Promise.resolve();
+    });
+    expect(remoteHostRetryInMs("h")).toBe(0);
+  });
+
+  // The prompt must clear the moment the host connects, even if it took longer
+  // than the window.
+  it("clears the stall prompt once a poll reports the host connected", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus.mockResolvedValue({
+        ...base,
+        connected: false,
+        connecting: true,
+        connect_started_at: Date.now(),
+      });
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await Promise.resolve();
+      });
+      expect(result.current.stalled).toBe(true);
+
+      mockStatus.mockResolvedValue(base);
+      await act(async () => {
+        for (const handler of reconnectHandlers) handler();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.status).toEqual(base);
+      expect(result.current.stalled).toBe(false);
+      expect(result.current.escalation).toBe("none");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A healthy host with no attempt in flight must never prompt, even after the
+  // window would have elapsed.
+  it("does not arm the stall timer for a connected host", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus.mockResolvedValue(base);
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS * 3);
+        await Promise.resolve();
+      });
+      expect(result.current.stalled).toBe(false);
+      expect(result.current.escalation).toBe("none");
     } finally {
       vi.useRealTimers();
     }

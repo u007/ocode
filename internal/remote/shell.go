@@ -14,13 +14,17 @@ import "os/exec"
 // WSL: wsl.exe's own --cd flag understands Linux paths including "~", and
 // its default action with no command is the distro's login shell.
 //
+// muxName names the remote tmux session an SSH terminal lives in (see
+// TerminalMuxName); "" runs the plain login shell, which dies with the ssh.
+// WSL ignores it: wsl.exe is not a network link that can drop.
+//
 // The caller must pass a registered non-empty host/path: path must be
 // non-empty, and SSH targets must carry a non-empty Host (ParseTarget
 // guarantees this; an empty Distro on WSL targets means the default distro
 // and is valid). An empty path would build a broken cd command (SSH) or an
 // empty --cd flag (WSL), and an empty SSH host would leave ssh with a
 // missing target, so invalid input returns nil instead of a broken command.
-func ShellCommand(t Target, path string) *exec.Cmd {
+func ShellCommand(t Target, path, muxName string) *exec.Cmd {
 	if path == "" {
 		return nil
 	}
@@ -35,7 +39,7 @@ func ShellCommand(t Target, path string) *exec.Cmd {
 		args = append(args, "--cd", path)
 		return exec.Command("wsl.exe", args...)
 	}
-	remoteCmd := launchScriptWithCd(path)
+	remoteCmd := launchScriptWithCd(path, muxName)
 	args := append([]string{"-t"}, sshKeepaliveArgs()...)
 	args = append(args, t.SSHArgs()...)
 	return exec.Command("ssh", append(args, remoteCmd)...)

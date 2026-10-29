@@ -1,15 +1,33 @@
 import { useEffect, useState } from "react";
 import { api } from "@/api/client";
+import {
+  DEFAULT_TERMINAL_CELL_HEIGHT,
+  DEFAULT_TERMINAL_FONT_FAMILY,
+  DEFAULT_TERMINAL_FONT_SIZE,
+} from "@/components/Terminal/terminalAppearance";
+import type {
+  CellAdjust,
+  GhosttyReport,
+  TerminalAppearance,
+} from "@/components/Terminal/terminalAppearance";
 
 export interface TerminalConfig {
   available?: boolean;
   scrollback_lines?: number;
+  /** Resolved font family. Kept for clients that ignore `appearance`. */
   font_family?: string;
+  /** Resolved font size. Kept for clients that ignore `appearance`. */
   font_size?: number;
   shell?: string;
   default_shell?: string;
   available_shells?: string[];
   work_dir?: string;
+  /** Resolved font/colour source (see terminalAppearance). */
+  appearance?: TerminalAppearance;
+  /** What was read from this machine's Ghostty config. */
+  ghostty?: GhosttyReport;
+  /** "local" when `appearance` was resolved here, "remote" when omitted. */
+  appearance_scope?: "local" | "remote";
 }
 
 type Listener = (config: TerminalConfig) => void;
@@ -23,9 +41,14 @@ function publish(value: TerminalConfig) {
   for (const fn of listeners) fn(value);
 }
 
-export const DEFAULT_TERMINAL_FONT_FAMILY =
-  "ui-monospace, SFMono-Regular, Menlo, monospace";
-export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+// Defaults live in terminalAppearance (which must stay free of this hook's
+// module graph); re-exported here because every existing consumer imports them
+// from the hook.
+export {
+  DEFAULT_TERMINAL_CELL_HEIGHT,
+  DEFAULT_TERMINAL_FONT_FAMILY,
+  DEFAULT_TERMINAL_FONT_SIZE,
+};
 
 function viewFor(config: TerminalConfig | null) {
   if (!config) {
@@ -35,17 +58,26 @@ function viewFor(config: TerminalConfig | null) {
       scrollbackLines: 0,
       fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
       fontSize: DEFAULT_TERMINAL_FONT_SIZE,
+      cellWidth: {} as CellAdjust,
+      cellHeight: DEFAULT_TERMINAL_CELL_HEIGHT,
+      appearance: undefined as TerminalAppearance | undefined,
+      ghostty: undefined as GhosttyReport | undefined,
       shell: "",
       defaultShell: "",
       availableShells: [] as string[],
     };
   }
+  const appearance = config.appearance;
   return {
     available: config.available !== false,
     loading: false,
     scrollbackLines: config.scrollback_lines ?? 0,
-    fontFamily: config.font_family || DEFAULT_TERMINAL_FONT_FAMILY,
-    fontSize: config.font_size ?? DEFAULT_TERMINAL_FONT_SIZE,
+    fontFamily: appearance?.font_family || config.font_family || DEFAULT_TERMINAL_FONT_FAMILY,
+    fontSize: appearance?.font_size ?? config.font_size ?? DEFAULT_TERMINAL_FONT_SIZE,
+    cellWidth: appearance?.cell_width ?? ({} as CellAdjust),
+    cellHeight: appearance?.cell_height ?? DEFAULT_TERMINAL_CELL_HEIGHT,
+    appearance,
+    ghostty: config.ghostty,
     shell: config.shell ?? "",
     defaultShell: config.default_shell ?? "",
     availableShells: config.available_shells ?? [],
@@ -107,6 +139,10 @@ export function useTerminalConfig() {
     scrollbackLines: view.scrollbackLines,
     fontFamily: view.fontFamily,
     fontSize: view.fontSize,
+    cellWidth: view.cellWidth,
+    cellHeight: view.cellHeight,
+    appearance: view.appearance,
+    ghostty: view.ghostty,
     shell: view.shell,
     defaultShell: view.defaultShell,
     availableShells: view.availableShells,

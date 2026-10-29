@@ -85,6 +85,15 @@ func (h *Handler) HandleRemoteConnect(w http.ResponseWriter, r *http.Request) {
 	// A user connect is an explicit retry: do not replay a failure remembered
 	// for the polling cooldown.
 	h.remoteHosts.clearFailed(p.Host, p.RemotePort)
+	// force=true supersedes an attempt that is STILL RUNNING. Without it a
+	// wedged connect (ssh hung before the fail-fast arg builder existed, a
+	// server that never answers its launch probe) cannot be retried at all:
+	// every call joins the existing attempt and returns "still connecting",
+	// and the only escape is remoteConnectTimeout (10 minutes). The client
+	// sends this only after its stall guard fires.
+	if force := r.URL.Query().Get("force"); force == "1" || force == "true" {
+		h.remoteHosts.dropForce(p.Host, p.RemotePort)
+	}
 	st, err := h.remoteHosts.connectHost(p.Host, p.Path, p.RemotePort)
 	if err != nil {
 		log.Printf("remote lifecycle: connect host %s failed: %v", p.Host, err)

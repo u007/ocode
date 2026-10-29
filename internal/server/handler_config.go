@@ -1091,23 +1091,29 @@ func (h *Handler) HandleSetAgent(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	scrollback := config.DefaultTerminalScrollbackLines
-	fontFamily := ""
-	fontSize := config.DefaultTerminalFontSize
 	shell := ""
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
+	var ocodeCfg config.OcodeConfig
 	if h.cfg != nil {
-		scrollback = config.NormalizeTerminalScrollbackLines(h.cfg.Ocode.TerminalScrollbackLines)
-		fontFamily = h.cfg.Ocode.TerminalFontFamily
-		if h.cfg.Ocode.TerminalFontSize > 0 {
-			fontSize = config.NormalizeTerminalFontSize(h.cfg.Ocode.TerminalFontSize)
-		}
-		shell = h.cfg.Ocode.TerminalShell
+		ocodeCfg = h.cfg.Ocode
+		scrollback = config.NormalizeTerminalScrollbackLines(ocodeCfg.TerminalScrollbackLines)
+		shell = ocodeCfg.TerminalShell
 	}
 	h.mu.Unlock()
 	if !available {
 		workDir = ""
 	}
+
+	// Resolve appearance AFTER releasing h.mu: it parses the user's Ghostty
+	// files, and h.mu is the map lock every endpoint takes. Reading it under the
+	// lock would stall unrelated sessions on filesystem I/O.
+	//
+	// The read is deliberately re-done on every request instead of being cached
+	// behind a reload path: two small files plus one theme cost well under a
+	// millisecond, and a stale appearance is a bug the user cannot see or fix.
+	ghosttyCfg := loadGhosttyConfig()
+	appearance := resolveTerminalAppearance(&ocodeCfg, ghosttyCfg)
 
 	// A `host` names an ocode Remote project. Its shells are the remote's, not
 	// this machine's: reporting the local /etc/shells (or the local
@@ -1123,8 +1129,14 @@ func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available":        available,
 			"scrollback_lines": scrollback,
-			"font_family":      fontFamily,
-			"font_size":        fontSize,
+			"font_family":      appearance.FontFamily,
+			"font_size":        appearance.FontSize,
+			// Appearance is NOT resolved for a remote host: this handler is
+			// running on the remote machine and would read ITS Ghostty config
+			// (usually none), not the viewer's. The client fetches the
+			// appearance from its own local server and only the shell
+			// inventory from here.
+			"appearance_scope": "remote",
 			// There is no per-host override: the remote picks its own shell,
 			// so the picker reads "use the remote default" (empty shell).
 			"shell":            "",
@@ -1139,32 +1151,46 @@ func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":        available,
 		"scrollback_lines": scrollback,
-		"font_family":      fontFamily,
-		"font_size":        fontSize,
+		// font_family/font_size carry the RESOLVED values so a client that does
+		// not understand `appearance` still renders the right font.
+		"font_family":      appearance.FontFamily,
+		"font_size":        appearance.FontSize,
 		"shell":            shell,
 		"default_shell":    config.DefaultTerminalShell(),
 		"available_shells": config.AvailableShells(),
 		"work_dir":         workDir,
+		"appearance":       appearance,
+		"ghostty":          newTerminalGhosttyResponse(ghosttyCfg),
+		"appearance_scope": "local",
 	})
 }
 
-// HandleSetTerminalConfig persists the terminal's scrollback, font family,
-// and font size settings. There is no enable/disable toggle: the interactive
+// HandleSetTerminalConfig persists the terminal's scrollback, shell and
+// appearance settings. There is no enable/disable toggle: the interactive
 // terminal is always enabled. Fields absent from the request keep their
 // current stored values.
+//
+// Appearance is a WHOLE BLOCK: `appearance_source` picks either the resolved
+// Ghostty configuration or ocode's own font/cell/theme settings, so the two can
+// never be mixed into one terminal.
 func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ScrollbackLines *int    `json:"scrollback_lines"`
-		FontFamily      *string `json:"font_family"`
-		FontSize        *int    `json:"font_size"`
-		Shell           *string `json:"shell"`
+		ScrollbackLines   *int     `json:"scrollback_lines"`
+		FontFamily        *string  `json:"font_family"`
+		FontSize          *int     `json:"font_size"`
+		Shell             *string  `json:"shell"`
+		AppearanceSource  *string  `json:"appearance_source"`
+		CellWidthPercent  *float64 `json:"cell_width_percent"`
+		CellHeightPercent *float64 `json:"cell_height_percent"`
+		Theme             *string  `json:"theme"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.ScrollbackLines == nil && req.FontFamily == nil && req.FontSize == nil && req.Shell == nil {
-		writeError(w, http.StatusBadRequest, "at least one of scrollback_lines, font_family, font_size, shell is required")
+	if req.ScrollbackLines == nil && req.FontFamily == nil && req.FontSize == nil && req.Shell == nil &&
+		req.AppearanceSource == nil && req.CellWidthPercent == nil && req.CellHeightPercent == nil && req.Theme == nil {
+		writeError(w, http.StatusBadRequest, "at least one of scrollback_lines, font_family, font_size, shell, appearance_source, cell_width_percent, cell_height_percent, theme is required")
 		return
 	}
 
@@ -1195,6 +1221,30 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	if req.AppearanceSource != nil {
+		if err := config.SaveTerminalAppearanceSource(*req.AppearanceSource); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.CellWidthPercent != nil {
+		if err := config.SaveTerminalCellWidthPercent(*req.CellWidthPercent); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.CellHeightPercent != nil {
+		if err := config.SaveTerminalCellHeightPercent(*req.CellHeightPercent); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.Theme != nil {
+		if err := config.SaveTerminalTheme(*req.Theme); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
 
 	h.mu.Lock()
 	if h.cfg != nil {
@@ -1214,22 +1264,34 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 		if req.Shell != nil {
 			h.cfg.Ocode.TerminalShell = strings.TrimSpace(*req.Shell)
 		}
+		if req.AppearanceSource != nil {
+			h.cfg.Ocode.TerminalAppearanceSource = config.NormalizeTerminalAppearanceSource(*req.AppearanceSource)
+		}
+		if req.CellWidthPercent != nil {
+			h.cfg.Ocode.TerminalCellWidthPercent = config.NormalizeTerminalCellWidthPercent(*req.CellWidthPercent)
+		}
+		if req.CellHeightPercent != nil {
+			h.cfg.Ocode.TerminalCellHeightPercent = config.NormalizeTerminalCellHeightPercent(*req.CellHeightPercent)
+		}
+		if req.Theme != nil {
+			h.cfg.Ocode.TerminalTheme = strings.TrimSpace(*req.Theme)
+		}
 	}
 	scrollback := config.DefaultTerminalScrollbackLines
-	fontFamily := ""
-	fontSize := config.DefaultTerminalFontSize
 	shell := ""
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
+	var ocodeCfg config.OcodeConfig
 	if h.cfg != nil {
-		scrollback = config.NormalizeTerminalScrollbackLines(h.cfg.Ocode.TerminalScrollbackLines)
-		fontFamily = h.cfg.Ocode.TerminalFontFamily
-		if h.cfg.Ocode.TerminalFontSize > 0 {
-			fontSize = config.NormalizeTerminalFontSize(h.cfg.Ocode.TerminalFontSize)
-		}
-		shell = h.cfg.Ocode.TerminalShell
+		ocodeCfg = h.cfg.Ocode
+		scrollback = config.NormalizeTerminalScrollbackLines(ocodeCfg.TerminalScrollbackLines)
+		shell = ocodeCfg.TerminalShell
 	}
 	h.mu.Unlock()
+
+	// Re-resolve outside the lock for the same reason as the GET handler.
+	ghosttyCfg := loadGhosttyConfig()
+	appearance := resolveTerminalAppearance(&ocodeCfg, ghosttyCfg)
 
 	if !available {
 		workDir = ""
@@ -1237,12 +1299,15 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":        available,
 		"scrollback_lines": scrollback,
-		"font_family":      fontFamily,
-		"font_size":        fontSize,
+		"font_family":      appearance.FontFamily,
+		"font_size":        appearance.FontSize,
 		"shell":            shell,
 		"default_shell":    config.DefaultTerminalShell(),
 		"available_shells": config.AvailableShells(),
 		"work_dir":         workDir,
+		"appearance":       appearance,
+		"ghostty":          newTerminalGhosttyResponse(ghosttyCfg),
+		"appearance_scope": "local",
 	})
 }
 

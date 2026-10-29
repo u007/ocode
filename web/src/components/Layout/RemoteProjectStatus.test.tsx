@@ -110,8 +110,11 @@ function state(over: Partial<RemoteHostStatusState> = {}): RemoteHostStatusState
     loading: false,
     error: null,
     busy: "idle",
+    stalled: false,
+    escalation: "none",
     refresh: vi.fn(),
     connect: vi.fn(),
+    reconnect: vi.fn(),
     restart: vi.fn(),
     ...over,
   };
@@ -155,6 +158,43 @@ describe("RemoteProjectStatus", () => {
     expect(screen.getByText("not connected")).toBeTruthy();
     fireEvent.click(screen.getByText("Connect"));
     expect(s.connect).toHaveBeenCalledTimes(1);
+  });
+
+  // The stall prompt is the only escalation point a wedged connect has. It is
+  // two-step by design: reconnect first, and only a retry that ALSO stalls
+  // offers the destructive host restart.
+  it("offers Reconnect when the connect attempt stalls", () => {
+    const s = state({
+      status: connected({ connected: false, version: "", pid: 0 }),
+      stalled: true,
+      escalation: "reconnect",
+    });
+    render(<RemoteProjectStatus project={project} statusState={s} />);
+    expect(screen.getByText("not responding")).toBeTruthy();
+    expect(screen.getByTestId("remote-project-stall")).toBeTruthy();
+    expect(screen.queryByText("Restart host")).toBeNull();
+    fireEvent.click(screen.getByText("Reconnect"));
+    expect(s.reconnect).toHaveBeenCalledTimes(1);
+    expect(s.restart).not.toHaveBeenCalled();
+  });
+
+  it("escalates to Restart host once a reconnect also stalled", () => {
+    const s = state({
+      status: connected({ connected: false, version: "", pid: 0 }),
+      stalled: true,
+      escalation: "restart",
+    });
+    render(<RemoteProjectStatus project={project} statusState={s} />);
+    expect(screen.getByText(/Restarting kills its running chats and terminals/)).toBeTruthy();
+    expect(screen.queryByText("Reconnect")).toBeNull();
+    fireEvent.click(screen.getByText("Restart host"));
+    expect(s.restart).toHaveBeenCalledTimes(1);
+    expect(s.reconnect).not.toHaveBeenCalled();
+  });
+
+  it("shows no stall prompt while the host is healthy", () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    expect(screen.queryByTestId("remote-project-stall")).toBeNull();
   });
 
   it("renders version, chat and terminal counts when connected", () => {

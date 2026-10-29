@@ -6,18 +6,35 @@ import {
   __resetRemoteReadGatesForTests,
   isHostUnreachable,
   noteRemoteHostReachable,
+  resetRemoteHostGate,
   withRemoteRead,
 } from "../lib/remoteHostGate";
 
 export type RemoteHostBusy = "idle" | "connecting" | "restarting";
+
+/**
+ * What the stalled-host prompt offers. `reconnect` is a forced retry (it
+ * supersedes the in-flight attempt); `restart` kills and relaunches the host's
+ * remote server, so it is offered only after a retry has also stalled.
+ */
+export type RemoteHostEscalation = "none" | "reconnect" | "restart";
+
+/** How long an attempt may run without connecting before the user is prompted. */
+export const REMOTE_STALL_AFTER_MS = 10_000;
 
 export interface RemoteHostStatusState {
   status: RemoteHostStatus | null;
   loading: boolean;
   error: string | null;
   busy: RemoteHostBusy;
+  /** True once the current attempt has run past REMOTE_STALL_AFTER_MS. */
+  stalled: boolean;
+  /** Which recovery the prompt should offer; `none` while healthy or still starting. */
+  escalation: RemoteHostEscalation;
   refresh: () => void;
   connect: () => void;
+  /** Forced retry: supersedes an attempt that is still running. */
+  reconnect: () => void;
   restart: () => void;
 }
 
@@ -28,9 +45,19 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-type StatusSnapshot = Pick<RemoteHostStatusState, "status" | "loading" | "error" | "busy">;
+type StatusSnapshot = Pick<
+  RemoteHostStatusState,
+  "status" | "loading" | "error" | "busy" | "stalled" | "escalation"
+>;
 
-const EMPTY_STATE: StatusSnapshot = { status: null, loading: false, error: null, busy: "idle" };
+const EMPTY_STATE: StatusSnapshot = {
+  status: null,
+  loading: false,
+  error: null,
+  busy: "idle",
+  stalled: false,
+  escalation: "none",
+};
 
 // ---------------------------------------------------------------------------
 // Shared per-host store
@@ -48,6 +75,14 @@ interface RemoteHostEntry {
   loading: boolean;
   error: string | null;
   busy: RemoteHostBusy;
+  /** Derived by refreshStall; never written by callers. */
+  stalled: boolean;
+  escalation: RemoteHostEscalation;
+  /** The current episode already offered (and used) a reconnect. */
+  retriedAfterStall: boolean;
+  /** Client-side start of the attempt, used when the status has no timestamp yet. */
+  episodeStartedAt: number;
+  stallTimer: ReturnType<typeof setTimeout> | null;
   readonly listeners: Set<() => void>;
   timer: ReturnType<typeof setInterval> | null;
   offReconnect: (() => void) | null;
@@ -57,10 +92,75 @@ const entries = new Map<string, RemoteHostEntry>();
 
 function snapshotOf(entry: RemoteHostEntry | undefined): StatusSnapshot {
   if (!entry) return EMPTY_STATE;
-  return { status: entry.status, loading: entry.loading, error: entry.error, busy: entry.busy };
+  return {
+    status: entry.status,
+    loading: entry.loading,
+    error: entry.error,
+    busy: entry.busy,
+    stalled: entry.stalled,
+    escalation: entry.escalation,
+  };
+}
+
+/**
+ * True while the local server has a connect attempt in flight for this host,
+ * whether the user started it (`busy`) or a proxied read did (`status`).
+ */
+function attemptInFlight(entry: RemoteHostEntry): boolean {
+  return (
+    entry.busy === "connecting" ||
+    entry.busy === "restarting" ||
+    entry.status?.connecting === true
+  );
+}
+
+/** When the current attempt began: the server's start, or this client's action. */
+function attemptStart(entry: RemoteHostEntry): number {
+  return Math.max(entry.status?.connect_started_at ?? 0, entry.episodeStartedAt);
+}
+
+/**
+ * Recomputes the stall state from the attempt clock. Called from notify so the
+ * derived fields can never disagree with the status they were derived from, and
+ * from the timer that arms the prompt.
+ */
+function refreshStall(entry: RemoteHostEntry) {
+  if (!attemptInFlight(entry)) {
+    entry.stalled = false;
+    // A retry that FAILED (rather than stalled) is still a failed recovery: the
+    // next step the prompt offers is the heavier one. The episode really ends
+    // only when the host connects, which clears the flag below.
+    if (entry.status?.connected) entry.retriedAfterStall = false;
+    entry.escalation = entry.retriedAfterStall ? "restart" : "none";
+    return;
+  }
+  // An in-flight attempt always has a clock. Without an episode start the
+  // deadline could never be reached, and the timer below would re-arm forever.
+  if (attemptStart(entry) === 0) entry.episodeStartedAt = Date.now();
+  if (entry.stalled) return;
+  if (Date.now() - attemptStart(entry) >= REMOTE_STALL_AFTER_MS) {
+    entry.stalled = true;
+    entry.escalation = entry.retriedAfterStall ? "restart" : "reconnect";
+  }
+}
+
+/** Arms exactly one timer for the moment the attempt crosses the stall deadline. */
+function scheduleStallCheck(entry: RemoteHostEntry) {
+  if (entry.stallTimer !== null) {
+    clearTimeout(entry.stallTimer);
+    entry.stallTimer = null;
+  }
+  if (!attemptInFlight(entry) || entry.stalled) return;
+  const wait = Math.max(0, REMOTE_STALL_AFTER_MS - (Date.now() - attemptStart(entry)));
+  entry.stallTimer = setTimeout(() => {
+    entry.stallTimer = null;
+    notify(entry);
+  }, wait);
 }
 
 function notify(entry: RemoteHostEntry) {
+  refreshStall(entry);
+  scheduleStallCheck(entry);
   for (const listener of entry.listeners) listener();
 }
 
@@ -123,6 +223,11 @@ function ensureEntry(host: string): RemoteHostEntry {
     loading: false,
     error: null,
     busy: "idle",
+    stalled: false,
+    escalation: "none",
+    retriedAfterStall: false,
+    episodeStartedAt: 0,
+    stallTimer: null,
     listeners: new Set(),
     timer: null,
     offReconnect: null,
@@ -151,6 +256,7 @@ function ensureEntry(host: string): RemoteHostEntry {
 function releaseEntry(host: string, entry: RemoteHostEntry) {
   if (entries.get(host) !== entry || entry.listeners.size > 0) return;
   if (entry.timer !== null) clearInterval(entry.timer);
+  if (entry.stallTimer !== null) clearTimeout(entry.stallTimer);
   entry.offReconnect?.();
   entries.delete(host);
 }
@@ -181,10 +287,26 @@ function withEntry(host: string, fn: (entry: RemoteHostEntry) => Promise<void>):
   void fn(entry).finally(() => releaseEntry(host, entry));
 }
 
-function runAction(host: string, busy: RemoteHostBusy, call: (host: string) => Promise<RemoteHostStatus>) {
+function runAction(
+  host: string,
+  busy: RemoteHostBusy,
+  call: (host: string) => Promise<RemoteHostStatus>,
+  opts?: { afterStall?: boolean },
+) {
   withEntry(host, (entry) => {
     entry.busy = busy;
     entry.error = null;
+    // A user action starts a NEW episode: restart the stall clock from now and
+    // drop the previous verdict. `afterStall` is what makes a second episode
+    // escalate to a host restart instead of offering reconnect again.
+    entry.stalled = false;
+    entry.escalation = "none";
+    entry.episodeStartedAt = Date.now();
+    if (opts?.afterStall) entry.retriedAfterStall = true;
+    // An explicit action also clears the 2-minute read backoff, or every read
+    // that follows would be skipped and the retry would look like it did
+    // nothing.
+    resetRemoteHostGate(host);
     notify(entry);
     return call(host)
       .then((s) => {
@@ -208,6 +330,7 @@ function runAction(host: string, busy: RemoteHostBusy, call: (host: string) => P
 export function __resetRemoteHostStatusForTests() {
   for (const entry of entries.values()) {
     if (entry.timer !== null) clearInterval(entry.timer);
+    if (entry.stallTimer !== null) clearTimeout(entry.stallTimer);
     entry.offReconnect?.();
   }
   entries.clear();
@@ -247,9 +370,18 @@ export function useRemoteHostStatus(host: string | undefined, enabled: boolean):
   const connect = useCallback(() => {
     if (host) runAction(host, "connecting", (h) => api.connectRemoteHost(h));
   }, [host]);
+  const reconnect = useCallback(() => {
+    if (host) {
+      runAction(host, "connecting", (h) => api.connectRemoteHost(h, { force: true }), {
+        afterStall: true,
+      });
+    }
+  }, [host]);
   const restart = useCallback(() => {
-    if (host) runAction(host, "restarting", (h) => api.restartRemoteHost(h));
+    if (host) {
+      runAction(host, "restarting", (h) => api.restartRemoteHost(h), { afterStall: true });
+    }
   }, [host]);
 
-  return { ...state, refresh, connect, restart };
+  return { ...state, refresh, connect, reconnect, restart };
 }

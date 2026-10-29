@@ -156,8 +156,11 @@ vi.mock("./hooks/useRemoteHostStatus", () => ({
     loading: false,
     error: null,
     busy: "idle",
+    stalled: false,
+    escalation: "none",
     refresh: vi.fn(),
     connect: vi.fn(),
+    reconnect: vi.fn(),
     restart: vi.fn(),
   }),
 }));

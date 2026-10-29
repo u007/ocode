@@ -92,7 +92,7 @@ func TestRemoteScriptsAreIsolatedFromLoginShell(t *testing.T) {
 		"LoginShellScript":     LoginShellScript("echo hi"),
 		"CdedLoginShellScript": CdedLoginShellScript("/srv/app", "echo hi"),
 		"ShellProbeCommand":    ShellProbeCommand(),
-		"launchScriptWithCd":   launchScriptWithCd("/srv/app"),
+		"launchScriptWithCd":   launchScriptWithCd("/srv/app", ""),
 	}
 	for name, script := range cases {
 		if !strings.HasPrefix(script, "sh -c '") || !strings.HasSuffix(script, "'") {

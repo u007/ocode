@@ -93,34 +93,68 @@ func stateCatCmd(slot ServeSlot) string {
 // ok=false — every one of those is "no reusable server," never a fatal
 // connect error.
 func DiscoverServer(t Transport, slot ServeSlot) (ServeState, bool) {
+	state, ok, _ := discoverServer(t, slot)
+	return state, ok
+}
+
+// sshExitCode is the exit status ssh itself returns for a connection-level
+// failure (as opposed to the remote command's own status).
+const sshExitCode = 255
+
+// transportFailed reports whether an Exec error means the command never got a
+// verdict: ssh could not reach the host (exit 255), or the run failed outright
+// (a context timeout, or a process killed by a signal, which
+// exec.ExitError.ExitCode reports as -1). A remote command that ran and exited
+// non-zero is NOT a transport failure; that is an answer.
+func transportFailed(res ExecResult, err error) bool {
+	return err != nil && (res.ExitCode <= 0 || res.ExitCode == sshExitCode)
+}
+
+// discoverServer is DiscoverServer plus the transport error, so a caller can
+// tell "the host did not answer" from "there is no server". The state-file cat
+// ends in `|| true`, so any Exec error here is a transport failure.
+func discoverServer(t Transport, slot ServeSlot) (ServeState, bool, error) {
 	if slot.valid() != nil {
-		return ServeState{}, false
+		return ServeState{}, false, nil
 	}
 	res, err := t.Exec(stateCatCmd(slot))
 	if err != nil {
-		return ServeState{}, false
+		return ServeState{}, false, fmt.Errorf("read remote state file: %w", err)
 	}
 	out := strings.TrimSpace(res.Stdout)
 	if out == "" {
-		return ServeState{}, false
+		return ServeState{}, false, nil
 	}
 	var state ServeState
 	if err := json.Unmarshal([]byte(out), &state); err != nil {
-		return ServeState{}, false
+		return ServeState{}, false, nil
 	}
-	return state, true
+	return state, true, nil
 }
 
 func pidAliveCmd(pid int) string {
 	return fmt.Sprintf("kill -0 %d 2>/dev/null", pid)
 }
 
+// probeCurlMissing is what healthProbeCmd prints when the host has no usable
+// curl. It is deliberately NOT an HTTP-ish value: "the probe could not run" and
+// "the server did not answer" are different answers, and only the second one
+// means the server is wedged.
+const probeCurlMissing = "no-curl"
+
 func healthProbeCmd(port int) string {
-	// Best-effort: curl ships on the overwhelming majority of target
-	// systems ocode already requires (git, go toolchain era Linux/macOS).
-	// A missing curl makes this probe report "000" (curl's own placeholder
-	// for "no response"), which serverHealthy correctly treats as not-alive —
-	// degrading to a fresh server start rather than failing the connect.
+	// Best-effort liveness probe. Two properties matter here:
+	//
+	//   - It must always produce a VERDICT, so curl carries a timeout. Without
+	//     one, a server that accepts TCP but never answers hangs the probe until
+	//     connectBounded's 10-minute backstop, which is indistinguishable from a
+	//     wedged connect.
+	//   - It must distinguish "curl is not installed" from "nothing answered".
+	//     Conflating them makes every reconnect on a curl-less host fail: the
+	//     pid is alive, so the server is never relaunched, and the health check
+	//     can never pass either. The explicit probeCurlMissing marker lets
+	//     probeServer treat an unmeasurable server as reusable instead of
+	//     replacing (and thereby killing) a live one.
 	//
 	// No Authorization header: /api/health is deliberately unauthenticated
 	// (see internal/server/handler_health.go), and putting the token into
@@ -128,26 +162,62 @@ func healthProbeCmd(port int) string {
 	// listing (ps) for the probe's duration — the same class of leak
 	// Transport.ExecStdin's doc warns against.
 	return fmt.Sprintf(
-		"curl -s -o /dev/null -w '%%{http_code}' http://127.0.0.1:%d/api/health",
-		port,
+		"if command -v curl >/dev/null 2>&1; then "+
+			"curl -s -m 5 --connect-timeout 3 -o /dev/null -w '%%{http_code}' http://127.0.0.1:%d/api/health; "+
+			"else echo %s; fi",
+		port, probeCurlMissing,
 	)
 }
 
 // serverHealthy reports whether a discovered ServeState describes a server
-// this client can reuse: the process must still be running and it must answer
-// /api/health with 200. Version is deliberately not part of this decision —
-// a version-mismatched but healthy server is reused (EnsureRemoteServer flags
-// it Outdated) rather than replaced, so its terminals and in-flight turns are
-// not orphaned.
+// this client can reuse: the process must still be running and it must either
+// answer /api/health with 200 or be unmeasurable on this host (no curl — see
+// probeServer). Version is deliberately not part of this decision — a
+// version-mismatched but healthy server is reused (EnsureRemoteServer flags it
+// Outdated) rather than replaced, so its terminals and in-flight turns are not
+// orphaned.
 func serverHealthy(t Transport, state ServeState) bool {
-	if res, err := t.Exec(pidAliveCmd(state.PID)); err != nil || res.ExitCode != 0 {
-		return false
+	alive, healthy, _ := probeServer(t, state)
+	return alive && healthy
+}
+
+// probeServer reports whether the state file's server pid is alive and whether
+// it answers /api/health. err is non-nil only when the host could not be asked
+// at all (transport failure, including a probe killed by a signal), because in
+// that case the server's fate is unknown and the caller must not replace it: a
+// replaced server takes every terminal on it down.
+//
+// healthy is true when the server answered 200, and ALSO when its health could
+// not be measured on this host (no usable curl). An unmeasurable server is
+// reused rather than replaced — the same "never destroy what you cannot verify"
+// rule, resolved the safe way. A probe that ran and got a non-200 answer is
+// NOT healthy: that is a wedged server, which only the explicit Restart retires.
+func probeServer(t Transport, state ServeState) (alive, healthy bool, err error) {
+	res, execErr := t.Exec(pidAliveCmd(state.PID))
+	if transportFailed(res, execErr) {
+		return false, false, fmt.Errorf("check remote server pid %d: %w", state.PID, execErr)
 	}
-	res, err := t.Exec(healthProbeCmd(state.Port))
-	if err != nil {
-		return false
+	if execErr != nil || res.ExitCode != 0 {
+		return false, false, nil
 	}
-	return strings.TrimSpace(res.Stdout) == "200"
+	res, execErr = t.Exec(healthProbeCmd(state.Port))
+	if transportFailed(res, execErr) {
+		return true, false, fmt.Errorf("probe remote server pid %d health: %w", state.PID, execErr)
+	}
+	switch out := strings.TrimSpace(res.Stdout); out {
+	case "200":
+		return true, true, nil
+	case probeCurlMissing, "":
+		// The probe could not run (missing or unusable curl) or produced no
+		// output at all. Liveness is proven by the pid check, so keep the server
+		// instead of guessing that it is wedged and killing its terminals.
+		return true, true, nil
+	default:
+		// A completed probe that is not 200: the server is running but not
+		// serving. An answer, not an error — EnsureRemoteServer turns it into
+		// the actionable "restart it explicitly".
+		return true, false, nil
+	}
 }
 
 func launchServerCmd(ver string, slot ServeSlot) string {
@@ -223,17 +293,45 @@ func EnsureRemoteServer(t Transport, ver string, slot ServeSlot) (state ServeSta
 	if err := slot.valid(); err != nil {
 		return ServeState{}, false, err
 	}
-	if existing, ok := DiscoverServer(t, slot); ok && serverHealthy(t, existing) {
-		existing.Outdated = existing.Version != ver
-		if !existing.Outdated {
-			return existing, true, nil
+	existing, ok, err := discoverServer(t, slot)
+	if err != nil {
+		return ServeState{}, false, err
+	}
+	if ok {
+		alive, healthy, err := probeServer(t, existing)
+		if err != nil {
+			return ServeState{}, false, err
 		}
-		// A patch update leaves the previous version's server running and
-		// holding memory; retire it and start one at the local version.
-		if err := KillServer(t, existing.PID, slot); err != nil {
-			return ServeState{}, false, fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
+		if alive && !healthy {
+			// A live pid that does not answer /api/health is wedged, or just slow
+			// behind a flaky link. Replacing it would kill its terminals; the
+			// explicit Restart action is the way to retire it.
+			return ServeState{}, false, fmt.Errorf("remote server pid %d is running but not answering /api/health; restart it explicitly", existing.PID)
+		}
+		if alive {
+			return retireOrReuse(t, ver, slot, existing)
 		}
 	}
+	return startAndSettle(t, ver, slot)
+}
+
+// retireOrReuse handles a live, healthy server: reuse it when it matches the
+// local version, otherwise retire it and start a fresh one.
+func retireOrReuse(t Transport, ver string, slot ServeSlot, existing ServeState) (ServeState, bool, error) {
+	existing.Outdated = existing.Version != ver
+	if !existing.Outdated {
+		return existing, true, nil
+	}
+	// A patch update leaves the previous version's server running and
+	// holding memory; retire it and start one at the local version.
+	if err := KillServer(t, existing.PID, slot); err != nil {
+		return ServeState{}, false, fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
+	}
+	return startAndSettle(t, ver, slot)
+}
+
+// startAndSettle launches a fresh server and reaps leftovers around it.
+func startAndSettle(t Transport, ver string, slot ServeSlot) (ServeState, bool, error) {
 	fresh, err := StartFreshServer(t, ver, slot)
 	if err != nil {
 		return ServeState{}, false, err

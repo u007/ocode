@@ -67,6 +67,23 @@ func SessionName(remotePath string) string {
 	return "ocode-" + hex.EncodeToString(sum[:])[:12]
 }
 
+// TerminalMuxName is the remote tmux session name for one web terminal tab.
+// It is derived from host, path and the tab's terminal id, so a reconnect of
+// the same tab reattaches while another tab (or project) gets its own session.
+func TerminalMuxName(host, path, terminalID string) string {
+	sum := sha256.Sum256([]byte(host + "\x00" + path + "\x00" + terminalID))
+	return "ocode-t-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// KillTerminalMux ends the remote tmux session behind a closed terminal tab.
+// A host without tmux, or a session that already ended, is not an error.
+func KillTerminalMux(t Transport, name string) error {
+	if res, err := t.Exec("tmux kill-session -t " + shellQuote(name) + " 2>/dev/null; true"); err != nil {
+		return fmt.Errorf("kill remote tmux session %s: %w: %s", name, err, res.Stderr)
+	}
+	return nil
+}
+
 // WrapLaunch builds the remote-side command line for the launch stage,
 // wrapping remoteOcodeCmd (the plain "<remote-ocode-path> <project-path>"
 // invocation) in the chosen multiplexer so that losing the local `ssh -t`

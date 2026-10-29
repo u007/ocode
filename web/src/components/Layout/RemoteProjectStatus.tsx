@@ -72,7 +72,7 @@ export function RemoteProjectStatus({
 }) {
   const host = project.host ?? "";
   const [expanded, setExpanded] = useState(false);
-  const { status, loading, busy, error, connect, restart } = statusState;
+  const { status, loading, busy, error, stalled, escalation, connect, reconnect, restart } = statusState;
   const { state: projectState, prefetchProjectSessions, openSessionTab, selectProject } = useProjectState();
   const { state: terminalState, attachTerminal, killTerminal: killTerminalTab } = useTerminalState();
   const running = useRunningSessions();
@@ -129,12 +129,17 @@ export function RemoteProjectStatus({
   const runningCount = visibleSessions.filter((s) => running.has(s.id)).length;
 
   let line: string;
-  if (busy === "connecting") line = "connecting…";
+  if (stalled) line = "not responding";
+  else if (busy === "connecting") line = "connecting…";
   else if (busy === "restarting") line = "restarting…";
   else if (!connected) line = loading && !status ? "checking…" : "not connected";
   else line = `${status?.version ?? ""} · ${visibleSessions.length} chats${runningCount > 0 ? ` (${runningCount} running)` : ""} · ${terminals.length} terminals`;
 
   const busyNow = busy !== "idle";
+  // Explicit, not `escalation !== "none"`: a partial/hosted-by-an-older-server
+  // state object with no `escalation` must render NOTHING rather than defaulting
+  // into a prompt that offers to kill the host's terminals.
+  const showStallPrompt = escalation === "reconnect" || escalation === "restart";
 
   const killTerminal = (id: string) => {
     // Route through the store: it removes this window's tab (live or peeked)
@@ -224,6 +229,57 @@ export function RemoteProjectStatus({
         )}
         {error && <span className="truncate text-destructive" title={error}>· {error}</span>}
       </div>
+
+      {showStallPrompt && (
+        // Non-blocking on purpose: a modal during a connect would steal focus
+        // from whatever the user opened the app to do, and the connect keeps
+        // running behind it. This is the escalation point the old UI lacked —
+        // without it a wedged connect only said "connecting…" until the
+        // server's 10-minute backstop.
+        <div
+          className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 pl-1 text-[11px]"
+          role="alert"
+          data-testid="remote-project-stall"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="text-amber-600 dark:text-amber-500">
+            {escalation === "restart"
+              ? "Remote host is still not responding."
+              : "Remote host is not responding."}
+          </span>
+          {escalation === "restart" ? (
+            <>
+              <span className="text-muted-foreground">Restarting kills its running chats and terminals.</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 px-1.5 text-[10px] font-medium text-link hover:bg-link/10 gap-1"
+                disabled={busyNow}
+                onClick={(e) => {
+                  stop(e);
+                  restart();
+                }}
+              >
+                <RotateCw className="w-2.5 h-2.5" />
+                Restart host
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 px-1.5 text-[10px] font-medium text-link hover:bg-link/10"
+              disabled={busyNow}
+              onClick={(e) => {
+                stop(e);
+                reconnect();
+              }}
+            >
+              Reconnect
+            </Button>
+          )}
+        </div>
+      )}
 
       {expanded && connected && (
         <div className="mt-1.5 space-y-2 pl-1">

@@ -752,3 +752,152 @@ func TestServeSlotPaths(t *testing.T) {
 		}
 	}
 }
+
+// assertNoLaunchOrKill fails if the transport saw a launch or kill command: a
+// server that may still be alive must never be replaced, because replacing it
+// kills every terminal running on it.
+func assertNoLaunchOrKill(t *testing.T, ft *fakeTransport) {
+	t.Helper()
+	for _, c := range ft.execCalls {
+		if strings.Contains(c, "nohup") || strings.Contains(c, "xargs") || c == killTERMCmd(42) || c == killKILLCmd(42) {
+			t.Fatalf("server was launched or killed: %q", c)
+		}
+	}
+}
+
+func TestEnsureRemoteServerTransportErrorOnDiscoverDoesNotLaunch(t *testing.T) {
+	ft := newFakeTransport()
+	ft.execErrs[stateCatCmd("")] = errors.New("ssh: connection timed out")
+	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+		t.Fatal("expected error when the host cannot be reached")
+	}
+	assertNoLaunchOrKill(t, ft)
+}
+
+func TestEnsureRemoteServerTransportErrorOnPidCheckDoesNotLaunch(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
+	data, _ := json.Marshal(existing)
+	ft := newFakeTransport()
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+	ft.execErrs[pidAliveCmd(42)] = errors.New("ssh: connection reset")
+	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+		t.Fatal("expected error when the pid check could not reach the host")
+	}
+	assertNoLaunchOrKill(t, ft)
+}
+
+func TestEnsureRemoteServerAliveButUnhealthyDoesNotLaunch(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
+	data, _ := json.Marshal(existing)
+	ft := newFakeTransport()
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "000"}
+	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+		t.Fatal("expected error for a live pid that is not answering health")
+	}
+	assertNoLaunchOrKill(t, ft)
+}
+
+// exitWithOutputFake returns BOTH a captured result and an error, with
+// res.ExitCode set — the shape SSHTransport.Exec produces for a remote command
+// that ran and exited non-zero (it sets res.ExitCode from the *exec.ExitError
+// and still returns an error). fakeTransport discards the result whenever an
+// error is configured, so it cannot express this shape: every test that used it
+// modelled a wedge as a clean exit, which real ssh never produces.
+type exitWithOutputFake struct {
+	*fakeTransport
+	cmd    string
+	result ExecResult
+	err    error
+}
+
+func (e *exitWithOutputFake) Exec(command string) (ExecResult, error) {
+	if command == e.cmd {
+		e.execCalls = append(e.execCalls, command)
+		return e.result, e.err
+	}
+	return e.fakeTransport.Exec(command)
+}
+
+// A live-but-wedged server over real ssh: curl exits 7 (connection refused), so
+// Exec yields stdout "000" AND an error. That is an ANSWER ("not answering"),
+// not a transport failure, so the caller must keep its own actionable error
+// instead of surfacing curl's exit status (which never tells the user what to do).
+func TestEnsureRemoteServerHealthProbeRemoteExitIsAnAnswer(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
+	data, _ := json.Marshal(existing)
+	base := newFakeTransport()
+	base.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+	base.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+	ft := &exitWithOutputFake{
+		fakeTransport: base,
+		cmd:           healthProbeCmd(4096),
+		result:        ExecResult{Stdout: "000", ExitCode: 7},
+		err:           errors.New(`ssh u@h "curl …": exit 7: `),
+	}
+
+	_, _, err := EnsureRemoteServer(ft, "0.8.85", "")
+	if err == nil {
+		t.Fatal("expected an error for a live pid that is not answering /api/health")
+	}
+	if !strings.Contains(err.Error(), "restart it explicitly") {
+		t.Errorf("a remote non-zero exit is an answer, not a transport failure; want the restart hint, got %v", err)
+	}
+	assertNoLaunchOrKill(t, base)
+}
+
+// curl is not universal. A host that has none can never be health-checked, so
+// the probe must say so explicitly; otherwise a live server reads as "not
+// answering" and every reconnect after the first hard-fails on a working host.
+func TestEnsureRemoteServerWithoutCurlReusesLiveServer(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
+	data, _ := json.Marshal(existing)
+	ft := newFakeTransport()
+	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: probeCurlMissing}
+
+	state, reused, err := EnsureRemoteServer(ft, "0.8.85", "")
+	if err != nil {
+		t.Fatalf("a verifiable pid with an unusable probe must reuse the server, got %v", err)
+	}
+	if !reused {
+		t.Fatal("expected reused=true for a live server whose health cannot be measured")
+	}
+	if state.PID != 42 || state.Port != 4096 {
+		t.Fatalf("got %+v, want the discovered server", state)
+	}
+	assertNoLaunchOrKill(t, ft)
+}
+
+// A signal-killed ssh (supervisor shutdown, a killed process group) reports
+// exit code -1 and no verdict. Reading that as "pid dead" sends
+// EnsureRemoteServer down the relaunch path, whose orphan reap kills the live
+// server — the exact failure this whole change set exists to prevent.
+func TestEnsureRemoteServerSignaledPidProbeDoesNotLaunch(t *testing.T) {
+	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.8.85"}
+	data, _ := json.Marshal(existing)
+	base := newFakeTransport()
+	base.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+	ft := &exitWithOutputFake{
+		fakeTransport: base,
+		cmd:           pidAliveCmd(42),
+		result:        ExecResult{ExitCode: -1},
+		err:           errors.New("signal: killed"),
+	}
+
+	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+		t.Fatal("a killed probe gave no verdict; expected an error instead of a relaunch")
+	}
+	assertNoLaunchOrKill(t, base)
+}
+
+func TestHealthProbeCmdBoundsTheProbeAndDetectsMissingCurl(t *testing.T) {
+	cmd := healthProbeCmd(4096)
+	for _, want := range []string{"command -v curl", "-m ", "--connect-timeout", "no-curl", "/api/health"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("health probe command missing %q: %q", want, cmd)
+		}
+	}
+}

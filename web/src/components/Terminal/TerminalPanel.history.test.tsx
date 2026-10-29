@@ -43,7 +43,7 @@ vi.mock("ghostty-web", async () => {
     constructor(opts: Record<string, unknown>) {
       super(opts);
       const write = this.write;
-      this.write = vi.fn((data: string, cb?: () => void) => {
+      this.write = vi.fn((data: string | Uint8Array, cb?: () => void) => {
         if (data === RIS) h.events.push("reset");
         return write.call(this, data, cb);
       });
@@ -67,6 +67,7 @@ vi.mock("@/api/client", () => ({
   },
   apiPath: (path: string) => path,
   apiWsPath: (path: string) => `ws://localhost${path}`,
+  remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
   authHeaders: () => ({}),
   authToken: () => "token",
   isRemoteSession: () => false,
@@ -141,6 +142,10 @@ describe("TerminalPanel history restore handoff", () => {
     await waitFor(() => expect(h.sockets).toHaveLength(1));
 
     expect(h.sockets[0].url).toContain("history_offset=11");
+    // The server rejects anything above terminalHistoryMaxPage with a 400, and a
+    // smaller page multiplies round-trips on a remote restore; pin the pairing.
+    const fetchMock = (globalThis.fetch as unknown as { mock: { calls: [string][] } }).mock;
+    expect(fetchMock.calls[0][0]).toContain("limit=262144");
     expect(FakeTerminal.instances[0].reset).not.toHaveBeenCalled();
     expect(FakeTerminal.instances[0].write).not.toHaveBeenCalledWith(RIS);
     expect(h.events).toEqual(["socket"]);
@@ -238,6 +243,147 @@ describe("TerminalPanel history restore handoff", () => {
 
 // The live socket is only opened after the REST history restore settles, so a
 // restore fetch that never settles would leave the terminal permanently blank.
+// A remote project's history lives on the host, and after a desktop restart the
+// host is usually still connecting: the endpoint answers 502/503. That is not a
+// history failure, and treating it as one reset the buffer and attached a fresh
+// shell — the restored terminal showed only new output and the scrollback looked
+// lost. It must retry until the host answers, then replay normally.
+describe("TerminalPanel remote history restore", () => {
+  it("retries while the remote host is still connecting instead of attaching without restore", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response("{}", { status: 503 }))
+        .mockResolvedValueOnce(jsonResponse(page("t1", 0, "restored-output", 15, true)));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { unmount } = render(
+        <TerminalPanel
+          id="t1"
+          active
+          projectPath="/project"
+          host="u@box"
+          scrollbackLines={100}
+          fontFamily="mono"
+          fontSize={12}
+        />,
+      );
+      await flushMount();
+
+      // The 503 must NOT end the restore: no socket, no "attached without restore".
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(h.sockets).toHaveLength(0);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(h.sockets).toHaveLength(1);
+      expect(h.sockets[0].url).toContain("history_offset=15");
+      const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
+      expect(writes).toContain("restored-output");
+      expect(writes).not.toContain("attached without restore");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up with the explicit banner when the host never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => Promise.resolve(new Response("{}", { status: 502 }))),
+      );
+      const { unmount } = render(
+        <TerminalPanel
+          id="t1"
+          active
+          projectPath="/project"
+          host="u@box"
+          scrollbackLines={100}
+          fontFamily="mono"
+          fontSize={12}
+        />,
+      );
+      await flushMount();
+
+      // Retry budget is finite: keep advancing until the bounded restore window
+      // expires, then the panel must attach instead of retrying forever.
+      for (let i = 0; i < 10 && h.sockets.length === 0; i++) {
+        await act(async () => {
+          vi.advanceTimersByTime(9000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      }
+      expect(h.sockets).toHaveLength(1);
+      const writes = FakeTerminal.instances[0].write.mock.calls.map(([text]) => String(text)).join("");
+      expect(writes).toContain("live terminal attached without restore");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// Replaying before the first stable fit parses the log at the saved geometry and
+// reflows it when the real fit lands, which is what clipped/duplicated the last
+// row after a desktop restart. A panel WITH layout must wait for that fit.
+describe("TerminalPanel restore layout ordering", () => {
+  it("starts the history fetch only after the first stable fit", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", ((cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return frames.length;
+    }) as unknown as typeof requestAnimationFrame);
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 800 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 400 });
+    let observer: ResizeObserverCallback | null = null;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: ResizeObserverCallback) {
+          observer = cb;
+        }
+        observe() {
+          observer?.([], this as unknown as ResizeObserver);
+        }
+        disconnect() {}
+      },
+    );
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(page("t1", 0, "hello", 5, true)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { unmount } = render(
+        <TerminalPanel id="t1" active projectPath="/project" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+      );
+      await flushMount();
+      // The fit settles over two frames; the restore must not have run yet.
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await act(async () => {
+        for (let i = 0; i < 6 && frames.length; i++) {
+          const batch = frames.splice(0);
+          for (const cb of batch) cb(0);
+          await Promise.resolve();
+        }
+      });
+      expect(fetchMock).toHaveBeenCalled();
+      unmount();
+    } finally {
+      delete (HTMLElement.prototype as unknown as { clientWidth?: number }).clientWidth;
+      delete (HTMLElement.prototype as unknown as { clientHeight?: number }).clientHeight;
+    }
+  });
+});
+
 // The restore timeout must attach the socket anyway (without a cursor) and say
 // so, instead of hanging with no output.
 describe("TerminalPanel history restore timeout", () => {

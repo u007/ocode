@@ -1,9 +1,10 @@
-import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, forwardRef } from "react";
 import TerminalPanel from "./TerminalPanel";
 import ProcessesPanel from "./ProcessesPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { useTerminalState, getProjectTerminals, PROCESSES_TAB_ID } from "../../stores/terminalStore";
 import { focusTerminalById } from "./terminalFocus";
+import { resolveTerminalTheme, terminalThemeKey } from "./terminalAppearance";
 
 export interface TerminalTabsHandle {
   openTerminal: () => void;
@@ -29,7 +30,22 @@ export interface TerminalTabsHandle {
  */
 const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string; host?: string }>(
   function TerminalTabs({ active, projectPath, host }, ref) {
-    const { available, loading, error, scrollbackLines, fontFamily, fontSize } = useTerminalConfig();
+    const {
+      available,
+      loading,
+      error,
+      scrollbackLines,
+      fontFamily,
+      fontSize,
+      cellWidth,
+      cellHeight,
+      appearance,
+      ghostty,
+    } = useTerminalConfig();
+    // Resolve once per appearance response: the theme object is what the panel
+    // compares (via themeKey) and constructs the terminal with.
+    const terminalTheme = useMemo(() => resolveTerminalTheme(appearance), [appearance]);
+    const themeKey = useMemo(() => terminalThemeKey(terminalTheme), [terminalTheme]);
     const { state: terminalState, activate, openTerminal, closeTerminal } = useTerminalState();
     const { terminals: peekedTerminals, activeId, live } = getProjectTerminals(terminalState, projectPath, host);
     // Real panels (real pty + WebSocket) only exist once this project is live —
@@ -108,6 +124,11 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
               scrollbackLines={scrollbackLines}
               fontFamily={fontFamily}
               fontSize={fontSize}
+              cellWidth={cellWidth}
+              cellHeight={cellHeight}
+              terminalTheme={terminalTheme}
+              themeKey={themeKey}
+              keybinds={ghostty?.keybinds}
               projectPath={projectPath}
               host={host}
             />

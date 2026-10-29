@@ -46,6 +46,15 @@ describe("remote host lifecycle client", () => {
     expect((fetchSpy.mock.calls[1][1] as RequestInit).method).toBe("POST");
   });
 
+  it("adds force=1 only when the caller asks to supersede an in-flight connect", async () => {
+    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse(statusBody)));
+    const { api } = await import("./client");
+    await api.connectRemoteHost("user@box");
+    await api.connectRemoteHost("user@box", { force: true });
+    expect(fetchSpy.mock.calls[0][0]).toBe("/api/remote/user%40box/connect");
+    expect(fetchSpy.mock.calls[1][0]).toBe("/api/remote/user%40box/connect?force=1");
+  });
+
   it("throws an error carrying the body's error and stage on 502", async () => {
     fetchSpy.mockResolvedValue(jsonResponse({ error: "kill failed", stage: "remote-kill" }, 502));
     const { api } = await import("./client");

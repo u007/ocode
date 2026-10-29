@@ -1,7 +1,8 @@
 ---
 type: Concept
 title: Web/Desktop Terminal on ghostty-web (libghostty-vt)
-description: The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
+description: |
+  The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
 resource: web/src/components/Terminal/TerminalPanel.tsx
 tags:
   - terminal
@@ -10,7 +11,7 @@ tags:
   - web
   - desktop
   - pulse
-timestamp: 2026-10-28T04:00:00Z
+timestamp: 2026-10-28T16:28:28Z
 ---
 # Web/Desktop Terminal on ghostty-web
 
@@ -28,7 +29,7 @@ The terminal panel uses `Terminal` and `FitAddon` from `ghostty-web` (libghostty
 - **Unzeroed wasm heap in upstream 0.4.0 (measured 2026-10-28).** Once any terminal in a `Ghostty` instance had been freed, a later terminal in the same instance read garbage codepoints and stale wide characters from cells it never wrote. On the Pulse parity fixtures one shared instance corrupted 9 of 20 cases and a fresh instance per terminal rendered all 20; it reproduces in plain Node. The stale data is in the terminal's own page memory, so zeroing the viewport export buffer does not help. The vendored fork zero-initializes page buffers (upstream PR #142) and the same probe shows 0 of 20 corrupt with a shared instance, so every panel and every Pulse screen read now shares the one instance `loadGhostty()` caches (a failed load is not cached). The panel calls `Terminal.reset()` only to apply a changed scrollback setting (see Traps) and never for the Reset action, because it frees and recreates the wasm terminal and drops the selection and link state under the panel: a full reset is written as RIS (`ESC c`), and Clear writes `ESC [3J` after `clear()` to drop the scrollback.
 - **No OSC handler API.** There is no `parser`. Titles and OSC 9/777/99/52 come from `terminalStream.ts`, which scans the byte stream.
 - **Bell on OSC terminators.** `onBell` fires when a written chunk contains `\x07` anywhere, including the BEL ending `ESC ] 0 ; title BEL`. `onTitleChange` only sees OSC 0/1/2 inside one chunk. Neither is used.
-- **`write` parses synchronously.** The callback is deferred with `requestAnimationFrame` and never fires in a hidden tab. Never await it. Every write also scrolls a scrolled-up viewport to the bottom.
+- **`write` parses synchronously.** The callback is deferred with `requestAnimationFrame` and never fires in a hidden tab. Never await it. ghostty-web 0.4.0 still ends every `write` with `if (this.viewportY !== 0) this.scrollToBottom();`, so a scrolled-up viewport would bounce to the bottom on each chunk; ocode re-anchors it to the same content via `web/src/components/Terminal/terminalScrollAnchor.ts` (`writePreservingScrollback`), which wraps every pty write and ocode banner. Raw `term.write` remains only for full-buffer operations — the RIS reset, Clear's ED 3, and the scrollback-setting/theme rebuild replays — which intentionally end at the bottom.
 - **Built-in mouse reporting, but not the one ocode needs.** The fork's `InputHandler` listens for mousedown/mouseup/mousemove/wheel on the host and sends SGR/X10 reports when the program tracks the mouse. It sends no focus reports (1004), reports shift/alt presses that ocode reserves for selecting text under a mouse-owning program, reports every wheel pixel delta, and only sees releases inside the host. `disableBuiltinMouseReporting` (ghosttyInternals.ts) removes those four listeners after `open()`, and `terminalMouse.ts` is the single sender of SGR and X10 reports and `CSI I`/`CSI O`. The npm 0.4.0 release had no mouse reporting at all; with the fork, leaving both in place sends every release, motion and wheel report twice.
 - **Built-in copy-on-select.** The selection manager copies on mouseup and double-click itself. ocode owns copy (dedupe against Cmd+C and Edit > Copy, desktop native clipboard), so `disableBuiltinSelectionCopy` replaces that path.
 - **Built-in link providers `window.open` on ctrl/cmd-click.** They are removed (`clearBuiltinLinkProviders`) and ocode registers its own. `registerLinkProvider` returns nothing; providers live until `dispose()`.
@@ -56,7 +57,7 @@ Pulse: `usePulseTerminals.ts` replays the log into a headless `GhosttyTerminal` 
 
 ## Behaviour changes versus xterm.js
 
-- Output always scrolls the viewport to the bottom.
+- A terminal scrolled up no longer bounces to the bottom while output streams: the viewport follows output only when already at the bottom (xterm.js/native Ghostty behavior), via `terminalScrollAnchor.ts` / `writePreservingScrollback` wrapping `writeOutput` and `writeBanner` in `TerminalPanel.tsx`.
 - A changed scrollback setting applies to open terminals too, by a serialize, `reset()` and replay; running programs lose their terminal modes (see Traps).
 - Find has no all-matches highlight.
 - Under a program that owns the mouse, text selection is shift+drag or alt+drag on every platform.
