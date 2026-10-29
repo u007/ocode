@@ -37,7 +37,8 @@ const state: {
 
 vi.mock("../../stores/projectStore", () => ({
   findTabForSession: () => undefined,
-  useProjectState: () => ({ activeTabId: "session-1" }),
+  findProjectPathForTab: () => undefined,
+  useProjectState: () => ({ state: {}, activeTabId: "session-1" }),
 }));
 vi.mock("../../stores/chatStore", () => ({
   useChatSelector: (sel: (s: unknown) => unknown) => sel(state),

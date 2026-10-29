@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   gitStashShow: vi.fn(),
   gitStashApply: vi.fn(),
   gitStashDrop: vi.fn(),
+  // WorktreesSection loads its list even while collapsed (the header flags
+  // checkouts no session uses), so every GitPanel render calls this.
+  gitWorktrees: vi.fn(),
   /** git_status bus handlers registered by GitPanel. */
   gitStatusHandlers: [] as Array<(env: unknown) => void>,
 }));
@@ -155,6 +158,7 @@ describe("GitPanel", () => {
     mocks.gitFetch.mockResolvedValue(workspace.status);
     mocks.gitPull.mockResolvedValue(workspace.status);
     mocks.gitStashList.mockResolvedValue([]);
+    mocks.gitWorktrees.mockResolvedValue([]);
     mocks.gitStashShow.mockResolvedValue([]);
     mocks.gitStashApply.mockResolvedValue(workspace);
     mocks.gitStashDrop.mockResolvedValue([]);
@@ -950,6 +954,7 @@ describe("GitPanel per-file stash & multi-select", () => {
     mocks.getGitWorkspace.mockResolvedValue(workspace);
     mocks.gitLog.mockResolvedValue([]);
     mocks.gitStashList.mockResolvedValue([]);
+    mocks.gitWorktrees.mockResolvedValue([]);
     mocks.gitStashShow.mockResolvedValue([]);
     mocks.gitStashApply.mockResolvedValue(workspace);
     mocks.gitStashDrop.mockResolvedValue([]);

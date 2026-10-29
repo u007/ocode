@@ -23,7 +23,10 @@ vi.mock("../../stores/projectStore", () => ({
   // resolveSessionHost (useSessionHost.ts) imports this directly, so the
   // real implementation runs against the stub state in these tests.
   findTabForSession: () => undefined,
-  useProjectState: () => ({ activeTabId: "s1" }),
+  // StatusBar now resolves the session's host for the workspace chip; an
+  // unknown path must resolve to "no host", not throw.
+  findProjectPathForTab: () => undefined,
+  useProjectState: () => ({ state: {}, activeTabId: "s1" }),
 }));
 
 vi.mock("../../components/Speech/SpeechProvider", () => ({

@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   gitStashShow: vi.fn(),
   gitStashApply: vi.fn(),
   gitStashDrop: vi.fn(),
+  gitWorktrees: vi.fn(),
   gitResetRemote: vi.fn(),
   gitResolveConflict: vi.fn(),
   gitConflictChunks: vi.fn(),
@@ -112,6 +113,7 @@ beforeEach(() => {
   mocks.gitConflictChunks.mockResolvedValue(twoBlocks);
   mocks.gitLog.mockResolvedValue([]);
   mocks.gitStashList.mockResolvedValue([]);
+  mocks.gitWorktrees.mockResolvedValue([]);
   mocks.gitResolveConflict.mockResolvedValue(conflicted);
   mocks.gitOperation.mockResolvedValue({ workspace: ws({}) });
 });

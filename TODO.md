@@ -1,5 +1,18 @@
 # TODO
 
+## Open: session worktree identity, phase 2+ (2026-10-29)
+
+Phase 1 (visibility only) shipped: `GET /api/git/worktrees` derives `exists`/`dirty`/`ahead`/`behind`/`contained_in_base`/`base_ref`/owner sessions/`last_commit` (paged, bounded probes), the status bar names the checkout the chat is rooted in, and the Git tab's Worktrees section shows per-checkout state plus a `no session` badge (`skills/ocode-web/SKILL.md` item 81). Deferred:
+
+- **`activeCwd` + `EnterWorktree`/`ExitWorktree`.** Design already written: `.opencode/plans/2026-10-04-agent-active-cwd-worktree-design.md` (§3 says do NOT reuse `SetWorkDir`: it relocates the snapshot store via `ProjectSlug`, emptying the Changes tab and breaking undo). Once this lands, the chip can show INTENT vs OBSERVED instead of deriving the checkout from the session's project root.
+- **"Touched elsewhere" drift warning.** Nothing observes that a main-rooted session ran `git -C .worktrees/x` / `cd .worktrees/x && git commit`. Needs a per-turn ground-truth probe (HEAD + `status --porcelain` digest per checkout, compared at turn boundaries) — command-text parsing is NOT sound enough to be load-bearing (`$VAR`, subshells, `sudo`, `make`). Surface as a separate, best-effort warning; never fold it into the chip.
+- **Session notices.** No user-role `[ocode:worktree]` notice when the session's recorded worktree is removed, or when its branch becomes contained in the base. Prompt-cache rule: user-role tail injection, never system-role.
+- **TUI parity.** No worktree surface in `internal/tui`; the sidebar shows the branch only (`git_model.go` `currentBranch`). A `⌥ branch ↑3` row plus `/worktree` would mirror the web chip.
+- **Remote (SSH/WSL) worktrees.** `rejectRemoteWorktree` answers 501 (`internal/server/handler_git_worktrees.go:117`); the web chip reports nothing for a remote project rather than guessing locally. Would need the host's `git worktree list` through the `serve --remote` proxy.
+- **Squash/rebase merge detection.** `contained_in_base` is an ancestor check, so a squash- or rebase-merged PR reads as not contained. Detecting it needs a patch-id/tree comparison against the base; until then the UI names the base ref and says the check cannot detect those merges.
+- **Changes-tab blind spot.** `internal/changes/bash.go:331` skips every dot-directory, so `.worktrees/` is not fingerprinted: work an agent does there from a main-rooted session is invisible to the Changes tab and cannot be undone from it. Either walk registered worktree roots as extra roots (with their own budget) or make the drift warning steer the user to open the worktree as a project.
+- **`docs/concepts/git-worktrees.md` is stale** — it documents the pre-2026-10-29 endpoint shape (`path`/`head`/`branch`/`detached`/`locked`/`prunable`/`is_main`/`is_current` and the four actions only) and knows nothing about the derived fields, the paging, or the web chip/header surface. It must be updated through the `context` agent **operating in `.worktrees/worktree-visibility`**, not the parent checkout: `docs/` is the OKF bundle (context-agent-only), and the parent tree has concurrent WIP. Read the page first, use `edit` not `write`, and re-derive every `file.go:NNN` anchor on it afterwards (they shift when the handler file grows).
+
 ## Open: todo plan deps and task link follow-ups (2026-10-28)
 
 Phases 1 to 4 (store and tools, prompt, push and Pulse view, chat inline card and plan panel; `docs/concepts/persistent-todo-plan.md`) are done. Deferred:

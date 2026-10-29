@@ -27,6 +27,67 @@ function shortHead(head: string): string {
 }
 
 /**
+ * Derived-state line for one checkout. Every entry is a fact the server
+ * computed (`ahead`/`behind`/`contained_in_base`/`dirty`/`owner_session_count`)
+ * or omitted entirely when the value is unknown — an older server must not
+ * make a checkout look clean, merged or unowned.
+ */
+function worktreeStateBits(wt: GitWorktree): string[] {
+  const bits: string[] = [];
+  const ahead = typeof wt.ahead === "number" ? wt.ahead : -1;
+  const behind = typeof wt.behind === "number" ? wt.behind : -1;
+
+  if (!wt.is_main && wt.base_known === false) {
+    bits.push("base unknown");
+  } else if (!wt.is_main && (ahead > 0 || behind > 0)) {
+    const parts: string[] = [];
+    if (ahead > 0) parts.push(`↑${ahead}`);
+    if (behind > 0) parts.push(`↓${behind}`);
+    bits.push(`${parts.join(" ")} vs ${wt.base_ref ?? "base"}`);
+  }
+  if (wt.contained_in_base === true) {
+    bits.push(`contained in ${wt.base_ref ?? "base"}`);
+  }
+  if (typeof wt.dirty === "number" && wt.dirty > 0) {
+    bits.push(`${wt.dirty} changed`);
+  }
+  if (
+    typeof wt.owner_session_count === "number" &&
+    wt.owner_session_count > 0
+  ) {
+    bits.push(
+      `${wt.owner_session_count} session${wt.owner_session_count === 1 ? "" : "s"}`,
+    );
+  }
+  if (wt.last_commit) {
+    bits.push(`last commit ${wt.last_commit.slice(0, 10)}`);
+  }
+  return bits;
+}
+
+function worktreeStateTitle(wt: GitWorktree): string {
+  const bits: string[] = [];
+  if (wt.contained_in_base === true) {
+    bits.push(
+      `Every commit here is reachable from ${wt.base_ref ?? "the base"} (ancestor check; squash/rebase merges are not detected).`,
+    );
+  } else if (wt.contained_in_base === false && wt.base_known) {
+    bits.push(`Not contained in ${wt.base_ref ?? "the base"}.`);
+  }
+  if (typeof wt.dirty === "number" && wt.dirty > 0) {
+    bits.push(`${wt.dirty} changed path${wt.dirty === 1 ? "" : "s"} in this checkout.`);
+  }
+  if (typeof wt.owner_session_count === "number") {
+    bits.push(
+      wt.owner_session_count === 0
+        ? "No chat session is rooted at this checkout."
+        : `${wt.owner_session_count} chat session${wt.owner_session_count === 1 ? " is" : "s are"} rooted here.`,
+    );
+  }
+  return bits.join(" ");
+}
+
+/**
  * Worktrees section of the Git tab: the project's checkouts, with open,
  * create and remove. The parent keys this component by project path, so
  * switching projects discards the old list instead of showing it.
@@ -55,7 +116,12 @@ export default function WorktreesSection({
   const [pendingRemove, setPendingRemove] = useState<GitWorktree | null>(null);
 
   const isRemote = Boolean(projectHost);
-  const shouldLoad = expanded && !isRemote && Boolean(projectPath);
+  // Loaded even while collapsed: the header uses the result to flag checkouts
+  // that no chat session is rooted at, which is the "we forgot a worktree"
+  // signal and is useless if it only appears after the user expands the
+  // section. The fetch is one request (the server probes each checkout under
+  // its own timeout), not one per row.
+  const shouldLoad = !isRemote && Boolean(projectPath);
 
   useEffect(() => {
     if (!shouldLoad || !projectPath) return;
@@ -116,6 +182,14 @@ export default function WorktreesSection({
   };
 
   const count = worktrees ? worktrees.length : 0;
+  // Only linked checkouts count: the main checkout having no session is normal.
+  // `owner_session_count` absent = an older server, which must not be read as
+  // "zero sessions".
+  const unusedCount = worktrees
+    ? worktrees.filter(
+        (wt) => !wt.is_main && typeof wt.owner_session_count === "number" && wt.owner_session_count === 0,
+      ).length
+    : 0;
 
   return (
     <div className={`min-h-0 flex flex-col border-t border-border ${className}`}>
@@ -133,6 +207,27 @@ export default function WorktreesSection({
           <span className="truncate">
             Worktrees{" "}
             {worktrees && <span className="text-foreground/50">({count})</span>}
+            {unusedCount > 0 && (
+              <span
+                className="text-amber-500 normal-case tracking-normal"
+                data-testid="worktrees-unused-flag"
+                title={`${unusedCount} linked checkout${unusedCount === 1 ? " has" : "s have"} no chat session rooted at them`}
+              >
+                {" "}· {unusedCount} no session
+              </span>
+            )}
+            {loadError && (
+              // The list now loads on mount, so a failure must be visible in
+              // the COLLAPSED header instead of only inside the expanded body
+              // (where it used to be unreachable without opening the section).
+              <span
+                className="text-muted-foreground normal-case tracking-normal"
+                data-testid="worktrees-load-error-flag"
+                title={loadError}
+              >
+                {" "}· unavailable
+              </span>
+            )}
           </span>
         </button>
         {!isRemote && (
@@ -166,6 +261,8 @@ export default function WorktreesSection({
           ) : (
             worktrees.map((wt) => {
               const label = wt.branch || (wt.detached ? `detached ${shortHead(wt.head)}` : shortHead(wt.head));
+              const stateBits = worktreeStateBits(wt);
+              const stateTitle = worktreeStateTitle(wt);
               return (
                 <div
                   key={wt.path}
@@ -178,11 +275,29 @@ export default function WorktreesSection({
                       {wt.is_main && <span className="text-[10px] text-muted-foreground shrink-0">main</span>}
                       {wt.is_current && <span className="text-[10px] text-purple-400 shrink-0">open</span>}
                       {wt.locked && <span className="text-[10px] text-amber-500 shrink-0">locked</span>}
-                      {wt.prunable && <span className="text-[10px] text-red-400 shrink-0">missing</span>}
+                      {(wt.prunable || wt.exists === false) && (
+                        <span className="text-[10px] text-red-400 shrink-0">missing</span>
+                      )}
+                      {!wt.is_main && wt.owner_session_count === 0 && (
+                        <span
+                          className="text-[10px] text-amber-500 shrink-0"
+                          title="No chat session is rooted at this checkout"
+                        >
+                          no session
+                        </span>
+                      )}
                     </div>
                     <div className="pl-5 text-[11px] text-muted-foreground truncate" title={wt.path}>
                       {wt.path}
                     </div>
+                    {stateBits.length > 0 && (
+                      <div
+                        className="pl-5 text-[11px] text-muted-foreground/80 truncate"
+                        title={stateTitle}
+                      >
+                        {stateBits.join(" · ")}
+                      </div>
+                    )}
                   </div>
                   {onOpenWorktree && (
                     <button
