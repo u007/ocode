@@ -42,6 +42,9 @@ export class FakeTerminal {
   textarea: HTMLTextAreaElement | undefined = undefined;
   buffer = {
     active: {
+      // `viewportY` is deliberately the real library's always-0 field; callers must
+      // use getViewportY(). `type` drives terminalScrollAnchor's alternate-screen guard.
+      type: "normal" as "normal" | "alternate",
       length: 0,
       cursorX: 0,
       cursorY: 0,
@@ -57,6 +60,8 @@ export class FakeTerminal {
   mouseTracking = false;
   focusEvents = false;
   viewportY = 0;
+  /** Scrollback rows the fake write has produced (`getScrollbackLength`). */
+  scrollbackLength = 0;
   modes: Record<number, boolean> = {};
 
   // Handlers the panel registers.
@@ -81,7 +86,16 @@ export class FakeTerminal {
     this.textarea = document.createElement("textarea");
     host.appendChild(this.textarea);
   });
-  write = vi.fn();
+  // Models ghostty-web 0.4.0's writeInternal: newlines append scrollback, and a
+  // write resets a scrolled-back viewport to the bottom (the "bounce" that
+  // terminalScrollAnchor.ts compensates for). Tests drive it through the panel.
+  write = vi.fn((data: string | Uint8Array, _callback?: () => void) => {
+    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+    for (const ch of text) {
+      if (ch === "\n") this.scrollbackLength += 1;
+    }
+    if (this.viewportY !== 0) this.viewportY = 0;
+  });
   focus = vi.fn();
   blur = vi.fn();
   dispose = vi.fn();
@@ -120,10 +134,19 @@ export class FakeTerminal {
   hasFocusEvents = vi.fn(() => this.focusEvents);
   getMode = vi.fn((mode: number) => this.modes[mode] ?? false);
   getViewportY = vi.fn(() => this.viewportY);
-  scrollLines = vi.fn();
-  scrollToTop = vi.fn();
-  scrollToBottom = vi.fn();
-  scrollToLine = vi.fn();
+  getScrollbackLength = vi.fn(() => this.scrollbackLength);
+  scrollLines = vi.fn((amount: number) => {
+    this.viewportY = Math.max(0, Math.min(this.scrollbackLength, this.viewportY - amount));
+  });
+  scrollToTop = vi.fn(() => {
+    this.viewportY = this.scrollbackLength;
+  });
+  scrollToBottom = vi.fn(() => {
+    this.viewportY = 0;
+  });
+  scrollToLine = vi.fn((line: number) => {
+    this.viewportY = Math.max(0, Math.min(this.scrollbackLength, line));
+  });
 }
 
 export class FakeFitAddon {
@@ -145,6 +168,11 @@ export function ghosttyInternalsMock() {
     clearBuiltinLinkProviders: vi.fn(),
     disableBuiltinMouseReporting: vi.fn(),
     setSelectionAbsolute: vi.fn(),
+    // Appearance path: no-ops here. Tests that assert the cell/theme application
+    // read the real helpers from ghosttyInternals.test.ts instead, because a mock
+    // that pretends to scale metrics would assert nothing about the renderer.
+    applyCellAdjust: vi.fn(),
+    applyTerminalTheme: vi.fn(),
   };
 }
 

@@ -1621,6 +1621,105 @@ func TestTerminalScrollbackLinesConfig(t *testing.T) {
 	})
 }
 
+func TestTerminalAppearanceConfig(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("defaults follow ghostty with breathing room", func(t *testing.T) {
+		setHomeTree(t, t.TempDir())
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.TerminalAppearanceSource != "ghostty" {
+			t.Fatalf("appearance source = %q, want ghostty", cfg.Ocode.TerminalAppearanceSource)
+		}
+		// Unset percentages resolve through the normalizers the API uses.
+		if got := NormalizeTerminalCellHeightPercent(cfg.Ocode.TerminalCellHeightPercent); got != 110 {
+			t.Fatalf("cell height percent = %v, want 110", got)
+		}
+		if got := NormalizeTerminalCellWidthPercent(cfg.Ocode.TerminalCellWidthPercent); got != 100 {
+			t.Fatalf("cell width percent = %v, want 100", got)
+		}
+		if DefaultTerminalFontSize != 12 {
+			t.Fatalf("DefaultTerminalFontSize = %d, want 12", DefaultTerminalFontSize)
+		}
+	})
+
+	t.Run("clamps loaded values", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			json  string
+			want  float64
+			which string
+		}{
+			{name: "height too small", json: `{"terminal_cell_height_percent":10}`, want: MinTerminalCellPercent, which: "height"},
+			{name: "height too large", json: `{"terminal_cell_height_percent":900}`, want: MaxTerminalCellPercent, which: "height"},
+			{name: "width too small", json: `{"terminal_cell_width_percent":10}`, want: MinTerminalCellPercent, which: "width"},
+			{name: "width too large", json: `{"terminal_cell_width_percent":900}`, want: MaxTerminalCellPercent, which: "width"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmp := t.TempDir()
+				setHomeTree(t, tmp)
+				dir := filepath.Join(tmp, ".config", "opencode")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "ocodeconfig.json"), []byte(tc.json), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var cfg Config
+				if err := LoadOcodeConfig(&cfg); err != nil {
+					t.Fatalf("LoadOcodeConfig failed: %v", err)
+				}
+				if tc.which == "height" && cfg.Ocode.TerminalCellHeightPercent != tc.want {
+					t.Fatalf("height = %v, want %v", cfg.Ocode.TerminalCellHeightPercent, tc.want)
+				}
+				if tc.which == "width" && cfg.Ocode.TerminalCellWidthPercent != tc.want {
+					t.Fatalf("width = %v, want %v", cfg.Ocode.TerminalCellWidthPercent, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("unknown source degrades to ghostty", func(t *testing.T) {
+		if got := NormalizeTerminalAppearanceSource("bogus"); got != "ghostty" {
+			t.Fatalf("NormalizeTerminalAppearanceSource(bogus) = %q", got)
+		}
+		if got := NormalizeTerminalAppearanceSource(" OCODE "); got != "ocode" {
+			t.Fatalf("NormalizeTerminalAppearanceSource(ocode) = %q", got)
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		setHomeTree(t, t.TempDir())
+		if err := SaveTerminalAppearanceSource("ocode"); err != nil {
+			t.Fatalf("SaveTerminalAppearanceSource failed: %v", err)
+		}
+		if err := SaveTerminalCellHeightPercent(125); err != nil {
+			t.Fatalf("SaveTerminalCellHeightPercent failed: %v", err)
+		}
+		if err := SaveTerminalCellWidthPercent(105); err != nil {
+			t.Fatalf("SaveTerminalCellWidthPercent failed: %v", err)
+		}
+		if err := SaveTerminalTheme("Bright Lights"); err != nil {
+			t.Fatalf("SaveTerminalTheme failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.TerminalAppearanceSource != "ocode" {
+			t.Fatalf("source = %q", cfg.Ocode.TerminalAppearanceSource)
+		}
+		if cfg.Ocode.TerminalCellHeightPercent != 125 || cfg.Ocode.TerminalCellWidthPercent != 105 {
+			t.Fatalf("cell percentages = %v/%v", cfg.Ocode.TerminalCellHeightPercent, cfg.Ocode.TerminalCellWidthPercent)
+		}
+		if cfg.Ocode.TerminalTheme != "Bright Lights" {
+			t.Fatalf("theme = %q", cfg.Ocode.TerminalTheme)
+		}
+	})
+}
+
 func TestThinkingBudgetLevelsAndIndex(t *testing.T) {
 	if len(ThinkingBudgetLevels) != len(ThinkingBudgetLabels) {
 		t.Fatalf("level/budget table length mismatch: %d budgets, %d labels", len(ThinkingBudgetLevels), len(ThinkingBudgetLabels))

@@ -565,6 +565,13 @@ request parked on a slow remote connect (`workspaceForPort`) pins a slot, and ~5
   browser slots and stalled all the others.
 - **`drop()` is a no-op while a connect is in flight.** Superseding it lets the next poller
   start a parallel connect, which relaunches the remote server and orphans the first.
+  The only exception is an **explicit user retry**: `dropForce` + `POST
+  /api/remote/{host}/connect?force=1` (also used by `restart`, which otherwise no-ops
+  mid-connect). The abandoned attempt runs detached and its own completion path
+  disconnects any late workspace. The SPA calls it only after its 10s stall guard
+  (`REMOTE_STALL_AFTER_MS`) fires, which is what turns "connecting…" forever into
+  Reconnect → Restart host. Every explicit action must also `resetRemoteHostGate(host)`,
+  or the 2-minute read backoff swallows the retry.
 - **A connect still in progress is HTTP 503 + `Retry-After` (stage `remote-connecting`,
   `errConnectInProgress`), never 502.** The SPA opens a 2-minute unreachable window on a 502
   (`isHostUnreachable`) and treats a 503 as a skipped read (`isHostConnecting`).

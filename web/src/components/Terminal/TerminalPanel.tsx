@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Copy,
@@ -17,20 +17,25 @@ import {
   Square,
   Loader2,
 } from "lucide-react";
-import { FitAddon, Terminal, type Ghostty } from "ghostty-web";
+import { FitAddon, Terminal, type Ghostty, type ITheme } from "ghostty-web";
 import { registerFileLinkProvider, registerUrlLinkProvider } from "./terminalLinkProvider";
 import { openExternalURL } from "../../lib/externalLinks";
-import { buildTerminalOptions, TERMINAL_THEME_DEFAULTS } from "./terminalOptions";
+import { buildTerminalOptions, DEFAULT_TERMINAL_THEME, serializeDefaultsFor } from "./terminalOptions";
 import { loadGhostty } from "./ghosttyRuntime";
 import { createTerminalStreamScanner, type TerminalStreamScanner } from "./terminalStream";
+import { writePreservingScrollback } from "./terminalScrollAnchor";
 import { serializeTerminalBuffer } from "./terminalSerialize";
 import { createTerminalSearch, type TerminalSearch } from "./terminalSearch";
 import {
+  applyCellAdjust,
+  applyTerminalTheme,
   clearBuiltinLinkProviders,
   disableBuiltinMouseReporting,
   disableBuiltinSelectionCopy,
   setSelectionAbsolute,
 } from "./ghosttyInternals";
+import type { CellAdjust, GhosttyKeybind } from "./terminalAppearance";
+import { actionForEvent, buildKeybindTable, type KeybindAction } from "./ghosttyKeybinds";
 import { attachMouseReporting, sendWheelReport } from "./terminalMouse";
 import { attachImeHygiene } from "./terminalImeHygiene";
 import TerminalFindBar from "./TerminalFindBar";
@@ -247,6 +252,19 @@ const TERMINAL_MOUSE_RESET =
 const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 
 /**
+ * Retries allowed when a remote project's history endpoint answers 502/503
+ * because the host is still connecting. The log is on the host and readable as
+ * soon as the tunnel comes up, so giving up on the first answer is what made a
+ * restored remote terminal show only the new shell's output. Backoff caps at
+ * REMOTE_HISTORY_RESTORE_RETRY_MAX_MS, which must stay BELOW
+ * TERMINAL_HISTORY_RESTORE_TIMEOUT_MS: each retry re-arms the restore timer, so
+ * a wait longer than the window would abort the restore instead of continuing it.
+ */
+const REMOTE_HISTORY_RESTORE_RETRIES = 8;
+const REMOTE_HISTORY_RESTORE_RETRY_BASE_MS = 1000;
+const REMOTE_HISTORY_RESTORE_RETRY_MAX_MS = 8000;
+
+/**
  * How often a terminal waiting out a remote host's retry window re-checks the
  * in-memory gate. The gate can close early (a status probe saw the host come
  * back), and waiting the whole multi-minute window would leave the panel dead
@@ -263,8 +281,18 @@ const REMOTE_HOST_RECHECK_MS = 10_000;
  * multi-MB result into localStorage — which is what drove the desktop
  * renderer past 3 GB and hung it. Replaying only the tail keeps the buffer
  * bounded by the user's scrollback; older output stays on disk.
+ *
+ * The bound is a SAFETY NET, not the memory control: the emulator's buffer is
+ * already capped by the user's scrollback setting, so replaying more of the log
+ * cannot grow it — it only decides how much of the available history the buffer
+ * fills. 2 MB cut real sessions short (ordinary Claude Code logs on this machine
+ * run 3-4 MB), which is the "only recent output" the user saw; 8 MB covers them
+ * while still refusing an unbounded TUI log. Raise it only with that distinction
+ * in mind, and keep the page size at the server's maximum so the extra bytes do
+ * not multiply round-trips (a remote restore proxies each page over SSH).
  */
-const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
+const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 8 * 1024 * 1024;
+const TERMINAL_HISTORY_RESTORE_PAGE_BYTES = 256 * 1024;
 
 /**
  * A single interactive terminal: one ghostty-web instance bridged to one
@@ -282,12 +310,61 @@ const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
  * used only when the endpoint/log is explicitly missing (404), so a restart
  * cannot silently restore only the local tail.
  */
+/** Applies a mapped Ghostty keybinding to the live terminal.
+ *
+ * Returns true (handled, skip ghostty-web and cancel the browser default),
+ * false (let the browser's default action run — ONLY for paste, where the
+ * native paste event is the single owner of clipboard text), or undefined when
+ * this helper cannot perform the action and the caller must.
+ */
+function runKeybindAction(term: Terminal, action: KeybindAction): boolean | undefined {
+  switch (action.kind) {
+    case "paste":
+      // The native `paste` event pastes; returning true would preventDefault the
+      // keydown and kill that event. Same contract as Cmd/Ctrl+V below.
+      return false;
+    case "scroll-pages":
+      term.scrollPages(action.pages);
+      return true;
+    case "scroll-top":
+      term.scrollToTop();
+      return true;
+    case "scroll-bottom":
+      term.scrollToBottom();
+      return true;
+    case "search":
+      return undefined; // the panel owns the find bar's state
+    default:
+      return undefined;
+  }
+}
+
+/** Ghostty's per-surface font zoom (increase/decrease/reset_font_size). Clamped
+ *  to the same range the server accepts, and ephemeral like Ghostty's: changing
+ *  the configured size resets it (see the font effect below). */
+const MIN_ZOOM_FONT_SIZE = 6;
+const MAX_ZOOM_FONT_SIZE = 48;
+
+function zoomTerminalFont(term: Terminal, delta: number, configuredSize: number): void {
+  const current = term.options.fontSize ?? configuredSize;
+  const next = Math.min(MAX_ZOOM_FONT_SIZE, Math.max(MIN_ZOOM_FONT_SIZE, delta === 0 ? configuredSize : current + delta));
+  if (next === current) return;
+  // A font change re-measures the cell to the new font's natural metrics, which
+  // drops the Ghostty cell adjustments: re-apply them before the fit.
+  term.options.fontSize = next;
+}
+
 export default function TerminalPanel({
   id,
   active,
   scrollbackLines,
   fontFamily,
   fontSize,
+  cellWidth = {},
+  cellHeight = {},
+  terminalTheme,
+  themeKey = "",
+  keybinds,
   projectPath,
   host,
 }: {
@@ -296,6 +373,16 @@ export default function TerminalPanel({
   scrollbackLines: number;
   fontFamily: string;
   fontSize: number;
+  /** Cell-size DELTAS (Ghostty adjust-cell-*); applied after open. Optional so
+   *  a panel rendered without appearance config behaves exactly as before. */
+  cellWidth?: CellAdjust;
+  cellHeight?: CellAdjust;
+  /** Resolved theme; construction uses it so a new terminal never needs a rebuild. */
+  terminalTheme?: ITheme;
+  /** Identity of `terminalTheme` for change detection (the object is rebuilt per response). */
+  themeKey?: string;
+  /** The user's Ghostty keybindings (only the mappable subset is applied). */
+  keybinds?: GhosttyKeybind[];
   projectPath: string;
   host?: string;
 }) {
@@ -367,6 +454,34 @@ export default function TerminalPanel({
   // started the load saw; the live-scrollback effect below only sees an open terminal.
   const scrollbackLinesRef = useRef(scrollbackLines);
   scrollbackLinesRef.current = scrollbackLines;
+  // Same reason as scrollbackLinesRef: the async mount (it awaits the wasm load)
+  // must build with the appearance current at build time, and the live effects
+  // below must read it without re-subscribing to objects that get a new identity
+  // on every /api/config/terminal response.
+  const cellWidthRef = useRef(cellWidth);
+  cellWidthRef.current = cellWidth;
+  const cellHeightRef = useRef(cellHeight);
+  cellHeightRef.current = cellHeight;
+  const themeRef = useRef(terminalTheme);
+  themeRef.current = terminalTheme;
+  // The default-colour pair the serializer compares cells against. Must track the
+  // ACTIVE theme: with another palette, "default foreground" is a different RGB
+  // and a stale pair would mark every plain cell as explicitly coloured.
+  const serializeDefaultsRef = useRef(serializeDefaultsFor(terminalTheme));
+  serializeDefaultsRef.current = serializeDefaultsFor(terminalTheme);
+  // Theme currently baked into the wasm terminal; set at construction (the theme
+  // is passed to the constructor) so the live effect never re-applies it.
+  const appliedThemeKeyRef = useRef(themeKey);
+  // Identity of the cell adjustment for the effect below: the API hands back a
+  // fresh object per response, so an object-identity dependency would re-apply
+  // the metrics on every unrelated config refresh.
+  const cellKey = `${cellWidth.percent ?? 0}:${cellWidth.px ?? 0}|${cellHeight.percent ?? 0}:${cellHeight.px ?? 0}`;
+  // The key handler is registered once at mount, so it reads the table from a
+  // ref. Key only on the serialized bindings: the array gets a new identity on
+  // every /api/config/terminal response.
+  const keybindTable = useMemo(() => buildKeybindTable(keybinds), [JSON.stringify(keybinds ?? [])]);
+  const keybindTableRef = useRef(keybindTable);
+  keybindTableRef.current = keybindTable;
   // False during the initial scrollback replay; flipped true once the live pty
   // socket opens so a BEL baked into restored history can't false-alert.
   const readyRef = useRef(false);
@@ -943,6 +1058,7 @@ export default function TerminalPanel({
         scrollbackLines: scrollbackLinesRef.current,
         fontFamily,
         fontSize,
+        theme: themeRef.current,
         savedBuffer,
         ghostty,
       }),
@@ -950,6 +1066,11 @@ export default function TerminalPanel({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(termHost);
+    // ghostty-web measures the cell from the font and nothing else; the Ghostty
+    // cell adjustments are applied to the renderer's metrics. Before fit() so
+    // the first column/row count already accounts for the taller/shorter cell.
+    applyCellAdjust(term, cellWidthRef.current, cellHeightRef.current);
+    appliedThemeKeyRef.current = themeKey;
     // Everything here throws on a ghostty-web internals mismatch; an opened terminal
     // must not outlive a failed setup (render loop, listeners, wasm terminal).
     let detachMouse: () => void;
@@ -999,6 +1120,32 @@ export default function TerminalPanel({
     // process the key.
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return false;
+      // The user's Ghostty keybindings run FIRST: they are an explicit
+      // configuration, so they beat ocode's built-in defaults. Only bindings the
+      // server parsed and this module could map are in the table.
+      const bound = actionForEvent(keybindTableRef.current, ev);
+      if (bound) {
+        if (bound.kind === "copy") {
+          // Consume even with no selection: a copy binding must never fall
+          // through to the  that Ctrl+C would otherwise send.
+          copyViaShortcut();
+          return true;
+        }
+        if (bound.kind === "font-size" || bound.kind === "font-size-reset") {
+          zoomTerminalFont(term, bound.kind === "font-size" ? bound.delta : 0, fontSize);
+          applyCellAdjust(term, cellWidthRef.current, cellHeightRef.current);
+          fitAndResize.current();
+          return true;
+        }
+        if (bound.kind === "search") {
+          const sel = term.getSelection();
+          if (sel && !findOpenRef.current) setFindQuery(sel);
+          setFindOpen(true);
+          return true;
+        }
+        const handled = runKeybindAction(term, bound);
+        if (handled !== undefined) return handled;
+      }
       // Cmd/Ctrl+C: copy when there is a selection (handled, so the keydown is
       // never converted to \x03). With no selection fall through so Ctrl+C
       // still sends SIGINT as usual.
@@ -1194,20 +1341,24 @@ export default function TerminalPanel({
     // every write instead of from a "write parsed" event (ghostty-web has none).
     // Never acknowledge queued bytes before they have been written.
     const snapshot = createTerminalSnapshot(() => {
-      saveTerminalBuffer(id, serializeTerminalBuffer(term, TERMINAL_THEME_DEFAULTS), term.cols, term.rows);
+      saveTerminalBuffer(id, serializeTerminalBuffer(term, serializeDefaultsRef.current), term.cols, term.rows);
     });
     snapshotRef.current = snapshot;
     // EVERY pty-originated write goes through here so the scanner sees it.
+    // ghostty-web's write() resets a scrolled-back viewport to the bottom, which
+    // would make a streaming program impossible to read; the helper anchors the
+    // viewport to the same content across the write (terminalScrollAnchor.ts).
     const writeOutput = (text: string) => {
       search.invalidate();
       scanner.scan(text);
-      term.write(text);
+      writePreservingScrollback(term, text);
       snapshot.markDirty();
     };
-    // Banners ocode writes itself: shown on screen, never scanned.
+    // Banners ocode writes itself: shown on screen, never scanned. Same guard:
+    // an ocode notice must not move a reader out of the scrollback either.
     const writeBanner = (text: string) => {
       search.invalidate();
-      term.write(text);
+      writePreservingScrollback(term, text);
       snapshot.markDirty();
     };
     // A full reset is RIS (ESC c), parsed in place, never term.reset():
@@ -1655,7 +1806,36 @@ export default function TerminalPanel({
     // The restore starts only once the host can be asked. A remote host inside
     // its retry window is not asked for history (the request would hang for the
     // whole ssh timeout), so the mount waits out the window and restores then.
-    const startRestore = () => {
+    //
+    // A remote host that is STILL CONNECTING answers 502/503 instead of the
+    // history pages. That is not a history failure: the log lives on the host
+    // and becomes readable as soon as the tunnel is up. Treating it like one
+    // (the old behaviour) reset the buffer and attached a fresh shell, so a
+    // desktop restart showed only the new shell's output and the user's
+    // scrollback looked lost. Retry with backoff instead, bounded by
+    // REMOTE_HISTORY_RESTORE_RETRIES.
+    let restoreAttempt = 0;
+    let restoreRetryTimer: number | null = null;
+    const clearRestoreRetry = () => {
+      if (restoreRetryTimer !== null) {
+        clearTimeout(restoreRetryTimer);
+        restoreRetryTimer = null;
+      }
+    };
+    let restoreBannerWritten = false;
+    const hostStillConnecting = (err: unknown): boolean => {
+      if (!host) return false;
+      const status = err instanceof TerminalHistoryError ? err.status : undefined;
+      return status === 502 || status === 503;
+    };
+
+    const attemptRestore = () => {
+      // A retry starts from byte zero, so drop the partial replay (and the
+      // "waiting" banner) before the fresh pages land.
+      if (restoreBannerWritten) {
+        resetTerminal();
+        restoreBannerWritten = false;
+      }
       armRestoreTimeout();
 
       void restoreTerminalHistory({
@@ -1664,6 +1844,7 @@ export default function TerminalPanel({
         host,
         decoder: terminalDecoder,
         maxBytes: TERMINAL_HISTORY_RESTORE_MAX_BYTES,
+        pageSize: TERMINAL_HISTORY_RESTORE_PAGE_BYTES,
         signal: restoreController.signal,
         onText: (text) => {
           if (restoreCancelled || restoreController.signal.aborted) return;
@@ -1704,6 +1885,34 @@ export default function TerminalPanel({
           restoreTimer = null;
         }
         if (restoreCancelled || restoreController.signal.aborted) return;
+
+        if (hostStillConnecting(err) && restoreAttempt < REMOTE_HISTORY_RESTORE_RETRIES) {
+          restoreAttempt += 1;
+          // Drop the partial replay: the retry restarts at byte zero, and
+          // leaving the first attempt's pages would duplicate the log.
+          if (serverHistoryPartial) {
+            resetTerminal();
+            serverHistoryPartial = false;
+          }
+          if (!restoreBannerWritten) {
+            writeBanner(
+              "\r\n\x1b[2m[waiting for the remote host to restore terminal history…]\x1b[0m\r\n",
+            );
+            restoreBannerWritten = true;
+          }
+          const delay = Math.min(
+            REMOTE_HISTORY_RESTORE_RETRY_MAX_MS,
+            REMOTE_HISTORY_RESTORE_RETRY_BASE_MS * 2 ** (restoreAttempt - 1),
+          );
+          restoreRetryTimer = window.setTimeout(() => {
+            restoreRetryTimer = null;
+            if (restoreCancelled || restoreController.signal.aborted) return;
+            restoreSettled = false;
+            attemptRestore();
+          }, delay);
+          return;
+        }
+
         // Do not leave a partial server replay on screen before attaching
         // without a cursor. A resumed shell will send its capped replay, while
         // a fresh shell starts from a clean buffer; either way this avoids
@@ -1716,13 +1925,30 @@ export default function TerminalPanel({
       });
     };
 
+    // Replaying the log BEFORE the first stable fit() parses it at the saved
+    // geometry and then reflows it when the real fit lands, which is what
+    // leaves a clipped or duplicated bottom row after a desktop restart. Wait
+    // for the fit when the panel has layout; a hidden panel has none (and
+    // nothing on screen to garble), so the saved geometry is the best
+    // available and the restore must not wait for a fit that cannot happen.
+    const RESTORE_FIT_WAIT_FRAMES = 30;
+    const startRestoreWhenSized = (frame = 0) => {
+      if (restoreCancelled || restoreController.signal.aborted) return;
+      const el = containerRef.current;
+      const hasLayout = !!el && el.clientWidth > 0 && el.clientHeight > 0;
+      if (hasLayout && !initialFitDoneRef.current && frame < RESTORE_FIT_WAIT_FRAMES) {
+        requestAnimationFrame(() => startRestoreWhenSized(frame + 1));
+        return;
+      }
+      attemptRestore();
+    };
     const waitThenRestore = () => {
       const waitMs = host ? remoteHostRetryInMs(host) : 0;
       if (waitMs > 0) {
         waitForRemoteHost(waitMs, waitThenRestore);
         return;
       }
-      startRestore();
+      startRestoreWhenSized();
     };
     waitThenRestore();
 
@@ -1759,6 +1985,7 @@ export default function TerminalPanel({
       disposed = true;
       restoreCancelled = true;
       restoreController.abort();
+      clearRestoreRetry();
       if (restoreTimer !== null) {
         clearTimeout(restoreTimer);
         restoreTimer = null;
@@ -1858,7 +2085,7 @@ export default function TerminalPanel({
   useEffect(() => {
     const term = termRef.current;
     if (!term || term.options.scrollback === scrollbackLines) return;
-    const text = serializeTerminalBuffer(term, TERMINAL_THEME_DEFAULTS);
+    const text = serializeTerminalBuffer(term, serializeDefaultsRef.current);
     term.options.scrollback = scrollbackLines;
     term.reset();
     term.write(text);
@@ -1869,13 +2096,48 @@ export default function TerminalPanel({
 
   // Apply font changes to the live terminal in place instead of tearing down
   // the session (which would kill the pty/websocket) whenever settings change.
+  // The cell adjustment is re-applied because ghostty-web's font change resets
+  // the metrics to the new font's natural cell.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     term.options.fontFamily = fontFamily;
     term.options.fontSize = fontSize;
+    applyCellAdjust(term, cellWidthRef.current, cellHeightRef.current);
     fitAndResize.current();
   }, [fontFamily, fontSize]);
+
+  // Apply a changed cell adjustment (Ghostty's adjust-cell-width/-height, or the
+  // ocode "extra spacing" default) without rebuilding the session.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    applyCellAdjust(term, cellWidthRef.current, cellHeightRef.current);
+    fitAndResize.current();
+  }, [cellKey]);
+
+  // Apply a changed theme. The wasm terminal's colour palette is fixed at
+  // construction and has no setter, so the only correct path is the same
+  // serialize -> reset -> replay the scrollback rebuild uses. Theme changes come
+  // from Settings (rare), and the accepted losses are identical: terminal modes,
+  // the alternate screen, the selection and the link cache. New terminals get
+  // the theme at construction and never take this path.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || appliedThemeKeyRef.current === themeKey) return;
+    appliedThemeKeyRef.current = themeKey;
+    // A switch BACK to "no theme" (Ghostty theme -> ocode settings without a
+    // theme) must repaint with ocode's own palette; returning early there would
+    // leave the Ghostty colours on screen until the panel remounted.
+    const next = themeRef.current ?? DEFAULT_TERMINAL_THEME;
+    const text = serializeTerminalBuffer(term, serializeDefaultsRef.current);
+    applyTerminalTheme(term, next);
+    term.reset();
+    term.write(text);
+    term.clearSelection();
+    searchRef.current?.invalidate();
+    snapshotRef.current?.markDirty();
+  }, [themeKey]);
 
   // Re-fit when the tab comes back to the foreground: any resize that happened
   // while hidden was skipped because the container had no layout.

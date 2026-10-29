@@ -1,4 +1,6 @@
-import type { Terminal } from "ghostty-web";
+import type { ITheme, Terminal } from "ghostty-web";
+import type { CellAdjust } from "./terminalAppearance";
+import { scaleCellMetrics } from "./terminalAppearance";
 
 // The ONLY file allowed to touch private ghostty-web members.
 //
@@ -131,4 +133,82 @@ export function setSelectionAbsolute(
   sm.selectionEnd = { col: endCol, absoluteRow: endAbsRow } satisfies AbsPos;
   sm.requestRender();
   emitter.fire();
+}
+
+
+/**
+ * Applies Ghostty-style cell-size deltas (adjust-cell-width/-height) to an OPEN
+ * terminal.
+ *
+ * ghostty-web has no such option: the cell is whatever the font measures. The
+ * renderer's metrics are the only lever, and FitAddon/mouse reporting/selection
+ * all read them, so scaling them keeps every coordinate system consistent.
+ *
+ * `remeasureFont()` first is load-bearing: it restores the NATURAL metrics for
+ * the current font, so calling this twice does not compound the delta (which is
+ * exactly what would happen after a font-size change).
+ */
+export function applyCellAdjust(
+  term: Terminal,
+  widthAdjust: CellAdjust | undefined,
+  heightAdjust: CellAdjust | undefined,
+): void {
+  const renderer = term.renderer;
+  // No renderer means open() has not run (or the terminal is disposed): nothing
+  // to adjust, and no internals contract to check.
+  if (!renderer) return;
+  const raw = renderer as unknown as Obj & { remeasureFont?: unknown; metrics?: unknown };
+  if (typeof raw.remeasureFont !== "function") {
+    throw new Error("ghostty-web internals changed: CanvasRenderer.remeasureFont is not a function");
+  }
+  raw.remeasureFont();
+  raw.metrics = scaleCellMetrics(renderer.getMetrics(), widthAdjust, heightAdjust);
+  // Re-sizes the canvas from the new metrics (its own width/height math), then
+  // repaints: a metrics change alone leaves a stale, wrongly-spaced frame.
+  renderer.resize(term.cols, term.rows);
+  redrawTerminal(term);
+}
+
+/** Repaints the whole viewport. Needed after any metrics/theme change, because
+ *  the render loop only repaints rows the wasm buffer reports as dirty. */
+export function redrawTerminal(term: Terminal): void {
+  const renderer = term.renderer;
+  const buffer = term.wasmTerm;
+  if (!renderer || !buffer) return;
+  type Renderable = Parameters<typeof renderer.render>[0];
+  renderer.render(buffer as unknown as Renderable, true, term.viewportY, term);
+}
+
+/**
+ * Applies a theme to an OPEN terminal.
+ *
+ * Two things must happen: the renderer's colours (immediate) and
+ * `options.theme`, which is what `reset()` feeds to the wasm terminal's
+ * palette. The wasm palette is fixed at construction, so the CALLER must
+ * rebuild the terminal after this (serialize -> reset -> replay): updating only
+ * the renderer leaves ANSI-coloured cells on the old palette.
+ *
+ * The assignment deliberately silences ghostty-web's own
+ * "theme changes after open() are not yet fully supported" warning: it is true
+ * of ghostty-web's handler, which does nothing, and false of this path, which
+ * rebuilds the terminal. Suppression is synchronous and scoped to the setter.
+ */
+export function applyTerminalTheme(term: Terminal, theme: ITheme): void {
+  if (!term.renderer) return;
+  term.renderer.setTheme(theme);
+  const previousWarn = console.warn;
+  console.warn = () => {};
+  try {
+    (term.options as unknown as { theme: ITheme }).theme = theme;
+  } finally {
+    console.warn = previousWarn;
+  }
+}
+
+/** The theme currently in effect, read back from the renderer (which merges
+ *  every value onto ghostty-web's defaults). */
+export function currentTerminalTheme(term: Terminal): ITheme | undefined {
+  const renderer = term.renderer as unknown as Obj | undefined;
+  if (!renderer || !isObj(renderer.theme)) return undefined;
+  return renderer.theme as ITheme;
 }

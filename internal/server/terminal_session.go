@@ -110,6 +110,10 @@ type terminalSession struct {
 	ptmx      *os.File
 	detachTTL time.Duration
 	onExit    func(*terminalSession)
+	// onKill, when set, runs on every kill() — even after the local process
+	// exited — to release state outside it (a remote ssh terminal's tmux session
+	// outlives its ssh).
+	onKill func()
 
 	// startedAt is when the shell was spawned; the list endpoint sorts by it.
 	// title is the last OSC 0/2 window title the shell advertised (parsed from
@@ -534,6 +538,9 @@ func (s *terminalSession) detachLocked(ws *websocket.Conn) {
 // the pty closing and runs exit, which is what releases the socket and
 // registry entries — so kill never has to race with it.
 func (s *terminalSession) kill() {
+	if s.onKill != nil {
+		s.onKill()
+	}
 	s.mu.Lock()
 	if s.detachTimer != nil {
 		s.detachTimer.Stop()

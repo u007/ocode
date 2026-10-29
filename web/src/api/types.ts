@@ -1446,6 +1446,10 @@ export interface RemoteHostStatus {
   local_version: string;
   outdated: boolean;
   pid: number;
+  /** True while a connect attempt is running for this connection. */
+  connecting?: boolean;
+  /** Unix ms start of that attempt, absent when nothing is connecting. */
+  connect_started_at?: number;
 }
 
 /** One live terminal session on a remote host, from GET /api/terminal. */

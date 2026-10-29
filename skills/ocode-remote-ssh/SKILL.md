@@ -159,6 +159,54 @@ Fixed in-tree; each has a regression test (page in §9):
 3. **Registration failure must call `remoteHosts.drop(host)`** — otherwise a
    dead cached workspace makes every later request 502 until restart.
 
+### A WEDGED connect needs an escape hatch (stall guard)
+
+The connect runs in the background for up to `remoteConnectTimeout` (10 min) and
+every read gets `503 stage=remote-connecting`, which the client retries forever
+by design. Nothing used to escalate, so a connect that hung mid-provision left
+the UI saying "connecting…" for ten minutes. The pieces:
+
+- **`remoteHostStatus` carries `connecting` + `connect_started_at`** (unix ms).
+  Without them the client cannot tell "3s in" from "wedged", because 503 is
+  deliberately indistinguishable from progress.
+- **`remoteHosts.dropForce(host, port)`** evicts a connection EVEN IF a connect
+  is in flight. Plain `drop` refuses that on purpose (a superseded attempt can
+  relaunch the remote server and orphan the first), so only an explicit user
+  retry may force it. The abandoned `runConnect` keeps running detached; its
+  completion path compares `reg.byConn[key]` with its own entry and disconnects
+  any late workspace, so nothing leaks.
+- **`POST /api/remote/{host}/connect?force=1`** clears the failed-entry cooldown,
+  force-drops, and starts a fresh attempt. `restart` also force-drops: mid-connect
+  it has no pid to kill, so before this a restart was a silent no-op that
+  re-joined the same wedged attempt.
+- **Client**: `useRemoteHostStatus` arms a 10s stall timer
+  (`REMOTE_STALL_AFTER_MS`) while an attempt is in flight, offering **Reconnect**
+  (forced) and, if a retry ALSO stalls or fails, **Restart host** (kills the
+  host's turns and terminals). Every explicit action calls
+  `resetRemoteHostGate(host)`, or the client's 2-minute read backoff would skip
+  the very reads the retry needs.
+- **The health probe must produce an ANSWER, not an error.** `probeServer`
+  (`internal/remote/serve.go`) runs through `Transport.Exec`, which returns an
+  error for EVERY non-zero *remote* exit — so curl's exit 7 (connection
+  refused: the ordinary "live pid, nothing listening") used to be reported as a
+  transport failure, making the actionable "running but not answering
+  /api/health; restart it explicitly" unreachable. Classify with
+  `transportFailed` (exit 255 or `<= 0`, i.e. no verdict) and treat any other
+  non-200 as the wedged ANSWER. The command carries `-m 5 --connect-timeout 3`
+  so a server that accepts TCP and never replies cannot hold the probe until the
+  10-minute backstop, and prints `no-curl` when the host has no usable curl —
+  that is UNMEASURABLE, not wedged, so the live server is reused; otherwise
+  every reconnect on a curl-less host fails forever (pid alive ⇒ never
+  relaunched, health never passes).
+- Regression: `remote_hosts_stall_test.go` (`TestStatusReportsInFlightConnect`,
+  `TestDropForceSupersedesInFlightConnect`, `TestRestartSupersedesInFlightConnect`,
+  the `?force=1` lifecycle test), `useRemoteHostStatus.test.tsx`,
+  `RemoteProjectStatus.test.tsx`; and `serve_test.go`'s
+  `TestEnsureRemoteServerHealthProbeRemoteExitIsAnAnswer`,
+  `TestEnsureRemoteServerWithoutCurlReusesLiveServer`,
+  `TestEnsureRemoteServerSignaledPidProbeDoesNotLaunch`,
+  `TestHealthProbeCmdBoundsTheProbeAndDetectsMissingCurl`.
+
 `HandleRemoteProxy` resolves the saved project's `RemotePort` **server-side** and
 connects via `workspaceForPort(host, projectPath, remotePort)`. The web client
 sends **no** `host=`/`port=` query params for terminal history or the WS.

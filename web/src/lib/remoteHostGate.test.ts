@@ -7,6 +7,7 @@ import {
   noteRemoteHostReachable,
   noteRemoteHostUnreachable,
   periodicRemoteRead,
+  resetRemoteHostGate,
   REMOTE_HOST_RETRY_MS,
   remoteHostRetryInMs,
   withRemoteRead,
@@ -127,6 +128,18 @@ describe("remoteHostRetryInMs and noteRemoteHostReachable", () => {
     expect(remoteHostRetryInMs("dev@box")).toBeGreaterThan(0);
 
     noteRemoteHostReachable("dev@box");
+    expect(remoteHostRetryInMs("dev@box")).toBe(0);
+    await expect(periodicRemoteRead("dev@box", "/proj", async () => "ok")).resolves.toEqual({ value: "ok" });
+  });
+
+  // A user-initiated retry must actually ask the host again. Leaving the window
+  // armed would skip every read that follows for two minutes, so the retry
+  // would look like it did nothing — the symptom the stall prompt exists to end.
+  it("clears an open window for an explicit user retry", async () => {
+    noteRemoteHostUnreachable("dev@box");
+    expect(remoteHostRetryInMs("dev@box")).toBeGreaterThan(0);
+
+    resetRemoteHostGate("dev@box");
     expect(remoteHostRetryInMs("dev@box")).toBe(0);
     await expect(periodicRemoteRead("dev@box", "/proj", async () => "ok")).resolves.toEqual({ value: "ok" });
   });

@@ -44,6 +44,12 @@ type remoteHostWorkspace interface {
 }
 
 // remoteHostStatus is the JSON body of the remote host lifecycle endpoints.
+//
+// Connecting/ConnectStartedAt are what lets the SPA tell "the connect has been
+// running for 3s" from "it has been wedged for four minutes". Without them the
+// client can only observe 503 stage=remote-connecting on every read, which is
+// deliberately indistinguishable from progress (and retried forever), so a
+// stalled connect has no escalation point and the UI just says "connecting…".
 type remoteHostStatus struct {
 	Host         string `json:"host"`
 	Connected    bool   `json:"connected"`
@@ -51,6 +57,13 @@ type remoteHostStatus struct {
 	LocalVersion string `json:"local_version"`
 	Outdated     bool   `json:"outdated"`
 	PID          int    `json:"pid"`
+	// Connecting is true while a connect attempt is in flight for this
+	// connection (a failed or superseded attempt is not "connecting").
+	Connecting bool `json:"connecting"`
+	// ConnectStartedAt is the Unix-millisecond start of the in-flight attempt,
+	// 0 when nothing is connecting. The client measures elapsed time from it
+	// rather than from its own mount, so a reload does not restart the clock.
+	ConnectStartedAt int64 `json:"connect_started_at,omitempty"`
 }
 
 // remoteHostStageError tags a lifecycle failure with the stage that failed so
@@ -92,6 +105,10 @@ type remoteHostEntry struct {
 	failed     bool  // connect failed; entry is kept until remoteConnectCooldown elapses
 	connectErr error // the error from a failed connect attempt
 	failedAt   time.Time
+	// startedAt is when this attempt began. status() reports it while the
+	// attempt is in flight so the client can distinguish progress from a wedge
+	// instead of treating every 503 as "still connecting" forever.
+	startedAt time.Time
 	// proxy is the cached reverse proxy built once per connect. The ErrorHandler
 	// calls drop(host) on round-trip failure so the next request reconnects.
 	proxy *httputil.ReverseProxy
@@ -426,6 +443,12 @@ func (reg *remoteHostRegistry) status(host string, port int) remoteHostStatus {
 			st.Version = ws.Version
 			st.Outdated = ws.Outdated
 			st.PID = ws.PID
+		} else if !e.failed && !e.startedAt.IsZero() {
+			// An attempt is in flight. A failed attempt is NOT connecting: it
+			// is being remembered for the cooldown, and reporting it as
+			// connecting would keep a dead host looking like progress.
+			st.Connecting = true
+			st.ConnectStartedAt = e.startedAt.UnixMilli()
 		}
 		e.mu.Unlock()
 	}
@@ -483,7 +506,11 @@ func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostS
 	if transport != nil && pid > 0 {
 		killErr = remote.KillServer(transport, pid, slot)
 	}
-	reg.drop(host, port)
+	// Force: a restart requested while a connect is still running must not be a
+	// no-op. killErr stays nil in that case (there is no pid yet), so without
+	// the force the handler would drop nothing, reconnect into the SAME wedged
+	// attempt and report success-shaped status while the host never comes up.
+	reg.dropForce(host, port)
 	if killErr != nil {
 		return reg.status(host, port), &remoteHostStageError{Stage: "remote-kill", Err: killErr}
 	}
@@ -611,7 +638,7 @@ func (reg *remoteHostRegistry) getOrCreateEntry(key string) (*remoteHostEntry, b
 	if e, ok := reg.byConn[key]; ok {
 		return e, false
 	}
-	e := &remoteHostEntry{}
+	e := &remoteHostEntry{startedAt: time.Now()}
 	e.connecting.L = &e.mu
 	reg.byConn[key] = e
 	return e, true
@@ -625,10 +652,31 @@ func (reg *remoteHostRegistry) getOrCreateEntry(key string) (*remoteHostEntry, b
 // It is deliberately scoped to a single port: another port on the same host is
 // a separate tunnel and must not be torn down because one connection failed.
 func (reg *remoteHostRegistry) drop(host string, port int) {
+	reg.dropMaybe(host, port, false)
+}
+
+// dropForce evicts a connection EVEN IF a connect is still running for it.
+//
+// A normal drop refuses that on purpose: superseding an in-flight connect lets
+// the next poller start a parallel attempt, which can relaunch the remote
+// server and orphan the first. That is the right default for background
+// polling, but it also means a connect that has genuinely wedged can only be
+// cleared by waiting out remoteConnectTimeout. An EXPLICIT user retry after the
+// stall guard fires is the one caller allowed to override it.
+//
+// The in-flight attempt is not cancelled — it keeps running detached. Its
+// completion path compares reg.byConn[key] with its own entry and disconnects
+// any late workspace it produces, so nothing leaks. registeredPaths is cleared
+// so the new attempt re-registers the project on the fresh server.
+func (reg *remoteHostRegistry) dropForce(host string, port int) {
+	reg.dropMaybe(host, port, true)
+}
+
+func (reg *remoteHostRegistry) dropMaybe(host string, port int, force bool) {
 	key := remoteConnectionKey(host, port)
 	reg.mu.Lock()
 	e, ok := reg.byConn[key]
-	if ok {
+	if ok && !force {
 		e.mu.Lock()
 		inFlight := !e.connected && !e.failed
 		e.mu.Unlock()

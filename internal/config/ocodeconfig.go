@@ -1080,7 +1080,23 @@ type OcodeConfig struct {
 	TerminalFontSize int
 	// TerminalShell overrides which shell binary the interactive terminal
 	// starts. Empty means use $SHELL, falling back to /bin/sh.
-	TerminalShell        string
+	TerminalShell string
+	// TerminalAppearanceSource selects where the interactive terminal's font
+	// and colours come from: "ghostty" (default) follows the user's Ghostty
+	// configuration on the machine running the server; "ocode" uses the
+	// Terminal* settings below. A missing Ghostty config always falls back to
+	// the ocode settings, and the API reports which one actually applied.
+	TerminalAppearanceSource string
+	// TerminalCellWidthPercent / TerminalCellHeightPercent are cell-size DELTAS
+	// applied when TerminalAppearanceSource is "ocode", matching Ghostty's
+	// adjust-cell-width / adjust-cell-height: 100 means "no change", 110 adds
+	// 10% to the measured cell. Zero means use the defaults.
+	TerminalCellWidthPercent  float64
+	TerminalCellHeightPercent float64
+	// TerminalTheme is a Ghostty theme name applied when the source is "ocode"
+	// (resolved from the same theme directories Ghostty uses). Empty keeps
+	// ocode's built-in terminal palette.
+	TerminalTheme        string
 	ExtraAllowedPaths    []string
 	Editor               string
 	EditorMode           string
@@ -1206,9 +1222,23 @@ const (
 	MinTerminalScrollbackLines     = 100
 	MaxTerminalScrollbackLines     = 100000
 
-	DefaultTerminalFontSize = 13
+	// DefaultTerminalFontSize is one point smaller than the pre-ghostty-web
+	// default (13): with the default 10% cell-height increase the visual size
+	// stays familiar while rows breathe. Users with an explicit
+	// terminal_font_size are unaffected.
+	DefaultTerminalFontSize = 12
 	MinTerminalFontSize     = 8
 	MaxTerminalFontSize     = 32
+	// Terminal appearance defaults for the "ocode" source. Percentages are
+	// deltas on the measured cell (100 = unchanged), like Ghostty's
+	// adjust-cell-* options.
+	DefaultTerminalCellWidthPercent  = 100.0
+	DefaultTerminalCellHeightPercent = 110.0
+	MinTerminalCellPercent           = 50.0
+	MaxTerminalCellPercent           = 300.0
+	// DefaultTerminalAppearanceSource follows the user's Ghostty config when
+	// one exists; "ocode" pins the settings below instead.
+	DefaultTerminalAppearanceSource = "ghostty"
 )
 
 // NormalizeTerminalFontSize applies the terminal font size default and bounds
@@ -1224,6 +1254,43 @@ func NormalizeTerminalFontSize(size int) int {
 		return MaxTerminalFontSize
 	}
 	return size
+}
+
+// NormalizeTerminalAppearanceSource maps the stored appearance source to a
+// known value. Only "ocode" pins the settings below; everything else follows
+// the Ghostty configuration (the default), so a corrupt value degrades to the
+// documented default instead of disabling both paths.
+func NormalizeTerminalAppearanceSource(source string) string {
+	if strings.EqualFold(strings.TrimSpace(source), "ocode") {
+		return "ocode"
+	}
+	return DefaultTerminalAppearanceSource
+}
+
+// NormalizeTerminalCellWidthPercent applies the "no change" default and bounds
+// a width delta. 0 means "unset" because percentages are deltas: an explicit
+// 0 is meaningless here.
+func NormalizeTerminalCellWidthPercent(percent float64) float64 {
+	return normalizeTerminalCellPercent(percent, DefaultTerminalCellWidthPercent)
+}
+
+// NormalizeTerminalCellHeightPercent applies the default cell-height delta
+// (breathing room between rows) and bounds it.
+func NormalizeTerminalCellHeightPercent(percent float64) float64 {
+	return normalizeTerminalCellPercent(percent, DefaultTerminalCellHeightPercent)
+}
+
+func normalizeTerminalCellPercent(percent, fallback float64) float64 {
+	if percent == 0 {
+		return fallback
+	}
+	if percent < MinTerminalCellPercent {
+		return MinTerminalCellPercent
+	}
+	if percent > MaxTerminalCellPercent {
+		return MaxTerminalCellPercent
+	}
+	return percent
 }
 
 // NormalizeTerminalScrollbackLines applies the terminal scrollback default and
@@ -1498,6 +1565,10 @@ type ocodeConfigFile struct {
 	TerminalFontFamily         string                      `json:"terminal_font_family,omitempty"`
 	TerminalFontSize           *int                        `json:"terminal_font_size,omitempty"`
 	TerminalShell              string                      `json:"terminal_shell,omitempty"`
+	TerminalAppearanceSource   string                      `json:"terminal_appearance_source,omitempty"`
+	TerminalCellWidthPercent   *float64                    `json:"terminal_cell_width_percent,omitempty"`
+	TerminalCellHeightPercent  *float64                    `json:"terminal_cell_height_percent,omitempty"`
+	TerminalTheme              string                      `json:"terminal_theme,omitempty"`
 	ExtraAllowedPaths          []string                    `json:"extra_allowed_paths,omitempty"`
 	Editor                     string                      `json:"editor,omitempty"`
 	EditorMode                 string                      `json:"editor_mode,omitempty"`
@@ -1600,25 +1671,26 @@ func defaultOcodeConfig() OcodeConfig {
 		ContextModelEnabled:       false,
 		// Summarising before speech is the DEFAULT experience (listen instead of
 		// reading a wall of code); every sibling gate above defaults false.
-		SpeechSummaryEnabled:    true,
-		Security:                defaultSecurityConfig(),
-		Discovery:               defaultDiscoveryConfig(),
-		DocSearch:               defaultJudgeModelConfig(),
-		Search:                  defaultJudgeModelConfig(),
-		NetworkGuard:            defaultJudgeModelConfig(),
-		ContentGuard:            defaultJudgeModelConfig(),
-		Goal:                    defaultJudgeModelConfig(),
-		RecapTimeoutSeconds:     120,
-		UndoMaxAgeDelta:         10,
-		MaxConcurrentAgents:     2,
-		FakeAgent:               DefaultFakeAgent,
-		TerminalScrollbackLines: DefaultTerminalScrollbackLines,
-		TUI:                     defaultTUIConfig(),
-		Ocr:                     ocr.DefaultOcrConfig(),
-		Extra:                   make(map[string]json.RawMessage),
-		ImageGen:                DefaultImageGenConfig(),
-		ComputerUse:             DefaultComputerUseConfig(),
-		SystemPermissions:       sysperm.DefaultConfig(),
+		SpeechSummaryEnabled:     true,
+		Security:                 defaultSecurityConfig(),
+		Discovery:                defaultDiscoveryConfig(),
+		DocSearch:                defaultJudgeModelConfig(),
+		Search:                   defaultJudgeModelConfig(),
+		NetworkGuard:             defaultJudgeModelConfig(),
+		ContentGuard:             defaultJudgeModelConfig(),
+		Goal:                     defaultJudgeModelConfig(),
+		RecapTimeoutSeconds:      120,
+		UndoMaxAgeDelta:          10,
+		MaxConcurrentAgents:      2,
+		FakeAgent:                DefaultFakeAgent,
+		TerminalScrollbackLines:  DefaultTerminalScrollbackLines,
+		TerminalAppearanceSource: DefaultTerminalAppearanceSource,
+		TUI:                      defaultTUIConfig(),
+		Ocr:                      ocr.DefaultOcrConfig(),
+		Extra:                    make(map[string]json.RawMessage),
+		ImageGen:                 DefaultImageGenConfig(),
+		ComputerUse:              DefaultComputerUseConfig(),
+		SystemPermissions:        sysperm.DefaultConfig(),
 	}
 }
 
@@ -2244,6 +2316,26 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["terminal_shell"]; ok {
 		cfg.TerminalShell = file.TerminalShell
 		delete(raw, "terminal_shell")
+	}
+
+	if _, ok := raw["terminal_appearance_source"]; ok {
+		cfg.TerminalAppearanceSource = NormalizeTerminalAppearanceSource(file.TerminalAppearanceSource)
+		delete(raw, "terminal_appearance_source")
+	}
+
+	if _, ok := raw["terminal_cell_width_percent"]; ok && file.TerminalCellWidthPercent != nil {
+		cfg.TerminalCellWidthPercent = NormalizeTerminalCellWidthPercent(*file.TerminalCellWidthPercent)
+		delete(raw, "terminal_cell_width_percent")
+	}
+
+	if _, ok := raw["terminal_cell_height_percent"]; ok && file.TerminalCellHeightPercent != nil {
+		cfg.TerminalCellHeightPercent = NormalizeTerminalCellHeightPercent(*file.TerminalCellHeightPercent)
+		delete(raw, "terminal_cell_height_percent")
+	}
+
+	if _, ok := raw["terminal_theme"]; ok {
+		cfg.TerminalTheme = strings.TrimSpace(file.TerminalTheme)
+		delete(raw, "terminal_theme")
 	}
 
 	if _, ok := raw["doc_prompt_enabled"]; ok {
@@ -3049,6 +3141,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.TerminalShell != "" {
 		payload["terminal_shell"] = cfg.TerminalShell
+	}
+	payload["terminal_appearance_source"] = NormalizeTerminalAppearanceSource(cfg.TerminalAppearanceSource)
+	payload["terminal_cell_width_percent"] = NormalizeTerminalCellWidthPercent(cfg.TerminalCellWidthPercent)
+	payload["terminal_cell_height_percent"] = NormalizeTerminalCellHeightPercent(cfg.TerminalCellHeightPercent)
+	if cfg.TerminalTheme != "" {
+		payload["terminal_theme"] = cfg.TerminalTheme
 	}
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
@@ -4044,6 +4142,42 @@ func SaveTerminalFontSize(fontSize int) error {
 func SaveTerminalShell(shell string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.TerminalShell = strings.TrimSpace(shell)
+		return nil
+	})
+}
+
+// SaveTerminalAppearanceSource persists whether the terminal follows the
+// user's Ghostty configuration ("ghostty") or ocode's own settings ("ocode").
+func SaveTerminalAppearanceSource(source string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalAppearanceSource = NormalizeTerminalAppearanceSource(source)
+		return nil
+	})
+}
+
+// SaveTerminalCellWidthPercent persists the cell-width delta for the "ocode"
+// appearance source (100 = the font's natural width).
+func SaveTerminalCellWidthPercent(percent float64) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalCellWidthPercent = NormalizeTerminalCellWidthPercent(percent)
+		return nil
+	})
+}
+
+// SaveTerminalCellHeightPercent persists the cell-height delta for the "ocode"
+// appearance source (100 = the font's natural height).
+func SaveTerminalCellHeightPercent(percent float64) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalCellHeightPercent = NormalizeTerminalCellHeightPercent(percent)
+		return nil
+	})
+}
+
+// SaveTerminalTheme persists the Ghostty theme name used when the "ocode"
+// appearance source is selected. An empty name keeps ocode's built-in palette.
+func SaveTerminalTheme(name string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalTheme = strings.TrimSpace(name)
 		return nil
 	})
 }

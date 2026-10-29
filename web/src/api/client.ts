@@ -2713,6 +2713,12 @@ export const api = {
       work_dir: string;
       /** Present and true when the response describes a remote host. */
       remote?: boolean;
+      /** Resolved font/colour source. Absent for a remote host: appearance is
+       *  always answered by the LOCAL server (see terminalAppearance.ts). */
+      appearance?: import("@/components/Terminal/terminalAppearance").TerminalAppearance;
+      /** What was read from this machine's Ghostty config. */
+      ghostty?: import("@/components/Terminal/terminalAppearance").GhosttyReport;
+      appearance_scope?: "local" | "remote";
     }>(`/api/config/terminal${query ? `?${query}` : ""}`);
   },
   setTerminalScrollbackLines: (scrollback_lines: number) =>
@@ -2732,6 +2738,26 @@ export const api = {
     fetchJSON<{ shell: string }>("/api/config/terminal", {
       method: "PUT",
       body: JSON.stringify({ shell }),
+    }),
+  // Appearance is a whole block: `appearance_source` picks either the resolved
+  // Ghostty configuration or ocode's own font/cell/theme settings. Percentages
+  // are ABSOLUTE (100 = the font's natural cell), unlike the API's deltas.
+  setTerminalAppearance: (appearance: {
+    appearance_source: string;
+    font_family: string;
+    font_size: number;
+    cell_width_percent: number;
+    cell_height_percent: number;
+    theme: string;
+  }) =>
+    fetchJSON<{
+      font_family: string;
+      font_size: number;
+      appearance?: import("@/components/Terminal/terminalAppearance").TerminalAppearance;
+      ghostty?: import("@/components/Terminal/terminalAppearance").GhosttyReport;
+    }>("/api/config/terminal", {
+      method: "PUT",
+      body: JSON.stringify(appearance),
     }),
   getTerminalProcesses: () =>
     fetchJSON<
@@ -2848,9 +2874,9 @@ export const api = {
       `/api/remote/${encodeURIComponent(host)}/status`,
       "GET",
     ),
-  connectRemoteHost: (host: string) =>
+  connectRemoteHost: (host: string, opts?: { force?: boolean }) =>
     remoteLifecycleRequest<import("../api/types").RemoteHostStatus>(
-      `/api/remote/${encodeURIComponent(host)}/connect`,
+      `/api/remote/${encodeURIComponent(host)}/connect${opts?.force ? "?force=1" : ""}`,
       "POST",
     ),
   restartRemoteHost: (host: string) =>

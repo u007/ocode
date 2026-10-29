@@ -6,6 +6,14 @@
 
 
 
+
+## 2026-10-29
+
+* **Update**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
+* **Update**: Persistent Todo Plan (todowrite / todoread / todo_update) ([concepts/persistent-todo-plan.md](/concepts/persistent-todo-plan.md))
+* **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+* **Creation**: Terminal appearance: following Ghostty config in a browser terminal ([concepts/terminal-appearance-ghostty.md](/concepts/terminal-appearance-ghostty.md))
+
 ## 2026-10-28
 
 * **Update**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))

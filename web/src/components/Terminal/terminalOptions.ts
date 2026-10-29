@@ -1,17 +1,33 @@
-import type { Ghostty, ITerminalOptions } from "ghostty-web";
+import type { Ghostty, ITerminalOptions, ITheme } from "ghostty-web";
+import { themeColorToInt } from "./terminalAppearance";
 
 /**
  * Theme colours as 0xRRGGBB, for the buffer serializer: ghostty-web resolves every
  * cell to RGB, so these are the only way to recognise "default colour". Keep in
- * sync with the `theme` below.
+ * sync with DEFAULT_TERMINAL_THEME below.
  */
 export const TERMINAL_THEME_DEFAULTS = { foreground: 0xe4e4e7, background: 0x18181b };
+
+/**
+ * ocode's own palette, used when the resolved appearance carries no theme. It is
+ * also the value a LIVE terminal must be reset to when the appearance switches
+ * from a Ghostty theme back to "no theme" — otherwise the old palette would stay
+ * on screen until the panel remounts.
+ */
+export const DEFAULT_TERMINAL_THEME: ITheme = { background: "#18181b", foreground: "#e4e4e7" };
 
 export interface TerminalOptionsInput {
   /** Scrollback lines retained by this terminal (from user settings). */
   scrollbackLines: number;
   fontFamily: string;
   fontSize: number;
+  /**
+   * Resolved theme (Ghostty config or ocode settings — see terminalAppearance).
+   * Omitted keeps ocode's built-in palette. ghostty-web fixes the wasm colour
+   * palette at construction, which is why the theme is passed here rather than
+   * applied afterwards: a new terminal must never need a rebuild-and-replay.
+   */
+  theme?: ITheme;
   /**
    * Buffer geometry to construct at (from the persisted snapshot). When both
    * cols and rows are present the terminal is created at the size the buffer
@@ -30,10 +46,21 @@ export interface TerminalOptionsInput {
  * Exported (and kept free of React/refs) so a regression test can assert the
  * exact production options without mounting the panel.
  */
+/** The default foreground/background pair for the serializer, taken from the
+ *  ACTIVE theme. The serializer recognises "default colour" cells by RGB, so a
+ *  stale pair would tag every plain cell as explicitly coloured. */
+export function serializeDefaultsFor(theme: ITheme | undefined): { foreground: number; background: number } {
+  return {
+    foreground: themeColorToInt(theme?.foreground, TERMINAL_THEME_DEFAULTS.foreground),
+    background: themeColorToInt(theme?.background, TERMINAL_THEME_DEFAULTS.background),
+  };
+}
+
 export function buildTerminalOptions({
   scrollbackLines,
   fontFamily,
   fontSize,
+  theme,
   savedBuffer,
   ghostty,
 }: TerminalOptionsInput): ITerminalOptions {
@@ -54,7 +81,7 @@ export function buildTerminalOptions({
     // left to ghostty-web so text can still be selected under such a program —
     // the same convention on every platform. (xterm's scrollSensitivity and
     // macOptionClickForcesSelection options do not exist here.)
-    theme: { background: "#18181b", foreground: "#e4e4e7" },
+    theme: theme ?? DEFAULT_TERMINAL_THEME,
     ...(savedBuffer?.cols && savedBuffer?.rows
       ? { cols: savedBuffer.cols, rows: savedBuffer.rows }
       : {}),

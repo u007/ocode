@@ -177,10 +177,18 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// from, or mistaken for, a same-path local project.
 	requestedPath := r.URL.Query().Get("project_path")
 	host := r.URL.Query().Get("host")
+	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
+	// reload or socket drop detaches the shell, and the next socket carrying
+	// the same id resumes it. It also lets the terminal-processes emitter
+	// correlate a pid with the tab the browser shows it under. An empty id
+	// (old/other clients) gets a shell that dies with its socket, as before.
+	terminalID := r.URL.Query().Get("terminal_id")
 	port, err := remotePortQuery(r)
 	var (
 		project string
 		cmd     *exec.Cmd
+		muxName string
+		target  remote.Target
 	)
 	remoteAdmissionLocked := false
 	if err != nil {
@@ -188,7 +196,8 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if host != "" {
-		target, err := remote.ParseTarget(host)
+		var err error
+		target, err = remote.ParseTarget(host)
 		if err != nil {
 			log.Printf("terminal: rejected remote host %q: %v", host, err)
 			writeError(w, http.StatusForbidden, "invalid remote host")
@@ -200,7 +209,12 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		project = host + ":" + requestedPath
-		cmd = remote.ShellCommand(target, requestedPath)
+		// An anonymous socket (no terminal id) has nothing to reattach to, so it
+		// gets no tmux session.
+		if terminalID != "" {
+			muxName = remote.TerminalMuxName(host, requestedPath, terminalID)
+		}
+		cmd = remote.ShellCommand(target, requestedPath, muxName)
 		if cmd == nil {
 			log.Printf("terminal: rejected remote %s:%s: empty host/path", host, requestedPath)
 			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
@@ -271,12 +285,6 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		cmd.Dir = workDir
 	}
 
-	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
-	// reload or socket drop detaches the shell, and the next socket carrying
-	// the same id resumes it. It also lets the terminal-processes emitter
-	// correlate a pid with the tab the browser shows it under. An empty id
-	// (old/other clients) gets a shell that dies with its socket, as before.
-	terminalID := r.URL.Query().Get("terminal_id")
 	historyOffset, hasHistoryOffset, err := terminalHistoryCursor(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "history_offset must be a non-negative integer")
@@ -399,6 +407,9 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	sess, err := h.startTerminalShell(terminalID, project, cmd)
+	if err == nil && muxName != "" && target.Kind == remote.KindSSH {
+		sess.onKill = func() { h.killRemoteMux(target, muxName) }
+	}
 	// Publish the session (or the failure) before doing anything else so
 	// waiters unblock promptly; on failure they re-lookup, find nothing, and
 	// return an error the client will retry.
@@ -422,6 +433,20 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveFreshTerminal(w, r, sess)
+}
+
+// killRemoteMux ends the remote tmux session behind a closed ssh terminal tab.
+// It runs in the background of a kill: the tab is already gone, so a failure
+// (host unreachable) can only leave an idle tmux session behind, which is logged.
+func (h *Handler) killRemoteMux(target remote.Target, muxName string) {
+	tr, err := remote.TransportForTarget(target)
+	if err != nil {
+		log.Printf("terminal: open transport to end remote tmux session %s on %s: %v", muxName, target.String(), err)
+		return
+	}
+	if err := remote.KillTerminalMux(tr, muxName); err != nil {
+		log.Printf("terminal: end remote tmux session %s on %s: %v", muxName, target.String(), err)
+	}
 }
 
 func terminalHistoryCursor(r *http.Request) (int64, bool, error) {

@@ -101,8 +101,17 @@ func shellLaunchScript() string {
 // with a `cd` into path so the terminal opens in the remote project. The cd
 // is inside the wrapper so its `"$HOME/…"` expansion is also evaluated by
 // /bin/sh, never by the remote user's login shell.
-func launchScriptWithCd(path string) string {
-	return posixWrap("cd " + shellQuotePath(path) + " && " + shellLaunchScript())
+//
+// muxName, when non-empty, makes the launcher prefer tmux: `new-session -A`
+// attaches the named session if it exists, else creates it, so a dropped ssh
+// only detaches the remote shell (and whatever runs in it) and the next ssh
+// reattaches. A host without tmux falls through to the plain login shell.
+func launchScriptWithCd(path, muxName string) string {
+	script := "cd " + shellQuotePath(path) + " && "
+	if muxName != "" {
+		script += "if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s " + shellQuote(muxName) + "; fi; "
+	}
+	return posixWrap(script + shellLaunchScript())
 }
 
 // LoginShellScript returns the remote-side command that runs command through the

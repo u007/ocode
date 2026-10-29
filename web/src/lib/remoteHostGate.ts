@@ -270,6 +270,21 @@ function drain(gate: HostGate): void {
 }
 
 /**
+ * Clears a host's retry window.
+ *
+ * An explicit user action (Connect / Reconnect / Restart) must not be followed
+ * by two minutes of skipped reads: the action proves the user wants this host
+ * asked again, and leaving the window armed would make the retry look like it
+ * did nothing — the very "it stays frozen" symptom the stall prompt exists to
+ * end. Only the window is cleared; the in-flight slot and queue are untouched
+ * so concurrent reads still serialize.
+ */
+export function resetRemoteHostGate(host: string): void {
+  const gate = gates.get(host);
+  if (gate) gate.retryAt = 0;
+}
+
+/**
  * Test hook: forgets every host's failure window and abandons anything
  * queued. Abandoned reads resolve as "skipped" (they see a bumped generation),
  * so a reset never lets a queued read fire afterwards.
