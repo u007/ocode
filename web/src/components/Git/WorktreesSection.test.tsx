@@ -56,9 +56,41 @@ describe("WorktreesSection", () => {
     mocks.gitWorktrees.mockResolvedValue([main, linked]);
   });
 
-  it("does not fetch while collapsed", () => {
+  it("fetches while collapsed so the header can flag unused checkouts, but renders no rows", async () => {
+    mocks.gitWorktrees.mockResolvedValue([
+      { ...main, owner_session_count: 1 },
+      { ...linked, owner_session_count: 0 },
+      { ...linked, path: "/proj/.worktrees/feature/y", branch: "feature/y", owner_session_count: 0 },
+    ]);
     renderSection({ expanded: false });
-    expect(mocks.gitWorktrees).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.gitWorktrees).toHaveBeenCalledWith("/proj"));
+
+    const flag = await screen.findByTestId("worktrees-unused-flag");
+    expect(flag.textContent).toContain("2 no session");
+    expect(flag.getAttribute("title")).toContain("2 linked checkouts have no chat session");
+    // Collapsed still means collapsed: the rows themselves are not mounted.
+    expect(screen.queryByText("feature/x")).toBeNull();
+  });
+
+  it("shows no header flag when every checkout has a session", async () => {
+    mocks.gitWorktrees.mockResolvedValue([
+      { ...main, owner_session_count: 1 },
+      { ...linked, owner_session_count: 2 },
+    ]);
+    renderSection();
+    await screen.findByText("feature/x");
+    expect(screen.queryByTestId("worktrees-unused-flag")).toBeNull();
+  });
+
+  it("flags a failed list in the collapsed header instead of hiding it", async () => {
+    mocks.gitWorktrees.mockRejectedValue(new Error("not a git repository"));
+    renderSection({ expanded: false });
+
+    const flag = await screen.findByTestId("worktrees-load-error-flag");
+    expect(flag.textContent).toContain("unavailable");
+    expect(flag.getAttribute("title")).toContain("not a git repository");
+    // Still collapsed: the detailed alert lives in the expanded body.
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("lists checkouts with main and open markers", async () => {
@@ -172,5 +204,82 @@ describe("WorktreesSection", () => {
 
     expect(await screen.findByText(/modified or untracked files/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
+  });
+
+  // ── Derived state ────────────────────────────────────────────────────────
+
+  it("shows the checkout's divergence, dirtiness, owners and last commit", async () => {
+    mocks.gitWorktrees.mockResolvedValue([
+      main,
+      {
+        ...linked,
+        exists: true,
+        dirty: 2,
+        ahead: 3,
+        behind: 0,
+        contained_in_base: false,
+        base_ref: "main",
+        base_known: true,
+        owner_sessions: [{ session_id: "ses_1" }],
+        owner_session_count: 1,
+        last_commit: "2026-10-28T12:00:00+08:00",
+      },
+    ]);
+    renderSection();
+    await screen.findByText("feature/x");
+
+    const stateLine = screen.getByText(/↑3 vs main/);
+    expect(stateLine.textContent).toContain("2 changed");
+    expect(stateLine.textContent).toContain("1 session");
+    expect(stateLine.textContent).toContain("last commit 2026-10-28");
+    expect(stateLine.getAttribute("title")).toContain("Not contained in main");
+  });
+
+  it("reports containment without ever calling it merged", async () => {
+    mocks.gitWorktrees.mockResolvedValue([
+      main,
+      {
+        ...linked,
+        ahead: 0,
+        behind: 0,
+        contained_in_base: true,
+        base_ref: "main",
+        base_known: true,
+        owner_session_count: 1,
+      },
+    ]);
+    renderSection();
+    await screen.findByText("feature/x");
+
+    const stateLine = screen.getByText(/contained in main/);
+    expect(stateLine.textContent).not.toContain("merged");
+    expect(stateLine.getAttribute("title")).toContain("squash/rebase merges are not detected");
+  });
+
+  it("marks a linked checkout nobody has used, but never the main checkout", async () => {
+    mocks.gitWorktrees.mockResolvedValue([
+      { ...main, owner_session_count: 0 },
+      { ...linked, owner_session_count: 0 },
+    ]);
+    renderSection();
+    await screen.findByText("feature/x");
+
+    const linkedRow = screen.getByText("/proj/.worktrees/feature/x").closest("div.group") as HTMLElement;
+    const mainRow = screen.getByText("/proj").closest("div.group") as HTMLElement;
+    expect(within(linkedRow).getByText("no session")).toBeTruthy();
+    expect(within(mainRow).queryByText("no session")).toBeNull();
+  });
+
+  it("invents no derived state against an older server", async () => {
+    // Every new field absent: the row may name the checkout, but it must not
+    // claim it is clean, contained or unowned.
+    mocks.gitWorktrees.mockResolvedValue([main, linked]);
+    renderSection();
+    await screen.findByText("feature/x");
+
+    expect(screen.queryByText("no session")).toBeNull();
+    expect(screen.queryByText(/changed/)).toBeNull();
+    expect(screen.queryByText(/contained/)).toBeNull();
+    expect(screen.queryByText(/↑/)).toBeNull();
   });
 });

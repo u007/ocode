@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   gitStashShow: vi.fn(),
   gitStashApply: vi.fn(),
   gitStashDrop: vi.fn(),
+  gitWorktrees: vi.fn(),
   gitStash: vi.fn(),
   gitHunk: vi.fn(),
   gitShow: vi.fn(),
@@ -48,6 +49,7 @@ beforeEach(() => {
   mocks.getGitWorkspace.mockResolvedValue(workspace);
   mocks.gitLog.mockResolvedValue([]);
   mocks.gitStashList.mockResolvedValue([]);
+  mocks.gitWorktrees.mockResolvedValue([]);
   window.matchMedia = ((media: string) => ({
     matches: false,
     media,

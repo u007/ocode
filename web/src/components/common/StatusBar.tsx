@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { resolveSessionHost } from "../../hooks/useSessionHost";
+import {
+  describeSessionWorkspace,
+  useSessionWorkspace,
+  type WorkspaceTone,
+} from "../../lib/sessionWorkspace";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { Button } from "@/components/ui/button";
 import { PanelRight, Mic, MicOff, Activity, ChevronDown, ChevronUp } from "lucide-react";
@@ -153,8 +159,18 @@ export const runningStatusPartsForTests = runningStatusParts;
 export const formatDurationForTests = formatDuration;
 export const elapsedMsSinceForTests = elapsedMsSince;
 
+const WORKSPACE_TONE_CLASS: Record<WorkspaceTone, string> = {
+  muted: "text-muted-foreground",
+  accent: "text-cyan-400",
+  ok: "text-emerald-500",
+  warn: "text-amber-500",
+  danger: "text-red-400",
+};
+
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
-  const { activeTabId } = useProjectState();
+  const projectContext = useProjectState();
+  const { activeTabId } = projectContext;
+  const projectState = projectContext.state;
   // Collapsible: collapsed keeps a slim row with the working indicator + error
   // (this bar is the single synchronized "working" signal — see
   // runningStatusParts) and hides the detail rows. Preference persists across
@@ -211,6 +227,14 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
   const cwd = snap?.cwd || "";
+  // The checkout this chat is rooted in — main or a linked worktree. The host
+  // is resolved per session: worktrees are a local-only endpoint, so a remote
+  // project reports no chip instead of this machine's answer.
+  const workspaceHost = resolveSessionHost(projectState, snap?.session_id, {
+    fallbackToActive: true,
+  });
+  const workspace = useSessionWorkspace(cwd, workspaceHost);
+  const workspaceChip = describeSessionWorkspace(cwd, workspace.worktrees);
   const ctxCur = snap?.context_current_tokens ?? 0;
   const ctxMax = snap?.context_max_tokens ?? 0;
   // Percentage of the context window in use (null = unknown), so the
@@ -413,6 +437,15 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
           {displayCwd && (
             <span className="text-foreground truncate max-w-[18rem]" title={cwd}>
               cwd: {displayCwd}
+            </span>
+          )}
+          {workspaceChip && (
+            <span
+              className={`${WORKSPACE_TONE_CLASS[workspaceChip.tone]} truncate max-w-[18rem]`}
+              title={workspaceChip.title}
+              data-testid="statusbar-workspace"
+            >
+              {workspaceChip.text}
             </span>
           )}
         </div>

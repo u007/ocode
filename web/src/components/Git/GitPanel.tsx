@@ -64,7 +64,9 @@ const DEFAULT_SECTIONS: PanelSections = {
   staged: true,
   unstaged: true,
   commits: true,
-  // Collapsed by default: the list is fetched only once the user opens it.
+  // Collapsed by default. The list is still fetched on mount, so the collapsed
+  // header can show the checkout count and flag checkouts no session uses;
+  // expanding reveals the per-checkout detail rows.
   worktrees: false,
   stashes: true,
 };

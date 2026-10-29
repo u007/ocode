@@ -900,6 +900,33 @@ export interface GitWorktree {
   is_main: boolean;
   /** The checkout the project is open on. It can't be removed while open. */
   is_current: boolean;
+
+  // Derived state, computed per request. Every field is OPTIONAL because a
+  // desktop bundle can outlive its server and a remote host can run an older
+  // build; `undefined` means "this server does not report it", which must
+  // render as unknown and never as clean / merged / unowned.
+  // `-1` and `null` mean "unknown" on a server that does report the field.
+  /** False when the checkout directory is gone (git still lists it). */
+  exists?: boolean;
+  /** Changed/untracked path count; -1 = unknown. */
+  dirty?: number;
+  /** Commits ahead/behind `base_ref`; -1 = unknown. Always -1 for the main
+   *  checkout, where "ahead of its own branch" is meaningless. */
+  ahead?: number;
+  behind?: number;
+  /** True when every commit here is reachable from `base_ref`. This is
+   *  CONTAINMENT, not "merged": squash/rebase merges read as not contained. */
+  contained_in_base?: boolean | null;
+  /** Ref used for the three fields above; "" when none resolved. */
+  base_ref?: string;
+  base_known?: boolean;
+  /** Chat sessions rooted at this checkout (live + persisted on disk).
+   *  Absent on an older server — never read absence as "no sessions". */
+  owner_sessions?: { session_id: string; title?: string }[];
+  /** Untruncated owner total; `owner_sessions` may be capped. */
+  owner_session_count?: number;
+  /** Committer date (RFC3339) of HEAD; "" when unknown. */
+  last_commit?: string;
 }
 
 export interface ThemeColors {

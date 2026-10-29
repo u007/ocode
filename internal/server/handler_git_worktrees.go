@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,53 @@ type GitWorktree struct {
 	Prunable  bool   `json:"prunable"`
 	IsMain    bool   `json:"is_main"`
 	IsCurrent bool   `json:"is_current"`
+
+	// Derived state, computed per request from git and the filesystem. It is
+	// deliberately never persisted: a stale "clean" or "contained" label is
+	// worse than showing nothing, and the whole point of this surface is to
+	// stop the UI from guessing which checkout a session is really on.
+	//
+	// Exists is false when the checkout directory is gone. git keeps listing
+	// such an entry, so without this the UI cannot say "missing".
+	Exists bool `json:"exists"`
+	// Dirty is the number of changed/untracked entries from the default
+	// `git status --porcelain`: git collapses an untracked directory into one
+	// entry, so this is "how much is going on here", not a file total. -1
+	// means unknown (missing directory, git error, or probe timeout) and must
+	// never be read as "clean".
+	Dirty int `json:"dirty"`
+	// Ahead/Behind count commits versus BaseRef. -1 means unknown. They stay
+	// unknown for the main checkout: "ahead of the base branch" is
+	// meaningless there (the base usually IS its branch). Use
+	// GitStatus.Ahead/Behind for divergence from upstream instead.
+	Ahead  int `json:"ahead"`
+	Behind int `json:"behind"`
+	// ContainedInBase reports whether every commit in this checkout is also
+	// reachable from BaseRef. nil means unknown or not applicable. This is
+	// CONTAINMENT, not "merged": a squash- or rebase-merged branch is not an
+	// ancestor of the base and will read as not contained.
+	ContainedInBase *bool `json:"contained_in_base,omitempty"`
+	// BaseRef is the ref used for the three fields above; BaseKnown says
+	// whether one could be resolved at all. An unresolved base is reported as
+	// unknown, never silently treated as "main".
+	BaseRef   string `json:"base_ref,omitempty"`
+	BaseKnown bool   `json:"base_known"`
+	// OwnerSessions are the chat sessions rooted at this checkout: live ones
+	// in this process plus persisted ones on disk. It is always an empty
+	// slice, never null, so "nobody has worked here" is distinguishable from
+	// "not computed". OwnerSessionCount is the untruncated total.
+	OwnerSessions     []WorktreeOwner `json:"owner_sessions"`
+	OwnerSessionCount int             `json:"owner_session_count"`
+	// LastCommit is the committer date (RFC3339) of HEAD, or "" when unknown.
+	LastCommit string `json:"last_commit,omitempty"`
+}
+
+// WorktreeOwner identifies one chat session rooted at a checkout. Title is
+// omitted when only live-session state is available (the in-memory registry
+// carries the id and project root, not the title).
+type WorktreeOwner struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title,omitempty"`
 }
 
 // worktreesDirName is where the UI creates worktrees, relative to the main
@@ -40,6 +88,12 @@ func parseGitWorktreeList(out string) []GitWorktree {
 	seen := 0
 	flush := func() {
 		if open && !bare {
+			// Derived state starts UNKNOWN: parseGitWorktreeList only reads
+			// `git worktree list --porcelain`, which says nothing about
+			// cleanliness or divergence. Handler paths replace these via
+			// enrichWorktrees; a zero value would otherwise claim "clean".
+			cur.Dirty, cur.Ahead, cur.Behind = -1, -1, -1
+			cur.OwnerSessions = []WorktreeOwner{}
 			entries = append(entries, cur)
 		}
 		cur, open, bare = GitWorktree{}, false, false
@@ -137,7 +191,18 @@ func (h *Handler) HandleGitWorktreeList(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "list worktrees: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	// Page BEFORE enriching: deriving state runs git per checkout, so a
+	// pathological repository must not pay for checkouts the caller never
+	// asked for.
+	limit, offset := worktreePageParams(r)
+	if offset > len(entries) {
+		offset = len(entries)
+	}
+	entries = entries[offset:]
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	writeJSON(w, http.StatusOK, h.enrichWorktrees(r.Context(), dir, entries))
 }
 
 // gitWorktreeCreateRequest is the body of POST /api/git/worktree. The server
@@ -221,7 +286,7 @@ func (h *Handler) HandleGitWorktreeCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, "git worktree add failed: "+err.Error())
 		return
 	}
-	h.writeWorktreeList(w, dir)
+	h.writeWorktreeList(r.Context(), w, dir)
 }
 
 // gitWorktreeRemoveRequest is the body of POST /api/git/worktree/remove.
@@ -282,7 +347,7 @@ func (h *Handler) HandleGitWorktreeRemove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	removeEmptyWorktreeParents(entries[0].Path, target.Path)
-	h.writeWorktreeList(w, dir)
+	h.writeWorktreeList(r.Context(), w, dir)
 }
 
 // removeEmptyWorktreeParents deletes now-empty parent directories of a removed
@@ -300,14 +365,16 @@ func removeEmptyWorktreeParents(mainRoot, removed string) {
 }
 
 // writeWorktreeList answers a mutation with the refreshed list, so the panel
-// never shows a stale checkout set.
-func (h *Handler) writeWorktreeList(w http.ResponseWriter, dir string) {
+// never shows a stale checkout set. Mutations are not paginated: the caller is
+// about to render the whole panel, and the checkout count is bounded by the
+// repository, not by user input.
+func (h *Handler) writeWorktreeList(ctx context.Context, w http.ResponseWriter, dir string) {
 	entries, err := gitWorktreesForDir(dir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list worktrees: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	writeJSON(w, http.StatusOK, h.enrichWorktrees(ctx, dir, entries))
 }
 
 // localBranchExists reports whether refs/heads/<branch> exists. for-each-ref
