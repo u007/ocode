@@ -154,7 +154,16 @@ function scheduleStallCheck(entry: RemoteHostEntry) {
   const wait = Math.max(0, REMOTE_STALL_AFTER_MS - (Date.now() - attemptStart(entry)));
   entry.stallTimer = setTimeout(() => {
     entry.stallTimer = null;
-    notify(entry);
+    // Ask the host before accusing it. `attemptInFlight` can be true on the
+    // strength of `status.connecting`, which is a snapshot up to
+    // REMOTE_STATUS_POLL_MS (30s) old: a connect that finished at 3s would
+    // otherwise raise the prompt at 10s, and the prompt's only action is a
+    // FORCED retry, which force-drops the workspace of a host that is actually
+    // up. fetchStatus() notifies when it settles, and that recomputes the
+    // verdict from the fresh status, so a still-running attempt still stalls
+    // (and an unreachable host still escalates — a failed read is not proof of
+    // health).
+    void fetchStatus(entry, false);
   }, wait);
 }
 

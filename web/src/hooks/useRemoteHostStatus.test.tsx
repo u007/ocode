@@ -315,4 +315,133 @@ describe("useRemoteHostStatus", () => {
     // Initial fetch + the post-failure refresh.
     expect(mockStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
+
+  // The stall verdict is a claim about the server, and `status.connecting` can
+  // be up to REMOTE_STATUS_POLL_MS old. A connect that finished inside the
+  // window must not raise the prompt: its only action is a FORCED retry, which
+  // force-drops the workspace of a host that is actually up.
+  it("does not accuse a host that connected before the stall deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus
+        .mockResolvedValueOnce({
+          ...base,
+          connected: false,
+          connecting: true,
+          connect_started_at: Date.now(),
+        })
+        .mockResolvedValue({ ...base, connected: true, connecting: false });
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(flushMicrotasks);
+      expect(result.current.stalled).toBe(false);
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await flushMicrotasks();
+      });
+
+      // The deadline triggered a verification read, which saw the live host.
+      expect(mockStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(result.current.stalled).toBe(false);
+      expect(result.current.escalation).toBe("none");
+      expect(mockConnect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The verification must not weaken the guard: when the fresh read agrees that
+  // the same attempt is still running, the prompt still appears.
+  it("still escalates when the verification read confirms the attempt is running", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus.mockResolvedValue({
+        ...base,
+        connected: false,
+        connecting: true,
+        connect_started_at: Date.now(),
+      });
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(flushMicrotasks);
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await flushMicrotasks();
+      });
+
+      expect(mockStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(result.current.stalled).toBe(true);
+      expect(result.current.escalation).toBe("reconnect");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The verification must not be swallowed by the client's 2-minute read
+  // backoff: that window is armed by OTHER reads, and skipping the probe would
+  // publish a verdict from the very snapshot the read exists to refresh.
+  it("verifies even while the host's read backoff is armed", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus
+        .mockResolvedValueOnce({
+          ...base,
+          connected: false,
+          connecting: true,
+          connect_started_at: Date.now(),
+        })
+        .mockResolvedValue({ ...base, connected: true, connecting: false });
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(flushMicrotasks);
+
+      // A transient failure armed the window: an ordinary read would be skipped
+      // for the next two minutes.
+      noteRemoteHostUnreachable("h");
+      expect(remoteHostRetryInMs("h")).toBeGreaterThan(0);
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await flushMicrotasks();
+      });
+
+      expect(mockStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(result.current.stalled).toBe(false);
+      expect(result.current.escalation).toBe("none");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Failing to confirm is not proof of health: an unreachable status probe must
+  // leave the escalation in place rather than silently retracting it.
+  it("keeps the escalation when the verification read itself fails", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatus
+        .mockResolvedValueOnce({
+          ...base,
+          connected: false,
+          connecting: true,
+          connect_started_at: Date.now(),
+        })
+        .mockRejectedValue(new Error("ssh: no route to host"));
+      const { result } = renderHook(() => useRemoteHostStatus("h", true));
+      await act(flushMicrotasks);
+
+      await act(async () => {
+        vi.advanceTimersByTime(REMOTE_STALL_AFTER_MS);
+        await flushMicrotasks();
+      });
+
+      expect(result.current.stalled).toBe(true);
+      expect(result.current.escalation).toBe("reconnect");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
+
+/** Drain the promise chain a status fetch goes through (then/catch/finally). */
+async function flushMicrotasks() {
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+}

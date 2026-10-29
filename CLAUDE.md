@@ -571,7 +571,9 @@ request parked on a slow remote connect (`workspaceForPort`) pins a slot, and ~5
   disconnects any late workspace. The SPA calls it only after its 10s stall guard
   (`REMOTE_STALL_AFTER_MS`) fires, which is what turns "connecting…" forever into
   Reconnect → Restart host. Every explicit action must also `resetRemoteHostGate(host)`,
-  or the 2-minute read backoff swallows the retry.
+  or the 2-minute read backoff swallows the retry. **The deadline re-reads status
+  before publishing the verdict**: `connecting` can be a 30 s-old snapshot, and a false
+  prompt's Reconnect force-drops a healthy host (`useRemoteHostStatus`).
 - **A connect still in progress is HTTP 503 + `Retry-After` (stage `remote-connecting`,
   `errConnectInProgress`), never 502.** The SPA opens a 2-minute unreachable window on a 502
   (`isHostUnreachable`) and treats a 503 as a skipped read (`isHostConnecting`).
