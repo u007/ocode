@@ -52,6 +52,8 @@ The **app header is 2 rows**: a leading blank pad + the title line. Always go th
 
 **Status broadcast:** when the TUI is mirrored to web/desktop (`/rc` bridge), the server's `TUIStatus` now carries the TUI's **activity row** state (`LLMRunning`, `ActiveTools`, `ActiveAgents`) so the web status bar shows live agent activity instead of just the model name. If you add a new activity indicator in the TUI, surface it through `internal/server/tui_status.go` too.
 
+**Sidebar checkout label:** the chat sidebar's Git section renders `Branch: <name>`, and appends a `worktree` tag when the session's checkout is a LINKED worktree (`gitModel.isWorktree`, set by `loadBranches` via `git rev-parse --git-dir` vs `--git-common-dir`). The two spellings are NOT comparable as printed: inside a subdirectory git prints `--git-dir` absolute but `--git-common-dir` relative to the CWD (`/repo/.git` vs `../.git`), so a raw string compare calls every subdirectory of the main checkout a worktree — both are resolved against the `workDir` first (`isLinkedWorktree`). This is the TUI half of the web status-bar workspace chip; keep the two surfaces saying the same thing, and surface any new checkout state through `TUIStatus` so the mirrored web sidebar agrees.
+
 ## 3. Per-tab render path
 
 `m.renderContent()` in `model.go` handles modal overlays (theme picker, picker, connect, file search) first, then calls `m.renderTabContent()`, which handles the drill-in detail view, then routes by `m.activeTab` (constants in `internal/tui/tabs.go`, `tabCount = 6`):

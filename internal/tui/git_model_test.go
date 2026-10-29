@@ -793,3 +793,58 @@ func TestGitNetworkKeysRunNoGitInHandler(t *testing.T) {
 		})
 	}
 }
+
+// TestIsLinkedWorktreeResolvesRelativeCommonDir pins the comparison the sidebar
+// relies on. git prints `--git-dir` absolute but `--git-common-dir` relative to
+// the CWD when it runs inside a subdirectory, so a plain string compare would
+// call every subdirectory of the main checkout a worktree.
+func TestIsLinkedWorktreeResolvesRelativeCommonDir(t *testing.T) {
+	base := filepath.Join(string(filepath.Separator), "repo", "internal")
+	cases := []struct {
+		name      string
+		gitDir    string
+		commonDir string
+		want      bool
+	}{
+		{"main root", "/repo/.git", "/repo/.git", false},
+		{"main subdirectory mixes spellings", "/repo/.git", "../.git", false},
+		{"linked worktree", "/repo/.git/worktrees/feat", "/repo/.git", true},
+		{"unresolved git dir", "", "/repo/.git", false},
+	}
+	for _, tc := range cases {
+		if got := isLinkedWorktree(base, tc.gitDir, tc.commonDir); got != tc.want {
+			t.Errorf("%s: isLinkedWorktree(%q, %q) = %v, want %v", tc.name, tc.gitDir, tc.commonDir, got, tc.want)
+		}
+	}
+}
+
+// TestLoadBranchesDetectsLinkedWorktree drives the real git probe: the main
+// checkout, a subdirectory of it, and a linked worktree must be classified
+// differently, because the sidebar uses this to say WHERE the branch lives.
+func TestLoadBranchesDetectsLinkedWorktree(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	linked := filepath.Join(dir, "linked")
+	gitRunForTest(t, dir, "worktree", "add", "-b", "feat", linked)
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+
+	mainModel := gitModel{workDir: dir}
+	mainModel.loadBranches()
+	if mainModel.isWorktree {
+		t.Errorf("main checkout reported as a worktree")
+	}
+
+	subModel := gitModel{workDir: sub}
+	subModel.loadBranches()
+	if subModel.isWorktree {
+		t.Errorf("subdirectory of the main checkout reported as a worktree")
+	}
+
+	linkedModel := gitModel{workDir: linked}
+	linkedModel.loadBranches()
+	if !linkedModel.isWorktree {
+		t.Errorf("linked worktree not detected")
+	}
+}

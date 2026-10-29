@@ -22361,6 +22361,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		gitBranch = "(no git repo)"
 	}
 	gitBody := []string{dimStyle.Render("Branch: ") + sidebarTextStyle.Render(gitBranch)}
+	if m.git.isWorktree {
+		// The branch name alone does not say WHERE it is checked out: the same
+		// branch name can exist in the main tree. Name the config explicitly.
+		gitBody[0] += "  " + sidebarAccentStyle.Render("worktree")
+	}
 	if m.git.aheadBehind != "" {
 		gitBody[0] += "  " + dimStyle.Render(m.git.aheadBehind)
 	}

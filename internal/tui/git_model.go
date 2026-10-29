@@ -132,11 +132,14 @@ type gitModel struct {
 	branches       []string
 	branchCursor   int
 	currentBranch  string
-	aheadBehind    string
-	diff           viewport.Model
-	committing     bool
-	commitInput    textarea.Model
-	statusMsg      string
+	// isWorktree marks a LINKED checkout (not the main one), so the sidebar can
+	// say which checkout this session is on. Set by loadBranches.
+	isWorktree  bool
+	aheadBehind string
+	diff        viewport.Model
+	committing  bool
+	commitInput textarea.Model
+	statusMsg   string
 	// statusSeq identifies the current status message so a stale auto-clear
 	// timer cannot wipe a newer message. Whether the message is an error is
 	// derived from its text by gitStatusIsError, so it can never go stale.
@@ -969,6 +972,60 @@ func (m *gitModel) loadBranches() {
 		return
 	}
 	m.parseBranches(out)
+	m.loadWorktreeKind()
+}
+
+// loadWorktreeKind records whether this session's checkout is a LINKED git
+// worktree. Two cheap rev-parse calls ride along with the branch refresh, so
+// the sidebar can name the checkout instead of leaving the user to work out
+// that a branch name came from somewhere other than the main tree.
+func (m *gitModel) loadWorktreeKind() {
+	gitDir, err := m.gitRun("rev-parse", "--git-dir")
+	if err != nil {
+		m.isWorktree = false
+		return
+	}
+	commonDir, err := m.gitRun("rev-parse", "--git-common-dir")
+	if err != nil {
+		m.isWorktree = false
+		return
+	}
+	m.isWorktree = isLinkedWorktree(m.workDir, gitDir, commonDir)
+}
+
+// isLinkedWorktree reports whether the checkout is a linked worktree rather
+// than the main one. Inside a linked worktree `--git-dir` points at
+// <common>/worktrees/<name> while `--git-common-dir` points at <common>, so the
+// two paths differ; in the main checkout they name the same directory.
+//
+// The two spellings are NOT comparable as printed: git prints `--git-dir`
+// absolute but `--git-common-dir` relative to the CWD when it runs inside a
+// subdirectory (`/repo/.git` vs `../.git`), so a plain string compare would
+// call every subdirectory of the main checkout a worktree. Both are resolved
+// against base (the directory git ran in) before comparing.
+func isLinkedWorktree(base, gitDir, commonDir string) bool {
+	gitDir = resolveGitPath(base, strings.TrimSpace(gitDir))
+	commonDir = resolveGitPath(base, strings.TrimSpace(commonDir))
+	if gitDir == "" || commonDir == "" {
+		return false
+	}
+	return gitDir != commonDir
+}
+
+func resolveGitPath(base, p string) string {
+	if p == "" {
+		return ""
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(base, p)
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
