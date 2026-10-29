@@ -4452,6 +4452,12 @@ export const api = {
       },
     ),
 
+  reclaimPortMap: (remotePort: number, pid: number, target: PortMapTarget) =>
+    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}/reclaim`), {
+      method: "POST",
+      body: JSON.stringify({ pid }),
+    }),
+
   // htrcli reverse forward for the target's SSH host (project-scoped family
   // only: there is no desktop-family equivalent).
   getHtrForward: (target: PortMapTarget) =>
@@ -4459,6 +4465,11 @@ export const api = {
   startHtrForward: (target: PortMapTarget) =>
     fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr/start"), {
       method: "POST",
+    }),
+  reclaimHtrForward: (pid: number, target: PortMapTarget) =>
+    fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr/reclaim"), {
+      method: "POST",
+      body: JSON.stringify({ pid }),
     }),
   setHtrForwardAutoStart: (enabled: boolean, target: PortMapTarget) =>
     fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr/autostart"), {

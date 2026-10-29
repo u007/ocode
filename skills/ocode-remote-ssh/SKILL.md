@@ -52,7 +52,7 @@ host on different ports.
 ## 3. ssh argv: two independent barriers
 
 All non-interactive ssh goes through one builder, `commandArgs`
-(`internal/remote/ssh.go:114`):
+(`internal/remote/ssh.go:116`):
 
 ```go
 args := append(sshFailFastArgs(), s.Target.SSHArgs()...)
@@ -184,7 +184,13 @@ the UI saying "connecting…" for ten minutes. The pieces:
   (forced) and, if a retry ALSO stalls or fails, **Restart host** (kills the
   host's turns and terminals). Every explicit action calls
   `resetRemoteHostGate(host)`, or the client's 2-minute read backoff would skip
-  the very reads the retry needs.
+  the very reads the retry needs. **The deadline does not publish the verdict
+  directly**: `attemptInFlight` can be true from `status.connecting`, a snapshot
+  up to `REMOTE_STATUS_POLL_MS` (30 s) old, so the timer re-reads
+  `/api/remote/{host}/status` first (`fetchStatus`) and the verdict is recomputed
+  from the fresh answer. A false prompt is destructive — its Reconnect force-drops
+  the workspace of a host that is actually up. A verification read that FAILS
+  keeps the escalation: an unreachable host is not proof of health.
 - **The health probe must produce an ANSWER, not an error.** `probeServer`
   (`internal/remote/serve.go`) runs through `Transport.Exec`, which returns an
   error for EVERY non-zero *remote* exit — so curl's exit 7 (connection

@@ -1,6 +1,9 @@
 package remote
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // fakeTransport is a scriptable Transport for unit tests — no real ssh/scp
 // process is ever spawned.
@@ -21,6 +24,7 @@ type fakeTransport struct {
 }
 
 var _ Transport = (*fakeTransport)(nil)
+var _ BoundedTransport = (*fakeTransport)(nil)
 
 func newFakeTransport() *fakeTransport {
 	return &fakeTransport{
@@ -38,6 +42,14 @@ func (f *fakeTransport) Exec(command string) (ExecResult, error) {
 		return res, nil
 	}
 	return f.execDefault, nil
+}
+
+// ExecContext answers like Exec once ctx is live; a dead ctx fails like a killed command.
+func (f *fakeTransport) ExecContext(ctx context.Context, command string) (ExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ExecResult{}, err
+	}
+	return f.Exec(command)
 }
 
 func (f *fakeTransport) ExecStdin(command string, stdin io.Reader) (ExecResult, error) {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ type portMapView struct {
 	Enabled    bool `json:"enabled"`
 	Reverse    bool `json:"reverse"`
 	Live       bool `json:"live"`
+	// Holder is the local process squatting LocalPort after the last open of
+	// this -L forward failed; absent when unknown or not the cause.
+	Holder *remote.PortHolder `json:"holder,omitempty"`
 }
 
 // portMapRegistry owns one remote.ForwardManager per remote project, keyed by
@@ -65,6 +69,11 @@ type portMapEntry struct {
 	// project per process, on the boot sweep or the first list, whichever
 	// comes first. Any later edits go through the explicit add/enable handlers.
 	autoStartOnce sync.Once
+	// reclaiming holds the remote ports with a reclaim in flight. The holder
+	// check and the kill are not atomic, so a second reclaim of the same forward
+	// is refused instead of killing and re-opening underneath the first.
+	reclaimMu  sync.Mutex
+	reclaiming map[int]bool
 }
 
 func newPortMapRegistry(sup *tool.ProcessSupervisor) *portMapRegistry {
@@ -87,10 +96,11 @@ func (reg *portMapRegistry) entry(target remote.Target, path string) *portMapEnt
 	}
 	fm := remote.NewForwardManager(reg.sup, target)
 	e := &portMapEntry{
-		fm:     fm,
-		target: target,
-		ref:    projects.ProjectRef{Host: target.String(), Path: path},
-		policy: newPortMapPolicy(fm.Start, fm.Stop),
+		fm:         fm,
+		target:     target,
+		ref:        projects.ProjectRef{Host: target.String(), Path: path},
+		policy:     newPortMapPolicy(fm.Start, fm.Stop),
+		reclaiming: make(map[int]bool),
 	}
 	// The manager observes each child's exit; the policy decides whether that
 	// earns a restart, and the loop is woken so the common case does not wait
@@ -158,8 +168,108 @@ func (h *Handler) portMapViews(ref projects.ProjectRef, fm *remote.ForwardManage
 	out := make([]portMapView, len(maps))
 	for i, m := range maps {
 		out[i] = portMapView{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: m.Enabled, Reverse: m.Reverse, Live: fm.IsLive(m.RemotePort)}
+		if !m.Reverse && !out[i].Live {
+			out[i].Holder = localHolderOf(fm.StartError(m.RemotePort))
+		}
 	}
 	return out
+}
+
+// localHolderOf returns the local process a failed -L open was blocked by.
+func localHolderOf(err error) *remote.PortHolder {
+	var busy *remote.LocalPortBusyError
+	if errors.As(err, &busy) {
+		return busy.Holder
+	}
+	return nil
+}
+
+// killLocalPortHolder is the seam tests replace.
+var killLocalPortHolder = remote.KillLocalPortHolder
+
+// portReclaimTimeout is the overall deadline for a confirmed "kill the holder and
+// retry" request, covering the re-verify, the signal and the wait for the port to free.
+const portReclaimTimeout = 10 * time.Second
+
+// beginReclaim claims port for one reclaim. It reports false when a reclaim of
+// the same forward is already in flight; the caller must then refuse.
+func (e *portMapEntry) beginReclaim(port int) bool {
+	e.reclaimMu.Lock()
+	defer e.reclaimMu.Unlock()
+	if e.reclaiming[port] {
+		return false
+	}
+	e.reclaiming[port] = true
+	return true
+}
+
+// endReclaim releases a claim taken by beginReclaim.
+func (e *portMapEntry) endReclaim(port int) {
+	e.reclaimMu.Lock()
+	defer e.reclaimMu.Unlock()
+	delete(e.reclaiming, port)
+}
+
+// HandleReclaimPortMap serves POST /api/portmaps/{port}/reclaim?host=&project=
+// with body {"pid":int}: the user's confirmed "kill the local process holding
+// this -L forward's local port, then retry". The pid must be the holder the
+// last list reported; KillLocalPortHolder re-verifies it before signalling.
+func (h *Handler) HandleReclaimPortMap(w http.ResponseWriter, r *http.Request) {
+	rw, entry, ok := h.portMapTarget(w, r)
+	if !ok {
+		return
+	}
+	port, ok := portMapPathPort(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		PID int `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	ref := portMapRef(rw)
+	maps, err := h.projects.PortMaps(ref)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, m := range maps {
+		if m.RemotePort != port || m.Reverse {
+			continue
+		}
+		// Refused before anything is killed: a disabled forward must stay down.
+		if !m.Enabled {
+			writeError(w, http.StatusConflict, "this forward is disabled; enable it before reclaiming its port")
+			return
+		}
+		if !entry.beginReclaim(port) {
+			writeError(w, http.StatusConflict, "a reclaim for this forward is already running")
+			return
+		}
+		defer entry.endReclaim(port)
+		holder := localHolderOf(entry.fm.StartError(port))
+		if holder == nil || holder.PID != body.PID {
+			writeError(w, http.StatusConflict, "the process holding the local port changed; refresh and try again")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), portReclaimTimeout)
+		defer cancel()
+		if err := killLocalPortHolder(ctx, m.LocalPort, body.PID); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		entry.policy.reset(port)
+		if err := entry.fm.Start(m.Runtime()); err != nil {
+			writeError(w, http.StatusBadGateway, "killed the holder, but failed to open now: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, h.portMapViews(ref, entry.fm))
+		return
+	}
+	writeError(w, http.StatusNotFound, "no such local forward")
 }
 
 // autoStartPortMaps opens every persisted, enabled forward for ref. Best-effort

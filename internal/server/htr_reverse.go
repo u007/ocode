@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,6 +148,12 @@ type htrHost struct {
 	failures int
 	nextTry  time.Time
 	lastPort int
+
+	// holder is the remote process squatting the port after the last busy-port
+	// failure; nil when unknown, not busy, or the last open succeeded. It is
+	// probed once at failure time, not per status poll, which would cost an ssh
+	// exec every few seconds.
+	holder *remote.PortHolder
 }
 
 func (hh *htrHost) record(port int, err error) {
@@ -201,6 +208,38 @@ func (hh *htrHost) snapshot() (lastErr string, lastAttempt time.Time) {
 	return hh.lastErr, hh.lastAttempt
 }
 
+func (hh *htrHost) setHolder(p *remote.PortHolder) {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	hh.holder = p
+}
+
+func (hh *htrHost) getHolder() *remote.PortHolder {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	return hh.holder
+}
+
+// dropHolderIfLive clears the recorded squatter once the htr forward is live.
+// A live forward means the port is ours, so a holder left by an earlier
+// busy-port failure is gone; keeping it would offer to kill a process that is
+// not there. Both liveness readers (status and the auto-start skip) call this.
+func (hh *htrHost) dropHolderIfLive(live bool) {
+	if live {
+		hh.setHolder(nil)
+	}
+}
+
+// Seams for the remote holder probe/kill, replaced by tests.
+var (
+	findRemotePortHolder = remote.FindPortHolder
+	killRemotePortHolder = remote.KillPortHolder
+)
+
+// htrHolderProbeTimeout bounds the holder probe. The probe runs inside the open
+// request after a busy-port failure, so a hung ssh must not hold that request.
+var htrHolderProbeTimeout = 5 * time.Second
+
 func (reg *portMapRegistry) htrHost(target remote.Target) *htrHost {
 	key := target.String()
 	reg.mu.Lock()
@@ -229,7 +268,26 @@ func (h *Handler) openHTRReverse(ref projects.ProjectRef, target remote.Target, 
 	}
 	err = htrReverseForwardOpener()(hh.fm, maps)
 	hh.record(port, err)
+	hh.setHolder(nil)
+	var busy *remote.PortBusyError
+	if errors.As(err, &busy) {
+		h.recordHTRHolder(hh, target, port)
+	}
 	return err
+}
+
+// recordHTRHolder looks up who holds the busy remote port so the panel can offer
+// to kill it. A failed or timed-out probe is logged and leaves the holder unknown:
+// the original forward error is still what the user sees.
+func (h *Handler) recordHTRHolder(hh *htrHost, target remote.Target, port int) {
+	ctx, cancel := context.WithTimeout(context.Background(), htrHolderProbeTimeout)
+	defer cancel()
+	holder, err := findRemotePortHolder(ctx, remote.NewSSHTransport(target, h.portMaps.sup), port)
+	if err != nil {
+		log.Printf("htr: probe holder of remote port %d on %s: %v", port, target, err)
+		return
+	}
+	hh.setHolder(holder)
 }
 
 // autoStartHTRReverse is the list-triggered open: it honours the
@@ -249,7 +307,9 @@ func (h *Handler) autoStartHTRReverse(ref projects.ProjectRef, target remote.Tar
 	// Only skip when htr is running AND the forward is already live. When htr
 	// is not running (!ok) we still attempt: StartHTRReverseForward is a no-op
 	// then, but the attempt is the observable that marks this host as tried.
-	if ok && hh.fm.IsLive(port) {
+	live := ok && hh.fm.IsLive(port)
+	hh.dropHolderIfLive(live)
+	if live {
 		return
 	}
 	if !hh.shouldRetry(port) {
@@ -268,6 +328,8 @@ type htrStatusView struct {
 	Opening      bool   `json:"opening"`
 	AutoStart    bool   `json:"auto_start"`
 	LastError    string `json:"last_error"`
+	// Holder is the remote process squatting Port after a busy-port failure.
+	Holder *remote.PortHolder `json:"holder,omitempty"`
 }
 
 func (h *Handler) htrReverseStatus(target remote.Target) (htrStatusView, error) {
@@ -278,13 +340,16 @@ func (h *Handler) htrReverseStatus(target remote.Target) (htrStatusView, error) 
 	port, ok := localHTRPort(cfg.Browser)
 	hh := h.portMaps.htrHost(target)
 	lastErr, _ := hh.snapshot()
+	live := ok && hh.fm.IsLive(port)
+	hh.dropHolderIfLive(live)
 	return htrStatusView{
 		LocalRunning: ok,
 		Port:         port,
-		Live:         ok && hh.fm.IsLive(port),
+		Live:         live,
 		Opening:      hh.opening.Load(),
 		AutoStart:    cfg.Browser.HTRRemoteAutoStart,
 		LastError:    lastErr,
+		Holder:       hh.getHolder(),
 	}, nil
 }
 
@@ -354,6 +419,60 @@ func (h *Handler) HandleHTRAutoStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, err := h.htrReverseStatus(rw.Target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// HandleHTRReclaim serves POST /api/portmaps/htr/reclaim?host=&project= with body
+// {"pid":int}: the user's confirmed "kill the squatter and retry". The pid must
+// be the holder the status last reported, and the remote re-verifies it still
+// holds the port before killing.
+func (h *Handler) HandleHTRReclaim(w http.ResponseWriter, r *http.Request) {
+	rw, _, ok := h.portMapTarget(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		PID int `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	hh := h.portMaps.htrHost(rw.Target)
+	holder := hh.getHolder()
+	if holder == nil || holder.PID != body.PID {
+		writeError(w, http.StatusConflict, "the process holding the remote port changed; refresh and try again")
+		return
+	}
+	st, err := h.htrReverseStatus(rw.Target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !st.LocalRunning {
+		writeError(w, http.StatusConflict, "local htrcli daemon is not running, so there is nothing to map")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), portReclaimTimeout)
+	defer cancel()
+	if err := killRemotePortHolder(ctx, remote.NewSSHTransport(rw.Target, h.portMaps.sup), st.Port, body.PID); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	hh.setHolder(nil)
+	if err := h.openHTRReverse(portMapRef(rw), rw.Target, st.Port); err != nil {
+		code := http.StatusBadGateway
+		if errors.Is(err, errHTROpening) {
+			code = http.StatusConflict
+		}
+		writeError(w, code, err.Error())
+		return
+	}
+	st, err = h.htrReverseStatus(rw.Target)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

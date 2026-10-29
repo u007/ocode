@@ -725,9 +725,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/portmaps/htr", s.authMiddleware(s.handler.HandleHTRStatus))
 	s.mux.HandleFunc("POST /api/portmaps/htr/start", s.authMiddleware(s.handler.HandleHTRStart))
 	s.mux.HandleFunc("POST /api/portmaps/htr/autostart", s.authMiddleware(s.handler.HandleHTRAutoStart))
+	s.mux.HandleFunc("POST /api/portmaps/htr/reclaim", s.authMiddleware(s.handler.HandleHTRReclaim))
 	s.mux.HandleFunc("DELETE /api/portmaps/{port}", s.authMiddleware(s.handler.HandleRemovePortMap))
 	s.mux.HandleFunc("POST /api/portmaps/{port}/enable", s.authMiddleware(s.handler.HandleEnablePortMap))
 	s.mux.HandleFunc("POST /api/portmaps/{port}/disable", s.authMiddleware(s.handler.HandleDisablePortMap))
+	s.mux.HandleFunc("POST /api/portmaps/{port}/reclaim", s.authMiddleware(s.handler.HandleReclaimPortMap))
 
 	// Profiles — desktop per-window sparse overlays
 	s.mux.HandleFunc("GET /api/profiles", s.authMiddleware(s.handler.handleListProfiles))

@@ -2,12 +2,14 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/u007/ocode/internal/tool"
 )
@@ -42,6 +44,7 @@ type SSHTransport struct {
 var transportInstanceCounter atomic.Uint64
 
 var _ Transport = (*SSHTransport)(nil)
+var _ BoundedTransport = (*SSHTransport)(nil)
 
 func NewSSHTransport(t Target, sup *tool.ProcessSupervisor) *SSHTransport {
 	return &SSHTransport{Target: t, Supervisor: sup, instance: transportInstanceCounter.Add(1)}
@@ -120,11 +123,24 @@ func (s *SSHTransport) commandArgs(command string) []string {
 	return append(args, command)
 }
 
+// sshExecWaitDelay bounds how long Wait lingers on output pipes after ssh exits
+// or is killed.
+const sshExecWaitDelay = time.Second
+
 // Exec runs a single non-interactive command over ssh, capturing stdout and
 // stderr separately (never inheriting the terminal — house rule, see
 // CLAUDE.md "capture subprocess output").
 func (s *SSHTransport) Exec(command string) (ExecResult, error) {
-	cmd := exec.Command("ssh", s.commandArgs(command)...)
+	return s.ExecContext(context.Background(), command)
+}
+
+// ExecContext is Exec bounded by ctx: when ctx ends, the ssh child is killed and
+// the returned error wraps ctx.Err().
+func (s *SSHTransport) ExecContext(ctx context.Context, command string) (ExecResult, error) {
+	cmd := exec.CommandContext(ctx, "ssh", s.commandArgs(command)...)
+	// Killing ssh does not close a pipe a child of it still holds, and Wait waits
+	// for that pipe; WaitDelay bounds the wait so the deadline actually holds.
+	cmd.WaitDelay = sshExecWaitDelay
 	stdout := &LimitedBuffer{Max: MaxExecOutput}
 	stderr := &LimitedBuffer{Max: MaxExecOutput}
 	cmd.Stdout = stdout
@@ -135,6 +151,10 @@ func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 	if runErr == nil {
 		res.ExitCode = 0
 		return res, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The kill, not the command, ended it: report the deadline, not "signal: killed".
+		return res, fmt.Errorf("ssh %s %q: %w", s.Target.String(), command, ctxErr)
 	}
 	var exitErr *exec.ExitError
 	if asExitError(runErr, &exitErr) {

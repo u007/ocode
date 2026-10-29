@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -54,9 +55,12 @@ type ForwardManager struct {
 	sup    *tool.ProcessSupervisor
 	target Target
 
-	mu     sync.Mutex
-	live   map[int]*forwardProcess // remotePort -> running ssh process + its reaper
-	onExit func(remotePort, exitCode int, uptime time.Duration)
+	mu   sync.Mutex
+	live map[int]*forwardProcess // remotePort -> running ssh process + its reaper
+	// startErr is the error of the last Start per remotePort, cleared by a
+	// successful Start or a Stop. It lets a list view say WHY a forward is down.
+	startErr map[int]error
+	onExit   func(remotePort, exitCode int, uptime time.Duration)
 }
 
 // forwardProcess is one running `ssh -N -L` child together with the reaper that
@@ -104,7 +108,7 @@ const forwardWaitDelay = 2 * time.Second
 // NewForwardManager returns a manager for target's extra forwards, supervised
 // under sup (the same supervisor the session's fixed tunnel/remote server use).
 func NewForwardManager(sup *tool.ProcessSupervisor, target Target) *ForwardManager {
-	return &ForwardManager{sup: sup, target: target, live: make(map[int]*forwardProcess)}
+	return &ForwardManager{sup: sup, target: target, live: make(map[int]*forwardProcess), startErr: make(map[int]error)}
 }
 
 // forwardRegistrationID must stay distinct from StartTunnel's
@@ -212,15 +216,36 @@ func processExitCode(err error) int {
 // (not an error) when already live, so callers can call it unconditionally
 // on reconnect/enable.
 func (m *ForwardManager) Start(pm ProjectPortMap) error {
+	m.mu.Lock()
+	_, live := m.live[pm.RemotePort]
+	m.mu.Unlock()
+	if live {
+		// Nothing is attempted here, so startErr keeps what the last real
+		// attempt recorded (e.g. a failed reconnect) rather than being cleared.
+		return nil
+	}
+	err := m.start(pm)
+	m.mu.Lock()
+	if err != nil {
+		m.startErr[pm.RemotePort] = err
+	} else {
+		delete(m.startErr, pm.RemotePort)
+	}
+	m.mu.Unlock()
+	return err
+}
+
+// StartError returns the error of the last Start for remotePort, or nil.
+func (m *ForwardManager) StartError(remotePort int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startErr[remotePort]
+}
+
+func (m *ForwardManager) start(pm ProjectPortMap) error {
 	if pm.Reverse && m.target.Kind != KindSSH {
 		return fmt.Errorf("reverse forward for remote port %d needs an SSH target, not %s", pm.RemotePort, m.target.String())
 	}
-	m.mu.Lock()
-	if _, ok := m.live[pm.RemotePort]; ok {
-		m.mu.Unlock()
-		return nil
-	}
-	m.mu.Unlock()
 
 	cmd := exec.Command("ssh", forwardArgs(pm, m.target)...)
 	// Captured, not inherited: ssh's reason for refusing a forward is the only
@@ -269,13 +294,29 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 		<-fp.done
 		if detail := strings.TrimSpace(stderr.String()); detail != "" {
 			readyErr = fmt.Errorf("%w (ssh: %s)", readyErr, detail)
+			if pm.Reverse && strings.Contains(detail, "remote port forwarding failed") {
+				readyErr = &PortBusyError{Err: readyErr}
+			} else if !pm.Reverse && localBindRefused(detail) {
+				readyErr = localPortBusy(pm.LocalPort, readyErr)
+			}
 		}
 		return fmt.Errorf("forward for remote port %d did not become ready: %w", pm.RemotePort, readyErr)
 	}
 	// An exit that landed while readiness was being decided won the claim, so
 	// Start reports it here and the monitor hook stays silent.
 	if !fp.markReady() {
-		return fmt.Errorf("forward for remote port %d exited while opening", pm.RemotePort)
+		exitErr := fmt.Errorf("forward for remote port %d exited while opening", pm.RemotePort)
+		// A squatter on the local port answers the readiness dial, so a refused
+		// bind lands here rather than above. The child has exited; its stderr is
+		// complete once the reaper closes done.
+		<-fp.done
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			exitErr = fmt.Errorf("%w (ssh: %s)", exitErr, detail)
+			if !pm.Reverse && localBindRefused(detail) {
+				exitErr = localPortBusy(pm.LocalPort, exitErr)
+			}
+		}
+		return exitErr
 	}
 	return nil
 }
@@ -285,6 +326,7 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 // its own: the entry is gone, so there is nothing to kill.
 func (m *ForwardManager) Stop(remotePort int) error {
 	m.mu.Lock()
+	delete(m.startErr, remotePort)
 	fp, ok := m.live[remotePort]
 	m.mu.Unlock()
 	if !ok {
@@ -383,4 +425,22 @@ type PortMapHook interface {
 	// (a trailing newline is added); ok is false when line wasn't a
 	// recognized command.
 	Handle(fm *ForwardManager, line string) (output string, ok bool)
+}
+
+// localBindRefused reports whether ssh's stderr says the -L local port could not
+// be bound because something already holds it.
+func localBindRefused(stderr string) bool {
+	return strings.Contains(stderr, "Address already in use") || strings.Contains(stderr, "cannot listen to port")
+}
+
+// localPortBusy wraps err with the local process holding port. An unidentifiable
+// holder is logged and left nil; the original error still reaches the caller.
+func localPortBusy(port int, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerProbeTimeout)
+	defer cancel()
+	holder, herr := FindLocalPortHolder(ctx, port)
+	if herr != nil {
+		log.Printf("portmap: identify holder of local port %d: %v", port, herr)
+	}
+	return &LocalPortBusyError{Port: port, Holder: holder, Err: err}
 }

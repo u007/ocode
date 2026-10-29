@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -500,4 +501,86 @@ func TestPortMapsListReportsReverse(t *testing.T) {
 	if len(views) != 1 || views[0].RemotePort != 9222 || !views[0].Reverse {
 		t.Fatalf("list = %+v, want one reverse entry on 9222", views)
 	}
+}
+
+// reclaimFixture registers an SSH project with one -L forward on remote port 80
+// and returns the handler, its mux with the reclaim route, and the target.
+func reclaimFixture(t *testing.T) (*Handler, *http.ServeMux, remote.Target) {
+	t.Helper()
+	h, mux := newTestPortMapsHandler(t, "user@devbox", "/srv/app")
+	mux.HandleFunc("POST /api/portmaps/{port}/reclaim", h.HandleReclaimPortMap)
+	target, _ := remote.ParseTarget("user@devbox")
+	ref := projects.ProjectRef{Host: target.String(), Path: "/srv/app"}
+	if err := h.projects.AddPortMap(ref, 80, 9333); err != nil {
+		t.Fatal(err)
+	}
+	return h, mux, target
+}
+
+func TestReclaimRefusesDisabledForwardBeforeKilling(t *testing.T) {
+	h, mux, target := reclaimFixture(t)
+	ref := projects.ProjectRef{Host: target.String(), Path: "/srv/app"}
+	if err := h.projects.SetPortMapEnabled(ref, 80, false); err != nil {
+		t.Fatal(err)
+	}
+	orig := killLocalPortHolder
+	killLocalPortHolder = func(context.Context, int, int) error {
+		t.Fatal("kill must not run for a disabled forward")
+		return nil
+	}
+	t.Cleanup(func() { killLocalPortHolder = orig })
+
+	rec := doPortMaps(t, mux, http.MethodPost,
+		"/api/portmaps/80/reclaim?host=user@devbox&project=/srv/app", []byte(`{"pid":55}`))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "disabled") {
+		t.Fatalf("want 409 disabled, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestReclaimRefusesWhileAnotherReclaimIsInFlight: the holder check and the kill
+// are not atomic, so a second reclaim for the same forward must be refused
+// before it can kill or re-open underneath the first.
+func TestReclaimRefusesWhileAnotherReclaimIsInFlight(t *testing.T) {
+	h, mux, target := reclaimFixture(t)
+	entry := h.portMaps.entry(target, "/srv/app")
+	if !entry.beginReclaim(80) {
+		t.Fatal("first claim must succeed")
+	}
+	defer entry.endReclaim(80)
+
+	orig := killLocalPortHolder
+	killLocalPortHolder = func(context.Context, int, int) error {
+		t.Fatal("kill must not run while another reclaim holds the forward")
+		return nil
+	}
+	t.Cleanup(func() { killLocalPortHolder = orig })
+
+	rec := doPortMaps(t, mux, http.MethodPost,
+		"/api/portmaps/80/reclaim?host=user@devbox&project=/srv/app", []byte(`{"pid":55}`))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already running") {
+		t.Fatalf("want 409 already running, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestReclaimReleasesClaimWhenRefused: the claim must not outlive the request,
+// or the forward could never be reclaimed again after one refused attempt.
+func TestReclaimReleasesClaimWhenRefused(t *testing.T) {
+	h, mux, target := reclaimFixture(t)
+	orig := killLocalPortHolder
+	killLocalPortHolder = func(context.Context, int, int) error {
+		t.Fatal("kill must not run without a reported holder")
+		return nil
+	}
+	t.Cleanup(func() { killLocalPortHolder = orig })
+
+	rec := doPortMaps(t, mux, http.MethodPost,
+		"/api/portmaps/80/reclaim?host=user@devbox&project=/srv/app", []byte(`{"pid":55}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d %s", rec.Code, rec.Body.String())
+	}
+	entry := h.portMaps.entry(target, "/srv/app")
+	if !entry.beginReclaim(80) {
+		t.Fatal("claim still held after a refused reclaim returned")
+	}
+	entry.endReclaim(80)
 }

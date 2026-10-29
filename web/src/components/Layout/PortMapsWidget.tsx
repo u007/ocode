@@ -56,6 +56,14 @@ export default function PortMapsWidget() {
   const [reverse, setReverse] = useState(false);
   const [busy, setBusy] = useState(false);
   const [htr, setHtr] = useState<HtrForwardStatus | null>(null);
+  // The squatting process the user is being asked to kill: the htrcli relay's
+  // remote holder (scope "htr") or a -L row's local holder (scope "local").
+  const [kill, setKill] = useState<{
+    scope: "htr" | "local";
+    pid: number;
+    command: string;
+    remotePort?: number;
+  } | null>(null);
   // Bounded re-fetch budget for the background auto-start; reset whenever the
   // dialog opens or the project changes, so each open gets a fresh budget.
   const livePollAttempts = useRef(0);
@@ -131,6 +139,27 @@ export default function PortMapsWidget() {
       setError(e instanceof ApiError ? e.message : String(e));
       refreshHtr();
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReclaim = async () => {
+    const t = targetRef.current;
+    if (!t || !kill) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (kill.scope === "htr") {
+        setHtr(await api.reclaimHtrForward(kill.pid, t));
+      } else {
+        setMaps(await api.reclaimPortMap(kill.remotePort!, kill.pid, t));
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+      if (kill.scope === "htr") refreshHtr();
+      else refresh();
+    } finally {
+      setKill(null);
       setBusy(false);
     }
   };
@@ -349,6 +378,25 @@ export default function PortMapsWidget() {
               {htr.last_error && !htr.live && (
                 <p className="text-[11px] text-destructive break-words">{htr.last_error}</p>
               )}
+              {htr.holder && !htr.live && (
+                <div className="flex items-center gap-2" data-testid="htr-holder">
+                  <p className="flex-1 text-[11px] text-muted-foreground break-all">
+                    Remote port {htr.port} is held by pid {htr.holder.pid}
+                    {htr.holder.command ? `: ${htr.holder.command}` : ""}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() =>
+                      setKill({ scope: "htr", pid: htr.holder!.pid, command: htr.holder!.command })
+                    }
+                    data-testid="htr-kill-holder"
+                  >
+                    Kill and retry
+                  </Button>
+                </div>
+              )}
             </div>
           )}
 
@@ -371,6 +419,25 @@ export default function PortMapsWidget() {
                 >
                   {m.live ? "live" : m.enabled ? "enabled" : "disabled"}
                 </span>
+                {m.holder && !m.live && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    title={`localhost:${m.local_port} is held by pid ${m.holder.pid}: ${m.holder.command}`}
+                    onClick={() =>
+                      setKill({
+                        scope: "local",
+                        pid: m.holder!.pid,
+                        command: m.holder!.command,
+                        remotePort: m.remote_port,
+                      })
+                    }
+                    data-testid={`portmap-kill-holder-${m.remote_port}`}
+                  >
+                    Kill holder
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -390,6 +457,33 @@ export default function PortMapsWidget() {
                 </Button>
               </div>
             ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={kill !== null} onOpenChange={(o) => !o && setKill(null)}>
+        <DialogContent data-testid="htr-kill-confirm">
+          <DialogHeader>
+            <DialogTitle>
+              {kill?.scope === "local" ? "Kill process on this machine?" : "Kill process on remote?"}
+            </DialogTitle>
+            <DialogDescription>
+              {kill?.scope === "local"
+                ? `This sends SIGTERM to pid ${kill.pid} on this machine, then reopens the forward.`
+                : `This sends SIGTERM to pid ${kill?.pid} on the remote host, then reopens the htrcli relay on port ${htr?.port}.`}
+            </DialogDescription>
+          </DialogHeader>
+          {kill?.command && (
+            <p className="font-mono text-xs break-all rounded-md border border-border p-2">
+              {kill.command}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" disabled={busy} onClick={() => setKill(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={busy} onClick={handleReclaim}>
+              Kill and retry
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

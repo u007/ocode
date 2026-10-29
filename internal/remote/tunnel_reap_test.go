@@ -11,12 +11,13 @@ func TestParseListeningPID(t *testing.T) {
 	out := `COMMAND   PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
 ssh     20546 james    5u  IPv6 0x488e4df995a2d8c7      0t0  TCP [::1]:36655 (LISTEN)
 ssh     20546 james    6u  IPv4 0x70fb700a3123280a      0t0  TCP 127.0.0.1:36655 (LISTEN)`
-	pid, err := parseLsofOutput(out, 36655)
+	pids, err := parseLsofOutput(out, 36655)
 	if err != nil {
 		t.Fatalf("parseListeningPID() error: %v", err)
 	}
-	if pid != 20546 {
-		t.Fatalf("parseListeningPID() = %d, want 20546", pid)
+	// Two rows for one pid (IPv4 and IPv6) list that pid once.
+	if len(pids) != 1 || pids[0] != 20546 {
+		t.Fatalf("parseListeningPID() = %v, want [20546]", pids)
 	}
 
 	// Wrong port → not found.
@@ -47,12 +48,29 @@ func TestContainsPortAtBoundary(t *testing.T) {
 func TestParseListeningPID_SS(t *testing.T) {
 	out := `LISTEN 0      128          127.0.0.1:36655    0.0.0.0:*    users:(("ssh",pid=20546,fd=6))
 LISTEN 0      128          127.0.0.1:59190     0.0.0.0:*    users:(("ssh",pid=31001,fd=5))`
-	pid, err := parseSsOutput(out, 59190)
+	pids, err := parseSsOutput(out, 59190)
 	if err != nil {
 		t.Fatalf("parseListeningPID() error: %v", err)
 	}
-	if pid != 31001 {
-		t.Fatalf("parseListeningPID() = %d, want 31001", pid)
+	if len(pids) != 1 || pids[0] != 31001 {
+		t.Fatalf("parseListeningPID() = %v, want [31001]", pids)
+	}
+}
+
+// A socket shared by a master and its workers lists every holder; all of them
+// must be returned, or the port stays bound after the first one is signalled.
+func TestParseListeningPIDs_SharedSocket(t *testing.T) {
+	ss := `LISTEN 0 511 127.0.0.1:3845 0.0.0.0:* users:(("node",pid=701,fd=9),("node",pid=702,fd=9))`
+	pids, err := parseSsOutput(ss, 3845)
+	if err != nil || len(pids) != 2 || pids[0] != 701 || pids[1] != 702 {
+		t.Fatalf("parseSsOutput shared = %v, %v; want [701 702]", pids, err)
+	}
+	lsof := `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+node 701 james 9u IPv4 0x1 0t0 TCP 127.0.0.1:3845 (LISTEN)
+node 702 james 9u IPv4 0x1 0t0 TCP 127.0.0.1:3845 (LISTEN)`
+	pids, err = parseLsofOutput(lsof, 3845)
+	if err != nil || len(pids) != 2 || pids[0] != 701 || pids[1] != 702 {
+		t.Fatalf("parseLsofOutput shared = %v, %v; want [701 702]", pids, err)
 	}
 }
 

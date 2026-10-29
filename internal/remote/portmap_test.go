@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -565,6 +566,10 @@ func TestForwardStartReverseFailsFastWithSSHReason(t *testing.T) {
 	if elapsed := time.Since(began); elapsed > time.Second {
 		t.Fatalf("reverse Start took %s; an early ssh exit must fail well inside the 2s budget", elapsed)
 	}
+	var busy *PortBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("a refused remote bind must be a *PortBusyError, got %T", err)
+	}
 	if !strings.Contains(err.Error(), "remote port forwarding failed for listen port 9222") {
 		t.Fatalf("reverse Start error = %v, want ssh's stderr in it", err)
 	}
@@ -706,4 +711,84 @@ func waitForFile(t *testing.T, path string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestForwardStartLocalBindRefusedIsLocalPortBusy: a -L forward whose local port
+// ssh cannot bind must surface as *LocalPortBusyError carrying the holder, and
+// be remembered for the list view until a Stop clears it.
+func TestForwardStartLocalBindRefusedIsLocalPortBusy(t *testing.T) {
+	installFakeSSHScript(t, "echo 'bind [127.0.0.1]:9333: Address already in use' >&2\nexit 255")
+	of, oc := findLocalListener, localCmdline
+	findLocalListener = func(context.Context, int) ([]int, error) { return []int{55}, nil }
+	localCmdline = func(int) (string, error) { return "node dev.js", nil }
+	t.Cleanup(func() { findLocalListener, localCmdline = of, oc })
+	withShrunkTunnelReadyTimings(t, 100, 20*time.Millisecond)
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	err := fm.Start(ProjectPortMap{RemotePort: 80, LocalPort: 9333, Enabled: true})
+	var busy *LocalPortBusyError
+	if !errors.As(err, &busy) || busy.Holder == nil || busy.Holder.PID != 55 {
+		t.Fatalf("want LocalPortBusyError with holder 55, got %T %v", err, err)
+	}
+	if !errors.As(fm.StartError(80), &busy) {
+		t.Fatal("StartError must remember the failure")
+	}
+	_ = fm.Stop(80)
+	if fm.StartError(80) != nil {
+		t.Fatal("Stop must clear the remembered failure")
+	}
+}
+
+// TestForwardStartAlreadyLiveKeepsRememberedError: a Start that finds the
+// forward already live opens nothing, so it must not clear the error a failed
+// reconnect recorded for that port. Only a Start that actually attempts the
+// open sets or clears startErr.
+func TestForwardStartAlreadyLiveKeepsRememberedError(t *testing.T) {
+	installFakeSSH(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	localPort, _ := strconv.Atoi(portStr)
+
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "example.invalid"})
+	pm := ProjectPortMap{RemotePort: 3511, LocalPort: localPort, Enabled: true}
+
+	if err := fm.Start(pm); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	remembered := errors.New("reconnect failed")
+	fm.mu.Lock()
+	fm.startErr[pm.RemotePort] = remembered
+	fm.mu.Unlock()
+
+	if err := fm.Start(pm); err != nil {
+		t.Fatalf("Start on a live forward: %v", err)
+	}
+	if got := fm.StartError(pm.RemotePort); !errors.Is(got, remembered) {
+		t.Fatalf("a Start that found the forward live cleared the remembered error: got %v", got)
+	}
+
+	// With the forward down, a Start that really attempts the open and succeeds
+	// is what clears the remembered error.
+	if err := fm.Stop(pm.RemotePort); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	fm.mu.Lock()
+	fm.startErr[pm.RemotePort] = remembered
+	fm.mu.Unlock()
+	if err := fm.Start(pm); err != nil {
+		t.Fatalf("Start after Stop: %v", err)
+	}
+	if got := fm.StartError(pm.RemotePort); got != nil {
+		t.Fatalf("a successful attempt must clear the remembered error: got %v", got)
+	}
+	_ = fm.Stop(pm.RemotePort)
 }

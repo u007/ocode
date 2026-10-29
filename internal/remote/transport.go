@@ -1,6 +1,9 @@
 package remote
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // ExecResult is the outcome of a non-interactive remote command.
 type ExecResult struct {
@@ -42,4 +45,15 @@ type Transport interface {
 	// Describe returns a short human-readable label for progress output
 	// (e.g. "ssh user@host").
 	Describe() string
+}
+
+// BoundedTransport is a Transport whose single command can be cut short by a
+// context. The remote port-holder probe and kill take this type, so a hung ssh
+// child cannot outlive the request that started it.
+type BoundedTransport interface {
+	Transport
+
+	// ExecContext is Exec, but kills the command when ctx ends. The returned
+	// error then wraps ctx.Err().
+	ExecContext(ctx context.Context, command string) (ExecResult, error)
 }

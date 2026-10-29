@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const mockIsPortMapsAvailable = vi.hoisted(() => vi.fn());
@@ -9,6 +9,8 @@ const mockSetPortMapEnabled = vi.hoisted(() => vi.fn());
 const mockGetHtrForward = vi.hoisted(() => vi.fn());
 const mockStartHtrForward = vi.hoisted(() => vi.fn());
 const mockSetHtrAutoStart = vi.hoisted(() => vi.fn());
+const mockReclaimHtr = vi.hoisted(() => vi.fn());
+const mockReclaimPortMap = vi.hoisted(() => vi.fn());
 
 const FakeApiError = vi.hoisted(() => {
   return class FakeApiError extends Error {
@@ -31,6 +33,8 @@ vi.mock("../../api/client", () => ({
     getHtrForward: mockGetHtrForward,
     startHtrForward: mockStartHtrForward,
     setHtrForwardAutoStart: mockSetHtrAutoStart,
+    reclaimHtrForward: mockReclaimHtr,
+    reclaimPortMap: mockReclaimPortMap,
   },
 }));
 
@@ -69,6 +73,8 @@ describe("PortMapsWidget", () => {
     });
     mockStartHtrForward.mockReset();
     mockSetHtrAutoStart.mockReset();
+    mockReclaimHtr.mockReset();
+    mockReclaimPortMap.mockReset();
     mockIsPortMapsAvailable.mockReset();
     mockListPortMaps.mockReset().mockResolvedValue([]);
     mockAddPortMap.mockReset();
@@ -361,6 +367,38 @@ describe("PortMapsWidget", () => {
       expect(mockListPortMaps.mock.calls.length).toBe(callsAfterOpen);
     });
   });
+  describe("local holder of a -L forward", () => {
+    it("asks before killing the local process holding the local port, then retries", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      const row = { remote_port: 80, local_port: 9333, enabled: true, live: false };
+      mockListPortMaps.mockResolvedValue([{ ...row, holder: { pid: 55, command: "node dev.js" } }]);
+      mockReclaimPortMap.mockResolvedValue([{ ...row, live: true }]);
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      fireEvent.click(await screen.findByTestId("portmap-kill-holder-80"));
+      expect(mockReclaimPortMap).not.toHaveBeenCalled();
+      const confirm = await screen.findByTestId("htr-kill-confirm");
+      expect(within(confirm).getByText("node dev.js")).toBeTruthy();
+      fireEvent.click(within(confirm).getByRole("button", { name: "Kill and retry" }));
+      await waitFor(() => expect(mockReclaimPortMap).toHaveBeenCalledWith(80, 55, SSH_TARGET));
+      await waitFor(() => expect(screen.queryByTestId("portmap-kill-holder-80")).toBeNull());
+    });
+
+    it("offers no kill for a live forward or an unknown holder", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([
+        { remote_port: 80, local_port: 9333, enabled: true, live: false },
+        { remote_port: 81, local_port: 9334, enabled: true, live: true, holder: { pid: 7, command: "x" } },
+      ]);
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText("localhost:9334 → remote:81");
+      expect(screen.queryByTestId("portmap-kill-holder-80")).toBeNull();
+      expect(screen.queryByTestId("portmap-kill-holder-81")).toBeNull();
+    });
+  });
   describe("htrcli relay row", () => {
     const status = {
       local_running: true, port: 3845, live: false, opening: false, auto_start: true, last_error: "",
@@ -391,6 +429,40 @@ describe("PortMapsWidget", () => {
       const toggle = await screen.findByTestId("htr-autostart-toggle");
       fireEvent.click(toggle);
       await waitFor(() => expect(mockSetHtrAutoStart).toHaveBeenCalledWith(true, SSH_TARGET));
+    });
+
+    it("asks before killing the remote process squatting the port, then retries", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([]);
+      const holder = { pid: 4242, command: "htrcli serve --port 3845" };
+      mockGetHtrForward.mockResolvedValue({
+        ...status,
+        auto_start: false,
+        last_error: "remote port forwarding failed",
+        holder,
+      });
+      mockReclaimHtr.mockResolvedValue({ ...status, auto_start: false, live: true });
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      fireEvent.click(await screen.findByTestId("htr-kill-holder"));
+      // Nothing is killed until the confirm dialog is accepted.
+      expect(mockReclaimHtr).not.toHaveBeenCalled();
+      const confirm = await screen.findByTestId("htr-kill-confirm");
+      fireEvent.click(within(confirm).getByRole("button", { name: "Kill and retry" }));
+      await waitFor(() => expect(mockReclaimHtr).toHaveBeenCalledWith(4242, SSH_TARGET));
+      await screen.findByText("live");
+    });
+
+    it("offers no kill when the holder is unknown", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([]);
+      mockGetHtrForward.mockResolvedValue({ ...status, auto_start: false, last_error: "remote port forwarding failed" });
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText("remote port forwarding failed");
+      expect(screen.queryByTestId("htr-kill-holder")).toBeNull();
     });
 
     it("disables Start when the local daemon is down", async () => {

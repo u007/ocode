@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,13 +42,17 @@ func reclaimStaleTunnelPort(port int) error {
 	if port <= 0 {
 		return nil
 	}
-	pid, err := findListeningProcess(port)
+	ctx, cancel := context.WithTimeout(context.Background(), listenerProbeTimeout)
+	defer cancel()
+	pids, err := findListeningProcesses(ctx, port)
 	if errors.Is(err, errNoListener) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("find listener on port %d: %w", port, err)
 	}
+	// An ocode tunnel is a single ssh process, so its first listener is the one to judge.
+	pid := pids[0]
 	if !isOcodeSSHTunnel(pid) {
 		return nil // not ours; leave it alone
 	}
@@ -151,48 +156,65 @@ func parseProcStatPPID(s string) (int, error) {
 	return ppid, nil
 }
 
-// findListeningProcess returns the PID of the process listening on the given
-// local TCP port, or an error if none is found.
+// listenerProbeTimeout bounds one local listener inspection (lsof or ss).
+const listenerProbeTimeout = 5 * time.Second
+
+// findListeningProcesses returns the PIDs of every process listening on the
+// given local TCP port, in inspection order, or an error if none is found. A
+// socket shared by a master and its workers is listed once per holder, so
+// signalling only the first of them can leave the port bound.
 //
 // On macOS it uses lsof; on Linux it uses ss. The two formats are parsed
 // separately to avoid misreading ss's Recv-Q column as a PID.
 //
 // These are short-lived inspection commands, not long-running managed
 // processes, so they are invoked directly rather than through the process
-// supervisor.
+// supervisor. ctx bounds each one.
 //
 // It returns errNoListener when nothing listens on the port.
-func findListeningProcess(port int) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+func findListeningProcesses(ctx context.Context, port int) ([]int, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "lsof", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-P", "-n")
 		out, err := cmd.Output()
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("lsof listeners on port %d: %w", port, ctxErr)
+			}
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 				// lsof exits 1 when no file matches the filter.
-				return 0, errNoListener
+				return nil, errNoListener
 			}
-			return 0, err
+			return nil, err
 		}
 		return parseLsofOutput(string(out), port)
 	case "linux":
 		cmd := exec.CommandContext(ctx, "ss", "-ltnp")
 		out, err := cmd.Output()
 		if err != nil {
-			return 0, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("ss listeners on port %d: %w", port, ctxErr)
+			}
+			return nil, err
 		}
 		return parseSsOutput(string(out), port)
 	default:
-		return 0, fmt.Errorf("port inspection not supported on %s", runtime.GOOS)
+		return nil, fmt.Errorf("port inspection not supported on %s", runtime.GOOS)
 	}
 }
 
-// parseLsofOutput extracts a PID from lsof output for the given port.
-func parseLsofOutput(out string, port int) (int, error) {
+// appendPID adds pid to pids unless it is already there.
+func appendPID(pids []int, pid int) []int {
+	if slices.Contains(pids, pid) {
+		return pids
+	}
+	return append(pids, pid)
+}
+
+// parseLsofOutput extracts every listener PID from lsof output for the given port.
+func parseLsofOutput(out string, port int) ([]int, error) {
+	var pids []int
 	for _, line := range strings.Split(out, "\n") {
 		if !containsPortAtBoundary(line, port) {
 			continue
@@ -205,33 +227,43 @@ func parseLsofOutput(out string, port int) (int, error) {
 		if err != nil {
 			continue
 		}
-		return pid, nil
+		pids = appendPID(pids, pid)
 	}
-	return 0, fmt.Errorf("%w on port %d", errNoListener, port)
+	if len(pids) == 0 {
+		return nil, fmt.Errorf("%w on port %d", errNoListener, port)
+	}
+	return pids, nil
 }
 
-// parseSsOutput extracts a PID from ss output for the given port.
-func parseSsOutput(out string, port int) (int, error) {
+// parseSsOutput extracts every listener PID from ss output for the given port.
+// One socket can list several holders: users:(("node",pid=1,fd=3),("node",pid=2,fd=3)).
+func parseSsOutput(out string, port int) ([]int, error) {
+	var pids []int
 	for _, line := range strings.Split(out, "\n") {
 		if !containsPortAtBoundary(line, port) {
 			continue
 		}
-		idx := strings.Index(line, "pid=")
-		if idx < 0 {
-			continue
+		rest := line
+		for {
+			idx := strings.Index(rest, "pid=")
+			if idx < 0 {
+				break
+			}
+			rest = rest[idx+4:]
+			end := strings.IndexAny(rest, ",)")
+			if end < 0 {
+				end = len(rest)
+			}
+			if pid, err := strconv.Atoi(strings.TrimSpace(rest[:end])); err == nil {
+				pids = appendPID(pids, pid)
+			}
+			rest = rest[end:]
 		}
-		rest := line[idx+4:]
-		end := strings.IndexAny(rest, ",)")
-		if end < 0 {
-			end = len(rest)
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(rest[:end]))
-		if err != nil {
-			continue
-		}
-		return pid, nil
 	}
-	return 0, fmt.Errorf("%w on port %d", errNoListener, port)
+	if len(pids) == 0 {
+		return nil, fmt.Errorf("%w on port %d", errNoListener, port)
+	}
+	return pids, nil
 }
 
 // containsPortAtBoundary reports whether s contains the substring ":<port>"

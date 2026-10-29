@@ -1359,6 +1359,8 @@ export interface PortMapView {
   /** ssh -R: the remote reaches the desktop's local port. Absent on older servers, which only ran -L. */
   reverse?: boolean;
   live: boolean;
+  /** Local process squatting `local_port` after a -L forward failed to bind. */
+  holder?: { pid: number; command: string };
 }
 
 /** State of the htrcli reverse forward (remote:port -> this machine's htrcli
@@ -1371,6 +1373,9 @@ export interface HtrForwardStatus {
   opening: boolean;
   auto_start: boolean;
   last_error: string;
+  /** Remote process squatting `port` after a busy-port failure. Absent when
+   *  unknown or not busy. */
+  holder?: { pid: number; command: string };
 }
 
 /** The remote SSH project a port-forwards call is scoped to. Omit it to talk to
