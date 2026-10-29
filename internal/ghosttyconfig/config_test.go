@@ -1,8 +1,10 @@
 package ghosttyconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -296,13 +298,141 @@ func TestNormalizeFontFamily(t *testing.T) {
 }
 
 func TestFontSizeClamped(t *testing.T) {
-	if got := clampFontSize(2); got != 6 {
-		t.Errorf("clampFontSize(2) = %v", got)
+	if got := clampFontSize(2); got != MinFontSize {
+		t.Errorf("clampFontSize(2) = %v, want %v", got, MinFontSize)
 	}
-	if got := clampFontSize(80); got != 48 {
-		t.Errorf("clampFontSize(80) = %v", got)
+	if got := clampFontSize(80); got != MaxFontSize {
+		t.Errorf("clampFontSize(80) = %v, want %v", got, MaxFontSize)
 	}
 	if got := clampFontSize(13.5); got != 13.5 {
 		t.Errorf("clampFontSize(13.5) = %v", got)
+	}
+}
+
+// Sizes between the old floor (6) and the new one must reach the appearance
+// block unchanged; a floor above them silently re-sized the user's Ghostty font.
+func TestGhosttyFontSizeFloorIsHonoured(t *testing.T) {
+	opts, _ := testOptions(t)
+	writeFile(t, filepath.Join(opts.XDGConfigHome, "ghostty"), "config", "font-size = 7\n")
+
+	if cfg := LoadWith(opts); cfg.FontSize != 7 {
+		t.Errorf("font-size = 7 resolved to %v, want 7", cfg.FontSize)
+	}
+	writeFile(t, filepath.Join(opts.XDGConfigHome, "ghostty"), "config", "font-size = 6\n")
+	if cfg := LoadWith(opts); cfg.FontSize != 6 {
+		t.Errorf("font-size = 6 resolved to %v, want 6", cfg.FontSize)
+	}
+	writeFile(t, filepath.Join(opts.XDGConfigHome, "ghostty"), "config", "font-size = 2\n")
+	if cfg := LoadWith(opts); cfg.FontSize != MinFontSize {
+		t.Errorf("font-size = 2 resolved to %v, want the floor %v", cfg.FontSize, MinFontSize)
+	}
+}
+
+// Ghostty defines an empty value as "reset to default". A theme's colour must
+// not survive an explicit reset, or the user cannot undo a theme colour.
+func TestEmptyColourResetsTheThemeValue(t *testing.T) {
+	opts, _ := testOptions(t)
+	writeFile(t, filepath.Join(opts.XDGConfigHome, "ghostty", "themes"), "reset-me",
+		"background = #123456\nforeground = #abcdef\n")
+	writeFile(t, opts.XDGConfigHome, "ghostty/config",
+		"theme = reset-me\nbackground =\n")
+
+	cfg := LoadWith(opts)
+	if cfg.Dark == nil {
+		t.Fatalf("expected a resolved dark palette, errors=%v", cfg.Errors)
+	}
+	if cfg.Dark.Background != "" {
+		t.Errorf("an explicit empty value must clear the theme's background, got %q", cfg.Dark.Background)
+	}
+	if cfg.Dark.Foreground != "#abcdef" {
+		t.Errorf("an unreset colour must keep the theme's value, got %q", cfg.Dark.Foreground)
+	}
+}
+
+// A line without "=" is reported rather than skipped in silence: a typo like
+// `font-size 12` is otherwise indistinguishable from an unknown key.
+func TestMalformedLineIsReported(t *testing.T) {
+	opts, _ := testOptions(t)
+	writeFile(t, opts.XDGConfigHome, "ghostty/config", "font-size 12\n")
+
+	cfg := LoadWith(opts)
+	for _, entry := range cfg.Errors {
+		if strings.Contains(entry, "malformed line") {
+			return
+		}
+	}
+	t.Fatalf("a malformed line must be reported, errors=%v", cfg.Errors)
+}
+
+// Found means "a config was read", not "a path existed". An unreadable config
+// otherwise wins the whole appearance block with every field at its built-in
+// default, silently discarding the user's ocode font/size/theme.
+func TestLoadRequiresAReadableConfigForFound(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not honoured")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a 0o000 file, so the read cannot fail")
+	}
+	opts, _ := testOptions(t)
+	dir := filepath.Join(opts.XDGConfigHome, "ghostty")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("font-size = 15\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	cfg := LoadWith(opts)
+	if cfg.Found {
+		t.Fatalf("Found must require a successful read; got paths=%v errors=%v", cfg.Paths, cfg.Errors)
+	}
+	if len(cfg.Errors) == 0 {
+		t.Fatal("expected the read failure to be reported in Errors")
+	}
+	if cfg.FontSize != 0 {
+		t.Fatalf("an unreadable config must not supply values, got font size %v", cfg.FontSize)
+	}
+}
+
+// NaN/Inf parse as valid float64s. Left alone they reach the API response,
+// json.Marshal fails, and writeJSON has already committed a 200 — so the client
+// receives an empty body instead of the terminal settings.
+func TestLoadIgnoresNonFiniteNumbers(t *testing.T) {
+	opts, _ := testOptions(t)
+	writeFile(t, opts.XDGConfigHome, "ghostty/config",
+		"font-size = NaN\n"+
+			"adjust-cell-width = inf%\n"+
+			"adjust-cell-height = +Inf\n")
+
+	cfg := LoadWith(opts)
+	if !cfg.Found {
+		t.Fatalf("expected the config to be found, errors=%v", cfg.Errors)
+	}
+	if cfg.FontSize != 0 {
+		t.Errorf("font-size = NaN must be ignored, got %v", cfg.FontSize)
+	}
+	if cfg.CellWidth.Percent != 0 || cfg.CellWidth.Px != 0 {
+		t.Errorf("adjust-cell-width = inf%% must be ignored, got %+v", cfg.CellWidth)
+	}
+	if cfg.CellHeight.Percent != 0 || cfg.CellHeight.Px != 0 {
+		t.Errorf("adjust-cell-height = +Inf must be ignored, got %+v", cfg.CellHeight)
+	}
+
+	ignored := map[string]bool{}
+	for _, entry := range cfg.Ignored {
+		ignored[entry.Key] = true
+	}
+	for _, key := range []string{"font-size", "adjust-cell-width", "adjust-cell-height"} {
+		if !ignored[key] {
+			t.Errorf("%s = a non-finite number must be reported in Ignored, got %+v", key, cfg.Ignored)
+		}
+	}
+
+	// The user-visible invariant: the resolved config must be serialisable.
+	if _, err := json.Marshal(cfg); err != nil {
+		t.Fatalf("resolved config must marshal (a NaN/Inf makes the API answer 200 with an empty body): %v", err)
 	}
 }

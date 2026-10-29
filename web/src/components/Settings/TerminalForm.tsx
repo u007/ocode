@@ -100,8 +100,8 @@ export default function TerminalForm() {
     if (appearance.source === "ghostty") {
       setFontFamily(appearance.font_family || DEFAULT_TERMINAL_FONT_FAMILY);
       setFontSize(appearance.font_size || DEFAULT_TERMINAL_FONT_SIZE);
-      setCellWidthPercent(absolutePercent(appearance.cell_width, 100));
-      setCellHeightPercent(absolutePercent(appearance.cell_height, 100));
+      setCellWidthPercent(absolutePercent(appearance.cell_width_adjust, 100));
+      setCellHeightPercent(absolutePercent(appearance.cell_height_adjust, 100));
       setTheme(appearance.theme_name ?? "");
     }
     setAppearanceSource("ocode");
@@ -182,6 +182,13 @@ export default function TerminalForm() {
     <div className="p-6 max-w-lg space-y-4">
       <h2 className="text-sm font-semibold text-foreground">Terminal</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
+      {appearance?.errors?.length ? (
+        <ul className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-500">
+          {appearance.errors.map((message) => (
+            <li key={message}>{message}</li>
+          ))}
+        </ul>
+      ) : null}
 
       <div className="space-y-2 rounded-md border border-border p-3">
         <div className="text-xs font-medium text-foreground">Appearance source</div>
@@ -234,7 +241,7 @@ export default function TerminalForm() {
                   · theme <span className="text-foreground">{appearance.theme_name}</span>
                 </>
               ) : null}
-              {" "}· cell {signedPercent(appearance?.cell_width)} / {signedPercent(appearance?.cell_height)}
+              {" "}· cell {signedPercent(appearance?.cell_width_adjust)} / {signedPercent(appearance?.cell_height_adjust)}
             </div>
             <Button
               size="sm"

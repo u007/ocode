@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -2529,9 +2530,25 @@ func generateRemoteToken() (string, error) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	// Encode BEFORE the status line is committed. Encoding straight to the
+	// ResponseWriter meant a NaN/Inf (or any unencodable value) produced a 200
+	// whose body was empty or truncated, which reads as "no data" to the client
+	// instead of an error.
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(v); err != nil {
+		log.Printf("writeJSON: cannot encode %T response: %v", v, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, werr := w.Write([]byte(`{"error":"internal encoding error"}` + "\n")); werr != nil {
+			log.Printf("writeJSON: writing encoding-error body: %v", werr)
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if _, err := w.Write(body.Bytes()); err != nil {
+		log.Printf("writeJSON: writing %T response: %v", v, err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

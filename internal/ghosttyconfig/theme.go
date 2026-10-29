@@ -34,7 +34,7 @@ func (p *parser) themeFor(name string) *ThemeColors {
 			base = resolved
 		}
 	}
-	applyColorSet(base, p.colors, p.palette, p.paletteSet)
+	applyColorSet(base, p.colors, p.colorResets, p.palette, p.paletteSet)
 	deriveDefaults(base)
 	if base.Foreground == "" && base.Background == "" && base.Palette == nil {
 		return nil
@@ -138,10 +138,28 @@ func splitThemeSpec(spec string) (light, dark string, split bool, ok bool) {
 }
 
 // applyColorSet overlays explicit colour keys onto a theme. Palette slots the
-// config did not set keep the theme's colour.
-func applyColorSet(dst *ThemeColors, colors map[string]string, palette [16]string, set [16]bool) {
+// config did not set keep the theme's colour. A key in resets was written with
+// an empty value, which Ghostty defines as "reset to default": clearing it here
+// (after the theme was applied) is what stops the theme's colour surviving.
+func applyColorSet(dst *ThemeColors, colors map[string]string, resets map[string]bool, palette [16]string, set [16]bool) {
 	if dst == nil {
 		return
+	}
+	for key := range resets {
+		switch key {
+		case "foreground":
+			dst.Foreground = ""
+		case "background":
+			dst.Background = ""
+		case "cursor-color":
+			dst.Cursor = ""
+		case "cursor-text":
+			dst.CursorText = ""
+		case "selection-background":
+			dst.SelectionBackground = ""
+		case "selection-foreground":
+			dst.SelectionForeground = ""
+		}
 	}
 	if v, ok := colors["foreground"]; ok {
 		dst.Foreground = v

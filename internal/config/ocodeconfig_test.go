@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1645,6 +1646,15 @@ func TestTerminalAppearanceConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("font size floor is the Ghostty floor", func(t *testing.T) {
+		// Ghostty sizes of 6 and 7 must not be re-sized by the ocode range.
+		for _, tc := range []struct{ in, want int }{{6, 6}, {7, 7}, {5, 6}, {48, 48}, {49, 48}} {
+			if got := NormalizeTerminalFontSize(tc.in); got != tc.want {
+				t.Errorf("NormalizeTerminalFontSize(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		}
+	})
+
 	t.Run("clamps loaded values", func(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
@@ -2336,5 +2346,228 @@ func TestSavePulseActivationModelRoundTrip(t *testing.T) {
 	}
 	if cfg.PulseActivationModel != "" {
 		t.Fatalf("clear did not clear: %q", cfg.PulseActivationModel)
+	}
+}
+
+// A default value must not be materialized on disk by an unrelated save. If the
+// appearance keys are always written, "unset" becomes "explicitly set" and every
+// future change to a default (e.g. the 13 → 12 font size) is unreachable for
+// anyone who ever saved a setting.
+func TestWriteOcodeConfigOmitsDefaultAppearanceKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ocodeconfig.json")
+	cfg := defaultOcodeConfig()
+	if err := writeOcodeConfigFile(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"terminal_appearance_source",
+		"terminal_cell_width_percent",
+		"terminal_cell_height_percent",
+	} {
+		if value, ok := raw[key]; ok {
+			t.Errorf("%s is at its default but was written (%s); an untouched install must gain no key", key, value)
+		}
+	}
+}
+
+// The settings form always sends both percentages. Saving a default must leave
+// no key on disk (the default is stored as unset), and returning to the default
+// after a custom value must remove the key again, not write 100 or 110.
+func TestSaveTerminalConfigStoresDefaultPercentAsUnset(t *testing.T) {
+	chdirTempForConfigTest(t)
+	setHomeTree(t, t.TempDir())
+
+	readRaw := func(t *testing.T) map[string]json.RawMessage {
+		t.Helper()
+		path, err := getGlobalOcodeConfigPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	width, height := DefaultTerminalCellWidthPercent, DefaultTerminalCellHeightPercent
+	values, err := SaveTerminalConfig(TerminalConfigDelta{CellWidthPercent: &width, CellHeightPercent: &height})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values.CellWidthPercent != 0 || values.CellHeightPercent != 0 {
+		t.Fatalf("defaults returned as %v/%v, want unset 0/0", values.CellWidthPercent, values.CellHeightPercent)
+	}
+	raw := readRaw(t)
+	for _, key := range []string{"terminal_cell_width_percent", "terminal_cell_height_percent"} {
+		if value, ok := raw[key]; ok {
+			t.Fatalf("%s written as %s after saving its default", key, value)
+		}
+	}
+
+	custom := 120.0
+	if _, err := SaveTerminalConfig(TerminalConfigDelta{CellWidthPercent: &custom}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readRaw(t)["terminal_cell_width_percent"]); got != "120" {
+		t.Fatalf("custom width saved as %q, want 120", got)
+	}
+
+	if _, err := SaveTerminalConfig(TerminalConfigDelta{CellWidthPercent: &width}); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := readRaw(t)["terminal_cell_width_percent"]; ok {
+		t.Fatalf("returning to the default left %s on disk, want the key removed", value)
+	}
+}
+
+// A present-but-null value must be CONSUMED by the decoder. Left in `raw` it
+// lands in Extra and the Extra merge (which runs after the canonical terminal
+// writes) puts `null` back on disk, clobbering a real value saved later.
+func TestLoadOcodeConfigConsumesNullAppearancePercent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ocodeconfig.json")
+	if err := os.WriteFile(path, []byte(`{"terminal_cell_height_percent": null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg OcodeConfig
+	if err := loadOcodeConfigFile(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := cfg.Extra["terminal_cell_height_percent"]; ok {
+		t.Fatalf("a present-but-null key must not be kept in Extra, got %s", value)
+	}
+
+	// Saving a real value must survive its own write.
+	cfg.TerminalCellHeightPercent = 120
+	if err := writeOcodeConfigFile(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw["terminal_cell_height_percent"]); got != "120" {
+		t.Fatalf("saved cell height = %s, want 120 (a stale null must not win)", got)
+	}
+}
+
+// One PUT must be ONE config transaction: a single OnConfigSaved, and the values
+// the saver returns are the ones on disk, so a handler can adopt them instead of
+// keeping a second, divergent copy in memory.
+func TestSaveTerminalConfigIsOneTransaction(t *testing.T) {
+	chdirTempForConfigTest(t)
+	setHomeTree(t, t.TempDir())
+
+	fired := 0
+	remove := OnConfigSaved.Add(func() { fired++ })
+	defer remove()
+
+	scrollback, family, size := 5000, "  Mono Lisa  ", 20
+	shell, source, theme := "  /bin/zsh  ", "ocode", "  Solarized  "
+	width, height := 120.0, 130.0
+	values, err := SaveTerminalConfig(TerminalConfigDelta{
+		ScrollbackLines:   &scrollback,
+		FontFamily:        &family,
+		FontSize:          &size,
+		Shell:             &shell,
+		AppearanceSource:  &source,
+		CellWidthPercent:  &width,
+		CellHeightPercent: &height,
+		Theme:             &theme,
+	})
+	if err != nil {
+		t.Fatalf("SaveTerminalConfig: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("OnConfigSaved fired %d times, want exactly 1 for one save", fired)
+	}
+
+	if values.ScrollbackLines != 5000 || values.FontFamily != "Mono Lisa" || values.FontSize != 20 ||
+		values.Shell != "/bin/zsh" || values.AppearanceSource != "ocode" ||
+		values.CellWidthPercent != 120 || values.CellHeightPercent != 130 || values.Theme != "Solarized" {
+		t.Fatalf("returned values are not the normalized stored ones: %+v", values)
+	}
+
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TerminalScrollbackLines != values.ScrollbackLines ||
+		cfg.TerminalFontFamily != values.FontFamily ||
+		cfg.TerminalFontSize != values.FontSize ||
+		cfg.TerminalShell != values.Shell ||
+		cfg.TerminalAppearanceSource != values.AppearanceSource ||
+		cfg.TerminalCellWidthPercent != values.CellWidthPercent ||
+		cfg.TerminalCellHeightPercent != values.CellHeightPercent ||
+		cfg.TerminalTheme != values.Theme {
+		t.Fatalf("returned values disagree with disk: returned %+v, disk %+v", values, *cfg)
+	}
+}
+
+// A refused transaction must leave the file byte-identical and fire nothing. The
+// per-field savers persisted a prefix before the failing field was reached.
+func TestSaveTerminalConfigFailureWritesNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	chdirTempForConfigTest(t)
+	setHomeTree(t, t.TempDir())
+
+	size := 20
+	if _, err := SaveTerminalConfig(TerminalConfigDelta{FontSize: &size}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := ActiveOcodeConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	fired := 0
+	remove := OnConfigSaved.Add(func() { fired++ })
+	defer remove()
+
+	size = 24
+	if _, err := SaveTerminalConfig(TerminalConfigDelta{FontSize: &size}); err == nil {
+		t.Fatal("expected a save into a read-only directory to fail")
+	}
+	if fired != 0 {
+		t.Fatalf("OnConfigSaved fired %d times on a failed save", fired)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("a failed save modified the config file:\nbefore %s\nafter  %s", before, after)
 	}
 }

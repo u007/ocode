@@ -16,6 +16,7 @@ package ghosttyconfig
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -140,7 +141,6 @@ func LoadWith(opts Options) Config {
 		if !fileExists(path) {
 			continue
 		}
-		p.cfg.Found = true
 		p.parseFile(path)
 	}
 	return p.finish()
@@ -235,7 +235,11 @@ type parser struct {
 	colors     map[string]string
 	palette    [16]string
 	paletteSet [16]bool
-	keybinds   []Keybind
+	// colorResets are keys written with an empty value (`background =`), which
+	// Ghostty defines as "reset to default". Applied AFTER the theme so a theme
+	// colour cannot survive an explicit reset.
+	colorResets map[string]bool
+	keybinds    []Keybind
 }
 
 func (p *parser) parseFile(path string) {
@@ -262,6 +266,10 @@ func (p *parser) parseFile(path string) {
 		p.errf("cannot read %s: %v", path, err)
 		return
 	}
+	// Found means "a config was actually read", not "a path existed": an
+	// unreadable file must not win the appearance block with every value at its
+	// built-in default.
+	p.cfg.Found = true
 	p.stack = append(p.stack, abs)
 	defer func() { p.stack = p.stack[:len(p.stack)-1] }()
 
@@ -288,6 +296,9 @@ func (p *parser) parseContent(path, content string) []string {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
+			// Reported rather than skipped in silence: a typo like `font-size 12`
+			// is otherwise indistinguishable from a key ocode does not know.
+			p.errf("ignoring malformed line in %s: %q", path, line)
 			continue
 		}
 		key = strings.TrimSpace(key)
@@ -361,6 +372,12 @@ func (p *parser) apply(key, value string) {
 			p.ignored(key, value, "not a number")
 			return
 		}
+		if math.IsNaN(size) || math.IsInf(size, 0) {
+			// ParseFloat accepts these, but they make the resolved config fail to
+			// marshal, so the API answers 200 with an empty body.
+			p.ignored(key, value, "not a finite number")
+			return
+		}
 		p.fontSize = size
 	case "adjust-cell-width":
 		p.cellWidth = p.parseCellAdjust(key, value)
@@ -394,6 +411,12 @@ func (p *parser) applyColor(key, value string) {
 	}
 	if value == "" {
 		delete(p.colors, key)
+		// Ghostty defines an empty value as "reset to default", so a theme's
+		// colour must not survive it. Recorded and applied after the theme.
+		if p.colorResets == nil {
+			p.colorResets = map[string]bool{}
+		}
+		p.colorResets[key] = true
 		return
 	}
 	hex, ok := normalizeHex(value)
@@ -402,6 +425,7 @@ func (p *parser) applyColor(key, value string) {
 		return
 	}
 	p.colors[key] = hex
+	delete(p.colorResets, key)
 }
 
 // applyPalette parses Ghostty's `palette = N=#rrggbb` form. Only ANSI 0-15 can
@@ -483,6 +507,10 @@ func (p *parser) parseCellAdjust(key, value string) CellAdjust {
 		p.ignored(key, value, "expected a pixel integer or a percentage")
 		return CellAdjust{}
 	}
+	if math.IsNaN(delta) || math.IsInf(delta, 0) {
+		p.ignored(key, value, "expected a finite pixel integer or percentage")
+		return CellAdjust{}
+	}
 	if percent {
 		return CellAdjust{Percent: delta}
 	}
@@ -516,15 +544,25 @@ func (p *parser) finish() Config {
 	return p.cfg
 }
 
+// MinFontSize and MaxFontSize bound the rendered font size. internal/config's
+// MinTerminalFontSize / MaxTerminalFontSize MUST hold the same values (one range
+// for both sources); internal/server's TestFontSizeRangeAgreesWithGhosttyParser
+// fails if they drift. Ghostty's reference documents no lower bound (fractional
+// points are allowed), so 6 is ocode's own floor, matching the web zoom clamp.
+const (
+	MinFontSize = 6
+	MaxFontSize = 48
+)
+
 func clampFontSize(size float64) float64 {
 	if size <= 0 {
 		return 0
 	}
-	if size < 6 {
-		return 6
+	if size < MinFontSize {
+		return MinFontSize
 	}
-	if size > 48 {
-		return 48
+	if size > MaxFontSize {
+		return MaxFontSize
 	}
 	return size
 }

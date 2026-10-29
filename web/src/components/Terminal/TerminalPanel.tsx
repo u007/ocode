@@ -118,6 +118,16 @@ const MODIFIER_KEYS = new Set([
   "Fn", "Hyper", "Super", "OS", "ContextMenu",
 ]);
 
+/**
+ * Cmd+<key> app shortcuts bound in `useKeyboard` that the terminal must let bubble.
+ * Hand-synced with `web/src/hooks/useKeyboard.ts` (source of truth): add a key
+ * there, add it here. Cmd+K is deliberately absent so the terminal keeps it, and
+ * Cmd+J stays because useKeyboard's Pulse toggle is meant to work from the terminal.
+ */
+const APP_META_SHORTCUT_KEYS = new Set(["w", "n", "t", "p", "s", "j"]);
+/** Cmd+Shift+<key> app shortcut (assistant toggle). */
+const APP_META_SHIFT_SHORTCUT_KEY = "a";
+
 // Debounce window for duplicate clipboard writes of the SAME text. In the
 // desktop shell one physical Cmd+C can legitimately take two copy paths: the
 // native Edit ▸ Copy menu role (bound to CmdOrCtrl+c, firing the WKWebView
@@ -464,11 +474,13 @@ export default function TerminalPanel({
   cellHeightRef.current = cellHeight;
   const themeRef = useRef(terminalTheme);
   themeRef.current = terminalTheme;
-  // The default-colour pair the serializer compares cells against. Must track the
-  // ACTIVE theme: with another palette, "default foreground" is a different RGB
-  // and a stale pair would mark every plain cell as explicitly coloured.
-  const serializeDefaultsRef = useRef(serializeDefaultsFor(terminalTheme));
-  serializeDefaultsRef.current = serializeDefaultsFor(terminalTheme);
+  // The default-colour pair the serializer compares cells against, for the theme
+  // BAKED INTO the terminal — never the requested one. During a theme change the
+  // render already carries the new theme while the buffer still holds the old
+  // palette; comparing against the new pair would mark every plain cell as
+  // explicitly coloured, and the replay then pins the old RGB into those cells
+  // for good. Advanced at construction and after applyTerminalTheme.
+  const appliedThemeDefaultsRef = useRef(serializeDefaultsFor(themeRef.current));
   // Theme currently baked into the wasm terminal; set at construction (the theme
   // is passed to the constructor) so the live effect never re-applies it.
   const appliedThemeKeyRef = useRef(themeKey);
@@ -1071,6 +1083,8 @@ export default function TerminalPanel({
     // the first column/row count already accounts for the taller/shorter cell.
     applyCellAdjust(term, cellWidthRef.current, cellHeightRef.current);
     appliedThemeKeyRef.current = themeKey;
+    // The constructor painted with the theme current at build time.
+    appliedThemeDefaultsRef.current = serializeDefaultsFor(themeRef.current);
     // Everything here throws on a ghostty-web internals mismatch; an opened terminal
     // must not outlive a failed setup (render loop, listeners, wasm terminal).
     let detachMouse: () => void;
@@ -1198,6 +1212,17 @@ export default function TerminalPanel({
           else search.findNext(q);
           return true;
         }
+      }
+      // App-level Cmd shortcuts (useKeyboard: new session/terminal, close tab,
+      // file picker, save, Pulse, assistant; Cmd+K palette is not in the set, so
+      // it stays with the terminal). Cmd combos are never pty
+      // input on mac, but ghostty-web's key encoder preventDefaults AND
+      // stopPropagations any it does not handle, so the window-level listener
+      // never sees them. Returning true only preventDefaults (no
+      // stopPropagation), so the keydown still bubbles to useKeyboard.
+      if (ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        const k = ev.key.toLowerCase();
+        if (ev.shiftKey ? k === APP_META_SHIFT_SHORTCUT_KEY : APP_META_SHORTCUT_KEYS.has(k)) return true;
       }
       // A key the terminal will turn into pty input ends the selection the user
       // made; drop the snapshot with it so a later Copy never resurrects text
@@ -1341,7 +1366,7 @@ export default function TerminalPanel({
     // every write instead of from a "write parsed" event (ghostty-web has none).
     // Never acknowledge queued bytes before they have been written.
     const snapshot = createTerminalSnapshot(() => {
-      saveTerminalBuffer(id, serializeTerminalBuffer(term, serializeDefaultsRef.current), term.cols, term.rows);
+      saveTerminalBuffer(id, serializeTerminalBuffer(term, appliedThemeDefaultsRef.current), term.cols, term.rows);
     });
     snapshotRef.current = snapshot;
     // EVERY pty-originated write goes through here so the scanner sees it.
@@ -2085,7 +2110,7 @@ export default function TerminalPanel({
   useEffect(() => {
     const term = termRef.current;
     if (!term || term.options.scrollback === scrollbackLines) return;
-    const text = serializeTerminalBuffer(term, serializeDefaultsRef.current);
+    const text = serializeTerminalBuffer(term, appliedThemeDefaultsRef.current);
     term.options.scrollback = scrollbackLines;
     term.reset();
     term.write(text);
@@ -2130,8 +2155,11 @@ export default function TerminalPanel({
     // theme) must repaint with ocode's own palette; returning early there would
     // leave the Ghostty colours on screen until the panel remounted.
     const next = themeRef.current ?? DEFAULT_TERMINAL_THEME;
-    const text = serializeTerminalBuffer(term, serializeDefaultsRef.current);
+    const text = serializeTerminalBuffer(term, appliedThemeDefaultsRef.current);
     applyTerminalTheme(term, next);
+    // The palette is B's from here on: later reserializations (a scrollback
+    // change, a snapshot save) must compare cells against it.
+    appliedThemeDefaultsRef.current = serializeDefaultsFor(next);
     term.reset();
     term.write(text);
     term.clearSelection();
@@ -2254,7 +2282,10 @@ export default function TerminalPanel({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <div ref={hostRef} className="terminal-host h-full w-full p-2" />
+      {/* ghostty-web's open() makes this host contenteditable; its native caret would
+          blink at column 0 and span the whole canvas height. The canvas draws the
+          real cursor. */}
+      <div ref={hostRef} className="terminal-host h-full w-full p-2 caret-transparent" />
       {loadError && (
         <div
           role="alert"

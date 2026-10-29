@@ -2,13 +2,8 @@
 type: Concept
 title: 'Terminal appearance: following Ghostty config in a browser terminal'
 description: How ocode follows Ghostty's config file for terminal appearance inside ghostty-web (canvas 2D), mapping the keys it can honour and reporting the rest.
-tags:
-  - terminal
-  - ghostty
-  - appearance
-  - config
-  - web
-timestamp: 2026-10-28T16:16:41Z
+tags: []
+timestamp: 2026-10-29T08:39:33Z
 ---
 # Terminal appearance: following Ghostty config in a browser terminal
 
@@ -31,6 +26,8 @@ Discovery follows Ghostty's documented order; **later files win**:
 
 Syntax: `key = value`, `#` comments only on their own line, quoted values, empty value = reset to default. `config-file` includes are processed at the **end** of the containing file (so a key below them cannot override the include), relative paths resolve to the containing file, `?` prefix = optional, cycles + depth >16 are reported as errors.
 
+A non-finite number (`font-size = NaN`, `adjust-cell-width = inf%`) is ignored and reported in `ignored[]` with a reason: `ParseFloat` accepts these, but they make the resolved config fail to JSON-marshal, so the API answered 200 with an empty body.
+
 Themes: `theme = Name`, `theme = light:X,dark:Y` (both required), or an absolute path. Names are searched in `$XDG_CONFIG_HOME/ghostty/themes` then Ghostty's resource themes dirs (`/Applications/Ghostty.app/Contents/Resources/ghostty/themes`, `/usr/share/ghostty/themes`, `/usr/local/share/ghostty/themes`, `/opt/homebrew/share/ghostty/themes`, `$GHOSTTY_RESOURCES_DIR`). Names containing `/` or `..` are rejected. Explicit `background`/`foreground`/`palette` override theme values (Ghostty's own rule). Derived defaults: cursor = foreground, cursor-text = background, selection bg/fg = foreground/background, so ghostty-web's VS Code defaults never leak through.
 
 Mapped keys: `font-family` (quoted into a CSS stack + monospace fallback), `font-size` (clamped 6..48), `adjust-cell-width`, `adjust-cell-height` (**deltas**: px or %), `theme`, `background`, `foreground`, `cursor-color`, `cursor-text`, `selection-background`, `selection-foreground`, `palette = N=#rrggbb` (ANSI 0-15 only), `keybind`.
@@ -39,9 +36,9 @@ Not portable — reported with a reason in the API/Settings: `custom-shader*` (G
 
 ### API: `GET/PUT /api/config/terminal`
 
-New `appearance` block: `source` (effective: `ghostty`|`ocode`), `requested` (what the setting says — they differ when Ghostty was requested but no config exists), `font_family`, `font_size`, `cell_width`/`cell_height` as **deltas**, `theme_name`, `light`/`dark` colour sets, and `settings` (the persisted ocode-source values, so the UI can keep editing them while Ghostty is active).
+New `appearance` block: `source` (effective: `ghostty`|`ocode`), `requested` (what the setting says — they differ when Ghostty was requested but no config exists), `font_family`, `font_size`, `cell_width_adjust`/`cell_height_adjust` as **deltas** (renamed from `cell_width`/`cell_height` because `cell_width_percent`/`cell_height_percent` in `settings` are absolute — 100 = natural — while these deltas may be `{percent}` or `{px}` since Ghostty's `adjust-cell-*` can be a pixel count), `theme_name`, `light`/`dark` colour sets, and `settings` (the persisted ocode-source values, so the UI can keep editing them while Ghostty is active). The `appearance` block also carries `errors[]`: non-fatal problems with the configured appearance (today an unresolvable `terminal_theme` — a typo or a theme not installed yet); it never rejects a save and the rest of the block still resolves, and it is distinct from `ghostty.errors`, which describes the Ghostty source.
 
-New `ghostty` report: `found`, `paths`, `errors`, parsed font/cell/theme, `keybinds`, `ignored[] {key,value,reason}`.
+New `ghostty` report: `found`, `paths`, `errors`, parsed font/cell/theme, `keybinds`, `ignored[] {key,value,reason}`. `found` means a Ghostty config was actually **read**, not that a path existed: an unreadable config file is reported in `errors[]` and must not switch the appearance source (it used to report `found: true` with every field at its built-in default, silently discarding the user's ocode font/theme).
 
 `appearance_scope`: `"local"` on a local answer, `"remote"` on a `?host=` answer. A remote answer deliberately carries **no** `appearance`/`ghostty`: the handler would be reading the remote machine's Ghostty config (usually none), not the viewer's.
 
@@ -65,7 +62,7 @@ ghostty-web has **no** line-height/cell option (`ITerminalOptions` = cols, rows,
 
 ### Theme
 
-The wasm colour palette is fixed at **construction** (no runtime setter). A new terminal gets the theme in the constructor; a live change (Settings save) uses the same serialize → `reset()` → replay path the scrollback setting already uses, accepting the same documented losses (terminal modes, alternate screen, selection, link cache). The buffer serializer's "default colour" pair follows the **active** theme.
+The wasm colour palette is fixed at **construction** (no runtime setter). A new terminal gets the theme in the constructor; a live change (Settings save) uses the same serialize → `reset()` → replay path the scrollback setting already uses, accepting the same documented losses (terminal modes, alternate screen, selection, link cache). The buffer serializer's "default colour" pair must follow the theme baked into the terminal (`appliedThemeDefaultsRef`) — the palette that painted the buffer — never the requested theme: during a switch the React render already carries the new theme while the wasm terminal's buffer still holds the old palette, so comparing against the new pair marks every plain cell as explicitly coloured and the replay then pins the old RGB into those cells permanently. The ref is advanced at terminal construction (`buildTerminalOptions` theme) and immediately after `applyTerminalTheme`. Both reserialize paths use it — the live theme rebuild and a scrollback-setting rebuild. Regression: `TerminalPanel.themeSerialize.test.tsx`.
 
 ### Keybinds (`ghosttyKeybinds.ts`)
 

@@ -1194,88 +1194,39 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Persist only the fields present in the request via targeted savers, so
-	// concurrent updates to different fields cannot clobber each other with a
-	// stale pre-read snapshot.
-	if req.ScrollbackLines != nil {
-		if err := config.SaveTerminalScrollbackLines(*req.ScrollbackLines); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.FontFamily != nil {
-		if err := config.SaveTerminalFontFamily(*req.FontFamily); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.FontSize != nil {
-		if err := config.SaveTerminalFontSize(*req.FontSize); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.Shell != nil {
-		if err := config.SaveTerminalShell(*req.Shell); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.AppearanceSource != nil {
-		if err := config.SaveTerminalAppearanceSource(*req.AppearanceSource); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.CellWidthPercent != nil {
-		if err := config.SaveTerminalCellWidthPercent(*req.CellWidthPercent); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.CellHeightPercent != nil {
-		if err := config.SaveTerminalCellHeightPercent(*req.CellHeightPercent); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
-	}
-	if req.Theme != nil {
-		if err := config.SaveTerminalTheme(*req.Theme); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-			return
-		}
+	// ONE transaction for the whole request. Each per-field saver used to repeat
+	// the lock + load + full-file write cycle, so a PUT rewrote and re-fenced the
+	// config once per field and could fail after persisting a prefix of them.
+	// withOcodeConfigLock still serializes concurrent writers on the config-file
+	// lock, so nothing decides from a stale pre-read snapshot.
+	values, err := config.SaveTerminalConfig(config.TerminalConfigDelta{
+		ScrollbackLines:   req.ScrollbackLines,
+		FontFamily:        req.FontFamily,
+		FontSize:          req.FontSize,
+		Shell:             req.Shell,
+		AppearanceSource:  req.AppearanceSource,
+		CellWidthPercent:  req.CellWidthPercent,
+		CellHeightPercent: req.CellHeightPercent,
+		Theme:             req.Theme,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
 	}
 
 	h.mu.Lock()
 	if h.cfg != nil {
-		if req.ScrollbackLines != nil {
-			h.cfg.Ocode.TerminalScrollbackLines = config.NormalizeTerminalScrollbackLines(*req.ScrollbackLines)
-		}
-		if req.FontFamily != nil {
-			h.cfg.Ocode.TerminalFontFamily = strings.TrimSpace(*req.FontFamily)
-		}
-		if req.FontSize != nil {
-			if *req.FontSize <= 0 {
-				h.cfg.Ocode.TerminalFontSize = 0
-			} else {
-				h.cfg.Ocode.TerminalFontSize = config.NormalizeTerminalFontSize(*req.FontSize)
-			}
-		}
-		if req.Shell != nil {
-			h.cfg.Ocode.TerminalShell = strings.TrimSpace(*req.Shell)
-		}
-		if req.AppearanceSource != nil {
-			h.cfg.Ocode.TerminalAppearanceSource = config.NormalizeTerminalAppearanceSource(*req.AppearanceSource)
-		}
-		if req.CellWidthPercent != nil {
-			h.cfg.Ocode.TerminalCellWidthPercent = config.NormalizeTerminalCellWidthPercent(*req.CellWidthPercent)
-		}
-		if req.CellHeightPercent != nil {
-			h.cfg.Ocode.TerminalCellHeightPercent = config.NormalizeTerminalCellHeightPercent(*req.CellHeightPercent)
-		}
-		if req.Theme != nil {
-			h.cfg.Ocode.TerminalTheme = strings.TrimSpace(*req.Theme)
-		}
+		// Adopt the values the save actually WROTE (it loaded the file under the
+		// lock), not a second normalization of the request: memory and disk cannot
+		// diverge, including for fields this request did not name.
+		h.cfg.Ocode.TerminalScrollbackLines = values.ScrollbackLines
+		h.cfg.Ocode.TerminalFontFamily = values.FontFamily
+		h.cfg.Ocode.TerminalFontSize = values.FontSize
+		h.cfg.Ocode.TerminalShell = values.Shell
+		h.cfg.Ocode.TerminalAppearanceSource = values.AppearanceSource
+		h.cfg.Ocode.TerminalCellWidthPercent = values.CellWidthPercent
+		h.cfg.Ocode.TerminalCellHeightPercent = values.CellHeightPercent
+		h.cfg.Ocode.TerminalTheme = values.Theme
 	}
 	scrollback := config.DefaultTerminalScrollbackLines
 	shell := ""

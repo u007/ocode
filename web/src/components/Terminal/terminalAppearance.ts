@@ -41,11 +41,14 @@ export interface TerminalAppearance {
   requested: TerminalAppearanceSource;
   font_family: string;
   font_size: number;
-  cell_width: CellAdjust;
-  cell_height: CellAdjust;
+  cell_width_adjust: CellAdjust;
+  cell_height_adjust: CellAdjust;
   theme_name?: string;
   light?: TerminalThemeColors;
   dark?: TerminalThemeColors;
+  /** Non-fatal problems with the CONFIGURED appearance (e.g. a theme that does
+   *  not resolve). Never blocks a save. */
+  errors?: string[];
   /** The PERSISTED ocode-source values (not the resolved ones). Present so the
    *  Settings UI can keep editing them while Ghostty is the active source. */
   settings?: TerminalAppearanceSettings;
@@ -108,8 +111,8 @@ export const DEFAULT_TERMINAL_APPEARANCE: TerminalAppearance = {
   requested: "ocode",
   font_family: DEFAULT_TERMINAL_FONT_FAMILY,
   font_size: DEFAULT_TERMINAL_FONT_SIZE,
-  cell_width: {},
-  cell_height: DEFAULT_TERMINAL_CELL_HEIGHT,
+  cell_width_adjust: {},
+  cell_height_adjust: DEFAULT_TERMINAL_CELL_HEIGHT,
 };
 
 /** The app's current polarity, from the applied `--background` HSL triplet.

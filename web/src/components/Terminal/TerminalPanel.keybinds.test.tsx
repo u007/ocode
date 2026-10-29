@@ -198,7 +198,7 @@ describe("Ghostty keybindings in the terminal", () => {
       h.sockets[0]?.onopen?.();
     });
 
-    const result = fireKey(term, { key: "k", metaKey: true });
+    const result = fireKey(term, { key: "e", metaKey: true });
     expect(result.handled).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
   });
@@ -213,5 +213,23 @@ describe("Ghostty keybindings in the terminal", () => {
     const result = fireKey(term, { key: "K", metaKey: true, shiftKey: true });
     expect(result.handled).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
+describe("App Cmd shortcuts in the terminal", () => {
+  it.each(["w", "n", "t", "p", "s", "j"])("lets Cmd+%s bubble to the app", async (key) => {
+    const { term } = await mountPanel([]);
+    expect(fireKey(term, { key, metaKey: true }).handled).toBe(true);
+  });
+
+  it("keeps Cmd+K in the terminal instead of bubbling it to the palette", async () => {
+    const { term } = await mountPanel([]);
+    expect(fireKey(term, { key: "k", metaKey: true }).handled).toBe(false);
+  });
+
+  it("lets Cmd+Shift+A bubble but not Ctrl+W", async () => {
+    const { term } = await mountPanel([]);
+    expect(fireKey(term, { key: "A", metaKey: true, shiftKey: true }).handled).toBe(true);
+    expect(fireKey(term, { key: "w", ctrlKey: true }).handled).toBe(false);
   });
 });

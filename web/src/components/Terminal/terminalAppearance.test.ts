@@ -14,8 +14,8 @@ const appearance: TerminalAppearance = {
   requested: "ghostty",
   font_family: `"Fira Code", ui-monospace, monospace`,
   font_size: 12,
-  cell_width: {},
-  cell_height: { percent: 5 },
+  cell_width_adjust: {},
+  cell_height_adjust: { percent: 5 },
   theme_name: "Bright Lights",
   dark: {
     foreground: "#b3c9d7",
@@ -49,8 +49,8 @@ const appearance: TerminalAppearance = {
 describe("DEFAULT_TERMINAL_APPEARANCE", () => {
   it("matches the server defaults (12px with 10% extra cell height)", () => {
     expect(DEFAULT_TERMINAL_APPEARANCE.font_size).toBe(12);
-    expect(DEFAULT_TERMINAL_APPEARANCE.cell_height).toEqual({ percent: 10 });
-    expect(DEFAULT_TERMINAL_APPEARANCE.cell_width).toEqual({});
+    expect(DEFAULT_TERMINAL_APPEARANCE.cell_height_adjust).toEqual({ percent: 10 });
+    expect(DEFAULT_TERMINAL_APPEARANCE.cell_width_adjust).toEqual({});
     expect(DEFAULT_TERMINAL_APPEARANCE.font_family).toContain("monospace");
   });
 });

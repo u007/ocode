@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/u007/ocode/internal/config"
@@ -38,14 +39,21 @@ type terminalAppearanceResponse struct {
 	// Requested is the configured preference. When it is "ghostty" and no
 	// config was found, Source is "ocode" and this still says "ghostty" so the
 	// UI can explain the fallback instead of silently switching.
-	Requested  string                     `json:"requested"`
-	FontFamily string                     `json:"font_family"`
-	FontSize   float64                    `json:"font_size"`
-	CellWidth  ghosttyconfig.CellAdjust   `json:"cell_width"`
-	CellHeight ghosttyconfig.CellAdjust   `json:"cell_height"`
+	Requested  string  `json:"requested"`
+	FontFamily string  `json:"font_family"`
+	FontSize   float64 `json:"font_size"`
+	// The ADJUSTMENT (delta) forms, named so they cannot be confused with the
+	// ABSOLUTE `settings.cell_*_percent` below. A Ghostty adjust-cell-* may be a
+	// pixel delta, which has no absolute equivalent.
+	CellWidth  ghosttyconfig.CellAdjust   `json:"cell_width_adjust"`
+	CellHeight ghosttyconfig.CellAdjust   `json:"cell_height_adjust"`
 	ThemeName  string                     `json:"theme_name,omitempty"`
 	Light      *ghosttyconfig.ThemeColors `json:"light,omitempty"`
 	Dark       *ghosttyconfig.ThemeColors `json:"dark,omitempty"`
+	// Errors are non-fatal problems with the CONFIGURED appearance — today an
+	// unresolvable `terminal_theme`. Separate from the ghostty block's errors,
+	// which describe the Ghostty source itself.
+	Errors []string `json:"errors,omitempty"`
 	// Settings are the persisted ocode-source values (not the resolved ones).
 	Settings terminalAppearanceSettings `json:"settings"`
 }
@@ -156,7 +164,14 @@ func resolveTerminalAppearance(ocode *config.OcodeConfig, ghostty ghosttyconfig.
 		appearance.FontFamily = defaultTerminalFontFamily
 	}
 	if name := stored.Theme; name != "" {
-		if theme, err := ghosttyconfig.ResolveTheme(name); err == nil && theme != nil {
+		theme, err := ghosttyconfig.ResolveTheme(name)
+		switch {
+		case err != nil:
+			// A typo or a theme that is not installed yet. Reported instead of
+			// silently falling back to ocode's palette, and never a save error:
+			// the user must still be able to store the rest of their settings.
+			appearance.Errors = append(appearance.Errors, fmt.Sprintf("theme %q: %v", name, err))
+		case theme != nil:
 			appearance.ThemeName = name
 			appearance.Light = theme
 			appearance.Dark = theme

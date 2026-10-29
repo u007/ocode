@@ -1227,8 +1227,12 @@ const (
 	// stays familiar while rows breathe. Users with an explicit
 	// terminal_font_size are unaffected.
 	DefaultTerminalFontSize = 12
-	MinTerminalFontSize     = 8
-	MaxTerminalFontSize     = 32
+	// Min and MaxTerminalFontSize match ghosttyconfig.MinFontSize/MaxFontSize on
+	// purpose: one range for the rendered font size, whether it came from ocode's
+	// settings or from the user's Ghostty config. `TestFontSizeRangeAgreesWithGhosttyParser`
+	// guards the pairs.
+	MinTerminalFontSize = 6
+	MaxTerminalFontSize = 48
 	// Terminal appearance defaults for the "ocode" source. Percentages are
 	// deltas on the measured cell (100 = unchanged), like Ghostty's
 	// adjust-cell-* options.
@@ -1291,6 +1295,17 @@ func normalizeTerminalCellPercent(percent, fallback float64) float64 {
 		return MaxTerminalCellPercent
 	}
 	return percent
+}
+
+// storedTerminalCellPercent is the value a saver persists for a cell percentage.
+// A default is stored as 0 ("unset"), so the writer omits it and the in-memory
+// value always equals what is on disk.
+func storedTerminalCellPercent(percent, fallback float64) float64 {
+	normalized := normalizeTerminalCellPercent(percent, fallback)
+	if normalized == fallback {
+		return 0
+	}
+	return normalized
 }
 
 // NormalizeTerminalScrollbackLines applies the terminal scrollback default and
@@ -2323,13 +2338,20 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "terminal_appearance_source")
 	}
 
-	if _, ok := raw["terminal_cell_width_percent"]; ok && file.TerminalCellWidthPercent != nil {
-		cfg.TerminalCellWidthPercent = NormalizeTerminalCellWidthPercent(*file.TerminalCellWidthPercent)
+	if _, ok := raw["terminal_cell_width_percent"]; ok {
+		if file.TerminalCellWidthPercent != nil {
+			cfg.TerminalCellWidthPercent = NormalizeTerminalCellWidthPercent(*file.TerminalCellWidthPercent)
+		}
+		// Deleted whenever present, including an explicit null: leaving it in raw
+		// sends it to Extra, where the merge below writes it back over the
+		// canonical value.
 		delete(raw, "terminal_cell_width_percent")
 	}
 
-	if _, ok := raw["terminal_cell_height_percent"]; ok && file.TerminalCellHeightPercent != nil {
-		cfg.TerminalCellHeightPercent = NormalizeTerminalCellHeightPercent(*file.TerminalCellHeightPercent)
+	if _, ok := raw["terminal_cell_height_percent"]; ok {
+		if file.TerminalCellHeightPercent != nil {
+			cfg.TerminalCellHeightPercent = NormalizeTerminalCellHeightPercent(*file.TerminalCellHeightPercent)
+		}
 		delete(raw, "terminal_cell_height_percent")
 	}
 
@@ -3142,9 +3164,19 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.TerminalShell != "" {
 		payload["terminal_shell"] = cfg.TerminalShell
 	}
-	payload["terminal_appearance_source"] = NormalizeTerminalAppearanceSource(cfg.TerminalAppearanceSource)
-	payload["terminal_cell_width_percent"] = NormalizeTerminalCellWidthPercent(cfg.TerminalCellWidthPercent)
-	payload["terminal_cell_height_percent"] = NormalizeTerminalCellHeightPercent(cfg.TerminalCellHeightPercent)
+	// Appearance keys are written only when they differ from their defaults. A
+	// default on disk would pin it, so a later change to the default could never
+	// reach an existing install. The savers store a default percentage as 0, so
+	// an explicit 100/110 and an untouched config produce the same file.
+	if src := NormalizeTerminalAppearanceSource(cfg.TerminalAppearanceSource); src != DefaultTerminalAppearanceSource {
+		payload["terminal_appearance_source"] = src
+	}
+	if cfg.TerminalCellWidthPercent != 0 {
+		payload["terminal_cell_width_percent"] = NormalizeTerminalCellWidthPercent(cfg.TerminalCellWidthPercent)
+	}
+	if cfg.TerminalCellHeightPercent != 0 {
+		payload["terminal_cell_height_percent"] = NormalizeTerminalCellHeightPercent(cfg.TerminalCellHeightPercent)
+	}
 	if cfg.TerminalTheme != "" {
 		payload["terminal_theme"] = cfg.TerminalTheme
 	}
@@ -3177,7 +3209,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" || k == "git" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "terminal_appearance_source" || k == "terminal_cell_width_percent" || k == "terminal_cell_height_percent" || k == "terminal_theme" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" || k == "git" {
 			continue
 		}
 		payload[k] = v
@@ -4159,7 +4191,7 @@ func SaveTerminalAppearanceSource(source string) error {
 // appearance source (100 = the font's natural width).
 func SaveTerminalCellWidthPercent(percent float64) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
-		cfg.TerminalCellWidthPercent = NormalizeTerminalCellWidthPercent(percent)
+		cfg.TerminalCellWidthPercent = storedTerminalCellPercent(percent, DefaultTerminalCellWidthPercent)
 		return nil
 	})
 }
@@ -4168,7 +4200,7 @@ func SaveTerminalCellWidthPercent(percent float64) error {
 // appearance source (100 = the font's natural height).
 func SaveTerminalCellHeightPercent(percent float64) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
-		cfg.TerminalCellHeightPercent = NormalizeTerminalCellHeightPercent(percent)
+		cfg.TerminalCellHeightPercent = storedTerminalCellPercent(percent, DefaultTerminalCellHeightPercent)
 		return nil
 	})
 }
@@ -4180,6 +4212,90 @@ func SaveTerminalTheme(name string) error {
 		cfg.TerminalTheme = strings.TrimSpace(name)
 		return nil
 	})
+}
+
+// TerminalConfigDelta is a SUBSET of the terminal settings to persist. A nil
+// field keeps its stored value, so a caller sends only what the user changed.
+type TerminalConfigDelta struct {
+	ScrollbackLines   *int
+	FontFamily        *string
+	FontSize          *int
+	Shell             *string
+	AppearanceSource  *string
+	CellWidthPercent  *float64
+	CellHeightPercent *float64
+	Theme             *string
+}
+
+// TerminalConfigValues are the terminal settings as stored after a save, already
+// normalized. Callers adopt these instead of re-reading the file (or
+// re-normalizing the request), so memory and disk cannot disagree.
+type TerminalConfigValues struct {
+	ScrollbackLines   int
+	FontFamily        string
+	FontSize          int
+	Shell             string
+	AppearanceSource  string
+	CellWidthPercent  float64
+	CellHeightPercent float64
+	Theme             string
+}
+
+// SaveTerminalConfig persists every provided terminal setting in ONE
+// transaction: one lock, one load, one write, one OnConfigSaved.
+//
+// The per-field savers each repeated that cycle, so a single PUT rewrote and
+// re-fenced the config file once per field and could fail after persisting a
+// prefix of them. Batching keeps the property that mattered — concurrent
+// updates serialize on the config-file lock, so no caller decides from a stale
+// pre-read snapshot — while making the save all-or-nothing.
+func SaveTerminalConfig(delta TerminalConfigDelta) (TerminalConfigValues, error) {
+	var out TerminalConfigValues
+	err := withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if delta.ScrollbackLines != nil {
+			cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(*delta.ScrollbackLines)
+		}
+		if delta.FontFamily != nil {
+			cfg.TerminalFontFamily = strings.TrimSpace(*delta.FontFamily)
+		}
+		if delta.FontSize != nil {
+			if *delta.FontSize <= 0 {
+				cfg.TerminalFontSize = 0
+			} else {
+				cfg.TerminalFontSize = NormalizeTerminalFontSize(*delta.FontSize)
+			}
+		}
+		if delta.Shell != nil {
+			cfg.TerminalShell = strings.TrimSpace(*delta.Shell)
+		}
+		if delta.AppearanceSource != nil {
+			cfg.TerminalAppearanceSource = NormalizeTerminalAppearanceSource(*delta.AppearanceSource)
+		}
+		if delta.CellWidthPercent != nil {
+			cfg.TerminalCellWidthPercent = storedTerminalCellPercent(*delta.CellWidthPercent, DefaultTerminalCellWidthPercent)
+		}
+		if delta.CellHeightPercent != nil {
+			cfg.TerminalCellHeightPercent = storedTerminalCellPercent(*delta.CellHeightPercent, DefaultTerminalCellHeightPercent)
+		}
+		if delta.Theme != nil {
+			cfg.TerminalTheme = strings.TrimSpace(*delta.Theme)
+		}
+		out = TerminalConfigValues{
+			ScrollbackLines:   cfg.TerminalScrollbackLines,
+			FontFamily:        cfg.TerminalFontFamily,
+			FontSize:          cfg.TerminalFontSize,
+			Shell:             cfg.TerminalShell,
+			AppearanceSource:  cfg.TerminalAppearanceSource,
+			CellWidthPercent:  cfg.TerminalCellWidthPercent,
+			CellHeightPercent: cfg.TerminalCellHeightPercent,
+			Theme:             cfg.TerminalTheme,
+		}
+		return nil
+	})
+	if err != nil {
+		return TerminalConfigValues{}, err
+	}
+	return out, nil
 }
 
 // SaveMemoryEnabled persists the memory prompt-injection toggle to config.

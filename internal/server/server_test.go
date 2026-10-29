@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -505,5 +506,42 @@ func TestValidateStateSlot(t *testing.T) {
 				t.Fatalf("error = %v, want one containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// An unencodable value must not be reported as a successful empty response: the
+// old code committed 200 and then discarded the encoder error, so the client saw
+// an empty body instead of a failure.
+func TestWriteJSONEncodesBeforeCommittingStatus(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusOK, map[string]any{"bad": math.NaN()})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (the encoder must run before the status line)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "internal encoding error") {
+		t.Fatalf("body = %q, want a readable encoding error", w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json (the body is JSON)", ct)
+	}
+	var out map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out["error"] == "" {
+		t.Fatalf("body %q does not parse as a JSON error object: %v", w.Body.String(), err)
+	}
+}
+
+// The success path keeps the body byte-compatible with the old json.Encoder
+// output (trailing newline included) and the JSON content type.
+func TestWriteJSONSuccessKeepsEncoderFraming(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusCreated, map[string]int{"n": 1})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", w.Code)
+	}
+	if got, want := w.Body.String(), "{\"n\":1}\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
 	}
 }
