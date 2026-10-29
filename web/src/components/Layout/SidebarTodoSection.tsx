@@ -1,11 +1,16 @@
+import { useEffect, useState } from "react";
 import { useSessionPlanLive } from "../../hooks/useSessionPlanLive";
-import { cn } from "../../lib/utils";
-import { TODO_MARK, TodoItemDetail } from "../Pulse/PulseCard";
+import { visibleTodoItems } from "../../lib/todoPlan";
+import { TodoPlanRow } from "../common/TodoItem";
 
 interface Props {
   sessionId?: string | null;
   host?: string;
 }
+
+// A long plan must not push the sidebar's other sections away; the same
+// open-first truncation as the chat panel, with its own "show more" toggle.
+const SIDEBAR_TODO_LIMIT = 8;
 
 // The cowork sidebar's TODO section. It reads the same session plan store as
 // the chat's PlanPanel (`todo_updated` + GET /api/sessions/{id}/todo), so a
@@ -13,9 +18,13 @@ interface Props {
 // without a hard-coded empty state.
 export default function SidebarTodoSection({ sessionId, host }: Props) {
   const plan = useSessionPlanLive(sessionId, host);
-  const items = plan?.items ?? [];
+  const [showAll, setShowAll] = useState(false);
 
-  if (items.length === 0) {
+  useEffect(() => {
+    setShowAll(false);
+  }, [sessionId]);
+
+  if (!plan || plan.items.length === 0) {
     return (
       <div className="text-xs text-muted-foreground">
         <div>No TODO items</div>
@@ -24,13 +33,14 @@ export default function SidebarTodoSection({ sessionId, host }: Props) {
     );
   }
 
-  const running = items.some((item) => item.state === "in_progress");
+  const running = plan.items.some((item) => item.state === "in_progress");
+  const { items, hidden } = visibleTodoItems(plan.items, SIDEBAR_TODO_LIMIT, showAll);
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span className="font-mono">
-          {plan?.done ?? 0}/{plan?.total ?? items.length} done
+          {plan.done}/{plan.total} done
         </span>
         {running && (
           <span className="flex items-center gap-1 text-amber-400">
@@ -41,23 +51,19 @@ export default function SidebarTodoSection({ sessionId, host }: Props) {
       </div>
       <ul className="space-y-1">
         {items.map((item, i) => (
-          <li
-            key={item.id ?? `${i}-${item.text}`}
-            className={cn("min-w-0 text-xs", item.state === "done" && "text-muted-foreground")}
-          >
-            <span aria-hidden>{TODO_MARK[item.state]} </span>
-            <span
-              className={cn(
-                "break-words",
-                item.state === "done" && "line-through",
-                item.state === "in_progress" && "font-medium text-foreground",
-              )}
-            >
-              {item.text}
-            </span>
-            <TodoItemDetail item={item} />
-          </li>
+          <TodoPlanRow key={item.id ?? `${i}-${item.text}`} item={item} />
         ))}
+        {(hidden > 0 || showAll) && plan.items.length > SIDEBAR_TODO_LIMIT && (
+          <li>
+            <button
+              type="button"
+              onClick={() => setShowAll((value) => !value)}
+              className="text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              {showAll ? "Show less" : `+${hidden} more`}
+            </button>
+          </li>
+        )}
       </ul>
     </div>
   );

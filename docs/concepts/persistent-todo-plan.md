@@ -187,39 +187,37 @@ across long runs and post-compaction turns. The store lives in
   A finished or absent list injects nothing. This is the cache-stability
   invariant: a no-op turn keeps the messages slice byte-identical so the
   cached prefix survives.
-- **Tail directive (status nudge).** After the plan list and the `Blocked:` line,
-  `injectTodoTail` (`internal/agent/todo_inject.go:37`) appends a one-line
-  `Plan status:` directive (computed by `todoStatusDirective`,
-  `internal/agent/todo_inject.go:65`) that names the *next* status transition
-  the model must make, including the revision it must cite:
-  - **No item in_progress** (and at least one ready item): `Plan status: no plan
-    item is in_progress. Before your next tool call, run todo_update {"revision":
-    N, "op": "set_status", "item_id": "tN", "status": "in_progress"}. Next ready
-    item tN: <text>. Never batch status updates.` The first ready item that is
-    NOT listed in `TodoSnapshot.Blocked` (`blockedTodoIDs`,
-    `internal/agent/todo_inject.go:114` parses the `"t3 by t1, t2"` notes before
-    `" by "`) is recommended, so the directive never names an item the store
-    will refuse to move to in_progress. The item's text is collapsed to one
-    line (`oneLineTodoText`, `internal/agent/todo_inject.go:101`): whitespace
-    runs collapse to single spaces and text longer than 120 runes is truncated
-    with `…`.
-  - **An item in_progress**: `Plan status: tN is in_progress. As soon as an item
-    is verified, run todo_update {... "status": "done", "result": "<one-line
-    outcome>"}, then mark the next item in_progress before starting it. Never
-    batch status updates.` (Multiple in-progress items are named together.)
-  - **Defensive fallback** when every open item waits on another (unreachable
-    through the tools because the store rejects dependency cycles): `Plan status:
-    no ready plan item. Re-read the plan with todoread and clear a blocked
-    item's dependencies before starting work.` No target is named rather than
-    recommending one that cannot start.
-  The directive is user-role and derived only from the snapshot, so it is
-  byte-identical for an unchanged plan (cache stability); it is not emitted at
-  all when the plan has no open items (the existing early return in
-  `injectTodoTail`). Rationale: observed live sessions created a plan and then
-  never called `todo_update` even though the static `[ocode:plan]` fragment
-  demanded it, so every item stayed pending. The nudge names the exact call
-  (revision included) for the next transition. It does not replace the static
-  fragment; it complements it per turn.
+- **Tail directive (status nudge).** Only plan owners get it: `injectTodoTail`
+  returns early unless `a.PlanPromptEnabled()` is true (sub-agents and ask/advisor
+  helpers opt out and have `todo_update` stripped). For a primary agent with open
+  items it appends one `Plan status:` line after the list and `Blocked:` line,
+  computed by `todoStatusDirective` (`internal/agent/todo_inject.go:74`):
+  - **No item in_progress** (and a ready item): `Plan status: no plan item is
+    in_progress. If you are continuing this plan, before your next tool call run
+    todo_update {"revision": N, "op": "set_status", "item_id": "tN",
+    "status": "in_progress"} (run todoread first only if the plan changed since
+    this snapshot). The next ready item is tN: <text>. Never batch status
+    updates.` The first item NOT in `TodoSnapshot.BlockedIDs`
+    (`internal/tool/todo_store.go:1084`, populated from the same `openTodoDeps`
+    pass as the display strings) is recommended. Its text is collapsed to one
+    line (`oneLineTodoText`, `internal/agent/todo_inject.go:117`, max 120 runes).
+  - **An in-progress, unblocked item**: `Plan status: tN is in_progress. If you
+    are working this plan, the moment the item is verified run todo_update
+    {... "status": "done", "result": "<one-line outcome>"}, then cite the
+    revision that call returns when you mark the next ready item in_progress.`
+    (Multiple in-progress items are named together.)
+  - **An in-progress but blocked item** (`set_deps` does not check deps, while a
+    `done` transition does): names the `set_deps` recovery instead of a call the
+    store would reject.
+  The printed revision is the snapshot's and is valid for the FIRST mutation
+  only — the next call must cite the revision the previous `todo_update`
+  returned. The directive is user-role and derived only from the snapshot, so it
+  is byte-identical for an unchanged plan; it is emitted on every Step while any
+  item is open, and its "If you are continuing this plan" qualifier keeps a
+  question-only turn from being pushed into plan work. Rationale: observed live
+  sessions created a plan once and never called `todo_update`, leaving every
+  item pending. The nudge names the exact next call; it complements the static
+  `[ocode:plan]` fragment.
 - **Session resume and `/new` semantics.** `SetTodoSession` reloads the file
   from disk into the sidebar copy (so the TUI sidebar survives a process
   restart; the tools and re-anchor read the file directly through their scope
@@ -253,15 +251,21 @@ each row to one line.
 above the agent rail. It loads from `GET /api/sessions/{id}/todo`, which returns
 the `todo_updated` payload from the shared `readTodoUpdatedEvent` helper, then
 follows the `todo_updated` event into `sessionPlan.ts` and reseeds on reconnect.
-Both `PlanPanel` and the Cowork sidebar's TODO section now read the same store
+Both `PlanPanel` and the Cowork sidebar's TODO section read the same store
 through the shared hook `useSessionPlanLive`
-(`web/src/hooks/useSessionPlanLive.ts`): one seed GET per host+session (deduped
-via an in-flight map), a refetch on `eventBus.onReconnect`, and live updates
-through the `todo_updated` event. The duplicated seed effect that used to live in
-`PlanPanel.tsx` was removed; the sidebar no longer hardcodes an empty placeholder
-and instead renders `SidebarTodoSection`
-(`web/src/components/Layout/SidebarTodoSection.tsx`), which reflects the live
-plan (empty state only when the session truly has no plan). The chat display
+(`web/src/hooks/useSessionPlanLive.ts`): seed from
+`GET /api/sessions/{id}/todo`, one in-flight request per host+session (a
+reconnect reseed supersedes a stalled one), a refetch on `eventBus.onReconnect`,
+and live updates through `todo_updated`. `setSessionPlan`
+(`web/src/lib/sessionPlan.ts`) is the single write boundary: it rejects a
+malformed body or a foreign session id, drops a lower revision, lets revision 0
+clear a removed plan, and accepts `force` for a reconnect reseed (a recreated
+file restarts at 1). The sidebar no longer hardcodes an empty placeholder and
+renders `SidebarTodoSection`
+(`web/src/components/Layout/SidebarTodoSection.tsx`) with the shared
+`TodoPlanRow`/`visibleTodoItems` primitives (open items first, an 8-row cap with
+"+N more"); the section is folded by default (`DEFAULT_SECTIONS.todo = false`),
+so it must be expanded once. The chat display
 setting `plan_panel` (`collapsed` | `5` | `10` | `all`, default `5`, under
 `chat_verbosity.overrides`, edited in Settings → Chat display) sets only the
 panel's initial state: a number starts it open with that many rows, open items

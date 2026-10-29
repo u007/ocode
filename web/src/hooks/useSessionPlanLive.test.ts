@@ -5,11 +5,17 @@ import { setSessionPlan } from "../lib/sessionPlan";
 import { useSessionPlanLive } from "./useSessionPlanLive";
 
 const getSessionTodo = vi.fn();
+const reconnect = vi.hoisted(() => ({ handlers: [] as Array<() => void> }));
 vi.mock("../api/client", () => ({
   api: { getSessionTodo: (...args: unknown[]) => getSessionTodo(...args) },
 }));
 vi.mock("../lib/eventBus", () => ({
-  eventBus: { onReconnect: () => () => {} },
+  eventBus: {
+    onReconnect: (handler: () => void) => {
+      reconnect.handlers.push(handler);
+      return () => {};
+    },
+  },
 }));
 
 function plan(id: string, revision: number, done = 0): TodoUpdatedEvent {
@@ -29,6 +35,7 @@ function plan(id: string, revision: number, done = 0): TodoUpdatedEvent {
 describe("useSessionPlanLive", () => {
   beforeEach(() => {
     getSessionTodo.mockReset();
+    reconnect.handlers.length = 0;
   });
 
   it("seeds the session's plan from the server", async () => {
@@ -72,5 +79,47 @@ describe("useSessionPlanLive", () => {
     renderHook(() => useSessionPlanLive("ses-hook-remote", "host-1"));
 
     await waitFor(() => expect(getSessionTodo).toHaveBeenCalledWith("ses-hook-remote", "host-1"));
+  });
+
+  it("reseeds on reconnect even when the store already holds a plan", async () => {
+    getSessionTodo.mockResolvedValueOnce(plan("ses-hook-reconnect", 1));
+    const { result } = renderHook(() => useSessionPlanLive("ses-hook-reconnect"));
+    await waitFor(() => expect(result.current?.revision).toBe(1));
+
+    act(() => setSessionPlan("ses-hook-reconnect", plan("ses-hook-reconnect", 2, 1)));
+    expect(result.current?.revision).toBe(2);
+
+    // A missed `todo_updated` is not replayed, so the reconnect must fetch.
+    getSessionTodo.mockResolvedValueOnce(plan("ses-hook-reconnect", 3, 1));
+    act(() => reconnect.handlers.forEach((handler) => handler()));
+    await waitFor(() => expect(result.current?.revision).toBe(3));
+  });
+
+  it("issues one seed request for two mounted consumers", async () => {
+    getSessionTodo.mockResolvedValue(plan("ses-hook-dedupe", 1));
+    const a = renderHook(() => useSessionPlanLive("ses-hook-dedupe"));
+    const b = renderHook(() => useSessionPlanLive("ses-hook-dedupe"));
+
+    await waitFor(() => expect(a.result.current?.revision).toBe(1));
+    await waitFor(() => expect(b.result.current?.revision).toBe(1));
+    expect(getSessionTodo).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a slower seed overwrite a frame that arrived first", async () => {
+    let resolveSeed!: (value: TodoUpdatedEvent) => void;
+    getSessionTodo.mockReturnValueOnce(
+      new Promise<TodoUpdatedEvent>((resolve) => {
+        resolveSeed = resolve;
+      }),
+    );
+    const { result } = renderHook(() => useSessionPlanLive("ses-hook-race"));
+
+    act(() => setSessionPlan("ses-hook-race", plan("ses-hook-race", 2, 1)));
+    expect(result.current?.revision).toBe(2);
+
+    await act(async () => {
+      resolveSeed(plan("ses-hook-race", 1));
+    });
+    expect(result.current?.revision).toBe(2);
   });
 });

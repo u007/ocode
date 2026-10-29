@@ -1,7 +1,7 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TodoUpdatedEvent } from "../../api/types";
-import { setSessionPlan } from "../../lib/sessionPlan";
+import { getSessionPlan, setSessionPlan } from "../../lib/sessionPlan";
 import SidebarTodoSection from "./SidebarTodoSection";
 
 const getSessionTodo = vi.fn();
@@ -87,9 +87,38 @@ describe("SidebarTodoSection", () => {
   });
 
   it("ignores a malformed plan response instead of crashing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     getSessionTodo.mockResolvedValue({});
     render(<SidebarTodoSection sessionId="ses-sidebar-malformed" />);
 
-    expect(await screen.findByText("No TODO items")).toBeTruthy();
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(getSessionPlan("ses-sidebar-malformed")).toBeUndefined();
+    expect(screen.getByText("No TODO items")).toBeTruthy();
+    warn.mockRestore();
+  });
+
+  it("caps a long plan at eight rows and expands on demand", async () => {
+    const items = Array.from({ length: 10 }, (_, i) => ({
+      id: `t${i + 1}`,
+      text: `step ${i + 1}`,
+      state: "pending" as const,
+    }));
+    getSessionTodo.mockResolvedValue({
+      session_id: "ses-sidebar-long",
+      revision: 1,
+      done: 0,
+      total: 10,
+      current: "",
+      items,
+    });
+    render(<SidebarTodoSection sessionId="ses-sidebar-long" />);
+
+    expect(await screen.findByText("step 1")).toBeTruthy();
+    expect(screen.getByText("0/10 done")).toBeTruthy();
+    expect(screen.queryByText("step 9")).toBeNull();
+
+    fireEvent.click(screen.getByText("+2 more"));
+    expect(screen.getByText("step 9")).toBeTruthy();
+    expect(screen.getByText("step 10")).toBeTruthy();
   });
 });

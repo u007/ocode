@@ -17,11 +17,55 @@ export function getSessionPlan(sessionId: string | null | undefined): TodoUpdate
   return sessionId ? plans.get(sessionId) : undefined;
 }
 
-/** Frames can reach the client out of order (the server publishes from a goroutine per write): keep the highest revision. */
-export function setSessionPlan(sessionId: string, plan: TodoUpdatedEvent): void {
+/**
+ * Runtime shape check for the single store boundary. Both writers (the seed GET
+ * and the `todo_updated` event) go through setSessionPlan, so a half-deployed
+ * or proxy-mocked `{}` can never reach a renderer that indexes plan.items.
+ */
+export function isTodoUpdatedEvent(value: unknown): value is TodoUpdatedEvent {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.session_id === "string" &&
+    typeof v.revision === "number" &&
+    Number.isFinite(v.revision) &&
+    typeof v.done === "number" &&
+    Number.isFinite(v.done) &&
+    typeof v.total === "number" &&
+    Number.isFinite(v.total) &&
+    Array.isArray(v.items)
+  );
+}
+
+/**
+ * Frames can reach the client out of order (the server publishes from a
+ * goroutine per write): keep the highest revision. A revision of 0 is the
+ * server's "no plan" answer and always applies, otherwise a removed plan could
+ * never clear. `force` is the reconnect reseed: the server's current snapshot is
+ * authoritative even when its revision is lower (a recreated file restarts).
+ */
+export function setSessionPlan(
+  sessionId: string,
+  plan: TodoUpdatedEvent,
+  opts?: { force?: boolean },
+): void {
+  if (!isTodoUpdatedEvent(plan)) {
+    console.warn("ignoring malformed session plan", { sessionId, plan });
+    return;
+  }
+  if (plan.session_id !== sessionId) {
+    console.warn("ignoring session plan for another session", { sessionId, planSessionId: plan.session_id });
+    return;
+  }
   const held = plans.get(sessionId);
-  if (held && plan.revision < held.revision) return;
+  if (!opts?.force && held && plan.revision > 0 && plan.revision < held.revision) return;
   plans.set(sessionId, plan);
+  notify();
+}
+
+/** Drop a closed session's plan so the map does not retain every tab ever opened. */
+export function forgetSessionPlan(sessionId: string): void {
+  if (!plans.delete(sessionId)) return;
   notify();
 }
 

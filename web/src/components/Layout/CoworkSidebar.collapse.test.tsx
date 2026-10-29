@@ -49,6 +49,19 @@ vi.mock("../../api/client", () => ({
     setSpeechSummaryConfig: vi.fn((patch: Partial<SpeechSummaryConfig>) =>
       Promise.resolve({ ...DEFAULT_SPEECH_SUMMARY_CONFIG, ...patch })),
     getSessionStatus: vi.fn(() => Promise.resolve({ auto_continue_enabled: true })),
+    getSessionTodo: vi.fn(() =>
+      Promise.resolve({
+        session_id: "session-1",
+        revision: 1,
+        done: 0,
+        total: 2,
+        current: "first step",
+        items: [
+          { id: "t1", text: "first step", state: "in_progress" },
+          { id: "t2", text: "second step", state: "pending" },
+        ],
+      }),
+    ),
   },
   apiPath: (p: string) => p,
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
@@ -150,5 +163,22 @@ describe("CoworkSidebar auto-continue row", () => {
     // The model-name button opens the judge picker for the autocontinue purpose.
     fireEvent.click(screen.getByText("(step-limit only)"));
     expect(onModelClick).toHaveBeenCalledWith("autocontinue");
+  });
+});
+describe("CoworkSidebar TODO section", () => {
+  it("renders the live session plan instead of the empty placeholder", async () => {
+    window.localStorage.setItem("ocode.ui.sidebar.v2", JSON.stringify({ todo: true }));
+    try {
+      renderSidebar();
+
+      expect(await screen.findByText("first step")).toBeTruthy();
+      expect(screen.getByText("second step")).toBeTruthy();
+      expect(screen.getByText("0/2 done")).toBeTruthy();
+      expect(screen.queryByText("No TODO items")).toBeNull();
+      const { api } = await import("../../api/client");
+      expect(api.getSessionTodo).toHaveBeenCalledWith("session-1", undefined);
+    } finally {
+      window.localStorage.removeItem("ocode.ui.sidebar.v2");
+    }
   });
 });

@@ -1081,6 +1081,7 @@ type TodoSnapshot struct {
 	Revision     int
 	Content      string   // canonical serialized items (no header), or ""
 	Blocked      []string // open items waiting on open deps, as "t3 by t1, t2"; kept out of Content so it stays valid plan grammar
+	BlockedIDs   []string // ids of those items, so callers never parse the display strings in Blocked
 	HasOpenItems bool
 	OpenItems    []TodoSnapshotItem
 }
@@ -1109,7 +1110,8 @@ func ReadTodoSnapshot(scope TodoScope) TodoSnapshot {
 			openItems = append(openItems, TodoSnapshotItem{ID: it.id, Text: it.text, Status: state})
 		}
 	}
-	return TodoSnapshot{Revision: rev, Content: serializeItemsForAnchor(items), Blocked: blockedAnchorNotes(items), HasOpenItems: open, OpenItems: openItems}
+	blocked, blockedIDs := blockedTodoNotes(items)
+	return TodoSnapshot{Revision: rev, Content: serializeItemsForAnchor(items), Blocked: blocked, BlockedIDs: blockedIDs, HasOpenItems: open, OpenItems: openItems}
 }
 
 // TodoSummaryItem is one todo line reduced to what a cross-session dashboard

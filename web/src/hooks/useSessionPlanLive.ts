@@ -12,26 +12,19 @@ const inflight = new Map<string, Promise<void>>();
 
 // A malformed body must not reach the store: consumers index `plan.items`, and
 // an unvalidated `{}` (a proxy-mocked or half-deployed server response) would
-// throw during render and unmount the whole app. Same boundary rule as the
-// Pulse store.
-function isTodoUpdatedEvent(value: unknown): value is TodoUpdatedEvent {
-  if (!value || typeof value !== "object") return false;
-  return Array.isArray((value as { items?: unknown }).items);
-}
-
+// throw during render and unmount the whole app. The check lives in
+// setSessionPlan, the single writer for both the seed and the event path.
 function seedPlan(sessionId: string, host: string | undefined, replace: boolean): void {
   const key = `${host ?? ""}\u0000${sessionId}`;
-  if (inflight.has(key)) return;
+  // Expanding the sidebar after the chat seeded must not fetch again.
+  if (!replace && getSessionPlan(sessionId) !== undefined) return;
+  if (inflight.has(key) && !replace) return;
+  // A reconnect reseed supersedes an in-flight request: a stalled GET (fetchJSON
+  // has no timeout) must not disable reseeding for the SPA's lifetime.
   const request = api
     .getSessionTodo(sessionId, host)
     .then((next) => {
-      if (!isTodoUpdatedEvent(next)) {
-        console.warn("session plan response was not a plan; keeping the last good one");
-        return;
-      }
-      // A frame that arrived while the request was in flight is newer than the
-      // response; only a reconnect reseed may overwrite it.
-      if (replace || getSessionPlan(sessionId) === undefined) setSessionPlan(sessionId, next);
+      setSessionPlan(sessionId, next, { force: replace });
     })
     .catch((err) => {
       console.warn("failed to fetch session plan", err);
@@ -40,6 +33,14 @@ function seedPlan(sessionId: string, host: string | undefined, replace: boolean)
       if (inflight.get(key) === request) inflight.delete(key);
     });
   inflight.set(key, request);
+}
+
+/** Drop in-flight seeds for a session id that was closed or rekeyed. */
+export function forgetPlanSeed(sessionId: string): void {
+  const suffix = `\u0000${sessionId}`;
+  for (const key of inflight.keys()) {
+    if (key.endsWith(suffix)) inflight.delete(key);
+  }
 }
 
 /**
