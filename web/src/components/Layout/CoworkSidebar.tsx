@@ -11,6 +11,7 @@ import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus, ManageableSkill } from "../../api/types";
 import { reloadDynamicCommands, setDynamicCommandsScope } from "../Chat/commands";
 import PluginsPanel from "./PluginsPanel";
+import SidebarTodoSection from "./SidebarTodoSection";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
   Bot,
@@ -1287,9 +1288,9 @@ export default function CoworkSidebar({
           )}
         </div>
 
-        {/* TODO Section — no live data source is exposed by the backend yet,
-            so this shows a stable empty state instead of a list that can never
-            update. */}
+        {/* TODO Section — reads the session plan store (todo_updated + the
+            seed GET), the same source as the chat's PlanPanel. A session with
+            no plan keeps the empty state. */}
         <div className="border-b border-border">
           <button
             onClick={() => toggleSection("todo")}
@@ -1305,12 +1306,7 @@ export default function CoworkSidebar({
           </button>
           {expandedSections.todo && (
             <div className="px-4 pb-3">
-              <div className="text-xs text-muted-foreground">
-                <div>No TODO items</div>
-                <div className="mt-2 text-foreground">
-                  Agent will add items during execution
-                </div>
-              </div>
+              <SidebarTodoSection sessionId={sessionId} host={sessionHost} />
             </div>
           )}
         </div>

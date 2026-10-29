@@ -24,7 +24,8 @@ import {
 } from "./compactionState";
 import { clearSessionActivity, setSkillActivity } from "./commandActivity";
 import { closeBtw, rekeyBtw } from "./btwStore";
-import { rekeySessionPlan, setSessionPlan } from "./sessionPlan";
+import { rekeySessionPlan, forgetSessionPlan, setSessionPlan } from "./sessionPlan";
+import { forgetPlanSeed } from "../hooks/useSessionPlanLive";
 import { skillNameFromArgs } from "../components/Chat/toolHint";
 
 /**
@@ -139,6 +140,9 @@ export function closeSessionBackend(sessionId: string, host?: string): void {
   // by HandleCloseSession, and a retained store entry would render a dead panel
   // if the id were ever reused.
   closeBtw(sessionId, host);
+  // The plan (and any seed still in flight) follows the same rule.
+  forgetSessionPlan(sessionId);
+  forgetPlanSeed(sessionId);
   // A closed tab's pending rewind must not linger: reopening the session should
   // start from the persisted transcript, not a stale draft/capability pair.
   clearPendingRewind(host, sessionId);
@@ -403,6 +407,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeySidePaneState(oldId, newId);
       rekeyBtw(oldId, newId);
       rekeySessionPlan(oldId, newId);
+      forgetPlanSeed(oldId);
       rekeyPendingRewind(r.hostFor?.(oldId), oldId, r.hostFor?.(newId), newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);

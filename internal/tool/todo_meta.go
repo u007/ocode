@@ -183,20 +183,22 @@ func serializeItemsForAnchor(items []todoItem) string {
 	return b.String()
 }
 
-// blockedAnchorNotes lists, as "t3 by t1, t2", every open item whose
-// dependencies are not all done. They travel beside the item lines, never in
-// them, because a "blocked by" line is not part of the plan grammar.
-func blockedAnchorNotes(items []todoItem) []string {
-	var notes []string
+// blockedTodoNotes lists, as "t3 by t1, t2", every open item whose
+// dependencies are not all done, and returns the blocked ids separately so
+// callers that need structured state never parse the display string. They
+// travel beside the item lines, never in them, because a "blocked by" line is
+// not part of the plan grammar.
+func blockedTodoNotes(items []todoItem) (notes []string, ids []string) {
 	for i, it := range items {
 		if it.status == "✓" {
 			continue
 		}
 		if open := openTodoDeps(items, i); len(open) > 0 {
 			notes = append(notes, fmt.Sprintf("%s by %s", it.id, strings.Join(open, ", ")))
+			ids = append(ids, it.id)
 		}
 	}
-	return notes
+	return notes, ids
 }
 
 // openTodoDeps lists the dependencies of items[idx] that are not done.

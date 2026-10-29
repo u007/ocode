@@ -3,6 +3,7 @@ package tool
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,5 +29,27 @@ func TestTodoSnapshotOpenItems(t *testing.T) {
 	}
 	if snap.OpenItems[1].ID != "t2" || snap.OpenItems[1].Status != "in_progress" {
 		t.Fatalf("item1 = %+v", snap.OpenItems[1])
+	}
+}
+
+func TestTodoSnapshotBlockedIDs(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".ocode", "todo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "# Todo (revision 1)\n\n- [ ] t1 ready\n- [ ] t2 waiting\n  deps: t1\n- [•] t3 running blocked\n  deps: t2\n"
+	if err := os.WriteFile(filepath.Join(dir, "ses-b.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := ReadTodoSnapshot(TodoScope{ProjectRoot: root, SessionID: "ses-b"})
+	if got := strings.Join(snap.BlockedIDs, ","); got != "t2,t3" {
+		t.Fatalf("BlockedIDs = %q, want t2,t3", got)
+	}
+	if !strings.Contains(strings.Join(snap.Blocked, ";"), "t2 by t1") {
+		t.Fatalf("Blocked display lines = %v", snap.Blocked)
+	}
+	if !snap.HasOpenItems || len(snap.OpenItems) != 3 {
+		t.Fatalf("snapshot open items = %+v", snap.OpenItems)
 	}
 }
