@@ -238,14 +238,18 @@ node taskpane/scripts/smoke-ui.mjs [out.png]                 # headless Chromium
 DEBUG_SMOKE=1 node taskpane/scripts/smoke-ui.mjs             # logs SSE connect/close in the fake ocode
 ```
 
-## 8. Questions for you
+## 8. Decisions (confirmed 2026-10-30)
 
-1. Is the bridge-as-separate-process acceptable, or must the add-in work with only `ocode serve`? (The latter needs
-   ocode core changes: a CORS/TLS allowance for the add-in origin and a first-class client-tool round trip.)
-2. Deployment target: personal sideload, organisation (centralised deployment), or AppSource? It decides the manifest
-   format and whether a hosted bridge is needed (Excel on the web).
-3. Should Excel sessions appear in ocode's normal session list (they do now: project = the workspace, title
-   `[Excel] <file>`), or be hidden from it?
+1. **Architecture: bridge now, core later.** Keep the separate bridge. Move the transport into `ocode serve` (allowed
+   origin, TLS listener, first-class client-tool round trip) only if the desktop run shows Excel on the web cannot
+   reach the bridge (U3), or the discovery gate keeps hiding the `excel_*` tools (U7). The tools, `ExcelPort` and
+   `tools.json` stay the same either way.
+2. **Deployment: personal sideload on desktop Excel (Windows/Mac) first.** Excel on the web, organisation deployment
+   and AppSource are later, separate questions; a hosted bridge changes the threat model.
+3. **Sessions stay visible in ocode's normal session list** (project = the workbook workspace, title `[Excel] <file>`).
+
+Order of work once on the desktop: section 5 A and B -> settle U7 and the permission profile (B2, B3) -> build the
+`insert_delete` tool (B8) -> rewind/restore and compare (B5, B6) -> only then reconsider core changes.
 
 ## 9. Desktop verification log (append results here)
 
