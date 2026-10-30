@@ -1696,6 +1696,9 @@ export interface STTModel {
 export interface STTSettings {
   selected: string;
   models: STTModel[];
+  /** Whether hesitation sounds ("um", "uh", "hmm") are stripped from a
+   *  transcript after the engine returns it. Defaults to on. */
+  remove_fillers: boolean;
 }
 
 /** POST /api/stt/transcribe response. An empty `text` means nothing was heard. */

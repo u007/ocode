@@ -98,7 +98,7 @@ func TestPulseTerminalScreenTextKeepsAWindowWhoseFirstPageHasNoEscape(t *testing
 	// far past the first page.
 	raw := head + strings.Repeat("z", pulseTerminalScreenBytes+3-len(head)-len(tail)) + tail
 	h := screenTestHandler(t, 40, 5, raw)
-	_, _, _, history, err := h.pulseTerminalScreenText("term-1")
+	_, _, _, history, err := h.pulseTerminalScreenText("term-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,7 +23,7 @@ func (h *Handler) remoteDecodeFSRequest(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return req, remoteWork{}, false
 	}
-	rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+	rw, err := h.remoteMutationWorkFor(r.Context(), host, r.URL.Query().Get("project"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return req, remoteWork{}, false
@@ -32,8 +32,16 @@ func (h *Handler) remoteDecodeFSRequest(w http.ResponseWriter, r *http.Request, 
 }
 
 // remoteTargetOf resolves one request path against the remote root, checks
-// containment, and returns the quoted absolute remote path plus its
-// repo-relative spec. ok=false means the error response is already written.
+// containment, and returns the remote absolute path plus its repo-relative
+// spec. ok=false means the error response is already written.
+//
+// mode selects the existence rule:
+//   - "read":   the path itself must exist.
+//   - "create": the parent must exist (the path is new).
+//   - "dest":   a copy/move destination — must exist and be a directory, and
+//     the project ROOT is allowed ("paste to the root folder"), exactly like
+//     the local handler's resolveFSPath. Every other mode keeps refusing the
+//     root, because "." would let a delete/rename target the whole project.
 func (h *Handler) remoteTargetOf(w http.ResponseWriter, rw remoteWork, p, mode string) (string, string, bool) {
 	if p == "" {
 		writeError(w, http.StatusBadRequest, "empty path")
@@ -41,7 +49,7 @@ func (h *Handler) remoteTargetOf(w http.ResponseWriter, rw remoteWork, p, mode s
 	}
 	abs := remoteAbsJoin(rw.Path, p)
 	rel, err := remoteRelCheck(rw.Path, abs)
-	if err != nil || rel == "." {
+	if err != nil || (rel == "." && mode != "dest") {
 		writeError(w, http.StatusBadRequest, "path is outside the project root")
 		return "", "", false
 	}
@@ -50,14 +58,21 @@ func (h *Handler) remoteTargetOf(w http.ResponseWriter, rw remoteWork, p, mode s
 		writeError(w, http.StatusBadRequest, serr.Error())
 		return "", "", false
 	}
-	if mode == "read" && !remoteExists(contextBackground(), rw, abs) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("path %q does not exist", p))
-		return "", "", false
-	}
-	if mode != "read" {
+	switch mode {
+	case "create":
 		parent := remoteParentPath(abs)
 		if !remoteExists(contextBackground(), rw, parent) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("parent directory of %q does not exist", p))
+			return "", "", false
+		}
+	case "dest":
+		if !remoteStatIsDir(contextBackground(), rw, abs) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("destination %q does not exist or is not a directory", p))
+			return "", "", false
+		}
+	default: // "read"
+		if !remoteExists(contextBackground(), rw, abs) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("path %q does not exist", p))
 			return "", "", false
 		}
 	}
@@ -84,7 +99,7 @@ func (h *Handler) fsCopyRemote(w http.ResponseWriter, r *http.Request, host stri
 			writeError(w, http.StatusBadRequest, "dest_dir is required")
 			return
 		}
-		destAbs, _, destOK := h.remoteTargetOf(w, rw, req.DestDir, "read")
+		destAbs, _, destOK := h.remoteTargetOf(w, rw, req.DestDir, "dest")
 		if !destOK {
 			return
 		}
@@ -106,7 +121,7 @@ func (h *Handler) fsCopyRemote(w http.ResponseWriter, r *http.Request, host stri
 				return
 			}
 			dst := remoteUniqueDest(r.Context(), rw, destAbs, remoteBaseName(src))
-			if _, err := remoteRun(r.Context(), rw, "cp -a -- "+remote.ShellQuote(src)+" "+remote.ShellQuote(dst)); err != nil {
+			if _, err := remoteRun(r.Context(), rw, "cp -a -- "+remote.ShellQuotePath(src)+" "+remote.ShellQuotePath(dst)); err != nil {
 				writeError(w, http.StatusInternalServerError, "copy failed: "+err.Error())
 				return
 			}
@@ -126,7 +141,7 @@ func (h *Handler) fsMoveRemote(w http.ResponseWriter, r *http.Request, host stri
 			writeError(w, http.StatusBadRequest, "dest_dir is required")
 			return
 		}
-		destAbs, _, destOK := h.remoteTargetOf(w, rw, req.DestDir, "read")
+		destAbs, _, destOK := h.remoteTargetOf(w, rw, req.DestDir, "dest")
 		if !destOK {
 			return
 		}
@@ -148,7 +163,7 @@ func (h *Handler) fsMoveRemote(w http.ResponseWriter, r *http.Request, host stri
 				return
 			}
 			dst := remoteUniqueDest(r.Context(), rw, destAbs, remoteBaseName(src))
-			if _, err := remoteRun(r.Context(), rw, "mv -- "+remote.ShellQuote(src)+" "+remote.ShellQuote(dst)); err != nil {
+			if _, err := remoteRun(r.Context(), rw, "mv -- "+remote.ShellQuotePath(src)+" "+remote.ShellQuotePath(dst)); err != nil {
 				writeError(w, http.StatusInternalServerError, "move failed: "+err.Error())
 				return
 			}
@@ -177,7 +192,7 @@ func (h *Handler) fsDeleteRemote(w http.ResponseWriter, r *http.Request, host st
 			if !ok {
 				return
 			}
-			if _, err := remoteRun(r.Context(), rw, "rm -rf -- "+remote.ShellQuote(abs)); err != nil {
+			if _, err := remoteRun(r.Context(), rw, "rm -rf -- "+remote.ShellQuotePath(abs)); err != nil {
 				writeError(w, http.StatusInternalServerError, "delete failed: "+err.Error())
 				return
 			}
@@ -211,7 +226,7 @@ func (h *Handler) fsRenameRemote(w http.ResponseWriter, r *http.Request, host st
 			writeError(w, http.StatusConflict, "destination already exists")
 			return
 		}
-		if _, err := remoteRun(r.Context(), rw, "mv -- "+remote.ShellQuote(src)+" "+remote.ShellQuote(dst)); err != nil {
+		if _, err := remoteRun(r.Context(), rw, "mv -- "+remote.ShellQuotePath(src)+" "+remote.ShellQuotePath(dst)); err != nil {
 			writeError(w, http.StatusInternalServerError, "rename failed: "+err.Error())
 			return
 		}
@@ -242,7 +257,7 @@ func (h *Handler) fsNewFileRemote(w http.ResponseWriter, r *http.Request, host s
 			writeError(w, http.StatusInternalServerError, "failed to create parent: "+err.Error())
 			return
 		}
-		if _, err := remoteRun(r.Context(), rw, ": > "+remote.ShellQuote(target)); err != nil {
+		if _, err := remoteRun(r.Context(), rw, ": > "+remote.ShellQuotePath(target)); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create file: "+err.Error())
 			return
 		}
@@ -289,7 +304,7 @@ func (h *Handler) fsDuplicateRemote(w http.ResponseWriter, r *http.Request, host
 			return
 		}
 		dst := remoteUniqueDest(r.Context(), rw, remoteParentPath(src), remoteBaseName(src))
-		if _, err := remoteRun(r.Context(), rw, "cp -a -- "+remote.ShellQuote(src)+" "+remote.ShellQuote(dst)); err != nil {
+		if _, err := remoteRun(r.Context(), rw, "cp -a -- "+remote.ShellQuotePath(src)+" "+remote.ShellQuotePath(dst)); err != nil {
 			writeError(w, http.StatusInternalServerError, "duplicate failed: "+err.Error())
 			return
 		}

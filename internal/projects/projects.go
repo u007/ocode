@@ -250,17 +250,27 @@ func ExpandHome(path string) (string, error) {
 	return path, nil
 }
 
+// CanonicalPath is the form Add stores a local project under: a leading "~"
+// expanded on this machine, then cleaned. A server echoes it back so a caller
+// that registered a "~" path learns the absolute path the server stored.
+func CanonicalPath(path string) (string, error) {
+	expanded, err := ExpandHome(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(expanded), nil
+}
+
 // Add inserts a project root, or updates its LastUsedAt if already present.
 // New projects are appended with Order=0 (will sort to end until reordered).
 func (s *Store) Add(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	expanded, err := ExpandHome(path)
+	cleaned, err := CanonicalPath(path)
 	if err != nil {
 		return fmt.Errorf("add project: %w", err)
 	}
-	cleaned := filepath.Clean(expanded)
 	now := time.Now()
 
 	// Update existing entry.

@@ -304,14 +304,45 @@ func TestVoiceSlashModelPersistsValidID(t *testing.T) {
 	}
 }
 
+func TestVoiceSlashFillersPersistsWithoutDroppingModel(t *testing.T) {
+	stubVoice(t, availableStatus())
+	m := newVoiceTestModel()
+	m.handleVoiceCmd([]string{"model", "whisper-1"})
+	m.handleVoiceCmd([]string{"fillers", "off"})
+
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.STT.Model != "whisper-1" {
+		t.Fatalf("fillers toggle dropped the model: %q", cfg.STT.Model)
+	}
+	if cfg.STT.FillerCleanupEnabled() {
+		t.Fatal("/voice fillers off did not persist")
+	}
+
+	m.handleVoiceCmd([]string{"fillers", "on"})
+	cfg, err = config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.STT.FillerCleanupEnabled() {
+		t.Fatal("/voice fillers on did not persist")
+	}
+	if cfg.STT.Model != "whisper-1" {
+		t.Fatalf("fillers toggle dropped the model: %q", cfg.STT.Model)
+	}
+}
+
 func TestVoiceStatusAndListRender(t *testing.T) {
 	stubVoice(t, availableStatus())
 	m := newVoiceTestModel()
+	m.handleVoiceCmd([]string{"fillers", "off"})
 	m.handleVoiceCmd(nil)
 	m.handleVoiceCmd([]string{"list"})
 
 	out := stripANSI(m.messages[len(m.messages)-2].text + "\n" + m.messages[len(m.messages)-1].text)
-	for _, want := range []string{"Model: Whisper (whisper-1)", "Microphone:", "whisper-1"} {
+	for _, want := range []string{"Model: Whisper (whisper-1)", "Fillers: kept", "Microphone:", "whisper-1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}

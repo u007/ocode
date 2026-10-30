@@ -1901,6 +1901,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  /** Toggles hesitation-word cleanup. Sends only the setting: the server keeps
+   *  the selected model it already has. */
+  setSTTFillers: (remove: boolean) =>
+    fetchJSON<STTSettings>("/api/stt", {
+      method: "PUT",
+      body: JSON.stringify({ remove_fillers: remove }),
+    }),
   /** Uploads one recording as multipart field `audio`. No Content-Type header:
    *  the browser must set the multipart boundary itself. */
   transcribeSpeech: (

@@ -54,10 +54,19 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
+	resp := map[string]string{"status": "ok"}
 	if body.Host != "" {
 		err = h.projects.AddRemote(body.Host, body.Path, body.Port)
 	} else {
 		err = h.projects.Add(body.Path)
+		// Echo the path Add stored. A client that registered "~/app" on this host
+		// cannot otherwise learn the expansion, and the Pulse assistant maps a
+		// saved "~" project to its host path with it.
+		if err == nil {
+			if stored, cerr := projects.CanonicalPath(body.Path); cerr == nil {
+				resp["path"] = stored
+			}
+		}
 	}
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -68,7 +77,7 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleDuplicateProjectAsRemote creates a NEW remote (SSH/WSL) project entry

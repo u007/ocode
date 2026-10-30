@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/stt"
 )
 
@@ -33,6 +34,33 @@ func TestSetSTTRejectsTrailingJSON(t *testing.T) {
 	s.handleSetSTT(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestApplySTTUpdateKeepsTheOtherField pins that the model picker and the
+// filler-word checkbox each save only their own field. Losing the other here
+// would silently reset the user's choice on the next PUT.
+func TestApplySTTUpdateKeepsTheOtherField(t *testing.T) {
+	off := false
+	withModel := applySTTUpdate(config.STTConfig{Model: "whisper-1"}, "", &off)
+	if withModel.Model != "whisper-1" {
+		t.Fatalf("toggling cleanup lost the model: %+v", withModel)
+	}
+	if withModel.RemoveFillers == nil || *withModel.RemoveFillers {
+		t.Fatalf("toggling cleanup did not apply false: %+v", withModel)
+	}
+
+	withFlag := applySTTUpdate(config.STTConfig{Model: "whisper-1", RemoveFillers: &off}, "tiny", nil)
+	if withFlag.Model != "tiny" {
+		t.Fatalf("changing the model did not apply: %+v", withFlag)
+	}
+	if withFlag.RemoveFillers == nil || *withFlag.RemoveFillers {
+		t.Fatalf("changing the model lost the cleanup setting: %+v", withFlag)
+	}
+
+	both := applySTTUpdate(config.STTConfig{}, "tiny", &off)
+	if both.Model != "tiny" || both.RemoveFillers == nil || *both.RemoveFillers {
+		t.Fatalf("combined update = %+v", both)
 	}
 }
 

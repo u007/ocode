@@ -100,6 +100,9 @@ func (h *Handler) pulseWriteTarget(id string) error {
 		return fmt.Errorf("refusing to act on child session %q; act on its parent", id)
 	}
 	if _, err := h.sessions.Resolve(id); err != nil {
+		if host := h.pulseRemoteSessionHost(id); host != "" {
+			return fmt.Errorf("session %q runs on remote host %s; acting on a remote session is not supported from the Pulse assistant yet", id, host)
+		}
 		return fmt.Errorf("session %q not found", id)
 	}
 	return nil
@@ -179,11 +182,11 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 		},
 		{
 			name: "terminal_new",
-			desc: "Start a new terminal (pty shell) in a project and return its terminal id. Local projects only for now (remote SSH/WSL hosts are refused here). Needs the operator's approval.",
+			desc: "Start a new terminal (pty shell) in a project and return its terminal id. For a project on a remote SSH/WSL host pass host and the project's path as project_list shows it; the host must be connected. Needs the operator's approval.",
 			ask:  true,
 			props: map[string]any{
-				"project_path": str("Project root of the new terminal (local server project root)"),
-				"host":         str("Remote host; currently unsupported, refused when set"),
+				"project_path": str("Project root of the new terminal: a local project root, or for a remote host the saved path from project_list"),
+				"host":         str("The project's host from project_list, for a remote (SSH/WSL) project; omit for a local one"),
 				"title":        str("Optional tab title"),
 			},
 			run: h.pulseTerminalNewTool,
@@ -196,11 +199,14 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 			run:   h.pulseSessionCloseTool,
 		},
 		{
-			name:  "terminal_kill",
-			desc:  "Kill a terminal's shell and remove its tab/history. Needs the operator's approval.",
-			ask:   true,
-			props: map[string]any{"terminal_id": str("Terminal id from terminal_tabs")},
-			run:   h.pulseTerminalKillTool,
+			name: "terminal_kill",
+			desc: "Kill a terminal's shell and remove its tab/history. For a remote project's terminal pass its host. Needs the operator's approval.",
+			ask:  true,
+			props: map[string]any{
+				"terminal_id": str("Terminal id from terminal_tabs"),
+				"host":        str("The project's host from terminal_tabs, for a remote (SSH/WSL) terminal; omit for a local one"),
+			},
+			run: h.pulseTerminalKillTool,
 		},
 		{
 			name: "session_command",
@@ -511,6 +517,7 @@ func (h *Handler) pulseSessionCloseTool(raw json.RawMessage) (string, error) {
 func (h *Handler) pulseTerminalKillTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		TerminalID string `json:"terminal_id"`
+		Host       string `json:"host"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -518,6 +525,9 @@ func (h *Handler) pulseTerminalKillTool(raw json.RawMessage) (string, error) {
 	id := strings.TrimSpace(args.TerminalID)
 	if id == "" {
 		return "", errors.New("terminal_id is required")
+	}
+	if host := strings.TrimSpace(args.Host); host != "" {
+		return h.pulseRemoteTerminalKill(host, id)
 	}
 	// Only a live terminal can be killed, and only when its project is one
 	// this server may serve. This stops the assistant from tearing down a

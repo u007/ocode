@@ -48,6 +48,11 @@ type Options struct {
 	// returns an *InstallRequiredError so the host can ask first. A pinned
 	// Python is never modified regardless.
 	InstallApproved bool
+	// KeepFillers leaves hesitation sounds ("um", "uh", "hmm") in the
+	// transcript. The zero value cleans them, because a dictation transcript is
+	// noise-free by default: a host that forgets the field still gives the user
+	// the tidied text. Settings expose the inverse as "remove filler words".
+	KeepFillers bool
 }
 
 // Result is one finished transcription.
@@ -68,6 +73,10 @@ const localTimeout = 10 * time.Minute
 type Status struct {
 	Selected string      `json:"selected"`
 	Models   []ModelInfo `json:"models"`
+	// RemoveFillers mirrors Options.KeepFillers so a client can render the
+	// cleanup setting from the same response as the model list. It is a
+	// setting, not a model capability: both engines share the cleanup step.
+	RemoveFillers bool `json:"remove_fillers"`
 }
 
 // ModelAvailable reports whether id is in the list and usable on this host.
@@ -87,7 +96,7 @@ func (s Status) ModelAvailable(id string) bool {
 // in-flight scan through the probe cache.
 func StatusFor(opts Options) Status {
 	selected := ResolveModel(opts.Model)
-	out := Status{Selected: selected, Models: make([]ModelInfo, len(catalog))}
+	out := Status{Selected: selected, Models: make([]ModelInfo, len(catalog)), RemoveFillers: !opts.KeepFillers}
 	var wg sync.WaitGroup
 	for i, s := range catalog {
 		m := ModelInfo{
@@ -140,6 +149,17 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 	return transcribe(ctx, opts, audioPath, false)
 }
 
+// clean applies the post-transcription filler-word cleanup. Every engine
+// returns through it, so a dictation removes its hesitation sounds whichever
+// model produced the text. A host that wants the verbatim decode sets
+// KeepFillers.
+func (o Options) clean(text string) string {
+	if o.KeepFillers {
+		return text
+	}
+	return RemoveFillerWords(text)
+}
+
 // transcribe decodes audioPath. partial marks a live preview decode, which
 // is display-only: it must not queue behind another request and must not
 // start a worker of its own.
@@ -162,7 +182,7 @@ func transcribe(ctx context.Context, opts Options, audioPath string, partial boo
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Text: text, Model: id}, nil
+		return Result{Text: opts.clean(text), Model: id}, nil
 	case EngineLocal:
 		wav, cleanup, err := normaliseToWAV(ctx, audioPath, opts.TempDir)
 		if err != nil {
@@ -193,7 +213,7 @@ func transcribe(ctx context.Context, opts Options, audioPath string, partial boo
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Text: text, Model: id}, nil
+		return Result{Text: opts.clean(text), Model: id}, nil
 	}
 	return Result{}, fmt.Errorf("speech-to-text: unsupported engine %q", s.Engine)
 }

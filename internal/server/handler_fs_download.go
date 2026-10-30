@@ -131,7 +131,7 @@ func (h *Handler) fsDownloadRemote(w http.ResponseWriter, r *http.Request, host 
 		return
 	}
 
-	cmd, err := remote.ExecCommand(rw.Target, "cat -- "+remote.ShellQuote(abs))
+	cmd, err := remote.ExecCommand(rw.Target, "cat -- "+remote.ShellQuotePath(abs))
 	if err != nil {
 		writeRemoteDownloadError(w, &remoteTransportError{msg: err.Error()})
 		return

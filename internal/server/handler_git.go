@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -176,11 +177,19 @@ func (h *Handler) isRegisteredProjectRoot(p string) bool {
 	return false
 }
 
-// mutationProjectDir resolves the target project for the new file/git mutation
-// endpoints. It accepts the server workDir, any registered project root, or any
-// configured extra allowed path (snapshot under h.mu). Unlike fileTreeRootFor it
-// requires an exact match to an allowed root — it does not accept arbitrary
-// subpaths — and does not broaden the shared gitProjectDir used by uploads.
+// mutationProjectDir resolves the ?project= query parameter to the directory a
+// mutation is scoped to. It admits, in order: no parameter (the server's
+// workDir), an exact registered project root, an exact configured
+// extra-allowed path, and — like the read endpoints — a path INSIDE one of
+// those, so a session browsing a subfolder can still create/delete/rename
+// there. The returned directory is the ANCHOR for the operation's own
+// containment checks, so a sub-path narrows what is reachable and never widens
+// it.
+//
+// The containment test for the last case is the strict, symlink-resolved one:
+// the read path also accepts a lexically-inside path reached through a symlink
+// (so linked folders can be browsed), but a WRITE anchored at a symlinked
+// directory would land outside the project.
 func (h *Handler) mutationProjectDir(r *http.Request) (string, bool) {
 	dir := h.workDir
 	if p := r.URL.Query().Get("project"); p != "" && p != h.workDir {
@@ -196,6 +205,17 @@ func (h *Handler) mutationProjectDir(r *http.Request) (string, bool) {
 		h.mu.Unlock()
 		for _, extra := range extras {
 			if extra != "" && p == extra {
+				return p, true
+			}
+		}
+		// A sub-path of an allowed root. Absolute only: a relative value must
+		// not resolve against the server process CWD, which Finder/Dock-launched
+		// builds leave anywhere.
+		if !filepath.IsAbs(p) {
+			return "", false
+		}
+		for _, root := range append(h.allowedProjectRoots(), extras...) {
+			if root != "" && containedIn(p, root) {
 				return p, true
 			}
 		}

@@ -235,6 +235,28 @@ function parentDir(p: string): string {
 }
 
 /**
+ * The directory a "New file…" / "New folder…" menu item creates in. A focused
+ * folder takes the new entry; a focused file creates it BESIDE itself, in its
+ * parent.
+ *
+ * Node paths arrive in two shapes: the tree view passes a root-anchored path
+ * (`treePathForRequest`), the columns (Miller) view a root-RELATIVE one. Join
+ * the root FIRST in both cases, exactly like every other request path, so a
+ * ROOT-LEVEL file's parent is the project root — `parentDir("Makefile")` is
+ * "Makefile", which sent the request to "Makefile/newfile.txt" and failed with
+ * a parent-that-is-not-a-directory error. Shared and exported so the rule can
+ * be tested without driving the Radix menus.
+ */
+export function newEntryDir(
+  projectRoot: string | undefined,
+  nodePath: string,
+  isDir: boolean,
+): string {
+  const abs = treePathForRequest(projectRoot, nodePath);
+  return isDir ? abs : parentDir(abs);
+}
+
+/**
  * Where a paste should land. A focused folder is the destination, a focused
  * file pastes beside itself (its parent), and no focus — or a multi-selection,
  * which has no single "current folder" — falls back to the tree root.
@@ -766,10 +788,10 @@ function TreeNode({
         <Files className="w-3.5 h-3.5 mr-2" /> Duplicate
       </ContextMenuItem>
       <ContextMenuSeparator />
-      <ContextMenuItem onSelect={() => menu.newFile(isDir ? requestPath : parentDir(requestPath))}>
+      <ContextMenuItem onSelect={() => menu.newFile(newEntryDir(projectRoot, node.path, isDir))}>
         <FilePlus2 className="w-3.5 h-3.5 mr-2" /> New file…
       </ContextMenuItem>
-      <ContextMenuItem onSelect={() => menu.newFolder(isDir ? requestPath : parentDir(requestPath))}>
+      <ContextMenuItem onSelect={() => menu.newFolder(newEntryDir(projectRoot, node.path, isDir))}>
         <FolderPlus className="w-3.5 h-3.5 mr-2" /> New folder…
       </ContextMenuItem>
       <ContextMenuItem onSelect={() => menu.rename(node.path)}>
@@ -1866,6 +1888,17 @@ export default function FileTree({
     [refresh, showNotice],
   );
 
+  // EVERY file operation is anchored at the root the tree is BROWSING
+  // (`activeRoot`, i.e. the registered project unless the user picked another
+  // root), and every path handed to the API is anchored to it as well
+  // (`treePathForRequest`). The server accepts either an anchored path or one
+  // relative to `?project=`, but only when the two agree; anchoring at this
+  // boundary keeps them in agreement even if the browsing root and the
+  // registered project ever diverge. Selection state, the clipboard and the
+  // `ocode:fs-*` event payloads deliberately stay NODE-RELATIVE.
+  const requestRoot = activeRoot ?? projectPath ?? "";
+  const anchorPath = (p: string) => treePathForRequest(requestRoot || undefined, p);
+
   // Upload pasted OS files (Finder/Explorer) one at a time into destDir.
   // Sequential, not parallel: a burst of parallel uploads would occupy every
   // connection slot for the whole batch (the 2026-09-18 stall class) and the
@@ -1885,7 +1918,7 @@ export default function FileTree({
         if (controller.signal.aborted) return;
         setUploadProgress(`Uploading ${i + 1}/${files.length} to ${destLabel}…`);
         try {
-          await api.fsUpload(destDir, files[i], activeRoot, projectHost, controller.signal);
+          await api.fsUpload(destDir, files[i], requestRoot, projectHost, controller.signal);
           done++;
         } catch (err) {
           // An abort is not a failure: whoever aborted this batch (a newer paste or
@@ -1910,7 +1943,7 @@ export default function FileTree({
         showNotice(`Added ${done} ${noun} to ${destLabel}`);
       }
     },
-    [activeRoot, projectPath, projectHost, refresh, showNotice],
+    [requestRoot, projectHost, refresh, showNotice],
   );
 
   // Download the selected files one at a time: parallel fetches would hold every
@@ -1926,7 +1959,7 @@ export default function FileTree({
         const name = paths[i].split(/[\\/]/).pop() || paths[i];
         setUploadProgress(`Downloading ${i + 1}/${paths.length}…`);
         try {
-          saveBlobAsFile(await api.fsDownload(paths[i], activeRoot, projectHost), name);
+          saveBlobAsFile(await api.fsDownload(anchorPath(paths[i]), requestRoot, projectHost), name);
           done++;
         } catch (err) {
           // Kept as data, not rethrown: one failed file must not stop the rest.
@@ -1942,14 +1975,14 @@ export default function FileTree({
         showNotice(`Downloaded ${done} ${noun}`);
       }
     },
-    [activeRoot, projectHost, showNotice],
+    [requestRoot, projectHost, showNotice],
   );
 
   const confirmDelete = useCallback(async () => {
     const paths = pendingDelete;
     if (!paths || paths.length === 0) return;
     const ok = await runFs(async () => {
-      await api.fsDelete(paths, activeRoot, projectHost);
+      await api.fsDelete(paths.map(anchorPath), requestRoot, projectHost);
       window.dispatchEvent(
         new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }),
       );
@@ -2035,11 +2068,11 @@ export default function FileTree({
       const count = `${paths.length} item${paths.length === 1 ? "" : "s"}`;
       void runFs(async () => {
         if (cut) {
-          await api.fsMove(paths, destDir, activeRoot, projectHost);
+          await api.fsMove(paths.map(anchorPath), destDir, requestRoot, projectHost);
           setClipboard(null);
           window.dispatchEvent(new CustomEvent("ocode:fs-delete", { detail: { paths, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
         } else {
-          await api.fsCopy(paths, destDir, activeRoot, projectHost);
+          await api.fsCopy(paths.map(anchorPath), destDir, requestRoot, projectHost);
         }
       }, `${verb} ${count} to ${destLabel}`);
     },
@@ -2057,7 +2090,7 @@ export default function FileTree({
           setPrompt(null);
           if (!value) return;
           runFs(async () => {
-            const res = (await api.fsRename(path, value, activeRoot, projectHost)) as { path?: string };
+            const res = (await api.fsRename(anchorPath(path), value, requestRoot, projectHost)) as { path?: string };
             const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             const newPath = res?.path ?? (dir ? `${dir}/${value}` : value);
             window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
@@ -2073,7 +2106,7 @@ export default function FileTree({
         onConfirm: (value) => {
           setPrompt(null);
           if (!value) return;
-          runFs(() => api.fsNewFile(`${dir}/${value}`, activeRoot, projectHost));
+          runFs(() => api.fsNewFile(`${dir}/${value}`, requestRoot, projectHost));
         },
       });
     },
@@ -2085,15 +2118,15 @@ export default function FileTree({
         onConfirm: (value) => {
           setPrompt(null);
           if (!value) return;
-          runFs(() => api.fsNewFolder(`${dir}/${value}`, activeRoot, projectHost));
+          runFs(() => api.fsNewFolder(`${dir}/${value}`, requestRoot, projectHost));
         },
       });
     },
-    duplicate: (path) => runFs(() => api.fsDuplicate(path, activeRoot, projectHost)),
+    duplicate: (path) => runFs(() => api.fsDuplicate(anchorPath(path), requestRoot, projectHost)),
     secret: (path, name, isDir, mode) => setSecretAction({ path, name, isDir, mode }),
-    gitStage: (paths) => runGit((p) => api.gitStage(p, activeRoot, projectHost), paths),
-    gitUnstage: (paths) => runGit((p) => api.gitUnstage(p, activeRoot, projectHost), paths),
-    gitDiscard: (paths) => runGit((p) => api.gitDiscard(p, activeRoot, projectHost), paths),
+    gitStage: (paths) => runGit((p) => api.gitStage(p, requestRoot, projectHost), paths),
+    gitUnstage: (paths) => runGit((p) => api.gitUnstage(p, requestRoot, projectHost), paths),
+    gitDiscard: (paths) => runGit((p) => api.gitDiscard(p, requestRoot, projectHost), paths),
     gitStash: (paths) =>
       setPrompt({
         title: "Stash changes",
@@ -2101,7 +2134,7 @@ export default function FileTree({
         defaultValue: "",
         onConfirm: (value) => {
           setPrompt(null);
-          runGit((p) => api.gitStash(value, p, activeRoot, projectHost), paths);
+          runGit((p) => api.gitStash(value, p, requestRoot, projectHost), paths);
         },
       }),
     gitCommit: (paths) =>
@@ -2115,7 +2148,7 @@ export default function FileTree({
             showNotice("Commit message required");
             return;
           }
-          runGit((p) => api.gitCommit(value, p, activeRoot, projectHost), paths);
+          runGit((p) => api.gitCommit(value, p, requestRoot, projectHost), paths);
         },
       }),
   };
@@ -2123,7 +2156,7 @@ export default function FileTree({
   // The root currently being browsed: the paste destination for the explicit
   // "paste to project root" affordances (empty-area/root menus, toolbar) and
   // the fallback when no single row is focused.
-  const treeRoot = activeRoot ?? projectPath ?? "";
+  const treeRoot = requestRoot;
   // "2 items · copy" for the toolbar tooltip, so the user can see what a paste
   // would apply before clicking.
   const clipboardSummary = clipboard
@@ -2853,15 +2886,15 @@ export default function FileTree({
                                             <Scissors className="w-3.5 h-3.5 mr-2" /> Cut
                                           </ContextMenuItem>
                                           {menu.clipboard && (
-                                            <ContextMenuItem disabled={!isDir} onSelect={() => isDir && menu.paste(node.path)}>
+                                            <ContextMenuItem disabled={!isDir} onSelect={() => isDir && menu.paste(newEntryDir(activeRoot, node.path, isDir))}>
                                               <Clipboard className="w-3.5 h-3.5 mr-2" /> Paste
                                             </ContextMenuItem>
                                           )}
                                           <ContextMenuSeparator />
-                                          <ContextMenuItem onSelect={() => menu.newFile(isDir ? node.path : parentDir(node.path))}>
+                                          <ContextMenuItem onSelect={() => menu.newFile(newEntryDir(activeRoot, node.path, isDir))}>
                                             <FilePlus2 className="w-3.5 h-3.5 mr-2" /> New file…
                                           </ContextMenuItem>
-                                          <ContextMenuItem onSelect={() => menu.newFolder(isDir ? node.path : parentDir(node.path))}>
+                                          <ContextMenuItem onSelect={() => menu.newFolder(newEntryDir(activeRoot, node.path, isDir))}>
                                             <FolderPlus className="w-3.5 h-3.5 mr-2" /> New folder…
                                           </ContextMenuItem>
                                           <ContextMenuItem onSelect={() => menu.rename(node.path)}>

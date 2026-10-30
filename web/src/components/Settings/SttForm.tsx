@@ -11,9 +11,10 @@ const ENGINE_LABEL: Record<STTEngine, string> = {
   openai: "OpenAI",
 };
 
-/** Speech-to-text model picker for voice input. The server owns the selection;
- *  every pick is a PUT whose response replaces the list, so the radio never
- *  shows a choice the server did not accept. */
+/** Speech-to-text settings: the model picker and the filler-word cleanup
+ *  toggle for voice input. The server owns both choices; every change is a PUT
+ *  whose response replaces the state, so the form never shows a value the
+ *  server did not accept. */
 export default function SttForm() {
   const [settings, setSettings] = useState<STTSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -35,17 +36,29 @@ export default function SttForm() {
     };
   }, []);
 
-  const select = async (id: string) => {
-    if (saving || !settings || settings.selected === id) return;
+  // save runs one PUT and adopts its response, so the form never shows a
+  // setting the server did not accept.
+  const save = async (request: () => Promise<STTSettings>) => {
+    if (saving) return;
     setSaving(true);
     setSaveError(null);
     try {
-      setSettings(await api.setSTTModel(id));
+      setSettings(await request());
     } catch (err) {
       setSaveError(errorText(err));
     } finally {
       setSaving(false);
     }
+  };
+
+  const select = (id: string) => {
+    if (!settings || settings.selected === id) return;
+    void save(() => api.setSTTModel(id));
+  };
+
+  const toggleFillers = (remove: boolean) => {
+    if (!settings || settings.remove_fillers === remove) return;
+    void save(() => api.setSTTFillers(remove));
   };
 
   const selected = settings?.models.find((m) => m.id === settings.selected);
@@ -106,6 +119,25 @@ export default function SttForm() {
               );
             })}
           </div>
+          <label
+            data-testid="stt-remove-fillers"
+            className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-card p-3 text-xs shadow-sm"
+          >
+            <input
+              type="checkbox"
+              className="mt-0.5 shrink-0"
+              checked={settings.remove_fillers !== false}
+              disabled={saving}
+              onChange={(e) => toggleFillers(e.target.checked)}
+            />
+            <span className="min-w-0 flex-1 space-y-0.5">
+              <span className="block break-words text-sm font-medium">Remove filler words</span>
+              <span className="block break-words text-[11px] text-muted-foreground">
+                Drops hesitation sounds such as “um”, “uh” and “hmm” after the transcription. Turn it off to
+                keep the transcript exactly as the model heard it.
+              </span>
+            </span>
+          </label>
           {saving && <p className="text-[11px] text-muted-foreground">Saving…</p>}
           {saveError && <p className="text-[11px] text-destructive">{saveError}</p>}
         </>

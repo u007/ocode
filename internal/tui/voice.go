@@ -151,20 +151,30 @@ func voiceDir() string {
 	return filepath.Join(os.TempDir(), "ocode-stt")
 }
 
-// voiceOptions reads the model selected in settings at call time, so a
-// /voice model change applies to the next recording without a restart.
-func voiceOptions() stt.Options {
-	model := ""
+// voiceConfig is the persisted speech-to-text settings, or the zero value when
+// none can be read. Saving one field must not drop the others: SaveOcodeSTTConfig
+// replaces the whole section.
+func voiceConfig() config.STTConfig {
 	cfg, err := config.LoadOcodeConfigCopy()
 	if err != nil {
 		log.Printf("voice: load config: %v", err)
-	} else if cfg != nil {
-		model = cfg.STT.Model
+		return config.STTConfig{}
 	}
+	if cfg == nil {
+		return config.STTConfig{}
+	}
+	return cfg.STT
+}
+
+// voiceOptions reads the settings at call time, so a /voice model or
+// /voice fillers change applies to the next recording without a restart.
+func voiceOptions() stt.Options {
+	c := voiceConfig()
 	return stt.Options{
-		Model:     model,
-		OpenAIKey: func() string { return auth.ResolveKey("openai") },
-		TempDir:   voiceDir(),
+		Model:       c.Model,
+		OpenAIKey:   func() string { return auth.ResolveKey("openai") },
+		TempDir:     voiceDir(),
+		KeepFillers: !c.FillerCleanupEnabled(),
 	}
 }
 
@@ -534,7 +544,8 @@ func (m *model) startVoiceInstall() tea.Cmd {
 	}
 }
 
-// handleVoiceCmd implements /voice (status), /voice list and /voice model <id>.
+// handleVoiceCmd implements /voice (status), /voice list, /voice model <id>
+// and /voice fillers on|off.
 // Everything here is synchronous and local, so the command is instant.
 func (m *model) handleVoiceCmd(args []string) {
 	reply := func(lines ...string) {
@@ -565,11 +576,16 @@ func (m *model) handleVoiceCmd(args []string) {
 				availability = "unavailable: " + mi.Reason
 			}
 		}
+		filler := "kept (verbatim transcript)"
+		if !opts.KeepFillers {
+			filler = "removed (um, uh, hmm, ...)"
+		}
 		reply("Voice input: ctrl+x v starts and stops recording; the transcript is inserted at the cursor, and enter sends it.",
 			"Model: "+selected,
 			"Model status: "+availability,
+			"Fillers: "+filler,
 			"Microphone: "+mic,
-			"Use /voice list to see models, /voice model <id> to change the model, /voice install to set up local dependencies.")
+			"Use /voice list to see models, /voice model <id> to change the model, /voice fillers on|off, /voice install to set up local dependencies.")
 	case "list":
 		st := voiceStatusFor(voiceOptions())
 		lines := []string{"Voice models:"}
@@ -595,7 +611,10 @@ func (m *model) handleVoiceCmd(args []string) {
 			reply(fmt.Sprintf("Unknown voice model %q. Run /voice list to see the choices.", id))
 			return
 		}
-		if err := config.SaveOcodeSTTConfig(config.STTConfig{Model: id}); err != nil {
+		// Keep the other settings: SaveOcodeSTTConfig replaces the section.
+		c := voiceConfig()
+		c.Model = id
+		if err := config.SaveOcodeSTTConfig(c); err != nil {
 			reply("Could not save the voice model: " + err.Error())
 			return
 		}
@@ -605,7 +624,24 @@ func (m *model) handleVoiceCmd(args []string) {
 			msg += " Note: " + voiceUnavailableReason(st) + "."
 		}
 		reply(msg)
+	case "fillers":
+		if len(args) < 2 || (args[1] != "on" && args[1] != "off") {
+			reply("Usage: /voice fillers on|off")
+			return
+		}
+		wanted := args[1] == "on"
+		c := voiceConfig()
+		c.RemoveFillers = &wanted
+		if err := config.SaveOcodeSTTConfig(c); err != nil {
+			reply("Could not save the filler-word setting: " + err.Error())
+			return
+		}
+		if wanted {
+			reply("Filler words (um, uh, hmm, ...) are removed from voice transcripts.")
+		} else {
+			reply("Voice transcripts keep filler words exactly as transcribed.")
+		}
 	default:
-		reply("Usage: /voice [status|list|model <id>]")
+		reply("Usage: /voice [status|list|model <id>|fillers on|off]")
 	}
 }
