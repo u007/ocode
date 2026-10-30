@@ -164,6 +164,16 @@ func TestDetect(t *testing.T) {
 			want:  []string{"pptx"},
 		},
 		{
+			name:  "xlsx at the root and legacy xls two levels down → xlsx",
+			files: map[string]string{"ledger.xlsx": "PK", "archive/2025/old.xls": "\xd0\xcf\x11\xe0"},
+			want:  []string{"xlsx"},
+		},
+		{
+			name:  "xlsm one level down → xlsx, and csv is not a workbook",
+			files: map[string]string{"macros/report.xlsm": "PK", "data/export.csv": "a,b\n"},
+			want:  []string{"xlsx"},
+		},
+		{
 			name:  "pdf, docx and pptx together",
 			files: map[string]string{"a.pdf": "%PDF", "b.docx": "PK", "c.pptx": "PK"},
 			want:  []string{"docx", "pdf", "pptx"},
