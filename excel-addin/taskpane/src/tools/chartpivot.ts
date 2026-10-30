@@ -2,9 +2,15 @@ import { Rect, cellAddress, colToLetters, formatRect, intersects, parseAddress, 
 import type { ChartKind, ChartSpec, PivotSpec } from "../port";
 import { ToolCtx, ToolError, checkAbort, isBlank, resolveRect, usedRect } from "./util";
 
-const TOTAL_LABEL = /^\s*(grand\s+)?(sub)?totals?\b/i;
-const CHART_COLS = 8;
-const CHART_ROWS = 16;
+/** A whole label that is a total: "Total", "Totals", "Grand Total", "Subtotal" or "Sub Total", optionally with a colon. */
+const TOTAL_LABEL = /^(grand\s+total|sub\s*total|totals?)\s*:?$/i;
+/** The chart footprint: the block a chart covers from its anchor cell. Office.js adds the same size in addChart. */
+export const CHART_COLS = 8;
+export const CHART_ROWS = 16;
+
+export function chartFootprint(anchor: { c1: number; r1: number }): Rect {
+  return { c1: anchor.c1, r1: anchor.r1, c2: anchor.c1 + CHART_COLS - 1, r2: anchor.r1 + CHART_ROWS - 1 };
+}
 
 export interface ChartPlan {
   rect: Rect;
@@ -14,19 +20,22 @@ export interface ChartPlan {
 
 /** Pure validation of a chart's source block; throws ToolError with an actionable message. */
 export function validateChartData(
-  kind: ChartKind, rect: Rect, values: unknown[][], types: string[][],
+  kind: ChartKind, rect: Rect, values: unknown[][], types: string[][], opts: { includeTotalRows?: boolean } = {},
 ): ChartPlan {
   const warnings: string[] = [];
   const nrows = values.length;
   const ncols = values[0]?.length ?? 0;
   if (nrows < 2 || ncols < 2) throw new ToolError("A chart needs a header row, at least one data row, a category column and at least one series column");
-  // Total / subtotal rows are charted as ordinary data points, which is wrong for pies and misleading for bars.
+  // Totals live at the bottom, so only a final row labelled as a total is an error. A total-looking label anywhere
+  // else is only a warning. include_total_rows turns the final-row error into a warning too.
   for (let i = 1; i < nrows; i++) {
-    const label = String(values[i][0] ?? "");
-    if (TOTAL_LABEL.test(label)) {
+    const label = String(values[i][0] ?? "").trim();
+    if (!TOTAL_LABEL.test(label)) continue;
+    if (i === nrows - 1 && !opts.includeTotalRows) {
       const excl = formatRect({ ...rect, r2: rect.r1 + i - 1 });
-      throw new ToolError(`Row ${rect.r1 + i} ("${label.trim()}") is inside the data range and would be charted as a data point. Use ${excl} to exclude it.`);
+      throw new ToolError(`Row ${rect.r1 + i} ("${label}") is inside the data range and would be charted as a data point. Use ${excl} to exclude it, or pass include_total_rows=true if it is a real category.`);
     }
+    warnings.push(`Row ${rect.r1 + i} ("${label}") looks like a total; check it belongs in the chart.`);
   }
   const seriesCols = ncols - 1;
   for (let j = 1; j < ncols; j++) {
@@ -51,22 +60,21 @@ export function validateChartData(
 
 export async function createChart(ctx: ToolCtx, a: {
   sheet: string; data_address: string; type: ChartKind; title?: string; category_axis_title?: string; value_axis_title?: string;
-  show_percent_labels?: boolean; show_legend: boolean; anchor?: string;
+  show_percent_labels?: boolean; show_legend: boolean; anchor?: string; include_total_rows?: boolean;
 }) {
   const rect = await resolveRect(ctx, a.sheet, a.data_address);
   const d = await ctx.port.read(a.sheet, formatRect(rect));
-  const plan = validateChartData(a.type, rect, d.values, d.valueTypes);
+  const plan = validateChartData(a.type, rect, d.values, d.valueTypes, { includeTotalRows: a.include_total_rows ?? false });
 
   const used = await usedRect(ctx, a.sheet);
-  const existing = (await ctx.port.listCharts(a.sheet)).map((c) => parseAddress(c.anchor)).filter((r): r is Rect => !!r);
   let anchor: Rect;
   if (a.anchor) {
     const p = parseAddress(a.anchor);
     if (!p) throw new ToolError(`anchor "${a.anchor}" is not a valid cell`);
-    anchor = { c1: p.c1, r1: p.r1, c2: p.c1 + CHART_COLS - 1, r2: p.r1 + CHART_ROWS - 1 };
+    anchor = chartFootprint(p);
   } else {
     const col = Math.max(used?.c2 ?? rect.c2, rect.c2) + 2;
-    anchor = { c1: col, r1: rect.r1, c2: col + CHART_COLS - 1, r2: rect.r1 + CHART_ROWS - 1 };
+    anchor = chartFootprint({ c1: col, r1: rect.r1 });
   }
   // The chart covers a CHART_COLS x CHART_ROWS block from the anchor; it must not hide any data on the sheet.
   if (used && intersects(anchor, used)) {
@@ -77,9 +85,9 @@ export async function createChart(ctx: ToolCtx, a: {
       throw new ToolError(`The chart would cover data at ${formatRect(anchor)}. Choose an anchor in free space, for example ${cellAddress(free.c1, free.r1)}.`);
     }
   }
-  if (existing.some((e) => intersects(anchor, { ...e, c2: e.c1 + CHART_COLS - 1, r2: e.r1 + CHART_ROWS - 1 }))) {
-    throw new ToolError(`The chart would overlap an existing chart at ${formatRect(anchor)}. Choose a different anchor.`);
-  }
+  // Asked of the port, not computed from anchors: Office.js does not report a chart's anchor cell.
+  const overlap = await ctx.port.findChartOverlap(a.sheet, formatRect(anchor));
+  if (overlap) throw new ToolError(`The chart would overlap the existing chart "${overlap}" at ${formatRect(anchor)}. Choose a different anchor.`);
   const spec: ChartSpec = {
     sheet: a.sheet, dataAddress: formatRect(rect), kind: a.type, title: a.title, categoryAxisTitle: a.category_axis_title,
     valueAxisTitle: a.value_axis_title, showPercentLabels: a.show_percent_labels ?? a.type === "pie", showLegend: a.show_legend,

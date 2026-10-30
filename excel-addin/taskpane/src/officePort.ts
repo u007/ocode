@@ -16,6 +16,29 @@ export function splitQualified(a: string): { sheet: string; address: string } {
   return { sheet, address: a.slice(i + 1) };
 }
 
+/** A box in points, as Office.js reports Chart and Range positions. */
+export interface Box { left: number; top: number; width: number; height: number }
+
+/** Boxes closer than this (points) along an edge are treated as touching, not overlapping. */
+const EDGE_TOLERANCE_PT = 0.5;
+
+/** Pure: true when two boxes overlap by more than EDGE_TOLERANCE_PT on both axes. */
+export function boxesOverlap(a: Box, b: Box): boolean {
+  return a.left < b.left + b.width - EDGE_TOLERANCE_PT && b.left < a.left + a.width - EDGE_TOLERANCE_PT
+    && a.top < b.top + b.height - EDGE_TOLERANCE_PT && b.top < a.top + a.height - EDGE_TOLERANCE_PT;
+}
+
+/**
+ * Edges a border set always covers. The inside lines exist only with more than one row (InsideHorizontal) or
+ * column (InsideVertical); setting them on a single cell, row or column rejects the whole batch in Excel.
+ */
+export function bordersFor(rowCount: number, columnCount: number): string[] {
+  const edges = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight"];
+  if (rowCount > 1) edges.push("InsideHorizontal");
+  if (columnCount > 1) edges.push("InsideVertical");
+  return edges;
+}
+
 const CHART_TYPES: Record<ChartKind, string> = {
   pie: "Pie", column_clustered: "ColumnClustered", column_stacked: "ColumnStacked", bar_clustered: "BarClustered",
   line: "Line", area: "Area", scatter: "XYScatter",
@@ -128,14 +151,17 @@ export class OfficePort implements ExcelPort {
       if (spec.align) r.format.horizontalAlignment = spec.align === "left" ? "Left" : spec.align === "center" ? "Center" : "Right";
       if (spec.wrapText !== undefined) r.format.wrapText = spec.wrapText;
       if (spec.columnWidth !== undefined) r.format.columnWidth = spec.columnWidth; // UNVERIFIED unit (points vs characters)
+      // One load and one sync serve both the border and the number-format decisions.
+      if (spec.borders || spec.numberFormat) {
+        r.load("rowCount,columnCount");
+        await ctx.sync();
+      }
       if (spec.borders) {
-        for (const edge of ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight", "InsideHorizontal", "InsideVertical"] as const) {
-          r.format.borders.getItem(edge).style = "Continuous";
+        for (const edge of bordersFor(r.rowCount, r.columnCount)) {
+          r.format.borders.getItem(edge as Excel.BorderIndex).style = "Continuous";
         }
       }
       if (spec.numberFormat) {
-        r.load("rowCount,columnCount");
-        await ctx.sync();
         r.numberFormat = Array.from({ length: r.rowCount }, () => Array.from({ length: r.columnCount }, () => spec.numberFormat!));
       }
       if (spec.autofitColumns) r.format.autofitColumns();
@@ -186,6 +212,24 @@ export class OfficePort implements ExcelPort {
       const titles = cs.items.map((c) => { c.title.load("text"); return c.title; });
       await ctx.sync();
       return cs.items.map((c, i) => ({ name: c.name, sheet, type: String(c.chartType), title: titles[i].text, dataAddress: "", anchor: "" }));
+    });
+  }
+
+  /**
+   * UNVERIFIED: overlap is geometric, in one Excel.run. Office.js reports a chart's position in points (not its
+   * anchor cell), so the target range's box is compared with each chart's box. Returns the first chart that overlaps.
+   */
+  async findChartOverlap(sheet: string, address: string): Promise<string | null> {
+    return Excel.run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItem(sheet);
+      const charts = ws.charts;
+      charts.load("items/name,items/left,items/top,items/width,items/height");
+      const target = ws.getRange(address);
+      target.load("left,top,width,height");
+      await ctx.sync();
+      const box: Box = { left: target.left, top: target.top, width: target.width, height: target.height };
+      const hit = charts.items.find((c) => boxesOverlap({ left: c.left, top: c.top, width: c.width, height: c.height }, box));
+      return hit ? hit.name : null;
     });
   }
 

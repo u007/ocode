@@ -113,8 +113,14 @@ export class Journal {
   async markUndone(id: string) {
     await this.ensure();
     const s = this.steps.find((x) => x.id === id);
-    if (s) s.undone = true;
-    await this.store.save(this.steps);
+    if (!s) return;
+    s.undone = true;
+    try {
+      await this.store.save(this.steps);
+    } catch (e) {
+      s.undone = false; // memory must not claim an undo that was not persisted
+      throw e;
+    }
   }
 
   /** Cells whose current state differs from what the step left behind. */

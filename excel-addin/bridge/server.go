@@ -84,7 +84,11 @@ func NewHandler(cfg Config) (http.Handler, *Hub, error) {
 	mux.Handle("POST /bridge/workspace/{workbook}", s.auth(http.HandlerFunc(s.workspace)))
 	mux.Handle("GET /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.getState)))
 	mux.Handle("PUT /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.putState)))
-	mux.Handle("/api/", s.auth(allowAPI(proxy)))
+	wsRoot := cfg.WorkspaceRoot
+	if wsRoot == "" {
+		wsRoot, _ = defaultWorkspaceRoot() // on error stays "": chat and project registration are then refused
+	}
+	mux.Handle("/api/", s.auth(allowAPI(wsRoot, proxy)))
 	// MCP is for ocode on the same machine: loopback only, same key.
 	mux.Handle("/mcp", s.auth(s.loopbackOnly(mcp)))
 	if cfg.StaticDir != "" {

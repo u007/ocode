@@ -27,6 +27,7 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
   const port = new FakePort().addSheet("Summary", [["Category", "Spent"], ["Travel", 841.5], ["Meals", 451.8]]);
   let client: BridgeClient;
   const dataDir = mkdtempSync(join(tmpdir(), "bridge-data-"));
+  const wsRoot = mkdtempSync(join(tmpdir(), "bridge-ws-"));
   const runnerFor = () => new Runner(port, new Journal(new BridgeJournalStore(base, KEY, "wb1")), contractJson as unknown as Contract);
   let runner: Runner;
 
@@ -54,7 +55,7 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
     });
     const up = await new Promise<number>((r) => upstream.listen(0, "127.0.0.1", () => r((upstream.address() as any).port)));
     const p = await freePort();
-    proc = spawn(bin, ["-listen", `127.0.0.1:${p}`, "-ocode", `http://127.0.0.1:${up}`, "-data-dir", dataDir, "-call-timeout", "1500ms"], {
+    proc = spawn(bin, ["-listen", `127.0.0.1:${p}`, "-ocode", `http://127.0.0.1:${up}`, "-data-dir", dataDir, "-workspace-root", wsRoot, "-call-timeout", "1500ms"], {
       env: { ...process.env, EXCEL_BRIDGE_PANE_KEY: KEY, OCODE_TOKEN: "ocode-secret" },
     });
     await new Promise<void>((res, rej) => { proc.stdout!.on("data", (d) => String(d).includes("excel bridge on") && res()); proc.on("exit", () => rej(new Error("bridge exited"))); setTimeout(() => rej(new Error("bridge did not start")), 10000); });
@@ -125,20 +126,31 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
 
   it("/api is proxied to ocode with ITS token; the pane's credentials never go upstream; the key is required", async () => {
     const oc = new OcodeClient({ base, key: KEY });
-    const chat = await oc.startChat({ content: "hello", projectPath: "/data/excel/wb1", permissionMode: "normal" });
+    const chat = await oc.startChat({ content: "hello", projectPath: `${wsRoot}/wb1`, permissionMode: "normal" });
     expect(chat.sessionId).toBe("ses_1");
     const last = seen[seen.length - 1];
     expect(last).toMatchObject({ auth: "Bearer ocode-secret", path: "/api/chat" });
     expect(last.key).toBeUndefined();
-    expect(JSON.parse(last.body!)).toMatchObject({ content: "hello", project_path: "/data/excel/wb1", async: true });
+    expect(JSON.parse(last.body!)).toMatchObject({ content: "hello", project_path: `${wsRoot}/wb1`, async: true });
     expect((await fetch(`${base}/api/sessions`)).status).toBe(401);
   });
 
+  it("the proxy refuses what a leaked pane key could abuse: yolo chats, folders outside the workspace, and non-pane routes", async () => {
+    const oc = new OcodeClient({ base, key: KEY });
+    const before = seen.length;
+    await expect(oc.startChat({ content: "x", projectPath: `${wsRoot}/wb1`, permissionMode: "yolo" })).rejects.toMatchObject({ status: 403 });
+    await expect(oc.startChat({ content: "x", projectPath: "/etc", permissionMode: "normal" })).rejects.toMatchObject({ status: 403 });
+    await expect(oc.addProject("/home")).rejects.toMatchObject({ status: 403 });
+    const r = await fetch(`${base}/api/terminal`, { headers: { "X-Bridge-Key": KEY } });
+    expect(r.status).toBe(403);
+    expect(seen.length).toBe(before); // nothing reached ocode
+  });
+
   it("registers the workspace as an ocode project through the proxy", async () => {
-    await new OcodeClient({ base, key: KEY }).addProject("/data/excel/wb1");
+    await new OcodeClient({ base, key: KEY }).addProject(`${wsRoot}/wb1`);
     const last = seen[seen.length - 1];
     expect(last).toMatchObject({ auth: "Bearer ocode-secret", path: "/api/projects" });
-    expect(JSON.parse(last.body!)).toEqual({ path: "/data/excel/wb1" });
+    expect(JSON.parse(last.body!)).toEqual({ path: `${wsRoot}/wb1` });
   });
 
   it("the session index round-trips through the bridge", async () => {

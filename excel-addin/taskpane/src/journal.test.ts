@@ -130,7 +130,7 @@ describe("number formats in undo (bug 2)", () => {
   it("write_range with number_format '@' records both format images, and undo puts General back", async () => {
     const { port, ctx, journal } = setup();
     const w = await writeRange(ctx, { ...ADDR, values: [["007"]], number_format: "@" });
-    expect(w.formats_restored).toBe(true);
+    expect(w.undo_restores_formats).toBe(true);
     const step = await journal.get(w.step_id);
     expect(step?.beforeFormats).toEqual([["General"]]);
     expect(step?.afterFormats).toEqual([["@"]]);
@@ -170,5 +170,16 @@ describe("number formats in undo (bug 2)", () => {
     expect(u.formats_restored).toBe(false);
     expect(port.log.slice(mark).some((l) => l.startsWith("formats"))).toBe(false);
     expect((await port.read(SHEET, "E1")).values[0][0]).toBe("");
+  });
+});
+
+describe("undo robustness", () => {
+  it("a failed journal save during markUndone leaves the step undoable in memory", async () => {
+    const store = new MemoryJournalStore();
+    const j = new Journal(store);
+    await j.record({ tool: "write_range", sheet: "S", address: "A1", before: [[""]], after: [["x"]] });
+    store.save = async () => { throw new Error("bridge down"); };
+    await expect(j.markUndone("s1")).rejects.toThrow("bridge down");
+    expect((await j.get("s1"))?.undone).toBeFalsy();
   });
 });

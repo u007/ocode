@@ -1,9 +1,10 @@
 // In-memory ExcelPort for tests: a sparse grid per sheet, a tiny formula evaluator
 // (numbers, cell refs, + - * /, parentheses, SUM, COUNT) and the same observable behaviour the tools rely on.
-import { MAX_COL, MAX_ROW, Rect, cellAddress, clampTo, colToLetters, lettersToCol, parseAddress, shiftFormula } from "./a1";
+import { MAX_COL, MAX_ROW, Rect, cellAddress, clampTo, colToLetters, intersects, lettersToCol, parseAddress, shiftFormula } from "./a1";
 import type {
   CellValue, ChartInfo, ChartSpec, ExcelPort, FormatSpec, NameInfo, PivotInfo, PivotSpec, RangeData, SheetInfo, TableInfo, ValueType,
 } from "./port";
+import { chartFootprint } from "./tools/chartpivot";
 
 interface Cell { raw: CellValue; fmt: string }
 type Grid = Map<string, Cell>;
@@ -217,6 +218,17 @@ export class FakePort implements ExcelPort {
   }
   async listNames() { return this.names; }
   async listCharts(sheet: string) { return this.charts.filter((c) => c.sheet === sheet); }
+  /** Each chart covers the same 8 x 16 block addChart gives it, measured from its anchor cell. */
+  async findChartOverlap(sheet: string, address: string): Promise<string | null> {
+    const target = parseAddress(address);
+    if (!target) throw new Error(`"${address}" is not a valid A1 address`);
+    for (const c of this.charts) {
+      if (c.sheet !== sheet) continue;
+      const anchor = parseAddress(c.anchor);
+      if (anchor && intersects(chartFootprint(anchor), target)) return c.name;
+    }
+    return null;
+  }
   async addChart(spec: ChartSpec): Promise<ChartInfo> {
     this.log.push(`chart ${spec.sheet}`);
     const c = { name: `Chart ${this.charts.length + 1}`, sheet: spec.sheet, type: spec.kind, title: spec.title ?? "", dataAddress: spec.dataAddress, anchor: spec.anchor };

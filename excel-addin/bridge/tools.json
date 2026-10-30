@@ -52,7 +52,7 @@
     {
       "name": "create_chart",
       "risk": "write",
-      "description": "Create a chart from a data range. Validates the range first: rejects a Total/Subtotal row or the header row inside the data, and refuses an anchor that covers data. Returns the final series references. type: pie, column_clustered, column_stacked, bar_clustered, line, area, scatter.",
+      "description": "Create a chart from a data range. Validates the range first: rejects a final row labelled Total/Subtotal (overridable with include_total_rows) and the header row inside the data, and refuses an anchor that covers data or overlaps an existing chart. Returns the final series references. type: pie, column_clustered, column_stacked, bar_clustered, line, area, scatter.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -90,6 +90,11 @@
           "show_legend": {
             "type": "boolean",
             "default": true
+          },
+          "include_total_rows": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true when the final row is a real category labelled Total or Subtotal, not a total. The check is then skipped and a warning is returned instead."
           },
           "anchor": {
             "type": "string",

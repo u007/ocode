@@ -75,8 +75,8 @@ async function checkpointedWrite(
   return {
     data_notice: DATA_NOTICE, step_id: step.id, sheet, address: addr,
     cells_written: cellCount(rect),
-    /** true when the step holds format images, so undo restores the number formats too */
-    formats_restored: step.beforeFormats !== undefined,
+    /** the step holds number-format images, so undo_step will put the previous formats back (nothing was restored now) */
+    undo_restores_formats: step.beforeFormats !== undefined,
     evaluated: small ? after.values : undefined,
     formulas: small ? Object.fromEntries(after.formulas.flatMap((r, i) => r.map((f, j) => [cellAddress(rect.c1 + j, rect.r1 + i), f] as const)).filter(([, f]) => f.startsWith("="))) : undefined,
     first_rows: small ? undefined : after.values.slice(0, 3),
@@ -166,8 +166,14 @@ export async function undoStep(ctx: ToolCtx, a: { step_id: string }) {
   // Formats go first: a text format must be in place before a string such as "007" lands, or Excel re-parses it.
   // Steps recorded before formats were kept have no beforeFormats and skip this.
   if (step.beforeFormats) await ctx.port.setNumberFormats(step.sheet, step.address, step.beforeFormats);
-  // Empty before-cells are written back as "" so they end up empty again.
-  await ctx.port.write(step.sheet, step.address, step.before);
+  try {
+    // Empty before-cells are written back as "" so they end up empty again.
+    await ctx.port.write(step.sheet, step.address, step.before);
+  } catch (e) {
+    // Do not leave the formats reverted while the values are not: put the post-write formats back (best effort).
+    if (step.beforeFormats && step.afterFormats) await ctx.port.setNumberFormats(step.sheet, step.address, step.afterFormats).catch(() => undefined);
+    throw e;
+  }
   await ctx.journal.markUndone(step.id);
   return { restored: step.id, sheet: step.sheet, address: step.address, formats_restored: step.beforeFormats !== undefined };
 }

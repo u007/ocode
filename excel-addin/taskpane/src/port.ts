@@ -82,6 +82,12 @@ export interface ExcelPort {
   addTable(sheet: string, address: string, name: string | undefined, style: string): Promise<TableInfo>;
   listNames(): Promise<NameInfo[]>;
   listCharts(sheet: string): Promise<ChartInfo[]>;
+  /**
+   * Name of an existing chart on `sheet` whose bounding box overlaps the cell range `address`, or null.
+   * Ranges that only touch along an edge do not overlap. Works from chart positions because Office.js does not
+   * expose a chart's anchor cell.
+   */
+  findChartOverlap(sheet: string, address: string): Promise<string | null>;
   addChart(spec: ChartSpec): Promise<ChartInfo>;
   listPivots(): Promise<PivotInfo[]>;
   addPivot(spec: PivotSpec): Promise<PivotInfo>;

@@ -10,7 +10,11 @@ export async function describeWorkbook(ctx: ToolCtx) {
   const out = [];
   for (const s of sheets) {
     const ch = s.visibility === "VeryHidden" ? [] : await ctx.port.listCharts(s.name);
-    out.push({ name: s.name, visibility: s.visibility, used_range: s.usedAddress, charts: ch.map((c) => ({ name: c.name, type: c.type, title: c.title, data: c.dataAddress })) });
+    // An empty dataAddress means the port cannot report it (Office.js); omit the key rather than say "".
+    out.push({
+      name: s.name, visibility: s.visibility, used_range: s.usedAddress,
+      charts: ch.map((c) => ({ name: c.name, type: c.type, title: c.title, ...(c.dataAddress ? { data: c.dataAddress } : {}) })),
+    });
   }
   return { active_sheet: active, selection: sel, calculation_mode: calc, sheets: out, tables, named_ranges: names, pivots };
 }

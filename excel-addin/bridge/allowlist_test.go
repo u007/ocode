@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -38,9 +40,13 @@ func (u *recordingUpstream) snapshot() (int, string, string, string) {
 // noRedirect keeps the bridge's own status codes visible instead of following them.
 var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-func doAPI(t *testing.T, base, method, rawPath string) *http.Response {
+func doAPI(t *testing.T, base, method, rawPath string, body ...string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(method, base+rawPath, nil)
+	var rd io.Reader
+	if len(body) > 0 {
+		rd = strings.NewReader(body[0])
+	}
+	req, err := http.NewRequest(method, base+rawPath, rd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +85,22 @@ func TestAPIAllowlistForwardsEveryPaneRouteWithOcodeToken(t *testing.T) {
 		{"GET", "/api/models"},
 		{"POST", "/api/projects"},
 	}
+	// /api/chat and /api/projects carry a body that must name a folder inside the workspace root.
+	wsRoot, err := defaultWorkspaceRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(wsRoot, "wb-1")
 	for _, rt := range routes {
-		resp := doAPI(t, s.URL, rt.method, rt.path)
+		var resp *http.Response
+		switch rt.path {
+		case "/api/chat":
+			resp = doAPI(t, s.URL, rt.method, rt.path, `{"content":"x","project_path":"`+ws+`","permission_mode":"normal"}`)
+		case "/api/projects":
+			resp = doAPI(t, s.URL, rt.method, rt.path, `{"path":"`+ws+`"}`)
+		default:
+			resp = doAPI(t, s.URL, rt.method, rt.path)
+		}
 		hits, last, auth, _ := up.snapshot()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("%s %s: want 200 from upstream, got %d", rt.method, rt.path, resp.StatusCode)
@@ -154,7 +174,7 @@ func TestAPIAllowlistRefusesEverythingElseWithoutForwarding(t *testing.T) {
 func TestAPIAllowlistRefusesUncleanPathsItself(t *testing.T) {
 	// Bypass the mux (which redirects unclean paths before allowAPI sees them) and check the guard directly.
 	var forwarded int
-	guard := allowAPI(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { forwarded++ }))
+	guard := allowAPI("/ws", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { forwarded++ }))
 	for _, target := range []string{
 		"/api/sessions/../terminal",
 		"/api/sessions/a%2F..%2Fterminal",

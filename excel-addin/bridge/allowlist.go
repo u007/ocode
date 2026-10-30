@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -51,16 +54,82 @@ func newAPIRoute(method, pattern string) apiRoute {
 
 // allowAPI forwards only allowlisted (method, path) pairs to next. It must sit behind auth, so an
 // unauthenticated caller gets 401 before the route is even checked.
-func allowAPI(next http.Handler) http.Handler {
+//
+// Two routes can start work anywhere on the machine, so their request bodies are constrained too: POST /api/chat
+// (a new session runs an agent in `project_path`, in the `permission_mode` it asks for) and POST /api/projects
+// (registers a directory). Both must stay inside workspaceRoot, and a chat may not ask for yolo or any other
+// mode that skips permission prompts. With no workspaceRoot those two routes are refused (fail closed).
+func allowAPI(workspaceRoot string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := safeAPIPath(r)
 		if !ok || !apiRouteAllowed(r.Method, p) {
 			refuseAPI(w)
 			return
 		}
+		if r.Method == http.MethodPost && (p == "/api/chat" || p == "/api/projects") {
+			if !constrainBody(w, r, p, workspaceRoot) {
+				return
+			}
+		}
 		stripTokenQuery(r)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowedChatModes are the permission modes a pane-started session may use. "yolo" (no prompts) and the rest are refused.
+var allowedChatModes = map[string]bool{"": true, "normal": true, "locked": true}
+
+// constrainBody validates the JSON body of /api/chat and /api/projects and puts the original bytes back for the proxy.
+func constrainBody(w http.ResponseWriter, r *http.Request, route, root string) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		refuseAPI(w)
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		refuseAPI(w)
+		return false
+	}
+	str := func(k string) (string, bool) {
+		v, present := m[k]
+		if !present || v == nil {
+			return "", true
+		}
+		s, ok := v.(string)
+		return s, ok
+	}
+	okBody := false
+	switch route {
+	case "/api/chat":
+		pp, ok1 := str("project_path")
+		mode, ok2 := str("permission_mode")
+		okBody = ok1 && ok2 && allowedChatModes[mode] && insideRoot(root, pp)
+	case "/api/projects":
+		pp, ok1 := str("path")
+		host, ok2 := str("host")
+		okBody = ok1 && ok2 && host == "" && m["port"] == nil && insideRoot(root, pp)
+	}
+	if !okBody {
+		refuseAPI(w)
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
+}
+
+// insideRoot reports whether p is an absolute, clean path strictly below root. "~" and relative paths are refused
+// (ocode would expand them against its own home). Symlinks are not resolved: the workspace folders are created by the bridge.
+func insideRoot(root, p string) bool {
+	if root == "" || p == "" || strings.HasPrefix(p, "~") || !filepath.IsAbs(p) || !filepath.IsAbs(root) {
+		return false
+	}
+	if filepath.Clean(p) != p {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // safeAPIPath returns the decoded request path only when it is already clean: no traversal, no empty or
