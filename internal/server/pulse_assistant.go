@@ -691,8 +691,9 @@ func (h *Handler) configurePulseAgent(ag *agent.Agent, effCfg *config.Config) {
 // assistant is already excluded by buildPulseRows.
 func (h *Handler) pulseBoardSnapshot() string {
 	now := time.Now()
-	rows := buildPulseRows(h.gatherPulseInputs(pulseScopeLive, now), pulseScopeLive, now)
+	rows, notes := h.pulseBoardRows(pulseScopeLive, now)
 	board := renderPulseBoard(rows, now)
+	board += renderPulseHostNotes(notes)
 	if h.terminalAccessAllowed() {
 		board += "\n" + renderPulseTerminals(h.pulseTerminalRows())
 	}
@@ -721,7 +722,7 @@ func (h *Handler) pulseBoardSnapshot() string {
 		}
 	}
 
-	mem, err := h.pulseMemorySection(rows)
+	mem, err := h.pulseMemorySection(localPulseRows(rows))
 	if err != nil {
 		log.Printf("serve: pulse memory for the board: %v", err)
 		mem = pulseMemoryOpen + "\n(memory unavailable: " + err.Error() + ")\n" + pulseMemoryClose
@@ -771,12 +772,49 @@ func renderPulseBoard(rows []PulseRow, now time.Time) string {
 		b.WriteByte('\n')
 		fmt.Fprintf(&b, "%s | %s | %s | %s | %s",
 			r.Status,
-			filepath.Base(r.ProjectPath),
+			pulseBoardProject(r),
 			r.SessionID,
 			pulseOneLine(r.Title, pulseBoardTitleRunes),
 			pulseOneLine(pulseRowDetail(r), pulseBoardTaskRunes))
 	}
 	return b.String()
+}
+
+// pulseBoardProject is the board's project column: the project's base name, and
+// for a remote session "name@host", so two hosts' "app" projects stay apart and the
+// assistant knows to pass the host to the session tools.
+func pulseBoardProject(r PulseRow) string {
+	name := filepath.Base(r.ProjectPath)
+	if r.Host != "" {
+		return name + "@" + r.Host
+	}
+	return name
+}
+
+// renderPulseHostNotes lists the remote hosts whose sessions are missing from the
+// board and why, or "" when every host was read.
+func renderPulseHostNotes(notes []pulseHostNote) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nRemote hosts not shown:")
+	for _, n := range notes {
+		fmt.Fprintf(&b, "\n%s: %s", n.Host, pulseOneLine(n.Reason, pulseBoardTaskRunes))
+	}
+	return b.String()
+}
+
+// localPulseRows keeps the rows of this server's own projects. Project memory and
+// the project-root checks key on local paths; a remote path is another machine's.
+func localPulseRows(rows []PulseRow) []PulseRow {
+	out := make([]PulseRow, 0, len(rows))
+	for _, r := range rows {
+		if r.Host == "" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // pulseRowDetail is the last board column: the blocking ask when there is one,

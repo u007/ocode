@@ -90,7 +90,7 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 	return []*pulseTool{
 		{
 			name:  "pulse_board",
-			desc:  "List the dashboard rows (one per top-level session across all projects): status, project, title, current task or pending ask, todo progress. scope \"live\" (default) is what is active now; \"all\" also includes idle sessions from the last 7 days.",
+			desc:  "List the dashboard rows (one per top-level session across all projects, local and on connected remote SSH/WSL hosts): status, project, host (remote rows only), title, current task or pending ask, todo progress. scope \"live\" (default) is what is active now; \"all\" also includes idle sessions from the last 7 days. hosts_unavailable names a remote host whose sessions could not be read and why; its absence from items does not mean nothing runs there. Pass a remote row's host to session_read, session_recap and session_ask.",
 			props: map[string]any{"scope": str(`"live" (default) or "all"`)},
 			run:   h.pulseBoardTool,
 		},
@@ -105,10 +105,13 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 			run: h.pulseSessionReadTool,
 		},
 		{
-			name:  "session_recap",
-			desc:  "Produce the recap of a session (what was asked, done, found, decided, next). Runs a model call, so prefer session_read for a quick look.",
-			props: map[string]any{"session_id": str("Session id, as shown on the board")},
-			run:   h.pulseSessionRecapTool,
+			name: "session_recap",
+			desc: "Produce the recap of a session (what was asked, done, found, decided, next). Runs a model call, so prefer session_read for a quick look.",
+			props: map[string]any{
+				"session_id": str("Session id, as shown on the board"),
+				"host":       str("The session's host, for a remote row of the board; omit for a local one"),
+			},
+			run: h.pulseSessionRecapTool,
 		},
 		{
 			name:  "project_list",
@@ -150,10 +153,13 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 			run:   h.pulseAgentRunsTool,
 		},
 		{
-			name:  "session_ask",
-			desc:  "Read the pending permission/question ask(s) a session is currently paused on, with details (tool, options, multiple-select). Unless terminal access is enabled on this server, a permission carries only its request_id, tool, scope and agent (no command, args, rule, summary or deny reason). Use this before permission_resolve / question_answer / question_dismiss so you know the request_id and the available options. Returns {session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]} (empty arrays when nothing is pending).",
-			props: map[string]any{"session_id": str("Session id, as shown on the board")},
-			run:   h.pulseSessionAskTool,
+			name: "session_ask",
+			desc: "Read the pending permission/question ask(s) a session is currently paused on, with details (tool, options, multiple-select). Unless terminal access is enabled on this server, a permission carries only its request_id, tool, scope and agent (no command, args, rule, summary or deny reason). Use this before permission_resolve / question_answer / question_dismiss so you know the request_id and the available options. Returns {session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]} (empty arrays when nothing is pending).",
+			props: map[string]any{
+				"session_id": str("Session id, as shown on the board"),
+				"host":       str("The session's host, for a remote row of the board; omit for a local one"),
+			},
+			run: h.pulseSessionAskTool,
 		},
 	}
 }
@@ -232,12 +238,13 @@ func (h *Handler) pulseBoardTool(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid scope %q (want %q or %q)", scope, pulseScopeLive, pulseScopeAll)
 	}
 	now := time.Now()
-	rows := buildPulseRows(h.gatherPulseInputs(scope, now), scope, now)
+	rows, notes := h.pulseBoardRows(scope, now)
 	return pulseCapped(len(rows), func(n int, truncated bool) any {
 		return struct {
-			Items     []PulseRow `json:"items"`
-			Truncated bool       `json:"truncated,omitempty"`
-		}{Items: append([]PulseRow{}, rows[:n]...), Truncated: truncated}
+			Items            []PulseRow      `json:"items"`
+			HostsUnavailable []pulseHostNote `json:"hosts_unavailable,omitempty"`
+			Truncated        bool            `json:"truncated,omitempty"`
+		}{Items: append([]PulseRow{}, rows[:n]...), HostsUnavailable: notes, Truncated: truncated}
 	})
 }
 
@@ -298,6 +305,7 @@ func (h *Handler) pulseSessionTranscript(id string) (title, project string, msgs
 func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
+		Host      string `json:"host"`
 		Last      *int   `json:"last"`
 		Search    string `json:"search"`
 	}
@@ -311,7 +319,17 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 			return "", fmt.Errorf("last must be 1-%d, got %d", pulseSessionReadMax, last)
 		}
 	}
-	title, project, msgs, err := h.pulseSessionTranscript(args.SessionID)
+	var (
+		title, project string
+		msgs           []agent.Message
+		base           int
+		err            error
+	)
+	if args.Host != "" {
+		title, project, msgs, base, err = h.pulseRemoteSessionTranscript(args.Host, args.SessionID, last, args.Search != "")
+	} else {
+		title, project, msgs, err = h.pulseSessionTranscript(args.SessionID)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +340,7 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 		if needle != "" && !strings.Contains(strings.ToLower(m.Content), needle) {
 			continue
 		}
-		pm := pulseReadMessage{Index: i, Role: m.Role, Content: truncateRunes(m.Content, pulseMessageRuneBudget)}
+		pm := pulseReadMessage{Index: base + i, Role: m.Role, Content: truncateRunes(m.Content, pulseMessageRuneBudget)}
 		for _, c := range m.ToolCalls {
 			pm.ToolCalls = append(pm.ToolCalls, pulseReadCall{Name: c.Function.Name, Args: truncateRunes(c.Function.Arguments, pulseCallArgsRuneBudget)})
 		}
@@ -336,11 +354,12 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 	return pulseCapped(len(selected), func(n int, truncated bool) any {
 		return struct {
 			SessionID   string             `json:"session_id"`
+			Host        string             `json:"host,omitempty"`
 			ProjectPath string             `json:"project_path"`
 			Title       string             `json:"title"`
 			Messages    []pulseReadMessage `json:"messages"`
 			Truncated   bool               `json:"truncated,omitempty"`
-		}{args.SessionID, project, title, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
+		}{args.SessionID, args.Host, project, title, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
 	})
 }
 
@@ -349,6 +368,7 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 func (h *Handler) pulseSessionRecapTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
+		Host      string `json:"host"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -360,6 +380,9 @@ func (h *Handler) pulseSessionRecapTool(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("refusing to recap the assistant's own session %q", args.SessionID)
 	}
 	text, err := pulseRecapWithTimeout(pulseRecapTimeout, func(ctx context.Context) (string, error) {
+		if args.Host != "" {
+			return h.pulseRemoteRecap(args.Host, args.SessionID)
+		}
 		return h.recapSessionCtx(ctx, args.SessionID)
 	})
 	if err != nil {
@@ -371,9 +394,10 @@ func (h *Handler) pulseSessionRecapTool(raw json.RawMessage) (string, error) {
 	return pulseCapped(len(runes), func(n int, truncated bool) any {
 		return struct {
 			SessionID string `json:"session_id"`
+			Host      string `json:"host,omitempty"`
 			Recap     string `json:"recap"`
 			Truncated bool   `json:"truncated,omitempty"`
-		}{args.SessionID, string(runes[:n]), truncated}
+		}{args.SessionID, args.Host, string(runes[:n]), truncated}
 	})
 }
 
@@ -679,6 +703,7 @@ func (h *Handler) pulseAgentRunsTool(raw json.RawMessage) (string, error) {
 
 type pulseAskResult struct {
 	SessionID   string            `json:"session_id"`
+	Host        string            `json:"host,omitempty"`
 	Permissions []PermissionEvent `json:"permissions"`
 	Questions   []QuestionEvent   `json:"questions"`
 }
@@ -686,6 +711,7 @@ type pulseAskResult struct {
 func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
+		Host      string `json:"host"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -697,8 +723,18 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 	if isPulseSession(id) {
 		return "", fmt.Errorf("refusing to read the assistant's own session %q", id)
 	}
-	if _, err := h.sessions.Resolve(id); err != nil {
-		return "", fmt.Errorf("session %q not found: %w", id, err)
+	var pa *PendingAsks
+	if args.Host != "" {
+		remote, err := h.pulseRemoteSessionAsks(args.Host, id)
+		if err != nil {
+			return "", err
+		}
+		pa = remote
+	} else {
+		if _, err := h.sessions.Resolve(id); err != nil {
+			return "", fmt.Errorf("session %q not found: %w", id, err)
+		}
+		pa = h.livePendingAsks(id)
 	}
 
 	// Command lines reach the model only when the same gate that guards
@@ -707,8 +743,8 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 	// Summary can all quote the command. The event is rebuilt, never edited in
 	// place, so the live ask state is never mutated.
 	showCommands := h.terminalAccessAllowed()
-	res := pulseAskResult{SessionID: id, Permissions: []PermissionEvent{}, Questions: []QuestionEvent{}}
-	if pa := h.livePendingAsks(id); pa != nil {
+	res := pulseAskResult{SessionID: id, Host: args.Host, Permissions: []PermissionEvent{}, Questions: []QuestionEvent{}}
+	if pa != nil {
 		for _, p := range pa.Permissions {
 			if !showCommands {
 				p = PermissionEvent{

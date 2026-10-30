@@ -318,9 +318,9 @@ error.
 
 | Tool | Args | Returns | Limits |
 |---|---|---|---|
-| `pulse_board` | `scope?` live (default) / all | `{items: [PulseRow]}` as `GET /api/pulse` | cap drops tail rows |
-| `session_read` | `session_id`, `last?` 1-200 (30), `search?` | `{session_id, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
-| `session_recap` | `session_id` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
+| `pulse_board` | `scope?` live (default) / all | `{items: [PulseRow], hosts_unavailable?: [{host, reason}]}`: this server's rows as `GET /api/pulse` plus the rows of every connected remote host, merged in board order; a remote row carries `host` | cap drops tail rows; a remote host that is not connected or does not answer contributes no rows and is named in `hosts_unavailable` (see "Remote hosts") |
+| `session_read` | `session_id`, `host?`, `last?` 1-200 (30), `search?` | `{session_id, host?, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
+| `session_recap` | `session_id`, `host?` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
 | `project_list` | none | `{projects: [{path, name, host?, kind?, group?, connected?}]}`: every project in the store, local and remote (SSH/WSL) | sorted by host then path (local first); `connected` appears on remote projects only and says whether this server holds a live connection to the host right now, without dialing |
 | `terminal_tabs` | none | `{projects: [{project, host?, remote_error?, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by host then project, terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it. A remote project (tab key `<host>::<path>`) carries its `host`, which `terminal_read`/`terminal_screen` take; its live state comes from that host's own server, and a host that is not connected or does not answer lists its tabs without live state and says why in `remote_error` |
 | `terminal_read` | `terminal_id`, `host?`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, host?, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed (a line ending in `\r` shows its last redraw, so progress bars do not read as blank; a redraw that erases the line with `CSI K`/`CSI J` shows it empty), 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; a remote terminal needs its `host` (see "Remote hosts"); the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
@@ -330,14 +330,14 @@ error.
 | `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
 | `session_command` | `session_id`, `command`, `args?` | `{session_id, command, result}` where `result` is the operation's own JSON | **asks**; fixed allowlist `/btw` `/cancel` `/compact` `/recap` `/title`, anything else is an error listing them, no send-as-text fallback |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
-| `session_ask` | `session_id` | `{session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]}` (empty arrays when nothing is pending) | read; details of the pending permission/question ask(s) a session is paused on — tool for permissions, header/question/options/multiple for questions; use before resolving so the request_id and available options are known. Unless terminal access is enabled (the same gate as `pulseTerminalRows`), a permission keeps only `request_id`, `tool`, `scope` and `agent_name`; an unknown session is an error |
+| `session_ask` | `session_id`, `host?` | `{session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]}` (empty arrays when nothing is pending) | read; details of the pending permission/question ask(s) a session is paused on — tool for permissions, header/question/options/multiple for questions; use before resolving so the request_id and available options are known. Unless terminal access is enabled (the same gate as `pulseTerminalRows`), a permission keeps only `request_id`, `tool`, `scope` and `agent_name`; an unknown session is an error |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
 | `question_answer` | `session_id`, `request_id`, `answers` | `{session_id, request_id, accepted: true}` via `HandleAnswerQuestion` (same payload as `POST /api/questions`) | **asks**; unknown request id is an error. Each answer is `{header, question, answers: [{label, text, custom}]}` — labels select an option, `text`+`custom` sends a free-text/custom entry, `multiple` allows several choices per question. |
 | `question_dismiss` | `session_id`, `request_id` | `{session_id, request_id, dismissed: true}` via `HandleDismissQuestion` | **asks**; cancels a pending question without answering it (no continuation turn). "Switch tab" for a multi-question prompt means answering each question in its own `answers` entry. |
 | `session_new` | `message` | `{session_id}`; starts a new local chat session with an initial message via the async chat path | **asks**; local only — remote/WSL hosts refused |
 | `session_close` | `session_id` | `{session_id, closed: true}` | **asks**; refuses the assistant's own session, child sessions, unknown ids |
-| `terminal_new` | `project_path?` | `{terminal_id}`; starts a new local pty shell | **asks**; Unix-only (Windows refuses); refuses remote hosts and unregistered projects; gated on terminal access |
-| `terminal_kill` | `terminal_id` | `{terminal_id, killed: true}`; kills the shell, removes history and shared tab entry | **asks**; refuses a terminal whose project is not a registered project root |
+| `terminal_new` | `project_path?`, `host?`, `title?` | `{terminal_id, host?, project_path?}`; starts a new pty shell, locally or on a connected remote host | **asks**; Unix-only (Windows refuses); refuses unregistered projects, gated on terminal access. With `host` the path must be a saved project of that host and the host connected; the shell is created by a websocket attach on the host and left detached (see "Remote hosts") |
+| `terminal_kill` | `terminal_id`, `host?` | `{terminal_id, host?, killed: true}`; kills the shell, removes history and shared tab entry | **asks**; refuses a terminal whose project is not a registered project root. With `host` the terminal must be live on that host and in one of its saved projects |
 | `activation_read` | none | `{prompt, max_chars, judge_model, auto_receive, active, recent_decisions: [{at, events, outcome, detail, input_tokens?, output_tokens?}], note?}` | read; allow rule; see "Activation gate" |
 | `activation_write` | `prompt` (full replacement, `""` clears) | same body as `activation_read` after the write | allow rule (own file only); over 4000 characters is rejected and the old condition kept; a write skips the backlog recorded before it |
 | `agent_runs` | `session_id?` | `{sessions: [{session_id, runs: [...nested children]}]}` | transcripts omitted, results 500 runes; sessions without runs omitted; the assistant is excluded |
@@ -419,8 +419,34 @@ connection, with the same bearer token the browser proxy injects
   endpoint admits only registered projects.
 - The local `terminalAccessAllowed()` gate applies to remote output too: it reaches the
   model provider from this process, so the remote host's own gate is not the only one.
-- Remote terminals are read-only here exactly as local ones are. `terminal_new` and
-  `terminal_kill` still refuse remote hosts.
+- `terminal_new` with `host` creates the shell on the host: the host spawns a pty when a
+  websocket attaches with a new `terminal_id` (`HandleTerminalWS`), so the tool attaches
+  with a fresh `pulse-term-<ns>` id, waits for the attach frame, and closes the socket.
+  The host keeps a detached shell for `terminalDetachTTLRemote` (24 h) and the browser
+  reattaches to it by id. The tab is stored under `<host>::<path>` like any remote tab.
+  The path must match a saved project of that host verbatim, and the project is
+  registered on the host first.
+- `terminal_kill` with `host` asks the host for its live terminals, requires the id to be
+  there and its project to be a saved project of the host (the host's kill endpoint takes
+  only an id, so that check lives here), then `DELETE /api/terminal/{id}` and drops the tab.
+- Both write tools stay **asks**: each call raises the permission dialog.
+
+**Remote sessions on the board.** `pulse_board` and the per-turn board merge every
+connected host's own `GET /api/pulse` rows (`pulseBoardRows`, up to 3 pages of 100 per
+host), tagged with `host`, into the one board order (`sortPulseRows`). The board's project
+column reads `name@host` for a remote row. A host that is not connected, or fails, adds
+no rows and is listed under "Remote hosts not shown:" (and `hosts_unavailable`) with the
+reason, so absence is never read as "nothing running there". The merge sits in front of an
+LLM call, so it is bounded: hosts are asked in parallel under a 3 s deadline, rows are
+cached for 5 s, and a failed host is left alone for 30 s (`pulseRemoteBoardCache`). Only
+the assistant's board merges hosts; `GET /api/pulse` itself stays this server's sessions.
+`session_read`, `session_recap` and `session_ask` take the row's `host` and ask the host's
+`GET /api/sessions/{id}` (newest N, or the whole transcript for a search), `/recap` and
+`/state`; message indexes are absolute within the host's transcript. A remote project's
+memory is not injected (project memory keys on local paths). The write tools
+(`session_send`, `session_command`, `permission_resolve`, `question_answer`,
+`question_dismiss`, `session_close`) do not reach remote sessions: they refuse with an
+error naming the host.
 
 **Access**
 
@@ -481,6 +507,7 @@ assistant never appears as a card, never counts as a child, and is absent from
 - Always-allow decisions through `permission_resolve` (only allow/deny are exposed;
   harmful operations must stay a human click).
 - Reading or writing memory for remote (SSH/WSL) projects.
+- Acting on remote sessions, and stop indicators from remote hosts.
 
 ## Known limits
 
@@ -493,10 +520,12 @@ assistant never appears as a card, never counts as a child, and is absent from
   server process's live sessions (and, for `scope=all`, the disk listing of local
   projects). Sessions held by another `ocode` process are invisible until they
   persist.
-- Remote (SSH/WSL) projects: their terminals are readable through `host` (see "Remote
-  hosts"), but their SESSIONS are not on the board, in `session_read` or in the disk scan:
-  those live in the host's server process. `project_list` shows the project exists and
-  whether it is connected, and nothing more about its sessions.
+- Remote (SSH/WSL) projects: their terminals and sessions are readable through `host` (see
+  "Remote hosts"), but only while connected. Sessions are the host's live registry plus
+  what its `/api/pulse` reports; this server's disk scan never reaches them. Acting on a
+  remote session (send, command, permission and question answers, close) is not built.
+- Stop indicators and the activation gate cover this server's sessions and terminals only;
+  a remote host's turn-done, ask or terminal-stop never wakes the assistant.
 - A remote terminal is readable only while its host is connected from this server. The
   assistant cannot connect a host itself.
 - The board is a point-in-time snapshot built when the turn starts; the model must

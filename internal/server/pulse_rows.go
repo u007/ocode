@@ -103,10 +103,14 @@ type PulseAsk struct {
 
 // PulseRow is one dashboard card.
 type PulseRow struct {
-	SessionID   string      `json:"session_id"`
-	ProjectPath string      `json:"project_path"`
-	Title       string      `json:"title"`
-	Status      PulseStatus `json:"status"`
+	SessionID   string `json:"session_id"`
+	ProjectPath string `json:"project_path"`
+	// Host is the SSH/WSL host the session runs on, "" for a local one. GET
+	// /api/pulse never sets it (a host's own server reports its own sessions as
+	// local); only the Pulse assistant's merged board does.
+	Host   string      `json:"host,omitempty"`
+	Title  string      `json:"title"`
+	Status PulseStatus `json:"status"`
 	// CurrentTask is nil for needs-you rows: the pending ask already carries
 	// the text, so a task line would duplicate it.
 	CurrentTask *PulseTask `json:"current_task"`
@@ -246,6 +250,13 @@ func buildPulseRows(inputs []PulseInput, scope string, now time.Time) []PulseRow
 		})
 	}
 
+	sortPulseRows(rows)
+	return rows
+}
+
+// sortPulseRows orders rows by the board contract: status rank, then newest
+// update, then session id. The merged local+remote board sorts with the same rule.
+func sortPulseRows(rows []PulseRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		ri, rj := pulseStatusRank(rows[i].Status), pulseStatusRank(rows[j].Status)
 		if ri != rj {
@@ -256,7 +267,6 @@ func buildPulseRows(inputs []PulseInput, scope string, now time.Time) []PulseRow
 		}
 		return rows[i].SessionID < rows[j].SessionID
 	})
-	return rows
 }
 
 // parentSessionID returns the parent id when in belongs to a child session,
