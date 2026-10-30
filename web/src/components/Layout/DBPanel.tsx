@@ -1,7 +1,11 @@
-// DB session sub-tab: Postgres connector. Saved connections are global
+// DB project tab: Postgres connector. Saved connections are global
 // (ocodeconfig.json, encrypted); each panel unlocks them under its own surface
 // id and locks them on close. Every statement runs read-only first; a write is
 // shown to the user and runs only after an explicit confirmation.
+//
+// An environment-backed connection ("${DATABASE_URL}") carries no secret: its
+// URL is read from the project's .env / .env.local at load time, with no master
+// password. A literal URL stays sealed and needs the password that sealed it.
 import { Database, Loader2, Lock, PanelLeft, PanelLeftClose, Play, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -35,9 +39,22 @@ const LIST_DEFAULT_PX = 160;
 const HANDLE_PX = 4;
 const DATA_MIN_PX = 320;
 
-export default function DBPanel({ sessionId }: { sessionId: string }) {
-  // Stable per panel so the server's unlock grant belongs to this panel only.
-  const surface = useMemo(() => `db-panel:${sessionId}`, [sessionId]);
+// A URL that names environment variables ("${DATABASE_URL}") is not a secret,
+// so it needs no master password. Mirrors dbconnect.IsTemplate on the server: a
+// BRACED reference makes it a template; a bare "$" (as in a password) stays a
+// literal URL.
+function isEnvTemplate(url: string): boolean {
+  return /\$\{[^}]+\}/.test(url);
+}
+
+export default function DBPanel({ projectPath, projectHost }: { projectPath?: string; projectHost?: string }) {
+  // Stable per project so the server's unlock grant belongs to this project's
+  // panel only. The host is part of the key so two machines' same-named
+  // projects never share a grant.
+  const surface = useMemo(
+    () => `db-panel:${projectHost ?? ""}:${projectPath ?? ""}`,
+    [projectHost, projectPath],
+  );
 
   // Table-list pane width: drag-to-resize + collapse, persisted per panel kind.
   const tablePane = useResizableSidebar({
@@ -94,13 +111,20 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
 
   const current = connections?.find((c) => c.name === selected) ?? null;
   const unlocked = current?.unlocked ?? false;
+  // A template URL needs no master password, so the add form neither asks for
+  // one nor blocks Save on it.
+  const addIsTemplate = isEnvTemplate(addUrl.trim());
 
   const refresh = useCallback(async () => {
     const res = await api.dbConnectList(surface);
-    setConnections(res.connections);
+    // Normalise at the fetch boundary: the api client already turns a null
+    // list into [], but a partial mock (or an older server) must not crash the
+    // panel with an undefined list.
+    const list = res?.connections ?? [];
+    setConnections(list);
     setSelected((prev) => {
-      if (prev && res.connections.some((c) => c.name === prev)) return prev;
-      return res.connections[0]?.name ?? null;
+      if (prev && list.some((c) => c.name === prev)) return prev;
+      return list[0]?.name ?? null;
     });
   }, [surface]);
 
@@ -126,6 +150,26 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
         console.warn("db panel: lock on close failed", errorText(err));
       });
     };
+  }, [surface]);
+
+  // Switching projects is a different surface: an environment-backed connection
+  // now resolves against the NEW project's .env, so nothing from the previous
+  // project's grant may be reused while the list reloads.
+  useEffect(() => {
+    setConnections(null);
+    setSelected(null);
+    setPanelError(null);
+    setTables([]);
+    setTablesHasMore(false);
+    setResult(null);
+    setQueryError(null);
+    setNotice(null);
+    setPendingWrite(null);
+    setSql("");
+    setActiveTable(null);
+    setView("data");
+    setUnlockPassword("");
+    setConfirmRemove(null);
   }, [surface]);
 
   // Switching connection clears everything tied to the previous one.
@@ -203,7 +247,9 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
   const addConnection = () =>
     withBusy("add", async () => {
       const name = addName.trim();
-      await api.dbConnectAdd(name, addUrl.trim(), addPassword, sessionId);
+      // A template URL is saved in the clear and needs no password; a literal
+      // URL is sealed under it. The server enforces the same rule.
+      await api.dbConnectAdd(name, addUrl.trim(), addPassword);
       setAddUrl("");
       setAddPassword("");
       setAddName("");
@@ -213,9 +259,15 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
 
   const unlockConnection = () =>
     withBusy("unlock", async () => {
-      // The session id lets the server resolve an environment-backed
-      // connection against THIS project's .env / .env.local.
-      await api.dbConnectUnlock(surface, unlockPassword, sessionId);
+      // The project path lets the server resolve an environment-backed
+      // connection against THIS project's .env / .env.local. The password is
+      // empty for that flow; only sealed connections need it.
+      //
+      // A remote project's files (including .env) live on the other machine and
+      // this endpoint is not host-threaded, so its path must never be sent: the
+      // server would either refuse it or, worse, match a same-named local dir.
+      const password = current?.fromEnv ? "" : unlockPassword;
+      await api.dbConnectUnlock(surface, password, projectHost ? undefined : projectPath);
       setUnlockPassword("");
       await refresh();
       if (selected) await loadTables(selected, 0);
@@ -246,7 +298,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-4" data-session-id={sessionId}>
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-4" data-project-path={projectPath}>
       <div className="flex flex-wrap items-center gap-2">
         <Database className="h-4 w-4" aria-hidden="true" />
         <h2 className="text-sm font-semibold">PostgreSQL</h2>
@@ -293,7 +345,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
             onUrl={setAddUrl}
             onPassword={setAddPassword}
           />
-          <Button type="submit" size="sm" disabled={busy !== null || !addName || !addUrl || !addPassword}>
+          <Button type="submit" size="sm" disabled={busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword)}>
             Save connection
           </Button>
         </form>
@@ -305,7 +357,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
           {current.fromEnv && (
             <span
               className="rounded border border-border px-1 py-0.5 font-mono text-[10px] text-muted-foreground"
-              title="The connection URL comes from an environment variable, resolved when you unlock."
+              title="The connection URL is read from this project's .env / .env.local — no password or stored secret."
             >
               env
             </span>
@@ -336,30 +388,62 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
 
       {connections.length > 0 && current && !unlocked && (
         <div className="max-w-xl space-y-3 rounded-lg border border-border bg-card p-4">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Lock className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} is locked
-          </div>
-          <form
-            className="flex items-end gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void unlockConnection();
-            }}
-          >
-            <label className="flex-1 space-y-1 text-xs font-medium text-muted-foreground">
-              Master password
-              <Input
-                type="password"
-                autoComplete="off"
-                value={unlockPassword}
-                onChange={(e) => setUnlockPassword(e.target.value)}
-                className="h-8 text-xs"
-              />
-            </label>
-            <Button type="submit" size="sm" disabled={busy !== null || !unlockPassword}>
-              <Unlock className="mr-1 h-3.5 w-3.5" /> Unlock
-            </Button>
-          </form>
+          {current.fromEnv ? (
+            <>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Database className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} reads its URL from the
+                project&apos;s <code className="font-mono">.env</code>
+              </div>
+              <form
+                className="flex items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void unlockConnection();
+                }}
+              >
+                <Button type="submit" size="sm" disabled={busy !== null}>
+                  {busy === "unlock" ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Unlock className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Load from .env
+                </Button>
+              </form>
+              <p className="text-[11px] text-muted-foreground">
+                No password needed — nothing is stored or encrypted. The connection URL is read from{" "}
+                <code className="font-mono">.env</code> / <code className="font-mono">.env.local</code> in the
+                project root when you load it.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Lock className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} is locked
+              </div>
+              <form
+                className="flex items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void unlockConnection();
+                }}
+              >
+                <label className="flex-1 space-y-1 text-xs font-medium text-muted-foreground">
+                  Master password
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    value={unlockPassword}
+                    onChange={(e) => setUnlockPassword(e.target.value)}
+                    className="h-8 text-xs"
+                  />
+                </label>
+                <Button type="submit" size="sm" disabled={busy !== null || !unlockPassword}>
+                  <Unlock className="mr-1 h-3.5 w-3.5" /> Unlock
+                </Button>
+              </form>
+            </>
+          )}
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">Add another connection</summary>
             <form
@@ -377,7 +461,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
               />
-              <Button type="submit" size="sm" variant="outline" disabled={busy !== null || !addName || !addUrl || !addPassword}>
+              <Button type="submit" size="sm" variant="outline" disabled={busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword)}>
                 Save connection
               </Button>
             </form>
@@ -564,6 +648,9 @@ function AddFields({
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
 }) {
+  // A URL that references an environment variable is not a secret, so the
+  // password field is neither required nor meaningful for it.
+  const template = isEnvTemplate(url.trim());
   return (
     <div className="space-y-2">
       <label className="block space-y-1 text-xs font-medium text-muted-foreground">
@@ -574,9 +661,9 @@ function AddFields({
         <label className="block text-xs font-medium text-muted-foreground">
           Connection URL
           <Input
-            type="password"
+            type={template ? "text" : "password"}
             autoComplete="off"
-            placeholder="postgres://user:pass@host:5432/db"
+            placeholder={"postgres://user:pass@host:5432/db  or  ${DATABASE_URL}"}
             value={url}
             onChange={(e) => onUrl(e.target.value)}
             className="h-8 font-mono text-xs"
@@ -587,24 +674,26 @@ function AddFields({
             "Connection URL". */}
         <p className="text-[11px] text-muted-foreground">
           Use <code className="font-mono">{"${DATABASE_URL}"}</code> to read the URL from the
-          environment (the project&apos;s <code className="font-mono">.env</code> /{" "}
-          <code className="font-mono">.env.local</code>).
+          project&apos;s <code className="font-mono">.env</code> /{" "}
+          <code className="font-mono">.env.local</code>. No password is needed for that.
         </p>
       </div>
       <div className="space-y-1">
         <label className="block text-xs font-medium text-muted-foreground">
-          Master password (encrypts the URL)
+          {template ? "Master password (not needed for an environment URL)" : "Master password (encrypts the URL)"}
           <Input
             type="password"
             autoComplete="off"
             value={password}
             onChange={(e) => onPassword(e.target.value)}
+            disabled={template}
             className="h-8 text-xs"
           />
         </label>
         <p className="text-[11px] text-muted-foreground">
-          Still required. An environment-backed URL is not stored, so the password
-          gates the whole set of connections.
+          {template
+            ? "Nothing is stored or encrypted: the value is read from the project's .env files when the connection is loaded."
+            : "Required for a literal URL: it seals the value that is saved."}
         </p>
       </div>
     </div>

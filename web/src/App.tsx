@@ -310,6 +310,13 @@ function HomeApp() {
     leavePulseFor,
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
+  // The DB panel issues a connection-list request on mount. Mount it on first
+  // visit and keep it afterwards (so table/query state survives a tab switch),
+  // rather than eagerly at app start for a tab the user may never open.
+  const [dbVisited, setDbVisited] = useState(false);
+  useEffect(() => {
+    if (activeView === "db") setDbVisited(true);
+  }, [activeView]);
   // "Show in file tree" from an editor/preview tab's context menu, and folder
   // picks from the ctrl/cmd+p picker: switch to the Files view, un-collapse the
   // tree pane (a reveal into a collapsed tree would be invisible), and hand the
@@ -1804,6 +1811,18 @@ function HomeApp() {
                   />
                 </div>
               </TabsContent>
+              {/* Project-level DB connector (beside Assets). Its surface is keyed
+                  by project so an environment-backed connection resolves against
+                  this project's .env, and a project switch drops the old grant. */}
+              <TabsContent value="db" forceMount className="flex-1 overflow-hidden m-0">
+                {dbVisited && (
+                  <DBPanel
+                    key={`${projectState.activeProject?.host ?? ""}:${projectState.activeProject?.path ?? ""}`}
+                    projectPath={projectState.activeProject?.path}
+                    projectHost={projectState.activeProject?.host}
+                  />
+                )}
+              </TabsContent>
               <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
               </TabsContent>
@@ -2009,16 +2028,6 @@ function HomeApp() {
                             nonce={takesActivation ? previewNonce : 0}
                             onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
                           />
-                        </div>
-                      );
-                    })}
-                    {allChatTabs.map((tab) => {
-                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "db";
-                      const key = `${tab.projectPath ?? ""}:${tab.id}:db`;
-                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
-                      return (
-                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <DBPanel sessionId={tab.id} />
                         </div>
                       );
                     })}

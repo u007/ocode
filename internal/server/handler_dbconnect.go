@@ -17,12 +17,16 @@ import (
 
 // Postgres DB connector HTTP surface (/api/dbconnect/*).
 //
-// Saved connections live in ocodeconfig.json under db.connections as encrypted
-// envelopes. Unlock opens every envelope with the master password and keeps the
-// plaintext URLs in memory under the client-supplied surface id, the same shape
-// as the password vault's surface grants. Plaintext URLs are never returned,
-// logged, or written to disk. Connections are global rather than directory-bound,
-// so these endpoints take no project param.
+// Saved connections live in ocodeconfig.json under db.connections. A literal URL
+// is stored as an encrypted envelope; an environment template ("${DATABASE_URL}")
+// is stored in the clear because it names variables, not a credential. Unlock
+// opens the envelopes with the master password and/or resolves the templates
+// against one project's .env files, then keeps the plaintext URLs in memory under
+// the client-supplied surface id, the same shape as the password vault's surface
+// grants. Plaintext URLs are never returned, logged, or written to disk.
+//
+// Only unlock takes a project param (project_path), because only template
+// resolution reads files. The other endpoints work on the surface's grant.
 
 const (
 	dbConnectOpenTimeout  = 15 * time.Second
@@ -181,12 +185,14 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"connections": out})
 }
 
-// HandleDBConnectAdd seals a plaintext URL under the master password and saves it.
-// The URL and password are never logged or echoed back.
+// HandleDBConnectAdd saves a connection. A literal URL is sealed under the
+// master password; the URL and password are never logged or echoed back.
 //
 // A URL that contains an environment reference ("${DATABASE_URL}") is NOT a
 // secret: it names a variable, not a credential. It is saved as a template,
-// in the clear, and resolved per project when the connection is unlocked.
+// in the clear, and resolved per project when the connection is unlocked. That
+// is the "read the value from .env" flow, so it needs NO master password —
+// there is nothing to encrypt.
 func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name     string `json:"name"`
@@ -198,8 +204,16 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.Name == "" || req.URL == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "name, url and password are required")
+	if req.Name == "" || req.URL == "" {
+		writeError(w, http.StatusBadRequest, "name and url are required")
+		return
+	}
+	// A template names variables instead of carrying a credential, so there is
+	// nothing to encrypt and no master password is involved. A literal URL is a
+	// secret and still requires the password that seals it.
+	isTemplate := dbconnect.IsTemplate(req.URL)
+	if !isTemplate && req.Password == "" {
+		writeError(w, http.StatusBadRequest, "password is required to encrypt a connection URL")
 		return
 	}
 	// Every saved envelope must open with the same master password, or unlock
@@ -212,16 +226,18 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verified := cfg.DB.Connections
-	if err := dbCheckMasterPassword(verified, req.Password); err != nil {
-		log.Printf("dbconnect: add %q: %v", req.Name, err)
-		writeError(w, http.StatusUnauthorized, err.Error())
-		return
+	if !isTemplate {
+		if err := dbCheckMasterPassword(verified, req.Password); err != nil {
+			log.Printf("dbconnect: add %q: %v", req.Name, err)
+			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
 	}
 	conn := config.DBConnection{
 		Name:   req.Name,
 		Driver: config.DBDriverPostgres,
 	}
-	if dbconnect.IsTemplate(req.URL) {
+	if isTemplate {
 		// A template is not a secret, so it is stored in the clear. It is
 		// resolved — and validated — when the connection is unlocked.
 		conn.EnvTemplate = req.URL
@@ -250,9 +266,8 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 // envelope, so a later unlock cannot be half-applied.
 //
 // A template connection has no envelope, so it contributes nothing to this
-// check. The password is still REQUIRED for the whole set — the unlock flow
-// stays uniform, and a connection whose name a stranger can guess is still
-// gated on a secret the stranger does not have.
+// check. Templates are resolved from the project's .env files and never require
+// this password; it gates the sealed connections only.
 func dbCheckMasterPassword(conns []config.DBConnection, password string) error {
 	for _, c := range conns {
 		if c.EncryptedURL == "" {
@@ -277,21 +292,34 @@ func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"removed": name})
 }
 
-// HandleDBConnectUnlock opens every saved connection with the master password and
-// grants the surface access to all of them. Any envelope that fails to open
-// rejects the whole unlock, so a password mismatch is never half-applied.
+// HandleDBConnectUnlock grants the surface access to saved connections.
 //
-// A connection saved as an environment template is resolved here, against the
-// project the session belongs to, and its resolved URL is held in the grant
-// exactly like a decrypted one. The resolved URL is never returned, logged,
-// or written to disk.
+// A connection saved as an environment template ("${DATABASE_URL}") carries no
+// secret of its own: it names variables that are read from the project's .env /
+// .env.local at unlock time. Such a connection needs NO master password — there
+// is nothing to decrypt. This is the "read the URL from .env" flow, not a secret
+// store.
+//
+// A connection saved as a sealed URL still needs the master password that sealed
+// it. With a password, every envelope must open (a mismatch rejects the whole
+// unlock, so it is never half-applied) and templates are resolved too. Without a
+// password, only the template connections are granted; any sealed connection is
+// left locked.
+//
+// The project whose .env files are read is the explicit project_path (validated
+// against the server's allowed project roots). session_id remains as a
+// compatibility fallback for callers that predate the project-scoped panel.
+// The resolved URL is never returned, logged, or written to disk.
 func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Surface  string `json:"surface"`
 		Password string `json:"password"`
-		// SessionID names the session whose project provides the .env files
-		// for a template connection. It is optional: without it, only the
-		// process environment is consulted.
+		// ProjectPath is the project whose .env files provide template
+		// values. It is resolved only when it names a project root this
+		// server may read.
+		ProjectPath string `json:"project_path"`
+		// SessionID is the pre-project-scoped fallback: the project of this
+		// session provides the .env files. Ignored when ProjectPath is set.
 		SessionID string `json:"session_id"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
@@ -299,8 +327,8 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.Surface == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "surface and password are required")
+	if req.Surface == "" {
+		writeError(w, http.StatusBadRequest, "surface is required")
 		return
 	}
 	cfg, err := config.LoadOcodeConfigCopy()
@@ -313,7 +341,22 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "no saved connections")
 		return
 	}
-	projectRoot := h.sessionProjectRoot(req.SessionID)
+	projectRoot := ""
+	if req.ProjectPath != "" {
+		// The explicit project is the authority; never fall back to the
+		// server's default directory. fileContentRootFor is the same
+		// allow-list check the file reader uses, so a remote project's path
+		// (which belongs to another machine) is refused instead of reading
+		// the wrong .env locally.
+		root, ok := h.fileContentRootFor(req.ProjectPath)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_path is not an allowed project root")
+			return
+		}
+		projectRoot = root
+	} else {
+		projectRoot = h.sessionProjectRoot(req.SessionID)
+	}
 	grant := make(dbGrant, len(cfg.DB.Connections))
 	names := make([]string, 0, len(cfg.DB.Connections))
 	// Every envelope is decrypted EXACTLY ONCE. Argon2id is deliberately
@@ -322,10 +365,10 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	// rejects the whole unlock, so a password mismatch is never
 	// half-applied.
 	//
-	// A template connection has no envelope, so it contributes nothing to
-	// that check. The password is still REQUIRED for the whole set — the
-	// flow stays uniform, and a connection whose name a stranger can guess
-	// is still gated on a secret the stranger does not have.
+	// A template connection has no envelope, so it never contributes to
+	// that check. With no password it is the ONLY kind granted: there is
+	// nothing to decrypt, and a sealed connection must never open without
+	// the password that sealed it.
 	for _, c := range cfg.DB.Connections {
 		var u string
 		if c.EnvTemplate != "" {
@@ -339,6 +382,11 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 			}
 			u = resolved
 		} else {
+			if req.Password == "" {
+				// Sealed connection and no master password: leave it out of
+				// the grant rather than asking for a password it cannot use.
+				continue
+			}
 			opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
 			if err != nil {
 				log.Printf("dbconnect: unlock %q: %v", c.Name, err)
@@ -349,6 +397,10 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		}
 		grant[c.Name] = u
 		names = append(names, c.Name)
+	}
+	if len(grant) == 0 {
+		writeError(w, http.StatusBadRequest, "no connection can be unlocked: a master password is required for encrypted connections")
+		return
 	}
 	sort.Strings(names)
 	h.dbSetGrant(req.Surface, grant)

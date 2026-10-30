@@ -1,5 +1,12 @@
 # TODO
 
+## Open: DB connector project tab (2026-10-30)
+
+The Postgres DB panel is now a project tab beside Assets, and an environment-backed connection (`${DATABASE_URL}`) loads from the project `.env` with no master password (`docs/concepts/db-connector.md`, `docs/concepts/db-environment-templates.md`; commits on branch `db-project-tab`). Deferred:
+
+- **Remote (SSH/WSL) projects cannot read their `.env`.** `GET/POST /api/dbconnect/*` are not host-threaded, so the panel deliberately sends no `project_path` for a remote project and an environment connection fails with the missing-variable error instead of reading a same-named local directory. Supporting it means either host-threading the dbconnect routes (proxy to the host's `serve --remote`, whose `.env` is local there) or a dedicated "read this remote `.env`" call. A literal (sealed) connection still works for remote projects; only the env-template flow is limited.
+- **The stale-sub-tab migration is silent.** A tab persisted with `activeSubTab: "db"` restores to Chat (`toSubTab`, pinned by `projectStore.test.tsx`); no notice is shown. Acceptable as a one-time state migration; routing it to the project-level DB tab instead would be a different change.
+
 ## Open: session worktree identity, phase 2+ (2026-10-29)
 
 Phase 1 (visibility only) shipped: `GET /api/git/worktrees` derives `exists`/`dirty`/`ahead`/`behind`/`contained_in_base`/`base_ref`/owner sessions/`last_commit` (paged, bounded probes), the status bar names the checkout the chat is rooted in, and the Git tab's Worktrees section shows per-checkout state plus a `no session` badge (`skills/ocode-web/SKILL.md` item 81). Deferred:

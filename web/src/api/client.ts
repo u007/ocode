@@ -4485,21 +4485,24 @@ export const api = {
     fetchJSON<{ connections: DBConnectConnection[] | null }>(
       `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
     ).then((r) => ({ connections: r.connections ?? [] })),
-  dbConnectAdd: (name: string, url: string, password: string, sessionId?: string) =>
+  /** `password` is required only for a literal (sealed) URL. An environment
+   *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
+  dbConnectAdd: (name: string, url: string, password: string) =>
     fetchJSON<{ name: string }>("/api/dbconnect/connections", {
       method: "POST",
-      body: JSON.stringify({ name, url, password, session_id: sessionId }),
+      body: JSON.stringify({ name, url, password }),
     }),
   dbConnectRemove: (name: string) =>
     fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
-  /** `sessionId` names the session whose project provides the .env files for
-   *  an environment-backed connection. */
-  dbConnectUnlock: (surface: string, password: string, sessionId?: string) =>
+  /** `projectPath` names the project whose .env / .env.local files provide the
+   *  URL for an environment-backed connection. An empty password unlocks only
+   *  those connections; sealed connections still need the master password. */
+  dbConnectUnlock: (surface: string, password: string, projectPath?: string) =>
     fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
       method: "POST",
-      body: JSON.stringify({ surface, password, session_id: sessionId }),
+      body: JSON.stringify({ surface, password, project_path: projectPath }),
     }),
   dbConnectLock: (surface: string) =>
     fetchEmpty("/api/dbconnect/lock", {
