@@ -34,7 +34,7 @@ const mockUnlock = vi.mocked(api.dbConnectUnlock);
 const mockLock = vi.mocked(api.dbConnectLock);
 const mockTables = vi.mocked(api.dbConnectTables);
 
-const SURFACE = "db-panel::/proj";
+const SURFACE_RE = /^db-panel::\/proj:p\d+$/;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -81,7 +81,7 @@ describe("DBPanel environment-backed connections", () => {
     mockList.mockResolvedValue({
       connections: [{ name: "env", driver: "postgres", unlocked: false, fromEnv: true }],
     });
-    mockUnlock.mockResolvedValue({ unlocked: ["env"] });
+    mockUnlock.mockResolvedValue({ unlocked: ["env"], failed: [] });
     render(<DBPanel projectPath="/proj" />);
 
     const load = await screen.findByRole("button", { name: /Load from \.env/ });
@@ -89,7 +89,7 @@ describe("DBPanel environment-backed connections", () => {
     fireEvent.click(load);
 
     await waitFor(() => {
-      expect(mockUnlock).toHaveBeenCalledWith(SURFACE, "", "/proj");
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", "/proj");
     });
   });
 

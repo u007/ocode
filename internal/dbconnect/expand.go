@@ -159,3 +159,75 @@ func IsTemplate(s string) bool {
 	}
 	return false
 }
+
+// nonReferenceText returns the part of s that is not an environment reference.
+// A bare "$" with no valid identifier after it stays in the result.
+func nonReferenceText(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '$' {
+			if _, next, _, ok := readReference(s, i); ok {
+				i = next
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// TemplateHasLiteralSecret reports whether s carries a literal credential even
+// though it also contains an environment reference.
+//
+// A template is saved in the clear (it names variables, not a credential), so a
+// literal password in it would be persisted unencrypted. The check is
+// deliberately conservative: the userinfo password, and the password /
+// sslpassword query values, must consist ONLY of references. A partial
+// reference such as "pa$HOME" is refused too — the user can write ${DB_PASS}
+// instead.
+//
+// A URL with no reference is not a template; the caller seals it. A URL whose
+// template reference is outside the credential (for example a literal user with
+// ${DB_PASS}) is a valid template.
+func TemplateHasLiteralSecret(s string) bool {
+	const schemeSep = "://"
+	sep := strings.Index(s, schemeSep)
+	if sep < 0 {
+		return false
+	}
+	rest := s[sep+len(schemeSep):]
+	authorityEnd := strings.IndexAny(rest, "/?#")
+	authority := rest
+	if authorityEnd >= 0 {
+		authority = rest[:authorityEnd]
+	}
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		userinfo := authority[:at]
+		if colon := strings.IndexByte(userinfo, ':'); colon >= 0 {
+			if nonReferenceText(userinfo[colon+1:]) != "" {
+				return true
+			}
+		}
+	}
+	query := ""
+	if q := strings.IndexByte(s, '?'); q >= 0 {
+		query = s[q+1:]
+		if hash := strings.IndexByte(query, '#'); hash >= 0 {
+			query = query[:hash]
+		}
+	}
+	for _, pair := range strings.Split(query, "&") {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "password", "sslpassword":
+			if nonReferenceText(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}

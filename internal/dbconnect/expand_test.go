@@ -234,3 +234,34 @@ func TestExpandEnvDoesNotExpandInsideAnInvalidReference(t *testing.T) {
 		t.Errorf("ExpandEnv = %q, want ${1BAD}", got)
 	}
 }
+
+func TestTemplateHasLiteralSecret(t *testing.T) {
+	// A template is stored in the clear, so its password must come entirely
+	// from references.
+	literal := []string{
+		"postgres://app:hunter2@host/db?sslmode=${SM}",
+		"postgres://app:pa$HOME@host/db?sslmode=${SM}",
+		"postgres://app:${DB_PASS}x@host/db",
+		"postgres://${DB_USER}:hunter2@host/db",
+		"postgres://app@host/db?sslmode=${SM}&password=hunter2",
+		"postgres://app@host/db?sslpassword=hunter2&sslmode=${SM}",
+	}
+	for _, s := range literal {
+		if !TemplateHasLiteralSecret(s) {
+			t.Errorf("TemplateHasLiteralSecret(%q) = false, want true", s)
+		}
+	}
+	safe := []string{
+		"postgres://app:${DB_PASS}@host/db",
+		"postgres://${DB_USER}:${DB_PASS}@host/db",
+		"postgres://app@host/db?sslmode=${SM}",
+		"postgres://app@${DB_HOST}:${DB_PORT}/db",
+		"postgres://app@host/db?password=${DB_PASS}",
+		"postgres://app@host/db",
+	}
+	for _, s := range safe {
+		if TemplateHasLiteralSecret(s) {
+			t.Errorf("TemplateHasLiteralSecret(%q) = true, want false", s)
+		}
+	}
+}

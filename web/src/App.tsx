@@ -311,12 +311,16 @@ function HomeApp() {
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
   // The DB panel issues a connection-list request on mount. Mount it on first
-  // visit and keep it afterwards (so table/query state survives a tab switch),
-  // rather than eagerly at app start for a tab the user may never open.
-  const [dbVisited, setDbVisited] = useState(false);
+  // visit PER PROJECT (its surface is project-scoped), so switching to a
+  // project whose DB tab was never opened does not fetch for it. The panel is
+  // keyed by the same pair in the render below: switching remounts it and drops
+  // the previous project's grant.
+  const dbProjectKey = `${projectState.activeProject?.host ?? ""}:${projectState.activeProject?.path ?? ""}`;
+  const [dbVisitedProjects, setDbVisitedProjects] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    if (activeView === "db") setDbVisited(true);
-  }, [activeView]);
+    if (activeView !== "db") return;
+    setDbVisitedProjects((prev) => (prev[dbProjectKey] ? prev : { ...prev, [dbProjectKey]: true }));
+  }, [activeView, dbProjectKey]);
   // "Show in file tree" from an editor/preview tab's context menu, and folder
   // picks from the ctrl/cmd+p picker: switch to the Files view, un-collapse the
   // tree pane (a reveal into a collapsed tree would be invisible), and hand the
@@ -1815,9 +1819,9 @@ function HomeApp() {
                   by project so an environment-backed connection resolves against
                   this project's .env, and a project switch drops the old grant. */}
               <TabsContent value="db" forceMount className="flex-1 overflow-hidden m-0">
-                {dbVisited && (
+                {dbVisitedProjects[dbProjectKey] && (
                   <DBPanel
-                    key={`${projectState.activeProject?.host ?? ""}:${projectState.activeProject?.path ?? ""}`}
+                    key={dbProjectKey}
                     projectPath={projectState.activeProject?.path}
                     projectHost={projectState.activeProject?.host}
                   />

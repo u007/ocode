@@ -57,6 +57,35 @@ func (h *Handler) dbSetGrant(surface string, grant dbGrant) {
 	dbClosePools(stale)
 }
 
+// dbAddToGrant merges entries into a surface's grant without touching the
+// connections it does not name. A password-less unlock grants only the
+// environment connections, so replacing the whole grant would silently revoke
+// sealed connections the user had already unlocked (and close their pools).
+// A pool whose URL changed is closed and reopened lazily.
+func (h *Handler) dbAddToGrant(surface string, entries dbGrant) {
+	h.dbMu.Lock()
+	if h.dbGrants == nil {
+		h.dbGrants = make(map[string]dbGrant)
+	}
+	grant := h.dbGrants[surface]
+	if grant == nil {
+		grant = make(dbGrant)
+		h.dbGrants[surface] = grant
+	}
+	var stale []*sql.DB
+	for name, u := range entries {
+		if old, ok := grant[name]; ok && old != u {
+			if db := h.dbPools[surface][name]; db != nil {
+				stale = append(stale, db)
+				delete(h.dbPools[surface], name)
+			}
+		}
+		grant[name] = u
+	}
+	h.dbMu.Unlock()
+	dbClosePools(stale)
+}
+
 // dbDropSurface forgets every grant held by one surface and closes its pools.
 func (h *Handler) dbDropSurface(surface string) {
 	h.dbMu.Lock()
@@ -212,6 +241,13 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	// nothing to encrypt and no master password is involved. A literal URL is a
 	// secret and still requires the password that seals it.
 	isTemplate := dbconnect.IsTemplate(req.URL)
+	if isTemplate && dbconnect.TemplateHasLiteralSecret(req.URL) {
+		// A template is stored in the clear. One that also carries a literal
+		// password would write that password to ocodeconfig.json unencrypted.
+		writeError(w, http.StatusBadRequest,
+			"an environment-backed connection must not contain a literal password; use ${VAR} for the password instead")
+		return
+	}
 	if !isTemplate && req.Password == "" {
 		writeError(w, http.StatusBadRequest, "password is required to encrypt a connection URL")
 		return
@@ -292,6 +328,13 @@ func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"removed": name})
 }
 
+// dbUnlockFailure names one connection that could not be unlocked. The message
+// names a variable or a parameter, never a value, so it is safe to show.
+type dbUnlockFailure struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
+}
+
 // HandleDBConnectUnlock grants the surface access to saved connections.
 //
 // A connection saved as an environment template ("${DATABASE_URL}") carries no
@@ -304,12 +347,17 @@ func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) 
 // it. With a password, every envelope must open (a mismatch rejects the whole
 // unlock, so it is never half-applied) and templates are resolved too. Without a
 // password, only the template connections are granted; any sealed connection is
-// left locked.
+// left locked, and the existing grant is MERGED rather than replaced.
 //
-// The project whose .env files are read is the explicit project_path (validated
-// against the server's allowed project roots). session_id remains as a
-// compatibility fallback for callers that predate the project-scoped panel.
-// The resolved URL is never returned, logged, or written to disk.
+// A template needs a project to read: project_path (validated against the
+// server's allowed project roots) or, for a legacy caller, session_id. With
+// neither, a template is reported as failed and is never resolved from the
+// server's own process environment — that would silently connect a remote
+// project to the wrong database.
+//
+// Templates that fail are reported per connection in "failed"; the ones that
+// resolved are still granted. Only a wrong master password aborts the whole
+// unlock. The resolved URL is never returned, logged, or written to disk.
 func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Surface  string `json:"surface"`
@@ -359,6 +407,10 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	}
 	grant := make(dbGrant, len(cfg.DB.Connections))
 	names := make([]string, 0, len(cfg.DB.Connections))
+	// failures lists the connections that could not be unlocked, without
+	// aborting the rest. One obsolete template used to block unlocking a
+	// sealed connection with the correct password in every project.
+	failures := make([]dbUnlockFailure, 0)
 	// Every envelope is decrypted EXACTLY ONCE. Argon2id is deliberately
 	// slow, so a second pass over the same envelopes would double the cost
 	// of an unlock for no benefit. The first envelope that fails to open
@@ -370,41 +422,62 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	// nothing to decrypt, and a sealed connection must never open without
 	// the password that sealed it.
 	for _, c := range cfg.DB.Connections {
-		var u string
 		if c.EnvTemplate != "" {
+			if projectRoot == "" {
+				// Never fall back to the process environment: this panel
+				// exists for a project, and a remote project's .env lives on
+				// the host. Silently using the server's own DATABASE_URL
+				// would connect (and allow writes) to the wrong database.
+				msg := "an environment-backed connection needs a project; its .env / .env.local cannot be read here (a remote project keeps them on the host)"
+				log.Printf("dbconnect: unlock %q: %s", c.Name, msg)
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: msg})
+				continue
+			}
 			resolved, err := dbResolveTemplate(c.EnvTemplate, projectRoot)
 			if err != nil {
 				// The error names the missing variable or the invalid URL
 				// shape, never a value, so it is safe to show the user.
 				log.Printf("dbconnect: unlock %q: resolve template: %v", c.Name, err)
-				writeError(w, http.StatusBadRequest, "connection "+c.Name+": "+err.Error())
-				return
-			}
-			u = resolved
-		} else {
-			if req.Password == "" {
-				// Sealed connection and no master password: leave it out of
-				// the grant rather than asking for a password it cannot use.
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: err.Error()})
 				continue
 			}
-			opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
-			if err != nil {
-				log.Printf("dbconnect: unlock %q: %v", c.Name, err)
-				writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
-				return
-			}
-			u = opened
+			grant[c.Name] = resolved
+			names = append(names, c.Name)
+			continue
 		}
-		grant[c.Name] = u
+		if req.Password == "" {
+			// Sealed connection and no master password: leave it out of
+			// the grant. The caller is loading an environment connection,
+			// not unlocking the sealed set.
+			continue
+		}
+		opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
+		if err != nil {
+			log.Printf("dbconnect: unlock %q: %v", c.Name, err)
+			writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
+			return
+		}
+		grant[c.Name] = opened
 		names = append(names, c.Name)
 	}
+	sort.Strings(names)
 	if len(grant) == 0 {
-		writeError(w, http.StatusBadRequest, "no connection can be unlocked: a master password is required for encrypted connections")
+		msg := "no connection can be unlocked: a master password is required for encrypted connections"
+		if len(failures) > 0 {
+			msg = "connection " + failures[0].Name + ": " + failures[0].Error
+		}
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	sort.Strings(names)
-	h.dbSetGrant(req.Surface, grant)
-	writeJSON(w, http.StatusOK, map[string]any{"unlocked": names})
+	// A password unlock is the full set, so it replaces the grant. The
+	// password-less flow grants only the environment connections: merge, or
+	// it would revoke the sealed ones the user already unlocked.
+	if req.Password == "" {
+		h.dbAddToGrant(req.Surface, grant)
+	} else {
+		h.dbSetGrant(req.Surface, grant)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"unlocked": names, "failed": failures})
 }
 
 // HandleDBConnectLock drops the surface's grant.

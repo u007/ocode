@@ -665,3 +665,142 @@ func TestDBConnectListReportsEnvBackedConnection(t *testing.T) {
 		t.Fatalf("list response leaked the template: %s", rec.Body.String())
 	}
 }
+
+func TestDBConnectUnlockRefusesTemplateWithoutAProject(t *testing.T) {
+	// No project_path and no session: the server must NOT fall back to its own
+	// process environment. A remote project would otherwise connect (and allow
+	// writes) to a local database that happens to be exported there.
+	setHomeTree(t, t.TempDir())
+	t.Setenv("OCODE_TEST_NO_PROJECT_DB_URL", "postgres://app:local@127.0.0.1:1/local")
+	h := &Handler{}
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_NO_PROJECT_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock without a project = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "needs a project") {
+		t.Fatalf("error %q does not explain the missing project", rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); ok {
+		t.Error("a template was granted from the process environment")
+	}
+}
+
+func TestDBConnectUnlockGrantsResolvedTemplatesAndReportsTheRest(t *testing.T) {
+	// One bad template must not block the connection that does resolve.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	for name, url := range map[string]string{
+		"env": "${OCODE_TEST_DB_URL}",
+		"bad": "${OCODE_TEST_ABSENT_DB_URL}",
+	} {
+		if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+			map[string]string{"name": name, "url": url}); rec.Code != http.StatusCreated {
+			t.Fatalf("add %s = %d body=%s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Unlocked []string `json:"unlocked"`
+		Failed   []struct {
+			Name  string `json:"name"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(out.Unlocked) != 1 || out.Unlocked[0] != "env" {
+		t.Fatalf("unlocked = %v, want [env]", out.Unlocked)
+	}
+	if len(out.Failed) != 1 || out.Failed[0].Name != "bad" || !strings.Contains(out.Failed[0].Error, "OCODE_TEST_ABSENT_DB_URL") {
+		t.Fatalf("failed = %+v, want the bad template naming its variable", out.Failed)
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Error("the resolved template was not granted")
+	}
+	if _, ok := h.dbGrantURL("s1", "bad"); ok {
+		t.Error("the failed template was granted")
+	}
+}
+
+func TestDBConnectUnlockPasswordlessMergesIntoAnExistingGrant(t *testing.T) {
+	// Loading an environment connection must not revoke a sealed connection
+	// the user already unlocked (nor close its pool).
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add prod = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := dbUnlockProject(t, h, "s1", "master-pw", project); rec.Code != http.StatusOK {
+		t.Fatalf("password unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); !ok {
+		t.Fatal("prod was not granted by the password unlock")
+	}
+
+	// The environment connection is added after the grant, so it is not in it.
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add env = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := dbUnlockProject(t, h, "s1", "", project); rec.Code != http.StatusOK {
+		t.Fatalf("password-less unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); !ok {
+		t.Error("a password-less unlock revoked the sealed connection")
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Error("the environment connection was not granted")
+	}
+}
+
+func TestDBConnectAddRejectsTemplateWithALiteralPassword(t *testing.T) {
+	// A template is stored in the clear. A literal password in one must be
+	// refused, or it would be written to ocodeconfig.json unencrypted.
+	setHomeTree(t, t.TempDir())
+	h := &Handler{}
+
+	for _, url := range []string{
+		"postgres://app:hunter2@db/prod?sslmode=${SM}",
+		"postgres://app@db/prod?sslmode=${SM}&password=hunter2",
+	} {
+		rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+			map[string]string{"name": "mixed", "url": url})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("add %q = %d, want 400 (body=%s)", url, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "hunter2") {
+			t.Fatalf("refusal echoed the password: %s", rec.Body.String())
+		}
+	}
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 0 {
+		t.Fatalf("stored connections = %+v, want none", cfg.DB.Connections)
+	}
+
+	// A password that is entirely a reference is a valid template.
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "postgres://app:${DB_PASS}@db/prod"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add referenced password = %d body=%s", rec.Code, rec.Body.String())
+	}
+}

@@ -36,7 +36,7 @@ const mockQuery = vi.mocked(api.dbConnectQuery);
 const mockAdd = vi.mocked(api.dbConnectAdd);
 const mockRows = vi.mocked(api.dbConnectRows);
 
-const SURFACE = "db-panel::/proj";
+const SURFACE_RE = /^db-panel::\/proj:p\d+$/;
 const UNLOCKED = { connections: [{ name: "prod", driver: "postgres", unlocked: true, fromEnv: false }] };
 
 // jsdom has no layout, so the panel's width is fed in through the observer it creates.
@@ -85,14 +85,14 @@ describe("DBPanel", () => {
 
     expect(await screen.findByText("Add a PostgreSQL connection")).toBeTruthy();
     expect(screen.queryByLabelText("Connection")).toBeNull();
-    expect(mockList).toHaveBeenCalledWith(SURFACE);
+    expect(mockList).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE));
   });
 
   it("keeps the master password out of the DOM after a successful unlock", async () => {
     mockList
       .mockResolvedValueOnce({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] })
       .mockResolvedValueOnce(UNLOCKED);
-    mockUnlock.mockResolvedValue({ unlocked: ["prod"] });
+    mockUnlock.mockResolvedValue({ unlocked: ["prod"], failed: [] });
     mockTables.mockResolvedValue({ tables: ["users"], hasMore: false });
 
     render(<DBPanel projectPath="/proj" />);
@@ -100,7 +100,7 @@ describe("DBPanel", () => {
     fireEvent.change(pw, { target: { value: "hunter2" } });
     fireEvent.click(screen.getByRole("button", { name: /Unlock/ }));
 
-    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(SURFACE, "hunter2", "/proj"));
+    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "hunter2", "/proj"));
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
     expect((screen.queryByLabelText("Master password") as HTMLInputElement | null)?.value ?? "").toBe("");
   });
@@ -137,7 +137,7 @@ describe("DBPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: 'we"ird' }));
 
     await waitFor(() =>
-      expect(mockRows).toHaveBeenCalledWith(SURFACE, "prod", 'we"ird', {
+      expect(mockRows).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "prod", 'we"ird', {
         sort: "",
         dir: "asc",
         filter: "",
@@ -197,12 +197,12 @@ describe("DBPanel", () => {
 
     expect(await screen.findByText("Run this write?")).toBeTruthy();
     expect(mockQuery).toHaveBeenCalledTimes(1);
-    expect(mockQuery).toHaveBeenLastCalledWith(SURFACE, "prod", sql, false);
+    expect(mockQuery).toHaveBeenLastCalledWith(expect.stringMatching(SURFACE_RE), "prod", sql, false);
 
     fireEvent.click(screen.getByRole("button", { name: "Run and commit" }));
 
     await waitFor(() => expect(mockQuery).toHaveBeenCalledTimes(2));
-    expect(mockQuery).toHaveBeenLastCalledWith(SURFACE, "prod", sql, true);
+    expect(mockQuery).toHaveBeenLastCalledWith(expect.stringMatching(SURFACE_RE), "prod", sql, true);
     expect(await screen.findByText("1 row(s) affected. Committed.")).toBeTruthy();
   });
 
@@ -253,7 +253,7 @@ describe("DBPanel", () => {
 
     expect(await screen.findByRole("button", { name: "beta" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "alpha" })).toBeTruthy();
-    expect(mockTables).toHaveBeenLastCalledWith(SURFACE, "prod", 100, 1);
+    expect(mockTables).toHaveBeenLastCalledWith(expect.stringMatching(SURFACE_RE), "prod", 100, 1);
     expect(screen.queryByRole("button", { name: "Load more tables" })).toBeNull();
   });
 
@@ -310,7 +310,7 @@ describe("DBPanel", () => {
     await screen.findByLabelText("SQL");
     unmount();
 
-    expect(mockLock).toHaveBeenCalledWith(SURFACE);
+    expect(mockLock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE));
   });
 
   it("adds a connection with the password and selects it", async () => {
@@ -337,7 +337,7 @@ describe("DBPanel", () => {
     mockList
       .mockResolvedValueOnce({ connections: [{ name: "env2", driver: "postgres", unlocked: false, fromEnv: true }] })
       .mockResolvedValueOnce({ connections: [{ name: "env2", driver: "postgres", unlocked: true, fromEnv: true }] });
-    mockUnlock.mockResolvedValue({ unlocked: ["env2"] });
+    mockUnlock.mockResolvedValue({ unlocked: ["env2"], failed: [] });
     mockTables.mockResolvedValue({ tables: ["users"], hasMore: false });
 
     render(<DBPanel projectPath="/proj" />);
@@ -347,25 +347,77 @@ describe("DBPanel", () => {
     expect(screen.queryByLabelText("Master password")).toBeNull();
     fireEvent.click(load);
 
-    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(SURFACE, "", "/proj"));
+    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", "/proj"));
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
   });
 
-  it("never sends a remote project's path when loading from .env", async () => {
+  it("does not offer Load from .env for a remote project", async () => {
     // The endpoint is not host-threaded; a remote .env lives on the other
-    // machine, so sending its path could read a same-named local directory.
+    // machine, so the panel must not promise to read it (and must not send a
+    // path that could match a same-named local directory).
     mockList.mockResolvedValue({
       connections: [{ name: "env", driver: "postgres", unlocked: false, fromEnv: true }],
     });
-    mockUnlock.mockResolvedValue({ unlocked: ["env"] });
-    mockTables.mockResolvedValue({ tables: [], hasMore: false });
 
     render(<DBPanel projectPath="~/proj" projectHost="me@host" />);
+
+    expect(await screen.findByText(/Not available for a remote project/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Load from \.env/ })).toBeNull();
+    expect(mockUnlock).not.toHaveBeenCalled();
+  });
+
+  it("shows the connections that failed to unlock and keeps the granted ones", async () => {
+    mockList
+      .mockResolvedValueOnce({
+        connections: [
+          { name: "env", driver: "postgres", unlocked: false, fromEnv: true },
+          { name: "bad", driver: "postgres", unlocked: false, fromEnv: true },
+        ],
+      })
+      .mockResolvedValueOnce({
+        connections: [
+          { name: "env", driver: "postgres", unlocked: true, fromEnv: true },
+          { name: "bad", driver: "postgres", unlocked: false, fromEnv: true },
+        ],
+      });
+    mockUnlock.mockResolvedValue({
+      unlocked: ["env"],
+      failed: [{ name: "bad", error: 'environment variable "DB_URL" is not set' }],
+    });
+    mockTables.mockResolvedValue({ tables: [], hasMore: false });
+
+    render(<DBPanel projectPath="/proj" />);
     fireEvent.click(await screen.findByRole("button", { name: /Load from \.env/ }));
 
-    await waitFor(() =>
-      expect(mockUnlock).toHaveBeenCalledWith("db-panel:me@host:~/proj", "", undefined),
-    );
+    expect(await screen.findByText(/Some connections could not be unlocked/)).toBeTruthy();
+    expect(screen.getByText(/DB_URL/)).toBeTruthy();
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("offers a retry when the connection list cannot be loaded", async () => {
+    mockList
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce({ connections: [] });
+
+    render(<DBPanel projectPath="/proj" />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("network down");
+    expect(screen.queryByText("Add a PostgreSQL connection")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Add a PostgreSQL connection")).toBeTruthy();
+  });
+
+  it("does not treat an invalid reference name as a template", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    render(<DBPanel projectPath="/proj" />);
+
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "stage" } });
+    fireEvent.change(screen.getByLabelText("Connection URL"), { target: { value: "${1BAD}" } });
+
+    // The server's IsTemplate requires a shell-valid name, so this stays a
+    // literal URL and still needs the master password.
+    expect((screen.getByLabelText(/Master password/) as HTMLInputElement).disabled).toBe(false);
   });
 
   it("saves an environment URL without a master password", async () => {

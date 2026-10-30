@@ -920,6 +920,21 @@ export interface DBConnectConnection {
   fromEnv: boolean;
 }
 
+/** One connection that could not be unlocked. The message names a variable or
+ *  a parameter, never a value. */
+export interface DBConnectUnlockFailure {
+  name: string;
+  error: string;
+}
+
+export interface DBConnectUnlockResult {
+  /** Connections now granted to this surface. */
+  unlocked: string[];
+  /** Connections this attempt could not grant; the rest may still have been
+   *  granted (an obsolete template no longer blocks the others). */
+  failed: DBConnectUnlockFailure[];
+}
+
 /** A Postgres query result. Values are JSON scalars, or objects for json/array columns. */
 export interface DBConnectQueryResult {
   columns: string[];
@@ -4498,12 +4513,21 @@ export const api = {
     }),
   /** `projectPath` names the project whose .env / .env.local files provide the
    *  URL for an environment-backed connection. An empty password unlocks only
-   *  those connections; sealed connections still need the master password. */
+   *  those connections; sealed connections still need the master password. A
+   *  template that fails is reported in `failed`; the others are still granted. */
   dbConnectUnlock: (surface: string, password: string, projectPath?: string) =>
-    fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
-      method: "POST",
-      body: JSON.stringify({ surface, password, project_path: projectPath }),
-    }),
+    fetchJSON<{ unlocked: string[] | null; failed: DBConnectUnlockFailure[] | null }>(
+      "/api/dbconnect/unlock",
+      {
+        method: "POST",
+        body: JSON.stringify({ surface, password, project_path: projectPath }),
+      },
+    ).then(
+      (r): DBConnectUnlockResult => ({
+        unlocked: r.unlocked ?? [],
+        failed: r.failed ?? [],
+      }),
+    ),
   dbConnectLock: (surface: string) =>
     fetchEmpty("/api/dbconnect/lock", {
       method: "POST",

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/u007/ocode/internal/encryption"
 
@@ -156,6 +157,18 @@ func OpenURL(sealed, password string) (string, error) {
 	return string(plain), nil
 }
 
+// dbRedirectParams make the client read a service definition or a password
+// file from the server's filesystem. A connection URL can come from a
+// project's .env (a file that arrives with a cloned repository), and a template
+// URL is expanded from it, so these are refused rather than handed to pgx:
+// service/servicefile can redirect the connection, and passfile makes pgx read
+// a local file and send its contents as the password.
+var dbRedirectParams = map[string]bool{
+	"service":     true,
+	"servicefile": true,
+	"passfile":    true,
+}
+
 // ParseURL validates a postgres:// URL.
 //
 // The error text never includes the raw URL: url.Parse's error quotes the
@@ -167,6 +180,12 @@ func ParseURL(raw string) (*url.URL, error) {
 	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+	for key := range u.Query() {
+		if dbRedirectParams[strings.ToLower(key)] {
+			// Name the parameter only: its value may be a path or a secret.
+			return nil, fmt.Errorf("connection parameter %q is not allowed", key)
+		}
 	}
 	return u, nil
 }
