@@ -163,7 +163,11 @@ html.light {
    */
   .app-viewport {
     height: 100vh;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    /* `--speech-toolbar-height` is published by SpeechToolbar while its fixed
+       bar is up, so the bottom band of every panel (a Git commit box, the chat
+       composer) stays above the bar instead of under it. Resolves to 0 while
+       the bar is hidden, so this is exactly the old padding. */
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--speech-toolbar-height, 0px));
   }
   /* An explicit @supports block, not two declarations in one rule: the build's
      CSS minifier (Lightning CSS) DROPS the `100vh` fallback when both are in the

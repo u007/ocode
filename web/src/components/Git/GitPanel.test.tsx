@@ -331,6 +331,51 @@ describe("GitPanel", () => {
     await waitFor(() => expect(field.style.height).toBe("132px"));
   });
 
+  it("wraps the commit box below sm so every button stays on screen on a phone", async () => {
+    // jsdom has no layout engine, so this pins the CSS CONTRACT that makes the
+    // row responsive rather than geometry. On a ~390px phone viewport the
+    // textarea's intrinsic min-width plus the three buttons exceeded the tab
+    // body (which is `overflow-hidden`), so the nowrap row pushed
+    // "Commit & Push" past the right edge with no way to scroll to it.
+    // Verified in a real browser at 320/360/390px: no horizontal overflow, the
+    // message field takes the first row and the buttons the second; from `sm`
+    // up it is the original single row with the buttons at the right edge.
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+
+    const field = screen.getByPlaceholderText("Commit message for staged changes…");
+    const box = field.parentElement as HTMLElement;
+    const boxTokens = box.className.split(/\s+/);
+    const fieldTokens = field.className.split(/\s+/);
+
+    // The row must be allowed to wrap (and must not be pinned to one line).
+    expect(boxTokens).toContain("flex-wrap");
+    expect(boxTokens).not.toContain("flex-nowrap");
+
+    // Phones: the message field takes a full-width row of its own...
+    expect(fieldTokens).toContain("w-full");
+    // ...and may shrink instead of forcing the row wider than the pane.
+    expect(fieldTokens).toContain("min-w-0");
+    // From `sm` up it goes back to sharing the single row.
+    expect(fieldTokens).toContain("sm:w-auto");
+    expect(fieldTokens).toContain("sm:flex-1");
+
+    // Buttons keep their labels: they must never shrink or wrap their text.
+    const commitButton = screen.getByRole("button", { name: "Commit" });
+    const pushButton = screen.getByRole("button", { name: "Commit & Push" });
+    for (const button of [commitButton, pushButton]) {
+      const tokens = button.className.split(/\s+/);
+      expect(tokens).toContain("shrink-0");
+      expect(tokens).toContain("whitespace-nowrap");
+    }
+    // The wrapped button row is right-aligned; the desktop row is unchanged.
+    const generateButton = screen.getByRole("button", {
+      name: "Generate commit message with AI",
+    });
+    expect(generateButton.className.split(/\s+/)).toContain("ml-auto");
+    expect(generateButton.className.split(/\s+/)).toContain("sm:ml-0");
+  });
+
   it("uses the working-tree diff when nothing is staged", async () => {
     mocks.getGitWorkspace.mockResolvedValue({ ...workspace, staged: [] });
     mocks.gitCommitMessage.mockResolvedValue({ message: "fix: from worktree", model: "" });
@@ -874,24 +919,40 @@ describe("GitPanel", () => {
     expect(screen.getByTestId("git-file-pane").style.width).toBe("0px");
   });
 
-  it("stacks the file list above the diff on narrow viewports", async () => {
+  it("overlays the file list on narrow viewports instead of splitting", async () => {
     mqMatches = true;
     render(<GitPanel projectPath="/proj" />);
     await screen.findByText("src/unstaged.ts");
 
-    // Body switches to a column and a column-resize handle is meaningless.
-    expect(screen.getByTestId("git-body").className).toContain("flex-col");
+    // A column resize handle is meaningless for an overlay drawer.
     expect(
       screen.queryByRole("separator", { name: /resize file list and diff/i }),
     ).toBeNull();
 
     const pane = screen.getByTestId("git-file-pane");
-    expect(pane.style.height).toBe("45%");
+    // Out of flow and parked off-screen: closed by default, so the diff owns
+    // the full width instead of both panes sharing a phone screen.
+    expect(pane.className).toContain("absolute");
+    expect(pane.className).toContain("-translate-x-full");
     expect(pane.style.width).toBe("");
+    expect(pane.style.height).toBe("");
+    expect(screen.queryByTestId("git-file-backdrop")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Show file list" }).getAttribute("aria-expanded"),
+    ).toBe("false");
 
-    // The header toggle still collapses the stacked list.
-    fireEvent.click(screen.getByRole("button", { name: "Hide file list" }));
-    expect(pane.style.height).toBe("0px");
+    // The header toggle slides it over the diff, behind a dismissable backdrop.
+    fireEvent.click(screen.getByRole("button", { name: "Show file list" }));
+    expect(pane.className).not.toContain("-translate-x-full");
+    expect(screen.getByTestId("git-file-backdrop")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Hide file list" }).getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    // Choosing a file dismisses the drawer so the diff it selected is visible.
+    fireEvent.click(screen.getByText("src/unstaged.ts"));
+    await waitFor(() => expect(pane.className).toContain("-translate-x-full"));
+    expect(screen.queryByTestId("git-file-backdrop")).toBeNull();
   });
 });
 

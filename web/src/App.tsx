@@ -62,7 +62,7 @@ import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
 import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
-import { basename } from "./lib/utils";
+import { basename, cn } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
 import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
@@ -344,11 +344,37 @@ function HomeApp() {
   // as done. `setCollapsed` (a state setter) is the dependency rather than
   // `fileTreePane`, which is a fresh object per render.
   const [treeRevealRequest, setTreeRevealRequest] = useState<TreeRevealRequest | null>(null);
+  // Below the mobile breakpoint the Files tab has no room for a side-by-side
+  // tree+editor split, so the file tree is an overlay drawer over the editor.
+  // It starts closed (an opened file gets the full width) and is deliberately
+  // NOT the persisted desktop `fileTreePane.collapsed` — a desktop layout
+  // preference must not decide the phone's initial state.
+  const isMobile = useIsMobile();
+  const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  // Tab contents stay mounted, so leaving the Files view would otherwise keep
+  // the drawer open for the rest of the session. Coming back should show the
+  // editor, not a tree the user never re-opened.
+  useEffect(() => {
+    if (activeView !== "files") setMobileTreeOpen(false);
+  }, [activeView]);
+  // Esc dismisses the drawer, matching the backdrop tap and every other
+  // dismissable surface (the desktop split has no such notion).
+  useEffect(() => {
+    if (!mobileTreeOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileTreeOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileTreeOpen]);
   const treeRevealSeqRef = useRef(0);
   const revealPathInTree = useCallback(
     (target: { path: string; projectRoot?: string; isDir?: boolean }) => {
       setActiveView("files");
       fileTreePane.setCollapsed(false);
+      // A reveal into a closed mobile drawer would be invisible, so "Show in
+      // file tree" must actually show the tree on a phone as well.
+      setMobileTreeOpen(isMobile);
       setTreeRevealRequest({
         path: target.path,
         root: target.projectRoot,
@@ -356,7 +382,7 @@ function HomeApp() {
         isDir: target.isDir,
       });
     },
-    [fileTreePane.setCollapsed],
+    [fileTreePane.setCollapsed, isMobile],
   );
 
   const activeProjectPath = projectState.activeProject?.path ?? "";
@@ -622,7 +648,20 @@ function HomeApp() {
   }, [activeEditorContext, visibleEditorTabs]);
 
   // Mobile responsive
-  const isMobile = useIsMobile();
+
+  // Files-tab tree visibility. On a phone the drawer's transient state governs
+  // it; from the tablet/desktop layout up the persisted, drag-resizable pane
+  // does (so `toggleTreePane` keeps meaning "collapse the split" there).
+  const treePaneCollapsed = isMobile ? !mobileTreeOpen : fileTreePane.collapsed;
+  const toggleTreePane = useCallback(() => {
+    if (isMobile) setMobileTreeOpen((open) => !open);
+    else fileTreePane.toggleCollapsed();
+  }, [isMobile, fileTreePane.toggleCollapsed]);
+  // Crossing the breakpoint drops the drawer: the desktop split has its own
+  // persisted state, and returning to a phone must start closed.
+  useEffect(() => {
+    if (!isMobile) setMobileTreeOpen(false);
+  }, [isMobile]);
 
   // ── Sidebar PreviewHost: AI/file-tree activation + highlight context ──
   // The `preview_open` agent tool and `ocode:open-preview` events (file tree
@@ -774,6 +813,17 @@ function HomeApp() {
       }
     },
     [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
+  );
+
+  // FileTree open handler. On a phone the tree is an overlay drawer over the
+  // editor, so picking a file must dismiss the drawer to reveal what was
+  // opened; the desktop split keeps the tree in place.
+  const openTreeFile = useCallback(
+    (path: string, projectRoot?: string, line?: number, query?: string) => {
+      if (isMobile) setMobileTreeOpen(false);
+      void openFileAndShow(path, projectRoot, line, query);
+    },
+    [isMobile, openFileAndShow],
   );
 
   // ── Open a file OUTSIDE the active project ─────────────────────────────
@@ -1675,13 +1725,38 @@ function HomeApp() {
               <div className={activeView === "sessions" && focusedKind === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex" aria-busy={filesBusy}>
                 <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                {/* Mobile: the file tree is an overlay drawer, so a backdrop
+                    sits behind it (tap to dismiss). The desktop split keeps
+                    the tree in flow, where a backdrop would be wrong. */}
+                {isMobile && !treePaneCollapsed && (
+                  <div
+                    data-testid="file-tree-backdrop"
+                    aria-hidden="true"
+                    onClick={() => setMobileTreeOpen(false)}
+                    className="absolute inset-0 z-20 bg-black/50"
+                  />
+                )}
                 <div
-                  className="relative shrink-0 h-full overflow-hidden border-r border-border transition-[width] duration-100"
-                  style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
+                  data-testid="file-tree-pane"
+                  aria-hidden={isMobile && treePaneCollapsed ? true : undefined}
+                  inert={isMobile && treePaneCollapsed}
+                  className={cn(
+                    "shrink-0 h-full overflow-hidden border-r border-border",
+                    isMobile
+                      ? cn(
+                          "absolute inset-y-0 left-0 z-30 w-72 max-w-[85vw] bg-card shadow-xl transition-transform duration-200",
+                          treePaneCollapsed && "-translate-x-full",
+                        )
+                      : "relative transition-[width] duration-100",
+                  )}
+                  style={isMobile ? undefined : { width: treePaneCollapsed ? 0 : fileTreePane.width }}
                 >
-                  <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
+                  <div
+                    className="absolute inset-0"
+                    style={isMobile ? undefined : { width: fileTreePane.width }}
+                  >
                     <FileTree
-                      onOpenFile={openFileAndShow}
+                      onOpenFile={openTreeFile}
                       onRequestOpenOutsideProject={() => requestOpenOutsideProject()}
                       projectPath={projectState.activeProject?.path}
                       projectHost={projectState.activeProject?.host}
@@ -1698,7 +1773,7 @@ function HomeApp() {
                     onRetry={filesLoading?.retry}
                   />
                 </div>
-                {!fileTreePane.collapsed && (
+                {!treePaneCollapsed && !isMobile && (
                   <div
                     ref={fileTreePane.handleRef}
                     onPointerDown={fileTreePane.onPointerDown}
@@ -1707,11 +1782,11 @@ function HomeApp() {
                   />
                 )}
                 <button
-                  onClick={fileTreePane.toggleCollapsed}
-                  title={fileTreePane.collapsed ? "Show file tree" : "Hide file tree"}
+                  onClick={toggleTreePane}
+                  title={treePaneCollapsed ? "Show file tree" : "Hide file tree"}
                   className="shrink-0 self-start mt-1 p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
-                  {fileTreePane.collapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
+                  {treePaneCollapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
                 </button>
                 <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                   <EditorTabBar

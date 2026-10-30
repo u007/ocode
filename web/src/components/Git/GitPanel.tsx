@@ -78,8 +78,28 @@ const DEFAULT_SECTIONS: PanelSections = {
   stashes: true,
 };
 
-/** Height of the file-list pane when the panel is stacked on narrow viewports. */
-const MOBILE_FILE_PANE_HEIGHT = "45%";
+// Sizing of the three stacked list sections (commits / worktrees / stashes).
+//
+// An EXPANDED section is CONTENT-sized instead of taking an equal flex share.
+// `flex: 1 1 0%` split the pane into equal thirds, so on a phone a two-item
+// worktree or stash list was squeezed into a single visible row (inner
+// scrollbar) while the space below it sat empty. Content sizing shows every
+// row the list has.
+//
+// The `max-h` caps keep one long list from crowding out its neighbours: the
+// commit log is the only list that is routinely long, so it gets the tighter
+// cap (and a phone the tightest, where the whole pane is a short overlay
+// drawer). A list longer than its cap still scrolls internally, and the pane
+// scrolls when the expanded sections together exceed it.
+const EXPANDED_LIST_SECTION = "flex-none min-h-0";
+const COLLAPSED_LIST_SECTION = "shrink-0";
+const COMMITS_SECTION_MAX_HEIGHT = "max-h-[30%] md:max-h-[55%]";
+const LIST_SECTION_MAX_HEIGHT = "max-h-[45%] md:max-h-[55%]";
+
+/** Class string for one of the three stacked list sections. */
+function listSectionClass(expanded: boolean, maxHeight: string): string {
+  return expanded ? `${EXPANDED_LIST_SECTION} ${maxHeight}` : COLLAPSED_LIST_SECTION;
+}
 
 function loadPanelSections(): PanelSections {
   try {
@@ -331,9 +351,36 @@ export default function GitPanel({
     // `ocode.ui.git-panel.width.collapsed`.
     collapsible: true,
   });
-  // Below the mobile breakpoint the panel stacks the file list above the diff
-  // instead of squeezing a two-column split.
+  // Below the mobile breakpoint the file list is an overlay drawer over the
+  // diff instead of a split: a phone has no width for two panes side by side,
+  // and a stacked split leaves two scroll regions fighting over one screen.
+  // Closed by default so the diff owns the full width; the header toggle opens
+  // it. Deliberately NOT the persisted `filePane.collapsed` — a desktop layout
+  // preference must not decide the phone's initial state.
   const isMobile = useIsMobile();
+  const [mobileFilePaneOpen, setMobileFilePaneOpen] = useState(false);
+  // One "is the list hidden" flag for both layouts: the drawer's own state on a
+  // phone, the persisted resizable pane's collapse everywhere else.
+  const filePaneHidden = isMobile ? !mobileFilePaneOpen : filePane.collapsed;
+  const toggleFilePane = useCallback(() => {
+    if (isMobile) setMobileFilePaneOpen((open) => !open);
+    else filePane.toggleCollapsed();
+  }, [isMobile, filePane.toggleCollapsed]);
+  // Crossing the breakpoint drops the drawer: the desktop split has its own
+  // persisted state, and returning to a phone must start closed.
+  useEffect(() => {
+    if (!isMobile) setMobileFilePaneOpen(false);
+  }, [isMobile]);
+  // Esc dismisses the mobile drawer, matching the backdrop tap. Harmless on
+  // desktop (the pane there is never in the drawer state).
+  useEffect(() => {
+    if (!mobileFilePaneOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileFilePaneOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileFilePaneOpen]);
 
   // showNotice displays a transient success message for 5 seconds. Any prior
   // timer is cleared so rapid actions don't leave a stale message on screen.
@@ -954,6 +1001,9 @@ export default function GitPanel({
   const selectFile = (file: GitDiffFile, staged: boolean) => {
     setSelection({ kind: "file", path: file.path, staged });
     setCommitDiff(null);
+    // On a phone the list is an overlay drawer: picking a file dismisses it so
+    // the diff it just selected is actually visible.
+    if (isMobile) setMobileFilePaneOpen(false);
   };
 
   const selectCommit = async (c: GitCommit) => {
@@ -961,6 +1011,7 @@ export default function GitPanel({
     try {
       const files = await api.gitShow(c.hash, projectPath, projectHost);
       setCommitDiff(files);
+      if (isMobile) setMobileFilePaneOpen(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load commit diff");
       setCommitDiff(null);
@@ -974,6 +1025,7 @@ export default function GitPanel({
     try {
       const files = await api.gitStashShow(s.index, projectPath, projectHost);
       setStashFiles(files);
+      if (isMobile) setMobileFilePaneOpen(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load stash files");
       setStashFiles([]);
@@ -1321,13 +1373,13 @@ export default function GitPanel({
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
           </button>
           <button
-            onClick={filePane.toggleCollapsed}
-            aria-label={filePane.collapsed ? "Show file list" : "Hide file list"}
-            aria-expanded={!filePane.collapsed}
-            title={filePane.collapsed ? "Show file list" : "Hide file list"}
+            onClick={toggleFilePane}
+            aria-label={filePaneHidden ? "Show file list" : "Hide file list"}
+            aria-expanded={!filePaneHidden}
+            title={filePaneHidden ? "Show file list" : "Hide file list"}
             className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground"
           >
-            {filePane.collapsed ? (
+            {filePaneHidden ? (
               <PanelLeft className="w-3.5 h-3.5" />
             ) : (
               <PanelLeftClose className="w-3.5 h-3.5" />
@@ -1511,27 +1563,43 @@ export default function GitPanel({
         </div>
       )}
 
-      {/* Body — side-by-side from the md breakpoint up, stacked (file list
-          above the diff) on narrower viewports. */}
+      {/* Body — a side-by-side split from the desktop layout up. On a phone the
+          file list is an overlay drawer (closed by default) so the diff keeps
+          the full width instead of both panes sharing a narrow screen. */}
       <div
         data-testid="git-body"
-        className={cn("flex flex-1 min-h-0", isMobile && "flex-col")}
+        className="relative flex flex-1 min-h-0"
       >
+        {isMobile && !filePaneHidden && (
+          <div
+            data-testid="git-file-backdrop"
+            aria-hidden="true"
+            onClick={() => setMobileFilePaneOpen(false)}
+            className="absolute inset-0 z-20 bg-black/50"
+          />
+        )}
         {/* Left: staged / unstaged / commits — width is drag-resizable and
             persisted (see `filePane`). The header toggle collapses it to zero;
-            `overflow-hidden` clips the content while the width/height animates. */}
+            `overflow-x-hidden` clips the content while the width animates, and
+            `overflow-y-auto` makes this element the scroll container for the
+            stacked sections: an expanded list is content-sized (see
+            listSectionClass), so when they together exceed the pane the PANE
+            scrolls instead of every list being clipped to an equal share.
+            On a phone the same element is the overlay drawer. */}
         <div
           data-testid="git-file-pane"
+          aria-hidden={isMobile && filePaneHidden ? true : undefined}
+          inert={isMobile && filePaneHidden}
           className={cn(
-            "shrink-0 flex flex-col min-h-0 bg-muted/10 overflow-hidden transition-[width,height] duration-100",
-            isMobile && "w-full",
-            isMobile && !filePane.collapsed && "border-b border-border",
-          )}
-          style={
+            "shrink-0 flex flex-col min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain",
             isMobile
-              ? { height: filePane.collapsed ? 0 : MOBILE_FILE_PANE_HEIGHT }
-              : { width: filePane.collapsed ? 0 : filePane.width }
-          }
+              ? cn(
+                  "absolute inset-y-0 left-0 z-30 w-72 max-w-[85vw] bg-card shadow-xl transition-transform duration-200",
+                  filePaneHidden && "-translate-x-full",
+                )
+              : "bg-muted/10 transition-[width] duration-100",
+          )}
+          style={isMobile ? undefined : { width: filePane.collapsed ? 0 : filePane.width }}
         >
           <FileSection
             title="Staged changes"
@@ -1616,9 +1684,10 @@ export default function GitPanel({
 
           {/* Commits */}
           <div
-            className={`min-h-0 flex flex-col border-t border-border ${
-              sections.commits ? "flex-1" : "shrink-0"
-            }`}
+            className={`min-h-0 flex flex-col border-t border-border ${listSectionClass(
+              sections.commits,
+              COMMITS_SECTION_MAX_HEIGHT,
+            )}`}
           >
             <button
               onClick={() => toggleSection("commits")}
@@ -1636,7 +1705,7 @@ export default function GitPanel({
               <span className="text-muted-foreground/60 normal-case">{commits.length}</span>
             </button>
             {sections.commits && (
-              <div className="flex-1 overflow-y-auto divide-y divide-border">
+              <div className="min-h-0 overflow-y-auto overscroll-contain divide-y divide-border">
                 {commits.length === 0 ? (
                   <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
                     No commits yet
@@ -1677,14 +1746,15 @@ export default function GitPanel({
             expanded={sections.worktrees}
             onToggle={() => toggleSection("worktrees")}
             onOpenWorktree={onOpenWorktree}
-            className={sections.worktrees ? "flex-1" : "shrink-0"}
+            className={listSectionClass(sections.worktrees, LIST_SECTION_MAX_HEIGHT)}
           />
 
           {/* Stashes */}
           <div
-            className={`min-h-0 flex flex-col border-t border-border ${
-              sections.stashes ? "flex-1" : "shrink-0"
-            }`}
+            className={`min-h-0 flex flex-col border-t border-border ${listSectionClass(
+              sections.stashes,
+              LIST_SECTION_MAX_HEIGHT,
+            )}`}
           >
             <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center justify-between">
               <button
@@ -1715,7 +1785,7 @@ export default function GitPanel({
               </button>
             </div>
             {sections.stashes && (
-              <div className="flex-1 overflow-y-auto divide-y divide-border/60">
+              <div className="min-h-0 overflow-y-auto overscroll-contain divide-y divide-border/60">
                 {stashes.length === 0 ? (
                   <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
                     No stashes
@@ -1852,8 +1922,14 @@ export default function GitPanel({
         </div>
       </div>
 
-      {/* Commit box */}
-      <div className="p-3 border-t border-border flex items-end gap-2">
+      {/* Commit box. Wraps below `sm`: the message box takes its own full-width
+          row and the buttons drop onto a second line. The textarea's intrinsic
+          min-width plus three buttons is wider than a phone viewport (~390px),
+          and the tab body is `overflow-hidden`, so the old single-line
+          `flex-nowrap` row pushed "Commit & Push" off the right edge with no way
+          to scroll to it. From `sm` up it stays the original single row: the
+          message box grows and the buttons sit at the right edge. */}
+      <div className="p-3 border-t border-border flex flex-wrap items-end gap-2">
         <textarea
           ref={commitInputRef}
           value={commitMessage}
@@ -1867,7 +1943,7 @@ export default function GitPanel({
           rows={1}
           placeholder="Commit message for staged changes…"
           aria-label="Commit message"
-          className="flex-1 min-h-9 max-h-[132px] resize-none overflow-y-auto px-3 py-[7px] rounded-md bg-muted/40 border border-border text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-full min-w-0 sm:w-auto sm:flex-1 min-h-9 max-h-[132px] resize-none overflow-y-auto px-3 py-[7px] rounded-md bg-muted/40 border border-border text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-ring"
         />
         <button
           type="button"
@@ -1879,7 +1955,7 @@ export default function GitPanel({
               ? "Generating a commit message…"
               : "Generate a commit message from the staged (or working-tree) changes"
           }
-          className="h-9 w-9 shrink-0 inline-flex items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground hover:bg-muted/60 disabled:opacity-40"
+          className="ml-auto sm:ml-0 h-9 w-9 shrink-0 inline-flex items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground hover:bg-muted/60 disabled:opacity-40"
         >
           {generatingMessage ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -1891,7 +1967,7 @@ export default function GitPanel({
           onClick={commit}
           disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}
           title={opInProgress ? "Finish or abort the in-progress git operation first" : undefined}
-          className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-40"
+          className="h-9 px-4 shrink-0 whitespace-nowrap rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-40"
         >
           Commit
         </button>

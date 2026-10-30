@@ -100,7 +100,11 @@ export class FakeTerminal {
   blur = vi.fn();
   dispose = vi.fn();
   paste = vi.fn();
-  input = vi.fn();
+  // Mirrors ghostty-web: `input(data, true)` fires onData (the typed-input
+  // path the pty is driven by); `input(data)` writes into the emulator only.
+  input = vi.fn((data: string, wasUserInput = false) => {
+    if (wasUserInput) this._data?.(data);
+  });
   reset = vi.fn();
   clear = vi.fn();
   resize = vi.fn();

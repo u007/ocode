@@ -1,5 +1,14 @@
 # TODO
 
+## Open: mobile terminal keys beyond a keydown (2026-10-31)
+
+Soft-keyboard arrow keys now work (ghostty-web drops them: `keyCode === 229`, and nav keys encode from `event.code` only). `web/src/components/Terminal/terminalSoftKeyboard.ts` + a capture-phase listener in `TerminalPanel.tsx` claim only soft-keyboard-shaped events, so hardware/numpad/Kitty encodings stay ghostty-web's. Deferred:
+
+- **No on-screen key bar.** A phone has no Esc, Tab or Ctrl, and `terminalSoftKeyboard.ts` can only synthesise the unmodified nav keys (a real one is a config/UI feature, not a bug fix). A compact bar (Esc, Tab, sticky Ctrl, ↑ ↓ ← →) above the terminal on coarse pointers would cover both — and would also be the ONLY path for keyboards that emit no keydown at all (next bullet). Keep it out of the terminal host so it does not fight `touch-none`/`preventDefault`, and route through `term.input(seq, true)` like the nav keys do.
+- **Caret movement with no key event is unreachable from the web layer.** A keyboard that moves the caret via `setSelection` (SwiftKey's space-bar cursor swipe) fires `selectionchange` on the hidden textarea and NO keydown; nothing can translate that into pty bytes without hijacking text selection. Treat as covered-only-by-the-key-bar.
+- **`beforeinput` arrow forms do not exist**, so there is nothing more to intercept there. Backspace/Enter already work through ghostty-web's `beforeinput` (`deleteContentBackward`, `insertLineBreak`) — do not add them to the nav-key map, a second sender double-submits.
+- **Not verified on a physical device.** The fix is derived from the library source plus DOM-level tests; confirm with `chrome://inspect` (keydown/beforeinput/selectionchange logger) on a real SwiftKey/Gboard phone. If no keydown arrives, the key bar is the whole fix, not a supplement.
+
 ## Open: DB connector project tab (2026-10-30)
 
 The Postgres DB panel is now a project tab beside Assets, and an environment-backed connection (`${DATABASE_URL}`) loads from the project `.env` with no master password (`docs/concepts/db-connector.md`, `docs/concepts/db-environment-templates.md`; commits on branch `db-project-tab`). A review of that change set hardened it (see CHANGES.md [Unreleased]): the `#` bypass in `ParseURL`/`TemplateHasLiteralSecret` is closed, the client maps `from_env`, surfaces carry a per-document tag and are evicted after 30 min idle, a template that stops resolving loses its grant, and only a saved template makes unlock resolve the project. Deferred:

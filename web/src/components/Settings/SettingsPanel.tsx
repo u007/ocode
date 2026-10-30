@@ -1,4 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Menu, X } from "lucide-react";
+import { Button } from "../ui/button";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
@@ -131,6 +134,12 @@ const OPENCODE_GROUPS: GroupDef[] = [
   { id: "opencode-model-state", label: "Model Selection State" },
 ];
 
+const ALL_GROUPS = [...OCODE_GROUPS, ...OPENCODE_GROUPS];
+
+function groupLabel(id: SettingsGroupId): string {
+  return ALL_GROUPS.find((g) => g.id === id)?.label ?? "Settings";
+}
+
 // Placeholder content renderer — later tasks replace each case with the
 // group's real form component. Kept as a single switch (not a lookup map)
 // so each task's diff is a localized one-case addition.
@@ -233,7 +242,7 @@ function renderGroup(id: SettingsGroupId) {
     default:
       return (
         <div className="text-sm text-muted-foreground p-6">
-          {OCODE_GROUPS.concat(OPENCODE_GROUPS).find((g) => g.id === id)?.label} — coming soon.
+          {ALL_GROUPS.find((g) => g.id === id)?.label} — coming soon.
         </div>
       );
   }
@@ -275,12 +284,25 @@ function NavSection({
 
 export default function SettingsPanel() {
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
+  // Mobile only: the section list is an overlay drawer, not a column. Without
+  // this the <=md layout rendered the two <NavSection> stacks side by side
+  // across the full width and pushed the selected form below the viewport —
+  // the nav looked like an enormous sidebar and the form was unreachable.
+  const [navOpen, setNavOpen] = useState(false);
+  const isMobile = useIsMobile();
   const navPane = useResizableSidebar({
     storageKey: "ocode.ui.settings-panel.width",
     defaultWidth: 256,
     minWidth: 160,
     maxWidth: 420,
   });
+
+  // Selecting a section always dismisses the drawer. On desktop the drawer is
+  // not mounted, so this is a no-op there.
+  const selectGroup = useCallback((id: SettingsGroupId) => {
+    setActive(id);
+    setNavOpen(false);
+  }, []);
 
   useEffect(() => {
     const h = () => setActive("profiles")
@@ -293,14 +315,103 @@ export default function SettingsPanel() {
     return () => window.removeEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
   }, [])
 
+  // A drawer opened on a phone must not reopen when the viewport widens again
+  // (the desktop split view would then be rendered with a stale overlay flag).
+  useEffect(() => {
+    if (!isMobile) setNavOpen(false);
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNavOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navOpen]);
+
+  const navSections = (
+    <>
+      <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={selectGroup} />
+      <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={selectGroup} />
+    </>
+  );
+
+  if (isMobile) {
+    return (
+      <div className="absolute inset-0 flex min-w-0 flex-col overflow-hidden bg-card">
+        {/* Full-width section switcher. The selected form gets the whole
+            viewport below it; the list itself lives in the overlay. */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 shrink-0 gap-1.5 px-2.5"
+            aria-label="Open settings sections"
+            aria-expanded={navOpen}
+            aria-controls="settings-nav-drawer"
+            onClick={() => setNavOpen(true)}
+          >
+            <Menu className="h-4 w-4" />
+            Sections
+          </Button>
+          <span
+            data-testid="settings-active-group"
+            className="min-w-0 flex-1 truncate text-sm font-medium"
+          >
+            {groupLabel(active)}
+          </span>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">{renderGroup(active)}</div>
+
+        {/* Off-canvas drawer + backdrop, matching ProjectSidebar/CoworkSidebar's
+            mobile pattern. Kept mounted so it can slide; `inert` and
+            `aria-hidden` keep the closed drawer out of the tab order and the
+            accessibility tree. */}
+        {navOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-black/50"
+            onClick={() => setNavOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+        <nav
+          id="settings-nav-drawer"
+          aria-label="Settings sections"
+          aria-hidden={!navOpen}
+          inert={!navOpen}
+          className={`fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border bg-card shadow-xl transition-transform duration-200 ${
+            navOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-sm font-semibold">Settings</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 shrink-0 p-0"
+              aria-label="Close settings sections"
+              onClick={() => setNavOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">{navSections}</div>
+        </nav>
+      </div>
+    );
+  }
+
   return (
     <div className="absolute inset-0 flex flex-col md:flex-row overflow-hidden bg-card">
       <nav
         className="shrink-0 overflow-auto border-b md:border-b-0 md:border-r border-border py-2 md:py-3 px-2 md:px-0 flex flex-row md:flex-col gap-1 md:gap-0 w-full md:w-[var(--nav-width)]"
         style={{ "--nav-width": `${navPane.width}px` } as { [key: string]: string }}
       >
-        <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={setActive} />
-        <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={setActive} />
+        {navSections}
       </nav>
       <div
         ref={navPane.handleRef}

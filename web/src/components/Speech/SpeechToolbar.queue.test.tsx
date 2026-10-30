@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SpeechToolbar, { speechItemLabel } from "./SpeechToolbar";
 import type { SpeechItemLabels } from "./SpeechProvider";
@@ -61,6 +61,7 @@ beforeEach(() => {
   speech.queuedCount = 0;
   speech.nowPlaying = null;
   speech.isSpeaking = true;
+  speech.toolbarVisible = true;
 });
 
 afterEach(() => {
@@ -144,5 +145,39 @@ describe("the queued badge", () => {
     screen.getByLabelText("Clear speech queue").click();
     expect(speech.clearQueue).toHaveBeenCalledOnce();
     expect(speech.stop).not.toHaveBeenCalled();
+  });
+});
+
+describe("reserved shell space", () => {
+  it("publishes its own height so the shell can keep panel content above it", () => {
+    // The bar is position:fixed, so it floats OVER whatever sits at the bottom
+    // of a panel. At 393px it covered the Git commit box's buttons completely:
+    // elementFromPoint returned the toolbar for all three, so no tap reached
+    // them. `.app-viewport` adds this variable to its bottom padding.
+    const view = render(<SpeechToolbar />);
+    const bar = screen.getByTestId("speech-toolbar");
+    // jsdom has no layout engine, so the measured height must be stubbed.
+    Object.defineProperty(bar, "offsetHeight", { value: 74, configurable: true });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    // 74px of bar plus the 8px `bottom-2` gap it floats above.
+    expect(
+      document.documentElement.style.getPropertyValue("--speech-toolbar-height"),
+    ).toBe("82px");
+
+    view.unmount();
+    expect(
+      document.documentElement.style.getPropertyValue("--speech-toolbar-height"),
+    ).toBe("");
+  });
+
+  it("reserves nothing while the bar is hidden", () => {
+    speech.toolbarVisible = false;
+    render(<SpeechToolbar />);
+    expect(screen.queryByTestId("speech-toolbar")).toBeNull();
+    expect(
+      document.documentElement.style.getPropertyValue("--speech-toolbar-height"),
+    ).toBe("");
   });
 });

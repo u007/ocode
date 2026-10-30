@@ -10,13 +10,18 @@
 //     └ src/
 //         └ app/
 //             └ deep.ts        ← the open editor tab's file
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+
+/** Mutable matchMedia result so a test can simulate a phone viewport. */
+let mqMatches = false;
 
 beforeAll(() => {
   window.matchMedia = ((media: string) => ({
-    matches: false,
+    get matches() {
+      return mqMatches;
+    },
     media,
     onchange: null,
     addListener: () => {},
@@ -33,6 +38,10 @@ beforeAll(() => {
       disconnect() {}
     };
   }
+});
+
+afterEach(() => {
+  mqMatches = false;
 });
 
 const appApi = vi.hoisted(() => ({
@@ -283,5 +292,72 @@ describe("Show in file tree (App wiring)", () => {
     // Re-opened and revealed, not silently swallowed by the collapsed pane.
     await waitFor(() => expect(screen.getByTitle("Hide file tree")).toBeTruthy());
     await waitFor(() => expect(row("src/app/deep.ts")).toBeTruthy());
+  });
+});
+// On a phone there is no room for a side-by-side tree+editor split, so the file
+// tree becomes an overlay drawer over the editor. These drive the REAL App so
+// the drawer state, the toggle, and the open-file hand-off are wired together.
+describe("Files tree drawer on a phone", () => {
+  it("opens as an overlay and closes when a file is picked", async () => {
+    mqMatches = true;
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const pane = await waitFor(() => screen.getByTestId("file-tree-pane"));
+    // Closed by default: the editor owns the full width.
+    expect(pane.className).toContain("absolute");
+    expect(pane.className).toContain("-translate-x-full");
+    expect(screen.queryByTestId("file-tree-backdrop")).toBeNull();
+
+    // "Show in file tree" from another view must surface the tree on a phone.
+    fireEvent.contextMenu(await screen.findByText("deep.ts"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Show in file tree" }));
+    await waitFor(() => expect(row("src/app/deep.ts")).toBeTruthy());
+    expect(pane.className).not.toContain("-translate-x-full");
+    expect(screen.getByTestId("file-tree-backdrop")).toBeTruthy();
+
+    // Picking a file dismisses the drawer so the opened file is visible. The
+    // row's clickable element is the inner button, not the wrapper carrying
+    // `data-tree-path`.
+    fireEvent.click(within(row("src/app/deep.ts")!).getByText("deep.ts"));
+    await waitFor(() => expect(pane.className).toContain("-translate-x-full"));
+    expect(screen.queryByTestId("file-tree-backdrop")).toBeNull();
+  });
+
+  it("toggles from the header button and dismisses on backdrop click and Esc", async () => {
+    mqMatches = true;
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // Reach the Files view through a reveal (TopTabs is stubbed out here).
+    fireEvent.contextMenu(await screen.findByText("deep.ts"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Show in file tree" }));
+    const pane = await waitFor(() => screen.getByTestId("file-tree-pane"));
+    expect(pane.className).not.toContain("-translate-x-full");
+
+    // The pane's own toggle closes it again.
+    fireEvent.click(screen.getByTitle("Hide file tree"));
+    expect(pane.className).toContain("-translate-x-full");
+    expect(screen.queryByTestId("file-tree-backdrop")).toBeNull();
+
+    // ...and re-opens it.
+    fireEvent.click(screen.getByTitle("Show file tree"));
+    expect(pane.className).not.toContain("-translate-x-full");
+
+    // Tapping the backdrop dismisses it.
+    fireEvent.click(screen.getByTestId("file-tree-backdrop"));
+    expect(pane.className).toContain("-translate-x-full");
+
+    // Esc does the same.
+    fireEvent.click(screen.getByTitle("Show file tree"));
+    expect(pane.className).not.toContain("-translate-x-full");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(pane.className).toContain("-translate-x-full");
   });
 });

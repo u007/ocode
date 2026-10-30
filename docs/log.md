@@ -1,5 +1,14 @@
 # Directory Update Log
 
+
+## 2026-10-31
+
+* **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+* **Update**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
+* **Creation**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
 ## 2026-10-30
 
 * **Update**: Terminal voice input (mic button in the web Terminal panel) ([concepts/terminal-voice-input.md](/concepts/terminal-voice-input.md))
