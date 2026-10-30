@@ -24,6 +24,7 @@ this file is the index plus the rules the pages only imply.
 | `internal/remote/sync.go` | `BuildSyncPayload` — credentials/config pushed to the host |
 | `internal/server/remote_hosts.go` | Connection registry: `remoteConnectionKey`, per-entry connect `sync.Cond` |
 | `internal/server/handler_remote_work.go` | `remoteGitCommand`, `remoteSafeSpec`, the exec slot pool |
+| `internal/server/handler_remote_fs.go` | `/api/fs/*?host=` mutations (`remoteTargetOf`, `remoteAbsJoin` callers) |
 | `internal/server/handler_remote_proxy.go` | `HandleRemoteProxy` — the `/api/remote/{host}/…` entry |
 
 ## 2. The one invariant that matters most: connection identity
@@ -35,7 +36,7 @@ host on different ports.
 | Site | Helper | Anchor |
 |---|---|---|
 | Registry / per-entry connect state | `remoteConnectionKey(host, port)` | `internal/server/remote_hosts.go:64` |
-| Exec slot pool | `remoteSlotKey(t)` → `remoteConnectionKey(t.String(), t.Port)` | `internal/server/handler_remote_work.go:405` |
+| Exec slot pool | `remoteSlotKey(t)` → `remoteConnectionKey(t.String(), t.Port)` | `internal/server/handler_remote_work.go:479` |
 | Cross-package pin | `TestRemoteConnectionKeyAgreesWithMuxIdentity` | `internal/server/remote_hosts_test.go:1037` |
 
 - `port <= 0` means "unspecified" and keys as the **bare host**. An unspecified
@@ -79,7 +80,7 @@ block — a real terminal must be able to prompt. Never add `BatchMode` there.
 
 ## 4. The exec slot pool: two-phase admission
 
-Per connection, from `remoteExecSlots` (`handler_remote_work.go:351`):
+Per connection, from `remoteExecSlots` (`handler_remote_work.go:425`):
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -87,7 +88,7 @@ Per connection, from `remoteExecSlots` (`handler_remote_work.go:351`):
 | `remoteExecLongRunningSlotsPerHost` | 6 | Sub-cap for long-running work |
 
 Admission is an **all-or-nothing pair**, and the order is the whole point
-(`acquireRemoteExecSlot`, `handler_remote_work.go:417`):
+(`acquireRemoteExecSlot`, `handler_remote_work.go:492`):
 
 1. **Long-running** takes the `long` token **first, non-blocking**. If the
    sub-cap is full it is **refused immediately** — not queued. Queueing would
@@ -108,10 +109,10 @@ Git panel go stale while every starved poll burns its own 30s bound.
 
 **A remote project's path must never enter a path-only local allowlist.**
 
-- `allowedProjectRoots` (`internal/server/handler.go:662`) contains only the
+- `allowedProjectRoots` (`internal/server/handler.go:811`) contains only the
   workdir plus projects with `Host == ""`. Project identity is
   `(host, path)` (+ port).
-- `resolveRegisteredProjectRoot` (`handler_git.go:136`) matches **verbatim
+- `resolveRegisteredProjectRoot` (`handler_git.go:144`) matches **verbatim
   first**, then falls back to `ExpandHome`. The `?host=` branch keeps the exact
   `(host, verbatim path)` match and **never expands** — a remote path is another
   machine's filesystem.
@@ -123,9 +124,52 @@ Git panel go stale while every starved poll burns its own 30s bound.
   `allowedProjectRoots`.
 - Any new project-scoped endpoint must pick local-vs-remote mode **explicitly**.
 
+### `?project=` scope: a registered root OR a path INSIDE one
+
+Read endpoints have always admitted a sub-path (`?path=<root>/<child>`) through
+its containing root. Mutations now do the same, so a session browsing a
+subfolder can still create/rename/delete there:
+
+| Surface | Resolver | Rule |
+|---|---|---|
+| reads | `remoteTreeRoot` / `fileTreeRootFor` | longest containing root; a symlinked subdirectory is tolerated (documented residual) |
+| mutations, remote | `remoteMutationWorkFor` (`handler_remote_work.go:104`) → `remoteWorkFor` (`:66`) | same, PLUS a canonical `pwd -P` check on the host: a symlinked subdirectory is refused |
+| mutations, local | `mutationProjectDir` (`handler_git.go:193`) | same, with strict symlink-resolved containment; absolute paths only |
+
+The returned `remoteWork.Path` / `dir` is the REQUESTED path, so downstream
+containment (`remoteRelCheck`, `resolveFSPath`) is anchored exactly there — a
+sub-path narrows what is reachable and never widens it. On the web side every
+`api.fs*` call sends the browsed root as `?project=` and **anchors each path to
+it** (`requestRoot` + `treePathForRequest` in `FileTree.tsx`); selection state,
+the clipboard and the `ocode:fs-*` event payloads stay node-relative, because
+the pair (`project`, path) must agree or a relative path resolves against the
+wrong directory.
+
 Host-side `~` expansion belongs to the `host == ""` branch only
 (`handler_terminal.go:226`, `:728`) — expanding on the host side is a
 cross-machine path bug.
+
+### Remote file operations (`/api/fs/*?host=…`, download, paste-upload)
+
+These handlers run ONE POSIX shell command per operation, so two more path rules
+apply on top of the trust boundary. Both broke "add a new file" on a tilde-rooted
+remote project (`~/www/aimsweb`):
+
+- **Resolve with `remoteAbsJoin` (`handler_remote_work.go:685`) and treat a path
+  already anchored at the root as absolute.** The web file tree sends
+  ROOT-JOINED paths (`treePathForRequest`), so on a tilde root the request is
+  `~/www/aimsweb/Makefile`, not `Makefile`. A leading-`/` test missed that and
+  rejoined it into `~/www/aimsweb/~/www/aimsweb/Makefile` → `parent directory of
+  "~/www/aimsweb/Makefile" does not exist`.
+- **Quote a PATH with `remote.ShellQuotePath`, never `remote.ShellQuote`.** A
+  remote root may be `~`-relative and `shellQuotePath` translates a leading `~/`
+  to `"$HOME/"`. `'~/x'` never expands, so `rm -rf` "succeeds" while deleting
+  nothing (delete silently no-ops), and `cat >`/`:`/`mv` fail outright.
+  `ShellQuote` is only for non-path words (refs, commit messages, specs).
+- `remoteTargetOf` modes: `read` (must exist), `create` (parent must exist),
+  `dest` (must exist and be a directory, and the project ROOT is allowed —
+  "paste to the root folder"). Only `dest` accepts `.`; delete/rename keep
+  refusing the root.
 
 ## 6. Git over a remote connection
 
@@ -136,11 +180,11 @@ Two complementary layers of the same function — don't merge them:
 | Lock/env | **`CLAUDE.md` §"Git subprocesses: `gitexec`"** | leading `GIT_OPTIONAL_LOCKS=0` in `remoteGitCommand`; mutations via `remoteGitMutation` |
 | Quoting | `docs/gotchas/remote-git-shell-quoting.md` | see below |
 
-- `remoteGitCommand` (`handler_remote_work.go:527`) builds a **shell string**,
+- `remoteGitCommand` (`handler_remote_work.go:601`) builds a **shell string**,
   so quoting is the caller's job.
 - Any free-form argument (commit message, stash message, ref, branch) **must** be
   wrapped in `remote.ShellQuote` by the caller.
-- A pathspec from `remoteSafeSpec` (`handler_remote_work.go:547`) **must not** be
+- A pathspec from `remoteSafeSpec` (`handler_remote_work.go:621`) **must not** be
   pre-quoted — double-quoting breaks `^{commit}` rev resolution.
 - **Never** quote for the local `gitRunInDir` path: it's argv, no shell, so
   quoting embeds literal `"` characters.
@@ -291,6 +335,7 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 |---|---|
 | `docs/gotchas/remote-connection-identity-includes-port.md` | the identity invariant + its history (**untracked**; see §10) |
 | `docs/gotchas/remote-git-shell-quoting.md` | the quoting layer of `remoteGitCommand` |
+| `docs/gotchas/remote-fs-tilde-root-pathing.md` | `/api/fs/*` path resolution: root-anchored joins, `ShellQuotePath` vs `ShellQuote`, the `dest` mode |
 | `docs/gotchas/remote-project-path-trust-boundary.md` | allowlist boundary, ssh-destination validation |
 | `docs/gotchas/remote-session-list-tilde-404.md` | `resolveRegisteredProjectRoot` in list endpoints (**untracked**) |
 | `docs/gotchas/remote-ssh-chat-profile-not-applied.md` | profile stamping, `BuildSyncPayload` gap |

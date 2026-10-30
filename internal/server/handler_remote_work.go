@@ -45,11 +45,24 @@ func (h *Handler) remoteProjectEntry(host, path string) (projects.Project, bool)
 
 // remoteWorkFor resolves the ?host= + ?project= pair (or the JSON body's
 // host/project fields, handled by callers) into a validated remoteWork.
-// The pair must be a registered remote project — the same admission rule
-// the terminal endpoint applies (remoteProjectRegistered) — so the endpoint
-// can't be aimed at unregistered hosts. ParseTarget accepts the same
-// canonical strings the projects store keys on ("[user@]host" with an
-// optional :port suffix, or "wsl:<distro>").
+//
+// The pair must name a registered remote project — the same admission rule the
+// terminal endpoint applies (remoteProjectRegistered) — so an endpoint can't be
+// aimed at unregistered hosts. ParseTarget accepts the same canonical strings
+// the projects store keys on ("[user@]host" with an optional :port suffix, or
+// "wsl:<distro>").
+//
+// "Names a project" includes a path INSIDE one: the file tree browses into a
+// subfolder and sends it as ?project=, and the read endpoints have always
+// admitted it through its containing root (remoteTreeRoot). Mutations do the
+// same here, so a session rooted at a subfolder can still create, rename and
+// delete. The returned Path is the REQUESTED path, so every downstream
+// containment check (remoteRelCheck, remoteSafeSpec) stays anchored exactly
+// where the caller asked — a sub-path can only narrow what is reachable, never
+// widen it.
+//
+// Mutation callers must use remoteMutationWorkFor instead, which additionally
+// re-checks the canonical directory (see below).
 func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 	if host == "" {
 		return remoteWork{}, fmt.Errorf("host is required")
@@ -67,6 +80,12 @@ func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 		if target.Port == 0 && entry.RemotePort > 0 {
 			target.Port = entry.RemotePort
 		}
+	} else if anchor, ok := h.remoteTreeRoot(target.String(), path); ok {
+		if entry, ok := h.remoteProjectEntry(target.String(), anchor); ok {
+			if target.Port == 0 && entry.RemotePort > 0 {
+				target.Port = entry.RemotePort
+			}
+		}
 	} else {
 		return remoteWork{}, fmt.Errorf("host/project_path is not a remote project registered with this server")
 	}
@@ -74,6 +93,61 @@ func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 		return remoteWork{}, err
 	}
 	return remoteWork{Target: target, Path: path}, nil
+}
+
+// remoteMutationWorkFor is remoteWorkFor for an endpoint that WRITES on the
+// host. A registered project root passes straight through (no extra round
+// trip). A path inside one is legal too, but its canonical directory must still
+// sit inside that project: otherwise a symlinked subdirectory would become a
+// mutation anchor reaching into another tree — a write the read path's
+// documented lexical tolerance must not be able to escalate into.
+func (h *Handler) remoteMutationWorkFor(ctx context.Context, host, path string) (remoteWork, error) {
+	rw, err := h.remoteWorkFor(host, path)
+	if err != nil {
+		return remoteWork{}, err
+	}
+	if _, exact := h.remoteProjectEntry(rw.Target.String(), rw.Path); exact {
+		return rw, nil
+	}
+	anchor, ok := h.remoteTreeRoot(rw.Target.String(), rw.Path)
+	if !ok {
+		return remoteWork{}, fmt.Errorf("host/project_path is not a remote project registered with this server")
+	}
+	inside, cerr := remoteDirInside(ctx, remoteWork{Target: rw.Target, Path: anchor}, rw.Path)
+	if cerr != nil {
+		return remoteWork{}, cerr
+	}
+	if !inside {
+		return remoteWork{}, fmt.Errorf("project path is outside its registered project (a symlinked directory cannot be a mutation target)")
+	}
+	return rw, nil
+}
+
+// remoteDirInside reports whether the canonical (symlink-resolved) directory of
+// sub is inside the canonical directory of root. Both are resolved on the host
+// in ONE command so a path that does not exist, or a `pwd -P` that fails, is
+// answered as an error rather than as a permissive default. Runs through
+// remoteRun, so it obeys the per-host exec slot pool and the usual timeouts.
+func remoteDirInside(ctx context.Context, rw remoteWork, sub string) (bool, error) {
+	script := fmt.Sprintf(`a=$(cd %s && pwd -P) || exit 3; b=$(cd %s && pwd -P) || exit 4; printf '%%s\n%%s\n' "$a" "$b"`,
+		remote.ShellQuotePath(rw.Path), remote.ShellQuotePath(sub))
+	out, err := remoteRun(ctx, rw, script)
+	if err != nil {
+		return false, fmt.Errorf("cannot resolve project path on the host: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
+		return false, fmt.Errorf("cannot resolve project path on the host")
+	}
+	realRoot := strings.TrimRight(lines[0], "/")
+	realSub := strings.TrimRight(lines[1], "/")
+	if realSub == realRoot {
+		return true, nil
+	}
+	if realRoot == "" { // root canonicalised to "/"
+		return strings.HasPrefix(realSub, "/"), nil
+	}
+	return strings.HasPrefix(realSub, realRoot+"/"), nil
 }
 
 // hostParam extracts the remote ?host= routing parameter. Empty means the
@@ -598,17 +672,40 @@ func remoteGitSpec(p string) (string, error) {
 }
 
 // remoteAbsJoin resolves a possibly-remote-project-relative path against the
-// remote project root. Relative paths from the frontend (tree Path values)
-// become "<root>/<rel>"; absolute remote paths pass through unchanged
-// (callers still bound them to the root with remoteRelCheck).
+// remote project root. Relative paths from the frontend become
+// "<root>/<rel>"; a path already anchored at the remote root passes through
+// unchanged (callers still bound the result to the root with remoteRelCheck).
+//
+// "Already anchored" cannot be a leading-"/" test: a remote project root may
+// be "~"-relative ("~/www/app"), and the file tree sends root-joined paths
+// (treePathForRequest), not only root-relative ones. Testing only for "/"
+// prefixed those onto the root a SECOND time — "~/www/app/~/www/app/Makefile"
+// — so every create/copy/paste destination on a tilde-rooted remote project
+// failed with `parent directory of "~/www/app/Makefile" does not exist`.
 func remoteAbsJoin(root, p string) string {
 	if p == "" {
 		return root
 	}
+	// Compare against a slash-trimmed root so "~/www/app/" still matches a
+	// request path spelled "~/www/app/Makefile"; remoteRelCheck trims the same
+	// way, so both spellings of the saved root resolve identically.
+	rootPrefix := remoteRootPrefix(root)
+	if p == rootPrefix || strings.HasPrefix(p, rootPrefix+"/") {
+		return p
+	}
 	if strings.HasPrefix(p, "/") {
 		return p
 	}
-	return root + "/" + p
+	if rootPrefix == "" {
+		return "/" + p
+	}
+	return rootPrefix + "/" + p
+}
+
+// remoteRootPrefix drops trailing slashes from a remote project root. The saved
+// path is verbatim, so "~/www/app/" and "~/www/app" must behave the same.
+func remoteRootPrefix(root string) string {
+	return strings.TrimRight(root, "/")
 }
 
 // remoteRelCheck validates that p stays inside root and returns the
@@ -619,6 +716,9 @@ func remoteRelCheck(root, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty path")
 	}
+	// Trim trailing slashes so a root saved as "~/www/app/" still contains
+	// "~/www/app/x" (and yields "x", not "/x").
+	root = remoteRootPrefix(root)
 	if !strings.HasPrefix(p, root+"/") {
 		if p == root {
 			return ".", nil

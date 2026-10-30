@@ -183,7 +183,7 @@ describe("FileTree download and drop", () => {
       fireEvent.click(await screen.findByRole("menuitem", { name: /^Download$/ }));
 
       await waitFor(() => expect(mocks.saveBlobAsFile).toHaveBeenCalledTimes(1));
-      expect(mocks.fsDownload).toHaveBeenCalledWith("a.ts", "/proj", undefined);
+      expect(mocks.fsDownload).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined);
       const [blob, name] = mocks.saveBlobAsFile.mock.calls[0];
       expect(blob).toBeInstanceOf(Blob);
       expect(name).toBe("a.ts");
@@ -208,7 +208,7 @@ describe("FileTree download and drop", () => {
       fireEvent.contextMenu(screen.getByText("a.ts"));
       fireEvent.click(await screen.findByRole("menuitem", { name: /^Download$/ }));
 
-      await waitFor(() => expect(mocks.fsDownload).toHaveBeenCalledWith("a.ts", "/proj", undefined));
+      await waitFor(() => expect(mocks.fsDownload).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined));
     });
   });
 

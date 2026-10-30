@@ -1,11 +1,11 @@
 # Directory Update Log
 
+## 2026-10-30
 
-
-
-
-
-
+* **Update**: Terminal voice input (mic button in the web Terminal panel) ([concepts/terminal-voice-input.md](/concepts/terminal-voice-input.md))
+* **Update**: Local Speech-to-Text Runs in a Resident Worker ([architecture/stt-resident-worker.md](/architecture/stt-resident-worker.md))
+* **Update**: Speech-to-text (voice input) ([concepts/speech-to-text.md](/concepts/speech-to-text.md))
+* **Creation**: Remote fs actions on a "~"-rooted project: root-joined paths and $HOME quoting ([gotchas/remote-fs-tilde-root-pathing.md](/gotchas/remote-fs-tilde-root-pathing.md))
 
 ## 2026-10-29
 

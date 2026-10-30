@@ -168,7 +168,7 @@ describe("FileTree clipboard: paste to project root", () => {
     fireEvent.click(paste);
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
   });
 
@@ -179,7 +179,7 @@ describe("FileTree clipboard: paste to project root", () => {
     fireEvent.click(screen.getByLabelText("Paste to project root"));
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
     expect(await screen.findByText("Copied 1 item to proj/")).toBeTruthy();
   });
@@ -192,7 +192,7 @@ describe("FileTree clipboard: paste to project root", () => {
     fireEvent.click(await screen.findByLabelText("Paste to project root"));
 
     await waitFor(() =>
-      expect(mocks.fsMove).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsMove).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
     // The clipboard is consumed by a cut, so the affordance disappears.
     await waitFor(() => expect(screen.queryByLabelText("Paste to project root")).toBeNull());
@@ -209,7 +209,7 @@ describe("FileTree clipboard: paste to project root", () => {
     fireEvent.click(paste);
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
   });
 });
@@ -249,7 +249,7 @@ describe("FileTree clipboard: keyboard shortcuts", () => {
     fireEvent.paste(document.body);
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
   });
 
@@ -269,7 +269,7 @@ describe("FileTree clipboard: keyboard shortcuts", () => {
     fireEvent.paste(document.body);
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj/src", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj/src", "/proj", undefined),
     );
   });
 
@@ -287,7 +287,7 @@ describe("FileTree clipboard: keyboard shortcuts", () => {
       await vi.advanceTimersByTimeAsync(200);
     });
 
-    expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined);
+    expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined);
   });
 
   it("treats a duplicate paste delivery as one paste", async () => {
@@ -528,7 +528,7 @@ describe("FileTree clipboard: OS file paste (Finder/Explorer)", () => {
     pasteFiles([osFile("stray.png")]);
 
     await waitFor(() =>
-      expect(mocks.fsCopy).toHaveBeenCalledWith(["a.ts"], "/proj", "/proj", undefined),
+      expect(mocks.fsCopy).toHaveBeenCalledWith(["/proj/a.ts"], "/proj", "/proj", undefined),
     );
     expect(mocks.fsUpload).not.toHaveBeenCalled();
   });
