@@ -17,20 +17,18 @@ import (
 // with no newline inside the window, so the returned text starts or ends
 // mid-line. It mirrors GET /api/terminal/{id}/history: the same access gate,
 // the same project trust boundary, the same log.
-func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, text string, moreBefore, moreAfter, lineClipped bool, err error) {
-	if !h.terminalAccessAllowed() {
-		return "", "", false, false, false, errors.New("terminal access requires server authentication or a loopback bind address")
-	}
-	if strings.HasPrefix(terminalID, "anon-") {
-		return "", "", false, false, false, fmt.Errorf("terminal %q has no history: %w", terminalID, errTerminalHistoryMissing)
-	}
-	project, err = h.pulseTerminalProject(terminalID)
+//
+// host names a remote (SSH/WSL) host whose terminal this is, "" for a local one.
+// A remote log is read through the host's own history endpoint, page for page the
+// way a local file is, so the window rules below are the same for both.
+func (h *Handler) pulseTerminalWindow(terminalID, host string, head bool) (project, text string, moreBefore, moreAfter, lineClipped bool, err error) {
+	project, read, err := h.pulseTerminalSource(terminalID, host)
 	if err != nil {
 		return "", "", false, false, false, err
 	}
 
 	// Pin the snapshot end with a one-byte read, then read the chosen window.
-	_, end, err := readTerminalHistoryRangeAt(project, terminalID, 0, 1, nil)
+	_, end, err := read(0, 1, nil)
 	if err != nil {
 		return "", "", false, false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
@@ -43,7 +41,7 @@ func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, te
 		length = end - offset
 		moreBefore = offset > 0
 	}
-	data, err := readPulseWindow(project, terminalID, offset, length, end)
+	data, err := readPulseWindow(read, offset, length, end)
 	if err != nil {
 		return "", "", false, false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
@@ -77,11 +75,11 @@ func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, te
 // readPulseWindow reads [offset, offset+length) of a terminal's log, pinned to
 // the snapshot end. The history reader returns at most terminalHistoryMaxPage
 // per call, so a window wider than that is read in chunks.
-func readPulseWindow(project, terminalID string, offset, length, end int64) ([]byte, error) {
+func readPulseWindow(read pulseHistoryReader, offset, length, end int64) ([]byte, error) {
 	out := make([]byte, 0, length)
 	for int64(len(out)) < length {
 		chunk := min(length-int64(len(out)), terminalHistoryMaxPage)
-		data, _, err := readTerminalHistoryRangeAt(project, terminalID, offset+int64(len(out)), chunk, &end)
+		data, _, err := read(offset+int64(len(out)), chunk, &end)
 		if err != nil {
 			return nil, err
 		}
@@ -93,10 +91,29 @@ func readPulseWindow(project, terminalID string, offset, length, end int64) ([]b
 	return out, nil
 }
 
+// pulseTerminalSource applies the access gate and resolves a terminal to its
+// project and log reader: local (host "") or on a connected remote host.
+func (h *Handler) pulseTerminalSource(terminalID, host string) (string, pulseHistoryReader, error) {
+	if !h.terminalAccessAllowed() {
+		return "", nil, errors.New("terminal access requires server authentication or a loopback bind address")
+	}
+	if strings.HasPrefix(terminalID, "anon-") {
+		return "", nil, fmt.Errorf("terminal %q has no history: %w", terminalID, errTerminalHistoryMissing)
+	}
+	if host != "" {
+		return h.pulseRemoteTerminalSource(host, terminalID)
+	}
+	project, err := h.pulseTerminalProject(terminalID)
+	if err != nil {
+		return "", nil, err
+	}
+	return project, localPulseHistoryReader(project, terminalID), nil
+}
+
 // pulseTerminalProject resolves the project a terminal belongs to: the live
-// session when there is one, else the open-tab store. Remote terminals are not
-// readable here (their history lives on the remote host), and the project must
-// be a root this server serves.
+// session when there is one, else the open-tab store. A remote terminal's history
+// lives on its host and is reached by pulseRemoteTerminalSource instead; this
+// resolves local terminals only, and the project must be a root this server serves.
 func (h *Handler) pulseTerminalProject(terminalID string) (string, error) {
 	project := ""
 	if sess := h.terminalSessions.lookup(terminalID); sess != nil {

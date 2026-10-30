@@ -596,7 +596,7 @@ Rules:
 - Write tools (the ones that message a session, run a command on it, or answer its permission or question asks) act on the operator's other work. Use them ONLY when the operator's CURRENT message explicitly asks for that action on that session. Otherwise describe what is pending and ask what they want. Each call needs the operator's approval; if it is denied or errors, say so and do not retry around it.
 - You cannot edit files or run shell commands. Never claim to have changed, sent, approved or started anything unless the write tool result confirmed it.
 - Your memory files (memory_read, memory_write) are yours alone. Keep them minimal: save only important, durable notes, such as standing preferences, ongoing goals and decisions the operator asks you to keep. Never save transient status, copies of the board, or task progress. Each file is capped at about 30k tokens, so condense on every write and drop stale entries instead of appending. Read before you write, because a write replaces the whole file.
-- You only see sessions of this ocode server process. Sessions in other ocode processes are invisible to you.
+- You see the sessions and terminals of this ocode server and of the remote SSH/WSL hosts it is connected to (board rows with a host). A remote host that is not connected is invisible until it is connected: the board says so under "Remote hosts not shown". Call host_connect only when the operator asks about, or asks you to connect, such a host; if it answers "connecting", check again on a later turn instead of calling it again. Sessions in other ocode processes are invisible to you.
 - Cite session ids when you refer to a session. Say when a tool result was truncated.
 - Be concise and factual. If you do not know, say so and name the tool call that would find out.`
 
@@ -691,8 +691,9 @@ func (h *Handler) configurePulseAgent(ag *agent.Agent, effCfg *config.Config) {
 // assistant is already excluded by buildPulseRows.
 func (h *Handler) pulseBoardSnapshot() string {
 	now := time.Now()
-	rows := buildPulseRows(h.gatherPulseInputs(pulseScopeLive, now), pulseScopeLive, now)
+	rows, notes := h.pulseBoardRows(pulseScopeLive, now)
 	board := renderPulseBoard(rows, now)
+	board += renderPulseHostNotes(notes)
 	if h.terminalAccessAllowed() {
 		board += "\n" + renderPulseTerminals(h.pulseTerminalRows())
 	}
@@ -721,7 +722,7 @@ func (h *Handler) pulseBoardSnapshot() string {
 		}
 	}
 
-	mem, err := h.pulseMemorySection(rows)
+	mem, err := h.pulseMemorySection(localPulseRows(rows))
 	if err != nil {
 		log.Printf("serve: pulse memory for the board: %v", err)
 		mem = pulseMemoryOpen + "\n(memory unavailable: " + err.Error() + ")\n" + pulseMemoryClose
@@ -771,12 +772,49 @@ func renderPulseBoard(rows []PulseRow, now time.Time) string {
 		b.WriteByte('\n')
 		fmt.Fprintf(&b, "%s | %s | %s | %s | %s",
 			r.Status,
-			filepath.Base(r.ProjectPath),
+			pulseBoardProject(r),
 			r.SessionID,
 			pulseOneLine(r.Title, pulseBoardTitleRunes),
 			pulseOneLine(pulseRowDetail(r), pulseBoardTaskRunes))
 	}
 	return b.String()
+}
+
+// pulseBoardProject is the board's project column: the project's base name, and
+// for a remote session "name@host", so two hosts' "app" projects stay apart and the
+// assistant knows to pass the host to the session tools.
+func pulseBoardProject(r PulseRow) string {
+	name := filepath.Base(r.ProjectPath)
+	if r.Host != "" {
+		return name + "@" + r.Host
+	}
+	return name
+}
+
+// renderPulseHostNotes lists the remote hosts whose sessions are missing from the
+// board and why, or "" when every host was read.
+func renderPulseHostNotes(notes []pulseHostNote) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nRemote hosts not shown:")
+	for _, n := range notes {
+		fmt.Fprintf(&b, "\n%s: %s", n.Host, pulseOneLine(n.Reason, pulseBoardTaskRunes))
+	}
+	return b.String()
+}
+
+// localPulseRows keeps the rows of this server's own projects. Project memory and
+// the project-root checks key on local paths; a remote path is another machine's.
+func localPulseRows(rows []PulseRow) []PulseRow {
+	out := make([]PulseRow, 0, len(rows))
+	for _, r := range rows {
+		if r.Host == "" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // pulseRowDetail is the last board column: the blocking ask when there is one,
