@@ -5,6 +5,7 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/termtabs"
 )
 
@@ -157,7 +160,11 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 // on pulseRemoteTestHost, a terminal-tab store, and the fake host connected.
 func pulseRemoteTestHandler(t *testing.T, f *pulseRemoteFake) *Handler {
 	t.Helper()
-	h := newTestProxyHandler(t, pulseRemoteTestHost, pulseRemoteTestPath, f.ws)
+	var ws remoteHostWorkspace
+	if f != nil {
+		ws = f.ws
+	}
+	h := newTestProxyHandler(t, pulseRemoteTestHost, pulseRemoteTestPath, ws)
 	localRoot := t.TempDir()
 	if err := h.projects.Add(localRoot); err != nil {
 		t.Fatalf("add local project: %v", err)
@@ -578,5 +585,98 @@ func TestTerminalKillKillsARemoteTerminalAndDropsItsTab(t *testing.T) {
 	f.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("refused kills must not reach the host, kills = %d", n)
+	}
+}
+
+func TestHostConnectConnectsASavedHostWithoutBlocking(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	h := pulseRemoteTestHandler(t, nil) // saved remote project, nothing connected
+	var connects atomic.Int32
+	release := make(chan struct{})
+	h.remoteHosts = newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		<-release
+		return f.ws, nil
+	})
+	old := remoteConnectWaitBound
+	remoteConnectWaitBound = 50 * time.Millisecond
+	t.Cleanup(func() { remoteConnectWaitBound = old })
+
+	if pt := pulseToolByName(t, h, "host_connect"); pt.ask {
+		t.Fatal("host_connect is allowed without a per-call approval; it must carry no ask")
+	}
+	call := func() pulseHostConnectResult {
+		t.Helper()
+		var r pulseHostConnectResult
+		if err := json.Unmarshal([]byte(mustPulseTool(t, h, "host_connect", fmt.Sprintf(`{"host":%q}`, pulseRemoteTestHost))), &r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// A connect that outlasts the wait bound is reported as in progress, not awaited.
+	started := time.Now()
+	if r := call(); r.State != "connecting" {
+		t.Fatalf("slow connect = %+v, want connecting", r)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("host_connect must not wait for a whole connect")
+	}
+	// Calling again must not start a second connect.
+	if r := call(); r.State != "connecting" {
+		t.Fatalf("second call = %+v, want connecting", r)
+	}
+	if n := connects.Load(); n != 1 {
+		t.Fatalf("one connect attempt expected, got %d", n)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.pulseRemoteHostConnected(pulseRemoteTestHost) {
+		if time.Now().After(deadline) {
+			t.Fatal("the background connect never completed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if r := call(); r.State != "connected" {
+		t.Fatalf("connected host = %+v", r)
+	}
+	if n := connects.Load(); n != 1 {
+		t.Fatalf("a connected host must never be reconnected, connects = %d", n)
+	}
+}
+
+func TestHostConnectLeavesAFailedHostAloneAndRefusesUnsavedHosts(t *testing.T) {
+	h := pulseRemoteTestHandler(t, nil)
+	var connects atomic.Int32
+	h.remoteHosts = newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		return nil, errors.New("ssh: connection refused")
+	})
+	args := fmt.Sprintf(`{"host":%q}`, pulseRemoteTestHost)
+	var first, second pulseHostConnectResult
+	if err := json.Unmarshal([]byte(mustPulseTool(t, h, "host_connect", args)), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.State != "failed" || !strings.Contains(first.Error, "connection refused") || first.RetryAfterSeconds == 0 {
+		t.Fatalf("first attempt = %+v", first)
+	}
+	if err := json.Unmarshal([]byte(mustPulseTool(t, h, "host_connect", args)), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.State != "failed" || second.RetryAfterSeconds == 0 || !strings.Contains(second.Error, "connection refused") {
+		t.Fatalf("a repeat inside the cooldown must report the last failure: %+v", second)
+	}
+	if n := connects.Load(); n != 1 {
+		t.Fatalf("a failed host must not be retried inside the cooldown, connects = %d", n)
+	}
+
+	if _, err := runPulseTool(t, h, "host_connect", `{"host":"evil@elsewhere"}`); err == nil {
+		t.Fatal("a host that is not the host of a saved project must be refused")
+	}
+	if _, err := runPulseTool(t, h, "host_connect", `{}`); err == nil {
+		t.Fatal("host is required")
+	}
+	if n := connects.Load(); n != 1 {
+		t.Fatalf("refused calls must not dial, connects = %d", n)
 	}
 }

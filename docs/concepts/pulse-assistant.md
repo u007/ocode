@@ -322,6 +322,7 @@ error.
 | `session_read` | `session_id`, `host?`, `last?` 1-200 (30), `search?` | `{session_id, host?, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id`, `host?` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
 | `project_list` | none | `{projects: [{path, name, host?, kind?, group?, connected?}]}`: every project in the store, local and remote (SSH/WSL) | sorted by host then path (local first); `connected` appears on remote projects only and says whether this server holds a live connection to the host right now, without dialing |
+| `host_connect` | `host` | `{host, state: "connected"\|"connecting"\|"failed", error?, retry_after_seconds?}` | **allow rule, no per-call ask**; the host must be the host of a saved project, and the connect uses that project's path and port. Starts the connect in the background and returns after at most `remoteConnectWaitBound` (2 s); `connecting` means check `project_list` or the board later. Never reconnects a connected host, never forces or supersedes an attempt in flight, and leaves a host alone for 30 s after an attempt (`pulseHostConnectCooldown`), answering from the last result |
 | `terminal_tabs` | none | `{projects: [{project, host?, remote_error?, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by host then project, terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it. A remote project (tab key `<host>::<path>`) carries its `host`, which `terminal_read`/`terminal_screen` take; its live state comes from that host's own server, and a host that is not connected or does not answer lists its tabs without live state and says why in `remote_error` |
 | `terminal_read` | `terminal_id`, `host?`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, host?, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed (a line ending in `\r` shows its last redraw, so progress bars do not read as blank; a redraw that erases the line with `CSI K`/`CSI J` shows it empty), 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; a remote terminal needs its `host` (see "Remote hosts"); the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
 | `terminal_screen` | `terminal_id`, `host?` | `{terminal_id, host?, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
@@ -408,10 +409,21 @@ connection, with the same bearer token the browser proxy injects
   log uses (`pulseHistoryReader`), so paging, `head`, `offset`, the 1 MiB window and the
   256 KiB screen replay behave identically. The screen's `cols`/`rows` come from the
   host's live row, so it needs a size the host's browser reported, as a local one does.
-- **A tool call never dials.** It uses `connectedWorkspace`, so an LLM loop cannot start
-  an SSH connect or park on one (CLAUDE.md "Remote connects"). A saved host with no live
-  connection is an error naming it ("open one of its projects in the app to connect it"),
-  never a retry. The operator connects it by opening a project of that host.
+- **A read or write tool never dials.** It uses `connectedWorkspace`, so an LLM loop cannot
+  start an SSH connect or park on one (CLAUDE.md "Remote connects"). A saved host with no
+  live connection is an error naming it, never a retry. The one tool that connects is
+  `host_connect`, below; the operator can also connect by opening a project of that host.
+- **`host_connect` is the only dialing tool, and it is bounded.** It is allowed without a
+  per-call ask because it can only reach hosts the operator already saved, and it does what
+  opening a project of that host does. It goes through `workspaceForPort`, so the connect
+  runs in the background, every caller waits at most 2 s, and a connect already in flight
+  is joined, not duplicated. On top of the registry's 5 s failed-connect memory the tool
+  keeps its own 30 s per-host cooldown (`pulseRemoteConnectState`), because a model
+  retrying in a loop would otherwise start an SSH connect every few seconds. It has no
+  `force` (a stuck "connecting" stays the operator's Reconnect action in the UI) and no
+  config or restart side effects. The system prompt tells the model to call it only when
+  the operator asks about, or asks to connect, a host the board lists under "Remote hosts
+  not shown", and to check again on a later turn after `connecting`.
 - **Admission is the browser proxy's.** The host must be the host of a saved project, and
   the terminal's path must be a saved project of that host (a saved `~/app` matches the
   host's expanded `/home/me/app`, `pulseRemoteSavedPath`). The project is registered on
@@ -526,8 +538,8 @@ assistant never appears as a card, never counts as a child, and is absent from
   remote session (send, command, permission and question answers, close) is not built.
 - Stop indicators and the activation gate cover this server's sessions and terminals only;
   a remote host's turn-done, ask or terminal-stop never wakes the assistant.
-- A remote terminal is readable only while its host is connected from this server. The
-  assistant cannot connect a host itself.
+- A remote host is readable only while connected from this server. The assistant can start
+  a connect with `host_connect` but not force or restart one.
 - The board is a point-in-time snapshot built when the turn starts; the model must
   call tools for fresher data.
 - Idle eviction (30 min) drops the live agent like any session; `GET

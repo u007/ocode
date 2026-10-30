@@ -519,3 +519,117 @@ func (h *Handler) pulseRemoteSessionAsks(host, id string) (*PendingAsks, error) 
 	}
 	return resp.PendingAsks, nil
 }
+
+// --- host_connect ---
+
+// pulseHostConnectCooldown is how long after one host_connect attempt the next
+// one for the same host is answered from the last attempt instead of starting
+// another connect. The registry already remembers a failure for a few seconds
+// (remoteConnectCooldown), which is short enough that a model retrying in a loop
+// would still start an SSH connect every few seconds. This is the assistant's own
+// bound on top of it.
+const pulseHostConnectCooldown = 30 * time.Second
+
+type pulseConnectAttempt struct {
+	at  time.Time
+	err string
+}
+
+// pulseRemoteConnectState remembers the last host_connect attempt per host. The
+// zero value is ready to use.
+type pulseRemoteConnectState struct {
+	mu   sync.Mutex
+	last map[string]pulseConnectAttempt
+}
+
+type pulseHostConnectResult struct {
+	Host string `json:"host"`
+	// State is "connected", "connecting" (the connect is running in the
+	// background; check project_list or the board in a moment) or "failed".
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
+	// RetryAfterSeconds is set when a failed host is being left alone.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+}
+
+func (h *Handler) pulseRemoteConnectTools() []*pulseTool {
+	return []*pulseTool{{
+		name:  "host_connect",
+		desc:  "Connect a remote SSH/WSL host so its sessions and terminals become readable. Only for a host of a saved project (project_list shows connected: false). It starts the connection and returns after at most a couple of seconds: state \"connecting\" means it is still coming up, so check project_list or the board on a later turn instead of calling again. A failed host is not retried for 30 seconds. Use it only when the operator asks about, or asks you to connect, a host that is not connected. It never reconnects a host that is already connected.",
+		props: map[string]any{"host": map[string]any{"type": "string", "description": "Host as project_list shows it"}},
+		run:   h.pulseHostConnectTool,
+	}}
+}
+
+func (h *Handler) pulseHostConnectTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		Host string `json:"host"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	host := strings.TrimSpace(args.Host)
+	if host == "" {
+		return "", errors.New("host is required")
+	}
+	if h.remoteHosts == nil {
+		return "", errors.New("remote connections are not available on this server")
+	}
+	// Admission is the browser proxy's: the host must be the host of a saved
+	// project, and the connect uses that project's path and port. The tool never
+	// names an arbitrary ssh target.
+	proj, ok := h.firstSavedProjectForHost(host)
+	if !ok {
+		return "", fmt.Errorf("%q is not the host of a saved project (see project_list)", host)
+	}
+	port := proj.RemotePort
+	res := pulseHostConnectResult{Host: host}
+
+	if h.pulseRemoteHostConnected(host) {
+		res.State = "connected"
+		return marshalPulseString(res)
+	}
+
+	st := &h.pulseRemoteConnect
+	st.mu.Lock()
+	if last, seen := st.last[host]; seen {
+		if wait := pulseHostConnectCooldown - time.Since(last.at); wait > 0 {
+			st.mu.Unlock()
+			if h.remoteHosts.status(host, port).Connecting {
+				res.State = "connecting"
+				return marshalPulseString(res)
+			}
+			res.State, res.Error, res.RetryAfterSeconds = "failed", last.err, int(wait.Seconds())+1
+			if res.Error == "" {
+				res.Error = "the last attempt did not finish connected"
+			}
+			return marshalPulseString(res)
+		}
+	}
+	if st.last == nil {
+		st.last = make(map[string]pulseConnectAttempt)
+	}
+	st.last[host] = pulseConnectAttempt{at: time.Now()}
+	st.mu.Unlock()
+
+	// workspaceForPort runs the connect in the background and waits at most
+	// remoteConnectWaitBound (2 s) for it, so this call never parks on a slow SSH
+	// connect. It joins an attempt already in flight instead of starting another.
+	_, err := h.remoteHosts.workspaceForPort(host, proj.Path, port)
+	switch {
+	case err == nil:
+		res.State = "connected"
+		st.mu.Lock()
+		delete(st.last, host)
+		st.mu.Unlock()
+	case errors.Is(err, errConnectInProgress):
+		res.State = "connecting"
+	default:
+		res.State, res.Error = "failed", truncateRunes(err.Error(), 300)
+		st.mu.Lock()
+		st.last[host] = pulseConnectAttempt{at: time.Now(), err: res.Error}
+		st.mu.Unlock()
+		res.RetryAfterSeconds = int(pulseHostConnectCooldown.Seconds())
+	}
+	return marshalPulseString(res)
+}

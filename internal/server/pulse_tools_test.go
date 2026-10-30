@@ -50,7 +50,7 @@ func mustPulseTool(t *testing.T, h *Handler, name, args string) string {
 func TestPulseToolsShape(t *testing.T) {
 	h := pulseTestHandler(t)
 	tools := h.pulseTools()
-	want := []string{"activation_read", "activation_write", "agent_runs", "memory_read", "memory_write", "permission_resolve", "project_list", "pulse_board", "question_answer", "question_dismiss", "session_ask", "session_close", "session_command", "session_new", "session_read", "session_recap", "session_send", "terminal_kill", "terminal_new", "terminal_read", "terminal_screen", "terminal_tabs"}
+	want := []string{"activation_read", "activation_write", "agent_runs", "host_connect", "memory_read", "memory_write", "permission_resolve", "project_list", "pulse_board", "question_answer", "question_dismiss", "session_ask", "session_close", "session_command", "session_new", "session_read", "session_recap", "session_send", "terminal_kill", "terminal_new", "terminal_read", "terminal_screen", "terminal_tabs"}
 	var got []string
 	for _, pt := range tools {
 		got = append(got, pt.Name())
