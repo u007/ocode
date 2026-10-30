@@ -111,16 +111,23 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 			run:   h.pulseSessionRecapTool,
 		},
 		{
+			name:  "project_list",
+			desc:  "List every project this server knows: local ones and remote SSH/WSL ones (host set). A remote project says whether its host is connected right now; the terminal tools can read a remote terminal only while it is.",
+			props: map[string]any{},
+			run:   h.pulseProjectListTool,
+		},
+		{
 			name:  "terminal_tabs",
-			desc:  "List the open terminal tabs, grouped by project. Each terminal says whether it is live and whether a program (command) is running in it.",
+			desc:  "List the open terminal tabs, grouped by project, local and remote. A remote project carries its host: pass that host to terminal_read and terminal_screen. Each terminal says whether it is live and whether a program (command) is running in it; a remote project whose host is not connected has no live state and says why in remote_error.",
 			props: map[string]any{},
 			run:   h.pulseTerminalTabsTool,
 		},
 		{
 			name: "terminal_read",
-			desc: fmt.Sprintf("Read N lines (default %d, max %d) of a terminal's output, ANSI escape codes removed. By default the last lines; offset skips that many lines back from the end, so repeated calls page backwards. head=true reads from the start of the output instead, and offset then skips forward from the start. Only the newest or oldest %d KiB of history is reachable. Each call reads the output as it is now, so on a terminal that is still writing, paging can overlap or skip lines. Terminal ids come from terminal_tabs.", pulseTerminalDefaultLines, pulseTerminalMaxLines, pulseTerminalWindowBytes>>10),
+			desc: fmt.Sprintf("Read N lines (default %d, max %d) of a terminal's output, ANSI escape codes removed. By default the last lines; offset skips that many lines back from the end, so repeated calls page backwards. head=true reads from the start of the output instead, and offset then skips forward from the start. Only the newest or oldest %d KiB of history is reachable. Each call reads the output as it is now, so on a terminal that is still writing, paging can overlap or skip lines. Terminal ids come from terminal_tabs; for a remote project's terminal also pass its host.", pulseTerminalDefaultLines, pulseTerminalMaxLines, pulseTerminalWindowBytes>>10),
 			props: map[string]any{
 				"terminal_id": str("Terminal id from terminal_tabs"),
+				"host":        str("The project's host from terminal_tabs, for a remote (SSH/WSL) terminal; omit for a local one"),
 				"lines":       integer(fmt.Sprintf("How many lines to return (1-%d, default %d)", pulseTerminalMaxLines, pulseTerminalDefaultLines)),
 				"offset":      integer("Lines to skip from the end (or from the start with head), default 0"),
 				"head":        map[string]any{"type": "boolean", "description": "true to read from the start of the output, default false (the end)"},
@@ -128,10 +135,13 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 			run: h.pulseTerminalReadTool,
 		},
 		{
-			name:  "terminal_screen",
-			desc:  fmt.Sprintf("Read a live terminal's current screen as text, laid out at the terminal's own size, the way its dashboard row shows it. Use this for a full-screen program such as claude: it repaints in place, so terminal_read would return a jumble of frames. Use terminal_read for line-oriented output like a build or test log. Replays the newest %d KiB of output. Only a live terminal has a screen; ids come from terminal_tabs.", pulseTerminalScreenBytes>>10),
-			props: map[string]any{"terminal_id": str("Terminal id from terminal_tabs")},
-			run:   h.pulseTerminalScreenTool,
+			name: "terminal_screen",
+			desc: fmt.Sprintf("Read a live terminal's current screen as text, laid out at the terminal's own size, the way its dashboard row shows it. Use this for a full-screen program such as claude: it repaints in place, so terminal_read would return a jumble of frames. Use terminal_read for line-oriented output like a build or test log. Replays the newest %d KiB of output. Only a live terminal has a screen; ids come from terminal_tabs, and a remote project's terminal also needs its host.", pulseTerminalScreenBytes>>10),
+			props: map[string]any{
+				"terminal_id": str("Terminal id from terminal_tabs"),
+				"host":        str("The project's host from terminal_tabs, for a remote (SSH/WSL) terminal; omit for a local one"),
+			},
+			run: h.pulseTerminalScreenTool,
 		},
 		{
 			name:  "agent_runs",
@@ -382,8 +392,14 @@ type pulseTabTerminal struct {
 }
 
 type pulseTabsProject struct {
-	Project   string             `json:"project"`
-	Terminals []pulseTabTerminal `json:"terminals"`
+	// Project is the path on its host.
+	Project string `json:"project"`
+	// Host is "" for a local project, else the SSH/WSL host to pass to
+	// terminal_read and terminal_screen.
+	Host string `json:"host,omitempty"`
+	// RemoteError says why a remote project's terminals carry no live state.
+	RemoteError string             `json:"remote_error,omitempty"`
+	Terminals   []pulseTabTerminal `json:"terminals"`
 }
 
 func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
@@ -405,12 +421,43 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 	for _, row := range h.pulseTerminalRows() {
 		live[row.ID] = row
 	}
+
+	// Remote projects' shells live on their hosts, so their live state comes from
+	// each connected host's own server. Hosts are asked in parallel and never
+	// dialed: an unreachable one costs one bounded request, not a connect.
+	var hosts []string
+	seen := make(map[string]bool)
+	for _, k := range keys {
+		if host, _ := pulseRemoteTabKey(k); host != "" && !seen[host] {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	remoteLive, remoteErrs := h.pulseRemoteLiveByHost(hosts)
+	remoteRows := make(map[string]map[string]pulseTerminalRow, len(remoteLive))
+	for host, rows := range remoteLive {
+		m := make(map[string]pulseTerminalRow, len(rows))
+		for _, r := range rows {
+			m[r.ID] = r
+		}
+		remoteRows[host] = m
+	}
+
 	projects := make([]pulseTabsProject, 0, len(keys))
 	for _, k := range keys {
+		host, path := pulseRemoteTabKey(k)
+		group := pulseTabsProject{Project: path, Host: host}
+		rows := live
+		if host != "" {
+			rows = remoteRows[host]
+			if err := remoteErrs[host]; err != nil {
+				group.RemoteError = truncateRunes(err.Error(), 200)
+			}
+		}
 		terms := make([]pulseTabTerminal, 0, len(all[k].Terminals))
 		for _, t := range all[k].Terminals {
 			pt := pulseTabTerminal{ID: t.ID, Title: t.Title, OSCTitle: t.OSCTitle}
-			if row, ok := live[t.ID]; ok {
+			if row, ok := rows[t.ID]; ok {
 				pt.Live = true
 				pt.Running = row.Running
 				pt.Command = row.Command
@@ -418,8 +465,17 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 			terms = append(terms, pt)
 		}
 		sort.Slice(terms, func(i, j int) bool { return terms[i].ID < terms[j].ID })
-		projects = append(projects, pulseTabsProject{Project: k, Terminals: terms})
+		group.Terminals = terms
+		projects = append(projects, group)
 	}
+	// Local projects first (host ""), then by host, then path: keys sort by
+	// "<host>::<path>", which already interleaves them by path.
+	sort.SliceStable(projects, func(i, j int) bool {
+		if projects[i].Host != projects[j].Host {
+			return projects[i].Host < projects[j].Host
+		}
+		return projects[i].Project < projects[j].Project
+	})
 	return pulseCapped(len(projects), func(n int, truncated bool) any {
 		return struct {
 			Projects  []pulseTabsProject `json:"projects"`
@@ -431,6 +487,7 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		TerminalID string `json:"terminal_id"`
+		Host       string `json:"host"`
 		Lines      *int   `json:"lines"`
 		Offset     int    `json:"offset"`
 		Head       bool   `json:"head"`
@@ -451,7 +508,7 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 	if args.Offset < 0 {
 		return "", fmt.Errorf("offset must be non-negative, got %d", args.Offset)
 	}
-	project, text, windowBefore, windowAfter, lineClipped, err := h.pulseTerminalWindow(args.TerminalID, args.Head)
+	project, text, windowBefore, windowAfter, lineClipped, err := h.pulseTerminalWindow(args.TerminalID, args.Host, args.Head)
 	if err != nil {
 		return "", err
 	}
@@ -471,6 +528,7 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 		}
 		return struct {
 			TerminalID    string   `json:"terminal_id"`
+			Host          string   `json:"host,omitempty"`
 			Project       string   `json:"project"`
 			Head          bool     `json:"head,omitempty"`
 			Offset        int      `json:"offset,omitempty"`
@@ -479,7 +537,7 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 			HasMoreAfter  bool     `json:"has_more_after,omitempty"`
 			Truncated     bool     `json:"truncated,omitempty"`
 			LineClipped   bool     `json:"line_clipped,omitempty"`
-		}{args.TerminalID, project, args.Head, args.Offset, append([]string{}, kept...), before, after, truncated, lineClipped}
+		}{args.TerminalID, args.Host, project, args.Head, args.Offset, append([]string{}, kept...), before, after, truncated, lineClipped}
 	})
 }
 

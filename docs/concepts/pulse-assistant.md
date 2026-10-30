@@ -321,9 +321,10 @@ error.
 | `pulse_board` | `scope?` live (default) / all | `{items: [PulseRow]}` as `GET /api/pulse` | cap drops tail rows |
 | `session_read` | `session_id`, `last?` 1-200 (30), `search?` | `{session_id, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
-| `terminal_tabs` | none | `{projects: [{project, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by project then terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it |
-| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed (a line ending in `\r` shows its last redraw, so progress bars do not read as blank; a redraw that erases the line with `CSI K`/`CSI J` shows it empty), 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
-| `terminal_screen` | `terminal_id` | `{terminal_id, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
+| `project_list` | none | `{projects: [{path, name, host?, kind?, group?, connected?}]}`: every project in the store, local and remote (SSH/WSL) | sorted by host then path (local first); `connected` appears on remote projects only and says whether this server holds a live connection to the host right now, without dialing |
+| `terminal_tabs` | none | `{projects: [{project, host?, remote_error?, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by host then project, terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it. A remote project (tab key `<host>::<path>`) carries its `host`, which `terminal_read`/`terminal_screen` take; its live state comes from that host's own server, and a host that is not connected or does not answer lists its tabs without live state and says why in `remote_error` |
+| `terminal_read` | `terminal_id`, `host?`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, host?, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed (a line ending in `\r` shows its last redraw, so progress bars do not read as blank; a redraw that erases the line with `CSI K`/`CSI J` shows it empty), 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; a remote terminal needs its `host` (see "Remote hosts"); the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
+| `terminal_screen` | `terminal_id`, `host?` | `{terminal_id, host?, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
 | `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
 | `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
@@ -389,6 +390,37 @@ scope test will say whether it leaked.
   xterm, keeps it. The tool strips `ESC[3J` from the
   input before writing, since x/vt would otherwise blank the visible screen on it. See
   `docs/gotchas/pulse-screen-emulator-parity.md`.
+
+**Remote hosts**
+
+A remote (SSH/WSL) project's shells and sessions live in the host's own `ocode serve
+--remote`, so nothing in this process's registries describes them. `project_list`
+shows which remote projects exist and whether their host is connected. The terminal
+tools reach a remote terminal by asking that host's server over the workspace
+connection, with the same bearer token the browser proxy injects
+(`internal/server/pulse_remote.go`, `pulse_remote_terminal.go`):
+
+- `terminal_tabs` joins each remote project's tabs with the host's
+  `GET /api/pulse/terminals`; hosts are asked in parallel, each under a deadline
+  (`pulseRemoteTimeout`, 8 s).
+- `terminal_read` and `terminal_screen` with `host` read the host's
+  `GET /api/terminal/{id}/history` page by page through the same window code a local
+  log uses (`pulseHistoryReader`), so paging, `head`, `offset`, the 1 MiB window and the
+  256 KiB screen replay behave identically. The screen's `cols`/`rows` come from the
+  host's live row, so it needs a size the host's browser reported, as a local one does.
+- **A tool call never dials.** It uses `connectedWorkspace`, so an LLM loop cannot start
+  an SSH connect or park on one (CLAUDE.md "Remote connects"). A saved host with no live
+  connection is an error naming it ("open one of its projects in the app to connect it"),
+  never a retry. The operator connects it by opening a project of that host.
+- **Admission is the browser proxy's.** The host must be the host of a saved project, and
+  the terminal's path must be a saved project of that host (a saved `~/app` matches the
+  host's expanded `/home/me/app`, `pulseRemoteSavedPath`). The project is registered on
+  the host first (`ensureRemoteProject`), as the proxy does, because the host's history
+  endpoint admits only registered projects.
+- The local `terminalAccessAllowed()` gate applies to remote output too: it reaches the
+  model provider from this process, so the remote host's own gate is not the only one.
+- Remote terminals are read-only here exactly as local ones are. `terminal_new` and
+  `terminal_kill` still refuse remote hosts.
 
 **Access**
 
@@ -461,8 +493,12 @@ assistant never appears as a card, never counts as a child, and is absent from
   server process's live sessions (and, for `scope=all`, the disk listing of local
   projects). Sessions held by another `ocode` process are invisible until they
   persist.
-- Remote (SSH/WSL) projects: sessions are not listed by the disk scan and remote
-  terminals are not readable.
+- Remote (SSH/WSL) projects: their terminals are readable through `host` (see "Remote
+  hosts"), but their SESSIONS are not on the board, in `session_read` or in the disk scan:
+  those live in the host's server process. `project_list` shows the project exists and
+  whether it is connected, and nothing more about its sessions.
+- A remote terminal is readable only while its host is connected from this server. The
+  assistant cannot connect a host itself.
 - The board is a point-in-time snapshot built when the turn starts; the model must
   call tools for fresher data.
 - Idle eviction (30 min) drops the live agent like any session; `GET
@@ -480,7 +516,8 @@ assistant never appears as a card, never counts as a child, and is absent from
 ## References
 
 - `internal/server/pulse_assistant.go`, `pulse_tools.go`, `pulse_terminal.go`
+- `internal/server/pulse_remote.go`, `pulse_remote_terminal.go` (remote hosts: `project_list`, remote tabs, remote log reader)
 - `internal/server/pulse_activation.go`, `internal/agent/pulse_activation.go` (activation gate)
 - `internal/agent/pulse_assistant.go` (`SetSystemPromptOverride`, `SetPulseSnapshot`, `RestrictToTools`)
 - `internal/server/agent_session.go` (`buildAgentSession` pulse branch)
-- Tests: `pulse_activation_test.go` (server and agent), `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `internal/agent/pulse_assistant_test.go`
+- Tests: `handler_pulse_remote_test.go` (remote hosts), `pulse_activation_test.go` (server and agent), `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `internal/agent/pulse_assistant_test.go`
