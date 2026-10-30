@@ -27,8 +27,8 @@ The data-backed main tabs (Files, Git, Cron, Assets) and the session Changes sub
 
 `tabLoadKey(host, projectPath, tabKey)` in `web/src/hooks/useKeyedLoad.ts:228-234` joins the three segments with a literal NUL (`\u0000`), which cannot occur in host ids or paths, so composite keys never collide. The NUL separator is also why the same path on two remote hosts is two distinct keys.
 
-- Main tabs: `tabLoadKey(activeProjectHost, activeProjectPath, "files" | "git" | "cron" | "assets")` — built once in `web/src/App.tsx:347-350`.
-- Session Changes: tab segment is `` `${sessionId}:changes` `` — `web/src/App.tsx:1853-1859` and `web/src/components/Layout/SessionSubTabs.tsx:45-48`.
+- Main tabs: `tabLoadKey(activeProjectHost, activeProjectPath, "files" | "git" | "cron" | "assets")` — built once in `web/src/App.tsx:349-352`.
+- Session Changes: tab segment is `` `${sessionId}:changes` `` — `web/src/App.tsx:1860-1866` and `web/src/components/Layout/SessionSubTabs.tsx:45-48`.
 
 Keying by project identity alone is insufficient: in an A→B→A round trip the key matches again, so a per-request **generation** (below) is also required to reject a late response issued during the *first* visit to A.
 
@@ -58,18 +58,18 @@ For an already-resolved entry the `error` transition keeps `phase: "idle"` and d
 
 ## Scoped store clear on project switch
 
-`App.tsx:336-346` tracks `{host, path}` in a ref (`previousLoadingProject`) and, when the active project's host or path changes, calls `clearTabLoadingForProject(previous.host, previous.path)` (`useKeyedLoad.ts:360-373`) — which drops only the **previous** project's key prefix (`host\0path\0…`), invalidates its owner records, and clears any armed refresh timers for those keys.
+`App.tsx:338-348` tracks `{host, path}` in a ref (`previousLoadingProject`) and, when the active project's host or path changes, calls `clearTabLoadingForProject(previous.host, previous.path)` (`useKeyedLoad.ts:360-373`) — which drops only the **previous** project's key prefix (`host\0path\0…`), invalidates its owner records, and clears any armed refresh timers for those keys.
 
-This is deliberately scoped rather than a full wipe: child effects for the newly active project claim their fresh keys **before** this parent effect runs, so clearing the whole map would cancel those just-started requests (`App.tsx:336-346`). `clearTabLoadingStore()` (`useKeyedLoad.ts:351-357`) still exists and clears everything (entries, timers, owner records) for an explicit full reset — production callers should use the scoped helper, and `__resetTabLoadingStoreForTests` is the test-only wrapper around the full clear. Either way, the guarantee holds: a visible spinner always means "loading for the currently selected project"; stale flags from the old project cannot linger.
+This is deliberately scoped rather than a full wipe: child effects for the newly active project claim their fresh keys **before** this parent effect runs, so clearing the whole map would cancel those just-started requests (`App.tsx:338-348`). `clearTabLoadingStore()` (`useKeyedLoad.ts:351-357`) still exists and clears everything (entries, timers, owner records) for an explicit full reset — production callers should use the scoped helper, and `__resetTabLoadingStoreForTests` is the test-only wrapper around the full clear. Either way, the guarantee holds: a visible spinner always means "loading for the currently selected project"; stale flags from the old project cannot linger.
 
 ## App-owned overlay/trigger wiring
 
 `App.tsx` owns all composition; panels only receive `loadingKey` + `onLoadingEvent`:
 
-- Keys and `busy` derivations: `App.tsx:347-356`; event funnel `handleTabLoadingEvent` → `emitTabLoadEvent` (`App.tsx:333-335`).
-- Each `TabsContent` carries `aria-busy` and mounts a `TabLoadingOverlay` sibling: Files `App.tsx:1564-1581`, Git `1679-1690`, Cron `1698-1707`, Assets `1715-1722`, session Changes `1853-1877`.
+- Keys and `busy` derivations: `App.tsx:349-358`; event funnel `handleTabLoadingEvent` → `emitTabLoadEvent` (`App.tsx:335-337`).
+- Each `TabsContent` carries `aria-busy` and mounts a `TabLoadingOverlay` sibling: Files `App.tsx:1571-1588`, Git `1679-1690`, Cron `1698-1707`, Assets `1715-1722`, session Changes `1853-1877`.
 - Wired panels: `FileTree` (`web/src/components/Files/FileTree.tsx:807-809`), `GitPanel:164`, `CronPanel:31`, `AssetsPanel:107`, `ChangesPanel:29` — each through `useKeyedLoad`.
-- Trigger indicators: `web/src/components/Layout/TopTabs.tsx:204/219` (main triggers) and `267/277` (the overflow Select, whose items render in a portal so the indicator must live inside the item content); `web/src/components/Layout/SessionSubTabs.tsx:45-48` on the Changes item only. Reads go through `useTabLoadingStore()` in `App.tsx:332` passed down as `loadingStates`.
+- Trigger indicators: `web/src/components/Layout/TopTabs.tsx:204/219` (main triggers) and `267/277` (the overflow Select, whose items render in a portal so the indicator must live inside the item content); `web/src/components/Layout/SessionSubTabs.tsx:45-48` on the Changes item only. Reads go through `useTabLoadingStore()` in `App.tsx:334` passed down as `loadingStates`.
 
 Tabs are force-mounted, so hidden panels can load invisibly; their trigger indicator still shows. Deliberately **not** wired: Settings and the main Sessions triggers, all other session sub-tabs (chat/terminal/browser), editor tabs, preview viewers, browser and terminal panels — those own specialized loading UI.
 

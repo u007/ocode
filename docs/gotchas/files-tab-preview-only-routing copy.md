@@ -56,7 +56,7 @@ helper.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
 (`FileTabContent.tsx:19`) that the controlled viewers need; every editor tab
-stays mounted (hidden, not unmounted — see `App.tsx:1013`), so this state
+stays mounted (hidden, not unmounted — see `App.tsx:1015`), so this state
 survives tab switches.
 
 ## Why `FileEditor` was left pure

@@ -141,7 +141,7 @@ output is a tool result consumed by the model, not a response shown to a user.
   `SetSuggestedResponsesEnabled` / `SuggestedResponsesEnabled` accessors, and the
   `NewAgent` read from `cfg.Ocode.SuggestedResponsesEnabled`.
 - Live agents pick the setting up the same way the doc-prompt toggle does: the TUI
-  carries it across agent rebuilds (`internal/tui/model.go:1280`), and the server
+  carries it across agent rebuilds (`internal/tui/model.go:1291`), and the server
   rebuilds resident agents through the existing `rebuildAgentForPreferenceChange`
   seam (`internal/server/handler_skills.go:225`) so a just-saved setting takes effect
   without a server restart.

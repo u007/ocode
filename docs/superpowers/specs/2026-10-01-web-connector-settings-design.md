@@ -191,7 +191,7 @@ Web, landed 2026-10-01 (plan Phase 1): client methods for all 8 routes
 `submitConnectFlowInput`, `cancelConnectFlow`), `ConnectorsForm.tsx`, and the
 `SettingsPanel` section — `connectors` sits immediately before `profiles`
 (`SettingsPanel.tsx:78`) — base creds are the layer beneath profile overlays. The
-legacy `api.connectProvider` (`client.ts:2885`) is kept deliberately: it targets
+legacy `api.connectProvider` (`client.ts:2886`) is kept deliberately: it targets
 a different, older Server-level route.
 
 2026-10-09: the web surfaces for the remaining kinds landed. `ConnectFlowPanel` renders

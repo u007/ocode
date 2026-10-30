@@ -27,7 +27,7 @@ sessions. The engine is `internal/agent/goal.go`.
 | `/goal clear` (also `stop`, `off`, `reset`, `none`, `cancel`) | Removes the goal. Recognised only as the lone argument. | Instant | Queued while busy |
 
 - `/goal stop the flaky test` is a condition, not a clear: a clear verb counts only when it is the
-  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1914`).
+  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1920`).
 - A condition must be non-empty and at most `GoalMaxConditionLen` (4000) characters
   (`internal/agent/goal.go:30`, `SetGoal` at `:163`).
 - The kickoff turn is `GoalKickoffPrompt` (`internal/agent/goal.go:231`): the condition plus "verify
@@ -117,12 +117,12 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `/goal <text>` starts fresh state (`SetGoal`, `:162`).
 - **A pending ask never auto-resumes.** The server skips the goal judge while the tail is an
   unresolved permission or question ask (`agent_session.go:1318`). The TUI runs its post-turn
-  decisions only when `queueDrainBlocked()` is false (`model.go:5591`).
+  decisions only when `queueDrainBlocked()` is false (`model.go:5618`).
 - **A deferred resume waits for an idle session.** In the TUI, a `Resume` verdict that cannot fire
   right away (the session is streaming, compacting, or has a queue drain blocked) sets
   `goalResumePending`. `compactFinishedMsg` fires it once the session is idle (`goalResumeReady`,
   `model.go:303`, `:5792`). Any new turn clears the flag, because that turn's own judge decides the
-  goal (`askAgent`, `model.go:16027`).
+  goal (`askAgent`, `model.go:16096`).
 - **The resume message is user-role.** `GoalResumeMessage` (`goal.go:241`) produces a `[ocode:goal]`
   user message: the condition, the evaluator's last reason, and a continue instruction. It is never
   system-role, so the cached system prefix stays stable.
@@ -135,10 +135,10 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   rejected values are logged with the `GOAL` debug kind.
 - Written after every judged turn (`goalShouldResume`, `agent_session.go:1491`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
-  (`sessionSidebarMetadata`, `model.go:21261`).
+  (`sessionSidebarMetadata`, `model.go:21330`).
 - Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads
-  (`restoreSessionMetadata`, `model.go:21295`). The key is listed in `sessionOwnedMetadataKeys`
-  (`model.go:21233`), so the TUI's carry-forward copy never overwrites it.
+  (`restoreSessionMetadata`, `model.go:21364`). The key is listed in `sessionOwnedMetadataKeys`
+  (`model.go:21302`), so the TUI's carry-forward copy never overwrites it.
 
 ## Endpoints
 

@@ -7,12 +7,12 @@ sessions. Total long-lived connections: 2 (events SSE + terminal WebSocket).
 
 **Context (self-contained):**
 - Today the client opens: a permanent chat-mirror `EventSource`
-  (`web/src/api/client.ts:709-737 connectSessionMirror`, consumed by
+  (`web/src/api/client.ts:710-738 connectSessionMirror`, consumed by
   `web/src/components/Layout/SessionTabSync.tsx:38-246`), one agent-runs
   `EventSource` per session (`web/src/hooks/useAgentRuns.ts:26-53`), a logs
   `EventSource` (`web/src/components/.../LogPanel.tsx:86`), a terminal
   WebSocket, 10s git polling (`CoworkSidebar.tsx:121-138`) and 60s spending
-  polling (`App.tsx:76`). On HTTP/1.1's 6-per-origin cap this starves
+  polling (`App.tsx:77`). On HTTP/1.1's 6-per-origin cap this starves
   `POST /api/chat` → multi-minute hangs.
 - Server side (Parts 02–03) provides `GET /api/events` streaming envelopes
   `{event, project, session_id, seq, data}` (projects viewed passed as a

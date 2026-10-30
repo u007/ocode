@@ -218,12 +218,12 @@ capability** in `?media_token=`:
   `..`. Returns `{"token": "..."}`; a 500 (never a predictable token) if the
   system RNG fails.
 - **Grant validation happens at use time, in the middleware**, against the exact
-  triple (`server.go:848`) — the token is a capability, never a substitute for
+  triple (`server.go:850`) — the token is a capability, never a substitute for
   the raw handler's own anchoring/containment checks.
 
 ## `mediaAuthMiddleware` — the rejection policy is load-bearing
 
-`mediaAuthMiddleware` (`server.go:848`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
+`mediaAuthMiddleware` (`server.go:850`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
 three constraints that make the capability safe even if leaked:
 
 - **No cross-host reuse.** A token granted for `(path, root, host_A)` fails

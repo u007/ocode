@@ -55,13 +55,13 @@ Two more facts close the remaining gaps:
 - The sentinel path in `Agent.Step` is only taken when `a.OnPermissionAsk` is
   nil (`internal/agent/agent.go:4135`).
 - `SetSubAgentPermAsker` has exactly one real install site in the whole tree,
-  `internal/tui/model.go:18842`. The server never installs one; `subagent.go:552`
+  `internal/tui/model.go:18911`. The server never installs one; `subagent.go:552`
   and `advisor_tool.go:358` merely propagate the parent's (nil) asker.
 
 ## Non-goals
 
 - **The TUI is unaffected.** It installs a working asker
-  (`tui/model.go:18842-18859`) and this change does not touch that path. The
+  (`tui/model.go:18911-18928`) and this change does not touch that path. The
   attribution wrapper (§Components #2) is a no-op when the name is already set.
 - **ACP and `runcli` are unaffected.** ACP installs its own asker; `runcli`'s
   is opt-in (`internal/runcli/run.go:267`). Either way both keep their current

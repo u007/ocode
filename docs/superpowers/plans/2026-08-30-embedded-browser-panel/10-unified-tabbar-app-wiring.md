@@ -373,7 +373,7 @@ git commit -m "feat(browser): browser tab kind + add control in UnifiedTabBar"
 
 ## Task 10d: Render the full-width browser tab in `App.tsx`
 
-**Verified current state:** `App.tsx:157` derives `focusedKind` (default `"chat"`), `:173` `setFocusedKind`, `:713` renders `<UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />`. Center region uses CSS-visibility (`className={... ? "hidden" : ...}`) at :755, :839 to keep chat/terminal mounted-hidden. The terminal region is toggled at :729,:755.
+**Verified current state:** `App.tsx:158` derives `focusedKind` (default `"chat"`), `:173` `setFocusedKind`, `:713` renders `<UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />`. Center region uses CSS-visibility (`className={... ? "hidden" : ...}`) at :755, :839 to keep chat/terminal mounted-hidden. The terminal region is toggled at :729,:755.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -446,7 +446,7 @@ git commit -m "feat(browser): render full-width browser tab in App center region
 
 ## Task 10e: Side panel (resizable, collapsible) beside chat/terminal
 
-**Verified current state:** `useResizableSidebar` is used at `App.tsx:116,117`; its resize handle pattern is at `:672-683` (`ref={sidebar.handleRef}`, `role="separator"`, `cursor-col-resize`, `onDoubleClick={sidebar.resetToDefault}`, `onKeyDown` for arrow/Home). The hook accepts `{ storageKey, defaultWidth, minWidth, maxWidth, collapsible }`.
+**Verified current state:** `useResizableSidebar` is used at `App.tsx:117,117`; its resize handle pattern is at `:672-683` (`ref={sidebar.handleRef}`, `role="separator"`, `cursor-col-resize`, `onDoubleClick={sidebar.resetToDefault}`, `onKeyDown` for arrow/Home). The hook accepts `{ storageKey, defaultWidth, minWidth, maxWidth, collapsible }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -533,7 +533,7 @@ const closeBrowser = useBrowserStore((s) => s.close);
       className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
       onDoubleClick={browserPane.resetToDefault}
       onKeyDown={(e) => {
-        // mirror the existing sidebar handle keyboard logic at App.tsx:682
+        // mirror the existing sidebar handle keyboard logic at App.tsx:684
         if (e.key === "ArrowLeft") browserPane.nudge(-16);
         else if (e.key === "ArrowRight") browserPane.nudge(16);
         else if (e.key === "Home") browserPane.resetToDefault();

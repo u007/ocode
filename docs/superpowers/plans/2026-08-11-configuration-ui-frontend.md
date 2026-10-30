@@ -23,7 +23,7 @@
 
 **Files:**
 - Modify: `web/src/components/Layout/TopTabs.tsx:1-18` (imports, `mainTabs` array)
-- Modify: `web/src/App.tsx:108-110` (activeView union type), `App.tsx:341-382` (TabsContent switch — insert alongside `git`/`cron`/`assets`)
+- Modify: `web/src/App.tsx:109-111` (activeView union type), `App.tsx:343-384` (TabsContent switch — insert alongside `git`/`cron`/`assets`)
 - Create: `web/src/components/Settings/SettingsPanel.tsx`
 
 **Interfaces:**
@@ -50,7 +50,7 @@ const mainTabs = [
 - [x] **Step 2: Add `"settings"` to `App.tsx`'s `activeView` union**
 
 ```tsx
-  // web/src/App.tsx:108-110
+  // web/src/App.tsx:109-111
   const [activeView, setActiveView] = useState<
     "files" | "git" | "cron" | "assets" | "sessions" | "settings"
   >("sessions");
@@ -186,7 +186,7 @@ import SettingsPanel from "./components/Settings/SettingsPanel";
 ```
 
 ```tsx
-              {/* Inserted alongside the existing git/cron/assets TabsContent blocks, App.tsx:341-382 */}
+              {/* Inserted alongside the existing git/cron/assets TabsContent blocks, App.tsx:343-384 */}
               <TabsContent value="settings" forceMount className="flex-1 overflow-hidden m-0">
                 <SettingsPanel />
               </TabsContent>

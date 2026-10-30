@@ -78,7 +78,7 @@ The menu wiring is trivial; the load-bearing part is how the path is turned into
 - The **staged pane returns before the ignore item is built** (`:653-666`), so it never
   appears there.
 - API call: `api.gitIgnore(paths, projectPath, projectHost)` (`:597`) →
-  `web/src/api/client.ts:2031` → `POST /api/git/ignore${projQuery(project, host)}` with body
+  `web/src/api/client.ts:2032` → `POST /api/git/ignore${projQuery(project, host)}` with body
   `{paths}`.
 
 The **API itself accepts a tracked path** — the frontend is what restricts the menu

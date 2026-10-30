@@ -39,14 +39,14 @@
 **Risk:** standard — mechanical rename plus deletion of code that is already unreachable.
 
 **Files:**
-- Modify: `internal/tui/commands.go:175` (command table entry), `internal/tui/commands.go:1823-1841` (delete `runGoalCmd`)
-- Modify: `internal/tui/model.go:9002-9009`, `:9097`, `:9111-9117` (alias flag + instant list + rewrite), `:5748-5771` (delete `goalDoneMsg`/`goalStatusMsg` cases)
+- Modify: `internal/tui/commands.go:175` (command table entry), `internal/tui/commands.go:1829-1847` (delete `runGoalCmd`)
+- Modify: `internal/tui/model.go:9029-9036`, `:9097`, `:9111-9117` (alias flag + instant list + rewrite), `:5748-5771` (delete `goalDoneMsg`/`goalStatusMsg` cases)
 - Delete: `internal/tui/goal.go`, `internal/tui/goal_test.go` (it asserts `strings.Join`, not a feature)
 - Rename: `internal/cli/goal.go` → `internal/cli/orchestrate.go`, `internal/cli/goal_test.go` → `internal/cli/orchestrate_test.go`; `main.go:221` subcommand `goal` → `orchestrate`
 - Modify: `internal/agent/agent_registry.go:157-160` (comment: there is no TUI intercept; `/orchestrate` switches to the plugin's `orchestrator` primary agent and sends the goal as a normal turn; the Go pipeline is CLI-only)
-- Modify: `web/src/components/Chat/commands.ts:119`, `:578`, `:1931-1948` (`/goal` → `/orchestrate`, `handleGoal` → `handleOrchestrate`; the `/goal` slot is reused in Task 5)
+- Modify: `web/src/components/Chat/commands.ts:120`, `:578`, `:1931-1948` (`/goal` → `/orchestrate`, `handleGoal` → `handleOrchestrate`; the `/goal` slot is reused in Task 5)
 - Modify: `internal/tui/command_test.go:1686`
-- Modify docs: `README.md:562`, `:605`, `:670`, `:877`, `:883`; `skills/ocode-usage/SKILL.md:285`, `:527`; `skills/ocode-tui/SKILL.md:151`; `docs/web-desktop-parity-todo.md:111-115`; `internal/tui/commands.go:1893` (help copy "not just /goal" → "not just /orchestrate")
+- Modify docs: `README.md:562`, `:605`, `:670`, `:877`, `:883`; `skills/ocode-usage/SKILL.md:285`, `:527`; `skills/ocode-tui/SKILL.md:151`; `docs/web-desktop-parity-todo.md:111-115`; `internal/tui/commands.go:1899` (help copy "not just /goal" → "not just /orchestrate")
 
 **Interfaces:**
 - Produces: slash command `/orchestrate <goal>` (TUI + web), CLI `ocode orchestrate …` with unchanged flags. `cli.ParseGoalArgs`/`GoalOptions` renamed to `ParseOrchestrateArgs`/`OrchestrateOptions`.

@@ -12,7 +12,7 @@ and the streaming spinner can no longer hang forever (turn-state-derived with
 heartbeat watchdog + reconcile).
 
 **Context (self-contained):**
-- Today `tuiStatus` is fetched once at app mount (`web/src/App.tsx:186-203`,
+- Today `tuiStatus` is fetched once at app mount (`web/src/App.tsx:187-204`,
   deps `[dispatch]`) and keyed to whatever tab was active; switching
   session/project hits the empty slice (`web/src/stores/chatStore.tsx:74-80`)
   → sidebar empties (Bug 1). The Context panel has two sources:
@@ -38,7 +38,7 @@ heartbeat watchdog + reconcile).
   session (replaces `tuiStatus` seeding semantics); turn-state fields
   (`turnActive`, `lastHeartbeatAt`, `bootstrapStage`)
 - Modify: `web/src/App.tsx` — delete the mount-once status seed
-  (`App.tsx:186-203`) and `StatusMetricsHydrator` special-casing
+  (`App.tsx:187-204`) and `StatusMetricsHydrator` special-casing
 - Create: `web/src/hooks/useSessionStatus.ts` (+ test) — fetch-on-activation
   hook: given the active session id, fetches `/api/sessions/:id/status` into
   the store, subscribes to patching events

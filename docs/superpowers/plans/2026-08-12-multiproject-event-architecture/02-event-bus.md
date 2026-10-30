@@ -70,7 +70,7 @@ endpoint. Old SSE endpoints stay functional until Part 06.
   stops the watcher. Implement watcher/emitter reusing whatever git-status
   computation the existing `GET` endpoint uses (the one the web client polls
   every 10s from `CoworkSidebar.tsx:121-138`), and the spending computation
-  polled from `App.tsx:76`. Verify. Commit.
+  polled from `App.tsx:77`. Verify. Commit.
 
 - [ ] **Task 5: regression + ship.** `go test ./internal/...`. Manual: open
   `/api/events` with `curl -N`, trigger a chat turn and a config change,
