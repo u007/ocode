@@ -226,6 +226,9 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	// raw suggestions block would end up in the parent's prompt. Opt out, like
 	// the recap fragment above.
 	child.SetSuggestedResponsesEnabled(false)
+	// A side query's answer feeds the parent's context, not the user, so the
+	// user-facing communication standard does not apply. Opt out, like recap.
+	child.SetCommunicationStyleEnabled(false)
 	child.SetMaxSteps(maxSteps)
 	child.skipDiscovery = true
 	// Side-query agents belong to the same logical session. Share the root

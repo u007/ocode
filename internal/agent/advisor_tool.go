@@ -330,6 +330,9 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// parent's prompt and could prompt the model to emit another one. Opt out,
 	// like the recap fragment above.
 	advisorAgent.SetSuggestedResponsesEnabled(false)
+	// The advisor's advice is injected into the parent's context, not shown to
+	// the user, so the user-facing communication standard does not apply.
+	advisorAgent.SetCommunicationStyleEnabled(false)
 	advisorAgent.SetParentAdvisorInFlight(t.mainAgent.advisorGuard())
 	// This agent is used for one synchronous advisor call and must not retain
 	// its maintenance workers or background shell processes after Step returns.

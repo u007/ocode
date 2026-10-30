@@ -835,7 +835,11 @@ type Agent struct {
 	// suggestedResponsesEnabled gates the suggested-responses prompt fragment.
 	// Read once at construction (like the other prompt gates) so the cached
 	// system prefix stays byte-stable within a session.
-	suggestedResponsesEnabled  bool
+	suggestedResponsesEnabled bool
+	// communicationStyleEnabled gates the communication-style prompt fragment.
+	// Read once at construction, like the other prompt gates, so the cached
+	// system prefix stays byte-stable within a session.
+	communicationStyleEnabled  bool
 	preloadedModelContext      string // cached result of LoadModelContext, set once lazily
 	preloadedModelContextKind  string // "file" | "embedded" | "" — source of preloadedModelContext
 	preloadedModelContextPath  string // absolute file path (Kind=="file") or embedded filename (Kind=="embedded")
@@ -1256,6 +1260,21 @@ func (a *Agent) SuggestedResponsesEnabled() bool {
 	return a.suggestedResponsesEnabled
 }
 
+// SetCommunicationStyleEnabled toggles injection of the communication-style
+// prompt fragment (ASD-STE100 structural constraints plus software-domain
+// overrides). Default is true for a primary agent (see NewAgent); dispatched
+// sub-agents, ask helpers and the advisor turn it off because their output is a
+// tool result the parent model consumes, not a reply the user reads.
+func (a *Agent) SetCommunicationStyleEnabled(enabled bool) {
+	a.communicationStyleEnabled = enabled
+}
+
+// CommunicationStyleEnabled reports whether the communication-style prompt
+// fragment is active.
+func (a *Agent) CommunicationStyleEnabled() bool {
+	return a.communicationStyleEnabled
+}
+
 // SetRecapPromptEnabled toggles injection of the recap system-prompt fragment.
 // Default is true for a primary agent (see NewAgent); the helper agents that
 // NewAgent also constructs — dispatched sub-agents (subagent.go), ask
@@ -1450,6 +1469,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// unlike the doc-prompt fragment: it is a presentation affordance the user
 	// asked for, and a nil config means "no explicit preference", not "off".
 	a.suggestedResponsesEnabled = cfg == nil || cfg.Ocode.SuggestedResponsesEnabled
+	// The communication-style fragment defaults ON for the same reason: a nil
+	// config means "no explicit preference", not "off".
+	a.communicationStyleEnabled = cfg == nil || cfg.Ocode.CommunicationStyleEnabled
 	// The recap fragment is on by default and is NOT config-derived: it is a
 	// static const, so it is fixed at construction time and never varies per
 	// turn (prompt-cache stability, see append_stable.go). Helper agents

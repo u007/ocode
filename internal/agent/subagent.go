@@ -462,6 +462,9 @@ func (t TaskTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	// and in the parent's live context — where it can prompt the model to emit
 	// another one. Opt out explicitly, like the recap fragment above.
 	subAgent.SetSuggestedResponsesEnabled(false)
+	// A child's reply is a tool result for the parent model, not a response the
+	// user reads, so the user-facing communication standard does not apply.
+	subAgent.SetCommunicationStyleEnabled(false)
 	// Draw concurrency slots from the same pool as the dispatcher instead of
 	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
 	// only caps direct dispatches at each nesting level independently, and

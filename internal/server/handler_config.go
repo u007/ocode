@@ -2388,50 +2388,58 @@ func (h *Handler) HandleListHTRTabs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs})
 }
 
-// HandleGetFeaturesConfig reports the memory/doc-prompt/suggested-responses feature toggles.
+// HandleGetFeaturesConfig reports the memory/doc-prompt/suggested-responses/
+// communication-style feature toggles.
 func (h *Handler) HandleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	mem, doc, sugg := false, false, false
+	mem, doc, sugg, style := false, false, false, false
 	if h.cfg != nil {
 		mem = h.cfg.Ocode.MemoryEnabled
 		doc = h.cfg.Ocode.DocPromptEnabled
 		sugg = h.cfg.Ocode.SuggestedResponsesEnabled
+		style = h.cfg.Ocode.CommunicationStyleEnabled
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"memory_enabled":              mem,
 		"doc_prompt_enabled":          doc,
 		"suggested_responses_enabled": sugg,
+		"communication_style_enabled": style,
 	})
 }
 
-// HandleSetFeaturesConfig persists the memory/doc-prompt/suggested-responses feature toggles.
+// HandleSetFeaturesConfig persists the memory/doc-prompt/suggested-responses/
+// communication-style feature toggles.
 func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MemoryEnabled    bool `json:"memory_enabled"`
 		DocPromptEnabled bool `json:"doc_prompt_enabled"`
-		// The suggested-responses toggle is OPTIONAL in the request body: a
-		// caller that does not know about it (an older client, or the /mem and
-		// /docs slash commands) omits the key, and the stored value is kept. A
-		// plain bool would decode an absent key as false and silently turn the
-		// feature off.
+		// The suggested-responses and communication-style toggles are OPTIONAL
+		// in the request body: a caller that does not know about them (an older
+		// client, or the /mem and /docs slash commands) omits the key, and the
+		// stored value is kept. A plain bool would decode an absent key as false
+		// and silently turn the feature off.
 		SuggestedResponsesEnabled *bool `json:"suggested_responses_enabled"`
+		CommunicationStyleEnabled *bool `json:"communication_style_enabled"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	suggested := true
+	suggested, style := true, true
+	h.mu.Lock()
+	if h.cfg != nil {
+		suggested = h.cfg.Ocode.SuggestedResponsesEnabled
+		style = h.cfg.Ocode.CommunicationStyleEnabled
+	}
+	h.mu.Unlock()
 	if req.SuggestedResponsesEnabled != nil {
 		suggested = *req.SuggestedResponsesEnabled
-	} else {
-		h.mu.Lock()
-		if h.cfg != nil {
-			suggested = h.cfg.Ocode.SuggestedResponsesEnabled
-		}
-		h.mu.Unlock()
 	}
-	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled, suggested); err != nil {
+	if req.CommunicationStyleEnabled != nil {
+		style = *req.CommunicationStyleEnabled
+	}
+	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled, suggested, style); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
@@ -2440,17 +2448,19 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 		h.cfg.Ocode.MemoryEnabled = req.MemoryEnabled
 		h.cfg.Ocode.DocPromptEnabled = req.DocPromptEnabled
 		h.cfg.Ocode.SuggestedResponsesEnabled = suggested
+		h.cfg.Ocode.CommunicationStyleEnabled = style
 	}
 	h.mu.Unlock()
-	// The suggested-responses toggle is baked into the agent's cached system
-	// prompt, so a resident agent must be rebuilt for it to take effect. The
-	// rebuild is deferred while a turn is active (see
+	// The suggested-responses and communication-style toggles are baked into the
+	// agent's cached system prompt, so a resident agent must be rebuilt for them
+	// to take effect. The rebuild is deferred while a turn is active (see
 	// rebuildAgentForPreferenceChange) so in-flight work keeps its agent.
-	h.rebuildAgentsForFeatureChange("suggested responses")
+	h.rebuildAgentsForFeatureChange("prompt feature toggles")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"memory_enabled":              req.MemoryEnabled,
 		"doc_prompt_enabled":          req.DocPromptEnabled,
 		"suggested_responses_enabled": suggested,
+		"communication_style_enabled": style,
 	})
 }
 

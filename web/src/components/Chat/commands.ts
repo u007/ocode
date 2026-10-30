@@ -430,11 +430,12 @@ export interface CommandContext {
     setConfigModel?: (model: string, host?: string) => Promise<unknown>;
     /** Persist a per-chat model override (/models <name> on a real session). */
     setSessionModel?: (sessionId: string, model: string, host?: string) => Promise<unknown>;
-    getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean; suggested_responses_enabled?: boolean }>;
-    // The third argument is optional: a caller that omits it leaves the
-    // server's stored suggested-responses value untouched (the /mem and /docs
-    // commands must not silently turn that feature off).
-    setFeaturesConfig?: (memory_enabled: boolean, doc_prompt_enabled: boolean, suggested_responses_enabled?: boolean) => Promise<unknown>;
+    getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean; suggested_responses_enabled?: boolean; communication_style_enabled?: boolean }>;
+    // The third and fourth arguments are optional: a caller that omits them
+    // leaves the server's stored suggested-responses and communication-style
+    // values untouched (the /mem and /docs commands must not silently turn
+    // those features off).
+    setFeaturesConfig?: (memory_enabled: boolean, doc_prompt_enabled: boolean, suggested_responses_enabled?: boolean, communication_style_enabled?: boolean) => Promise<unknown>;
     getPathsInfo?: () => Promise<{ work_dir: string; extra_allowed_paths: string[]; upload_dir: string; text: string }>;
     getPathsConfig?: () => Promise<{ extra_allowed_paths: string[]; upload_dir: string }>;
     setPathsConfig?: (extra_allowed_paths: string[], upload_dir: string) => Promise<unknown>;

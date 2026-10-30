@@ -24,11 +24,12 @@ describe("FeaturesForm suggested-responses toggle", () => {
     setFeaturesConfig.mockReset();
   });
 
-  it("shows the toggle and saves the three feature flags together", async () => {
+  it("shows the toggle and saves the four feature flags together", async () => {
     getFeaturesConfig.mockResolvedValue({
       memory_enabled: true,
       doc_prompt_enabled: false,
       suggested_responses_enabled: true,
+      communication_style_enabled: true,
     });
     setFeaturesConfig.mockResolvedValue({});
 
@@ -43,7 +44,7 @@ describe("FeaturesForm suggested-responses toggle", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
-      expect(setFeaturesConfig).toHaveBeenCalledWith(true, false, false);
+      expect(setFeaturesConfig).toHaveBeenCalledWith(true, false, false, true);
     });
   });
 
@@ -76,5 +77,43 @@ describe("FeaturesForm suggested-responses toggle", () => {
       /Suggested responses enabled/i,
     )) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
+  });
+
+  it("ticks the communication-style toggle by default when the server omits it", async () => {
+    getFeaturesConfig.mockResolvedValue({
+      memory_enabled: true,
+      doc_prompt_enabled: false,
+    });
+
+    render(<FeaturesForm />);
+
+    const toggle = (await screen.findByLabelText(
+      /Communication style standard enabled/i,
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+  });
+
+  it("reflects a disabled communication-style toggle and saves the change", async () => {
+    getFeaturesConfig.mockResolvedValue({
+      memory_enabled: true,
+      doc_prompt_enabled: false,
+      suggested_responses_enabled: true,
+      communication_style_enabled: false,
+    });
+    setFeaturesConfig.mockResolvedValue({});
+
+    render(<FeaturesForm />);
+
+    const toggle = (await screen.findByLabelText(
+      /Communication style standard enabled/i,
+    )) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(setFeaturesConfig).toHaveBeenCalledWith(true, false, true, true);
+    });
   });
 });

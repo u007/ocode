@@ -139,6 +139,59 @@ func TestReconcileProfileAgentRebuildsOnSuggestedResponsesToggle(t *testing.T) {
 	}
 }
 
+// TestReconcileProfileAgentRebuildsOnCommunicationStyleToggle is the
+// communication-style twin of the suggested-responses test above: the fragment
+// is baked into the cached system prompt, so a toggle must reach a live session
+// through reconcile, and a second reconcile must keep the rebuilt agent.
+func TestReconcileProfileAgentRebuildsOnCommunicationStyleToggle(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+
+	h.mu.Lock()
+	h.cfg.Ocode.CommunicationStyleEnabled = false
+	h.mu.Unlock()
+	as, stage, err := h.buildAgentSession(id, "opencode-go/deepseek-v4-flash", nil, proj)
+	if err != nil {
+		t.Fatalf("build agent: %v (stage %s)", err, stage)
+	}
+	defer as.agent.Shutdown()
+	if as.agent.CommunicationStyleEnabled() {
+		t.Fatalf("agent built with communication style off reports enabled")
+	}
+	h.replaceAgentSession(id, as)
+
+	h.mu.Lock()
+	h.cfg.Ocode.CommunicationStyleEnabled = true
+	h.mu.Unlock()
+
+	reb, err := h.reconcileProfileAgent(id, as, as.model)
+	if err != nil {
+		t.Fatalf("reconcile (after toggle on): %v", err)
+	}
+	if reb == as {
+		t.Fatalf("expected a rebuilt agent after the communication-style toggle")
+	}
+	defer reb.agent.Shutdown()
+	if !reb.agent.CommunicationStyleEnabled() {
+		t.Fatalf("rebuilt agent still has communication style off")
+	}
+
+	again, err := h.reconcileProfileAgent(id, reb, reb.model)
+	if err != nil {
+		t.Fatalf("reconcile (no further change): %v", err)
+	}
+	if again != reb {
+		t.Fatalf("reconcile rebuilt again with no communication-style change")
+	}
+}
+
 // TestResolveSessionProfileOrdering checks the precedence env > window profile
 // > global fallback used by both buildAgentSession and reconcileProfileAgent.
 func TestResolveSessionProfileOrdering(t *testing.T) {

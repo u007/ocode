@@ -68,11 +68,11 @@ agent that was already running when the edit was saved.
 ## Catalog keys
 
 The catalog is `agent.PromptCatalog()` in `internal/agent/prompt_catalog.go`.
-It currently holds 20 keys: `advisor`, `advisor_claude_code`,
-`auto_continue_judge`, `compaction`, `content_guard`, `discovery_contract`,
-`doc_prompt`, `goal_judge`, `md_summary`, `network_guard`, `recap`,
-`redaction_awareness`, `speech_summary`, `subagent_context`,
-`subagent_explore`, `subagent_general`, `subagent_scout`,
+It currently holds 22 keys: `advisor`, `advisor_claude_code`,
+`auto_continue_judge`, `communication_style`, `compaction`, `content_guard`,
+`discovery_contract`, `doc_prompt`, `goal_judge`, `md_summary`,
+`network_guard`, `plan`, `recap`, `redaction_awareness`, `speech_summary`,
+`subagent_context`, `subagent_explore`, `subagent_general`, `subagent_scout`,
 `suggested_responses`, `title` and `tool_digest`.
 
 ## Deliberately not covered
