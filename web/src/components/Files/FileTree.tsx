@@ -29,6 +29,7 @@ import {
   Clipboard,
   Columns2,
   Copy,
+  Download,
   Eye,
   EyeOff,
   File,
@@ -69,6 +70,7 @@ import {
   treeRelativePath,
 } from "./fileTreeReveal";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
+import { saveBlobAsFile } from "@/lib/saveBlob";
 import { eventBus } from "@/lib/eventBus";
 import { isMutatingTool, mutatedPathsFromToolCall } from "@/lib/previewLiveMutations";
 
@@ -125,6 +127,8 @@ interface FileMenuActions {
   copy: (paths: string[]) => void;
   cut: (paths: string[]) => void;
   paste: (destDir: string) => void;
+  /** Save the given project files to this machine, one browser download each. */
+  download: (paths: string[]) => void;
   remove: (paths: string[]) => void;
   rename: (path: string) => void;
   newFile: (dir: string) => void;
@@ -249,6 +253,31 @@ export function pasteDestination(
   if (!focus || selectionSize > 1) return root;
   const abs = treePathForRequest(root, focus.path);
   return focus.isDir ? abs : parentDir(abs);
+}
+
+/** Where a file dropped on the tree lands: a folder row takes it, a file row
+ *  sends it beside itself (its parent), and anything else (empty space, the
+ *  search results) lands in the browsed root. Reads the row markers the tree
+ *  renders (`data-tree-path`, and `data-tree-dir` on folder rows). */
+export function dropDestination(root: string, target: EventTarget | null): string {
+  const row = target instanceof Element ? target.closest<HTMLElement>("[data-tree-path]") : null;
+  if (!row?.dataset.treePath) return root;
+  const abs = treePathForRequest(root, row.dataset.treePath);
+  return row.hasAttribute("data-tree-dir") ? abs : parentDir(abs);
+}
+
+/** True when a paste or drop payload carries a directory entry. Browsers hand a
+ *  copied or dropped folder over as a file-less entry they cannot read. */
+export function transferHasFolder(data: DataTransfer): boolean {
+  return Array.from(data.items ?? []).some((item) => {
+    if (item.kind !== "file") return false;
+    const entry = (
+      item as DataTransferItem & {
+        webkitGetAsEntry?: () => { isDirectory: boolean } | null;
+      }
+    ).webkitGetAsEntry?.();
+    return !!entry && entry.isDirectory;
+  });
 }
 
 /** Human label for a paste destination: the root-relative folder, or the
@@ -754,6 +783,11 @@ function TreeNode({
           <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}
         </ContextMenuItem>
       )}
+      {!isDir && (
+        <ContextMenuItem onSelect={() => menu.download(effectivePaths)}>
+          <Download className="w-3.5 h-3.5 mr-2" /> Download
+        </ContextMenuItem>
+      )}
       <ContextMenuSeparator />
       <ContextMenuItem onSelect={() => menu.remove(effectivePaths)} className="text-red-400 focus:text-red-300">
         <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
@@ -769,6 +803,7 @@ function TreeNode({
             <div
               ref={rowRef}
               data-tree-path={nodePath}
+              data-tree-dir=""
               data-revealed={isRevealed ? "" : undefined}
               className={`flex items-center gap-0.5 ${isRevealed ? "bg-amber-400/10 ring-1 ring-inset ring-amber-400/70" : ""}`}
               style={{ paddingLeft: `${depth * 12 + 4}px` }}
@@ -999,6 +1034,8 @@ export default function FileTree({
   const appClipboardStaleRef = useRef(false);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -1876,6 +1913,38 @@ export default function FileTree({
     [activeRoot, projectPath, projectHost, refresh, showNotice],
   );
 
+  // Download the selected files one at a time: parallel fetches would hold every
+  // connection slot (WebKit allows ~6 per origin), and each save is its own
+  // browser download. A folder in the selection fails on its own entry; the rest
+  // still download.
+  const downloadFiles = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      let done = 0;
+      let firstError = "";
+      for (let i = 0; i < paths.length; i++) {
+        const name = paths[i].split(/[\\/]/).pop() || paths[i];
+        setUploadProgress(`Downloading ${i + 1}/${paths.length}…`);
+        try {
+          saveBlobAsFile(await api.fsDownload(paths[i], activeRoot, projectHost), name);
+          done++;
+        } catch (err) {
+          // Kept as data, not rethrown: one failed file must not stop the rest.
+          console.error("File tree download error:", err);
+          if (!firstError) firstError = `${name}: ${(err as Error).message}`;
+        }
+      }
+      setUploadProgress(null);
+      const noun = done === 1 ? "file" : "files";
+      if (firstError) {
+        showNotice(`Downloaded ${done} ${noun} — ${firstError}`);
+      } else {
+        showNotice(`Downloaded ${done} ${noun}`);
+      }
+    },
+    [activeRoot, projectHost, showNotice],
+  );
+
   const confirmDelete = useCallback(async () => {
     const paths = pendingDelete;
     if (!paths || paths.length === 0) return;
@@ -1953,6 +2022,9 @@ export default function FileTree({
       appClipboardStaleRef.current = false;
       setClipboard({ op: "cut", paths });
       showNotice(`Cut ${paths.length} item(s)`);
+    },
+    download: (paths) => {
+      void downloadFiles(paths);
     },
     paste: (destDir) => {
       if (!clipboard) return;
@@ -2221,17 +2293,7 @@ export default function FileTree({
       const files = data ? Array.from(data.files ?? []) : [];
       // A copied FOLDER reaches the page as a file-less directory entry, which
       // the browser cannot read — say so instead of silently pasting nothing.
-      const hasFolder = data
-        ? Array.from(data.items ?? []).some((item) => {
-            if (item.kind !== "file") return false;
-            const entry = (
-              item as DataTransferItem & {
-                webkitGetAsEntry?: () => { isDirectory: boolean } | null;
-              }
-            ).webkitGetAsEntry?.();
-            return !!entry && entry.isDirectory;
-          })
-        : false;
+      const hasFolder = data ? transferHasFolder(data) : false;
       if (hasFolder) {
         setUploadProgress(null);
         showNotice("Folders can't be pasted — copy the files inside instead");
@@ -2279,6 +2341,37 @@ export default function FileTree({
     uploadAbortRef.current = null;
     setUploadProgress(null);
   }, [activeRoot, projectHost]);
+
+  // Drag OS files onto the tree to upload them. Only a "Files" drag is claimed,
+  // so drags of tree rows and text pass straight through. A folder row takes the
+  // files, a file row sends them beside itself, and empty space lands in the root.
+  const onTreeFileDragEnter = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    dragDepthRef.current++;
+    setFileDragOver(true);
+  };
+  const onTreeFileDragLeave = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    dragDepthRef.current--;
+    if (dragDepthRef.current === 0) setFileDragOver(false);
+  };
+  const onTreeFileDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onTreeFileDrop = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setFileDragOver(false);
+    if (transferHasFolder(e.dataTransfer)) {
+      showNotice("Folders can't be added — drop the files inside instead");
+      return;
+    }
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) uploadFiles(files, dropDestination(treeRoot, e.target));
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -2518,7 +2611,14 @@ export default function FileTree({
       </div>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div ref={treePaneRef} className="flex flex-1 min-h-0 flex-col">
+          <div
+            ref={treePaneRef}
+            className={`flex flex-1 min-h-0 flex-col ${fileDragOver ? "ring-1 ring-inset ring-accent" : ""}`}
+            onDragEnter={onTreeFileDragEnter}
+            onDragLeave={onTreeFileDragLeave}
+            onDragOver={onTreeFileDragOver}
+            onDrop={onTreeFileDrop}
+          >
       <ScrollArea className="flex-1" ref={useCallback((el: HTMLDivElement | null) => {
         const prev = scrollViewportRef.current;
         if (prev) prev.removeEventListener("scroll", onSearchScroll);
@@ -2685,6 +2785,8 @@ export default function FileTree({
                                   <ContextMenuTrigger asChild>
                                     <button
                                       type="button"
+                                      data-tree-path={normalizeTreePath(node.path)}
+                                      data-tree-dir={isDir ? "" : undefined}
                                       onClick={() => {
                                         menu.setFocus({ path: node.path, isDir });
                                         handleColumnSelect(colIdx, node);
@@ -2736,6 +2838,11 @@ export default function FileTree({
                                           {menu.canReveal && (
                                             <ContextMenuItem onSelect={() => menu.reveal(requestPath)}>
                                               <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}
+                                            </ContextMenuItem>
+                                          )}
+                                          {!isDir && (
+                                            <ContextMenuItem onSelect={() => menu.download(effectivePaths)}>
+                                              <Download className="w-3.5 h-3.5 mr-2" /> Download
                                             </ContextMenuItem>
                                           )}
                                           <ContextMenuSeparator />

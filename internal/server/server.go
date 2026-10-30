@@ -439,6 +439,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/fs/new-folder", s.authMiddleware(s.handler.HandleFSNewFolder))
 	s.mux.HandleFunc("POST /api/fs/duplicate", s.authMiddleware(s.handler.HandleFSDuplicate))
 	s.mux.HandleFunc("POST /api/fs/upload", s.authMiddleware(s.handler.HandleFSUpload))
+	s.mux.HandleFunc("GET /api/fs/download", s.authMiddleware(s.handler.HandleFSDownload))
 	s.mux.HandleFunc("POST /api/secret/init", s.authMiddleware(s.handleSecretInit))
 	s.mux.HandleFunc("GET /api/secret/scan", s.authMiddleware(s.handleSecretScan))
 	s.mux.HandleFunc("POST /api/secret/encrypt", s.authMiddleware(s.handleSecretEncrypt))

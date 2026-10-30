@@ -692,7 +692,13 @@ func base64Decode(s string) ([]byte, error) {
 // like remoteReadFile (DIR error / found=false).
 var errTooLarge = fmt.Errorf("file exceeds the size limit")
 
-func remoteReadFileCapped(ctx context.Context, rw remoteWork, path string, maxBytes int64) ([]byte, bool, error) {
+// errRemoteIsDir means the remote path is a directory, which no byte-reading
+// endpoint can serve.
+var errRemoteIsDir = fmt.Errorf("path is a directory")
+
+// remoteFileSize stats a remote regular file's byte count. found=false means
+// the path is missing or not a regular file; a directory is errRemoteIsDir.
+func remoteFileSize(ctx context.Context, rw remoteWork, path string) (int64, bool, error) {
 	q := remote.ShellQuotePath(path)
 	// Portable stat: `wc -c` prints "<bytes> <path>" on GNU and busybox;
 	// dirs/missing are filtered first so the count parse only sees files.
@@ -701,18 +707,26 @@ func remoteReadFileCapped(ctx context.Context, rw remoteWork, path string, maxBy
 		"if [ ! -f "+q+" ]; then echo MISSING; exit 0; fi; "+
 		"wc -c < "+q)
 	if serr != nil {
-		return nil, false, serr
+		return 0, false, serr
 	}
 	trimmed := strings.TrimSpace(sizeOut)
 	if trimmed == "DIR" {
-		return nil, false, fmt.Errorf("path is a directory")
+		return 0, false, errRemoteIsDir
 	}
 	if trimmed == "MISSING" {
-		return nil, false, nil
+		return 0, false, nil
 	}
 	var size int64
 	if _, perr := fmt.Sscanf(trimmed, "%d", &size); perr != nil || size < 0 {
-		return nil, false, fmt.Errorf("remote read failed: unexpected size output")
+		return 0, false, fmt.Errorf("remote read failed: unexpected size output")
+	}
+	return size, true, nil
+}
+
+func remoteReadFileCapped(ctx context.Context, rw remoteWork, path string, maxBytes int64) ([]byte, bool, error) {
+	size, found, err := remoteFileSize(ctx, rw, path)
+	if err != nil || !found {
+		return nil, false, err
 	}
 	if size > maxBytes {
 		return nil, false, fmt.Errorf("%w: %d bytes exceeds %d-byte limit", errTooLarge, size, maxBytes)

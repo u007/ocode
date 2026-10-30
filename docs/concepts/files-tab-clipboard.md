@@ -1,12 +1,14 @@
 ---
 type: Concept
 title: Files Tab Clipboard (Cut / Copy / Paste)
-timestamp: 2026-10-27T08:20:49Z
-description: Files-tab clipboard concept doc with desktop WKWebView verification caveat
+timestamp: 2026-10-30T02:22:13Z
+description: Files-tab clipboard, drag-in upload and right-click download concept doc with desktop WKWebView verification caveat
 tags:
   - clipboard
   - files-tab
   - os-file-paste
+  - drag-and-drop
+  - download
   - concept
 ---
 ---
@@ -16,7 +18,7 @@ title: Files Tab Clipboard (Cut / Copy / Paste)
 
 # Files tab clipboard (cut / copy / paste)
 
-Shipped feature on the web/desktop Files tab (`web/src/components/Files/FileTree.tsx`). A single `pasteDestination` rule resolves the paste target; every affordance (context menus, toolbar button, keyboard) reports the same resolved destination. This doc covers the workflow, the OS-file upload path (`POST /api/fs/upload`), and the known gaps.
+Shipped feature on the web/desktop Files tab (`web/src/components/Files/FileTree.tsx`). A single `pasteDestination` rule resolves the paste target; every affordance (context menus, toolbar button, keyboard) reports the same resolved destination. This doc covers the workflow, the OS-file upload path (`POST /api/fs/upload`), drag-in upload and right-click Download (`GET /api/fs/download`), and the known gaps.
 
 ## Paste-destination rule (`FileTree.tsx` `pasteDestination`)
 
@@ -94,15 +96,50 @@ For remote projects (`host` set):
 - Idle timeout: `fsUploadIdleTimeout` (60 s without bytes). Overall backstop: `fsUploadOverallTimeout` (30 min).
 - A refusal from the remote long-running exec pool is returned as HTTP 503 + `Retry-After` (capacity, not a broken project).
 
+## Drag-in upload and right-click Download
+
+Both work for local and remote (`host=`) projects; the tree is one component and the same handlers serve both.
+
+### Drag OS files onto the tree (`FileTree.tsx` `onTreeFileDrop`)
+
+- The drop handlers sit on the tree pane (`treePaneRef`) and claim only drags whose `dataTransfer.types` include `"Files"`, so drags of text and tree rows pass through untouched.
+- The target is resolved by `dropDestination` from the row markers the tree renders: `data-tree-path` on every row (tree view and columns view), and `data-tree-dir` on folder rows. A folder row takes the files, a file row sends them beside itself (its parent), and empty space or the search results land in the browsed root.
+- Uploads reuse `uploadFiles` (the paste path): sequential, one progress label, aborted by a project switch, and the same `POST /api/fs/upload` route, so the remote branch and the name rules are shared.
+- A dropped folder is refused with "Folders can't be added — drop the files inside instead". The folder check (`transferHasFolder`) is the same one paste uses.
+- While a file drag is over the pane, the pane gets a `ring-accent` outline (`fileDragOver`).
+
+### Right-click Download (`FileTree.tsx` menus, `api.fsDownload`)
+
+- A **Download** item appears on file rows in both the tree view and the columns view, and only on files. It runs on the effective selection (`effectivePaths`), so a multi-selection downloads each file in turn; a folder in that selection fails on its own entry and is reported, and the rest still save.
+- Files are fetched one at a time (WebKit allows about six connections per origin). The client fetches a Blob with auth headers and saves it via `saveBlobAsFile` (`web/src/lib/saveBlob.ts`). The object URL is revoked on a 10 s timer, as in `csvExport.ts` and `PdfViewer.tsx`.
+- The progress label reuses the upload progress line (`Downloading 1/3…`); the outcome notice is `Downloaded 2 files` or `Downloaded 0 files — <name>: <error>`.
+
+### Server endpoint (`internal/server/handler_fs_download.go`; route in `server.go`)
+
+`GET /api/fs/download?project=&path=&host=` returns one project file as `application/octet-stream` with `Content-Disposition: attachment` (an ASCII fallback plus RFC 5987 `filename*`), `Content-Length`, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+
+- It is deliberately **not** `GET /api/files/raw`. That endpoint's extension allowlist and per-type caps exist for previews and must not be widened into a general file download.
+- Containment is the tree's existing rule: `mutationProjectDir` plus `resolveFSPath(..., "read")` locally (symlinks resolved, `.git` excluded), and `remoteWorkFor` plus `remoteTargetOf(..., "read")` remotely. Only regular files are served; a directory is a 400.
+- Access matches `/api/files/content`, which returns any readable project file. There is **no secret-file gate** on either route, so a download grants nothing the editor does not already show. If `.env`-style files should be gated, gate both routes together.
+- Local cap: `fsDownloadMaxBytes` (512 MiB), streamed with `io.Copy`, so the cap bounds time, not memory. Over the cap is 413.
+- Remote cap: `fsDownloadRemoteMaxBytes` (100 MiB, the upload cap). The size is stat'ed first (`remoteFileSize`, shared with `remoteReadFileCapped`) so Content-Length is exact and an oversized file is refused before any bytes move. The bytes then stream from `cat -- <quoted path>` through `runBounded(..., remoteExecLongRunning)`, bounded by a 60 s idle timer (`fsDownloadIdleTimeout`) and a 30 min overall backstop (`fsDownloadOverallTimeout`). `remoteReadFile` is NOT used: it base64-buffers the whole file in memory.
+- Headers are written on the first byte (`fsDownloadStream.start`), so a failure before any data still answers with a JSON status: a capacity refusal is 503 with `Retry-After`, a dead transport is 502, anything else is 500. A failure after bytes have gone out cannot change the status; it is logged and the short body tells the client.
+
 ## Tests
 
-Server: `internal/server/handler_fs_upload_test.go` (raw bytes, subdirectory, never-overwrites, unsafe names table, out-of-project dest, `.git` dest, file-as-dest, 413 + no partial file, route registered through the real mux, remote stdin over the fake-ssh shim).
+Download tests: `internal/server/handler_fs_download_test.go` (local stream and headers, the Content-Disposition encoding table, directory refusal, traversal and symlink-out refusal, missing file, over-cap 413, route registered through the real mux, remote stream over the fake-ssh shim, remote empty file, remote directory and traversal refusal, remote over-cap 413).
+
+Web: `web/src/components/Files/FileTree.download.test.tsx` (`dropDestination` and `transferHasFolder`; Download on files but not folders, in both views; the download notice and failure notice; drops into a folder row, a file row, and empty space; folder refusal; non-file drags ignored); `web/src/api/client.fsDownload.test.ts` (query args, host threading, error surfacing).
+
+Upload tests (paste and drop share this path): `internal/server/handler_fs_upload_test.go` (raw bytes, subdirectory, never-overwrites, unsafe names table, out-of-project dest, `.git` dest, file-as-dest, 413 + no partial file, route registered through the real mux, remote stdin over the fake-ssh shim).
 
 Web: `web/src/components/Files/FileTree.clipboard.test.tsx` (destination rules including Windows separators, all four affordances, keyboard targets, dedupe, hidden-pane and editable-field guards, OS-file upload including folder refusal and the blur rule); `web/src/api/client.fsUpload.test.ts` (raw `File` body, `octet-stream` content type, `host` threading, server error surfacing).
 
 ## Known limits worth recording
 
 - Pasted **text** (not files) is not written anywhere by this feature — only files from the OS clipboard are handled.
-- Pasted **folders** are refused explicitly; only files can be pasted.
+- Pasted and dropped **folders** are refused explicitly; only files can be pasted or dropped.
+- Download has no folder or zip support: a directory is refused (400), so a folder has to be opened and its files downloaded one by one.
+- Download carries no secret-file gate (see the endpoint notes above); a change to that policy must cover `/api/files/content` and `/api/fs/download` together.
 - Pasted files do **not** appear in the Changes-tab snapshot store (`internal/snapshot`) — that tab lists agent-authored edits with undo, so a user-pasted file is not considered an agent mutation and has no undo entry there.
 - The clipboard-to-notice mapping (`pasteDestination` / `pasteDestinationLabel`) does not expose line-level anchors; the cited paths (`FileTree.tsx`, `handler_fs_upload.go`, `handler_fs_upload_test.go`) are the canonical references.
