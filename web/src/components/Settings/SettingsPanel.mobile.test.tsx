@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { useEffect } from "react";
 import SettingsPanel from "./SettingsPanel";
 
 // SettingsPanel's default group is ModelDefaultsForm; stub the two groups this
 // suite drives so the nav assertions don't drag in the chat/config stores.
+const mounts = vi.hoisted(() => ({ count: 0 }));
+
 vi.mock("./ModelDefaultsForm", () => ({
-  default: () => <div data-testid="model-defaults-form">ModelDefaultsForm</div>,
+  default: () => {
+    useEffect(() => {
+      mounts.count += 1;
+    }, []);
+    return <div data-testid="model-defaults-form">ModelDefaultsForm</div>;
+  },
 }));
 vi.mock("./ChatDisplayForm", () => ({
   default: () => <div data-testid="chat-display-form">ChatDisplayForm</div>,
@@ -109,8 +117,26 @@ describe("SettingsPanel mobile layout", () => {
     expect(screen.queryByRole("button", { name: "Open settings sections" })).toBeNull();
     // Desktop keeps the inline nav column with the persisted width var.
     const nav = document.querySelector("nav");
-    expect(nav?.className).toContain("md:w-[var(--nav-width)]");
+    expect(nav?.className).toContain("w-[var(--nav-width)]");
     expect(screen.getByRole("button", { name: "Chat display" })).toBeTruthy();
     expect(screen.getByTestId("model-defaults-form")).toBeTruthy();
+  });
+
+  // The active form owns unsaved input, so crossing the breakpoint (rotation,
+  // split-screen, window resize) must not unmount and remount it.
+  it("keeps the active form mounted when the viewport crosses the breakpoint", () => {
+    mounts.count = 0;
+    render(<SettingsPanel />);
+    const form = screen.getByTestId("model-defaults-form");
+    expect(mounts.count).toBe(1);
+
+    setViewportWidth(1280);
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    expect(screen.queryByRole("button", { name: "Open settings sections" })).toBeNull();
+    expect(screen.getByTestId("model-defaults-form")).toBe(form);
+    expect(mounts.count).toBe(1);
   });
 });

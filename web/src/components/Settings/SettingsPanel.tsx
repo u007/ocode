@@ -337,11 +337,19 @@ export default function SettingsPanel() {
     </>
   );
 
-  if (isMobile) {
-    return (
-      <div className="absolute inset-0 flex min-w-0 flex-col overflow-hidden bg-card">
-        {/* Full-width section switcher. The selected form gets the whole
-            viewport below it; the list itself lives in the overlay. */}
+  // ONE tree for both layouts. The form's slot (third child) keeps the same
+  // element type and position across the breakpoint, so a viewport change
+  // (rotation, split-screen, window resize) does not remount it and drop
+  // unsaved input. Only the chrome around it differs.
+  return (
+    <div
+      className={`absolute inset-0 flex min-w-0 overflow-hidden bg-card ${
+        isMobile ? "flex-col" : "flex-row"
+      }`}
+    >
+      {isMobile ? (
+        // Full-width section switcher. The selected form gets the whole
+        // viewport below it; the list itself lives in the overlay.
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
           <Button
             type="button"
@@ -363,20 +371,39 @@ export default function SettingsPanel() {
             {groupLabel(active)}
           </span>
         </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">{renderGroup(active)}</div>
-
-        {/* Off-canvas drawer + backdrop, matching ProjectSidebar/CoworkSidebar's
-            mobile pattern. Kept mounted so it can slide; `inert` and
-            `aria-hidden` keep the closed drawer out of the tab order and the
-            accessibility tree. */}
-        {navOpen && (
-          <div
-            className="fixed inset-0 z-40 bg-black/50"
-            onClick={() => setNavOpen(false)}
-            aria-hidden="true"
-          />
-        )}
+      ) : (
+        <nav
+          className="flex w-[var(--nav-width)] shrink-0 flex-col overflow-auto border-r border-border py-3"
+          style={{ "--nav-width": `${navPane.width}px` } as { [key: string]: string }}
+        >
+          {navSections}
+        </nav>
+      )}
+      {!isMobile && (
+        <div
+          ref={navPane.handleRef}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize settings navigation"
+          title="Drag to resize · double-click to reset"
+          onPointerDown={navPane.onPointerDown}
+          onDoubleClick={navPane.resetToDefault}
+          className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
+        />
+      )}
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">{renderGroup(active)}</div>
+      {isMobile && navOpen && (
+        // Off-canvas drawer + backdrop, matching ProjectSidebar/CoworkSidebar's
+        // mobile pattern.
+        <div
+          className="fixed inset-0 z-40 bg-black/50"
+          onClick={() => setNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      {isMobile && (
+        // Kept mounted so it can slide; `inert` and `aria-hidden` keep the
+        // closed drawer out of the tab order and the accessibility tree.
         <nav
           id="settings-nav-drawer"
           aria-label="Settings sections"
@@ -401,29 +428,7 @@ export default function SettingsPanel() {
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">{navSections}</div>
         </nav>
-      </div>
-    );
-  }
-
-  return (
-    <div className="absolute inset-0 flex flex-col md:flex-row overflow-hidden bg-card">
-      <nav
-        className="shrink-0 overflow-auto border-b md:border-b-0 md:border-r border-border py-2 md:py-3 px-2 md:px-0 flex flex-row md:flex-col gap-1 md:gap-0 w-full md:w-[var(--nav-width)]"
-        style={{ "--nav-width": `${navPane.width}px` } as { [key: string]: string }}
-      >
-        {navSections}
-      </nav>
-      <div
-        ref={navPane.handleRef}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize settings navigation"
-        title="Drag to resize · double-click to reset"
-        onPointerDown={navPane.onPointerDown}
-        onDoubleClick={navPane.resetToDefault}
-        className="hidden md:block w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
-      />
-      <div className="flex-1 min-w-0 overflow-y-auto">{renderGroup(active)}</div>
+      )}
     </div>
   );
 }
