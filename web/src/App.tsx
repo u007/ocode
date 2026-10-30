@@ -312,6 +312,30 @@ function HomeApp() {
     leavePulseFor,
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
+  // The DB panel issues a connection-list request on mount. Mount it on first
+  // visit PER PROJECT (its surface is project-scoped), so switching to a
+  // project whose DB tab was never opened does not fetch for it. The panel is
+  // keyed by the same pair in the render below: switching remounts it and drops
+  // the previous project's grant.
+  const dbProjectKey = `${projectState.activeProject?.host ?? ""}:${projectState.activeProject?.path ?? ""}`;
+  const [dbVisitedProjects, setDbVisitedProjects] = useState<Record<string, boolean>>({});
+  // Recorded ONLY where the DB tab actually becomes visible for a project: an
+  // explicit view selection, and the per-project view restore. A passive effect
+  // keyed on (activeView, dbProjectKey) used to do it, and it raced the restore:
+  // on a project switch the first render still carries the OLD view with the NEW
+  // key, so the effect marked the new project as visited even when its restored
+  // view was not DB — mounting (and fetching for) a project whose DB tab had
+  // never been opened.
+  const markDBVisited = useCallback((key: string) => {
+    setDbVisitedProjects((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+  }, []);
+  const selectView = useCallback(
+    (v: string) => {
+      setActiveView(v as typeof activeView);
+      if (v === "db") markDBVisited(dbProjectKey);
+    },
+    [dbProjectKey, markDBVisited, setActiveView],
+  );
   // "Show in file tree" from an editor/preview tab's context menu, and folder
   // picks from the ctrl/cmd+p picker: switch to the Files view, un-collapse the
   // tree pane (a reveal into a collapsed tree would be invisible), and hand the
@@ -457,7 +481,12 @@ function HomeApp() {
     const next = resolveViewOnProjectSwitch(loadViewStateForProject(path), forced, path);
     setActiveView(next.view);
     setFocusedKind(next.focusedKind);
-  }, [projectState.activeProject?.path]);
+    // A project whose last view was DB restores straight onto it, so the panel
+    // must be allowed to mount for that project too.
+    if (next.view === "db") {
+      markDBVisited(`${projectState.activeProject?.host ?? ""}:${path}`);
+    }
+  }, [projectState.activeProject?.path, markDBVisited]);
   // Persist view state whenever it changes (debounced).
   useEffect(() => {
     const path = projectState.activeProject?.path;
@@ -1529,12 +1558,12 @@ function HomeApp() {
           data-active-view={activeView}
           data-focused-kind={focusedKind}
         >
-          <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
+          <Tabs value={activeView} onValueChange={selectView} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
                 <TopTabs
                   activeTab={activeView}
-                  onTabSelect={(v) => setActiveView(v as typeof activeView)}
+                  onTabSelect={selectView}
                   onMenuToggle={isMobile ? () => setSidebarOpen((open) => !open) : undefined}
                   loadingStates={loadingStates}
                 />
@@ -1811,6 +1840,26 @@ function HomeApp() {
                   />
                 </div>
               </TabsContent>
+              {/* Project-level DB connector (beside Assets). Its surface is keyed
+                  by project so an environment-backed connection resolves against
+                  this project's .env, and a project switch drops the old grant.
+                  With no active project there is nothing to resolve against, so
+                  the panel is not mounted (it would only offer an unlock that
+                  the server must refuse). */}
+              <TabsContent value="db" forceMount className="flex-1 overflow-hidden m-0">
+                {dbVisitedProjects[dbProjectKey] &&
+                  (projectState.activeProject ? (
+                    <DBPanel
+                      key={dbProjectKey}
+                      projectPath={projectState.activeProject.path}
+                      projectHost={projectState.activeProject.host}
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+                      Select a project to use the database connector.
+                    </div>
+                  ))}
+              </TabsContent>
               <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
               </TabsContent>
@@ -2016,16 +2065,6 @@ function HomeApp() {
                             nonce={takesActivation ? previewNonce : 0}
                             onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
                           />
-                        </div>
-                      );
-                    })}
-                    {allChatTabs.map((tab) => {
-                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "db";
-                      const key = `${tab.projectPath ?? ""}:${tab.id}:db`;
-                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
-                      return (
-                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <DBPanel sessionId={tab.id} />
                         </div>
                       );
                     })}

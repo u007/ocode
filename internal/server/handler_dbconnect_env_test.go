@@ -1,13 +1,17 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/dbconnect"
@@ -358,29 +362,291 @@ func TestDBConnectUnlockTemplateErrorDoesNotLeakTheValue(t *testing.T) {
 	}
 }
 
-func TestDBConnectUnlockTemplateStillRequiresTheMasterPassword(t *testing.T) {
-	// A template-only set has nothing to decrypt, but the password is still
-	// required: the flow stays uniform and a guessed connection name is not
-	// enough to open it.
+// dbEnvProjectHandler returns a Handler that can resolve .env files for the
+// registered project root, which is what the project-scoped DB panel sends.
+func dbEnvProjectHandler(t *testing.T, project string) *Handler {
+	t.Helper()
+	h := dbEnvHandler(t)
+	h.projects = newTestProjectStore(t, project)
+	return h
+}
+
+// dbUnlockProject unlocks through the project-scoped request shape.
+func dbUnlockProject(t *testing.T, h *Handler, surface, password, project string) *httptest.ResponseRecorder {
+	t.Helper()
+	return dbPostJSON(t, h.HandleDBConnectUnlock, "/api/dbconnect/unlock",
+		map[string]string{"surface": surface, "password": password, "project_path": project})
+}
+
+// dbUnlockedNames decodes the unlock response's granted names.
+func dbUnlockedNames(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var out struct {
+		Unlocked []string `json:"unlocked"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode unlock: %v (body=%s)", err, rec.Body.String())
+	}
+	return out.Unlocked
+}
+
+func TestDBConnectAddTemplateNeedsNoMasterPassword(t *testing.T) {
+	// A template names variables rather than carrying a credential, so there is
+	// nothing to encrypt and no password is involved.
+	setHomeTree(t, t.TempDir())
+	h := &Handler{}
+
+	rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${DATABASE_URL}"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add template without a password = %d body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 1 || cfg.DB.Connections[0].EnvTemplate != "${DATABASE_URL}" {
+		t.Fatalf("stored connections = %+v, want the template in the clear", cfg.DB.Connections)
+	}
+}
+
+func TestDBConnectAddLiteralURLWithoutPasswordIsRefused(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	h := &Handler{}
+
+	rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("add literal url without a password = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "TOPSECRET") {
+		t.Fatalf("refusal echoed the url: %s", rec.Body.String())
+	}
+}
+
+func TestDBConnectUnlockTemplateNeedsNoMasterPassword(t *testing.T) {
+	// The whole point of an environment-backed connection: the URL is read from
+	// the project's .env, with no encryption step and no master password.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock without a password = %d body=%s", rec.Code, rec.Body.String())
+	}
+	url, ok := h.dbGrantURL("s1", "env")
+	if !ok {
+		t.Fatal("template connection was not granted without a password")
+	}
+	if url != "postgres://app:pw@127.0.0.1:1/app" {
+		t.Fatalf("granted url = %q", url)
+	}
+}
+
+func TestDBConnectUnlockViaSessionIDTemplateNeedsNoMasterPassword(t *testing.T) {
+	// The pre-project-scoped caller shape (session_id) keeps working.
 	setHomeTree(t, t.TempDir())
 	h := dbEnvHandler(t)
 	project := t.TempDir()
 	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
-
-	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
-		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}", "password": "master-pw"}); rec.Code != http.StatusCreated {
-		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
-	}
 	h.sessions.Register("sess-1", project)
 
-	// An empty password is refused.
-	rec := dbPostJSON(t, h.HandleDBConnectUnlock, "/api/dbconnect/unlock",
-		map[string]string{"surface": "s1", "password": "", "session_id": "sess-1"})
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockSession(t, h, "s1", "", "sess-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock without a password = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Fatal("template connection was not granted")
+	}
+}
+
+func TestDBConnectUnlockWithoutPasswordLeavesSealedConnectionsLocked(t *testing.T) {
+	// A password-less unlock is the environment flow only: it grants every
+	// template and never opens a sealed connection.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add prod = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add env = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock without a password = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if names := dbUnlockedNames(t, rec); len(names) != 1 || names[0] != "env" {
+		t.Fatalf("unlocked = %v, want only the environment connection", names)
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Error("the environment connection was not granted")
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); ok {
+		t.Error("a sealed connection was granted without the master password")
+	}
+}
+
+func TestDBConnectUnlockSealedOnlyWithoutPasswordIsRefused(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unlock with no password = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		t.Fatalf("unlock sealed-only without a password = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); ok {
+		t.Error("an unlock without a password left a grant behind")
+	}
+}
+
+func TestDBConnectUnlockRefusesProjectOutsideAllowedRoots(t *testing.T) {
+	// project_path comes from the browser. It must name a project root this
+	// server may read, or the local .env of an arbitrary directory (or a remote
+	// project's path) would be used.
+	//
+	// The foreign directory carries a RESOLVABLE .env on purpose: without it the
+	// template would fail with "variable is not set" even if the allow-list
+	// check were deleted, and the test could not tell which layer refused.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	foreign := dbEnvFile(t, t.TempDir(), ".env",
+		"OCODE_TEST_DB_URL=postgres://app:from-foreign@127.0.0.1:1/app\n")
+	rec := dbUnlockProject(t, h, "s1", "", foreign)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock with a foreign project = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not an allowed project root") {
+		t.Fatalf("refusal names the wrong layer: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "from-foreign") {
+		t.Fatalf("refusal leaked the foreign .env value: %s", rec.Body.String())
 	}
 	if _, ok := h.dbGrantURL("s1", "env"); ok {
-		t.Error("an unlock without a password left a grant behind")
+		t.Error("a refused project left a grant behind")
+	}
+}
+
+func TestDBConnectUnlockRefusesTraversalProjectPath(t *testing.T) {
+	// A ".." component resolves to the parent directory. The comparison is on
+	// the RESOLVED path against the allowed roots, so traversal cannot smuggle
+	// in a directory that was never registered.
+	//
+	// The parent carries a resolvable .env so the guard, not a missing variable,
+	// is what refuses.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	parent := filepath.Dir(project)
+	if _, err := os.Stat(filepath.Join(parent, ".env")); err == nil {
+		t.Fatalf("test setup: %s already has a .env", parent)
+	}
+	dbEnvFile(t, parent, ".env", "OCODE_TEST_DB_URL=postgres://app:from-parent@127.0.0.1:1/app\n")
+
+	rec := dbUnlockProject(t, h, "s1", "", filepath.Join(project, ".."))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock with a traversal path = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not an allowed project root") {
+		t.Fatalf("refusal names the wrong layer: %s", rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); ok {
+		t.Error("a traversal path left a grant behind")
+	}
+}
+
+func TestDBConnectUnlockRefusesSymlinkedProjectPathOutsideRoots(t *testing.T) {
+	// A symlink in an allowed directory that points OUTSIDE the roots must be
+	// resolved before the comparison, or its .env would be read as if it were
+	// the project's.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	outside := t.TempDir()
+	dbEnvFile(t, outside, ".env", "OCODE_TEST_DB_URL=postgres://app:TOPSECRET@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	link := filepath.Join(t.TempDir(), "link-to-outside")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks are not supported here: %v", err)
+	}
+	rec := dbUnlockProject(t, h, "s1", "", link)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock through a symlink outside the roots = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "TOPSECRET") {
+		t.Fatalf("refusal leaked the resolved url: %s", rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); ok {
+		t.Error("a symlinked path left a grant behind")
+	}
+}
+
+func TestDBConnectUnlockTemplateSupportsQuotedAndExportedValues(t *testing.T) {
+	// The .env reader handles the usual dotenv shapes; the unlock path must not
+	// regress them.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "export OCODE_TEST_DB_URL=\"postgres://app:pw@127.0.0.1:1/app\"\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	url, ok := h.dbGrantURL("s1", "env")
+	if !ok {
+		t.Fatal("template connection was not granted")
+	}
+	if url != "postgres://app:pw@127.0.0.1:1/app" {
+		t.Fatalf("granted url = %q, want the quoted/exported value", url)
 	}
 }
 
@@ -425,5 +691,308 @@ func TestDBConnectListReportsEnvBackedConnection(t *testing.T) {
 	// resolved URL is a credential.
 	if strings.Contains(rec.Body.String(), "DATABASE_URL") {
 		t.Fatalf("list response leaked the template: %s", rec.Body.String())
+	}
+}
+
+func TestDBConnectUnlockRefusesTemplateWithoutAProject(t *testing.T) {
+	// No project_path and no session: the server must NOT fall back to its own
+	// process environment. A remote project would otherwise connect (and allow
+	// writes) to a local database that happens to be exported there.
+	setHomeTree(t, t.TempDir())
+	t.Setenv("OCODE_TEST_NO_PROJECT_DB_URL", "postgres://app:local@127.0.0.1:1/local")
+	h := &Handler{}
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_NO_PROJECT_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock without a project = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "needs a project") {
+		t.Fatalf("error %q does not explain the missing project", rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); ok {
+		t.Error("a template was granted from the process environment")
+	}
+}
+
+func TestDBConnectUnlockGrantsResolvedTemplatesAndReportsTheRest(t *testing.T) {
+	// One bad template must not block the connection that does resolve.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	for name, url := range map[string]string{
+		"env": "${OCODE_TEST_DB_URL}",
+		"bad": "${OCODE_TEST_ABSENT_DB_URL}",
+	} {
+		if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+			map[string]string{"name": name, "url": url}); rec.Code != http.StatusCreated {
+			t.Fatalf("add %s = %d body=%s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Unlocked []string `json:"unlocked"`
+		Failed   []struct {
+			Name  string `json:"name"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(out.Unlocked) != 1 || out.Unlocked[0] != "env" {
+		t.Fatalf("unlocked = %v, want [env]", out.Unlocked)
+	}
+	if len(out.Failed) != 1 || out.Failed[0].Name != "bad" || !strings.Contains(out.Failed[0].Error, "OCODE_TEST_ABSENT_DB_URL") {
+		t.Fatalf("failed = %+v, want the bad template naming its variable", out.Failed)
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Error("the resolved template was not granted")
+	}
+	if _, ok := h.dbGrantURL("s1", "bad"); ok {
+		t.Error("the failed template was granted")
+	}
+}
+
+func TestDBConnectUnlockPasswordlessMergesIntoAnExistingGrant(t *testing.T) {
+	// Loading an environment connection must not revoke a sealed connection
+	// the user already unlocked (nor close its pool).
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add prod = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := dbUnlockProject(t, h, "s1", "master-pw", project); rec.Code != http.StatusOK {
+		t.Fatalf("password unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); !ok {
+		t.Fatal("prod was not granted by the password unlock")
+	}
+
+	// The environment connection is added after the grant, so it is not in it.
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add env = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := dbUnlockProject(t, h, "s1", "", project); rec.Code != http.StatusOK {
+		t.Fatalf("password-less unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); !ok {
+		t.Error("a password-less unlock revoked the sealed connection")
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); !ok {
+		t.Error("the environment connection was not granted")
+	}
+}
+
+func TestDBConnectAddRejectsTemplateWithALiteralPassword(t *testing.T) {
+	// A template is stored in the clear. A literal password in one must be
+	// refused, or it would be written to ocodeconfig.json unencrypted.
+	setHomeTree(t, t.TempDir())
+	h := &Handler{}
+
+	for _, url := range []string{
+		"postgres://app:hunter2@db/prod?sslmode=${SM}",
+		"postgres://app@db/prod?sslmode=${SM}&password=hunter2",
+	} {
+		rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+			map[string]string{"name": "mixed", "url": url})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("add %q = %d, want 400 (body=%s)", url, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "hunter2") {
+			t.Fatalf("refusal echoed the password: %s", rec.Body.String())
+		}
+	}
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 0 {
+		t.Fatalf("stored connections = %+v, want none", cfg.DB.Connections)
+	}
+
+	// A password that is entirely a reference is a valid template.
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "postgres://app:${DB_PASS}@db/prod"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add referenced password = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDBConnectUnlockDropsGrantWhenATemplateStopsResolving(t *testing.T) {
+	// A template that resolved once must LOSE its grant when the .env value
+	// disappears. Otherwise the unlock reports the connection as failed while
+	// the connection list still says "unlocked" (and queries keep using the
+	// previous database).
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env",
+		"OCODE_TEST_DB_URL=postgres://app:first@127.0.0.1:1/app\n"+
+			"OCODE_TEST_DB_URL2=postgres://app:second@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	for _, c := range []struct{ name, url string }{
+		{"keep", "${OCODE_TEST_DB_URL}"},
+		{"break", "${OCODE_TEST_DB_URL2}"},
+	} {
+		if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+			map[string]string{"name": c.name, "url": c.url}); rec.Code != http.StatusCreated {
+			t.Fatalf("add %s = %d body=%s", c.name, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := dbUnlockProject(t, h, "s1", "", project); rec.Code != http.StatusOK {
+		t.Fatalf("unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, name := range []string{"keep", "break"} {
+		if _, ok := h.dbGrantURL("s1", name); !ok {
+			t.Fatalf("%s was not granted on the first unlock", name)
+		}
+	}
+
+	// Only the second variable disappears.
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:first@127.0.0.1:1/app\n")
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-unlock = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "break"); ok {
+		t.Error("a template that stopped resolving kept its stale grant")
+	}
+	if _, ok := h.dbGrantURL("s1", "keep"); !ok {
+		t.Error("a still-resolving template lost its grant")
+	}
+	var out struct {
+		Failed []struct {
+			Name string `json:"name"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Failed) != 1 || out.Failed[0].Name != "break" {
+		t.Fatalf("failed = %+v, want exactly the broken template", out.Failed)
+	}
+}
+
+func TestDBConnectUnlockSealedOnlyIgnoresAMovedProject(t *testing.T) {
+	// A sealed connection reads no files, so a project path that no longer
+	// resolves (moved or unmounted directory) must not block its unlock.
+	setHomeTree(t, t.TempDir())
+	h := dbEnvHandler(t)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	rec := dbUnlockProject(t, h, "s1", "master-pw", missing)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sealed-only unlock with a missing project = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := h.dbGrantURL("s1", "prod"); !ok {
+		t.Error("sealed connection was not granted")
+	}
+}
+
+func TestDBTouchRetiresIdleSurfacesAndClosesPools(t *testing.T) {
+	h := &Handler{}
+	h.dbAddToGrant("idle", dbGrant{"boom": "postgres://app:pw@127.0.0.1:1/app"})
+
+	pool, err := sql.Open("pgx", "postgres://app:pw@127.0.0.1:1/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.dbMu.Lock()
+	if h.dbPools == nil {
+		h.dbPools = make(map[string]map[string]*sql.DB)
+	}
+	h.dbPools["idle"] = map[string]*sql.DB{"boom": pool}
+	h.dbMu.Unlock()
+
+	// A touch far enough in the future retires the idle surface.
+	now := time.Now()
+	h.dbMu.Lock()
+	stale := h.dbTouchLocked("busy", now.Add(dbSurfaceIdleTTL+time.Minute))
+	h.dbMu.Unlock()
+	dbClosePools(stale)
+
+	if len(stale) != 1 {
+		t.Fatalf("retired %d pools, want the idle surface's one", len(stale))
+	}
+	// Check the usage map BEFORE any accessor: dbGrantURL touches the surface,
+	// which would legitimately re-add it (with no grant).
+	if _, ok := h.dbLastUsed["idle"]; ok {
+		t.Error("an idle surface stayed in the usage map")
+	}
+	if _, ok := h.dbLastUsed["busy"]; !ok {
+		t.Error("the touched surface was not recorded")
+	}
+	if _, ok := h.dbGrantURL("idle", "boom"); ok {
+		t.Error("an idle surface kept its grant")
+	}
+	if err := pool.Ping(); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Errorf("the idle surface's pool is still usable (err=%v)", err)
+	}
+}
+
+func TestDBTouchCapsRememberedSurfaces(t *testing.T) {
+	h := &Handler{}
+	now := time.Now()
+	for i := range dbSurfaceMax + 3 {
+		h.dbMu.Lock()
+		stale := h.dbTouchLocked(fmt.Sprintf("s%03d", i), now.Add(time.Duration(i)*time.Second))
+		h.dbMu.Unlock()
+		dbClosePools(stale)
+	}
+	h.dbMu.Lock()
+	remembered := len(h.dbLastUsed)
+	h.dbMu.Unlock()
+	if remembered > dbSurfaceMax {
+		t.Fatalf("remembered %d surfaces, want at most %d", remembered, dbSurfaceMax)
+	}
+}
+
+func TestDBGrantMapsAreSafeUnderConcurrentUse(t *testing.T) {
+	// Run with -race. Idle eviction, the merge and the removal path all mutate
+	// the same three maps, and they are reached from independent HTTP handlers.
+	h := &Handler{}
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := range 40 {
+				surface := fmt.Sprintf("s%d", (i+j)%5)
+				h.dbAddToGrant(surface, dbGrant{
+					fmt.Sprintf("c%d", j%3): "postgres://app:pw@127.0.0.1:1/app",
+				})
+				h.dbGrantURL(surface, "c0")
+				h.dbRemoveFromGrant(surface, []string{"c1"})
+				h.dbMu.Lock()
+				dbClosePools(h.dbTouchLocked(surface, time.Now().Add(time.Duration(j)*time.Second)))
+				h.dbMu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	h.dbDropSurface("s0")
+	if _, ok := h.dbGrantURL("s0", "c0"); ok {
+		t.Error("drop left a grant behind")
 	}
 }

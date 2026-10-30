@@ -30,6 +30,13 @@ describe("viewPersistence", () => {
     expect(getPersistedViewState()["/proj-a"]).toEqual({ view: "files", focusedKind: "chat" });
   });
 
+  it("accepts the project-level db view", () => {
+    // The DB connector moved from a session sub-tab to a project tab; the view
+    // must survive a reload like every other top tab.
+    saveViewStateForProject("/proj-a", { view: "db", focusedKind: "chat" });
+    expect(loadViewStateForProject("/proj-a")).toEqual({ view: "db", focusedKind: "chat" });
+  });
+
   it("preserves focusedKind when view changes and vice versa (simulated via save)", () => {
     saveViewStateForProject("/proj-a", { view: "files", focusedKind: "chat" });
     saveViewStateForProject("/proj-a", { view: "git", focusedKind: "chat" });

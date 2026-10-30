@@ -35,8 +35,8 @@ The SQLite browser (`docs/concepts/sqlite-browser.md`) is the parity reference. 
 `internal/server/handler_dbconnect.go` and `handler_dbconnect_rows.go`, routes in `server.go`, all behind `authMiddleware`:
 
 - `GET /api/dbconnect/connections?surface=` lists saved connections with an `unlocked` flag for the surface. Not paginated on purpose: a user saves a handful.
-- `POST /api/dbconnect/connections` `{name, url, password}` verifies the password against the saved set, seals, and saves. Returns 401 on a mismatch and 409 if the set changed during the save. `DELETE /api/dbconnect/connections/{name}` removes.
-- `POST /api/dbconnect/unlock` `{surface, password}` opens every saved envelope. Any failure rejects the whole unlock (401). Each granted connection keeps one pooled handle, opened on its first request. Replacing the grant closes the old handles.
+- `POST /api/dbconnect/connections` `{name, url, password}` seals a literal URL and saves it; the password is required for a literal URL only (a `${NAME}` template is stored in the clear and needs none). A template whose userinfo password or `password`/`sslpassword` value is not entirely a reference is refused (400) — a literal password would be persisted unencrypted. Returns 401 on a password mismatch and 409 if the set changed during the save. `DELETE /api/dbconnect/connections/{name}` removes.
+- `POST /api/dbconnect/unlock` `{surface, password, project_path}` returns `{unlocked, failed}`. With a password, every saved envelope must open (a wrong password is 401 before any grant) and templates are resolved too. Without a password, only the `${NAME}` templates are granted and sealed connections stay locked; this path MERGES into the surface's grant, so it never revokes an already-unlocked sealed connection. A template needs `project_path` (an allowed project root) or a `session_id`; with neither it is reported in `failed` and is never resolved from the server's process environment. Other template failures are also per connection in `failed`, and the connections that did resolve are still granted. Each granted connection keeps one pooled handle, opened on its first request. A password unlock replaces the grant and closes the old handles; a password-less one merges.
 - `POST /api/dbconnect/lock` `{surface}` drops the surface's grant and closes its pooled connections.
 - `GET /api/dbconnect/tables?surface=&connection=&limit=&offset=` returns one page (`limit` 1-500, default 100) and `has_more`.
 - `GET /api/dbconnect/rows?surface=&connection=&table=&sort=&dir=&filter=&limit=&offset=` returns one page of a table: `columns` (name, type, pk), `rows`, `has_more`, and `primary_key`. An unknown table is 404; a bad sort, direction, or paging value is 400; a filter that writes is 400.
@@ -47,8 +47,24 @@ The SQLite browser (`docs/concepts/sqlite-browser.md`) is the parity reference. 
 
 - Grants are in memory only, keyed by client surface id, then connection name. They hold the plaintext URLs. They are never serialized, logged, or written to disk. They last until the surface locks or the server restarts.
 - The surface id is UX state, not a security boundary. The auth token is.
-- Connections are global, not directory-bound, so the endpoints take no project param.
+- Saved connections are global, not directory-bound; they are not stored per project. Only `unlock` takes a `project_path`, and only so a `${NAME}` template can read that project's `.env` / `.env.local`. The path is validated against the server's allowed project roots; a remote project's path is refused (its `.env` is on the other machine). A template with neither `project_path` nor a `session_id` is refused, never resolved from the process environment.
+- A template carries no secret, so it needs no master password: a password-less unlock grants templates only and MERGES into the surface grant. A sealed connection still requires the password that sealed it; a password unlock replaces the grant.
+- The master password therefore protects stored literal URLs only. A holder of the server auth token can add and load an environment connection and then read/write that database; the token is the real boundary (it already opens a terminal). The `from_env` flag marks the password-free connections.
 - Plaintext URLs never appear in responses. Errors from `ParseURL` are generic, because Go's `url.Error` quotes the whole input including the password.
+
+## Unlock model additions (review fixes)
+
+- The in-memory grant is now bounded: a surface idle for 30 minutes (or beyond 64
+  remembered surfaces) is retired with its pooled handle, and the client-supplied
+  surface is length-bounded (256). The panel's surface id carries a per-DOCUMENT
+  random tag as well as the per-mount counter, because a module counter restarts
+  at 1 in every browser window.
+- A template that stops resolving now LOSES its grant and pool: the password-less
+  unlock drops it from the surface before the "nothing unlocked" 400, so a later
+  query cannot keep hitting the old database.
+- `project_path` is resolved and validated only when at least one saved connection
+  is a template, so a sealed-only unlock works even when the project directory has
+  moved.
 
 ## Reads never write
 
@@ -80,7 +96,7 @@ Differences from the SQLite browser:
 
 ## Environment templates
 
-A connection URL may contain ${NAME} or $NAME references (docs/concepts/db-environment-templates.md). At unlock (handler_dbconnect.go:292 HandleDBConnectUnlock) the template is expanded against the session project (.env then .env.local, then process env; dbconnect_env.go:27 dbEnvLookup) and validated as a URL (dbconnect_env.go:86 ParseURL). The resolved URL stays in the in-memory grant (handler_dbconnect.go:354); never returned, logged, or written (dbconnect_env.go:77). Only braced refs make a value a template (unresolved = error). A bare `$NAME` never does (expand.go:151 IsTemplate), so a literal p$ssword, pa$HOME or we$ird.db stays a plain value and is sealed. Saved shape uses env_template (plaintext, internal/config/db_connections.go:35); literal URLs stay encrypted (db_connections.go:31 EncryptedURL). Template-only set still requires master password (handler_dbconnect.go:256 dbCheckMasterPassword); wrong password = 401 before any template is resolved.
+A connection URL may contain ${NAME} or $NAME references (docs/concepts/db-environment-templates.md). At unlock (handler_dbconnect.go:472 HandleDBConnectUnlock) the template is expanded against the project the request names — `project_path` for the project-scoped DB tab, `session_id` as the legacy fallback — and validated as a URL (dbconnect_env.go:86 ParseURL). Precedence is process environment > `.env.local` > `.env` (`dbEnvLookup`/`envfile.Lookup`), so an exported server variable shadows the project file. The resolved URL stays in the in-memory grant (`handler_dbconnect.go:607` merge for the environment flow, `handler_dbconnect.go:609` replacement for a password unlock); never returned, logged, or written (dbconnect_env.go:77). Only a braced reference with a shell-valid name makes a value a template (unresolved = error); a bare `$NAME` never does (expand.go:151 IsTemplate), so a literal p$ssword, pa$HOME or we$ird.db stays a plain value and is sealed. A template's credential must now be BRACED references only (`${VAR}`): a bare `$NAME` is refused, because an unset variable is kept as literal text by `ExpandEnv` and would be stored in the clear. The query scan also no longer stops at `#` and runs even when the URL has no `://`. Saved shape uses env_template (plaintext, internal/config/db_connections.go:35); literal URLs stay encrypted (db_connections.go:31 EncryptedURL). A template needs NO master password (a password-less unlock grants templates only); sealed connections still require the password, and a wrong password is 401 before any grant. A template needs a PROJECT: with neither `project_path` nor `session_id` it is reported in `failed` and never resolved from the server's process environment. A template whose password is literal is refused (TemplateHasLiteralSecret, expand.go:207), and ParseURL refuses a raw `#`, parses the query the way pgx does (split on `&`, percent-decode the key, bad escape fails closed), and refuses `service`/`servicefile`/`passfile`/`sslkey`/`sslcert`/`sslrootcert` (`dbconnect.go:160` redirect params, `dbconnect.go:189` ParseURL).
 
 A saved template is protected against destruction by an older ocode binary: the template is duplicated under the separate top-level `db_env_templates` key (`internal/config/db_connections.go:35` `DBEnvTemplatesKey`), which an older binary writes back verbatim from its `Extra` map. The map is authoritative on load (`ocodeconfig.go:2308` `reconcileDBEnvTemplates`) and is rebuilt from the connections at save time (`ocodeconfig.go:2809`); when no template connection remains it is deleted (`ocodeconfig.go:2945`) so a stale map cannot resurrect one. Full mechanism: `docs/concepts/db-environment-templates.md` (§ "Forward-compatibility: the `db_env_templates` top-level key").
 
@@ -105,9 +121,9 @@ Browser pass (headless Chrome, isolated `HOME`, Postgres 16): add and unlock, ta
 
 ## DBPanel (web)
 
-`web/src/components/Layout/DBPanel.tsx` and `DBTableBrowser.tsx`:
+The DB connector is a **project-level top tab** (beside Assets), not a chat session sub-tab, because an environment-backed connection resolves against the active project. `web/src/components/Layout/DBPanel.tsx` and `DBTableBrowser.tsx`:
 
-- Add form (first run and "Add another connection"). Connection picker. Per-panel unlock; the password is cleared on success.
+- Add form (first run and "Add another connection"). Connection picker. A `${NAME}` environment URL needs no master password (the field is disabled); a literal URL still needs it. An environment-backed connection shows **Load from .env** instead of a password prompt. Per-panel unlock; the password is cleared on success.
 - Table list: paginated (100 per page, "Load more tables" appends). Clicking a table opens its Data view.
 - Right pane has a Data and a Query tab. The Data view (`DBTableBrowser`) has:
   - a read-only filter field, applied on Apply or Enter;
@@ -121,10 +137,11 @@ Browser pass (headless Chrome, isolated `HOME`, Postgres 16): add and unlock, ta
 - Collapsible, drag-resizable table pane via `useResizableSidebar`, using the storage key `ocode.ui.dbconnect-table-pane.width`.
 - Narrow panels stack. A `ResizeObserver` on the table-and-data area measures its width. Stacking is decided on the list's minimum (120px) plus a 4px handle plus 320px for the data pane: below 444px the list sits above the data at full width, capped at 10rem high, and the resize handle is hidden. Side by side, the list is drawn at the smaller of its saved width and the room left beside the data, so a wide saved width cannot lock the layout. The saved width and the collapsed state are never changed by the layout.
 - A 409 from a SQL run opens the write confirmation. Only the confirmed retry sends `confirm: true`.
-- Surface id is `db-panel:<sessionId>`. Unmount calls `/api/dbconnect/lock`.
-- Calls go through `api.dbConnect*` in `web/src/api/client.ts`. They are not host-threaded: connections are global, so a remote-project session never routes them through `?host=`.
+- Surface id is `db-panel:<host>:<projectPath>:<per-mount id>`, so two clients viewing the same project do not share (and revoke) each other's grant. App keys the panel by `host:path` and mounts it only for a project whose DB tab has been visited. Unmount calls `/api/dbconnect/lock` for this panel's surface.
+- Calls go through `api.dbConnect*` in `web/src/api/client.ts`. They are not host-threaded: connections are global, so a remote-project session never routes them through `?host=`. A remote project's `.env` is not readable here, so the panel shows "Not available for a remote project" instead of offering the action.
+- A failed connection-list load shows the error and a Retry (not an endless spinner). A partial unlock shows the `failed` connections in a warning while the granted ones are usable; the password form is absent for `from_env` connections.
 - Shared cell conversion (`dbConnectCells.ts`): `toCell`, `pgInputToCell`, and `toResultSet`.
-- Unit tests: `DBPanel.test.tsx` (15 cases) and `DBTableBrowser.test.tsx` (10 cases).
+- Unit tests: `DBPanel.test.tsx` (22 cases, including the password-less environment flow, partial failures, retry and the remote guard) and `DBTableBrowser.test.tsx` (10 cases).
 
 ## Known limits
 

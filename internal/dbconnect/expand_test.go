@@ -234,3 +234,48 @@ func TestExpandEnvDoesNotExpandInsideAnInvalidReference(t *testing.T) {
 		t.Errorf("ExpandEnv = %q, want ${1BAD}", got)
 	}
 }
+
+func TestTemplateHasLiteralSecret(t *testing.T) {
+	// A template is stored in the clear, so its password must come entirely
+	// from references.
+	literal := []string{
+		"postgres://app:hunter2@host/db?sslmode=${SM}",
+		"postgres://app:pa$HOME@host/db?sslmode=${SM}",
+		"postgres://app:${DB_PASS}x@host/db",
+		"postgres://${DB_USER}:hunter2@host/db",
+		"postgres://app@host/db?sslmode=${SM}&password=hunter2",
+		"postgres://app@host/db?sslpassword=hunter2&sslmode=${SM}",
+		"postgres://app@host/db?PASSWORD=hunter2&sslmode=${SM}",
+		// A BARE reference is not accepted as the credential: when the variable
+		// is unset, ExpandEnv keeps it as literal text, so it would be stored in
+		// the clear.
+		"postgres://app:$secretpass@${DB_HOST}/db",
+		"postgres://app@host/db?password=$DB_PASS",
+		// No "://" in the template: the query must still be scanned.
+		"${BASE}?password=hunter2",
+		// pgx treats '#' as query DATA, so it cannot end the scan.
+		"postgres://app@host/db?sslmode=${S}#&password=hunter2",
+	}
+	for _, s := range literal {
+		if !TemplateHasLiteralSecret(s) {
+			t.Errorf("TemplateHasLiteralSecret(%q) = false, want true", s)
+		}
+	}
+	safe := []string{
+		"postgres://app:${DB_PASS}@host/db",
+		"postgres://${DB_USER}:${DB_PASS}@host/db",
+		"postgres://app@host/db?sslmode=${SM}",
+		"postgres://app@${DB_HOST}:${DB_PORT}/db",
+		"postgres://app@host/db?password=${DB_PASS}",
+		"postgres://app@host/db",
+		// Scheme-less with a braced credential is a valid template.
+		"${BASE}?password=${DB_PASS}",
+		// '#' after a non-credential parameter is data, not a secret.
+		"postgres://app@host/db?sslmode=${SM}#frag",
+	}
+	for _, s := range safe {
+		if TemplateHasLiteralSecret(s) {
+			t.Errorf("TemplateHasLiteralSecret(%q) = true, want false", s)
+		}
+	}
+}

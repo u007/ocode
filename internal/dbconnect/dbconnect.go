@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/u007/ocode/internal/encryption"
 
@@ -156,17 +157,64 @@ func OpenURL(sealed, password string) (string, error) {
 	return string(plain), nil
 }
 
+// dbRedirectParams make the client read a file from the server's filesystem or
+// redirect the connection through a service definition. A connection URL can
+// come from a project's .env (a file that arrives with a cloned repository),
+// and a template URL is expanded from it, so these are refused rather than
+// handed to pgx. pgx's own documentation (pgconn/config.go) names exactly
+// servicefile, passfile, sslkey, sslcert and sslrootcert as the parameters that
+// make ParseConfig read local files; servicefile/service can additionally
+// redirect the connection, and passfile makes pgx read a file and send its
+// contents as the password.
+var dbRedirectParams = map[string]bool{
+	"service":     true,
+	"servicefile": true,
+	"passfile":    true,
+	"sslkey":      true,
+	"sslcert":     true,
+	"sslrootcert": true,
+}
+
 // ParseURL validates a postgres:// URL.
+//
+// A '#' is refused outright. pgx's URI parser is libpq-compatible, not RFC 3986:
+// it treats '#' as ordinary query DATA (its own test is named "hash is data not
+// fragment"), while net/url ends the query there. Leaving it accepted lets a
+// value like "...?x=1#&passfile=/etc/passwd" hide a redirect parameter from the
+// check below and still deliver it to pgx. No legitimate postgres URI needs a
+// fragment, and a literal '#' in a credential must be percent-encoded anyway.
 //
 // The error text never includes the raw URL: url.Parse's error quotes the
 // whole input, password included, and that text reaches API responses.
 func ParseURL(raw string) (*url.URL, error) {
+	if strings.ContainsRune(raw, '#') {
+		return nil, fmt.Errorf("invalid connection url")
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid connection url")
 	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+	// Parse the query the way pgx does (split on '&', decode the key) instead
+	// of via u.Query(), which silently drops ';'-separated pairs.
+	for pair := range strings.SplitSeq(u.RawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		name, _, _ := strings.Cut(pair, "=")
+		decoded, decErr := url.QueryUnescape(name)
+		if decErr != nil {
+			// pgx rejects a URI with a bad escape too. Fail closed instead of
+			// comparing the still-encoded key, which could hide a redirect
+			// parameter behind an escape pgx would still decode.
+			return nil, fmt.Errorf("invalid connection url")
+		}
+		if dbRedirectParams[strings.ToLower(decoded)] {
+			// Name the parameter only: its value may be a path or a secret.
+			return nil, fmt.Errorf("connection parameter %q is not allowed", decoded)
+		}
 	}
 	return u, nil
 }

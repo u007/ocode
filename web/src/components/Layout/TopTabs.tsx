@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, PanelLeft } from "lucide-react";
+import { Database, FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, PanelLeft } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
@@ -32,6 +32,10 @@ const mainTabs = [
   { id: "git", label: "Git", icon: GitBranch },
   { id: "cron", label: "Cron", icon: CalendarClock },
   { id: "assets", label: "Assets", icon: Paperclip },
+  // The DB connector is project-scoped (its .env-backed connections resolve
+  // against the active project), so it lives beside Assets rather than under a
+  // single chat session.
+  { id: "db", label: "DB", icon: Database },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
