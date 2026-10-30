@@ -167,6 +167,14 @@ type Handler struct {
 	// that small file read/write, never across agent construction.
 	pulseMu sync.Mutex
 
+	// pulseRemoteBoard caches each connected remote host's board rows for the
+	// Pulse assistant (pulse_remote.go). Its own mutex; never held across a request.
+	pulseRemoteBoard pulseRemoteBoardCache
+
+	// pulseRemoteConnect remembers the Pulse assistant's last host_connect attempt
+	// per host (pulse_remote.go) so a looping model cannot start a connect per call.
+	pulseRemoteConnect pulseRemoteConnectState
+
 	// pulseStopIndicators holds recent stop indicators (turn-done, terminal-stop,
 	// permission-ask, question-ask) for the Pulse assistant's auto-receive
 	// feature. Appended to by runTurn and the terminal polling path; read by

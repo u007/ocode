@@ -16,8 +16,8 @@ import (
 )
 
 // pulseTerminalNewTool starts a new local pty shell in a project and registers
-// it so terminal_read/screen and the shared tab list can reach it. Remote/WSL
-// hosts are refused here because the shell must run where the pty lives.
+// it so terminal_read/screen and the shared tab list can reach it. With a host
+// the shell is started on that remote machine instead (pulseRemoteTerminalNew).
 //
 // Unix-only: the pty bridge is built on github.com/creack/pty, so the method is
 // split out of pulse_tools_write.go (which must compile on Windows too). The
@@ -31,15 +31,15 @@ func (h *Handler) pulseTerminalNewTool(raw json.RawMessage) (string, error) {
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(args.Host) != "" {
-		return "", fmt.Errorf("creating terminals on remote hosts is not supported from the Pulse assistant yet; create it on the host")
+	if host := strings.TrimSpace(args.Host); host != "" {
+		return h.pulseRemoteTerminalNew(host, args.ProjectPath, args.Title)
 	}
 	projectRoot := strings.TrimSpace(args.ProjectPath)
 	if projectRoot == "" {
 		return "", errors.New("project_path is required")
 	}
 	if h.projectHostFor(projectRoot) != "" {
-		return "", fmt.Errorf("project_path %q looks like a remote path; pass host= for remotes (not yet supported)", projectRoot)
+		return "", fmt.Errorf("project_path %q belongs to a remote project; pass its host", projectRoot)
 	}
 	expanded, err := projects.ExpandHome(projectRoot)
 	if err != nil {
@@ -113,9 +113,9 @@ func (h *Handler) pulseTerminalNewTool(raw json.RawMessage) (string, error) {
 		title = "Terminal"
 	}
 	if h.termTabsStore != nil {
-		pt := h.termTabsStore.Get(projectRoot)
-		pt.Terminals = append(pt.Terminals, termtabs.Terminal{ID: id, Title: title})
-		if err := h.termTabsStore.Set(projectRoot, pt); err != nil {
+		// AddTerminal, not Get then Set: the append must not overwrite a tab another
+		// client or server process added between the two.
+		if err := h.termTabsStore.AddTerminal(projectRoot, termtabs.Terminal{ID: id, Title: title}); err != nil {
 			log.Printf("pulse terminal_new: persist tab list: %v", err)
 		}
 		h.bus.Publish("terminal_tabs_changed", "", "", nil)

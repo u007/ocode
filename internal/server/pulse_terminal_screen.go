@@ -4,9 +4,7 @@ package server
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"strings"
 )
 
 // pulseTerminalScreenText returns what terminal_screen replays for one live
@@ -14,32 +12,45 @@ import (
 // pulseTerminalScreenBytes of its log, pinned to one snapshot. The same access
 // gate and local-project boundary as terminal_read apply. A terminal that is not
 // live has no pty size, so it has no screen.
-func (h *Handler) pulseTerminalScreenText(terminalID string) (string, int, int, string, error) {
-	if !h.terminalAccessAllowed() {
-		return "", 0, 0, "", errors.New("terminal access requires server authentication or a loopback bind address")
-	}
-	if strings.HasPrefix(terminalID, "anon-") {
-		return "", 0, 0, "", fmt.Errorf("terminal %q has no screen: %w", terminalID, errTerminalHistoryMissing)
-	}
-	project, err := h.pulseTerminalProject(terminalID)
+func (h *Handler) pulseTerminalScreenText(terminalID, host string) (string, int, int, string, error) {
+	project, read, err := h.pulseTerminalSource(terminalID, host)
 	if err != nil {
 		return "", 0, 0, "", err
 	}
-	entry, live := h.terminalProcs.snapshot()[terminalID]
-	if !live {
-		return "", 0, 0, "", fmt.Errorf("terminal %q is not live, so it has no screen", terminalID)
+	var cols, rows uint16
+	if host != "" {
+		live, lerr := h.pulseRemoteLive(host)
+		if lerr != nil {
+			return "", 0, 0, "", lerr
+		}
+		found := false
+		for _, r := range live {
+			if r.ID == terminalID {
+				cols, rows, found = r.Cols, r.Rows, true
+				break
+			}
+		}
+		if !found {
+			return "", 0, 0, "", fmt.Errorf("terminal %q is not live on %s, so it has no screen", terminalID, host)
+		}
+	} else {
+		entry, live := h.terminalProcs.snapshot()[terminalID]
+		if !live {
+			return "", 0, 0, "", fmt.Errorf("terminal %q is not live, so it has no screen", terminalID)
+		}
+		cols, rows = entry.Cols, entry.Rows
 	}
-	if entry.Cols == 0 || entry.Rows == 0 {
+	if cols == 0 || rows == 0 {
 		return "", 0, 0, "", fmt.Errorf("terminal %q has no pty size yet; open the terminal in a browser", terminalID)
 	}
 
 	// Pin the snapshot end with a one-byte read, then read the newest window.
-	_, end, err := readTerminalHistoryRangeAt(project, terminalID, 0, 1, nil)
+	_, end, err := read(0, 1, nil)
 	if err != nil {
 		return "", 0, 0, "", fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
 	offset := max(end-pulseTerminalScreenBytes, 0)
-	data, err := readPulseWindow(project, terminalID, offset, end-offset, end)
+	data, err := readPulseWindow(read, offset, end-offset, end)
 	if err != nil {
 		return "", 0, 0, "", fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
@@ -52,5 +63,5 @@ func (h *Handler) pulseTerminalScreenText(terminalID string) (string, int, int, 
 			data = data[i:]
 		}
 	}
-	return project, int(entry.Cols), int(entry.Rows), string(data), nil
+	return project, int(cols), int(rows), string(data), nil
 }

@@ -70,6 +70,7 @@ func renderPulseScreen(raw string, cols, rows int) ([]string, error) {
 func (h *Handler) pulseTerminalScreenTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		TerminalID string `json:"terminal_id"`
+		Host       string `json:"host"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -77,7 +78,7 @@ func (h *Handler) pulseTerminalScreenTool(raw json.RawMessage) (string, error) {
 	if args.TerminalID == "" {
 		return "", fmt.Errorf("terminal_id is required")
 	}
-	project, cols, rows, history, err := h.pulseTerminalScreenText(args.TerminalID)
+	project, cols, rows, history, err := h.pulseTerminalScreenText(args.TerminalID, args.Host)
 	if err != nil {
 		return "", err
 	}
@@ -88,11 +89,12 @@ func (h *Handler) pulseTerminalScreenTool(raw json.RawMessage) (string, error) {
 	return pulseCapped(len(lines), func(n int, truncated bool) any {
 		return struct {
 			TerminalID string   `json:"terminal_id"`
+			Host       string   `json:"host,omitempty"`
 			Project    string   `json:"project"`
 			Cols       int      `json:"cols"`
 			Rows       int      `json:"rows"`
 			Lines      []string `json:"lines"`
 			Truncated  bool     `json:"truncated,omitempty"`
-		}{args.TerminalID, project, cols, rows, append([]string{}, lines[len(lines)-n:]...), truncated}
+		}{args.TerminalID, args.Host, project, cols, rows, append([]string{}, lines[len(lines)-n:]...), truncated}
 	})
 }
