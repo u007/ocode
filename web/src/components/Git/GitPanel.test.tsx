@@ -283,6 +283,54 @@ describe("GitPanel", () => {
     await waitFor(() => expect(input.value).toBe("feat: generated subject"));
   });
 
+  it("keeps a generated subject and body on separate lines and commits it whole", async () => {
+    const generated =
+      "feat: detailed commit messages\n\n- explain what changed\n- explain why";
+    mocks.gitCommitMessage.mockResolvedValue({ message: generated, model: "small/model" });
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+    fireEvent.click(screen.getByRole("button", { name: "Generate commit message with AI" }));
+
+    const field = screen.getByPlaceholderText("Commit message for staged changes…");
+    // A single-line <input> sanitises newlines away, collapsing the body into
+    // the subject; the box must be a textarea for the body to survive.
+    expect(field.tagName).toBe("TEXTAREA");
+    await waitFor(() => expect((field as HTMLTextAreaElement).value).toBe(generated));
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit" }));
+    await waitFor(() =>
+      expect(mocks.gitCommit).toHaveBeenCalledWith(generated, [], "/proj", undefined),
+    );
+  });
+
+  it("grows the commit box with the message and caps its height", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+    const field = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLTextAreaElement;
+    // jsdom has no layout engine: scrollHeight is 0, so the measured height has
+    // to be stubbed per case to exercise the clamp.
+    const setScrollHeight = (h: number) =>
+      Object.defineProperty(field, "scrollHeight", { value: h, configurable: true });
+
+    setScrollHeight(80);
+    fireEvent.change(field, { target: { value: "subject\n\n- one\n- two" } });
+    await waitFor(() => expect(field.style.height).toBe("80px"));
+
+    // The box is border-box while scrollHeight excludes the border, so the
+    // border must be added or the last line is clipped by it.
+    Object.defineProperty(field, "offsetHeight", { value: 82, configurable: true });
+    Object.defineProperty(field, "clientHeight", { value: 80, configurable: true });
+    fireEvent.change(field, { target: { value: "subject\n\n- one\n- two\n- three" } });
+    await waitFor(() => expect(field.style.height).toBe("82px"));
+
+    setScrollHeight(900);
+    fireEvent.change(field, { target: { value: "subject\n\n- one\n- two\n- three\n- four" } });
+    await waitFor(() => expect(field.style.height).toBe("132px"));
+  });
+
   it("uses the working-tree diff when nothing is staged", async () => {
     mocks.getGitWorkspace.mockResolvedValue({ ...workspace, staged: [] });
     mocks.gitCommitMessage.mockResolvedValue({ message: "fix: from worktree", model: "" });
