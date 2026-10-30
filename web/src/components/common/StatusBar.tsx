@@ -326,17 +326,34 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               {error}
             </span>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="ml-auto"
-            onClick={toggleCollapsed}
-            title="Expand status bar"
-            aria-label="Expand status bar"
-          >
-            <ChevronUp className="h-4 w-4" />
-          </Button>
+          {/* The cowork/sidebar toggle stays reachable while collapsed: this
+              status bar is its ONLY trigger on desktop (and the only one at
+              all on a phone, where the slim row is the default), so hiding it
+              with the detail rows left no way to open the panel. */}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {onCoworkToggle && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={onCoworkToggle}
+                title="Toggle cowork panel"
+                aria-label="Toggle cowork panel"
+              >
+                <PanelRight className="h-4 w-4" />
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={toggleCollapsed}
+              title="Expand status bar"
+              aria-label="Expand status bar"
+            >
+              <ChevronUp className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
     );
