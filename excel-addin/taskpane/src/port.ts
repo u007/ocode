@@ -72,6 +72,8 @@ export interface ExcelPort {
   read(sheet: string, address: string): Promise<RangeData>;
   /** Strings starting with "=" are formulas, everything else is a constant. */
   write(sheet: string, address: string, cells: CellValue[][], numberFormat?: string): Promise<void>;
+  /** Set each cell's number format from a grid the same shape as the address (used by undo, before the values). */
+  setNumberFormats(sheet: string, address: string, formats: string[][]): Promise<void>;
   /** Write one formula into `address` with relative references adjusting per cell (like Ctrl+Enter / fill). */
   fillFormula(sheet: string, address: string, formula: string): Promise<void>;
   clear(sheet: string, address: string, what: "contents" | "formats" | "all"): Promise<void>;

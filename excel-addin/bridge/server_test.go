@@ -105,7 +105,7 @@ func TestMCPLoopbackOnly(t *testing.T) {
 // paneClient plays the Excel task pane: reads SSE calls, answers via POST /bridge/result.
 func paneClient(t *testing.T, base, wb string, answer func(CallEvent) Result) (stop func()) {
 	t.Helper()
-	req, _ := http.NewRequest("GET", base+"/bridge/stream?workbook="+wb, nil)
+	req, _ := http.NewRequest("GET", base+"/bridge/stream?workbook="+wb+"&instance=test-pane", nil)
 	req.Header.Set("X-Bridge-Key", key)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {

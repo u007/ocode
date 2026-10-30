@@ -12,7 +12,7 @@ import (
 // fakePane answers every call with handler(call) until detach.
 func fakePane(t *testing.T, h *Hub, wb string, handler func(CallEvent) Result) (detach func(), cancels <-chan string) {
 	t.Helper()
-	events, done, det := h.Attach(wb)
+	events, done, det := h.Attach(wb, "test-pane-"+wb)
 	cc := make(chan string, 8)
 	go func() {
 		for {
@@ -110,7 +110,7 @@ func TestHubContextCancelAbandons(t *testing.T) {
 
 func TestHubPaneReplacedOrGoneFailsPendingCalls(t *testing.T) {
 	h := NewHub()
-	_, _, detach := h.Attach("wb") // nobody reads events; the call is queued then pending
+	_, _, detach := h.Attach("wb", "test-pane") // nobody reads events; the call is queued then pending
 	errc := make(chan error, 1)
 	go func() {
 		_, err := h.Call(context.Background(), "wb", "x", nil, 5*time.Second)

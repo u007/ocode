@@ -167,6 +167,16 @@ export class FakePort implements ExcelPort {
     }));
   }
 
+  async setNumberFormats(sheet: string, address: string, formats: string[][]): Promise<void> {
+    this.log.push(`formats ${sheet}!${address}`);
+    const r = parseAddress(address)!;
+    const g = this.grid(sheet);
+    for (let row = r.r1; row <= r.r2; row++) for (let c = r.c1; c <= r.c2; c++) {
+      const fmt = formats[row - r.r1]?.[c - r.c1] ?? "General";
+      g.set(key(c, row), { raw: g.get(key(c, row))?.raw ?? null, fmt });
+    }
+  }
+
   async fillFormula(sheet: string, address: string, formula: string): Promise<void> {
     this.log.push(`fill ${sheet}!${address}`);
     const r = parseAddress(address)!;

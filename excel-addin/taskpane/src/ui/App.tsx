@@ -7,7 +7,6 @@ import { stripContext, summarizeTool } from "../format";
 import type { SessionRef } from "../identity";
 import { sessionTitle } from "../identity";
 import type { Envelope } from "../ocodeClient";
-import { TOOLS } from "../tools";
 import type { Step } from "../tools/journal";
 
 type Action = { type: "env"; env: Envelope } | { type: "resync"; sid: string; transcript: any[]; pending?: any };
@@ -15,7 +14,7 @@ const reducer = (s: typeof initialState, a: Action) =>
   a.type === "env" ? reduce(s, a.env) : resync(s, a.sid, a.transcript, a.pending ?? {});
 
 export function App({ deps }: { deps: Deps }) {
-  const { ocode, index, journal, port, workbook, fileName, workspace } = deps;
+  const { ocode, index, journal, port, runner, workbook, fileName, workspace } = deps;
   const [chat, dispatch] = useReducer(reducer, initialState);
   const [sessions, setSessions] = useState<SessionRef[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -24,6 +23,7 @@ export function App({ deps }: { deps: Deps }) {
   const [events, setEvents] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changes, setChanges] = useState<Step[]>([]);
+  const [notice, setNotice] = useState<string | undefined>(deps.notice);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -70,10 +70,15 @@ export function App({ deps }: { deps: Deps }) {
     guard(() => ocode.resolvePermission({ requestId, sessionId: active!, decision }));
   const answer = (requestId: string, qq: { header?: string; question?: string }, label: string) =>
     guard(() => ocode.answerQuestion({ requestId, sessionId: active!, answers: [{ header: qq.header, question: qq.question ?? "", answers: [{ label }] }] }));
-  // Undo goes through the same tool the agent uses, so the "cells changed since" conflict check is identical.
+  // Undo goes through the Runner, like the agent's own calls, so it never interleaves with a write in
+  // flight, and through the same tool, so the "cells changed since" conflict check is identical.
   const undo = (id: string) => guard(async () => {
-    await TOOLS.undo_step({ port, journal, signal: new AbortController().signal }, { step_id: id });
-    await refreshChanges();
+    try {
+      const r = await runner.handle({ id: `ui-undo-${Date.now()}`, tool: "undo_step", args: { step_id: id } });
+      if (!r.ok) throw new Error(r.error ?? "Undo failed");
+    } finally {
+      await refreshChanges();
+    }
   });
 
   return (
@@ -90,7 +95,12 @@ export function App({ deps }: { deps: Deps }) {
         <button disabled={!active} onClick={() => guard(() => ocode.compact(active!))}>Compact</button>
       </header>
 
+      {bridge === "evicted" && (
+        <div className="err" role="alert">This workbook is open in another ocode pane. Reload this pane to take over.</div>
+      )}
+
       <div className="msgs">
+        {notice && <div className="msg tool">{notice} <button onClick={() => setNotice(undefined)}>Dismiss</button></div>}
         {!view && <div className="msg tool">Ask about this workbook, or ask for a change. Every change is checkpointed and can be undone below.</div>}
         {view?.messages.map((m) => <Message key={m.id} m={m} open={!!open[m.id]} toggle={() => setOpen({ ...open, [m.id]: !open[m.id] })} />)}
         {view?.permissions.map((p) => (

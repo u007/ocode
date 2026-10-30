@@ -132,12 +132,12 @@ func (s *srv) workspace(w http.ResponseWriter, r *http.Request) {
 	}
 	root := s.cfg.WorkspaceRoot
 	if root == "" {
-		home, err := os.UserHomeDir()
+		d, err := defaultWorkspaceRoot()
 		if err != nil {
-			http.Error(w, "no home directory; set --workspace-root", http.StatusInternalServerError)
+			http.Error(w, "no data directory; set --workspace-root: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		root = filepath.Join(home, ".ocode-excel")
+		root = d
 	}
 	dir := filepath.Join(root, wb)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

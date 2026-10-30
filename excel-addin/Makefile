@@ -23,4 +23,4 @@ manifest:
 
 # Desktop run: HTTPS certs from `npx office-addin-dev-certs install`, ocode serve already running.
 run-bridge: build
-	./bin/excel-bridge -static taskpane/dist -cert $(CERT) -key $(KEY) -data-dir $(HOME)/.ocode-excel/state
+	./bin/excel-bridge -static taskpane/dist -cert $(CERT) -key $(KEY)

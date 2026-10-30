@@ -28,9 +28,11 @@ type Config struct {
 	// CallTimeout bounds one tool call.
 	CallTimeout time.Duration
 	// WorkspaceRoot holds one directory per workbook; ocode sessions for a workbook are rooted there.
-	// The pane registers it with ocode as a project (POST /api/projects).
+	// The pane registers it with ocode as a project (POST /api/projects). Empty means
+	// <globalDataDir>/excel/workspaces (datadir.go).
 	WorkspaceRoot string
-	// DataDir persists the pane's small per-workbook state (undo journal, session index). Empty keeps it in memory.
+	// DataDir persists the pane's small per-workbook state (undo journal, session index). Empty keeps it in
+	// memory, which only tests use: the CLI always passes a directory (default <globalDataDir>/excel/state).
 	DataDir string
 }
 
@@ -82,7 +84,7 @@ func NewHandler(cfg Config) (http.Handler, *Hub, error) {
 	mux.Handle("POST /bridge/workspace/{workbook}", s.auth(http.HandlerFunc(s.workspace)))
 	mux.Handle("GET /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.getState)))
 	mux.Handle("PUT /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.putState)))
-	mux.Handle("/api/", s.auth(proxy))
+	mux.Handle("/api/", s.auth(allowAPI(proxy)))
 	// MCP is for ocode on the same machine: loopback only, same key.
 	mux.Handle("/mcp", s.auth(s.loopbackOnly(mcp)))
 	if cfg.StaticDir != "" {
@@ -178,6 +180,13 @@ func (s *srv) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workbook is required", http.StatusBadRequest)
 		return
 	}
+	// instance identifies one page load of the pane: the same instance reconnecting replaces its
+	// own stream silently, a different one evicts it (see Hub.Attach).
+	instance := r.URL.Query().Get("instance")
+	if instance == "" {
+		http.Error(w, "instance is required", http.StatusBadRequest)
+		return
+	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -186,7 +195,7 @@ func (s *srv) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	events, done, detach := s.hub.Attach(wb)
+	events, done, detach := s.hub.Attach(wb, instance)
 	defer detach()
 	bw := bufio.NewWriter(w)
 	write := func(name string, data any) error {
@@ -212,7 +221,10 @@ func (s *srv) stream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-done: // replaced by a newer pane for the same workbook
+		case reason := <-done: // replaced by a newer pane for the same workbook; empty reason = silent
+			if reason != "" {
+				_ = write("evicted", map[string]string{"reason": reason})
+			}
 			return
 		case ev := <-events:
 			if write(ev.Name, ev.Data) != nil {

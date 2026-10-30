@@ -84,6 +84,14 @@ export class OfficePort implements ExcelPort {
     });
   }
 
+  /** UNVERIFIED: undo sets formats before values so a "@" format keeps a restored "007" as text. */
+  async setNumberFormats(sheet: string, address: string, formats: string[][]): Promise<void> {
+    return Excel.run(async (ctx) => {
+      ctx.workbook.worksheets.getItem(sheet).getRange(address).numberFormat = formats;
+      await ctx.sync();
+    });
+  }
+
   /**
    * Fill by computing each cell's formula ourselves (shiftFormula is unit tested) instead of relying on how
    * Excel treats a single formula assigned to a multi-cell range. UNVERIFIED for functions that spill.

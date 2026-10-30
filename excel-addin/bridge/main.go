@@ -9,6 +9,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -26,6 +27,8 @@ func env(k, def string) string {
 }
 
 func main() {
+	wsDefault, wsErr := defaultWorkspaceRoot()
+	stateDefault, stateErr := defaultStateDir()
 	var (
 		listen   = flag.String("listen", env("EXCEL_BRIDGE_LISTEN", "127.0.0.1:3443"), "listen address (loopback)")
 		ocode    = flag.String("ocode", env("EXCEL_BRIDGE_OCODE_URL", "http://127.0.0.1:4096"), "ocode serve base URL")
@@ -34,10 +37,21 @@ func main() {
 		keyFile  = flag.String("key", env("EXCEL_BRIDGE_KEY", ""), "TLS private key (PEM)")
 		origins  = flag.String("allow-origin", env("EXCEL_BRIDGE_ALLOW_ORIGINS", ""), "extra allowed browser origins, comma separated")
 		timeout  = flag.Duration("call-timeout", 90*time.Second, "max time for one Excel tool call")
-		wsRoot   = flag.String("workspace-root", env("EXCEL_BRIDGE_WORKSPACE", ""), "directory holding one folder per workbook (default ~/.ocode-excel); the pane registers each as an ocode project")
-		dataDir  = flag.String("data-dir", env("EXCEL_BRIDGE_DATA", ""), "directory for the pane's undo journal and session index (default: memory only)")
+		wsRoot   = flag.String("workspace-root", env("EXCEL_BRIDGE_WORKSPACE", wsDefault), "one folder per workbook, each registered with ocode as a project; <data dir> is ocode's own data dir")
+		dataDir  = flag.String("data-dir", env("EXCEL_BRIDGE_DATA", stateDefault), "pane state kept across restarts (undo journal, session index); empty value means the default")
 	)
 	flag.Parse()
+	// An empty value means "use the default". It never means "keep state in memory": a flag must not silently
+	// turn persistence off. The data dir is <data dir>/excel, where <data dir> is the one ocode uses (datadir.go).
+	if *wsRoot == "" {
+		*wsRoot = wsDefault
+	}
+	if *dataDir == "" {
+		*dataDir = stateDefault
+	}
+	if *wsRoot == "" || *dataDir == "" {
+		log.Fatalf("no data directory: %v (pass --workspace-root and --data-dir)", errors.Join(wsErr, stateErr))
+	}
 
 	// The ocode token comes from the environment only (never a flag: flags show up in process lists).
 	token := os.Getenv("OCODE_TOKEN")

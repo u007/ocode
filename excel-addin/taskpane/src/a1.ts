@@ -135,11 +135,41 @@ export function shiftFormula(formula: string, dRow: number, dCol: number): strin
           continue;
         }
       }
+      // whole-column range B:B, $B:D: each end shifts unless anchored with $; a shifted end off the sheet makes the whole range #REF!
+      const wc = /^(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})(?![A-Za-z0-9_(.!])/.exec(formula.slice(i));
+      if (wc) {
+        const c1 = lettersToCol(wc[2]);
+        const c2 = lettersToCol(wc[4]);
+        if (c1 <= MAX_COL && c2 <= MAX_COL) {
+          const n1 = wc[1] ? c1 : c1 + dCol;
+          const n2 = wc[3] ? c2 : c2 + dCol;
+          const off = [n1, n2].some((n) => n < 1 || n > MAX_COL);
+          out += off ? "#REF!" : `${wc[1]}${colToLetters(n1)}:${wc[3]}${colToLetters(n2)}`;
+          i += wc[0].length;
+          continue;
+        }
+      }
       const w = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(formula.slice(i));
       if (w) {
         out += w[0]; // function or defined name: copy verbatim
         i += w[0].length;
         continue;
+      }
+    }
+    // whole-row range 2:2, $2:$5, 2:$5 (the leading $ or digit starts a token only when not inside a cell ref or number)
+    if ((ch === "$" || /\d/.test(ch)) && !/[A-Za-z0-9_.$]/.test(prev)) {
+      const rr = /^(\$?)(\d+):(\$?)(\d+)(?![A-Za-z0-9_(.!])/.exec(formula.slice(i));
+      if (rr) {
+        const r1 = Number(rr[2]);
+        const r2 = Number(rr[4]);
+        if (r1 >= 1 && r2 >= 1 && r1 <= MAX_ROW && r2 <= MAX_ROW) {
+          const n1 = rr[1] ? r1 : r1 + dRow;
+          const n2 = rr[3] ? r2 : r2 + dRow;
+          const off = [n1, n2].some((n) => n < 1 || n > MAX_ROW);
+          out += off ? "#REF!" : `${rr[1]}${n1}:${rr[3]}${n2}`;
+          i += rr[0].length;
+          continue;
+        }
       }
     }
     out += ch;

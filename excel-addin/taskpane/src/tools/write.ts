@@ -1,16 +1,34 @@
 import { Rect, cellAddress, cellCount, cols, formatRect, intersects, parseAddress, rows } from "../a1";
-import type { CellValue, FormatSpec } from "../port";
-import { MAX_CHECKPOINT_CELLS, Journal, Step, stepRect } from "./journal";
+import type { CellValue, FormatSpec, RangeData } from "../port";
+import { MAX_CHECKPOINT_CELLS, Journal, Step, jsonBytes, stepRect } from "./journal";
 import {
   DATA_NOTICE, ToolCtx, ToolError, checkAbort, errorsIn, gridDims, isBlank, isFormula, normalized, rectOfData, resolveRect,
 } from "./util";
 
 const READBACK_CELLS = 200;
 
+/**
+ * Put the prior values and formats back after a checkpoint failed. Returns the error to throw: either the write was
+ * rolled back, or (if the rollback failed too) the message says plainly which cells keep the new values.
+ */
+async function rollBack(
+  ctx: ToolCtx, sheet: string, addr: string, prior: CellValue[][], priorFormats: string[][], cause: unknown,
+): Promise<ToolError> {
+  const why = cause instanceof Error ? cause.message : String(cause);
+  try {
+    await ctx.port.setNumberFormats(sheet, addr, priorFormats);
+    await ctx.port.write(sheet, addr, prior);
+  } catch (e) {
+    const again = e instanceof Error ? e.message : String(e);
+    return new ToolError(`The write to ${sheet}!${addr} was applied but could NOT be checkpointed for undo (${why}), and rolling it back also failed (${again}). The cells at ${sheet}!${addr} keep the new values and no undo step exists for them. Tell the user and check or fix those cells by hand.`);
+  }
+  return new ToolError(`The write to ${sheet}!${addr} was rolled back because it could not be checkpointed for undo (${why}). Nothing was changed. Retry the write.`);
+}
+
 /** Shared by write_range and fill_formula: refuse silently destructive writes, checkpoint, write, read back. */
 async function checkpointedWrite(
   ctx: ToolCtx, tool: string, sheet: string, rect: Rect, overwrite: boolean, replaceFormulas: boolean,
-  incoming: CellValue[][] | null, apply: () => Promise<void>,
+  incoming: CellValue[][] | null, incomingBytes: number, apply: () => Promise<void>,
 ) {
   if (cellCount(rect) > MAX_CHECKPOINT_CELLS) {
     throw new ToolError(`${cellCount(rect)} cells is too many to checkpoint in one step (limit ${MAX_CHECKPOINT_CELLS}). Write in smaller blocks so every change can be undone.`);
@@ -19,6 +37,7 @@ async function checkpointedWrite(
   const addr = formatRect(rect);
   const before = await ctx.port.read(sheet, addr);
   const prior = normalized(before);
+  const priorFormats = before.numberFormats;
 
   const occupied: string[] = [];
   const formulaLoss: string[] = [];
@@ -35,15 +54,29 @@ async function checkpointedWrite(
     throw new ToolError(`${occupied.length} target cell(s) are not empty (${occupied.slice(0, 5).join(", ")}${occupied.length > 5 ? ", ..." : ""}). Pass overwrite=true only if replacing them is intended.`);
   }
 
+  // Estimate the persisted step before touching a cell: before image, after image, and both format grids.
+  const priorBytes = jsonBytes(prior);
+  await ctx.journal.prepare(Math.max(2 * priorBytes, priorBytes + incomingBytes) + 2 * jsonBytes(priorFormats));
+
   checkAbort(ctx);
   await apply();
-  const after = await ctx.port.read(sheet, addr);
-  const step = await ctx.journal.record({ tool, sheet, address: addr, before: prior, after: normalized(after) });
+  let after: RangeData;
+  let step: Step;
+  try {
+    after = await ctx.port.read(sheet, addr);
+    step = await ctx.journal.record({
+      tool, sheet, address: addr, before: prior, after: normalized(after), beforeFormats: priorFormats, afterFormats: after.numberFormats,
+    });
+  } catch (e) {
+    throw await rollBack(ctx, sheet, addr, prior, priorFormats, e);
+  }
   const errs = errorsIn(after, rectOfData(sheet, after));
   const small = cellCount(rect) <= READBACK_CELLS;
   return {
     data_notice: DATA_NOTICE, step_id: step.id, sheet, address: addr,
     cells_written: cellCount(rect),
+    /** true when the step holds format images, so undo restores the number formats too */
+    formats_restored: step.beforeFormats !== undefined,
     evaluated: small ? after.values : undefined,
     formulas: small ? Object.fromEntries(after.formulas.flatMap((r, i) => r.map((f, j) => [cellAddress(rect.c1 + j, rect.r1 + i), f] as const)).filter(([, f]) => f.startsWith("="))) : undefined,
     first_rows: small ? undefined : after.values.slice(0, 3),
@@ -62,14 +95,14 @@ export async function writeRange(ctx: ToolCtx, a: { sheet: string; address: stri
     throw new ToolError(`address ${a.address} is ${rows(given)}x${cols(given)} but values is ${nr}x${nc}. Give the top-left cell alone, or an address that matches the data.`);
   }
   const rect: Rect = { sheet: a.sheet, c1: given.c1, r1: given.r1, c2: given.c1 + nc - 1, r2: given.r1 + nr - 1 };
-  return checkpointedWrite(ctx, "write_range", a.sheet, rect, a.overwrite, a.replace_formulas, a.values, () =>
+  return checkpointedWrite(ctx, "write_range", a.sheet, rect, a.overwrite, a.replace_formulas, a.values, jsonBytes(a.values), () =>
     ctx.port.write(a.sheet, formatRect(rect), a.values, a.number_format));
 }
 
 export async function fillFormula(ctx: ToolCtx, a: { sheet: string; address: string; formula: string; overwrite: boolean }) {
   if (!a.formula.startsWith("=")) throw new ToolError("formula must start with '='");
   const rect = await resolveRect(ctx, a.sheet, a.address);
-  return checkpointedWrite(ctx, "fill_formula", a.sheet, rect, a.overwrite, true, null, () =>
+  return checkpointedWrite(ctx, "fill_formula", a.sheet, rect, a.overwrite, true, null, cellCount(rect) * (jsonBytes(a.formula) + 1), () =>
     ctx.port.fillFormula(a.sheet, formatRect(rect), a.formula));
 }
 
@@ -130,8 +163,11 @@ export async function undoStep(ctx: ToolCtx, a: { step_id: string }) {
   if (conflicts.length) {
     throw new ToolError(`Not undone: ${conflicts.length} cell(s) changed since step ${step.id} (${conflicts.slice(0, 5).map((c) => c.address).join(", ")}${conflicts.length > 5 ? ", ..." : ""}). Nothing was modified. Ask the user before overwriting their edits.`);
   }
+  // Formats go first: a text format must be in place before a string such as "007" lands, or Excel re-parses it.
+  // Steps recorded before formats were kept have no beforeFormats and skip this.
+  if (step.beforeFormats) await ctx.port.setNumberFormats(step.sheet, step.address, step.beforeFormats);
   // Empty before-cells are written back as "" so they end up empty again.
   await ctx.port.write(step.sheet, step.address, step.before);
   await ctx.journal.markUndone(step.id);
-  return { restored: step.id, sheet: step.sheet, address: step.address };
+  return { restored: step.id, sheet: step.sheet, address: step.address, formats_restored: step.beforeFormats !== undefined };
 }

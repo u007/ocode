@@ -112,10 +112,12 @@ export OCODE_TOKEN=<token printed by ocode serve, if auth is on>
 ocode serve                                    # note its port, default assumed 127.0.0.1:4096
 ./bin/excel-bridge -static taskpane/dist \
   -ocode http://127.0.0.1:4096 \
-  -cert ~/.office-addin-dev-certs/localhost.crt -key ~/.office-addin-dev-certs/localhost.key \
-  -data-dir ~/.ocode-excel/state
+  -cert ~/.office-addin-dev-certs/localhost.crt -key ~/.office-addin-dev-certs/localhost.key
 # it prints the task pane URL and the exact ocode MCP entry
 ```
+State and workspaces default to `<data dir>/excel/` (`state/` and `workspaces/`), where `<data dir>` is ocode's own
+data directory (`~/.local/share/opencode` on macOS and Linux, `$XDG_DATA_HOME/opencode` if set, `%LOCALAPPDATA%\opencode`
+on Windows). `--data-dir` and `--workspace-root` override them. See `bridge/datadir.go`.
 
 **Register the tools with ocode.** Add to the `mcp` map of the ocode config (same place other MCP servers live; see
 `docs/plugins.md` and `internal/config/config.go` `MCPConfig`):

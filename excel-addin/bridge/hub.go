@@ -42,15 +42,47 @@ var (
 	ErrCallLimit = errors.New("too many tool calls in flight for this workbook")
 )
 
-// pane is one connected task pane (one workbook).
+// evictedReason is sent to a pane that another task pane for the same workbook displaces.
+const evictedReason = "another task pane opened this workbook"
+
+// pane is one connected task pane (one workbook, one page load).
 type pane struct {
 	workbook string
+	// instance identifies one page load of the task pane. A reconnect of the same page load carries
+	// the same instance; a different instance is a second pane and evicts this one.
+	instance string
 	events   chan Event
-	done     chan struct{}
-	once     sync.Once
+	// gone is closed when the pane is detached or replaced. Calls select on it, so it must never
+	// carry a value.
+	gone chan struct{}
+	// done is what the stream handler waits on. It receives the eviction reason (only for an
+	// eviction) and is then closed, so the handler can tell the pane why its stream ends.
+	done chan string
+	once sync.Once
 }
 
-func (p *pane) close() { p.once.Do(func() { close(p.done) }) }
+// finish ends the pane exactly once. A non-empty reason is delivered on done before it closes.
+func (p *pane) finish(reason string) {
+	p.once.Do(func() {
+		close(p.gone)
+		if reason != "" {
+			p.done <- reason // buffered 1, sent once under once
+		}
+		close(p.done)
+	})
+}
+
+// discardQueued drops events that were queued for the pane but not yet written. Their calls are
+// failed by failPane, so the pane must not run them after it has been displaced.
+func (p *pane) discardQueued() {
+	for {
+		select {
+		case <-p.events:
+		default:
+			return
+		}
+	}
+}
 
 type pending struct {
 	pane *pane
@@ -73,17 +105,26 @@ func NewHub() *Hub {
 	return &Hub{panes: map[string]*pane{}, calls: map[string]*pending{}, MaxInFlight: 8}
 }
 
-// Attach registers a pane for a workbook. A newer pane for the same workbook replaces the older
-// one (the user reopened the task pane); the older one's in-flight calls fail with ErrPaneGone.
-func (h *Hub) Attach(workbook string) (events <-chan Event, done <-chan struct{}, detach func()) {
-	p := &pane{workbook: workbook, events: make(chan Event, 32), done: make(chan struct{})}
+// Attach registers a pane for a workbook. A newer attach for the same workbook replaces the older
+// pane. If the instance differs, the older pane is evicted: its stream gets an "evicted" event
+// before it closes, and its pane must stop reconnecting. If the instance is the same (a reconnect
+// after a network blip) the replacement is silent. Either way the older pane's in-flight calls
+// fail with ErrPaneGone. The returned done channel delivers the eviction reason, if any, and then
+// closes.
+func (h *Hub) Attach(workbook, instance string) (events <-chan Event, done <-chan string, detach func()) {
+	p := &pane{workbook: workbook, instance: instance, events: make(chan Event, 32), gone: make(chan struct{}), done: make(chan string, 1)}
 	h.mu.Lock()
 	old := h.panes[workbook]
 	h.panes[workbook] = p
 	h.mu.Unlock()
 	if old != nil {
 		h.failPane(old)
-		old.close()
+		old.discardQueued()
+		reason := ""
+		if old.instance != instance {
+			reason = evictedReason
+		}
+		old.finish(reason)
 	}
 	return p.events, p.done, func() {
 		h.mu.Lock()
@@ -92,7 +133,7 @@ func (h *Hub) Attach(workbook string) (events <-chan Event, done <-chan struct{}
 		}
 		h.mu.Unlock()
 		h.failPane(p)
-		p.close()
+		p.finish("")
 	}
 }
 
@@ -186,7 +227,7 @@ func (h *Hub) Call(ctx context.Context, workbook, tool string, args json.RawMess
 
 	select {
 	case p.events <- Event{Name: "call", Data: CallEvent{ID: id, Tool: tool, Args: args}}:
-	case <-p.done:
+	case <-p.gone:
 		h.drop(id)
 		return Result{}, ErrPaneGone
 	case <-ctx.Done():
