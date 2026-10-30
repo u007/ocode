@@ -21,48 +21,67 @@ const maxSTTUploadBody = 26 << 20
 
 var sttExtPattern = regexp.MustCompile(`^\.[A-Za-z0-9]{1,5}$`)
 
-// sttOptions builds the transcription options from the persisted selection.
-// The config is re-read per call so a model change in Settings applies at once.
-func (s *Server) sttOptions(model string) stt.Options {
-	return stt.Options{
-		Model:     model,
-		OpenAIKey: func() string { return auth.ResolveKey("openai") },
-	}
-}
-
-// sttSelectedModel is the persisted model id, or "" when none is saved.
-func sttSelectedModel() string {
+// sttSelectedConfig is the persisted speech-to-text settings. The config is
+// re-read per call so a model or cleanup change in Settings applies at once.
+func sttSelectedConfig() config.STTConfig {
 	cfg, err := config.LoadOcodeConfigCopy()
 	if err != nil || cfg == nil {
-		return ""
+		return config.STTConfig{}
 	}
-	return cfg.STT.Model
+	return cfg.STT
+}
+
+// sttOptions builds the transcription options from persisted settings.
+func (s *Server) sttOptions(c config.STTConfig) stt.Options {
+	return stt.Options{
+		Model:       c.Model,
+		OpenAIKey:   func() string { return auth.ResolveKey("openai") },
+		KeepFillers: !c.FillerCleanupEnabled(),
+	}
 }
 
 // handleGetSTT lists every speech model with its availability on this host.
 func (s *Server) handleGetSTT(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, stt.StatusFor(s.sttOptions(sttSelectedModel())))
+	writeJSON(w, http.StatusOK, stt.StatusFor(s.sttOptions(sttSelectedConfig())))
 }
 
-// handleSetSTT persists the selected model. An unknown id is rejected rather
-// than silently falling back, so the Settings UI shows what was saved.
+// applySTTUpdate merges a PUT body into the persisted settings. Both fields are
+// optional so the model picker and the cleanup checkbox can each save without
+// restating (and risking a lost update on) the other.
+func applySTTUpdate(current config.STTConfig, model string, removeFillers *bool) config.STTConfig {
+	if model != "" {
+		current.Model = model
+	}
+	if removeFillers != nil {
+		current.RemoveFillers = removeFillers
+	}
+	return current
+}
+
+// handleSetSTT persists the speech-to-text settings. The body may carry the
+// model, the filler-word cleanup choice, or both, so toggling cleanup never
+// has to restate (and risk overwriting) the selected model. An unknown model
+// id is rejected rather than silently falling back, so the Settings UI shows
+// what was saved.
 func (s *Server) handleSetSTT(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model string `json:"model"`
+		Model         string `json:"model"`
+		RemoveFillers *bool  `json:"remove_fillers"`
 	}
 	if err := decodeTTSJSON(w, r, &req, 4<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid speech-to-text config")
 		return
 	}
-	if !stt.ValidModel(req.Model) {
+	if req.Model != "" && !stt.ValidModel(req.Model) {
 		writeError(w, http.StatusBadRequest, stt.ErrUnknownModel.Error())
 		return
 	}
-	if err := config.SaveOcodeSTTConfig(config.STTConfig{Model: req.Model}); err != nil {
+	next := applySTTUpdate(sttSelectedConfig(), req.Model, req.RemoveFillers)
+	if err := config.SaveOcodeSTTConfig(next); err != nil {
 		writeError(w, http.StatusInternalServerError, "save speech-to-text config: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, stt.StatusFor(s.sttOptions(req.Model)))
+	writeJSON(w, http.StatusOK, stt.StatusFor(s.sttOptions(next)))
 }
 
 // handleTranscribeSTT takes a multipart upload (field "audio") recorded in the
@@ -106,7 +125,7 @@ func (s *Server) handleTranscribeSTT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := s.sttOptions(sttSelectedModel())
+	opts := s.sttOptions(sttSelectedConfig())
 	// The client sets install=1 only after the user confirmed the one-time
 	// dependency install; without it a missing runtime is a 409 that asks.
 	opts.InstallApproved = r.URL.Query().Get("install") == "1"
@@ -146,7 +165,7 @@ var sttPrewarmFunc = stt.Prewarm
 // or the microphone prompt would wait behind it — so the load runs in the
 // background and the handler answers immediately.
 func (s *Server) handlePrewarmSTT(w http.ResponseWriter, r *http.Request) {
-	opts := s.sttOptions(sttSelectedModel())
+	opts := s.sttOptions(sttSelectedConfig())
 	// Answer as soon as the request is accepted; the load continues in the
 	// background. The caller's next action is to talk, not to wait.
 	go func() {

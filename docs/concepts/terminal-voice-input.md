@@ -1,17 +1,11 @@
 ---
 type: Concept
 title: Terminal voice input (mic button in the web Terminal panel)
-description: A mic button in the web/desktop Terminal panel records with the shared recorder and pastes the transcript into the pty as one bracketed paste, never sent. It bypasses the phone keyboard's IME, which mangles dictation into xterm's hidden textarea.
-tags:
-  - terminal
-  - voice
-  - stt
-  - mobile
-  - ime
-  - xterm
-  - web-ui
-timestamp: 2026-10-27T17:30:00Z
+description: 'A mic button in the web/desktop Terminal panel records with the shared recorder and pastes the transcript into the pty as one bracketed paste, never sent. It bypasses the phone keyboard''s IME, which mangles dictation into xterm''s hidden textarea.'
+tags: [terminal, voice, stt, mobile, ime, xterm, web-ui]
+timestamp: 2026-10-30T13:15:21Z
 ---
+# Terminal voice input (mic button in the web Terminal panel)
 
 # Terminal voice input
 
@@ -46,8 +40,10 @@ the pty.
 
 ## Behaviour
 
-- **Insertion.** The transcript is trimmed, control characters (ESC, 0x03/0x04) and newlines collapse to single
-  spaces, then `term.paste(text)` runs once. `term.paste` honours bracketed-paste
+- **Insertion.** Filler-word removal (see [speech-to-text.md](speech-to-text.md)) happens in the transcription
+  layer before this step, so the transcript arrives already cleaned (subject to `stt.remove_fillers`,
+  default on). The transcript is then trimmed, control characters (ESC, 0x03/0x04) and newlines collapse
+  to single spaces, then `term.paste(text)` runs once. `term.paste` honours bracketed-paste
   mode, so a TUI that enabled it (Claude Code) receives it as one paste. Without
   that mode, no newline means no Return. `/voice status` documents insert-at-cursor (not a next-message send). Afterwards `term.focus()` is called.
 - **Connection re-checked at paste time.** Transcription takes seconds. If the

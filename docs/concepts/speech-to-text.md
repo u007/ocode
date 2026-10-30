@@ -1,11 +1,19 @@
+---
+type: Concept
+title: "Speech-to-text (voice input)"
+description: 'How ocode records, transcribes and cleans voice input in the TUI, web UI and desktop app, including the local and OpenAI engines, live partials and the stt config.'
+timestamp: 2026-10-30T13:13:37Z
+---
 # Speech-to-text (voice input)
 
 Dictate a chat message in the TUI, the web UI, or the desktop app. The transcript
 is inserted into the composer at the cursor and never sent: review it, then press
 Enter. On web and desktop a highlighted section (or the whole draft) is replaced
 by the transcript; the TUI composer has no persistent selection, so it always
-inserts at the cursor. The model is chosen once in Settings (web/desktop) or with
-`/voice model <id>` (TUI).
+inserts at the cursor. The transcript is cleaned of hesitation sounds ("um",
+"uh", "hmm", ...) before it is inserted (see "Post-processing (filler words)"
+under Engines); the same cleanup applies to the live partial transcripts. The
+model is chosen once in Settings (web/desktop) or with `/voice model <id>` (TUI).
 
 ## Model catalog
 
@@ -65,7 +73,8 @@ Rules:
   3.10+ exists, so it is selectable. With no Python 3.10+ at all it stays
   unavailable with the full list of rejected candidates.
 - `PartialTranscribe` clears `InstallApproved`: live partials are polled and a
-  failure is silent, so they can neither install nor nag.
+  failure is silent, so they can neither install nor nag. Live partials also
+  pass through the filler-word cleanup, so the preview shows the cleaned text.
 - **Install failures are shown, not swallowed.** The error carries the tail of
   pip's/venv's own output (`runInstallCmd`, last 800 bytes). The web composer
   shows it verbatim in a scrollable `role="alert"` banner prefixed "Voice
@@ -112,14 +121,32 @@ Rules:
   with `ffmpeg`. Only stdout is parsed; stderr carries download progress.
 - **openai**: multipart `POST {base}/audio/transcriptions`, returns `text`.
 
+### Post-processing (filler words)
+
+`internal/stt/fillers.go` (`RemoveFillerWords`) runs on every finished
+transcript, for both engines and for live partials (`PartialTranscribe` routes
+through the same `Options.clean`). It removes only whole-word English hesitation
+sounds from a fixed list (um, umm, ummm, uh, uhh, uhhh, uhm, uhhm, umh, hm,
+hmm, hmmm, mm, mmm, mmmm, erm). It never touches "like", "you know", "I
+mean", "oh", "ah"/"eh", or the affirmations "uh-huh"/"mm hmm" (single
+hyphenated token, plus a protected-pair guard for the spaced forms). Punctuation
+is repaired: a comma pair bracketing the filler is dropped ("we should, um, go"
+-> "we should go"), a trailing comma after the filler is dropped ("Um, hello" ->
+"Hello"), a sentence-opening filler leaves its replacement capitalised ("Hello.
+Um, we go" -> "Hello. We go"), runs of spaces are collapsed, a space before
+`, . ; : ! ?` is removed, and newlines are preserved. A transcript that was
+nothing but hesitation becomes "". A transcript with no filler word is returned
+byte-for-byte unchanged. The cleanup is deterministic (no model call). Opt out
+with `stt.Options.KeepFillers` (zero value cleans); see Config below.
+
 ## Capture
 
 - **Browser (web and desktop)**: `MediaRecorder` on `getUserMedia`. The blob is
   uploaded to `POST /api/stt/transcribe`. The mic button in the chat composer has
   a dual interaction: a quick press-and-release starts recording (traditional click
   to start, then click again to stop and insert the transcript); holding the button past
-  `VOICE_HOLD_THRESHOLD_MS` (default 2000 ms) locks continuous mode, where release
-  does *not* stop the recording — the user clicks the button again (it reads as a
+  `VOICE_HOLD_THRESHOLD_MS` (default 2000 ms) locks continuous mode, where release does
+  *not* stop the recording — the user clicks the button again (it reads as a
   red stop square) to stop and insert the transcript. Keyboard users can press
   Enter or Space the same way (keydown arms, keyup acts). The TUI keeps its
   `ctrl+x v` toggle, since terminals do not reliably report key release.
@@ -139,11 +166,19 @@ Rules:
 - `GET /api/stt` returns `{selected, models[]}` with availability and reasons.
 - `PUT /api/stt` with `{"model": id}` saves the selection (unknown id → 400).
 - `POST /api/stt/transcribe` (multipart field `audio`, max 25 MB) returns
-  `{text, model}`. 503 means the selected model is not available, 502 means the
-  engine failed.
+  `{text, model}`. The `text` is the CLEANED transcript for both engines (filler
+  words removed unless `remove_fillers` is off). 503 means the selected model is
+  not available, 502 means the engine failed.
 
 Config lives under the `stt` section of `ocodeconfig.json`
-(`config.SaveOcodeSTTConfig`).
+(`config.SaveOcodeSTTConfig`). The `remove_fillers` key (a `*bool`; absent means
+on, so upgrading an install keeps cleanup enabled) toggles the filler-word
+cleanup. It is exposed as a "Remove filler words" checkbox in Settings ->
+Speech to text, and in the TUI as `/voice fillers on|off` (state shown by
+`/voice status` as "Fillers: removed|kept"). `GET /api/stt` returns
+`remove_fillers` in `stt.Status`, and `PUT /api/stt` accepts `{model}`,
+`{remove_fillers}` or both and merges the other field, so changing the model
+never resets the toggle and vice versa.
 
 ## Not done yet
 

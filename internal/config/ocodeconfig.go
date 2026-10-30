@@ -2897,10 +2897,23 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 // from internal/stt; empty means the default model.
 type STTConfig struct {
 	Model string `json:"model,omitempty"`
+	// RemoveFillers controls the post-transcription cleanup of hesitation
+	// sounds. It is a pointer so an absent key means the default (on): a plain
+	// bool would read as "off" on every install written before the setting
+	// existed, and the user would see no cleanup after upgrading.
+	RemoveFillers *bool `json:"remove_fillers,omitempty"`
 }
 
-// SaveOcodeSTTConfig updates only the persisted speech-to-text selection while
-// preserving the other ocode configuration sections.
+// FillerCleanupEnabled reports whether transcripts should have hesitation
+// sounds removed. An unset setting means on.
+func (c STTConfig) FillerCleanupEnabled() bool {
+	return c.RemoveFillers == nil || *c.RemoveFillers
+}
+
+// SaveOcodeSTTConfig replaces the persisted speech-to-text settings (model and
+// filler-word cleanup) while preserving the other ocode configuration
+// sections. Replacing the whole struct means every caller must start from
+// LoadOcodeConfigCopy and change only its own field, or it drops the other.
 func SaveOcodeSTTConfig(stt STTConfig) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.STT = stt
