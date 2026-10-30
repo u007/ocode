@@ -41,6 +41,7 @@ import type {
   UsageSummary,
   PluginInfo,
   InstallPluginResult,
+  IntentPackageInfo,
   CommandEntry,
   SkillEntry,
   ManageableSkillsResponse,
@@ -3913,6 +3914,15 @@ export const api = {
     fetchJSON<InstallPluginResult>("/api/plugins", {
       method: "POST",
       body: JSON.stringify({ source }),
+    }),
+  /** Skills of the latest @tanstack/intent on npm (fetched server-side). */
+  listIntentSkills: (signal?: AbortSignal) =>
+    fetchJSON<IntentPackageInfo>("/api/skills/tanstack-intent", { signal }),
+  /** Install the named @tanstack/intent skills into ~/.claude/skills. */
+  installIntentSkills: (names: string[]) =>
+    fetchJSON<{ report: string }>("/api/skills/tanstack-intent/install", {
+      method: "POST",
+      body: JSON.stringify({ names }),
     }),
   removePlugin: async (name: string): Promise<void> => {
     const res = await fetch(

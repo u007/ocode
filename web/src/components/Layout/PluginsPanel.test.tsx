@@ -11,6 +11,7 @@ vi.mock("../../api/client", () => ({
     setPluginEnabled: vi.fn(),
     removePlugin: vi.fn(),
     installPlugin: vi.fn(),
+    listIntentSkills: vi.fn(),
   },
 }));
 
@@ -21,6 +22,27 @@ beforeEach(() => {
 });
 
 describe("PluginsPanel install", () => {
+  it("stacks the intent checklist over the panel; Escape closes only the checklist, and closing the panel leaves the page interactive", async () => {
+    vi.mocked(api.listIntentSkills).mockResolvedValue({
+      version: "0.5.6",
+      skills: [{ name: "generate-skill", description: "Use when generating skills." }],
+    });
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<PluginsPanel open onOpenChange={onOpenChange} />);
+
+    fireEvent.change(screen.getByPlaceholderText(/name, git URL/), { target: { value: "@tanstack/intent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Install/ }));
+    expect(await screen.findByText("generate-skill")).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByText("generate-skill")).toBeNull());
+    expect(screen.getByPlaceholderText(/name, git URL/)).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    rerender(<PluginsPanel open={false} onOpenChange={onOpenChange} />);
+    await waitFor(() => expect(document.body.style.pointerEvents).not.toBe("none"));
+  });
+
   it("shows the report when a bare name installs a bundled skill", async () => {
     vi.mocked(api.installPlugin).mockResolvedValue({
       skill: "standup",

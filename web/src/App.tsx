@@ -64,6 +64,7 @@ import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
 import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
 import { basename } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
+import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import QuestionDialog from "./components/Chat/QuestionDialog";
@@ -233,6 +234,7 @@ function HomeApp() {
     typeof window === "undefined" ? true : window.innerWidth >= 768,
   );
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [intentSkillsOpen, setIntentSkillsOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
   const fileTreePane = useResizableSidebar({
@@ -1276,6 +1278,11 @@ function HomeApp() {
       return { handled: true, accepted: true };
     }
 
+    if (result.openIntentSkillsDialog) {
+      setIntentSkillsOpen(true);
+      return { handled: true, accepted: true };
+    }
+
     // Apply result effects
     if (result.messages) {
       for (const msg of result.messages) {
@@ -2211,6 +2218,7 @@ function HomeApp() {
         sessionId={activeTabId ?? undefined}
         host={activeSessionHost}
       />
+      <IntentSkillsDialog open={intentSkillsOpen} onOpenChange={setIntentSkillsOpen} />
 
       {/* Permission Dialog — only while this session's Chat sub-tab is on
           screen, so an ask never blocks a view the user is not working in. The

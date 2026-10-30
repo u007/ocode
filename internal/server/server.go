@@ -691,6 +691,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/skills/manage", s.authMiddleware(s.handleListManageableSkills))
 	s.mux.HandleFunc("PUT /api/skills/{name}/enable", s.authMiddleware(s.handleEnableSkill))
 	s.mux.HandleFunc("PUT /api/skills/{name}/disable", s.authMiddleware(s.handleDisableSkill))
+	s.mux.HandleFunc("GET /api/skills/tanstack-intent", s.pluginAuthMiddleware(s.handleListIntentSkills))
+	s.mux.HandleFunc("POST /api/skills/tanstack-intent/install", s.pluginAuthMiddleware(s.handleInstallIntentSkills))
 	s.mux.HandleFunc("GET /api/commands", s.authMiddleware(s.handleListCommands))
 	s.mux.HandleFunc("GET /api/command-context/{name}", s.authMiddleware(s.handleCommandContext))
 	s.mux.HandleFunc("GET /api/github/pr/{owner}/{repo}/{number}", s.authMiddleware(s.handleGitHubPR))
@@ -3122,6 +3124,12 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleListManageableSkills(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListManageableSkills(w, r)
+}
+func (s *Server) handleListIntentSkills(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListIntentSkills(w, r)
+}
+func (s *Server) handleInstallIntentSkills(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleInstallIntentSkills(w, r)
 }
 func (s *Server) handleEnableSkill(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSkillEnabled(w, r, r.PathValue("name"), true)

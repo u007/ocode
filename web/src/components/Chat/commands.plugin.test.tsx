@@ -29,6 +29,12 @@ describe("/plugin install routing", () => {
     );
   });
 
+  it("opens the @tanstack/intent skill checklist instead of installing it as a plugin", async () => {
+    const result = await dispatchCommand("/plugin install @tanstack/intent", ctx());
+    expect(result).toEqual({ handled: true, openIntentSkillsDialog: true });
+    expect(mockInstall).not.toHaveBeenCalled();
+  });
+
   it("still reports a git plugin install by name and source", async () => {
     mockInstall.mockResolvedValue({
       name: "mine",

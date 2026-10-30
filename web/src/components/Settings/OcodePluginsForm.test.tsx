@@ -12,6 +12,8 @@ vi.mock("../../api/client", () => ({
     setPluginEnabled: vi.fn(),
     removePlugin: vi.fn(),
     installPlugin: vi.fn(),
+    listIntentSkills: vi.fn(),
+    installIntentSkills: vi.fn(),
   },
 }));
 
@@ -47,6 +49,24 @@ describe("OcodePluginsForm with Claude Code plugins", () => {
     const own = row("mine");
     expect(within(own).queryByText("Claude Code")).toBeNull();
     expect(within(own).getAllByRole("button")).toHaveLength(2); // toggle + remove
+  });
+
+  it("routes @tanstack/intent to the skill checklist instead of the git installer", async () => {
+    vi.mocked(api.listIntentSkills).mockResolvedValue({
+      version: "0.5.6",
+      skills: [{ name: "generate-skill", description: "Use when generating skills." }],
+    });
+    render(<OcodePluginsForm />);
+    await waitFor(() => expect(screen.getByText("superpowers")).toBeTruthy());
+
+    fireEvent.change(screen.getByPlaceholderText("name, git URL, or owner/repo@ref"), {
+      target: { value: "@tanstack/intent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Install/ }));
+
+    expect(await screen.findByText("generate-skill")).toBeTruthy();
+    expect(api.listIntentSkills).toHaveBeenCalledTimes(1);
+    expect(api.installPlugin).not.toHaveBeenCalled();
   });
 
   it("toggles a Claude Code plugin through ocode's plugin API", async () => {
