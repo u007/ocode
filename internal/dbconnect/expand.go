@@ -160,13 +160,20 @@ func IsTemplate(s string) bool {
 	return false
 }
 
-// nonReferenceText returns the part of s that is not an environment reference.
-// A bare "$" with no valid identifier after it stays in the result.
-func nonReferenceText(s string) string {
+// nonBracedReferenceText returns the part of s that is not a BRACED environment
+// reference ("${NAME}").
+//
+// A bare reference ("$NAME") is deliberately left in the result. It is not a
+// reliable credential reference: when the variable is unset, ExpandEnv keeps it
+// as literal text (see TestExpandEnvLeavesAnUnresolvedBareReferenceAlone), so a
+// password written as "$secretpass" would be persisted in the clear. Only the
+// braced form is both what IsTemplate recognizes and what the user is told to
+// write.
+func nonBracedReferenceText(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		if s[i] == '$' {
-			if _, next, _, ok := readReference(s, i); ok {
+			if _, next, braced, ok := readReference(s, i); ok && braced {
 				i = next
 				continue
 			}
@@ -183,48 +190,49 @@ func nonReferenceText(s string) string {
 // A template is saved in the clear (it names variables, not a credential), so a
 // literal password in it would be persisted unencrypted. The check is
 // deliberately conservative: the userinfo password, and the password /
-// sslpassword query values, must consist ONLY of references. A partial
-// reference such as "pa$HOME" is refused too — the user can write ${DB_PASS}
-// instead.
+// sslpassword query values, must consist ONLY of BRACED references. A bare
+// "$NAME" is not accepted there — it can stay literal when unset — and a
+// partial reference such as "pa$HOME" is refused too.
+//
+// The query is scanned to the END of the string, with no "#" truncation, because
+// pgx's URI parser treats "#" as ordinary data rather than an RFC 3986 fragment
+// (pgconn's own test is named "hash is data not fragment"). Truncating here would
+// let "...?sslmode=${X}#&password=hunter2" be stored as a template with the
+// literal password in the clear. The scan runs even when there is no "://", so a
+// scheme-less "${BASE}?password=hunter2" is covered as well.
 //
 // A URL with no reference is not a template; the caller seals it. A URL whose
 // template reference is outside the credential (for example a literal user with
 // ${DB_PASS}) is a valid template.
 func TemplateHasLiteralSecret(s string) bool {
-	const schemeSep = "://"
-	sep := strings.Index(s, schemeSep)
-	if sep < 0 {
-		return false
-	}
-	rest := s[sep+len(schemeSep):]
-	authorityEnd := strings.IndexAny(rest, "/?#")
-	authority := rest
-	if authorityEnd >= 0 {
-		authority = rest[:authorityEnd]
-	}
-	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
-		userinfo := authority[:at]
-		if colon := strings.IndexByte(userinfo, ':'); colon >= 0 {
-			if nonReferenceText(userinfo[colon+1:]) != "" {
-				return true
+	// Userinfo, when the scheme separator lets us find the authority. pgx ends
+	// the authority at '/', '?' or ',' only; '#' is data there too, so it is not
+	// a boundary here.
+	if _, after, found := strings.Cut(s, "://"); found {
+		authority := after
+		if authorityEnd := strings.IndexAny(after, "/?,"); authorityEnd >= 0 {
+			authority = after[:authorityEnd]
+		}
+		if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+			if _, password, hasPassword := strings.Cut(authority[:at], ":"); hasPassword {
+				if nonBracedReferenceText(password) != "" {
+					return true
+				}
 			}
 		}
 	}
 	query := ""
-	if q := strings.IndexByte(s, '?'); q >= 0 {
-		query = s[q+1:]
-		if hash := strings.IndexByte(query, '#'); hash >= 0 {
-			query = query[:hash]
-		}
+	if _, after, found := strings.Cut(s, "?"); found {
+		query = after
 	}
-	for _, pair := range strings.Split(query, "&") {
+	for pair := range strings.SplitSeq(query, "&") {
 		key, value, ok := strings.Cut(pair, "=")
 		if !ok {
 			continue
 		}
 		switch strings.ToLower(key) {
 		case "password", "sslpassword":
-			if nonReferenceText(value) != "" {
+			if nonBracedReferenceText(value) != "" {
 				return true
 			}
 		}

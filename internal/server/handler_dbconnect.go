@@ -31,16 +31,31 @@ import (
 const (
 	dbConnectOpenTimeout  = 15 * time.Second
 	dbConnectQueryTimeout = 30 * time.Second
+	// dbSurfaceIdleTTL bounds how long a surface's plaintext grant and pooled
+	// handle survive without a request. The surface is keyed per panel mount, so
+	// a panel closed without its unmount cleanup (browser reload, webview crash)
+	// would otherwise leak a credential and a live connection for the whole
+	// process lifetime.
+	dbSurfaceIdleTTL = 30 * time.Minute
+	// dbSurfaceMax caps remembered surfaces outright, in case a client creates
+	// mounts faster than the TTL retires them.
+	dbSurfaceMax = 64
+	// dbSurfaceMaxLen rejects an absurd client-supplied surface key.
+	dbSurfaceMaxLen = 256
 )
 
 // dbGrant maps connection name to its plaintext URL for one unlocked surface.
 type dbGrant map[string]string
 
 // dbGrantURL returns the plaintext URL for an unlocked connection, if any.
+// It also marks the surface as in use, which retires surfaces left behind by a
+// client that never called lock (see dbTouchLocked).
 func (h *Handler) dbGrantURL(surface, name string) (string, bool) {
 	h.dbMu.Lock()
-	defer h.dbMu.Unlock()
+	stale := h.dbTouchLocked(surface, time.Now())
 	u, ok := h.dbGrants[surface][name]
+	h.dbMu.Unlock()
+	dbClosePools(stale)
 	return u, ok
 }
 
@@ -51,8 +66,9 @@ func (h *Handler) dbSetGrant(surface string, grant dbGrant) {
 	if h.dbGrants == nil {
 		h.dbGrants = make(map[string]dbGrant)
 	}
+	stale := h.dbTouchLocked(surface, time.Now())
 	h.dbGrants[surface] = grant
-	stale := h.dbTakePoolsLocked(surface)
+	stale = append(stale, h.dbTakePoolsLocked(surface)...)
 	h.dbMu.Unlock()
 	dbClosePools(stale)
 }
@@ -72,7 +88,7 @@ func (h *Handler) dbAddToGrant(surface string, entries dbGrant) {
 		grant = make(dbGrant)
 		h.dbGrants[surface] = grant
 	}
-	var stale []*sql.DB
+	stale := h.dbTouchLocked(surface, time.Now())
 	for name, u := range entries {
 		if old, ok := grant[name]; ok && old != u {
 			if db := h.dbPools[surface][name]; db != nil {
@@ -84,6 +100,97 @@ func (h *Handler) dbAddToGrant(surface string, entries dbGrant) {
 	}
 	h.dbMu.Unlock()
 	dbClosePools(stale)
+}
+
+// dbRemoveFromGrant forgets the named connections on one surface and closes
+// their pools. A template that stopped resolving (its `.env` variable was
+// removed or its file deleted) must not keep the grant from its last successful
+// resolve, or the connection list would report it unlocked while the unlock
+// reported it failed — and queries would keep running against the old database.
+func (h *Handler) dbRemoveFromGrant(surface string, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	h.dbMu.Lock()
+	var stale []*sql.DB
+	for _, name := range names {
+		delete(h.dbGrants[surface], name)
+		if db := h.dbPools[surface][name]; db != nil {
+			stale = append(stale, db)
+			delete(h.dbPools[surface], name)
+		}
+	}
+	h.dbMu.Unlock()
+	dbClosePools(stale)
+}
+
+// dbTouchLocked records that a surface is in use and retires surfaces that have
+// been idle past dbSurfaceIdleTTL (or the oldest ones beyond dbSurfaceMax).
+// The caller holds dbMu and must pass the returned pools to dbClosePools after
+// releasing it, because Close waits for queries still in flight.
+func (h *Handler) dbTouchLocked(surface string, now time.Time) []*sql.DB {
+	if h.dbLastUsed == nil {
+		h.dbLastUsed = make(map[string]time.Time)
+	}
+	h.dbLastUsed[surface] = now
+	var stale []*sql.DB
+	for name, at := range h.dbLastUsed {
+		if name == surface || now.Sub(at) < dbSurfaceIdleTTL {
+			continue
+		}
+		stale = append(stale, h.dbTakePoolsLocked(name)...)
+		delete(h.dbGrants, name)
+		delete(h.dbLastUsed, name)
+	}
+	for len(h.dbLastUsed) > dbSurfaceMax {
+		oldest := ""
+		var oldestAt time.Time
+		for name, at := range h.dbLastUsed {
+			if name == surface {
+				continue
+			}
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = name, at
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		stale = append(stale, h.dbTakePoolsLocked(oldest)...)
+		delete(h.dbGrants, oldest)
+		delete(h.dbLastUsed, oldest)
+	}
+	return stale
+}
+
+// dbUnlockProjectRoot resolves the project whose .env files a template may read.
+//
+// An explicit project_path is the authority, and it must name an allowed project
+// root — the same check the file reader uses, so a remote project's path
+// (which belongs to another machine) is refused instead of reading a local .env
+// that happens to share its name.
+//
+// The legacy session_id fallback trusts the session registry's recorded root,
+// as docs/concepts/db-connector.md specifies. That is not the same thing as
+// trusting client input: Resolve only probes registered roots, so the value
+// comes from the server's own session state. It is deliberately NOT re-checked
+// against fileContentRootFor, because the registry is the documented boundary
+// for this compatibility path and the web client no longer sends the field.
+//
+// There is no fallback to the server's working directory or process
+// environment: that would connect a remote project to a local database.
+func (h *Handler) dbUnlockProjectRoot(projectPath, sessionID string) (string, error) {
+	if projectPath != "" {
+		root, ok := h.fileContentRootFor(projectPath)
+		if !ok {
+			return "", errors.New("project_path is not an allowed project root")
+		}
+		return root, nil
+	}
+	if sessionID != "" {
+		return h.sessionProjectRoot(sessionID), nil
+	}
+	return "", nil
 }
 
 // dbDropSurface forgets every grant held by one surface and closes its pools.
@@ -183,6 +290,10 @@ func (h *Handler) dbGrantDB(ctx context.Context, surface, name string) (db *sql.
 // connections, and the whole list is needed to pick one.
 func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 	surface := r.URL.Query().Get("surface")
+	if len(surface) > dbSurfaceMaxLen {
+		writeError(w, http.StatusBadRequest, "surface is too long")
+		return
+	}
 	cfg, err := config.LoadOcodeConfigCopy()
 	if err != nil {
 		log.Printf("dbconnect: list: load config: %v", err)
@@ -379,6 +490,10 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "surface is required")
 		return
 	}
+	if len(req.Surface) > dbSurfaceMaxLen {
+		writeError(w, http.StatusBadRequest, "surface is too long")
+		return
+	}
 	cfg, err := config.LoadOcodeConfigCopy()
 	if err != nil {
 		log.Printf("dbconnect: unlock: load config: %v", err)
@@ -389,21 +504,24 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "no saved connections")
 		return
 	}
+	// A project is only needed to resolve an environment template, so resolve
+	// (and validate) it only when the saved set has one. A sealed-only unlock
+	// must not fail because a project directory moved or unmounted since the
+	// user last opened it — it reads no files.
+	hasTemplate := false
+	for _, c := range cfg.DB.Connections {
+		if c.EnvTemplate != "" {
+			hasTemplate = true
+			break
+		}
+	}
 	projectRoot := ""
-	if req.ProjectPath != "" {
-		// The explicit project is the authority; never fall back to the
-		// server's default directory. fileContentRootFor is the same
-		// allow-list check the file reader uses, so a remote project's path
-		// (which belongs to another machine) is refused instead of reading
-		// the wrong .env locally.
-		root, ok := h.fileContentRootFor(req.ProjectPath)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "project_path is not an allowed project root")
+	if hasTemplate {
+		projectRoot, err = h.dbUnlockProjectRoot(req.ProjectPath, req.SessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		projectRoot = root
-	} else {
-		projectRoot = h.sessionProjectRoot(req.SessionID)
 	}
 	grant := make(dbGrant, len(cfg.DB.Connections))
 	names := make([]string, 0, len(cfg.DB.Connections))
@@ -411,6 +529,10 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	// aborting the rest. One obsolete template used to block unlocking a
 	// sealed connection with the correct password in every project.
 	failures := make([]dbUnlockFailure, 0)
+	// staleNames are the templates that FAILED to resolve. Their previous grant
+	// (and pool) must be dropped, or a connection whose `.env` value disappeared
+	// stays reported as unlocked and keeps querying the old database.
+	var staleNames []string
 	// Every envelope is decrypted EXACTLY ONCE. Argon2id is deliberately
 	// slow, so a second pass over the same envelopes would double the cost
 	// of an unlock for no benefit. The first envelope that fails to open
@@ -439,6 +561,7 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				// shape, never a value, so it is safe to show the user.
 				log.Printf("dbconnect: unlock %q: resolve template: %v", c.Name, err)
 				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: err.Error()})
+				staleNames = append(staleNames, c.Name)
 				continue
 			}
 			grant[c.Name] = resolved
@@ -459,6 +582,14 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		}
 		grant[c.Name] = opened
 		names = append(names, c.Name)
+	}
+	// Drop the grant of every template that no longer resolves, whatever the
+	// outcome below. This runs BEFORE the "nothing unlocked" early return: a
+	// surface whose only connection just broke would otherwise keep the stale
+	// grant and keep querying the old database. A password unlock replaces the
+	// whole grant anyway, so only the password-less path needs it.
+	if req.Password == "" {
+		h.dbRemoveFromGrant(req.Surface, staleNames)
 	}
 	sort.Strings(names)
 	if len(grant) == 0 {
@@ -492,6 +623,10 @@ func (h *Handler) HandleDBConnectLock(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Surface == "" {
 		writeError(w, http.StatusBadRequest, "surface is required")
+		return
+	}
+	if len(req.Surface) > dbSurfaceMaxLen {
+		writeError(w, http.StatusBadRequest, "surface is too long")
 		return
 	}
 	h.dbDropSurface(req.Surface)

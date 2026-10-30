@@ -921,6 +921,12 @@ export interface DBConnectConnection {
   fromEnv: boolean;
 }
 
+/** The wire shape of a saved connection. The server spells the env flag
+ *  `from_env`; `dbConnectList` maps it to `fromEnv` exactly once, here. */
+type DBConnectConnectionWire = Omit<DBConnectConnection, "fromEnv"> & {
+  from_env?: boolean;
+};
+
 /** One connection that could not be unlocked. The message names a variable or
  *  a parameter, never a value. */
 export interface DBConnectUnlockFailure {
@@ -4520,9 +4526,19 @@ export const api = {
   // these are NOT host-threaded. Unlock is per client surface, like the vault.
   // Null lists are normalised here, once, at the fetch boundary.
   dbConnectList: (surface: string) =>
-    fetchJSON<{ connections: DBConnectConnection[] | null }>(
+    fetchJSON<{ connections: DBConnectConnectionWire[] | null }>(
       `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
-    ).then((r) => ({ connections: r.connections ?? [] })),
+    ).then((r) => ({
+      connections: (r.connections ?? []).map((c) => ({
+        name: c.name,
+        driver: c.driver,
+        unlocked: c.unlocked,
+        // `from_env` is the server's key. Reading `fromEnv` off the raw payload
+        // was silently undefined, which disabled the whole no-password flow and
+        // made an env connection demand a master password.
+        fromEnv: c.from_env === true,
+      })),
+    })),
   /** `password` is required only for a literal (sealed) URL. An environment
    *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
   dbConnectAdd: (name: string, url: string, password: string) =>

@@ -34,7 +34,7 @@ const mockUnlock = vi.mocked(api.dbConnectUnlock);
 const mockLock = vi.mocked(api.dbConnectLock);
 const mockTables = vi.mocked(api.dbConnectTables);
 
-const SURFACE_RE = /^db-panel::\/proj:p\d+$/;
+const SURFACE_RE = /^db-panel::\/proj:[a-z0-9]+-\d+$/;
 
 beforeEach(() => {
   vi.clearAllMocks();

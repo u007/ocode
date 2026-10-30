@@ -135,24 +135,26 @@ logged (`dbconnect_env.go:86`), never returned to the client, and never written 
 URL shape (`ParseURL`'s error never contains the URL — `internal/dbconnect.ParseURL` doc —
 so the password cannot leak through the message).
 
-`HandleDBConnectUnlock` (`handler_dbconnect.go:361`) applies this per project:
-`project_path` names the project (`handler_dbconnect.go:399`
-`h.fileContentRootFor(req.ProjectPath)`), validated against the server's allowed
-project roots exactly like a file read. An invalid path — including a remote
+`HandleDBConnectUnlock` (`handler_dbconnect.go:472`) applies this per project:
+`project_path` names the project (`handler_dbconnect.go:520`
+`h.dbUnlockProjectRoot(req.ProjectPath, req.SessionID)`); the allowlist check
+itself is `handler_dbconnect.go:184` (`h.fileContentRootFor(projectPath)` inside
+dbUnlockProjectRoot), validated against the server's allowed project roots exactly
+like a file read. An invalid path — including a remote
 project's path, which belongs to another machine — is refused with 400 rather than
 reading a local `.env` by accident. `session_id` remains as a compatibility
 fallback for callers that predate the project-scoped panel
-(`handler_dbconnect.go:406` `h.sessionProjectRoot(req.SessionID)`); it trusts the
+(`handler_dbconnect.go:191` `h.sessionProjectRoot(req.SessionID)`); it trusts the
 session registry's recorded root (server-side state, never client input) as the
 trust boundary.
 
 **A template needs a project.** With neither `project_path` nor a resolvable
 `session_id`, a template is reported as failed and is NEVER resolved from the
-server's own process environment (`handler_dbconnect.go:431`). That fallback was
+server's own process environment (`handler_dbconnect.go:553`). That fallback was
 removed because a remote project would otherwise connect — and allow writes — to a
 local database exported in the server's shell.
 
-Every saved connection is iterated once (`handler_dbconnect.go:424`): if
+Every saved connection is iterated once (`handler_dbconnect.go:546`): if
 `c.EnvTemplate != ""` it is resolved against that project; if `c.EncryptedURL != ""`
 it is opened with the master password. The password is **optional for the
 environment flow**: with no password, only the template connections are granted and
@@ -163,40 +165,54 @@ a wrong password is rejected with 401 ("master password does not open connection
 
 Failures are **per connection**: a template that does not resolve is recorded in
 the response's `failed` array and the others are still granted
-(`handler_dbconnect.go:441`). An obsolete `${ANALYTICS_URL}` therefore no longer
+(`handler_dbconnect.go:563`). An obsolete `${ANALYTICS_URL}` therefore no longer
 blocks unlocking a sealed connection with the correct password. An unlock that
-grants nothing is a 400 (`handler_dbconnect.go:464`). The grant holds the plaintext
+grants nothing is a 400 (`handler_dbconnect.go:596`). The grant holds the plaintext
 URLs in memory only (`handler.go:229` "dbGrants holds the plaintext URLs"), keyed by
-surface id (`db-panel:<host>:<projectPath>:<per-mount id>` in `DBPanel.tsx:66`). The
-password-less flow MERGES into the surface grant (`handler_dbconnect.go:476`); a
-password unlock replaces it (`handler_dbconnect.go:478`), so loading an environment connection never
+surface id (`db-panel:<host>:<projectPath>:<per-mount id>` in `DBPanel.tsx:75`). The
+password-less flow MERGES into the surface grant (`handler_dbconnect.go:607`); a
+password unlock replaces it (`handler_dbconnect.go:609`), so loading an environment connection never
 revokes a sealed connection the user already unlocked.
 
-`HandleDBConnectAdd` (`handler_dbconnect.go:225`) stores the connection. The URL
+The grant is bounded: a surface idle for 30 minutes (or beyond 64 remembered
+surfaces) is retired with its pooled handle, and the client-supplied surface is
+length-bounded (256). A template that stops resolving now LOSES its grant and
+pool: the password-less unlock drops it from the surface before the "nothing
+unlocked" 400 (`handler_dbconnect.go:563` `staleNames`), so a later query cannot
+keep hitting the old database. `project_path` is resolved and validated only when
+at least one saved connection is a template (`handler_dbconnect.go:511`
+`hasTemplate`), so a sealed-only unlock works even when the project directory has
+moved.
+
+`HandleDBConnectAdd` (`handler_dbconnect.go:336`) stores the connection. The URL
 field (`req.URL`) is examined with `dbconnect.IsTemplate(req.URL)`
-(`handler_dbconnect.go:243`): a template is saved as `EnvTemplate` in the clear
-(`handler_dbconnect.go:279`); a literal URL is sealed (`dbconnect.SealURL`) and
+(`handler_dbconnect.go:354`): a template is saved as `EnvTemplate` in the clear
+(`handler_dbconnect.go:390`); a literal URL is sealed (`dbconnect.SealURL`) and
 saved as `EncryptedURL`. The master password is **required only for a literal
-URL** (`handler_dbconnect.go:251`): a template has no secret to encrypt, so the
+URL** (`handler_dbconnect.go:362`): a template has no secret to encrypt, so the
 add request may omit it and the existing `dbCheckMasterPassword` check is skipped
 for the template. A literal URL with no password is a 400.
 
 A template that ALSO carries a literal password is refused
-(`handler_dbconnect.go:244`, `dbconnect.TemplateHasLiteralSecret`): a template is
+(`handler_dbconnect.go:355`, `dbconnect.TemplateHasLiteralSecret`): a template is
 stored in the clear, so `postgres://app:hunter2@host/db?sslmode=${SM}` would put
 `hunter2` in `ocodeconfig.json` unencrypted. The password (and any
 `password`/`sslpassword` query value) must consist of references only
-(`${DB_PASS}`); a partial reference such as `pa$HOME` is refused too.
+(`${DB_PASS}`); a partial reference such as `pa$HOME` is refused too. Only
+BRACED references count: a bare `$NAME` is refused, because an unset variable is
+kept as literal text by `ExpandEnv` and would be stored in the clear. The query
+scan runs to the end of the string with no `#` truncation, and runs even when
+there is no `://` (scheme-less templates).
 
 Exactly one of the two fields must be set (`internal/config/db_connections.go:57`
 `AddDBConnection`): neither (`url` and `env_template` both empty) or both
 (ambiguous which wins at unlock) is an error. The saved connection never holds a
 plaintext URL.
 
-`HandleDBConnectList` (`handler_dbconnect.go:184`) returns `FromEnv: c.EnvTemplate != ""`
-(`handler_dbconnect.go:211`) — the "env" badge in the UI — and `Unlocked` from the
+`HandleDBConnectList` (`handler_dbconnect.go:291`) returns `FromEnv: c.EnvTemplate != ""`
+(`handler_dbconnect.go:322`) — the "env" badge in the UI — and `Unlocked` from the
 grant. The template itself (`EnvTemplate`) is **not** returned: it names variables,
-but the resolved URL is a credential and stays on the server (`handler_dbconnect.go:196`
+but the resolved URL is a credential and stays on the server (`handler_dbconnect.go:307`
 `FromEnv` doc comment).
 
 ## SQLite file paths (`internal/server/handler_db.go`)
@@ -231,7 +247,7 @@ containment + write-guard pipeline.
 ## Security properties
 
 - The resolved URL is never persisted (`dbconnect_env.go:77`), never returned
-  (`handler_dbconnect.go:211` `FromEnv` — only the boolean flag), never logged
+  (`handler_dbconnect.go:322` `FromEnv` — only the boolean flag), never logged
   (`dbconnect_env.go:86`; `ParseURL` never quotes the input), and never appears in
   an error message (`expand.go:63` names the variable, not a value; `dbconnect_env.go:87`
   validates the expanded URL with `ParseURL`, whose errors never include the URL).
@@ -249,7 +265,7 @@ to a different URL.
   database; token possession is the real boundary (the same token already opens a
   terminal). The `from_env` badge marks the connections that are password-free.
 - A template cannot smuggle a literal credential into the clear:
-  `TemplateHasLiteralSecret` (`internal/dbconnect/expand.go:193`) refuses a URL
+  `TemplateHasLiteralSecret` (`internal/dbconnect/expand.go:207`) refuses a URL
   whose userinfo password or `password`/`sslpassword` query value is not composed
   entirely of references.
 - `project_path` is validated against the server's allowed project roots, so a
@@ -257,9 +273,11 @@ to a different URL.
   project's path is refused because its `.env` lives on the other machine. A
   template with NO project is refused outright — there is no process-environment
   fallback.
-- `ParseURL` (`internal/dbconnect/dbconnect.go:176`) refuses `service`,
-  `servicefile` and `passfile` connection parameters
-  (`dbconnect.go:160`, `dbconnect.go:185`). A template is expanded from a repository's `.env`, so
+- `ParseURL` (`internal/dbconnect/dbconnect.go:189`) refuses a raw `#`, parses the
+  query the way pgx does (split on `&`, percent-decode the key, bad escape fails
+  closed), and refuses `service`/`servicefile`/`passfile`/`sslkey`/`sslcert`/
+  `sslrootcert` connection parameters (`dbconnect.go:160` redirect params,
+  `dbconnect.go:189` ParseURL). A template is expanded from a repository's `.env`, so
   these could otherwise redirect the connection through a service file or make pgx
   read a local file and send its contents as the password.
 - Precedence is process environment > `.env.local` > `.env`
@@ -267,6 +285,9 @@ to a different URL.
   shadows the project file; the UI says so.
 - Containment is the last gate (`handler_db.go:119`): env expansion is never a way
 around the allowed-roots boundary (`handler_db.go:89` comment).
+- The server's key is `from_env`; the client maps it to `fromEnv` in `dbConnectList`
+  (`web/src/api/client.ts`). A missing map made every env connection look sealed —
+  real bug found in review.
 
 ## Forward-compatibility: the `db_env_templates` top-level key
 
@@ -352,23 +373,38 @@ compile (`mutcheck_dbenv.py:137-151`).
 The DB connector is a **project-level top tab** (beside Assets in `TopTabs.tsx`),
 not a session sub-tab: its environment-backed connections resolve against the
 active project, so it must not be tied to one chat session. `DBPanel`
-(`DBPanel.tsx:61`) uses `surface = db-panel:<host>:<projectPath>:<per-mount id>`
-(`DBPanel.tsx:66`). The per-mount id matters: the surface used to be shared by
-every client viewing the project, so one window's unmount revoked another's grant
-and closed its pools. `App.tsx` also keys the panel by `host:path` and mounts it
-only for projects whose DB tab was actually visited.
+(`DBPanel.tsx:64` `newDbPanelSurfaceID`) uses
+`surface = db-panel:<host>:<projectPath>:<document tag>-<counter>`
+(`DBPanel.tsx:75`). The id is now unique per browser document AND per mount: the
+document tag is a per-document random (8 hex chars) and the counter is per mount.
+A plain module counter was NOT enough — module scope is per document, so every
+browser window restarted at 1 and two windows on one project collided on `p1`,
+and one window's unmount revoked the other's grant (and closed its pools). That
+was a real bug found in review. `App.tsx` also keys the panel by `host:path` and
+mounts it only for projects whose DB tab was actually visited.
 
 An environment-backed connection (`fromEnv`) gets a **"Load from .env"** action
-with no password field (`DBPanel.tsx:464`): the unlock call sends the empty
-password plus `project_path` (`DBPanel.tsx:272`), and the server grants only the
+with no password field (`DBPanel.tsx:498`): the unlock call sends the empty
+password plus `project_path` (`DBPanel.tsx:285`), and the server grants only the
 template connections. The button carries `aria-busy` while loading. A remote
 project (non-empty host) does NOT get the action; it shows "Not available for a
-remote project" (`DBPanel.tsx:445`), because this endpoint is not host-threaded and
+remote project" (`DBPanel.tsx:479`), because this endpoint is not host-threaded and
 its `.env` lives on the other machine. A sealed connection keeps the
 master-password form. The add form mirrors the rule: `isEnvTemplate(url)`
 (`DBPanel.tsx:47`, the server's exact `${[A-Za-z_][A-Za-z0-9_]*}` rule) disables the
-password field and lets Save proceed without it (`DBPanel.tsx:743`). The connection
-picker shows the `from_env` flag (`DBPanel.tsx:346`) and a tooltip explaining it.
-A partial unlock lists the failed connections in a warning (`DBPanel.tsx:366`). A
+password field and lets Save proceed without it (`DBPanel.tsx:800`). The connection
+picker shows the `from_env` flag (`DBPanel.tsx:379`) and a tooltip explaining it.
+A partial unlock lists the failed connections in a warning (`DBPanel.tsx:399`). A
 failed connection-list load shows the error and a Retry instead of an endless
-spinner (`DBPanel.tsx:306`).
+spinner (`DBPanel.tsx:344` error branch / `DBPanel.tsx:347` Retry button).
+
+The panel is no longer mounted when there is no active project: it renders "Select
+a project to use the database connector." instead. The add form now says an env URL
+is not usable for a remote project.
+
+Tests: `DBPanel.test.tsx` (22 cases, including the password-less environment flow,
+partial failures, retry and the remote guard — and it now also asserts that the
+GRANTED connection actually loads its tables), `web/src/api/client.dbConnect.test.ts`
+(wire mapping: `from_env` -> `fromEnv`, `project_path`, null normalisation) and
+`web/src/App.dbTab.test.tsx` (no mount before the tab is opened, mount path,
+project-switch remount, no-project empty state).

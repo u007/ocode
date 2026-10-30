@@ -49,13 +49,21 @@ function isEnvTemplate(url: string): boolean {
 }
 
 // Per-mount id for the unlock surface. The surface must be unique per panel, not
-// per project: two windows viewing the same project share it otherwise, and
-// closing one would revoke the other's grant (and close its pools). The vault
-// uses the same per-panel-key shape.
+// only per project: two windows viewing the same project would otherwise share
+// it, and closing one would revoke the other's grant (and close its pools).
+//
+// A module-scope counter alone is NOT enough: module scope is per DOCUMENT, so
+// every browser window restarts at 1 and two windows on one project collide on
+// `p1`. The document tag makes the id unique across windows too.
+const dbPanelDocumentTag = (() => {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID().slice(0, 8);
+  return Array.from({ length: 8 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+})();
 let dbPanelSurfaceSeq = 0;
 function newDbPanelSurfaceID(): string {
   dbPanelSurfaceSeq += 1;
-  return `p${dbPanelSurfaceSeq}`;
+  return `${dbPanelDocumentTag}-${dbPanelSurfaceSeq}`;
 }
 
 export default function DBPanel({ projectPath, projectHost }: { projectPath?: string; projectHost?: string }) {
@@ -256,6 +264,9 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       setAddUrl("");
       setAddPassword("");
       setAddName("");
+      // The connection set changed; a failure recorded for a name that was just
+      // (re)added no longer describes the saved state.
+      setUnlockFailures((prev) => prev.filter((f) => f.name !== name));
       await refresh();
       setSelected(name);
     });
@@ -270,12 +281,26 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       // this endpoint is not host-threaded, so its path must never be sent: the
       // server would either refuse it or, worse, match a same-named local dir.
       const password = current?.fromEnv ? "" : unlockPassword;
-      let granted: string[] = [];
       try {
         const res = await api.dbConnectUnlock(surface, password, projectHost ? undefined : projectPath);
-        granted = res.unlocked;
         setUnlockFailures(res.failed);
         setUnlockPassword("");
+        // Apply the server's answer locally as well, so a failed refresh below
+        // cannot leave the panel claiming the opposite of what the server did:
+        // granted connections become unlocked, failed ones lose the flag, and
+        // anything the attempt did not mention keeps its previous state (the
+        // password-less flow MERGES, so a sealed connection already unlocked
+        // stays unlocked and is never listed in `unlocked`).
+        const grantedNames = new Set(res.unlocked);
+        const failedNames = new Set(res.failed.map((f) => f.name));
+        setConnections((prev) =>
+          prev
+            ? prev.map((c) => ({
+                ...c,
+                unlocked: !failedNames.has(c.name) && (c.unlocked || grantedNames.has(c.name)),
+              }))
+            : prev,
+        );
       } finally {
         // A rejected attempt can still have changed the grant, and the panel
         // must not keep claiming a connection is locked when the server has
@@ -284,7 +309,8 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
           console.warn("db panel: refresh after unlock failed", errorText(err));
         });
       }
-      if (selected && granted.includes(selected)) await loadTables(selected, 0);
+      // No explicit loadTables: the [selected, unlocked] effect above reloads
+      // when the connection becomes unlocked, and doing both sent two requests.
     });
 
   const lockConnections = () =>
@@ -293,6 +319,8 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       setTables([]);
       setTablesHasMore(false);
       setResult(null);
+      setUnlockFailures([]);
+      setConnections((prev) => (prev ? prev.map((c) => ({ ...c, unlocked: false })) : prev));
       await refresh();
     });
 
@@ -300,6 +328,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     withBusy("remove", async () => {
       await api.dbConnectRemove(name);
       setConfirmRemove(null);
+      setUnlockFailures((prev) => prev.filter((f) => f.name !== name));
       await refresh();
     });
 
@@ -328,7 +357,11 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-4" data-project-path={projectPath}>
+    <div
+      className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-4"
+      data-project-path={projectPath}
+      aria-busy={busy !== null}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <Database className="h-4 w-4" aria-hidden="true" />
         <h2 className="text-sm font-semibold">PostgreSQL</h2>
@@ -387,6 +420,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             name={addName}
             url={addUrl}
             password={addPassword}
+            isRemote={!!projectHost}
             onName={setAddName}
             onUrl={setAddUrl}
             onPassword={setAddPassword}
@@ -495,7 +529,12 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                     className="h-8 text-xs"
                   />
                 </label>
-                <Button type="submit" size="sm" disabled={busy !== null || !unlockPassword}>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={busy !== null || !unlockPassword}
+                  aria-busy={busy === "unlock"}
+                >
                   <Unlock className="mr-1 h-3.5 w-3.5" /> Unlock
                 </Button>
               </form>
@@ -514,6 +553,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 name={addName}
                 url={addUrl}
                 password={addPassword}
+                isRemote={!!projectHost}
                 onName={setAddName}
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
@@ -694,6 +734,7 @@ function AddFields({
   name,
   url,
   password,
+  isRemote,
   onName,
   onUrl,
   onPassword,
@@ -701,6 +742,9 @@ function AddFields({
   name: string;
   url: string;
   password: string;
+  /** A remote project's .env lives on the host, and the dbconnect routes are not
+   *  host-threaded, so an env template saved here can never be loaded. */
+  isRemote: boolean;
   onName: (v: string) => void;
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
@@ -736,6 +780,13 @@ function AddFields({
           wins). No password is needed for that, and the password must itself be a{" "}
           <code className="font-mono">{"${VAR}"}</code> reference — a literal password is refused
           because a template is stored unencrypted.
+          {isRemote && (
+            <>
+              {" "}
+              <strong>Not usable for this remote project</strong>: its .env lives on the host, and
+              this connection is resolved on this machine. Use a literal URL instead.
+            </>
+          )}
         </p>
       </div>
       <div className="space-y-1">

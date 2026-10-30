@@ -36,7 +36,9 @@ const mockQuery = vi.mocked(api.dbConnectQuery);
 const mockAdd = vi.mocked(api.dbConnectAdd);
 const mockRows = vi.mocked(api.dbConnectRows);
 
-const SURFACE_RE = /^db-panel::\/proj:p\d+$/;
+// The per-mount suffix is a document tag plus a counter, so two browser windows
+// (each restarting its counter at 1) cannot collide.
+const SURFACE_RE = /^db-panel::\/proj:[a-z0-9]+-\d+$/;
 const UNLOCKED = { connections: [{ name: "prod", driver: "postgres", unlocked: true, fromEnv: false }] };
 
 // jsdom has no layout, so the panel's width is fed in through the observer it creates.
@@ -391,7 +393,33 @@ describe("DBPanel", () => {
 
     expect(await screen.findByText(/Some connections could not be unlocked/)).toBeTruthy();
     expect(screen.getByText(/DB_URL/)).toBeTruthy();
+    // The granted half must actually be usable: the point of a per-connection
+    // failure is that one bad template does not block the others.
+    await waitFor(() =>
+      expect(mockTables).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "env", 100, 0),
+    );
     expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("gives two mounts on the same project different surfaces", async () => {
+    // The server keys unlock grants by surface, so a shared id would let one
+    // window's unmount revoke the other's grant (and close its pools). The
+    // counter alone is per document, which is why the id carries a document tag.
+    mockList.mockResolvedValue({ connections: [] });
+
+    const first = render(<DBPanel projectPath="/proj" />);
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1));
+    const second = render(<DBPanel projectPath="/proj" />);
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2));
+
+    const firstSurface = mockList.mock.calls[0][0];
+    const secondSurface = mockList.mock.calls[1][0];
+    expect(firstSurface).toMatch(SURFACE_RE);
+    expect(secondSurface).toMatch(SURFACE_RE);
+    expect(firstSurface).not.toBe(secondSurface);
+
+    first.unmount();
+    second.unmount();
   });
 
   it("offers a retry when the connection list cannot be loaded", async () => {
