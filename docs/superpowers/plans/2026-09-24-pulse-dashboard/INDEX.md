@@ -49,7 +49,7 @@ interfaces it consumes.
 ## Spec deltas discovered while planning
 
 - **No `/pulse` URL route.** The web app has no client router; views are the
-  `activeView` state in `web/src/App.tsx:248`. Pulse is a new `activeView`
+  `activeView` state in `web/src/App.tsx:250`. Pulse is a new `activeView`
   value `"pulse"`. Spec updated in Part 10.
 - **Live tail for idle sessions.** `SessionManager.setTurnActive` clears
   buffered live frames when a turn ends, so an idle card's tail comes from

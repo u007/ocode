@@ -25,6 +25,9 @@ ocode's plugin system extends the agent with custom tools, slash commands, LLM i
 # Install a bundled skill (e.g. standup, changes) into ~/.claude/skills
 /plugin install standup
 
+# Fetch the latest @tanstack/intent and pick which of its skills to install
+/plugin install @tanstack/intent
+
 # List installed plugins
 /plugin list
 
@@ -202,6 +205,19 @@ Claude Code install; uninstall those from Claude Code.
 ## Managing Plugins
 
 All plugin management happens through the `/plugin` TUI command.
+
+### TanStack Intent skills (`/plugin install @tanstack/intent`)
+
+`@tanstack/intent` ships maintainer skills in its npm tarball under `meta/`. The command fetches the latest release from the npm registry, checks its sha512 against the registry metadata, and opens a checklist of its skills (Space toggles, Enter installs the checked ones). Each checked skill's whole directory is copied to `~/.claude/skills/<name>/`, the same target as `/plugin install <bundled-skill>`. Nothing from the package is executed.
+
+- The four skills are `domain-discovery`, `generate-skill`, `skill-staleness-check` and `tree-generator`. `tree-generator` links to `../generate-skill/` by relative path, so install `generate-skill` with it. `domain-discovery` and `skill-staleness-check` name their companions in `metadata.skills` (`tree-generator`; `generate-skill` and `tree-generator`) rather than by link.
+- An identical installed copy is left alone. A file that differs is kept as `<file>.bak.<UTC timestamp>` before the new copy is written. A symlinked skill directory is refused.
+- Only the latest version is offered; `@<version>` is not accepted here.
+- Web and desktop offer the same checklist. Typing `@tanstack/intent` in the Plugins panel or Settings → Plugins, or running `/plugin install @tanstack/intent` in chat, opens `IntentSkillsDialog`. It calls `GET /api/skills/tanstack-intent` (list) and `POST /api/skills/tanstack-intent/install` with `{"names": [...]}`. Both fetch the registry on every request, so the list and the installed copy are always the latest published release.
+- The installed files are the published tarball bytes, byte-identical to the upstream repo's `packages/intent/meta/` at `main` (checked for all four skills).
+- Closing the checklist aborts its list request, and the server cancels the registry fetch with the request context, so a closed dialog does not hold a browser connection slot.
+- Known limits: the dialog does not thread `?host=`, so for a remote (SSH/WSL) project the skills install into the desktop machine's `~/.claude/skills`, not the remote host's. The existing `installPlugin` has the same limit. A successful install reloads the web slash list; the bundled-skill install path in `installPlugin` does not, which predates this change.
+- Code: `internal/skill/intent.go` (fetch, extract, install), `internal/tui/commands.go` (routing), `internal/tui/model.go` (`openIntentSkillPicker`, `selectPickerMultiConfirm`), `internal/server/handler_intent_skills.go` (endpoints), `web/src/components/Layout/IntentSkillsDialog.tsx`, `web/src/components/Chat/commands.ts` (`openIntentSkillsDialog`).
 
 ## Web & Desktop UI
 

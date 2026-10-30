@@ -12,7 +12,15 @@ import (
 
 // DefaultCommitMsgPrompt is the built-in prompt for AI commit-message
 // generation, used when ocode.commit_msg_prompt is empty.
-const DefaultCommitMsgPrompt = "Write a concise git commit message (subject line only, max 72 chars) for these changes. Output only the commit message text, nothing else:"
+//
+// It asks for a short body under the subject: a subject alone records WHAT
+// changed but not WHY, and git log --oneline still shows only the first line,
+// so the body costs nothing there. The body is capped at three bullets to keep
+// the message short enough to read in the TUI/web commit boxes.
+const DefaultCommitMsgPrompt = `Write a git commit message for the changes below.
+Line 1: a subject, at most 72 characters, imperative mood, with a Conventional Commits prefix when it fits (feat, fix, refactor, docs, test, chore).
+Then one blank line, then 2-3 short bullets (each starting with "- ") saying what changed and why, naming the files or features involved. A one-line change still gets one bullet.
+Plain text only: no markdown headings, no code fences, no quotes, nothing outside the commit message:`
 
 // commitMsgMaxDiffBytes bounds the diff sent to the model. Every surface (TUI
 // git tab, web/desktop Git tab) generates through GenerateCommitMessage, so

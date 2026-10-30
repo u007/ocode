@@ -153,7 +153,7 @@ func init() {
 		{name: "/context-model", usage: "/context-model [status|enable|disable|model [name]]", help: "Show or switch the context agent (context/doc-sync) model; falls back to small model, then main model", handler: runContextModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
-		{name: "/plugin", usage: "/plugin [list|install <url[@ref]|skill>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; install a bundled skill name into ~/.claude/skills; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
+		{name: "/plugin", usage: "/plugin [list|install <url[@ref]|skill|@tanstack/intent>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; install a bundled skill name into ~/.claude/skills; 'install @tanstack/intent' fetches the latest TanStack Intent skills and lets you pick which to install; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
 		{name: "/tools", aliases: []string{"/tool"}, usage: "/tools [name]", help: "Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep); bare lists status, with name installs it", handler: runToolsCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
@@ -622,10 +622,16 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 
 	case "install":
 		if len(args) < 2 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref] | bundled-skill>"})
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref] | bundled-skill | @tanstack/intent>"})
 			return nil
 		}
 		source := args[1]
+		// The latest @tanstack/intent is fetched from npm and its skills are
+		// offered as a checklist. It is matched before the bundled and git
+		// installers, which would both reject it.
+		if source == skill.IntentPackageName {
+			return func() tea.Msg { return pluginIntentListMsg{} }
+		}
 		// A bare name is a bundled skill, installed into ~/.claude/skills.
 		// It never falls through to the GitHub installer.
 		if skill.IsBundledSkillRef(source) {

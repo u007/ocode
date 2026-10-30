@@ -47,6 +47,13 @@ import type {
 
 const REFRESH_INTERVAL = 10000;
 
+// The commit message box grows with its content so a generated subject plus
+// body is readable without scrolling. These px values must match the JSX
+// classes (min-h-9 / max-h-[132px]): the JS clamp is the runtime source of
+// truth, the classes keep the box correct before the first measurement.
+const COMMIT_BOX_MIN_HEIGHT = 36;
+const COMMIT_BOX_MAX_HEIGHT = 132;
+
 // Expanded/collapsed state of the Git panel's three left-side sections.
 // Persisted to localStorage (versioned key, same pattern as CoworkSidebar's
 // "ocode.ui.sidebar.v2") so the layout survives reloads.
@@ -289,6 +296,10 @@ export default function GitPanel({
   >(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  // Multi-line because the AI generator returns a subject plus a body: a
+  // single-line <input> strips newlines, so the body would silently collapse
+  // into the subject and commit as one long line.
+  const commitInputRef = useRef<HTMLTextAreaElement>(null);
   const [generatingMessage, setGeneratingMessage] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -862,6 +873,25 @@ export default function GitPanel({
     },
     [projectPath, projectHost, showNotice],
   );
+
+  // Grow the commit box to fit the message. Runs on every change (including a
+  // generated subject+body replacing the draft, and the clear after a commit),
+  // so the box never leaves a stale height behind.
+  useEffect(() => {
+    const el = commitInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    // scrollHeight covers content + padding but NOT the border, while the box
+    // is border-box: setting height to scrollHeight alone clips the last line
+    // by the border width and raises a phantom scrollbar.
+    const borderY = el.offsetHeight - el.clientHeight;
+    const measured = el.scrollHeight + Math.max(borderY, 0);
+    const next = Math.min(
+      Math.max(measured > 0 ? measured : COMMIT_BOX_MIN_HEIGHT, COMMIT_BOX_MIN_HEIGHT),
+      COMMIT_BOX_MAX_HEIGHT,
+    );
+    el.style.height = `${next}px`;
+  }, [commitMessage]);
 
   const commit = () => {
     if (!commitMessage.trim()) {
@@ -1823,15 +1853,21 @@ export default function GitPanel({
       </div>
 
       {/* Commit box */}
-      <div className="p-3 border-t border-border flex items-center gap-2">
-        <input
+      <div className="p-3 border-t border-border flex items-end gap-2">
+        <textarea
+          ref={commitInputRef}
           value={commitMessage}
           onChange={(e) => setCommitMessage(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) commit();
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              commit();
+            }
           }}
+          rows={1}
           placeholder="Commit message for staged changes…"
-          className="flex-1 h-9 px-3 rounded-md bg-muted/40 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          aria-label="Commit message"
+          className="flex-1 min-h-9 max-h-[132px] resize-none overflow-y-auto px-3 py-[7px] rounded-md bg-muted/40 border border-border text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-ring"
         />
         <button
           type="button"

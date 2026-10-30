@@ -23,7 +23,7 @@
 - **Modify:** `internal/server/server.go` — register `PUT /api/files/content` route.
 - **Create:** `internal/server/handler_files_test.go` — tests for the new write handler.
 - **Modify:** `web/src/api/client.ts` — add `api.saveFileContent(path, content)`.
-- **Create:** `web/src/hooks/useEditorTabs.ts` — shared hook: tab state, dirty tracking, open/close/save. `App.tsx` and `SessionPage.tsx` currently duplicate identical `EditorTab` state/handlers (`App.tsx:96-129`, `SessionPage.tsx:55-90`); this task set adds non-trivial new logic (dirty flags, save, confirm-gated close) to both call sites, so extracting the shared hook now avoids tripling that logic across three files. Behavior for existing callers (`FileTree`, `GitPanel` passing `onOpenFile`) is unchanged.
+- **Create:** `web/src/hooks/useEditorTabs.ts` — shared hook: tab state, dirty tracking, open/close/save. `App.tsx` and `SessionPage.tsx` currently duplicate identical `EditorTab` state/handlers (`App.tsx:97-130`, `SessionPage.tsx:55-90`); this task set adds non-trivial new logic (dirty flags, save, confirm-gated close) to both call sites, so extracting the shared hook now avoids tripling that logic across three files. Behavior for existing callers (`FileTree`, `GitPanel` passing `onOpenFile`) is unchanged.
 - **Create:** `web/src/components/Files/FilePicker.tsx` — Ctrl/Cmd+P fuzzy file picker.
 - **Create:** `web/src/components/Files/ConfirmCloseDialog.tsx` — Save/Discard/Cancel dialog.
 - **Modify:** `web/src/hooks/useKeyboard.ts` — add `onFilePicker` (Ctrl/Cmd+P) and `onSave` (Ctrl/Cmd+S) handlers.
@@ -273,7 +273,7 @@ git commit -m "feat(server): add PUT /api/files/content save endpoint with path-
 - Modify: `web/src/api/client.ts`
 
 **Interfaces:**
-- Consumes: `fetchJSON<T>(path, init)` (existing, `client.ts:65`).
+- Consumes: `fetchJSON<T>(path, init)` (existing, `client.ts:66`).
 - Produces: `api.saveFileContent(path: string, content: string): Promise<{path: string; saved: boolean}>`.
 
 - [ ] **Step 1: Add the method**
@@ -911,7 +911,7 @@ git commit -m "feat(web): wire Ctrl+P/Ctrl+S/dirty-close into SessionPage editor
 
 - [ ] **Step 1: Replace the inline editor-tab state in `HomeApp` with `useEditorTabs`**
 
-Remove the inline `EditorTab` interface, `editorTabs`/`openFileIdsRef` state, and `handleOpenFile`/`handleCloseEditorTab` callbacks (`App.tsx:96-129`). Replace with the same hook call as Task 8:
+Remove the inline `EditorTab` interface, `editorTabs`/`openFileIdsRef` state, and `handleOpenFile`/`handleCloseEditorTab` callbacks (`App.tsx:97-130`). Replace with the same hook call as Task 8:
 
 ```ts
   const {
@@ -930,7 +930,7 @@ Remove the inline `EditorTab` interface, `editorTabs`/`openFileIdsRef` state, an
   } = useEditorTabs("chat");
 ```
 
-Remove the old `const [activeTab, setActiveTab] = useState("chat");` (`App.tsx:94`) and add imports:
+Remove the old `const [activeTab, setActiveTab] = useState("chat");` (`App.tsx:95`) and add imports:
 
 ```ts
 import { useEditorTabs } from "./hooks/useEditorTabs";
@@ -940,7 +940,7 @@ import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 
 - [ ] **Step 2: Extend the existing `useKeyboard` call**
 
-Update the existing call (`App.tsx:181-185`):
+Update the existing call (`App.tsx:182-186`):
 
 ```ts
   const [filePickerOpen, setFilePickerOpen] = useState(false);
@@ -964,7 +964,7 @@ Update the existing call (`App.tsx:181-185`):
 
 - [ ] **Step 3: Update `TopTabs`, `FileEditor`, and add the new dialogs**
 
-Update the `TopTabs` usage (`App.tsx:264-269`):
+Update the `TopTabs` usage (`App.tsx:266-271`):
 
 ```tsx
           <TopTabs
@@ -975,7 +975,7 @@ Update the `TopTabs` usage (`App.tsx:264-269`):
           />
 ```
 
-Update the `FileEditor` usage (`App.tsx:281-288`):
+Update the `FileEditor` usage (`App.tsx:283-290`):
 
 ```tsx
                   <FileEditor
@@ -987,7 +987,7 @@ Update the `FileEditor` usage (`App.tsx:281-288`):
                   />
 ```
 
-Add alongside the existing dialogs near the end of `HomeApp`'s JSX (after `ModelDialog`, `App.tsx:336-340`):
+Add alongside the existing dialogs near the end of `HomeApp`'s JSX (after `ModelDialog`, `App.tsx:338-342`):
 
 ```tsx
       <FilePicker

@@ -18,7 +18,7 @@ A main-model pick (`ModelDialog` `handleSelect` `case "main"`, `internal/server/
 - **Draft `new-*` tab** -> local `SET_SESSION_MODEL` (rides the session slice; sent as the request model on the first `api.chat`); the server pins it at creation (`internal/server/handler.go:1279` writes `meta["model"] = model`).
 - **No session id** -> `SET_MODEL` + `api.setConfigModel(modelId, ...hostArgs)` (the default that NEW chats start from).
 
-`/models <name>` (`commands.ts:1972`) resolves typed names to `ModelInfo.name` (provider-qualified id; `name` = id, `model` = bare name, `display_name` = label) and follows the same three arms (`getSessionId`).
+`/models <name>` (`commands.ts:1979`) resolves typed names to `ModelInfo.name` (provider-qualified id; `name` = id, `model` = bare name, `display_name` = label) and follows the same three arms (`getSessionId`).
 
 ## Resolution order
 
@@ -37,7 +37,7 @@ A main-model pick (`ModelDialog` `handleSelect` `case "main"`, `internal/server/
 
 - Per-session override wins over the global default; clearing (`""`) means "follow the current default" (`handler_session_state.go:706`).
 - A remote session's model picks route to its own host (`hostArgs`); new chats on that host start from the host's config (`ModelDialog` `main` case line:528).
-- The `main` pick does NOT auto-promote to the global default; only a draft or no-session pick does (`commands.ts:2013-2022`).
+- The `main` pick does NOT auto-promote to the global default; only a draft or no-session pick does (`commands.ts:2020-2029`).
 
 ## Cross-reference
 

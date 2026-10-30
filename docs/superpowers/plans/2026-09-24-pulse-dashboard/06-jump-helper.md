@@ -19,7 +19,7 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
   (`lib/sidePaneState.ts`). No extra restore work should be needed — verify.
 - Host scoping rule: `docs/concepts/web-session-host-scoping.md`; local host
   is `""`.
-- App view state: `activeView` in `web/src/App.tsx:248`; jumping must set it
+- App view state: `activeView` in `web/src/App.tsx:250`; jumping must set it
   to `"sessions"` with chat focused.
 
 ## Files

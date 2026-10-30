@@ -1328,6 +1328,16 @@ export type InstallPluginResult =
   | { name: string; dir: string; source: string }
   | { skill: string; report: string };
 
+/** The npm package behind `/plugin install @tanstack/intent` (TUI and web). */
+export const INTENT_PACKAGE_NAME = "@tanstack/intent";
+
+/** GET /api/skills/tanstack-intent: the latest @tanstack/intent release and
+ * the maintainer skills it ships. */
+export interface IntentPackageInfo {
+  version: string;
+  skills: { name: string; description: string }[];
+}
+
 /** A plugin installed by Claude Code (source "claude-code"). ocode can
  * enable/disable it (in ocode's config only) but never removes it. */
 export const isClaudeCodePlugin = (p: PluginInfo): boolean => p.source === "claude-code";

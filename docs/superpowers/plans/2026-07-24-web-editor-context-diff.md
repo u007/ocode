@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the `useEditorTabs` hook (from the companion core-editor plan) with selection tracking and a save-triggered refresh counter. A new pure-function diff parser turns the existing `getChangeDiff` unified-diff patch into structured hunks; `FileEditor` applies them as Monaco decorations (line highlights) and view zones (deleted-line blocks, which live outside the editable text model and are therefore not modifiable). A new `EditorContextChip` renders in `ChatInput`, which prepends the formatted ref to outgoing messages using the same `@ref` convention already used for file uploads.
 
-**Tech Stack:** React + TypeScript, Monaco (`@monaco-editor/react` / `monaco-editor` decorations & view-zones APIs), existing `api.getChangeDiff` (`web/src/api/client.ts:440`).
+**Tech Stack:** React + TypeScript, Monaco (`@monaco-editor/react` / `monaco-editor` decorations & view-zones APIs), existing `api.getChangeDiff` (`web/src/api/client.ts:441`).
 
 ## Global Constraints
 
@@ -335,7 +335,7 @@ git commit -m "feat(web): report editor selection changes from FileEditor"
 - Modify: `web/src/index.css`
 
 **Interfaces:**
-- Consumes: `parseDiffPatch` (Task 1), `api.getChangeDiff` (existing, `web/src/api/client.ts:440`).
+- Consumes: `parseDiffPatch` (Task 1), `api.getChangeDiff` (existing, `web/src/api/client.ts:441`).
 - Produces: `FileEditorProps.session?: string`, `FileEditorProps.diffVersion?: number`.
 
 - [ ] **Step 1: Add CSS classes for the decorations**
@@ -737,7 +737,7 @@ Update the `FileEditor` usage (added in the core plan's Task 9):
                   />
 ```
 
-Update the `ChatInput` usage (`App.tsx:295`):
+Update the `ChatInput` usage (`App.tsx:297`):
 
 ```tsx
                 <ChatInput onSlashCommand={handleCommand} activeEditorContext={activeEditorContext} />

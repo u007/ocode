@@ -9,7 +9,7 @@
 **Files:**
 - Modify: `AGENTS.md` (new "Sandbox permission mode" section); the permission-mode help/command reference; the user-facing help text for the `/sandbox` command (TUI `commands.go`, web `commands.ts`) and the mode-pill tooltip.
 
-- [x] **Step 1:** `/sandbox` help text (TUI `commands.go:146`, web `commands.ts:77`) + CoworkSidebar mode-pill tooltip now state the one-line framing verbatim (write protection, not full containment; secrets/config still ask).
+- [x] **Step 1:** `/sandbox` help text (TUI `commands.go:146`, web `commands.ts:78`) + CoworkSidebar mode-pill tooltip now state the one-line framing verbatim (write protection, not full containment; secrets/config still ask).
 - [x] **Step 2:** AGENTS.md "Sandbox permission mode" section documents what's confined (shell tool only, OS write-walls to writable roots, global reads/exec, egress open), the sensitive set (auth.json, config/data-dir writes, ~/.ssh, .env — all Ask → judge when auto on), the self-escalation guard, and the interpreter-hidden residual plainly.
 - [x] **Step 3:** Platform matrix documented in AGENTS.md (macOS Seatbelt, Linux Landlock+bwrap, Windows normal-prompts degrade).
 - [x] **Step 4:** Toggling documented (TUI cycle / `/sandbox`, web selector / `/sandbox`; per-session, never persisted).

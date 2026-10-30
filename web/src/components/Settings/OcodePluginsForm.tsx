@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import { isClaudeCodePlugin, type PluginInfo } from "../../api/types";
+import { INTENT_PACKAGE_NAME, isClaudeCodePlugin, type PluginInfo } from "../../api/types";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import IntentSkillsDialog from "../Layout/IntentSkillsDialog";
 import { Loader2, Trash2, Download } from "lucide-react";
 
 export default function OcodePluginsForm() {
@@ -10,6 +11,7 @@ export default function OcodePluginsForm() {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [source, setSource] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [intentOpen, setIntentOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [localModels, setLocalModels] = useState<Record<string, { enabled: boolean; max_parallel: number }>>({});
   const [loading, setLoading] = useState(true);
@@ -81,6 +83,12 @@ export default function OcodePluginsForm() {
   const install = async () => {
     const src = source.trim();
     if (!src) return;
+    // Same routing as the TUI: the TanStack Intent package is a skill picker.
+    if (src === INTENT_PACKAGE_NAME) {
+      setSource("");
+      setIntentOpen(true);
+      return;
+    }
     setInstalling(true);
     setError(null);
     try {
@@ -213,6 +221,7 @@ export default function OcodePluginsForm() {
           </div>
         )}
       </div>
+      <IntentSkillsDialog open={intentOpen} onOpenChange={setIntentOpen} />
     </div>
   );
 }

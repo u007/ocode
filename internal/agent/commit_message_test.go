@@ -367,6 +367,22 @@ func TestGenerateCommitMessageCapsDiffAndUsesPrompt(t *testing.T) {
 	}
 }
 
+// TestDefaultCommitMsgPromptAsksForABody pins the SHAPE the built-in prompt
+// requests, because nothing downstream can recover it: both surfaces render
+// whatever the model returns verbatim, so reverting to a subject-only prompt
+// silently takes the body away from every user who has no custom prompt.
+func TestDefaultCommitMsgPromptAsksForABody(t *testing.T) {
+	prompt := DefaultCommitMsgPrompt
+	for _, want := range []string{"subject", "blank line", "bullets"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("default prompt no longer asks for %q: %q", want, prompt)
+		}
+	}
+	if strings.Contains(strings.ToLower(prompt), "subject line only") {
+		t.Fatalf("default prompt still restricts the reply to a subject line: %q", prompt)
+	}
+}
+
 func TestCapDiffBytesKeepsRuneBoundary(t *testing.T) {
 	cases := []struct {
 		name  string

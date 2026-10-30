@@ -13,7 +13,7 @@
 
 Web/desktop `/btw` does not behave like the TUI.
 
-**TUI** (`internal/tui/model.go:12642` `handleBtwCmd` → `internal/agent/ask.go:68`
+**TUI** (`internal/tui/model.go:12711` `handleBtwCmd` → `internal/agent/ask.go:68`
 `AskLoopAsync`): `/btw <msg>` runs an **independent side-query agent loop** — its own
 fresh LLM client, its own message list, the tool set minus dispatch/interactive tools,
 an 8-step cap, permission asks denied non-blockingly. It streams live tool activity and
@@ -23,7 +23,7 @@ the answer into a popup. Neither the aside, the activity, nor the answer enter
 **Web/desktop** (`internal/server/handler.go:2148` `HandleBtw`): `/btw <msg>` only
 prepends `"By the way: "` and **injects the aside into the running turn** (or appends it
 to the transcript when idle). The client then shows `Noted: <args>`
-(`web/src/components/Chat/commands.ts:1751`). There is **no side query and no answer**.
+(`web/src/components/Chat/commands.ts:1758`). There is **no side query and no answer**.
 When the session is idle, `AppendUserMessageForDir` records the note but starts no turn,
 so nothing ever answers it.
 
@@ -39,7 +39,7 @@ behaviour, with a **docked, non-blocking panel** instead of the TUI's modal popu
 
 ### TUI semantics (parity target)
 
-The observable contract to match (`internal/tui/model.go:12642` + `internal/agent/ask.go:68`):
+The observable contract to match (`internal/tui/model.go:12711` + `internal/agent/ask.go:68`):
 
 - Runs an independent child agent with its **own fresh client**; it sees the **full
   current transcript plus the aside** (not just the aside).
@@ -196,7 +196,7 @@ second browser tab invoking `/btw`).
 
 A new `BtwPanel` component (`web/src/components/Chat/BtwPanel.tsx`) renders the active
 session's side-query state. It is **docked above the composer** in `App.tsx` (between
-`ChatPanel` and `ChatInput`, near `AgentPreview` at `App.tsx:1774`), not a modal:
+`ChatPanel` and `ChatInput`, near `AgentPreview` at `App.tsx:1781`), not a modal:
 
 - Header `↳ By the Way` with the question and a close (X) button.
 - Scrollable, wrapped body: live activity lines (`→ tool args`) then the streamed answer;

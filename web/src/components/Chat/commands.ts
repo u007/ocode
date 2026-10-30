@@ -1,11 +1,12 @@
-import type {
-  ComputerUseConfig,
-  ContextBudgetReport,
-  Message,
-  OcrConfig,
-  OcrModelsResponse,
-  UsageSummary,
-  PermissionsResponse,
+import {
+  INTENT_PACKAGE_NAME,
+  type ComputerUseConfig,
+  type ContextBudgetReport,
+  type Message,
+  type OcrConfig,
+  type OcrModelsResponse,
+  type UsageSummary,
+  type PermissionsResponse,
 } from "../../api/types";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -336,6 +337,9 @@ export interface CommandResult {
    *  e.g. `/autocontinue model` opens the auto-continue judge picker. */
   openModelPicker?: boolean;
   modelPickerPurpose?: import("../../components/Layout/ModelDialog").ModelDialogTab;
+  /** Open the @tanstack/intent skill checklist (web twin of the TUI picker
+   *  that `/plugin install @tanstack/intent` opens). */
+  openIntentSkillsDialog?: boolean;
   /** Updated session title for tab label updates. */
   title?: string;
   /** Re-key the current tab to a new session id (server /reset-id). App.tsx
@@ -1376,7 +1380,7 @@ async function handlePlugin(args: string): Promise<CommandResult> {
         handled: true,
         messages: [{
           role: "assistant",
-          content: `## Plugins\n\n**Builtin plugins:**\n${builtinLines.join("\n")}${installedSection}\n\n\`/plugin enable\\|disable <name>\`, \`/plugin install <source>\`, \`/plugin remove <name>\``,
+          content: `## Plugins\n\n**Builtin plugins:**\n${builtinLines.join("\n")}${installedSection}\n\n\`/plugin enable\\|disable <name>\`, \`/plugin install <source>\` (or \`/plugin install @tanstack/intent\` for its skills), \`/plugin remove <name>\``,
         }],
       };
     }
@@ -1398,6 +1402,9 @@ async function handlePlugin(args: string): Promise<CommandResult> {
     }
 
     if (sub === "install" && rest) {
+      if (rest === INTENT_PACKAGE_NAME) {
+        return { handled: true, openIntentSkillsDialog: true };
+      }
       const res = await api.installPlugin(rest);
       if ("skill" in res) {
         return {
@@ -1423,7 +1430,7 @@ async function handlePlugin(args: string): Promise<CommandResult> {
       handled: true,
       messages: [{
         role: "assistant",
-        content: "Usage: `/plugin [list\\|enable <name>\\|disable <name>\\|install <source>\\|remove <name>]`",
+        content: "Usage: `/plugin [list\\|enable <name>\\|disable <name>\\|install <source\\|@tanstack/intent>\\|remove <name>]`",
       }],
     };
   } catch (err) {

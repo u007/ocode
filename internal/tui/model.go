@@ -917,6 +917,17 @@ type pluginInstallMsg struct {
 	ref    string
 }
 type pluginRemoveMsg struct{ name string }
+
+// pluginIntentListMsg starts the latest @tanstack/intent fetch behind
+// `/plugin install @tanstack/intent`.
+type pluginIntentListMsg struct{}
+
+// pluginIntentFetchedMsg carries the fetched package, or why the fetch failed.
+type pluginIntentFetchedMsg struct {
+	pkg skill.IntentPackage
+	err error
+}
+
 type skillsOutputMsg struct{ text string }
 type pluginInstalledMsg struct {
 	name   string
@@ -1680,6 +1691,7 @@ type model struct {
 	agentStripBlocks         []agentStripBlock
 	agentStripRow0           int
 	pendingPluginInstall     *pluginInstallPendingMsg
+	pendingIntentPackage     skill.IntentPackage                 // set while the @tanstack/intent skill picker is open
 	pluginSyncStates         map[string]plugins.SyncStatusResult // cached sync status per plugin name
 	streamStartedAt          time.Time
 	streamEndedAt            time.Time
@@ -4344,6 +4356,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.rebuildAgentWithExternalTools()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginIntentListMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Fetching the latest " + skill.IntentPackageName + "…"})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, func() tea.Msg {
+			pkg, err := skill.FetchIntentPackage(context.Background())
+			return pluginIntentFetchedMsg{pkg: pkg, err: err}
+		}
+	case pluginIntentFetchedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("/plugin install %s: %v", skill.IntentPackageName, msg.err)})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		m.openIntentSkillPicker(msg.pkg)
 		return m, nil
 	case skillsOutputMsg:
 		m.refreshCustomCommands()
@@ -11043,9 +11070,51 @@ func (m *model) selectPickerMultiConfirm() (tea.Model, tea.Cmd) {
 		m.localModelAddMultiple(selected)
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case "tanstack-intent-install":
+		pkg := m.pendingIntentPackage
+		m.pendingIntentPackage = skill.IntentPackage{}
+		return m, func() tea.Msg {
+			out, err := skill.InstallIntentSkillsToClaude(pkg, selected)
+			if err != nil {
+				return skillsOutputMsg{text: fmt.Sprintf("/plugin install %s: %v", skill.IntentPackageName, err)}
+			}
+			return skillsOutputMsg{text: out}
+		}
 	default:
 		return m, nil
 	}
+}
+
+// openIntentSkillPicker lists the skills of a fetched @tanstack/intent release
+// as a checklist. Enter installs the checked ones into ~/.claude/skills.
+func (m *model) openIntentSkillPicker(pkg skill.IntentPackage) {
+	m.pendingIntentPackage = pkg
+	m.input.Blur()
+	m.pickerKind = "tanstack-intent-install"
+	n := len(pkg.Skills)
+	m.pickerItems = make([]string, n)
+	m.pickerValues = make([]string, n)
+	m.pickerIsHeader = make([]bool, n)
+	// Border, padding, checkbox, separator and selection pad. The picker does
+	// not clamp rows, so a description that outruns the box wraps onto a second
+	// line and throws off the list height.
+	const intentRowChrome = 16
+	for i, s := range pkg.Skills {
+		label := s.Name
+		if room := m.width - len(s.Name) - intentRowChrome; room > 3 {
+			label += " — " + truncateTitle(s.Description, room)
+		}
+		m.pickerItems[i] = label
+		m.pickerValues[i] = s.Name
+	}
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
+	m.pickerMultiSelect = true
+	m.pickerChecked = map[string]bool{}
+	m.showPicker = true
+	m.pushPickerModal()
 }
 
 // localModelDisable stops modelID's process (if running) and persists
@@ -11366,7 +11435,7 @@ func (m *model) togglePickerSelectAll() {
 }
 
 func isMultiSelectPickerKind(kind string) bool {
-	return kind == "localmodel-enable" || kind == "localmodel-add"
+	return kind == "localmodel-enable" || kind == "localmodel-add" || kind == "tanstack-intent-install"
 }
 
 func localModelMemString(info discovery.InstanceInfo) string {

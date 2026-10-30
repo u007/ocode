@@ -59,7 +59,7 @@ fire unless a long-lived host is running. Document this in user-facing docs.
   ```
 - Constructs a per-job agent via `agent.NewAgent(client, tools, cfg, lspMgr)`
   and runs `ag.Step(msgs)` — the same entry the server SSE and TUI stream paths
-  use (`internal/server/handler_sse.go:198-229`, `internal/tui/model.go:11700`).
+  use (`internal/server/handler_sse.go:198-229`, `internal/tui/model.go:11769`).
 - Uses a **persistent per-job session** `cron:<id>` so context accumulates
   across firings. Retention: `capMessages(result, 80)` keeps the seeded context
   + the 79 most recent turns so the transcript never grows unbounded

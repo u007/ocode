@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:1869` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:1871` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 
@@ -264,7 +264,7 @@ never a global reset, which would tear down TUI `/rc` sessions on the same node.
   shows the same Running/Not-sharing badge + kind, and Start/Stop. The status block
   is independent of the persisted toggle.
 - **TUI:** `/auto-share [on|off|status]` (`internal/tui/commands.go:147`,
-  handler at `internal/tui/commands.go:1148`). Both write the same config key; the
+  handler at `internal/tui/commands.go:1154`). Both write the same config key; the
   `status` verb is read-only and an unrecognised argument prints usage without
   changing the setting.
 

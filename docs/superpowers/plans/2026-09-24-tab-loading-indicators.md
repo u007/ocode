@@ -21,7 +21,7 @@ In scope:
 - Trigger indicators in `TopTabs.tsx` (main triggers + overflow Select portal) and `SessionSubTabs.tsx` (Changes item only).
 - Minimal `App.tsx` edits (key/context threading and `aria-busy` wrappers only).
 
-Out of scope (no new loading UI): Settings tab (App.tsx:1430), the main Sessions trigger (App.tsx:1434), all other session sub-tabs (App.tsx:1451-1551: chat/terminal/browser), editor tabs, file viewers, browser panel, terminal panel, server/API changes, visual redesign.
+Out of scope (no new loading UI): Settings tab (App.tsx:1437), the main Sessions trigger (App.tsx:1441), all other session sub-tabs (App.tsx:1458-1558: chat/terminal/browser), editor tabs, file viewers, browser panel, terminal panel, server/API changes, visual redesign.
 
 Hard constraints: stable `(host id, project path, tab/session key)` identity; per-request generation + AbortController; 300ms delayed refresh indicators; initial load blocks, refresh never blocks; initial error → retry overlay, refresh error → retain content; TopTabs' independent Git badge poll (`TopTabs.tsx:81-120`) is NOT an indicator driver; the working tree has unrelated concurrent WIP, so `App.tsx` changes stay minimal and isolated.
 

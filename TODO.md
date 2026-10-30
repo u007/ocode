@@ -112,6 +112,15 @@ The agent tool (`docs/concepts/browser-agent-tools.md`) drives this machine's br
 - **`OpenAgentTab` leaves its blank tab registered when the navigation fails.** `AgentTarget` now closes the tab through `CloseAgentTab`; `OpenAgentTab` (`internal/browse/server.go`) still returns the key with the error. Fix: close the key on that error. The tool caller in `internal/server/browser_tool.go` is owned elsewhere.
 - **Frame clicks assume one level of same-origin iframe with no CSS transform.** `cdp.Target.frameOrigin` takes the iframe's content-box origin as the frame viewport origin. That is exact for a top-level `<iframe>` with no transform; a transformed or nested iframe would hit-test at the wrong point and refuse the click rather than mis-click.
 
+## Open: Files-tab drag-in and download follow-ups (2026-10-30)
+
+Drag OS files onto the tree to upload, and right-click Download for files, both shipped (`docs/concepts/files-tab-clipboard.md`, "Drag-in upload and right-click Download"). Deliberately deferred:
+
+- **Desktop shell (WKWebView) is unverified for both features.** A drop needs the DOM `drop` event to carry `dataTransfer.files` and a blob `<a download>` to save. Neither is proven in the desktop app. Verify by hand on a built desktop app: drop a Finder file onto a folder row, then Download a file. If drop is dead, paste still works. If `<a download>` navigates instead of saving, switch `saveBlobAsFile` to the desktop save path.
+- **A selection of N files is N browser downloads.** Each file is a separate save, so a large selection prompts the browser for every file. No zip bundling yet.
+- **Folders cannot be downloaded.** `/api/fs/download` refuses a directory (400). Zip-on-download would need a new endpoint and its own size cap.
+- **Remote download is capped at 100 MiB.** `fsDownloadRemoteMaxBytes` mirrors the remote upload cap. The bytes stream over ssh with a 60 s idle timer and a 30 min backstop; revisit if real projects need larger remote downloads.
+
 ## Open: Files-tab paste follow-ups (2026-10-27)
 
 The Files tab now has cut/copy/paste to the project root, keyboard shortcuts, and OS-file paste (`docs/concepts/files-tab-clipboard.md`). Deliberately deferred:

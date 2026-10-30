@@ -12,6 +12,7 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/skill"
 )
 
 func (m *model) openAdvisorPicker() tea.Cmd {
@@ -1031,6 +1032,9 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "localmodel-add" {
 		title = "Add local models (Space to toggle, Enter to confirm)"
+	}
+	if m.pickerKind == "tanstack-intent-install" {
+		title = "Install " + skill.IntentPackageName + " skills (Space to toggle, Enter to confirm)"
 	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 

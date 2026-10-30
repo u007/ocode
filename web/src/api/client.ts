@@ -41,6 +41,7 @@ import type {
   UsageSummary,
   PluginInfo,
   InstallPluginResult,
+  IntentPackageInfo,
   CommandEntry,
   SkillEntry,
   ManageableSkillsResponse,
@@ -2477,6 +2478,19 @@ export const api = {
     if (text.trim() === "") throw new Error("upload returned an empty response");
     return JSON.parse(text) as { success: boolean; path: string };
   },
+  // GET /api/fs/download: one project file as a Blob for a Files-tree save. Auth
+  // headers are required, so the caller saves the Blob itself (saveBlobAsFile)
+  // instead of pointing an <a href> at the URL.
+  fsDownload: async (path: string, project?: string, host?: string): Promise<Blob> => {
+    const res = await fetch(apiPath(`/api/fs/download${projQuery(project, host, { path })}`), {
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+      throw new Error(err.error || res.statusText);
+    }
+    return res.blob();
+  },
   // --- Cron (jobs, outbox, runs, targets) + reminders and tasks ------------
   //
   // Every method on this surface is PROJECT-SCOPED, and every one therefore
@@ -3928,6 +3942,15 @@ export const api = {
     fetchJSON<InstallPluginResult>("/api/plugins", {
       method: "POST",
       body: JSON.stringify({ source }),
+    }),
+  /** Skills of the latest @tanstack/intent on npm (fetched server-side). */
+  listIntentSkills: (signal?: AbortSignal) =>
+    fetchJSON<IntentPackageInfo>("/api/skills/tanstack-intent", { signal }),
+  /** Install the named @tanstack/intent skills into ~/.claude/skills. */
+  installIntentSkills: (names: string[]) =>
+    fetchJSON<{ report: string }>("/api/skills/tanstack-intent/install", {
+      method: "POST",
+      body: JSON.stringify({ names }),
     }),
   removePlugin: async (name: string): Promise<void> => {
     const res = await fetch(
