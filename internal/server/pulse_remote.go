@@ -62,8 +62,20 @@ func (h *Handler) pulseRemoteRequest(host string, port int, method, path string,
 	}
 	ws, ok := h.remoteHosts.connectedWorkspace(host, port)
 	if !ok {
-		return fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errPulseRemoteNotConnected, host)
+		return pulseRemoteNotConnected(host)
 	}
+	return pulseRemoteCall(ws, host, method, path, query, timeout, bodyCap, out)
+}
+
+// pulseRemoteNotConnected is the error for a saved host with no live connection.
+// The text tells the operator the one action that connects it.
+func pulseRemoteNotConnected(host string) error {
+	return fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errPulseRemoteNotConnected, host)
+}
+
+// pulseRemoteCall performs one request over a named connection. The caller
+// chooses the workspace, so a board entry can record the connection it was fetched over.
+func pulseRemoteCall(ws remoteHostWorkspace, host, method, path string, query url.Values, timeout time.Duration, bodyCap int64, out any) error {
 	apiURL, err := url.Parse(ws.APIURL())
 	if err != nil {
 		return fmt.Errorf("parse API URL: %w", err)
@@ -130,22 +142,33 @@ func (h *Handler) pulseRemotePort(host string) int {
 	return 0
 }
 
+// pulseRemoteWorkspace returns the live connection to a saved host, without
+// dialing. The pointer identifies one connection: a reconnect yields a different one.
+func (h *Handler) pulseRemoteWorkspace(host string) (remoteHostWorkspace, bool) {
+	if h.remoteHosts == nil {
+		return nil, false
+	}
+	return h.remoteHosts.connectedWorkspace(host, h.pulseRemotePort(host))
+}
+
 // pulseRemoteHostConnected reports whether a live connection to host exists,
 // without dialing.
 func (h *Handler) pulseRemoteHostConnected(host string) bool {
-	if h.remoteHosts == nil {
-		return false
-	}
-	_, ok := h.remoteHosts.connectedWorkspace(host, h.pulseRemotePort(host))
+	_, ok := h.pulseRemoteWorkspace(host)
 	return ok
 }
 
-// pulseRemoteTabKey splits a terminal-tab store key into (host, path). A local
+// pulseSplitTabKey splits a terminal-tab store key into (host, path). A local
 // project's key is its bare path; a remote one's is "<host>::<path>"
-// (projectTerminalsKey in the web client). host is "" for a local key.
-func pulseRemoteTabKey(key string) (host, path string) {
+// (projectTerminalsKey in the web client). The part before the first "::" is a
+// host only when it is the host of a saved remote project. A local path may
+// itself contain "::", and a key like that must not lose its first segment to
+// the host split. host is "" for a local key.
+func (h *Handler) pulseSplitTabKey(key string) (host, path string) {
 	if i := strings.Index(key, "::"); i > 0 {
-		return key[:i], key[i+2:]
+		if _, ok := h.firstSavedProjectForHost(key[:i]); ok {
+			return key[:i], key[i+2:]
+		}
 	}
 	return "", key
 }
@@ -209,25 +232,46 @@ func (h *Handler) pulseProjectListTool(raw json.RawMessage) (string, error) {
 
 // --- remote terminals ---
 
-// pulseRemoteLive fetches the live terminal rows of one connected host.
+// The live list is read in pages of pulseRemotePageSize rows, at most
+// pulseRemoteLiveMaxPages of them.
+const (
+	pulseRemotePageSize     = 200
+	pulseRemoteLiveMaxPages = 50
+)
+
+// pulseRemoteLive fetches the live terminal rows of one connected host. Every page
+// shares one deadline (pulseRemoteTimeout), so a slow host cannot stretch the call to
+// a full timeout per page. A host with more terminals than the page cap can hold is
+// an error, never a shorter list: a truncated list would make terminal_kill say a
+// live terminal is not live.
 func (h *Handler) pulseRemoteLive(host string) ([]pulseTerminalRow, error) {
-	port := h.pulseRemotePort(host)
+	ws, ok := h.pulseRemoteWorkspace(host)
+	if !ok {
+		return nil, pulseRemoteNotConnected(host)
+	}
+	deadline := time.Now().Add(pulseRemoteTimeout)
 	var rows []pulseTerminalRow
-	const page = 200
-	for offset := 0; ; offset += page {
+	for page := 0; page < pulseRemoteLiveMaxPages; page++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("host %s: live terminal list timed out after %v", host, pulseRemoteTimeout)
+		}
 		var resp struct {
 			Terminals []pulseTerminalRow `json:"terminals"`
 			Total     int                `json:"total"`
 		}
-		q := url.Values{"limit": {fmt.Sprint(page)}, "offset": {fmt.Sprint(offset)}}
-		if err := h.pulseRemoteGetJSON(host, port, "/api/pulse/terminals", q, &resp); err != nil {
+		q := url.Values{"limit": {fmt.Sprint(pulseRemotePageSize)}, "offset": {fmt.Sprint(len(rows))}}
+		if err := pulseRemoteCall(ws, host, http.MethodGet, "/api/pulse/terminals", q, remaining, pulseRemoteBodyCap, &resp); err != nil {
 			return nil, err
 		}
 		rows = append(rows, resp.Terminals...)
-		if len(resp.Terminals) == 0 || len(rows) >= resp.Total || offset > 20*page {
+		// Total is read from each page, so a host whose count keeps growing is
+		// followed to the cap and reported, not stopped at a stale total.
+		if len(resp.Terminals) == 0 || len(rows) >= resp.Total {
 			return rows, nil
 		}
 	}
+	return nil, fmt.Errorf("host %s reports more than %d terminals", host, pulseRemoteLiveMaxPages*pulseRemotePageSize)
 }
 
 // pulseRemoteLiveByHost fetches the live rows of several hosts in parallel. A
@@ -271,6 +315,9 @@ const (
 	// before the model is called, so the operator is waiting behind it.
 	pulseRemoteBoardTimeout = 3 * time.Second
 	pulseRemoteBoardPages   = 3
+	// pulseRemoteSessionHostMaxAge bounds how old a cached board row may be and still
+	// name the host of its session (pulseRemoteSessionHost).
+	pulseRemoteSessionHostMaxAge = 2 * time.Minute
 )
 
 // pulseHostNote says why a host's sessions are missing from the board, so the
@@ -284,13 +331,29 @@ type pulseRemoteBoardEntry struct {
 	rows []PulseRow
 	err  error
 	at   time.Time
+	// ws is the connection the rows were fetched over. A reconnect is a new
+	// workspace, so an entry from the old one (a failure above all) no longer
+	// answers for the host and is refetched.
+	ws remoteHostWorkspace
 }
 
-// pulseRemoteBoardCache holds each host's last board rows per scope. The zero
-// value is ready to use.
+// pulseRemoteFlight is one board fetch in progress. A caller that misses the
+// cache while a fetch for the same host and scope is running waits on done and
+// shares its result, instead of issuing a second request to the host.
+type pulseRemoteFlight struct {
+	ws       remoteHostWorkspace
+	deadline time.Time
+	done     chan struct{}
+	rows     []PulseRow
+	err      error
+}
+
+// pulseRemoteBoardCache holds each host's last board rows per scope, and the
+// fetches in flight. The zero value is ready to use.
 type pulseRemoteBoardCache struct {
-	mu sync.Mutex
-	m  map[string]pulseRemoteBoardEntry
+	mu       sync.Mutex
+	m        map[string]pulseRemoteBoardEntry
+	inflight map[string]*pulseRemoteFlight
 }
 
 // pulseRemoteHostList returns the distinct hosts of the saved remote projects,
@@ -312,14 +375,18 @@ func (h *Handler) pulseRemoteHostList() []string {
 }
 
 // pulseRemoteHostRows is one host's board rows, served from the cache while fresh.
+// A miss issues one request per host and scope: a caller that finds a fetch
+// already running over the same connection waits for it, bounded by that fetch's
+// deadline, and shares the result.
 func (h *Handler) pulseRemoteHostRows(host, scope string) ([]PulseRow, error) {
-	if !h.pulseRemoteHostConnected(host) {
+	ws, ok := h.pulseRemoteWorkspace(host)
+	if !ok {
 		return nil, fmt.Errorf("not connected (open one of its projects in the app to connect it)")
 	}
 	key := host + "\x00" + scope
 	c := &h.pulseRemoteBoard
 	c.mu.Lock()
-	if e, ok := c.m[key]; ok {
+	if e, ok := c.m[key]; ok && e.ws == ws {
 		ttl := pulseRemoteBoardTTL
 		if e.err != nil {
 			ttl = pulseRemoteBoardFailTTL
@@ -329,32 +396,72 @@ func (h *Handler) pulseRemoteHostRows(host, scope string) ([]PulseRow, error) {
 			return e.rows, e.err
 		}
 	}
+	if f, ok := c.inflight[key]; ok && f.ws == ws {
+		c.mu.Unlock()
+		return awaitPulseRemoteFlight(host, f)
+	}
+	// A fetch over a different connection is not shared, and it does not replace
+	// the flight already registered: only the first caller owns the key.
+	f := &pulseRemoteFlight{ws: ws, deadline: time.Now().Add(pulseRemoteBoardTimeout), done: make(chan struct{})}
+	_, busy := c.inflight[key]
+	if !busy {
+		if c.inflight == nil {
+			c.inflight = make(map[string]*pulseRemoteFlight)
+		}
+		c.inflight[key] = f
+	}
 	c.mu.Unlock()
 
-	rows, err := h.fetchPulseRemoteRows(host, scope)
+	rows, err := h.fetchPulseRemoteRows(ws, host, scope, f.deadline)
+
 	c.mu.Lock()
 	if c.m == nil {
 		c.m = make(map[string]pulseRemoteBoardEntry)
 	}
-	c.m[key] = pulseRemoteBoardEntry{rows: rows, err: err, at: time.Now()}
+	c.m[key] = pulseRemoteBoardEntry{rows: rows, err: err, at: time.Now(), ws: ws}
+	if !busy {
+		delete(c.inflight, key)
+	}
 	c.mu.Unlock()
+	if !busy {
+		f.rows, f.err = rows, err
+		close(f.done)
+	}
 	return rows, err
 }
 
-// fetchPulseRemoteRows pages through the host's own GET /api/pulse. Its rows are
-// already built and ordered by the host, so they are tagged with the host and
-// merged, not re-derived.
-func (h *Handler) fetchPulseRemoteRows(host, scope string) ([]PulseRow, error) {
-	port := h.pulseRemotePort(host)
+// awaitPulseRemoteFlight waits for another caller's fetch, bounded by the
+// deadline that fetch was started with.
+func awaitPulseRemoteFlight(host string, f *pulseRemoteFlight) ([]PulseRow, error) {
+	timer := time.NewTimer(time.Until(f.deadline))
+	defer timer.Stop()
+	select {
+	case <-f.done:
+		return f.rows, f.err
+	case <-timer.C:
+		return nil, fmt.Errorf("host %s: board read timed out after %v", host, pulseRemoteBoardTimeout)
+	}
+}
+
+// fetchPulseRemoteRows pages through the host's own GET /api/pulse over one
+// connection. The board waits for this before the model is called, so every page
+// shares one deadline: a host with several slow pages must not add up to a timeout
+// per page. The rows are already built and ordered by the host, so they are tagged
+// with the host and merged, not re-derived.
+func (h *Handler) fetchPulseRemoteRows(ws remoteHostWorkspace, host, scope string, deadline time.Time) ([]PulseRow, error) {
 	var rows []PulseRow
 	cursor := ""
 	for page := 0; page < pulseRemoteBoardPages; page++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("host %s: board read timed out after %v", host, pulseRemoteBoardTimeout)
+		}
 		q := url.Values{"scope": {scope}, "limit": {fmt.Sprint(pulseMaxLimit)}}
 		if cursor != "" {
 			q.Set("cursor", cursor)
 		}
 		var resp PulsePageResponse
-		if err := h.pulseRemoteRequest(host, port, http.MethodGet, "/api/pulse", q, pulseRemoteBoardTimeout, pulseRemoteBodyCap, &resp); err != nil {
+		if err := pulseRemoteCall(ws, host, http.MethodGet, "/api/pulse", q, remaining, pulseRemoteBodyCap, &resp); err != nil {
 			return nil, err
 		}
 		for _, r := range resp.Items {
@@ -406,13 +513,17 @@ func (h *Handler) pulseBoardRows(scope string, now time.Time) ([]PulseRow, []pul
 }
 
 // pulseRemoteSessionHost finds the host a session id was last seen on, from the
-// cached remote boards. "" when no remote board has it. It never fetches.
+// cached remote boards. "" when no board names it. A row counts only when its
+// fetch succeeded, the row is younger than pulseRemoteSessionHostMaxAge, and the
+// host is connected now: a stale or failed board must not name a host. It never fetches.
 func (h *Handler) pulseRemoteSessionHost(id string) string {
 	c := &h.pulseRemoteBoard
+	var hosts []string
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	hosts := make([]string, 0, len(c.m))
 	for key, e := range c.m {
+		if e.err != nil || time.Since(e.at) >= pulseRemoteSessionHostMaxAge {
+			continue
+		}
 		for _, r := range e.rows {
 			if r.SessionID == id {
 				hosts = append(hosts, strings.SplitN(key, "\x00", 2)[0])
@@ -420,11 +531,14 @@ func (h *Handler) pulseRemoteSessionHost(id string) string {
 			}
 		}
 	}
+	c.mu.Unlock()
 	sort.Strings(hosts)
-	if len(hosts) == 0 {
-		return ""
+	for _, host := range hosts {
+		if h.pulseRemoteHostConnected(host) {
+			return host
+		}
 	}
-	return hosts[0]
+	return ""
 }
 
 // --- remote session reads ---
@@ -600,6 +714,11 @@ func (h *Handler) pulseHostConnectTool(raw json.RawMessage) (string, error) {
 				return marshalPulseString(res)
 			}
 			res.State, res.Error, res.RetryAfterSeconds = "failed", last.err, int(wait.Seconds())+1
+			// The background attempt's own error is known only to the registry: this
+			// call recorded just the "connecting" it returned, so prefer the real cause.
+			if cause := h.remoteHosts.lastFailure(host, port); cause != nil {
+				res.Error = truncateRunes(cause.Error(), 300)
+			}
 			if res.Error == "" {
 				res.Error = "the last attempt did not finish connected"
 			}

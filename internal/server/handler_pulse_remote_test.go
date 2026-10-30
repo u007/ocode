@@ -27,6 +27,9 @@ const (
 	pulseRemoteTestHost = "dev@box"
 	pulseRemoteTestPath = "/home/me/app"
 	pulseRemoteTestTerm = "rt-1"
+	// pulseRemoteTestHome is the fake host's home: a saved "~" project expands to
+	// it, as the real host's POST /api/projects does on its own machine.
+	pulseRemoteTestHome = "/home/me"
 )
 
 // pulseRemoteFake is a remote host's own ocode server, reduced to the three
@@ -51,6 +54,17 @@ type pulseRemoteFake struct {
 	killed    []string
 	attached  []string // terminal ids created by a websocket attach
 	attachDir []string // project_path of each attach
+
+	// firstFrame, when set, replaces the attach frame the terminal websocket sends first.
+	firstFrame string
+	// liveGrow makes the live list grow forever: every page is full and total is
+	// always one more than the rows served so far. liveHits counts its requests.
+	liveGrow bool
+	liveHits int
+	// pulseDelay makes each GET /api/pulse wait before it answers. pulsePages > 0
+	// serves that many pages, linked by cursor.
+	pulseDelay time.Duration
+	pulsePages int
 }
 
 func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemoteFake {
@@ -74,12 +88,34 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 			Path string `json:"path"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		// Like the real host: "~" expands on the host's own home, and the stored
+		// path is echoed back.
+		stored := body.Path
+		if stored == "~" || strings.HasPrefix(stored, "~/") {
+			stored = filepath.Join(pulseRemoteTestHome, stored[1:])
+		}
 		f.mu.Lock()
 		f.registered = append(f.registered, body.Path)
 		f.mu.Unlock()
-		fmt.Fprint(w, `{"ok":true}`)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "path": stored})
 	}))
 	mux.HandleFunc("GET /api/pulse/terminals", auth(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		grow := f.liveGrow
+		if grow {
+			f.liveHits++
+		}
+		f.mu.Unlock()
+		if grow {
+			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			rows := make([]pulseTerminalRow, 0, limit)
+			for i := range limit {
+				rows = append(rows, pulseTerminalRow{ID: fmt.Sprintf("g-%d", offset+i), Project: pulseRemoteTestPath})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"terminals": rows, "total": offset + limit + 1})
+			return
+		}
 		row := pulseTerminalRow{ID: pulseRemoteTestTerm, Project: pulseRemoteTestPath, PID: 7, Command: "claude", Running: true, Cols: f.cols, Rows: f.rows}
 		_ = json.NewEncoder(w).Encode(map[string]any{"terminals": []pulseTerminalRow{row}, "total": 1})
 	}))
@@ -107,9 +143,28 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 	mux.HandleFunc("GET /api/pulse", auth(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.pulseHits++
+		delay, pages := f.pulseDelay, f.pulsePages
+		f.mu.Unlock()
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		page := 0
+		if c := r.URL.Query().Get("cursor"); c != "" {
+			page, _ = strconv.Atoi(c)
+		}
+		f.mu.Lock()
 		rows := append([]PulseRow{}, f.boardRows...)
 		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(PulsePageResponse{Items: rows})
+		resp := PulsePageResponse{Items: rows}
+		if pages > 0 && page+1 < pages {
+			next := strconv.Itoa(page + 1)
+			resp.NextCursor = &next
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	mux.HandleFunc("GET /api/sessions/{id}", auth(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -146,8 +201,12 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 		f.mu.Lock()
 		f.attached = append(f.attached, r.URL.Query().Get("terminal_id"))
 		f.attachDir = append(f.attachDir, r.URL.Query().Get("project_path"))
+		first := f.firstFrame
 		f.mu.Unlock()
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"attach","resumed":false}`))
+		if first == "" {
+			first = `{"type":"attach","resumed":false}`
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(first))
 		_, _, _ = conn.ReadMessage() // wait for the client's close
 	}))
 	f.srv = httptest.NewServer(mux)
@@ -341,33 +400,86 @@ func TestRemoteTerminalToolsRefuseWhatTheyMustNot(t *testing.T) {
 }
 
 func TestPulseRemoteTabKey(t *testing.T) {
+	h := pulseTestHandler(t)
+	for _, host := range []string{"dev@box", "dev@box:2222", "wsl:Ubuntu"} {
+		if err := h.projects.AddRemote(host, "/srv/x"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cases := []struct{ key, host, path string }{
 		{"/home/me/app", "", "/home/me/app"},
 		{"dev@box::/home/me/app", "dev@box", "/home/me/app"},
 		{"wsl:Ubuntu::/home/x", "wsl:Ubuntu", "/home/x"},
 		{"dev@box:2222::~/app", "dev@box:2222", "~/app"},
+		// A local path that contains "::" is not split on a prefix that is no saved host.
+		{"/work/a::b", "", "/work/a::b"},
+		{"unsaved@host::/x", "", "unsaved@host::/x"},
 	}
 	for _, c := range cases {
-		host, path := pulseRemoteTabKey(c.key)
+		host, path := h.pulseSplitTabKey(c.key)
 		if host != c.host || path != c.path {
 			t.Fatalf("%q -> (%q, %q), want (%q, %q)", c.key, host, path, c.host, c.path)
 		}
 	}
 }
 
-func TestPulseRemoteSavedPathMatchesTildeProjects(t *testing.T) {
-	h := pulseTestHandler(t)
-	if err := h.projects.AddRemote("dev@box", "~/app"); err != nil {
+func TestPulseRemoteSavedPathMatchesTildeProjectsOnlyByTheHostsExpansion(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	h := newTestProxyHandler(t, pulseRemoteTestHost, "~/app", f.ws)
+	if _, ok := h.pulseRemoteSavedPath(pulseRemoteTestHost, pulseRemoteTestPath); ok {
+		t.Fatal("before the host has reported the expansion, a ~ project must match nothing")
+	}
+	if err := h.pulseRemoteRegister(f.ws, pulseRemoteTestHost, "~/app"); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := h.pulseRemoteSavedPath("dev@box", "/home/me/app"); !ok || got != "~/app" {
-		t.Fatalf("expanded path must map to its saved ~ project, got %q %v", got, ok)
+	if got, ok := h.pulseRemoteSavedPath(pulseRemoteTestHost, pulseRemoteTestPath); !ok || got != "~/app" {
+		t.Fatalf("the host's expansion must map to its saved ~ project, got %q %v", got, ok)
 	}
-	if _, ok := h.pulseRemoteSavedPath("dev@box", "/home/me/other"); ok {
-		t.Fatal("a path outside the saved projects must not match")
+	// A suffix is not an expansion: each of these ends in /app, and none is the host's /home/me/app.
+	for _, path := range []string{"/var/www/app", "/home/me/x/app", "/home/me/other"} {
+		if _, ok := h.pulseRemoteSavedPath(pulseRemoteTestHost, path); ok {
+			t.Fatalf("%q must not match the saved ~/app", path)
+		}
 	}
-	if _, ok := h.pulseRemoteSavedPath("else@box", "/home/me/app"); ok {
+	if _, ok := h.pulseRemoteSavedPath("else@box", pulseRemoteTestPath); ok {
 		t.Fatal("a different host must not match")
+	}
+}
+
+func TestTildeProjectTerminalReadsThroughTheHostsExpansion(t *testing.T) {
+	f := newPulseRemoteFake(t, "one\r\ntwo\r\nthree\r\n", 80, 24)
+	h := newTestProxyHandler(t, pulseRemoteTestHost, "~/app", f.ws)
+	h.terminalLoopback = true
+	store, err := termtabs.NewStoreAt(filepath.Join(t.TempDir(), "term.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.termTabsStore = store
+	// The tab is keyed by the saved path. The host's own path (/home/me/app) is
+	// what its history endpoint must receive, and the read fails with a 404 if not.
+	if err := store.Set(pulseRemoteTestHost+"::~/app", termtabs.ProjectTerminals{
+		Terminals: []termtabs.Terminal{{ID: pulseRemoteTestTerm, Title: "claude"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	injectProxy(t, h.remoteHosts, pulseRemoteTestHost, f.ws)
+
+	var got struct {
+		Project string   `json:"project_path"`
+		Lines   []string `json:"lines"`
+	}
+	out := mustPulseTool(t, h, "terminal_read", fmt.Sprintf(`{"terminal_id":%q,"host":%q,"lines":2}`, pulseRemoteTestTerm, pulseRemoteTestHost))
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.Lines, "|") != "two|three" {
+		t.Fatalf("tilde project read = %+v", got)
+	}
+	f.mu.Lock()
+	registered := append([]string(nil), f.registered...)
+	f.mu.Unlock()
+	if len(registered) != 1 || registered[0] != "~/app" {
+		t.Fatalf("the saved path, not the host path, is what gets registered: %v", registered)
 	}
 }
 
@@ -678,5 +790,190 @@ func TestHostConnectLeavesAFailedHostAloneAndRefusesUnsavedHosts(t *testing.T) {
 	}
 	if n := connects.Load(); n != 1 {
 		t.Fatalf("refused calls must not dial, connects = %d", n)
+	}
+}
+
+func TestTerminalNewDiscardsTheShellWhenItsAttachFails(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	f.firstFrame = `{"type":"error","error":"no shell"}`
+	h := pulseRemoteTestHandler(t, f)
+	_, err := runPulseTool(t, h, "terminal_new", fmt.Sprintf(`{"host":%q,"project_path":%q}`, pulseRemoteTestHost, pulseRemoteTestPath))
+	if err == nil {
+		t.Fatal("a bad first frame must fail terminal_new")
+	}
+	f.mu.Lock()
+	attached := append([]string(nil), f.attached...)
+	killed := append([]string(nil), f.killed...)
+	f.mu.Unlock()
+	// The host spawned the shell before the websocket upgrade, so the failed attach
+	// must not leave it detached for 24 h with no tab.
+	if len(attached) != 1 || len(killed) != 1 || killed[0] != attached[0] {
+		t.Fatalf("the shell the host spawned must be discarded: attached %v, killed %v", attached, killed)
+	}
+	// The fixture's own tab stays; the failed attach must add none.
+	if tabs := h.termTabsStore.Get(pulseRemoteTestHost + "::" + pulseRemoteTestPath); len(tabs.Terminals) != 1 || tabs.Terminals[0].ID != pulseRemoteTestTerm {
+		t.Fatalf("a failed terminal_new must not add a tab: %+v", tabs.Terminals)
+	}
+}
+
+func TestPulseBoardConcurrentColdReadsShareOneHostRequest(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	// The delay keeps the first fetch in flight while the other callers arrive.
+	f.pulseDelay = 300 * time.Millisecond
+	f.boardRows = []PulseRow{{SessionID: "rs-1", ProjectPath: pulseRemoteTestPath, Status: PulseStatusRunning, UpdatedAt: time.Now()}}
+	h := pulseRemoteTestHandler(t, f)
+	const callers = 8
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := runPulseTool(t, h, "pulse_board", `{}`); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	f.mu.Lock()
+	hits := f.pulseHits
+	f.mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("%d concurrent board reads on a cold cache must share one /api/pulse request, got %d", callers, hits)
+	}
+}
+
+func TestPulseBoardFetchSpendsOneDeadlineAcrossPages(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	// Three pages of 1.2 s each fit each page's own 3 s limit, but not the 3 s the
+	// whole board read is allowed.
+	f.pulseDelay = 1200 * time.Millisecond
+	f.pulsePages = 3
+	h := pulseRemoteTestHandler(t, f)
+	started := time.Now()
+	if _, err := h.pulseRemoteHostRows(pulseRemoteTestHost, "live"); err == nil {
+		t.Fatal("three 1.2 s pages cannot finish inside one 3 s board deadline")
+	}
+	if elapsed := time.Since(started); elapsed > pulseRemoteBoardTimeout+time.Second {
+		t.Fatalf("the board read ran %v, past its %v deadline", elapsed, pulseRemoteBoardTimeout)
+	}
+}
+
+func TestPulseBoardFailureIsNotServedAfterReconnect(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	h := pulseRemoteTestHandler(t, f)
+	f.srv.Close() // the connection's host is down
+	if _, err := h.pulseRemoteHostRows(pulseRemoteTestHost, "live"); err == nil {
+		t.Fatal("a down host must fail the board read")
+	}
+	// The operator reconnects: the registry now holds a new workspace for the host.
+	back := newPulseRemoteFake(t, "", 80, 24)
+	injectProxy(t, h.remoteHosts, pulseRemoteTestHost, back.ws)
+	if _, err := h.pulseRemoteHostRows(pulseRemoteTestHost, "live"); err != nil {
+		t.Fatalf("a failure cached on the old connection must not be served after reconnect: %v", err)
+	}
+	back.mu.Lock()
+	hits := back.pulseHits
+	back.mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("the reconnected host must be asked once, got %d", hits)
+	}
+}
+
+func TestPulseRemoteSessionHostNamesOnlyFreshConnectedBoards(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	h := pulseRemoteTestHandler(t, f)
+	key := pulseRemoteTestHost + "\x00live"
+	put := func(e pulseRemoteBoardEntry) {
+		h.pulseRemoteBoard.mu.Lock()
+		defer h.pulseRemoteBoard.mu.Unlock()
+		if h.pulseRemoteBoard.m == nil {
+			h.pulseRemoteBoard.m = make(map[string]pulseRemoteBoardEntry)
+		}
+		h.pulseRemoteBoard.m[key] = e
+	}
+	rows := []PulseRow{{SessionID: "rs-1"}}
+	now := time.Now()
+
+	put(pulseRemoteBoardEntry{rows: rows, at: now.Add(-pulseRemoteSessionHostMaxAge - time.Minute), ws: f.ws})
+	if got := h.pulseRemoteSessionHost("rs-1"); got != "" {
+		t.Fatalf("a board older than %v must not name its host, got %q", pulseRemoteSessionHostMaxAge, got)
+	}
+	put(pulseRemoteBoardEntry{rows: rows, err: errors.New("timed out"), at: now, ws: f.ws})
+	if got := h.pulseRemoteSessionHost("rs-1"); got != "" {
+		t.Fatalf("a failed board must not name its host, got %q", got)
+	}
+	put(pulseRemoteBoardEntry{rows: rows, at: now, ws: f.ws})
+	if got := h.pulseRemoteSessionHost("rs-1"); got != pulseRemoteTestHost {
+		t.Fatalf("a fresh, successful board on a connected host must name it, got %q", got)
+	}
+	h.remoteHosts.drop(pulseRemoteTestHost, 0)
+	if got := h.pulseRemoteSessionHost("rs-1"); got != "" {
+		t.Fatalf("a host that is no longer connected must not be named, got %q", got)
+	}
+}
+
+func TestPulseRemoteLiveErrorsInsteadOfTruncating(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	f.liveGrow = true
+	h := pulseRemoteTestHandler(t, f)
+	rows, err := h.pulseRemoteLive(pulseRemoteTestHost)
+	if err == nil || !strings.Contains(err.Error(), "reports more than") {
+		t.Fatalf("a host that never stops growing must be an error, got %d rows, %v", len(rows), err)
+	}
+	f.mu.Lock()
+	hits := f.liveHits
+	f.mu.Unlock()
+	if hits != pulseRemoteLiveMaxPages {
+		t.Fatalf("the live list must stop at the page cap (%d requests), got %d", pulseRemoteLiveMaxPages, hits)
+	}
+}
+
+func TestHostConnectReportsTheBackgroundFailure(t *testing.T) {
+	h := pulseRemoteTestHandler(t, nil)
+	release := make(chan struct{})
+	h.remoteHosts = newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		<-release
+		return nil, errors.New("ssh: host key mismatch")
+	})
+	old := remoteConnectWaitBound
+	remoteConnectWaitBound = 50 * time.Millisecond
+	t.Cleanup(func() { remoteConnectWaitBound = old })
+
+	args := fmt.Sprintf(`{"host":%q}`, pulseRemoteTestHost)
+	var first pulseHostConnectResult
+	if err := json.Unmarshal([]byte(mustPulseTool(t, h, "host_connect", args)), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.State != "connecting" {
+		t.Fatalf("first call = %+v, want connecting", first)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for h.remoteHosts.lastFailure(pulseRemoteTestHost, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the background connect never failed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var second pulseHostConnectResult
+	if err := json.Unmarshal([]byte(mustPulseTool(t, h, "host_connect", args)), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.State != "failed" || !strings.Contains(second.Error, "host key mismatch") {
+		t.Fatalf("a repeat call after the background failure must report its real error, got %+v", second)
+	}
+}
+
+func TestPulseRemoteTildeRegistrationIsTheOnlyLinkToTheHostPath(t *testing.T) {
+	f := newPulseRemoteFake(t, "", 80, 24)
+	h := newTestProxyHandler(t, pulseRemoteTestHost, "~/app", f.ws)
+	if err := h.pulseRemoteRegister(f.ws, pulseRemoteTestHost, "~/app"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := h.pulseRemoteHostPath(pulseRemoteTestHost, "~/app"); !ok || got != pulseRemoteTestPath {
+		t.Fatalf("host path of ~/app = %q %v, want %q", got, ok, pulseRemoteTestPath)
+	}
+	if got, ok := h.pulseRemoteHostPath(pulseRemoteTestHost, "/srv/x"); !ok || got != "/srv/x" {
+		t.Fatalf("an absolute saved path is its own host path, got %q %v", got, ok)
 	}
 }

@@ -402,8 +402,12 @@ connection, with the same bearer token the browser proxy injects
 (`internal/server/pulse_remote.go`, `pulse_remote_terminal.go`):
 
 - `terminal_tabs` joins each remote project's tabs with the host's
-  `GET /api/pulse/terminals`; hosts are asked in parallel, each under a deadline
-  (`pulseRemoteTimeout`, 8 s).
+  `GET /api/pulse/terminals`; hosts are asked in parallel. Each host's list has one
+  deadline (`pulseRemoteTimeout`, 8 s) shared by all its pages. A host with more than 50
+  pages of 200 terminals is an error, never a shorter list: a truncated list would make
+  `terminal_kill` report a live terminal as not live (`pulseRemoteLive`). A tab key's host
+  part counts only when it is a saved host (`pulseSplitTabKey`), so a local path that
+  contains `::` is never read as a host.
 - `terminal_read` and `terminal_screen` with `host` read the host's
   `GET /api/terminal/{id}/history` page by page through the same window code a local
   log uses (`pulseHistoryReader`), so paging, `head`, `offset`, the 1 MiB window and the
@@ -421,14 +425,22 @@ connection, with the same bearer token the browser proxy injects
   keeps its own 30 s per-host cooldown (`pulseRemoteConnectState`), because a model
   retrying in a loop would otherwise start an SSH connect every few seconds. It has no
   `force` (a stuck "connecting" stays the operator's Reconnect action in the UI) and no
-  config or restart side effects. The system prompt tells the model to call it only when
-  the operator asks about, or asks to connect, a host the board lists under "Remote hosts
+  config or restart side effects. A repeat call inside that cooldown reports the background
+  attempt's real error once it has failed. The system prompt tells the model to call it only
+  when the operator asks about, or asks to connect, a host the board lists under "Remote hosts
   not shown", and to check again on a later turn after `connecting`.
 - **Admission is the browser proxy's.** The host must be the host of a saved project, and
-  the terminal's path must be a saved project of that host (a saved `~/app` matches the
-  host's expanded `/home/me/app`, `pulseRemoteSavedPath`). The project is registered on
+  the terminal's path must be a saved project of that host. A saved `~/app` matches only
+  the host path that the host reported for it when this server registered the project
+  (`pulseRemoteSavedPath`). The host's `POST /api/projects` answer carries the path it
+  stored, which is the only place the expansion is known. The match is exact, never a
+  suffix match. A `~` project whose expansion is not known yet matches nothing.
+  `pulseRemoteRegisterTilde` registers the host's saved `~` projects before a terminal is
+  matched, so this still holds after a restart of this server. The project is registered on
   the host first (`ensureRemoteProject`), as the proxy does, because the host's history
-  endpoint admits only registered projects.
+  endpoint admits only registered projects. The saved path is what is registered and what
+  keys the tab store. The history request names the host's own path of the project
+  (`pulseRemoteProjectPaths`).
 - The local `terminalAccessAllowed()` gate applies to remote output too: it reaches the
   model provider from this process, so the remote host's own gate is not the only one.
 - `terminal_new` with `host` creates the shell on the host: the host spawns a pty when a
@@ -437,10 +449,15 @@ connection, with the same bearer token the browser proxy injects
   The host keeps a detached shell for `terminalDetachTTLRemote` (24 h) and the browser
   reattaches to it by id. The tab is stored under `<host>::<path>` like any remote tab.
   The path must match a saved project of that host verbatim, and the project is
-  registered on the host first.
+  registered on the host first. If the attach fails after the websocket upgrade (a bad
+  first frame, the read deadline), the shell already exists, so the tool sends
+  `DELETE /api/terminal/{id}` to the host (`pulseRemoteDiscardTerminal`) and returns the
+  attach error. A failed `terminal_new` leaves neither a shell nor a tab.
 - `terminal_kill` with `host` asks the host for its live terminals, requires the id to be
   there and its project to be a saved project of the host (the host's kill endpoint takes
   only an id, so that check lives here), then `DELETE /api/terminal/{id}` and drops the tab.
+  It registers the host's saved `~` projects first, so a live terminal of a `~` project is
+  matched after a restart.
 - Both write tools stay **asks**: each call raises the permission dialog.
 
 **Remote sessions on the board.** `pulse_board` and the per-turn board merge every
@@ -449,9 +466,16 @@ host), tagged with `host`, into the one board order (`sortPulseRows`). The board
 column reads `name@host` for a remote row. A host that is not connected, or fails, adds
 no rows and is listed under "Remote hosts not shown:" (and `hosts_unavailable`) with the
 reason, so absence is never read as "nothing running there". The merge sits in front of an
-LLM call, so it is bounded: hosts are asked in parallel under a 3 s deadline, rows are
-cached for 5 s, and a failed host is left alone for 30 s (`pulseRemoteBoardCache`). Only
-the assistant's board merges hosts; `GET /api/pulse` itself stays this server's sessions.
+LLM call, so it is bounded. Hosts are asked in parallel. One host's fetch has one 3 s
+deadline for all its pages (`fetchPulseRemoteRows`), so a slow host is not charged a
+timeout per page. Rows are cached for 5 s, and a failed host is left alone for 30 s
+(`pulseRemoteBoardCache`). A cached row or failure belongs to the connection it was
+fetched over, so after a reconnect (a new workspace) it is refetched rather than served
+for its TTL. Concurrent callers on a cold cache share the fetch already in flight for that
+host and scope (`pulseRemoteFlight`), so N racing turns cost one `/api/pulse` request. The
+session host that a write refusal names (`pulseRemoteSessionHost`) comes only from fresh,
+successful rows of a connected host (2 min). Only the assistant's board merges hosts;
+`GET /api/pulse` itself stays this server's sessions.
 `session_read`, `session_recap` and `session_ask` take the row's `host` and ask the host's
 `GET /api/sessions/{id}` (newest N, or the whole transcript for a search), `/recap` and
 `/state`; message indexes are absolute within the host's transcript. A remote project's

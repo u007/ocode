@@ -113,9 +113,9 @@ func (h *Handler) pulseTerminalNewTool(raw json.RawMessage) (string, error) {
 		title = "Terminal"
 	}
 	if h.termTabsStore != nil {
-		pt := h.termTabsStore.Get(projectRoot)
-		pt.Terminals = append(pt.Terminals, termtabs.Terminal{ID: id, Title: title})
-		if err := h.termTabsStore.Set(projectRoot, pt); err != nil {
+		// AddTerminal, not Get then Set: the append must not overwrite a tab another
+		// client or server process added between the two.
+		if err := h.termTabsStore.AddTerminal(projectRoot, termtabs.Terminal{ID: id, Title: title}); err != nil {
 			log.Printf("pulse terminal_new: persist tab list: %v", err)
 		}
 		h.bus.Publish("terminal_tabs_changed", "", "", nil)

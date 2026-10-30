@@ -31,14 +31,35 @@ func localPulseHistoryReader(project, terminalID string) pulseHistoryReader {
 	}
 }
 
-// pulseRemoteTerminalProject finds the project (a path on the host) a remote
-// terminal belongs to: the shared tab store first (key "<host>::<path>"), else
-// the host's own live rows. The (host, path) pair must be a saved remote project,
-// the same admission HandleRemoteProxy applies, so the tool cannot be aimed at a
-// host or path the operator never added.
-func (h *Handler) pulseRemoteTerminalProject(host, terminalID string) (string, error) {
+// pulseRemoteProjectPaths is one remote project as its two sides name it.
+type pulseRemoteProjectPaths struct {
+	// Saved is the project as the operator saved it ("~/app" or an absolute path).
+	// It keys the shared tab store and is what the browser proxy registers on the host.
+	Saved string
+	// Host is the same project as the host names it: Saved with "~" expanded by the
+	// host. The host's terminal and history endpoints take this path.
+	Host string
+}
+
+// pulseRemoteTerminalProject finds the project a remote terminal belongs to and
+// registers it on the host. The shared tab store is searched first (key
+// "<host>::<path>"), else the host's own live rows. The (host, path) pair must be a
+// saved remote project, the same admission HandleRemoteProxy applies, so the tool
+// cannot be aimed at a host or path the operator never added. The host must hold a
+// live connection: a remote read never dials.
+func (h *Handler) pulseRemoteTerminalProject(host, terminalID string) (pulseRemoteProjectPaths, error) {
 	if _, ok := h.firstSavedProjectForHost(host); !ok {
-		return "", fmt.Errorf("%w: %q is not the host of a saved project (see project_list)", errPulseTerminalForeign, host)
+		return pulseRemoteProjectPaths{}, fmt.Errorf("%w: %q is not the host of a saved project (see project_list)", errPulseTerminalForeign, host)
+	}
+	ws, ok := h.pulseRemoteWorkspace(host)
+	if !ok {
+		return pulseRemoteProjectPaths{}, pulseRemoteNotConnected(host)
+	}
+	// A saved "~" project matches a host path only through the expansion the host
+	// reports when the project is registered. Register them before matching, so a
+	// terminal is still found after this server restarts.
+	if err := h.pulseRemoteRegisterTilde(ws, host); err != nil {
+		return pulseRemoteProjectPaths{}, err
 	}
 	path := ""
 	if h.termTabsStore != nil {
@@ -50,7 +71,7 @@ func (h *Handler) pulseRemoteTerminalProject(host, terminalID string) (string, e
 		sort.Strings(keys)
 	search:
 		for _, k := range keys {
-			kh, kp := pulseRemoteTabKey(k)
+			kh, kp := h.pulseSplitTabKey(k)
 			if kh != host {
 				continue
 			}
@@ -65,7 +86,7 @@ func (h *Handler) pulseRemoteTerminalProject(host, terminalID string) (string, e
 	if path == "" {
 		rows, err := h.pulseRemoteLive(host)
 		if err != nil {
-			return "", err
+			return pulseRemoteProjectPaths{}, err
 		}
 		for _, r := range rows {
 			if r.ID == terminalID {
@@ -75,19 +96,29 @@ func (h *Handler) pulseRemoteTerminalProject(host, terminalID string) (string, e
 		}
 	}
 	if path == "" {
-		return "", fmt.Errorf("%w: %q on host %q (see terminal_tabs for open terminals)", errPulseTerminalNotFound, terminalID, host)
+		return pulseRemoteProjectPaths{}, fmt.Errorf("%w: %q on host %q (see terminal_tabs for open terminals)", errPulseTerminalNotFound, terminalID, host)
 	}
 	saved, ok := h.pulseRemoteSavedPath(host, path)
 	if !ok {
-		return "", fmt.Errorf("%w: terminal %q belongs to %q on %q, which is not a saved project", errPulseTerminalForeign, terminalID, path, host)
+		return pulseRemoteProjectPaths{}, fmt.Errorf("%w: terminal %q belongs to %q on %q, which is not a saved project", errPulseTerminalForeign, terminalID, path, host)
 	}
-	return saved, nil
+	if err := h.pulseRemoteRegister(ws, host, saved); err != nil {
+		return pulseRemoteProjectPaths{}, err
+	}
+	hostPath, ok := h.pulseRemoteHostPath(host, saved)
+	if !ok {
+		return pulseRemoteProjectPaths{}, fmt.Errorf("host %s did not report where %q is stored, so the terminal's log cannot be located (update the host)", host, saved)
+	}
+	return pulseRemoteProjectPaths{Saved: saved, Host: hostPath}, nil
 }
 
-// pulseRemoteSavedPath maps a path on a host to the saved project that owns it
-// and returns the saved path. A host reports the path it expanded
-// (/home/me/app) while the saved project keeps what the operator typed (~/app),
-// so a saved path with a leading "~" matches by its tail.
+// pulseRemoteSavedPath maps a path on a host to the saved project that owns it and
+// returns the saved path. The path must equal the saved path exactly, or equal the
+// host path that a saved "~" project expanded to (pulseRemoteHostPath). A host
+// reports the expanded form (/home/me/app) while the saved project keeps what the
+// operator typed (~/app), and the host's report of that expansion is the only link
+// between them. A suffix match is not one: it would take /var/www/app for ~/app. A
+// "~" project whose expansion is not known yet matches nothing.
 func (h *Handler) pulseRemoteSavedPath(host, path string) (string, bool) {
 	if h.projects == nil {
 		return "", false
@@ -99,16 +130,64 @@ func (h *Handler) pulseRemoteSavedPath(host, path string) (string, bool) {
 		if p.Path == path {
 			return p.Path, true
 		}
-		rest, tilde := strings.CutPrefix(p.Path, "~")
-		if tilde && strings.HasPrefix(rest, "/") && strings.HasSuffix(path, rest) {
+		if hostPath, ok := h.pulseRemoteHostPath(host, p.Path); ok && hostPath == path {
 			return p.Path, true
 		}
 	}
 	return "", false
 }
 
+// pulseRemoteHostPath is the path a saved remote project has on its host: the same
+// path for an absolute one, the host's expansion for a "~" one. ok is false for a
+// "~" project the host has not reported an expansion for, which is not known until
+// the project is registered on the host.
+func (h *Handler) pulseRemoteHostPath(host, saved string) (string, bool) {
+	if !strings.HasPrefix(saved, "~") {
+		return saved, true
+	}
+	if h.remoteHosts == nil {
+		return "", false
+	}
+	return h.remoteHosts.expandedPath(host, saved)
+}
+
+// pulseRemoteRegister registers a saved project on the host, as the browser proxy
+// does on first use. The host's terminal and history endpoints admit only
+// registered projects. The host's answer is what names a "~" project's host path.
+func (h *Handler) pulseRemoteRegister(ws remoteHostWorkspace, host, saved string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), pulseRemoteTimeout)
+	defer cancel()
+	if err := ensureRemoteProject(ctx, ws, h.remoteHosts, host, h.pulseRemotePort(host), saved); err != nil {
+		return fmt.Errorf("register project %q on %s: %w", saved, host, err)
+	}
+	return nil
+}
+
+// pulseRemoteRegisterTilde registers every saved "~" project of host whose host path
+// is not known yet. Only that registration tells us the expansion, so this lets a
+// live terminal be matched to its saved "~" project even after a restart of this
+// server.
+func (h *Handler) pulseRemoteRegisterTilde(ws remoteHostWorkspace, host string) error {
+	if h.projects == nil {
+		return nil
+	}
+	for _, p := range h.projects.List() {
+		if p.Host != host || !strings.HasPrefix(p.Path, "~") {
+			continue
+		}
+		if _, ok := h.pulseRemoteHostPath(host, p.Path); ok {
+			continue
+		}
+		if err := h.pulseRemoteRegister(ws, host, p.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // pulseRemoteHistoryReader reads a remote terminal's log through the host's own
-// GET /api/terminal/{id}/history, with the project as the host sees it.
+// GET /api/terminal/{id}/history. project is the host's path for the project
+// (pulseRemoteProjectPaths.Host), which is the path the endpoint looks up.
 func (h *Handler) pulseRemoteHistoryReader(host, project, terminalID string) pulseHistoryReader {
 	port := h.pulseRemotePort(host)
 	return func(offset, limit int64, snapshotEnd *int64) ([]byte, int64, error) {
@@ -144,30 +223,15 @@ func (h *Handler) pulseRemoteHistoryReader(host, project, terminalID string) pul
 	}
 }
 
-// pulseRemoteTerminalSource resolves a remote terminal to its project and log
-// reader. The host must hold a live connection: a remote read never dials.
+// pulseRemoteTerminalSource resolves a remote terminal to its saved project and log
+// reader. The project returned is the saved path the operator knows. The reader
+// asks the host for the log under the host's own path of that project.
 func (h *Handler) pulseRemoteTerminalSource(host, terminalID string) (string, pulseHistoryReader, error) {
-	project, err := h.pulseRemoteTerminalProject(host, terminalID)
+	paths, err := h.pulseRemoteTerminalProject(host, terminalID)
 	if err != nil {
 		return "", nil, err
 	}
-	if h.remoteHosts == nil {
-		return "", nil, errors.New("remote connections are not available on this server")
-	}
-	port := h.pulseRemotePort(host)
-	ws, ok := h.remoteHosts.connectedWorkspace(host, port)
-	if !ok {
-		return "", nil, fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errPulseRemoteNotConnected, host)
-	}
-	// The host's history endpoint admits only registered projects, and the browser
-	// path registers on first use. Do the same, so a terminal the operator never
-	// opened through the proxy in this process is still readable.
-	ctx, cancel := context.WithTimeout(context.Background(), pulseRemoteTimeout)
-	defer cancel()
-	if err := ensureRemoteProject(ctx, ws, h.remoteHosts, host, port, project); err != nil {
-		return "", nil, fmt.Errorf("register project %q on %s: %w", project, host, err)
-	}
-	return project, h.pulseRemoteHistoryReader(host, project, terminalID), nil
+	return paths.Saved, h.pulseRemoteHistoryReader(host, paths.Host, terminalID), nil
 }
 
 // --- remote terminal_new / terminal_kill ---
@@ -181,7 +245,8 @@ const pulseRemoteTerminalAttachTimeout = 10 * time.Second
 // attach with a new terminal_id (HandleTerminalWS): the host spawns the pty before
 // it upgrades, so this attaches, waits for the attach frame, and detaches. The
 // host keeps a detached shell for terminalDetachTTLRemote (24 h), and the browser
-// reattaches to it by id, as it does after a reload.
+// reattaches to it by id, as it does after a reload. If the attach fails after
+// the shell exists, the shell is discarded, because no tab would ever reach it.
 func (h *Handler) pulseRemoteTerminalNew(host, projectPath, title string) (string, error) {
 	if !h.terminalAccessAllowed() {
 		return "", errors.New("terminals are disabled on this server (they require authentication or a loopback bind)")
@@ -195,22 +260,20 @@ func (h *Handler) pulseRemoteTerminalNew(host, projectPath, title string) (strin
 	if _, ok := h.remoteProjectEntry(host, projectPath); !ok {
 		return "", fmt.Errorf("%w: %q on %q is not a saved remote project (see project_list)", errPulseTerminalForeign, projectPath, host)
 	}
-	if h.remoteHosts == nil {
-		return "", errors.New("remote connections are not available on this server")
-	}
-	port := h.pulseRemotePort(host)
-	ws, ok := h.remoteHosts.connectedWorkspace(host, port)
+	ws, ok := h.pulseRemoteWorkspace(host)
 	if !ok {
-		return "", fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errPulseRemoteNotConnected, host)
+		return "", pulseRemoteNotConnected(host)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), pulseRemoteTimeout)
-	defer cancel()
-	if err := ensureRemoteProject(ctx, ws, h.remoteHosts, host, port, projectPath); err != nil {
-		return "", fmt.Errorf("register project %q on %s: %w", projectPath, host, err)
+	if err := h.pulseRemoteRegister(ws, host, projectPath); err != nil {
+		return "", err
 	}
 
 	id := fmt.Sprintf("pulse-term-%d", time.Now().UnixNano())
-	if err := pulseRemoteAttachTerminal(ws, id, projectPath); err != nil {
+	spawned, err := pulseRemoteAttachTerminal(ws, id, projectPath)
+	if err != nil {
+		if spawned {
+			h.pulseRemoteDiscardTerminal(host, id)
+		}
 		return "", fmt.Errorf("start terminal on %s: %w", host, err)
 	}
 
@@ -219,10 +282,9 @@ func (h *Handler) pulseRemoteTerminalNew(host, projectPath, title string) (strin
 		title = "Terminal"
 	}
 	if h.termTabsStore != nil {
-		key := host + "::" + projectPath
-		pt := h.termTabsStore.Get(key)
-		pt.Terminals = append(pt.Terminals, termtabs.Terminal{ID: id, Title: title})
-		if err := h.termTabsStore.Set(key, pt); err != nil {
+		// AddTerminal, not Get then Set: the append must not overwrite a tab another
+		// client or server process added between the two.
+		if err := h.termTabsStore.AddTerminal(host+"::"+projectPath, termtabs.Terminal{ID: id, Title: title}); err != nil {
 			log.Printf("pulse terminal_new: persist tab list for %s: %v", host, err)
 		}
 		h.bus.Publish("terminal_tabs_changed", "", "", nil)
@@ -230,13 +292,28 @@ func (h *Handler) pulseRemoteTerminalNew(host, projectPath, title string) (strin
 	return marshalPulseString(map[string]any{"terminal_id": id, "host": host, "project_path": projectPath})
 }
 
+// pulseRemoteDiscardTerminal kills a shell that pulseRemoteAttachTerminal spawned
+// and then could not confirm. Without this the shell stays detached on the host for
+// terminalDetachTTLRemote (24 h), and no tab exists to reach it. It is best effort:
+// a 404 means the shell is already gone, and any other failure is logged, because
+// the caller is already reporting the attach error.
+func (h *Handler) pulseRemoteDiscardTerminal(host, id string) {
+	err := h.pulseRemoteRequest(host, h.pulseRemotePort(host), http.MethodDelete, "/api/terminal/"+url.PathEscape(id), nil, pulseRemoteTimeout, pulseRemoteBodyCap, nil)
+	var se *pulseRemoteStatusError
+	if err != nil && !(errors.As(err, &se) && se.Status == http.StatusNotFound) {
+		log.Printf("pulse terminal_new: discard terminal %s on %s after a failed attach: %v", id, host, err)
+	}
+}
+
 // pulseRemoteAttachTerminal opens the host's terminal websocket with a fresh id,
 // waits for its attach frame (the shell exists by then), and closes the socket so
-// the shell stays detached for the browser to pick up.
-func pulseRemoteAttachTerminal(ws remoteHostWorkspace, id, projectPath string) error {
+// the shell stays detached for the browser to pick up. spawned reports that the
+// handshake succeeded. The host has created the shell by then, so the caller must
+// discard it when err is set.
+func pulseRemoteAttachTerminal(ws remoteHostWorkspace, id, projectPath string) (spawned bool, err error) {
 	u, err := url.Parse(ws.APIURL())
 	if err != nil {
-		return fmt.Errorf("parse API URL: %w", err)
+		return false, fmt.Errorf("parse API URL: %w", err)
 	}
 	if u.Scheme == "https" {
 		u.Scheme = "wss"
@@ -255,21 +332,22 @@ func pulseRemoteAttachTerminal(ws remoteHostWorkspace, id, projectPath string) e
 	conn, resp, err := dialer.Dial(u.String(), hdr)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("websocket refused (%d): %w", resp.StatusCode, err)
+			return false, fmt.Errorf("websocket refused (%d): %w", resp.StatusCode, err)
 		}
-		return err
+		return false, err
 	}
 	defer conn.Close()
+	spawned = true
 	_ = conn.SetReadDeadline(time.Now().Add(pulseRemoteTerminalAttachTimeout))
 	typ, msg, err := conn.ReadMessage()
 	if err != nil {
-		return fmt.Errorf("wait for attach: %w", err)
+		return spawned, fmt.Errorf("wait for attach: %w", err)
 	}
 	if typ != websocket.TextMessage || !strings.Contains(string(msg), `"attach"`) {
-		return fmt.Errorf("unexpected first frame from host: %.80q", msg)
+		return spawned, fmt.Errorf("unexpected first frame from host: %.80q", msg)
 	}
 	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
-	return nil
+	return spawned, nil
 }
 
 // pulseRemoteTerminalKill kills a live terminal on a connected remote host and
@@ -282,6 +360,16 @@ func (h *Handler) pulseRemoteTerminalKill(host, terminalID string) (string, erro
 	}
 	if err := h.pulseRemoteSessionHostOK(host); err != nil {
 		return "", fmt.Errorf("%w: %v", errPulseTerminalForeign, err)
+	}
+	ws, ok := h.pulseRemoteWorkspace(host)
+	if !ok {
+		return "", pulseRemoteNotConnected(host)
+	}
+	// Live rows name the host's own path, which matches a saved "~" project only
+	// through its registered expansion. Register those projects first, so a kill
+	// after a restart of this server still matches.
+	if err := h.pulseRemoteRegisterTilde(ws, host); err != nil {
+		return "", err
 	}
 	live, err := h.pulseRemoteLive(host)
 	if err != nil {

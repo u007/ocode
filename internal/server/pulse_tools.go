@@ -453,7 +453,7 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 	var hosts []string
 	seen := make(map[string]bool)
 	for _, k := range keys {
-		if host, _ := pulseRemoteTabKey(k); host != "" && !seen[host] {
+		if host, _ := h.pulseSplitTabKey(k); host != "" && !seen[host] {
 			seen[host] = true
 			hosts = append(hosts, host)
 		}
@@ -470,7 +470,7 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 
 	projects := make([]pulseTabsProject, 0, len(keys))
 	for _, k := range keys {
-		host, path := pulseRemoteTabKey(k)
+		host, path := h.pulseSplitTabKey(k)
 		group := pulseTabsProject{Project: path, Host: host}
 		rows := live
 		if host != "" {
