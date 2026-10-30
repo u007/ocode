@@ -22,7 +22,7 @@ Design background and alternatives: [docs/plans/2026-10-30-excel-addin-sidepane.
 
 ## Try it without Excel
 ```
-make test            # Go (race) + TypeScript (78 tests)
+make test            # Go (race, 31 tests) + TypeScript (153 tests)
 make smoke           # real Chromium against the real bridge and a fake ocode; writes a screenshot
 cd taskpane && pnpm dev   # ?fake=1 runs the pane on an in-memory workbook in a normal browser
 ```

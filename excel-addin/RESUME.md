@@ -17,12 +17,12 @@ the alternatives that were rejected are in `docs/plans/2026-10-30-excel-addin-si
 
 | piece | state |
 |---|---|
-| `bridge/` (Go, stdlib only) | done and tested: 18 Go tests, race detector on, mutation-checked on the security-relevant behaviours |
+| `bridge/` (Go, stdlib only) | done and tested: 31 Go tests, race detector on, mutation-checked on the security-relevant behaviours |
 | `taskpane/src/tools/` (13 tools) | done and tested against an in-memory workbook; 4 safety rules mutation-checked |
 | `taskpane/src/officePort.ts` | written, **unverified**; see section 5 |
 | chat UI (`ui/App.tsx`) | works in headless Chromium (`make smoke`); not seen in Excel's task pane |
 | manifest | generated + structurally checked (5 tests); **not validated by Microsoft's tool, never sideloaded** |
-| tests | 78 TypeScript tests in 8 files + 18 Go tests + 1 browser smoke test |
+| tests | 153 TypeScript tests in 12 files + 31 Go tests + 1 browser smoke test |
 
 Tools: `describe_workbook get_selection read_range profile_range check_errors write_range fill_formula format_range
 create_table create_chart create_pivot checkpoint undo_step` (contract: `bridge/tools.json`, sorted).
@@ -86,6 +86,47 @@ excel-addin/
   an equivalent mutant, so it is not test-covered).
 - LibreOffice 24.2 (used by the xlsx benchmark) cannot calculate XLOOKUP; Excel 365 can. The tools do not care.
 
+## 3b. Code-review round (2026-10-30): what changed after the first hand-off
+
+A 10-finding review was fixed (by Haiku subagents, then re-verified and mutation-checked). Things that now behave
+differently from what section 1-3 describe:
+
+- **Writes are checkpointed before they happen.** The journal is loaded (and a step too large to persist is refused)
+  before any cell changes; if recording fails after the write, the write is rolled back, and if the rollback fails the
+  error says so and names the range. The persisted journal is bounded by bytes (4 MiB) as well as 100 steps.
+- **Undo restores number formats** (captured in each step), formats first, then values. Steps recorded before this
+  change have no formats and undo values only. Write results carry `undo_restores_formats`.
+- **`fill_formula` shifts whole-column/row references** (`B:B`, `2:2`, `$B:D`), with `#REF!` on overflow.
+- **One pane per workbook.** Each page load sends an instance token; a second pane for the same workbook evicts the
+  first (it gets an `evicted` event and stops reconnecting, the UI shows a banner). A file whose URL differs from the one
+  stored in the workbook (copy / Save As / move) gets a NEW workbook id, so copies do not share a journal, session list or
+  workspace. Cost: renaming or moving a file starts a fresh history; a shared file opened from different local paths
+  on two machines would look like a copy (**U15**, verify).
+- **The pane's Undo button goes through the Runner**, the same serial queue as agent tool calls.
+- **Chart overlap is checked by geometry** (`ExcelPort.findChartOverlap`: chart and range left/top/width/height),
+  because Office.js does not expose a chart's anchor cell. `listCharts` still returns no data range or anchor, so
+  `describe_workbook` omits `data` for charts. A second no-anchor chart on the same data is refused (overlap), not
+  auto-placed.
+- **`create_chart` total rows:** only a FINAL row labelled exactly Total / Totals / Subtotal / Grand total is an error;
+  anywhere else it is a warning. `include_total_rows=true` overrides.
+- **`format_range` borders** set inside borders only when the range has more than one row / column.
+- **The bridge proxy is an allowlist** (`bridge/allowlist.go`): only the 18 (method, path) pairs the pane uses reach
+  ocode; the rest is 403. `POST /api/chat` and `POST /api/projects` additionally must name a folder strictly inside the
+  workspace root, `permission_mode` must be absent/`normal`/`locked` (never `yolo`), and remote hosts are refused. A
+  leaked pane key therefore cannot start an unprompted agent elsewhere on the machine. Adding a pane route is a
+  security decision.
+- **Data location:** state and workspaces default to `<ocode data dir>/excel/{state,workspaces}` (mirrors
+  `internal/paths.GlobalDataDir`; keep `bridge/datadir.go` in sync). The old `~/.ocode-excel` is not migrated.
+  `--data-dir` / `--workspace-root` override.
+- Unclean paths such as `/api/sessions/../terminal` get a 307 from Go's mux before the allowlist runs; nothing is
+  forwarded either way.
+
+New **unverified-in-Excel** members (add to checklist B): `setNumberFormats` (format-before-value order on undo; does
+`"007"` survive?), `findChartOverlap` (are `Chart.left/top` and `Range.left/top` populated and in the same units?),
+the borders change on a 1-cell, 1-row and 1-column range. Known remaining limits: undo itself is not atomic across
+formats and values beyond a best-effort format restore; a call enqueued in the instant of an eviction can still run on
+the old pane.
+
 ## 4. Desktop setup (do this first)
 
 Prerequisites: Excel (Windows or Mac, Microsoft 365), Go >= 1.26, Node >= 22, pnpm, a running `ocode serve`.
@@ -93,7 +134,7 @@ Prerequisites: Excel (Windows or Mac, Microsoft 365), Go >= 1.26, Node >= 22, pn
 ```bash
 git checkout ccr-915ec104-s4wquj
 cd excel-addin
-make test                      # must be green before anything else (Go race + 78 TS tests)
+make test                      # must be green before anything else (Go race + 153 TS tests)
 make build                     # taskpane/dist + bin/excel-bridge
 ```
 
@@ -161,14 +202,16 @@ directly with curl, which is faster for debugging: `POST /mcp` with header `X-Br
 | 5 | `check_errors` | lists error cells | |
 | 6 | `write_range` (values, formulas, `number_format:"@"` then `"007"`) | evaluated read-back, step id | **U12:** does `"007"` stay text with the `@` format set first? booleans/null; very large writes |
 | 7 | `fill_formula` | relative refs adjust down and across | spilling/dynamic-array formulas: not handled (U13) |
-| 8 | `format_range` | bold/fill/number format/autofit/freeze | **U10:** `columnWidth` unit; `numberFormat` 2D assignment; freeze on non-active sheet |
+| 8 | `format_range` | bold/fill/number format/autofit/freeze; `borders` on a single cell, a single row and a block | **U10:** `columnWidth` unit; `numberFormat` 2D assignment; freeze on non-active sheet; borders must not reject the batch |
 | 9 | `create_table` | table with banding | name collisions; header must be text |
 | 10 | `create_chart` pie from `A1:B7` | chart anchored at the requested cell, title, percent labels | **U9:** `setPosition` end cell (8x16); percent labels; axis titles on bar charts; chart type strings |
 | 11 | `create_chart` with a Total row in range | refused with the corrected address | this is pure logic; should already pass |
 | 12 | `create_pivot` Region x Month sum | a real PivotTable | **U13:** `summarizeBy` strings, `filterHierarchies`, destination collisions, refresh |
 | 13 | `checkpoint` then `undo_step` | cell state restored | undo of a formula cell restores the formula, not the value |
 | 14 | edit a cell by hand after a write, then `undo_step` | refused, nothing changed | |
-| 15 | `listCharts` / `listPivots` | names returned | **U9:** chart `dataAddress`/`anchor` are returned empty, so the chart-overlap check is blind in real Excel (see backlog B7) |
+| 15 | `listCharts` / `listPivots` | names returned | chart `dataAddress`/`anchor` are empty by design (describe omits `data`) |
+| 15a | `create_chart` twice on the same data with no anchor | the second is refused as overlapping | **U9:** `findChartOverlap` geometry; unit of `Chart.left/top` vs `Range.left/top` |
+| 15b | `write_range` with `number_format:"@"`, then `undo_step` | format back to General, text restored | `setNumberFormats` then value order |
 
 **C. Agent loop with a real model**
 16. Ask: "what is on this sheet?" -> the agent calls `excel_describe_workbook` / `excel_read_range` (not bash).
@@ -209,8 +252,7 @@ directly with curl, which is faster for debugging: `POST /mcp` with header `X-Br
 - B6. **Compare**: diff two journal states (cells old -> new, formula text) with select-in-Excel on click. The journal
   already stores before/after images. Full-file checkpoints via `Office.context.document.getFileAsync` (slices) enable a
   server-side openpyxl diff; not started.
-- B7. `listCharts` returns no anchor/data range in real Excel; persist created chart anchors (document settings or the
-  bridge state store) so the overlap check works, or read `ChartSeries.getDimensionDataSourceString` (newer API set).
+- B7. Charts: overlap is now checked geometrically, but `listCharts` still cannot return a chart's anchor or data range in real Excel, so `describe_workbook` omits `data` and a second no-anchor chart is refused rather than auto-placed. Read `ChartSeries.getDimensionDataSourceString` (newer API set) or persist created anchors to fix both.
 - B8. Missing tools from the proposal: `insert_delete` (with the impact report: formulas, charts, names, validations
   shifted or not extended; **this is the benchmark's `log-append` trap and the highest-value missing tool**),
   `named_item`, `conditional_format`, `data_validation`, `sheet`, `sort_filter`, `remove_duplicates`,
@@ -233,8 +275,8 @@ directly with curl, which is faster for debugging: `POST /mcp` with header `X-Br
 
 ```bash
 make test | make build | make smoke | make manifest         # from excel-addin/
-cd bridge && go test -race -count=1 ./...                    # 18 tests
-cd taskpane && pnpm test                                     # 78 tests (e2e builds the Go bridge; skips without go)
+cd bridge && go test -race -count=1 ./...                    # 31 tests
+cd taskpane && pnpm test                                     # 153 tests (e2e builds the Go bridge; skips without go)
 cd taskpane && pnpm dev                                      # http://localhost:3000/taskpane.html?fake=1&key=x  (needs the bridge running for /bridge and /api)
 node taskpane/scripts/smoke-ui.mjs [out.png]                 # headless Chromium end to end
 DEBUG_SMOKE=1 node taskpane/scripts/smoke-ui.mjs             # logs SSE connect/close in the fake ocode
