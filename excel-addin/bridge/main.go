@@ -34,6 +34,7 @@ func main() {
 		keyFile  = flag.String("key", env("EXCEL_BRIDGE_KEY", ""), "TLS private key (PEM)")
 		origins  = flag.String("allow-origin", env("EXCEL_BRIDGE_ALLOW_ORIGINS", ""), "extra allowed browser origins, comma separated")
 		timeout  = flag.Duration("call-timeout", 90*time.Second, "max time for one Excel tool call")
+		wsRoot   = flag.String("workspace-root", env("EXCEL_BRIDGE_WORKSPACE", ""), "directory holding one folder per workbook (default ~/.ocode-excel); the pane registers each as an ocode project")
 		dataDir  = flag.String("data-dir", env("EXCEL_BRIDGE_DATA", ""), "directory for the pane's undo journal and session index (default: memory only)")
 	)
 	flag.Parse()
@@ -48,7 +49,7 @@ func main() {
 		}
 		key = hex.EncodeToString(b)
 	}
-	cfg := Config{OcodeURL: *ocode, OcodeToken: token, PaneKey: key, StaticDir: *static, CallTimeout: *timeout, DataDir: *dataDir}
+	cfg := Config{OcodeURL: *ocode, OcodeToken: token, PaneKey: key, StaticDir: *static, CallTimeout: *timeout, DataDir: *dataDir, WorkspaceRoot: *wsRoot}
 	if *origins != "" {
 		cfg.AllowedOrigins = strings.Split(*origins, ",")
 	}

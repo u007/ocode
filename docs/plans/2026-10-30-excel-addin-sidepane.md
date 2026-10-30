@@ -320,6 +320,25 @@ Additions needed to the checker for this: a way to export the live workbook, and
 7. Is a single local bridge acceptable to the user, or must the add-in work with only `ocode serve` (then a core change
    for CORS + TLS + client tools is on the critical path).
 
+## Implementation status (2026-10-30)
+
+A first slice is built in `excel-addin/` (own `go.mod` and `package.json`); read `excel-addin/RESUME.md` to continue.
+Built and tested without Excel: the bridge, 13 of the proposed tools (section 6), the undo journal, the chat pane, a
+sideload manifest. Never run in Excel. Deltas from this proposal, found while building:
+
+- The MCP leg needs **no SSE**: ocode's remote MCP client sends one JSON-RPC `POST` per call and reads a JSON reply, and
+  only calls `tools/list` and `tools/call`. The bridge's `/mcp` is one handler.
+- ocode prefixes MCP tool names with the server name, so tools are unprefixed in the contract and the server is named
+  `excel` (agent sees `excel_read_range`).
+- Section 4 open question 2 is settled: register each per-workbook workspace as a project with `POST /api/projects`
+  (`allowedProjectRoots()` = server work dir + registered projects; `extra_allowed_paths` is not consulted).
+- The agent is told it is in a live workbook by a static `CLAUDE.md` the bridge seeds in each workspace (ocode loads it
+  from the session's project root), not by a per-turn system injection.
+- The journal and the session index live in the bridge's small state store, not in workbook settings.
+- Not built yet: `insert_delete` (the benchmark's `log-append` trap, highest value), conditional formats, validation,
+  names, sheets, sort/filter, dedupe, find/replace, page layout, comments; rewind/restore UI; compare view; model
+  picker; egress controls; packaging. Full list: `excel-addin/RESUME.md` section 6.
+
 ## Sources
 
 - [Excel JavaScript API requirement sets](https://learn.microsoft.com/en-us/javascript/api/requirement-sets/excel/excel-api-requirement-sets?view=common-js-preview)

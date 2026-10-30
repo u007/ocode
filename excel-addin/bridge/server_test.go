@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -316,5 +317,44 @@ func TestStateStoreRoundTripPersistsAndRejectsTraversal(t *testing.T) {
 	}
 	if r := do("PUT", "/bridge/state/wb1/k", "not json"); r.StatusCode != 400 {
 		t.Errorf("non-JSON state must be 400, got %d", r.StatusCode)
+	}
+}
+
+func TestWorkspaceIsCreatedPerWorkbookAndTraversalRefused(t *testing.T) {
+	root := t.TempDir()
+	h, _, _ := NewHandler(Config{OcodeURL: "http://127.0.0.1:1", PaneKey: key, WorkspaceRoot: root})
+	s := httptest.NewServer(h)
+	defer s.Close()
+	post := func(path string) (*http.Response, map[string]string) {
+		req, _ := http.NewRequest("POST", s.URL+path, nil)
+		req.Header.Set("X-Bridge-Key", key)
+		resp, _ := http.DefaultClient.Do(req)
+		var m map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp, m
+	}
+	resp, m := post("/bridge/workspace/wb-1")
+	if resp.StatusCode != 200 || m["path"] != root+"/wb-1" {
+		t.Fatalf("got %d %v", resp.StatusCode, m)
+	}
+	if again, m2 := post("/bridge/workspace/wb-1"); again.StatusCode != 200 || m2["path"] != m["path"] {
+		t.Fatal("must be idempotent")
+	}
+	guide := root + "/wb-1/CLAUDE.md"
+	b, err := os.ReadFile(guide)
+	if err != nil || !strings.Contains(string(b), "excel_describe_workbook") {
+		t.Fatalf("workspace guidance not seeded: %v", err)
+	}
+	if err := os.WriteFile(guide, []byte("user edited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	post("/bridge/workspace/wb-1")
+	if b, _ := os.ReadFile(guide); string(b) != "user edited" {
+		t.Fatalf("the user's edits to CLAUDE.md were overwritten: %q", b)
+	}
+	for _, bad := range []string{"/bridge/workspace/..", "/bridge/workspace/a%2Fb", "/bridge/workspace/a%20b"} {
+		if r, _ := post(bad); r.StatusCode == 200 {
+			t.Errorf("%s must be refused", bad)
+		}
 	}
 }

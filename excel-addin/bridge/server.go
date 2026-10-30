@@ -27,6 +27,9 @@ type Config struct {
 	AllowedOrigins []string
 	// CallTimeout bounds one tool call.
 	CallTimeout time.Duration
+	// WorkspaceRoot holds one directory per workbook; ocode sessions for a workbook are rooted there.
+	// The pane registers it with ocode as a project (POST /api/projects).
+	WorkspaceRoot string
 	// DataDir persists the pane's small per-workbook state (undo journal, session index). Empty keeps it in memory.
 	DataDir string
 }
@@ -76,6 +79,7 @@ func NewHandler(cfg Config) (http.Handler, *Hub, error) {
 	mux.Handle("GET /bridge/tools", s.auth(http.HandlerFunc(s.listTools)))
 	mux.Handle("GET /bridge/stream", s.auth(http.HandlerFunc(s.stream)))
 	mux.Handle("POST /bridge/result", s.auth(http.HandlerFunc(s.result)))
+	mux.Handle("POST /bridge/workspace/{workbook}", s.auth(http.HandlerFunc(s.workspace)))
 	mux.Handle("GET /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.getState)))
 	mux.Handle("PUT /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.putState)))
 	mux.Handle("/api/", s.auth(proxy))
