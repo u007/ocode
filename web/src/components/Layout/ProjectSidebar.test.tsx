@@ -14,6 +14,22 @@ const project = (path: string, group: string): Project => ({
 });
 
 describe("buildProjectSidebarOrder", () => {
+  it("folds a linked worktree under its saved main project and keeps it out of the list", () => {
+    const main = project("/repo", "");
+    const wt = { ...project("/repo-wt", ""), worktree_of: "/repo" };
+    const items = buildProjectSidebarOrder([main, wt], []);
+    expect(items).toHaveLength(1);
+    expect(items[0].data).toBe(main);
+    expect(items[0].worktrees).toEqual([wt]);
+  });
+
+  it("keeps a worktree top-level when its main project is not saved", () => {
+    const wt = { ...project("/repo-wt", ""), worktree_of: "/repo" };
+    const items = buildProjectSidebarOrder([wt], []);
+    expect(items.map((i) => i.data)).toEqual([wt]);
+    expect(items[0].worktrees).toBeUndefined();
+  });
+
   it("orders groups by group order while preserving persisted order within each group", () => {
     // Raw store order interleaves the two groups (backend List() sorts by a
     // global order/AddedAt, not by group). The canonical order must regroup.

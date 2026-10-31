@@ -1903,3 +1903,40 @@ func TestListAllDedupesClaudeClone(t *testing.T) {
 		t.Fatalf("claude ref with no clone was dropped: %#v", refs)
 	}
 }
+
+// An uncloned Claude Code session is listed with the "claude:" id and title
+// prefix; once OpenClaudeCloneForDir clones it, only the clone's row remains.
+func TestListRefsWithClaudeForDirShowsUnclonedAndDedupesClone(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+	writeClaudeSourceForTest(t, tmpHome, projectDir, "cc-1")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, total, err := ListRefsPaginatedWithClaudeForDir(projectDir, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(refs) != 1 {
+		t.Fatalf("expected one uncloned Claude ref, got total=%d %#v", total, refs)
+	}
+	if refs[0].ID != "claude:cc-1" || refs[0].Source != SourceClaude || refs[0].Title != "claude: hello from claude" {
+		t.Fatalf("unexpected Claude ref: %#v", refs[0])
+	}
+
+	if err := OpenClaudeCloneForDir(projectDir, "claude:cc-1"); err != nil {
+		t.Fatal(err)
+	}
+	refs, err = ListRefsWithClaudeForDir(projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].ID != "claude-cc-1" || refs[0].Source != SourceOcode {
+		t.Fatalf("expected only the clone after opening, got %#v", refs)
+	}
+}

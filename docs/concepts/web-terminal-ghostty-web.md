@@ -3,7 +3,7 @@ type: Concept
 title: Web/Desktop Terminal on ghostty-web (libghostty-vt)
 description: |
   The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
-resource: web/src/components/Terminal/TerminalPanel.tsx
+resource: ""
 tags:
   - terminal
   - ghostty-web
@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - pulse
-timestamp: 2026-10-28T16:28:28Z
+timestamp: 2026-10-30T16:23:00Z
 ---
 # Web/Desktop Terminal on ghostty-web
 
@@ -39,6 +39,22 @@ The terminal panel uses `Terminal` and `FitAddon` from `ghostty-web` (libghostty
 - **Option changes after `open()`.** Only `cursorBlink`, `cursorStyle`, `fontSize`, `fontFamily`, `cols`, `rows` apply live. `theme` does not. `scrollback` does not either, but the panel applies a changed `scrollbackLines` to an open terminal itself: it serializes the buffer, sets `options.scrollback`, calls `Terminal.reset()` (which rebuilds the wasm terminal from that option) and replays the text, like the mount restore. The pty and socket are untouched. The rebuild drops terminal modes (mouse tracking, alternate screen, bracketed paste) that a running full-screen program had set, plus the selection and link cache; the program is not asked to re-send them, so it keeps running but looks idle to the mouse and redraws only when it next repaints. This is the one deliberate `reset()` call, acceptable because the setting changes rarely.
 - **`select(col,row,len)` is wrong when scrollback exists.** Use `setSelectionAbsolute` from `ghosttyInternals.ts`.
 - **`buffer.active.viewportY` is always 0.** Use `getViewportY()`.
+
+### Phone soft-keyboard navigation keys
+
+On a phone, SwiftKey's/Gboard's arrow row used to do nothing while ordinary typing worked. ghostty-web's `handleKeyDown` bails out immediately for `keyCode === 229` (the marker Android stamps on every soft-key event) and resolves a navigation key from `event.code` only, so a keyboard that delegates arrows through `InputConnection.sendKeyEvent` supplies no usable `code` and nothing is encoded (and no `preventDefault` happens). Text is unaffected because it rides `beforeinput`, not `keydown`.
+
+`terminalSoftKeyboard.ts` (`softKeyboardNavigationSequence`, `terminalSoftKeyboard.ts:78`) resolves the key by `event.key` → `event.code` → `event.keyCode` and maps ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Insert, Delete to their DEC (`\x1b[A`) or application-cursor (`\x1bOA`) forms. The panel claims the leftovers in a capture-phase `keydown` on the panel root (`TerminalPanel.tsx:1064`–`1081`): it guards with `term.element.contains(target)` so the find bar's input is untouched, calls `preventDefault` + `stopPropagation`, then `term.input(seq, true)` (`TerminalPanel.tsx:1077`), so the pty sees exactly what a hardware arrow would send and the attach guard in `term.onData` applies. DECCKM comes from `term.getMode(1, false)` (`TerminalPanel.tsx:1073`), selecting `\x1bOA` vs `\x1b[A`.
+
+Rules:
+- Anything with a usable physical `code` and a non-229 keyCode stays ghostty-web's — including codes this table does not name (keypad arrows, F-keys): `terminalSoftKeyboard.ts:99` only claims soft-keyboard-shaped events (`keyCode === 229`, or no usable `code`), so Kitty/CSI-u and keypad encodings are neither bypassed nor double-sent.
+- A modified arrow (ctrl/alt/meta/**shift**) stays ghostty-web's (`terminalSoftKeyboard.ts:87`): only the unmodified form is synthesised, and a plain arrow for a modified one would break selection or word-wise movement. Phone keyboards produce no modifiers.
+- A nav key during an IME composition is ignored (`TerminalPanel.tsx:1068`) — the arrows move between candidates there and an escape sequence would corrupt the composition.
+- Enter/Tab/Backspace are deliberately not synthesised — they ride the text path and claiming them would double-send.
+- The find-bar input is excluded by `term.element.contains(target)` (`TerminalPanel.tsx:1072`).
+- `ghosttyWebMock.ts:105` mirrors the real `input(data, true)` by firing `_data` when `wasUserInput`, so the typed-input path is exercised in tests.
+
+Regression suite: `web/src/components/Terminal/TerminalPanel.mobileKeys.test.tsx` (10 cases, mutation-verified).
 
 ## Module map (`web/src/components/Terminal/`)
 

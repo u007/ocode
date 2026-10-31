@@ -35,4 +35,11 @@ describe("SessionSubTabs loading indicators", () => {
     expect(changes).toHaveAttribute("aria-busy", "true");
     expect(changes).toHaveTextContent("Loading Changes");
   });
+
+  it("no longer renders the DB sub-tab (DB is a project-level tab now)", () => {
+    render(<SessionSubTabs />);
+    expect(screen.queryByRole("button", { name: /^DB$/ })).toBeNull();
+    // The remaining session sub-tabs are unchanged.
+    expect(screen.getByRole("button", { name: /Preview/ })).toBeTruthy();
+  });
 });

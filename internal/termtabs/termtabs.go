@@ -116,6 +116,12 @@ func normalizeKey(key string) string {
 // load reads the whole file into the cache and records its stamp. Callers must
 // hold s.mu.
 func (s *Store) load() error {
+	// Stat BEFORE reading. NewStoreAt calls load without the file lock, so a
+	// rewrite can land between the read and a stat taken after it. The cache would
+	// then hold the old content under the new stamp, and no later check would
+	// reload it. A stamp taken first is at worst older than the content, which
+	// makes the next check reload.
+	stamp := currentStamp(s.path)
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -127,7 +133,7 @@ func (s *Store) load() error {
 	}
 	if len(data) == 0 {
 		s.cache = map[string]ProjectTerminals{}
-		s.recordStamp()
+		s.stamp = stamp
 		return nil
 	}
 	var cache map[string]ProjectTerminals
@@ -138,18 +144,32 @@ func (s *Store) load() error {
 		cache = map[string]ProjectTerminals{}
 	}
 	s.cache = cache
-	s.recordStamp()
+	s.stamp = stamp
 	return nil
 }
 
 // recordStamp stats the file and stores its revision. Callers must hold s.mu.
 func (s *Store) recordStamp() {
-	fi, err := os.Stat(s.path)
+	s.stamp = currentStamp(s.path)
+}
+
+// currentStamp stats path. A missing file has no stamp.
+func currentStamp(path string) fileStamp {
+	fi, err := os.Stat(path)
 	if err != nil {
-		s.stamp = fileStamp{}
-		return
+		return fileStamp{}
 	}
-	s.stamp = fileStamp{modTime: fi.ModTime(), size: fi.Size(), valid: true}
+	return fileStamp{modTime: fi.ModTime(), size: fi.Size(), valid: true}
+}
+
+// reloadLocked re-reads the file unconditionally. A mutation calls it while it
+// holds the cross-process lock, which makes the disk the truth. The stamp check
+// (mtime and size) cannot be: a rewrite can keep both, on a filesystem with coarse
+// timestamps. A read that fails keeps the cached state, as reloadIfChangedLocked does.
+func (s *Store) reloadLocked() {
+	if err := s.load(); err != nil {
+		log.Printf("termtabs: reloading %s: %v (keeping cached state)", s.path, err)
+	}
 }
 
 // reloadIfChangedLocked re-reads the file when another process has rewritten it
@@ -260,7 +280,7 @@ func (s *Store) ApplyBulk(patch map[string]ProjectTerminals) error {
 	return s.withLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.reloadIfChangedLocked()
+		s.reloadLocked()
 		for k, v := range patch {
 			cleaned := normalizeKey(k)
 			if cleaned == "" {
@@ -282,7 +302,7 @@ func (s *Store) Set(key string, pt ProjectTerminals) error {
 	return s.withLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.reloadIfChangedLocked()
+		s.reloadLocked()
 		cleaned := normalizeKey(key)
 		if cleaned == "" {
 			return fmt.Errorf("termtabs: empty project key")
@@ -305,7 +325,7 @@ func (s *Store) RemoveTerminal(key, id string) error {
 	return s.withLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.reloadIfChangedLocked()
+		s.reloadLocked()
 		cleaned := normalizeKey(key)
 		pt, ok := s.cache[cleaned]
 		if !ok {
@@ -330,13 +350,42 @@ func (s *Store) RemoveTerminal(key, id string) error {
 	})
 }
 
+// AddTerminal appends one terminal to a project's list. The read, the append and
+// the write all run under the cross-process lock against freshly reloaded state,
+// so a concurrent writer cannot be overwritten. A Get followed by a Set cannot
+// promise that. A terminal whose id is already listed is a no-op. The new list
+// is a new slice: the cached one is shared with Get callers and must not be
+// mutated.
+func (s *Store) AddTerminal(key string, t Terminal) error {
+	return s.withLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.reloadLocked()
+		cleaned := normalizeKey(key)
+		if cleaned == "" {
+			return fmt.Errorf("termtabs: empty project key")
+		}
+		pt := s.cache[cleaned]
+		for _, existing := range pt.Terminals {
+			if existing.ID == t.ID {
+				return nil
+			}
+		}
+		kept := make([]Terminal, 0, len(pt.Terminals)+1)
+		kept = append(kept, pt.Terminals...)
+		pt.Terminals = append(kept, t)
+		s.cache[cleaned] = pt
+		return s.saveLocked()
+	})
+}
+
 // Remove deletes the terminal list for a project key (e.g. when the project is
 // removed). Deleting a non-existent key is a no-op.
 func (s *Store) Remove(key string) error {
 	return s.withLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.reloadIfChangedLocked()
+		s.reloadLocked()
 		cleaned := normalizeKey(key)
 		if _, ok := s.cache[cleaned]; !ok {
 			return nil

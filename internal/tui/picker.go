@@ -571,9 +571,9 @@ func (m *model) rebuildSessionPickerItems() {
 	m.pickerValues = values
 }
 
-func loadSessionRefsCmd(seq int, limit, offset int) tea.Cmd {
+func loadSessionRefsCmd(workDir string, seq int, limit, offset int) tea.Cmd {
 	return func() tea.Msg {
-		refs, total, err := session.ListRefsPaginated(limit, offset)
+		refs, total, err := session.ListRefsPaginatedWithClaudeForDir(workDir, limit, offset)
 		return sessionRefsLoadedMsg{seq: seq, refs: refs, total: total, err: err}
 	}
 }
@@ -600,7 +600,7 @@ func (m *model) openSessionPicker() tea.Cmd {
 	m.pushPickerModal()
 
 	// Load first page of sessions (progressive loading)
-	return loadSessionRefsCmd(seq, sessionPickerPageSize, 0)
+	return loadSessionRefsCmd(m.workDir, seq, sessionPickerPageSize, 0)
 }
 
 // loadMoreSessions loads the next page of sessions from disk and appends to the picker.
@@ -612,7 +612,7 @@ func (m *model) loadMoreSessions() tea.Cmd {
 	m.pickerSessionLoadSeq++
 	seq := m.pickerSessionLoadSeq
 	offset := m.pickerSessionPage * sessionPickerPageSize
-	return loadSessionRefsCmd(seq, sessionPickerPageSize, offset)
+	return loadSessionRefsCmd(m.workDir, seq, sessionPickerPageSize, offset)
 }
 
 // appendSessionRefs appends newly loaded session refs and rebuilds picker items.
@@ -636,7 +636,7 @@ func (m *model) loadAllSessions() tea.Cmd {
 	offset := len(m.pickerSessionRefs)
 	// Load all remaining sessions in one batch
 	remaining := m.pickerSessionTotal - offset
-	return loadSessionRefsCmd(seq, remaining, offset)
+	return loadSessionRefsCmd(m.workDir, seq, remaining, offset)
 }
 
 // pickerScrollPercent returns how far through the items the cursor is (0.0 - 1.0).

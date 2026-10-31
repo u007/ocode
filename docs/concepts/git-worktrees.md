@@ -7,7 +7,7 @@ tags:
   - worktree
   - web
   - git-panel
-timestamp: 2026-10-15T13:11:13Z
+timestamp: 2026-10-31T01:18:40Z
 ---
 # Git worktrees: list, open, create, remove (web Git tab)
 
@@ -59,6 +59,8 @@ Listing parses `git worktree list --porcelain` in `parseGitWorktreeList` (`handl
 Mutations resolve the project through `mutationProjectDir`, the same gate every other git write uses (a registered root or an extra allowed path). The read endpoint uses `gitProjectDir`. Using the read resolver for writes would let an unregistered repository be mutated. Both are checked by `TestGitWorktreeMutationsRejectUnregisteredProject`.
 
 A linked checkout gets its own project identity. `paths.ProjectRoot` (`internal/paths/paths.go:67`) resolves through `git rev-parse --show-toplevel`, and `ProjectSlug` (`:85`) hashes that root. So opening a worktree gives it separate sessions rather than sharing the main repository's.
+
+The project **list** is the one place linked worktrees are grouped. `GET /api/projects` (`HandleListProjects`) returns each local project with a derived `worktree_of` field, the main checkout's path, set by `withWorktreeParents` in `internal/server/project_worktree_parent.go`. Each project is probed with `git rev-parse --path-format=absolute --git-dir --git-common-dir` under a 3 s per-project deadline (`projectWorktreeProbeTimeout`), and results are cached for 60 s (`projectWorktreeCacheTTL`). `worktree_of` is never persisted, so it cannot go stale on disk. A probe failure, a main checkout and a remote project all yield no parent. In the web sidebar, `buildProjectSidebarOrder` (`web/src/components/Layout/ProjectSidebar.tsx`) folds a linked worktree under its main checkout when that checkout is also a saved project, and `ProjectWorktreeTree` renders the sub tree: an `original` row for the main checkout, then one row per worktree. A project with no saved worktrees gets no sub tree, and a worktree whose main checkout is not saved stays top-level. The collapsed rail flattens each parent followed by its worktrees. The grouping changes only the list: each checkout still has its own sessions.
 
 ## Web behaviour
 

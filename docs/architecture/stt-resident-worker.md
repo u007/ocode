@@ -2,13 +2,8 @@
 type: Decision
 title: Local Speech-to-Text Runs in a Resident Worker
 description: 'Decision: the local STT engine keeps the model loaded in one child process (JSON-lines over stdio) instead of spawning a process per utterance, and pins the onnxruntime CPU provider'
-tags:
-  - stt
-  - speech-to-text
-  - architecture
-  - performance
-  - onnxruntime
-timestamp: 2026-10-20T00:00:00Z
+tags: [stt, speech-to-text, architecture, performance, onnxruntime]
+timestamp: 2026-10-30T13:14:42Z
 ---
 # Local Speech-to-Text Runs in a Resident Worker
 
@@ -87,6 +82,12 @@ Any library that prints to stdout — a warning, a progress bar — would
 otherwise inject a non-JSON line into the stream and desynchronise the reader.
 Diagnostics go to stderr, which the Go side captures into a bounded buffer and
 never writes to the terminal (the TUI runs in the alt-screen).
+
+The worker (and the one-shot helper) returns the RAW decoded text in the JSON
+`text` field. The deterministic filler-word cleanup (`RemoveFillerWords`,
+`internal/stt/fillers.go`) runs downstream in the Go transcription layer
+(`Options.clean`), so the JSON `text` contract is unchanged and live partials
+go through the same path.
 
 ## Lifecycle
 

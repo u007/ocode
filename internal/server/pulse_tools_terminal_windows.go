@@ -14,3 +14,9 @@ import (
 func (h *Handler) pulseTerminalNewTool(raw json.RawMessage) (string, error) {
 	return "", errors.New("interactive terminal is not supported on Windows")
 }
+
+// pulseRemoteTerminalKill: the remote terminal tools are built on the Unix terminal
+// support; the access gate is closed on Windows.
+func (h *Handler) pulseRemoteTerminalKill(host, terminalID string) (string, error) {
+	return "", errors.New("interactive terminal is not supported on Windows")
+}

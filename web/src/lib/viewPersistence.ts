@@ -1,4 +1,4 @@
-export type ActiveView = "files" | "git" | "cron" | "assets" | "sessions" | "settings";
+export type ActiveView = "files" | "git" | "cron" | "assets" | "db" | "sessions" | "settings";
 export type FocusedKind = "chat" | "terminal" | "browser";
 
 const STORAGE_KEY = "ocode.ui.view-state.v1";
@@ -8,7 +8,7 @@ interface PersistedViewState {
   projects: Record<string, { view: ActiveView; focusedKind: FocusedKind }>;
 }
 
-const validViews: Set<ActiveView> = new Set(["files", "git", "cron", "assets", "sessions", "settings"]);
+const validViews: Set<ActiveView> = new Set(["files", "git", "cron", "assets", "db", "sessions", "settings"]);
 const validKinds: Set<FocusedKind> = new Set(["chat", "terminal", "browser"]);
 
 function isValidView(v: unknown): v is ActiveView {

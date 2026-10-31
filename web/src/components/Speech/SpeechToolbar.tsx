@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FastForward,
   ListX,
@@ -29,6 +29,43 @@ export default function SpeechToolbar() {
   // with context so external toggleToolbar() calls (e.g. from StatusBar) also hide it.
   const [visible, setVisible] = useState(toolbarVisible);
   useEffect(() => { setVisible(toolbarVisible); }, [toolbarVisible]);
+  // Publish the bar's own height while it is up, so the shell can reserve that
+  // band (`.app-viewport` adds `--speech-toolbar-height` to its bottom padding).
+  // The bar is position:fixed, so without this it floats ON TOP of whatever
+  // occupies the bottom of a panel — at 393px it covered the Git commit box's
+  // buttons completely, making every tap land on the toolbar instead
+  // (elementFromPoint returned the toolbar for all three). Measured rather than
+  // hard-coded because the bar wraps to two rows on a phone and is a single
+  // pill from `sm` up. The `+8` is the `bottom-2` gap it floats above.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!visible) {
+      document.documentElement.style.removeProperty("--speech-toolbar-height");
+      return;
+    }
+    const publish = () => {
+      const height = rootRef.current?.offsetHeight ?? 0;
+      document.documentElement.style.setProperty(
+        "--speech-toolbar-height",
+        `${height + 8}px`,
+      );
+    };
+    publish();
+    // Wrapping changes with the width and with content (error/retry button,
+    // longer text, session label), so re-measure on resize and on any size
+    // change of the bar itself. jsdom has no ResizeObserver, hence the guard.
+    window.addEventListener("resize", publish);
+    const observer =
+      typeof ResizeObserver === "undefined" || !rootRef.current
+        ? null
+        : new ResizeObserver(publish);
+    if (observer && rootRef.current) observer.observe(rootRef.current);
+    return () => {
+      window.removeEventListener("resize", publish);
+      observer?.disconnect();
+      document.documentElement.style.removeProperty("--speech-toolbar-height");
+    };
+  }, [visible]);
   const activeText = currentText || status?.playback?.text;
   const canRetry = status?.engine?.availability !== "unavailable" && Boolean(error);
   // Which project/session this audio belongs to. Necessary once a queue
@@ -40,7 +77,11 @@ export default function SpeechToolbar() {
     // Mobile: full-width bottom bar that WRAPS, so nothing is clipped off the
     // right edge (the old single-line pill overflowed a 390px viewport). ≥sm
     // keeps the original centered, non-wrapping pill.
-    <div className="fixed bottom-2 inset-x-2 z-40 flex flex-wrap items-center justify-center gap-1.5 rounded-lg border border-border bg-card/95 px-2 py-2 text-xs shadow-lg backdrop-blur sm:inset-x-auto sm:left-1/2 sm:max-w-[calc(100vw-1rem)] sm:-translate-x-1/2 sm:flex-nowrap sm:justify-start sm:gap-2 sm:px-3">
+    <div
+      ref={rootRef}
+      data-testid="speech-toolbar"
+      className="fixed bottom-2 inset-x-2 z-40 flex flex-wrap items-center justify-center gap-1.5 rounded-lg border border-border bg-card/95 px-2 py-2 text-xs shadow-lg backdrop-blur sm:inset-x-auto sm:left-1/2 sm:max-w-[calc(100vw-1rem)] sm:-translate-x-1/2 sm:flex-nowrap sm:justify-start sm:gap-2 sm:px-3"
+    >
       <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <span className="max-w-32 truncate text-muted-foreground" title={status?.engine?.label ?? config?.engine ?? "browser-native"}>
         {status?.engine?.label ?? "Browser Native"}

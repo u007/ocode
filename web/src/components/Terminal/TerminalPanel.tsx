@@ -38,6 +38,7 @@ import type { CellAdjust, GhosttyKeybind } from "./terminalAppearance";
 import { actionForEvent, buildKeybindTable, type KeybindAction } from "./ghosttyKeybinds";
 import { attachMouseReporting, sendWheelReport } from "./terminalMouse";
 import { attachImeHygiene } from "./terminalImeHygiene";
+import { softKeyboardNavigationSequence } from "./terminalSoftKeyboard";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { noteRemoteHostReachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
@@ -1047,6 +1048,36 @@ export default function TerminalPanel({
     };
     el.addEventListener("paste", onPaste, true);
     return () => el.removeEventListener("paste", onPaste, true);
+  }, []);
+
+  // ── Soft-keyboard navigation keys ─────────────────────────────────
+  // Phone keyboards with an arrow row (SwiftKey, Gboard cursor keys) send
+  // keydowns ghostty-web throws away: it encodes a nav key from
+  // `event.code` only, and returns on the Android IME marker (keyCode 229).
+  // Typing still worked, which is why this looked like "only the arrows are
+  // broken" — text rides `beforeinput`, not keydown. Capture phase on the
+  // panel root runs before ghostty-web's own keydown listener (on the host
+  // inside it), so `stopPropagation` keeps it from also seeing the event.
+  // The sequence is fed back through `term.input(..., true)`: the same typed
+  // input path as a hardware key, so the attach guard in `term.onData`
+  // applies. Declining (null) is the default for every other key.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onSoftKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const term = termRef.current;
+      // Only keys aimed at the TERMINAL: the panel root also holds the find
+      // bar's input, and typing there must never reach the shell.
+      if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
+      const seq = softKeyboardNavigationSequence(e, term.getMode(1, false));
+      if (!seq) return;
+      e.preventDefault();
+      e.stopPropagation();
+      term.input(seq, true);
+    };
+    el.addEventListener("keydown", onSoftKeyDown, true);
+    return () => el.removeEventListener("keydown", onSoftKeyDown, true);
   }, []);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a

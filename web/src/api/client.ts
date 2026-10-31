@@ -921,6 +921,27 @@ export interface DBConnectConnection {
   fromEnv: boolean;
 }
 
+/** The wire shape of a saved connection. The server spells the env flag
+ *  `from_env`; `dbConnectList` maps it to `fromEnv` exactly once, here. */
+type DBConnectConnectionWire = Omit<DBConnectConnection, "fromEnv"> & {
+  from_env?: boolean;
+};
+
+/** One connection that could not be unlocked. The message names a variable or
+ *  a parameter, never a value. */
+export interface DBConnectUnlockFailure {
+  name: string;
+  error: string;
+}
+
+export interface DBConnectUnlockResult {
+  /** Connections now granted to this surface. */
+  unlocked: string[];
+  /** Connections this attempt could not grant; the rest may still have been
+   *  granted (an obsolete template no longer blocks the others). */
+  failed: DBConnectUnlockFailure[];
+}
+
 /** A Postgres query result. Values are JSON scalars, or objects for json/array columns. */
 export interface DBConnectQueryResult {
   columns: string[];
@@ -1879,6 +1900,13 @@ export const api = {
     fetchJSON<STTSettings>("/api/stt", {
       method: "PUT",
       body: JSON.stringify({ model }),
+    }),
+  /** Toggles hesitation-word cleanup. Sends only the setting: the server keeps
+   *  the selected model it already has. */
+  setSTTFillers: (remove: boolean) =>
+    fetchJSON<STTSettings>("/api/stt", {
+      method: "PUT",
+      body: JSON.stringify({ remove_fillers: remove }),
     }),
   /** Uploads one recording as multipart field `audio`. No Content-Type header:
    *  the browser must set the multipart boundary itself. */
@@ -4511,25 +4539,47 @@ export const api = {
   // these are NOT host-threaded. Unlock is per client surface, like the vault.
   // Null lists are normalised here, once, at the fetch boundary.
   dbConnectList: (surface: string) =>
-    fetchJSON<{ connections: DBConnectConnection[] | null }>(
+    fetchJSON<{ connections: DBConnectConnectionWire[] | null }>(
       `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
-    ).then((r) => ({ connections: r.connections ?? [] })),
-  dbConnectAdd: (name: string, url: string, password: string, sessionId?: string) =>
+    ).then((r) => ({
+      connections: (r.connections ?? []).map((c) => ({
+        name: c.name,
+        driver: c.driver,
+        unlocked: c.unlocked,
+        // `from_env` is the server's key. Reading `fromEnv` off the raw payload
+        // was silently undefined, which disabled the whole no-password flow and
+        // made an env connection demand a master password.
+        fromEnv: c.from_env === true,
+      })),
+    })),
+  /** `password` is required only for a literal (sealed) URL. An environment
+   *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
+  dbConnectAdd: (name: string, url: string, password: string) =>
     fetchJSON<{ name: string }>("/api/dbconnect/connections", {
       method: "POST",
-      body: JSON.stringify({ name, url, password, session_id: sessionId }),
+      body: JSON.stringify({ name, url, password }),
     }),
   dbConnectRemove: (name: string) =>
     fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
-  /** `sessionId` names the session whose project provides the .env files for
-   *  an environment-backed connection. */
-  dbConnectUnlock: (surface: string, password: string, sessionId?: string) =>
-    fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
-      method: "POST",
-      body: JSON.stringify({ surface, password, session_id: sessionId }),
-    }),
+  /** `projectPath` names the project whose .env / .env.local files provide the
+   *  URL for an environment-backed connection. An empty password unlocks only
+   *  those connections; sealed connections still need the master password. A
+   *  template that fails is reported in `failed`; the others are still granted. */
+  dbConnectUnlock: (surface: string, password: string, projectPath?: string) =>
+    fetchJSON<{ unlocked: string[] | null; failed: DBConnectUnlockFailure[] | null }>(
+      "/api/dbconnect/unlock",
+      {
+        method: "POST",
+        body: JSON.stringify({ surface, password, project_path: projectPath }),
+      },
+    ).then(
+      (r): DBConnectUnlockResult => ({
+        unlocked: r.unlocked ?? [],
+        failed: r.failed ?? [],
+      }),
+    ),
   dbConnectLock: (surface: string) =>
     fetchEmpty("/api/dbconnect/lock", {
       method: "POST",

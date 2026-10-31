@@ -526,6 +526,18 @@ describe("projectStore server-side tab persistence", () => {
     expect(result.current.state.activeTabByProject["/proj-a"]).toBe("s1");
   });
 
+  it("restores a stale db sub-tab as chat (DB is a project tab now)", async () => {
+    // Deliberate one-time migration: the server may still hold a sub_tab value
+    // persisted while DB was a session sub-tab. There is no equivalent session
+    // sub-tab any more, so it falls back to Chat rather than rendering nothing.
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One", sub_tab: "db" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    expect(result.current.state.tabsByProject["/proj-a"][0].activeSubTab).toBe("chat");
+  });
+
   it("persists tab changes to the server as a full projects map", async () => {
     const { result } = setup();
     await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));

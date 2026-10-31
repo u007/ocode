@@ -247,7 +247,10 @@ export default function WorktreesSection({
       </div>
 
       {expanded && (
-        <div className="flex-1 overflow-y-auto divide-y divide-border/60">
+        // No `flex-1`: the section is content-sized when expanded (the parent
+        // caps it with a max-height), so the list must contribute its natural
+        // height instead of flexing to a share of it.
+        <div className="min-h-0 overflow-y-auto overscroll-contain divide-y divide-border/60">
           {isRemote ? (
             <div className="px-3 py-2 text-xs text-muted-foreground/70 italic">
               Worktrees are available for local projects only.

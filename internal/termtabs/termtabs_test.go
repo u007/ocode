@@ -2,6 +2,7 @@ package termtabs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -278,5 +279,58 @@ func TestRemoveTerminalDoesNotMutateGetSnapshotAndPersists(t *testing.T) {
 	}
 	if got := mustStore(t, path).Get("/srv/app"); len(got.Terminals) != 0 {
 		t.Fatalf("last removal should clear project, got %v", idsOf(got))
+	}
+}
+
+// Each writer holds its own Store, as separate processes do, so the only thing
+// keeping AddTerminal's appends from overwriting one another is the file lock and
+// the reload under it.
+func TestAddTerminalFromConcurrentWritersAllLand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "terminals.json")
+	const writers, each = 4, 6
+	const key = "dev@box::/home/me/app"
+	var wg sync.WaitGroup
+	for w := range writers {
+		s := mustStore(t, path)
+		for i := range each {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				id := fmt.Sprintf("w%d-%d", w, i)
+				if err := s.AddTerminal(key, Terminal{ID: id, Title: id}); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+
+	got := idsOf(mustStore(t, path).Get(key))
+	if len(got) != writers*each {
+		t.Fatalf("every concurrent AddTerminal must land: got %d of %d: %v", len(got), writers*each, got)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, id := range got {
+		if seen[id] {
+			t.Fatalf("terminal %q was stored twice", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestAddTerminalIsIdempotentAndRejectsAnEmptyKey(t *testing.T) {
+	s := mustStore(t, filepath.Join(t.TempDir(), "terminals.json"))
+	const key = "/work/app"
+	if err := s.AddTerminal(key, Terminal{ID: "t1", Title: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddTerminal(key, Terminal{ID: "t1", Title: "again"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := idsOf(s.Get(key)); len(got) != 1 {
+		t.Fatalf("a terminal id already listed must not be added twice: %v", got)
+	}
+	if err := s.AddTerminal("  ", Terminal{ID: "t2"}); err == nil {
+		t.Fatal("an empty key must be rejected")
 	}
 }

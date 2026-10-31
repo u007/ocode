@@ -13,13 +13,14 @@ import (
 // by the tool-shape test instead.
 func TestPulseTerminalNewRefusesBadArgs(t *testing.T) {
 	h := pulseTestHandler(t)
+	h.SetTerminalAccessPolicy(false, true)
 	cases := []struct {
 		name string
 		args string
 		want string
 	}{
 		{"missing project", `{}`, "project_path is required"},
-		{"remote host", `{"project_path":"/tmp","host":"u@example.com"}`, "remote hosts is not supported"},
+		{"remote host that is not a saved project", `{"project_path":"/tmp","host":"u@example.com"}`, "not a saved remote project"},
 		{"out of root", `{"project_path":"/definitely/not/registered"}`, "not a registered project root"},
 	}
 	for _, tc := range cases {

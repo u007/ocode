@@ -326,6 +326,8 @@ func excludeKaizen(in []Skill) []Skill {
 //     built once and cached for prefix stability before the request exists. The
 //     result was a create-a-PDF task running with no catalogue line and no digest:
 //     the model had no way to learn the corrections were there.
+//   - "xlsx" has the same gap: office tasks ("make today's attendance sheet") usually
+//     start with no workbook on disk (docs/okf/xlsx/meta.yaml).
 //
 // Admission is not injection: whether a universal corpus's digest is force-injected
 // into the base prompt is decided by catalogOnlyStacks, not here.
@@ -335,6 +337,7 @@ var universalStacks = map[string]bool{
 	"hallucination": true,
 	"pdf":           true,
 	"webforms":      true,
+	"xlsx":          true,
 }
 
 // catalogOnlyStacks are the universal corpora whose tuning skills are advertised
@@ -345,6 +348,7 @@ var universalStacks = map[string]bool{
 var catalogOnlyStacks = map[string]bool{
 	"pdf":      true,
 	"webforms": true,
+	"xlsx":     true,
 }
 
 // ForceInjected reports whether the skill's digest goes into the base prompt

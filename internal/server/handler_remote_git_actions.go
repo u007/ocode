@@ -175,7 +175,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 			}
 		case "discard":
 			// Removing an untracked file remotely: rm -- the spec.
-			if _, err := remoteRun(ctx, rw, "rm -f -- "+remote.ShellQuote(rw.Path+"/"+spec)); err != nil {
+			if _, err := remoteRun(ctx, rw, "rm -f -- "+remote.ShellQuotePath(rw.Path+"/"+spec)); err != nil {
 				writeError(w, http.StatusBadRequest, "failed to remove "+spec+": "+err.Error())
 				return
 			}
@@ -347,7 +347,7 @@ func remoteRestoreStashPaths(ctx context.Context, rw remoteWork, rev string, spe
 		}
 	}
 	for _, spec := range deleted {
-		if _, err := remoteRun(ctx, rw, "rm -f -- "+remote.ShellQuote(rw.Path+"/"+spec)); err != nil {
+		if _, err := remoteRun(ctx, rw, "rm -f -- "+remote.ShellQuotePath(rw.Path+"/"+spec)); err != nil {
 			return err
 		}
 	}

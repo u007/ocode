@@ -60,11 +60,25 @@ func TestWorktreePreserveOnHalt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	t.Cleanup(func() { wm.Teardown(false) }) // always clean up
+	// Teardown clears the manager's path even when it preserves the tree, so
+	// wm.Teardown(false) in a cleanup would be a no-op. Remove from the
+	// captured path instead, or this test leaks .worktrees/orchestrator-test-run-002.
+	cleanup := func() {
+		_ = exec.Command("git", "-C", root, "worktree", "remove", "--force", path).Run()
+		_ = os.RemoveAll(path)
+		_ = exec.Command("git", "-C", root, "worktree", "prune").Run()
+	}
+	t.Cleanup(cleanup)
 	if err := wm.Teardown(true); err != nil {
 		t.Fatalf("Teardown(preserve=true) failed: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("worktree should be preserved: %v", err)
+	}
+	// The preserved tree must not outlive the test; a leaked tree stays
+	// registered in git and surfaces as a stale worktree.
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cleanup left %s behind: %v", path, err)
 	}
 }

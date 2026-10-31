@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated into manifest.xml by scripts/gen-manifest.mjs; do not hand-edit the generated file. -->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>{{GUID}}</Id>
+  <Version>0.1.0.0</Version>
+  <ProviderName>ocode</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="ocode"/>
+  <Description DefaultValue="Chat with ocode about the open workbook. It can read, change and chart your data, with every change checkpointed."/>
+  <IconUrl DefaultValue="{{BASE_URL}}/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="{{BASE_URL}}/icon-80.png"/>
+  <SupportUrl DefaultValue="https://github.com/u007/ocode"/>
+  <AppDomains>
+    <AppDomain>{{BASE_URL}}</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <Requirements>
+    <Sets>
+      <!-- 1.8 is the first set with PivotTables and data validation; the add-in needs it for create_pivot. -->
+      <Set Name="ExcelApi" MinVersion="1.8"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="{{BASE_URL}}/taskpane.html?key={{KEY}}"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="Support.Url"/>
+          </GetStarted>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="ocode.Group">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="ocode.OpenPane">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ocodePane</TaskpaneId>
+                    <SourceLocation resid="Pane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="{{BASE_URL}}/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="{{BASE_URL}}/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="{{BASE_URL}}/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Pane.Url" DefaultValue="{{BASE_URL}}/taskpane.html?key={{KEY}}"/>
+        <bt:Url id="Support.Url" DefaultValue="https://github.com/u007/ocode"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Group.Label" DefaultValue="ocode"/>
+        <bt:String id="Button.Label" DefaultValue="Ask ocode"/>
+        <bt:String id="GetStarted.Title" DefaultValue="ocode is ready"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Button.Tip" DefaultValue="Open the ocode chat pane for this workbook"/>
+        <bt:String id="GetStarted.Description" DefaultValue="Use Ask ocode on the Home tab to chat about this workbook."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

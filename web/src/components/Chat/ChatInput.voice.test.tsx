@@ -208,6 +208,7 @@ describe("ChatInput voice input", () => {
   it("shows a live partial preview while recording, never sends it, and clears it on stop", async () => {
     vi.spyOn(api, "getSTT").mockResolvedValue({
       selected: "parakeet-tdt-0.6b-v3",
+      remove_fillers: true,
       models: [{ id: "parakeet-tdt-0.6b-v3", label: "Parakeet", engine: "local", languages: "EN", description: "", available: true }],
     });
     const transcribe = vi

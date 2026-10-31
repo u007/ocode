@@ -193,7 +193,7 @@ func removePartialUpload(target string) {
 }
 
 func (h *Handler) fsUploadRemote(w http.ResponseWriter, r *http.Request, host string) {
-	rw, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
+	rw, err := h.remoteMutationWorkFor(r.Context(), host, r.URL.Query().Get("project"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -221,7 +221,7 @@ func (h *Handler) fsUploadRemote(w http.ResponseWriter, r *http.Request, host st
 		// Best effort, and on a context that is NOT the request's: the request
 		// may be what failed, but a partial file on the host still must go.
 		if created {
-			if _, rmErr := remoteRun(context.WithoutCancel(r.Context()), rw, "rm -f -- "+remote.ShellQuote(target)); rmErr != nil {
+			if _, rmErr := remoteRun(context.WithoutCancel(r.Context()), rw, "rm -f -- "+remote.ShellQuotePath(target)); rmErr != nil {
 				slog.Warn("fs upload: remove partial remote file failed", "host", host, "path", target, "err", rmErr)
 			}
 		}
@@ -311,7 +311,7 @@ var errUploadNameTaken = errors.New("destination name is occupied")
 // is its own before any byte moves and may remove it on failure. No retry: stdin
 // may already be partly consumed by the time the remote open fails.
 func remoteExclusiveWriteScript(abs string) string {
-	return "p=" + remote.ShellQuote(abs) + "; " +
+	return "p=" + remote.ShellQuotePath(abs) + "; " +
 		`if [ -e "$p" ] || [ -L "$p" ]; then echo EXISTS; exit 0; fi; ` +
 		`set -C; exec 3>"$p" && echo CREATED && exec cat >&3`
 }

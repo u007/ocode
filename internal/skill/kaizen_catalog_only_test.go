@@ -22,6 +22,7 @@ func TestKaizenCatalogOnlyStacksAdvertiseWithoutInjecting(t *testing.T) {
 		{"hallucination", true},
 		{"pdf", false},
 		{"webforms", false},
+		{"xlsx", false},
 	}
 	for _, c := range cases {
 		writeDigestKaizenSkill(t, root, c.stack+"-tuning-mdl", "mdl", c.stack, strings.ToUpper(c.stack)+"DIGEST")

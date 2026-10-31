@@ -167,6 +167,14 @@ type Handler struct {
 	// that small file read/write, never across agent construction.
 	pulseMu sync.Mutex
 
+	// pulseRemoteBoard caches each connected remote host's board rows for the
+	// Pulse assistant (pulse_remote.go). Its own mutex; never held across a request.
+	pulseRemoteBoard pulseRemoteBoardCache
+
+	// pulseRemoteConnect remembers the Pulse assistant's last host_connect attempt
+	// per host (pulse_remote.go) so a looping model cannot start a connect per call.
+	pulseRemoteConnect pulseRemoteConnectState
+
 	// pulseStopIndicators holds recent stop indicators (turn-done, terminal-stop,
 	// permission-ask, question-ask) for the Pulse assistant's auto-receive
 	// feature. Appended to by runTurn and the terminal polling path; read by
@@ -230,9 +238,13 @@ type Handler struct {
 	// client surface then connection name; guarded by dbMu. Never serialized.
 	// dbPools holds the open handle for each granted connection, opened on
 	// first use and closed when its grant is replaced, locked or removed.
-	dbMu     sync.Mutex
-	dbGrants map[string]dbGrant
-	dbPools  map[string]map[string]*sql.DB
+	// dbLastUsed bounds the other two: a surface is retired after
+	// dbSurfaceIdleTTL without a request, because the key is per panel mount and
+	// a client that never calls lock must not leak a credential forever.
+	dbMu       sync.Mutex
+	dbGrants   map[string]dbGrant
+	dbPools    map[string]map[string]*sql.DB
+	dbLastUsed map[string]time.Time
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
 	// terminal is only exposed without credentials when the server is bound to
 	// a loopback address.
@@ -1391,7 +1403,7 @@ func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	refs, total, err := session.ListRefsPaginatedForDir(h.workDir, limit, offset)
+	refs, total, err := session.ListRefsPaginatedWithClaudeForDir(h.workDir, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 		return

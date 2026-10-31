@@ -62,7 +62,7 @@ import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
 import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
-import { basename } from "./lib/utils";
+import { basename, cn } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
 import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
@@ -312,6 +312,30 @@ function HomeApp() {
     leavePulseFor,
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
+  // The DB panel issues a connection-list request on mount. Mount it on first
+  // visit PER PROJECT (its surface is project-scoped), so switching to a
+  // project whose DB tab was never opened does not fetch for it. The panel is
+  // keyed by the same pair in the render below: switching remounts it and drops
+  // the previous project's grant.
+  const dbProjectKey = `${projectState.activeProject?.host ?? ""}:${projectState.activeProject?.path ?? ""}`;
+  const [dbVisitedProjects, setDbVisitedProjects] = useState<Record<string, boolean>>({});
+  // Recorded ONLY where the DB tab actually becomes visible for a project: an
+  // explicit view selection, and the per-project view restore. A passive effect
+  // keyed on (activeView, dbProjectKey) used to do it, and it raced the restore:
+  // on a project switch the first render still carries the OLD view with the NEW
+  // key, so the effect marked the new project as visited even when its restored
+  // view was not DB — mounting (and fetching for) a project whose DB tab had
+  // never been opened.
+  const markDBVisited = useCallback((key: string) => {
+    setDbVisitedProjects((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+  }, []);
+  const selectView = useCallback(
+    (v: string) => {
+      setActiveView(v as typeof activeView);
+      if (v === "db") markDBVisited(dbProjectKey);
+    },
+    [dbProjectKey, markDBVisited, setActiveView],
+  );
   // "Show in file tree" from an editor/preview tab's context menu, and folder
   // picks from the ctrl/cmd+p picker: switch to the Files view, un-collapse the
   // tree pane (a reveal into a collapsed tree would be invisible), and hand the
@@ -320,11 +344,37 @@ function HomeApp() {
   // as done. `setCollapsed` (a state setter) is the dependency rather than
   // `fileTreePane`, which is a fresh object per render.
   const [treeRevealRequest, setTreeRevealRequest] = useState<TreeRevealRequest | null>(null);
+  // Below the mobile breakpoint the Files tab has no room for a side-by-side
+  // tree+editor split, so the file tree is an overlay drawer over the editor.
+  // It starts closed (an opened file gets the full width) and is deliberately
+  // NOT the persisted desktop `fileTreePane.collapsed` — a desktop layout
+  // preference must not decide the phone's initial state.
+  const isMobile = useIsMobile();
+  const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  // Tab contents stay mounted, so leaving the Files view would otherwise keep
+  // the drawer open for the rest of the session. Coming back should show the
+  // editor, not a tree the user never re-opened.
+  useEffect(() => {
+    if (activeView !== "files") setMobileTreeOpen(false);
+  }, [activeView]);
+  // Esc dismisses the drawer, matching the backdrop tap and every other
+  // dismissable surface (the desktop split has no such notion).
+  useEffect(() => {
+    if (!mobileTreeOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileTreeOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileTreeOpen]);
   const treeRevealSeqRef = useRef(0);
   const revealPathInTree = useCallback(
     (target: { path: string; projectRoot?: string; isDir?: boolean }) => {
       setActiveView("files");
       fileTreePane.setCollapsed(false);
+      // A reveal into a closed mobile drawer would be invisible, so "Show in
+      // file tree" must actually show the tree on a phone as well.
+      setMobileTreeOpen(isMobile);
       setTreeRevealRequest({
         path: target.path,
         root: target.projectRoot,
@@ -332,7 +382,7 @@ function HomeApp() {
         isDir: target.isDir,
       });
     },
-    [fileTreePane.setCollapsed],
+    [fileTreePane.setCollapsed, isMobile],
   );
 
   const activeProjectPath = projectState.activeProject?.path ?? "";
@@ -457,7 +507,12 @@ function HomeApp() {
     const next = resolveViewOnProjectSwitch(loadViewStateForProject(path), forced, path);
     setActiveView(next.view);
     setFocusedKind(next.focusedKind);
-  }, [projectState.activeProject?.path]);
+    // A project whose last view was DB restores straight onto it, so the panel
+    // must be allowed to mount for that project too.
+    if (next.view === "db") {
+      markDBVisited(`${projectState.activeProject?.host ?? ""}:${path}`);
+    }
+  }, [projectState.activeProject?.path, markDBVisited]);
   // Persist view state whenever it changes (debounced).
   useEffect(() => {
     const path = projectState.activeProject?.path;
@@ -593,7 +648,20 @@ function HomeApp() {
   }, [activeEditorContext, visibleEditorTabs]);
 
   // Mobile responsive
-  const isMobile = useIsMobile();
+
+  // Files-tab tree visibility. On a phone the drawer's transient state governs
+  // it; from the tablet/desktop layout up the persisted, drag-resizable pane
+  // does (so `toggleTreePane` keeps meaning "collapse the split" there).
+  const treePaneCollapsed = isMobile ? !mobileTreeOpen : fileTreePane.collapsed;
+  const toggleTreePane = useCallback(() => {
+    if (isMobile) setMobileTreeOpen((open) => !open);
+    else fileTreePane.toggleCollapsed();
+  }, [isMobile, fileTreePane.toggleCollapsed]);
+  // Crossing the breakpoint drops the drawer: the desktop split has its own
+  // persisted state, and returning to a phone must start closed.
+  useEffect(() => {
+    if (!isMobile) setMobileTreeOpen(false);
+  }, [isMobile]);
 
   // ── Sidebar PreviewHost: AI/file-tree activation + highlight context ──
   // The `preview_open` agent tool and `ocode:open-preview` events (file tree
@@ -745,6 +813,17 @@ function HomeApp() {
       }
     },
     [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
+  );
+
+  // FileTree open handler. On a phone the tree is an overlay drawer over the
+  // editor, so picking a file must dismiss the drawer to reveal what was
+  // opened; the desktop split keeps the tree in place.
+  const openTreeFile = useCallback(
+    (path: string, projectRoot?: string, line?: number, query?: string) => {
+      if (isMobile) setMobileTreeOpen(false);
+      void openFileAndShow(path, projectRoot, line, query);
+    },
+    [isMobile, openFileAndShow],
   );
 
   // ── Open a file OUTSIDE the active project ─────────────────────────────
@@ -1529,12 +1608,12 @@ function HomeApp() {
           data-active-view={activeView}
           data-focused-kind={focusedKind}
         >
-          <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
+          <Tabs value={activeView} onValueChange={selectView} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex items-center justify-between gap-2 border-b pr-2">
               <div className="flex-1 min-w-0">
                 <TopTabs
                   activeTab={activeView}
-                  onTabSelect={(v) => setActiveView(v as typeof activeView)}
+                  onTabSelect={selectView}
                   onMenuToggle={isMobile ? () => setSidebarOpen((open) => !open) : undefined}
                   loadingStates={loadingStates}
                 />
@@ -1646,13 +1725,38 @@ function HomeApp() {
               <div className={activeView === "sessions" && focusedKind === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex" aria-busy={filesBusy}>
                 <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                {/* Mobile: the file tree is an overlay drawer, so a backdrop
+                    sits behind it (tap to dismiss). The desktop split keeps
+                    the tree in flow, where a backdrop would be wrong. */}
+                {isMobile && !treePaneCollapsed && (
+                  <div
+                    data-testid="file-tree-backdrop"
+                    aria-hidden="true"
+                    onClick={() => setMobileTreeOpen(false)}
+                    className="absolute inset-0 z-20 bg-black/50"
+                  />
+                )}
                 <div
-                  className="relative shrink-0 h-full overflow-hidden border-r border-border transition-[width] duration-100"
-                  style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
+                  data-testid="file-tree-pane"
+                  aria-hidden={isMobile && treePaneCollapsed ? true : undefined}
+                  inert={isMobile && treePaneCollapsed}
+                  className={cn(
+                    "shrink-0 h-full overflow-hidden border-r border-border",
+                    isMobile
+                      ? cn(
+                          "absolute inset-y-0 left-0 z-30 w-72 max-w-[85vw] bg-card shadow-xl transition-transform duration-200",
+                          treePaneCollapsed && "-translate-x-full",
+                        )
+                      : "relative transition-[width] duration-100",
+                  )}
+                  style={isMobile ? undefined : { width: treePaneCollapsed ? 0 : fileTreePane.width }}
                 >
-                  <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
+                  <div
+                    className="absolute inset-0"
+                    style={isMobile ? undefined : { width: fileTreePane.width }}
+                  >
                     <FileTree
-                      onOpenFile={openFileAndShow}
+                      onOpenFile={openTreeFile}
                       onRequestOpenOutsideProject={() => requestOpenOutsideProject()}
                       projectPath={projectState.activeProject?.path}
                       projectHost={projectState.activeProject?.host}
@@ -1669,7 +1773,7 @@ function HomeApp() {
                     onRetry={filesLoading?.retry}
                   />
                 </div>
-                {!fileTreePane.collapsed && (
+                {!treePaneCollapsed && !isMobile && (
                   <div
                     ref={fileTreePane.handleRef}
                     onPointerDown={fileTreePane.onPointerDown}
@@ -1678,11 +1782,11 @@ function HomeApp() {
                   />
                 )}
                 <button
-                  onClick={fileTreePane.toggleCollapsed}
-                  title={fileTreePane.collapsed ? "Show file tree" : "Hide file tree"}
+                  onClick={toggleTreePane}
+                  title={treePaneCollapsed ? "Show file tree" : "Hide file tree"}
                   className="shrink-0 self-start mt-1 p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
-                  {fileTreePane.collapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
+                  {treePaneCollapsed ? <PanelLeft className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
                 </button>
                 <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
                   <EditorTabBar
@@ -1810,6 +1914,26 @@ function HomeApp() {
                     onRetry={assetsLoading?.retry}
                   />
                 </div>
+              </TabsContent>
+              {/* Project-level DB connector (beside Assets). Its surface is keyed
+                  by project so an environment-backed connection resolves against
+                  this project's .env, and a project switch drops the old grant.
+                  With no active project there is nothing to resolve against, so
+                  the panel is not mounted (it would only offer an unlock that
+                  the server must refuse). */}
+              <TabsContent value="db" forceMount className="flex-1 overflow-hidden m-0">
+                {dbVisitedProjects[dbProjectKey] &&
+                  (projectState.activeProject ? (
+                    <DBPanel
+                      key={dbProjectKey}
+                      projectPath={projectState.activeProject.path}
+                      projectHost={projectState.activeProject.host}
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+                      Select a project to use the database connector.
+                    </div>
+                  ))}
               </TabsContent>
               <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
@@ -2016,16 +2140,6 @@ function HomeApp() {
                             nonce={takesActivation ? previewNonce : 0}
                             onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
                           />
-                        </div>
-                      );
-                    })}
-                    {allChatTabs.map((tab) => {
-                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "db";
-                      const key = `${tab.projectPath ?? ""}:${tab.id}:db`;
-                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
-                      return (
-                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <DBPanel sessionId={tab.id} />
                         </div>
                       );
                     })}

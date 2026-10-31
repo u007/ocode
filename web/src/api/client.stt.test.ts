@@ -26,6 +26,17 @@ describe("speech-to-text client", () => {
     expect(res.selected).toBe("base");
   });
 
+  it("setSTTFillers PUTs only {remove_fillers} so the model is untouched", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ selected: "base", models: [], remove_fillers: false }));
+    const { api } = await import("./client");
+    const res = await api.setSTTFillers(false);
+    expect(fetchSpy.mock.calls[0][0]).toBe("/api/stt");
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ remove_fillers: false });
+    expect(res.remove_fillers).toBe(false);
+  });
+
   it("transcribeSpeech uploads multipart field audio with the real extension and no forced Content-Type", async () => {
     fetchSpy.mockResolvedValue(jsonResponse({ text: "hi", model: "tiny" }));
     const { api } = await import("./client");

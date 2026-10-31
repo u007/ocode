@@ -7,7 +7,7 @@ tags:
   - storage
   - paths
   - sessions
-timestamp: 2026-09-30T07:37:09Z
+timestamp: 2026-10-31T01:18:40Z
 ---
 # Data Storage Layout
 
@@ -40,9 +40,11 @@ Sub-directories:
   projects absent from the body are preserved. Never turn this back into a
   whole-map replace — that silently drops another window/process's projects.
 
-The `{slug}` is a SHA-256 prefix of the git repo root path, making sessions
-project-scoped even when working from different checkouts. The TUI's
-`m.workDir` is the source of truth for project resolution (set via
-`/cd`, `--dir`, or `session.SetWorkDir`); `os.Getwd()` is not — `/cd`
+The `{slug}` is a SHA-256 prefix of the git repo root (`git rev-parse --show-toplevel`), so
+sessions are scoped per checkout: each linked git worktree has its own slug and its own
+`project/{slug}/sessions/` directory and does not share the main checkout's sessions. Only the web
+project list groups a linked worktree under its main checkout; storage is unaffected (see
+[git-worktrees.md](git-worktrees.md)). The TUI's `m.workDir` is the source of truth for project
+resolution (set via `/cd`, `--dir`, or `session.SetWorkDir`); `os.Getwd()` is not — `/cd`
 can change the project root without changing the process CWD on every
 caller.

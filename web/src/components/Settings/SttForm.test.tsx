@@ -6,6 +6,7 @@ import type { STTSettings } from "@/api/types";
 
 const initial: STTSettings = {
   selected: "tiny",
+  remove_fillers: true,
   models: [
     { id: "tiny", label: "Tiny", engine: "local", languages: "English", size_mb: 75, description: "Fastest local model", available: true },
     { id: "base", label: "Base", engine: "local", languages: "99 languages", size_mb: 142, description: "Better accuracy", available: true },
@@ -76,5 +77,39 @@ describe("SttForm", () => {
     vi.spyOn(api, "getSTT").mockRejectedValue(new Error("boom"));
     render(<SttForm />);
     expect(await screen.findByText(/Speech-to-text settings unavailable: boom/)).toBeDefined();
+  });
+
+  it("shows the filler-word cleanup setting and defaults it to on", async () => {
+    render(<SttForm />);
+    const box = (await screen.findByTestId("stt-remove-fillers")).querySelector("input") as HTMLInputElement;
+    expect(box.type).toBe("checkbox");
+    expect(box.checked).toBe(true);
+  });
+
+  it("toggling filler cleanup PUTs only the setting and renders the response", async () => {
+    const put = vi.spyOn(api, "setSTTFillers").mockResolvedValue({
+      ...structuredClone(initial),
+      remove_fillers: false,
+    });
+    render(<SttForm />);
+    const box = (await screen.findByTestId("stt-remove-fillers")).querySelector("input") as HTMLInputElement;
+
+    fireEvent.click(box);
+
+    await waitFor(() => expect(put).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(box.checked).toBe(false));
+    // The model is untouched: the toggle sends only its own field.
+    expect((screen.getByTestId("stt-model-tiny").querySelector("input") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("a rejected filler toggle keeps the previous value and shows the error", async () => {
+    vi.spyOn(api, "setSTTFillers").mockRejectedValue(new Error("could not save"));
+    render(<SttForm />);
+    const box = (await screen.findByTestId("stt-remove-fillers")).querySelector("input") as HTMLInputElement;
+
+    fireEvent.click(box);
+
+    expect(await screen.findByText("could not save")).toBeDefined();
+    expect(box.checked).toBe(true);
   });
 });

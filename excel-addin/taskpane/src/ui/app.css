@@ -1,0 +1,25 @@
+:root { --bg:#fff; --fg:#1b1b1f; --muted:#6b6b76; --line:#dcdce2; --accent:#1f3b73; --accent-fg:#fff; --user:#eef2fb; --tool:#f6f6f8; --bad:#a4262c; --ok:#107c10; }
+@media (prefers-color-scheme: dark) { :root { --bg:#1e1e22; --fg:#ececf1; --muted:#9a9aa6; --line:#34343c; --accent:#5b8def; --accent-fg:#0b1020; --user:#26304a; --tool:#27272d; --bad:#ff8b8b; --ok:#7fd67f; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+.app { display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header select { flex: 1; min-width: 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.on { background: var(--ok); }
+button, select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; }
+button { cursor: pointer; } button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.msgs { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.msg { padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+.msg.user { background: var(--user); align-self: flex-end; max-width: 92%; }
+.msg.tool { background: var(--tool); color: var(--muted); font-size: 12px; cursor: pointer; }
+.msg.tool pre { white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 4px 0 0; }
+.card { border: 1px solid var(--accent); border-radius: 6px; padding: 8px; }
+.card .row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.err { color: var(--bad); padding: 4px 8px; }
+.composer { border-top: 1px solid var(--line); padding: 8px; display: flex; gap: 6px; }
+.composer textarea { flex: 1; resize: none; height: 54px; }
+.changes { border-top: 1px solid var(--line); padding: 6px 8px; max-height: 120px; overflow: auto; font-size: 12px; }
+.changes li { display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+.fatal { padding: 12px; color: var(--bad); white-space: pre-wrap; }

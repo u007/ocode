@@ -105,7 +105,10 @@ func (h *Handler) decodeFSRequest(r *http.Request) (fsActionRequest, bool, strin
 	}
 	dir, valid := h.mutationProjectDir(r)
 	if !valid {
-		return req, false, "", false
+		// The JSON parsed; the PROJECT is what was refused. Return decoded=true
+		// so every caller reports "unknown project" instead of blaming the
+		// request body (which is what this used to do, hiding the real cause).
+		return req, true, "", false
 	}
 	return req, true, dir, true
 }

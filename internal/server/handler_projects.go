@@ -20,14 +20,10 @@ import (
 // HandleListProjects returns all saved project roots.
 func (h *Handler) HandleListProjects(w http.ResponseWriter, _ *http.Request) {
 	if h.projects == nil {
-		writeJSON(w, http.StatusOK, []projects.Project{})
+		writeJSON(w, http.StatusOK, []projectDTO{})
 		return
 	}
-	list := h.projects.List()
-	if list == nil {
-		list = []projects.Project{}
-	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, withWorktreeParents(h.projects.List()))
 }
 
 // HandleAddProject adds a new project root to the saved list.
@@ -54,10 +50,19 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
+	resp := map[string]string{"status": "ok"}
 	if body.Host != "" {
 		err = h.projects.AddRemote(body.Host, body.Path, body.Port)
 	} else {
 		err = h.projects.Add(body.Path)
+		// Echo the path Add stored. A client that registered "~/app" on this host
+		// cannot otherwise learn the expansion, and the Pulse assistant maps a
+		// saved "~" project to its host path with it.
+		if err == nil {
+			if stored, cerr := projects.CanonicalPath(body.Path); cerr == nil {
+				resp["path"] = stored
+			}
+		}
 	}
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -68,7 +73,7 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleDuplicateProjectAsRemote creates a NEW remote (SSH/WSL) project entry
@@ -204,7 +209,7 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	refs, err := session.ListRefsForDir(listPath)
+	refs, err := session.ListRefsWithClaudeForDir(listPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 		return

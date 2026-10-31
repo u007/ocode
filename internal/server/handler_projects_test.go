@@ -495,3 +495,27 @@ func TestDuplicateProjectAsRemoteRouteRegistered(t *testing.T) {
 		t.Fatalf("list length = %d, want 1 (route did not reach the handler)", got)
 	}
 }
+
+// HandleAddProject answers with the path it stored. A host that registered "~/x"
+// for a remote client reports the absolute path, which is the only way the client
+// learns where the project lives.
+func TestHandleAddProjectEchoesTheStoredPath(t *testing.T) {
+	h := testProjectHandler(t)
+	home := t.TempDir()
+	setHomeTree(t, home)
+
+	rr := postJSON(t, h, h.HandleAddProject, `{"path":"~/webapp"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Status string `json:"status"`
+		Path   string `json:"path"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "webapp"); got.Path != want || got.Status != "ok" {
+		t.Fatalf("response = %+v, want status ok and path %q", got, want)
+	}
+}

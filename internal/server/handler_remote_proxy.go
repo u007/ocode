@@ -355,6 +355,17 @@ func ensureRemoteProject(ctx context.Context, ws remoteHostWorkspace, reg *remot
 
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
 		// 200 = registered, 409 = already registered — both are success.
+		// A 200 carries the path the host stored, which is the only way to learn
+		// what a "~" project expanded to on that host. Hosts that predate the echo
+		// send no path, and then the expansion stays unknown (fail closed).
+		if resp.StatusCode == http.StatusOK && strings.HasPrefix(path, "~") {
+			var stored struct {
+				Path string `json:"path"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&stored) == nil && stored.Path != "" {
+				reg.recordExpandedPath(host, path, stored.Path)
+			}
+		}
 		// Mark the pair so subsequent requests skip the POST.
 		reg.markRegistered(host, port, path)
 		return nil

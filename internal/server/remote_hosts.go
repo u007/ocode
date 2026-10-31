@@ -136,6 +136,13 @@ type remoteHostRegistry struct {
 	// clears.
 	registeredPaths map[string]map[string]struct{}
 
+	// expandedPaths maps a saved "~" project path to the absolute path the host
+	// stored it as: host -> saved -> expanded. Only the host can expand "~" (its
+	// home is not ours), and it reports the result when the project is registered
+	// (ensureRemoteProject). Guarded by mu. Never cleared: the expansion depends
+	// on the host's home, not on the connection.
+	expandedPaths map[string]map[string]string
+
 	// connect is the injectable constructor used by workspaceFor. nil means
 	// use the real path (realConnect).
 	connect func(target remote.Target, path string) (remoteHostWorkspace, error)
@@ -456,6 +463,25 @@ func (reg *remoteHostRegistry) status(host string, port int) remoteHostStatus {
 	return st
 }
 
+// lastFailure returns the error the connection's most recent connect failed
+// with, or nil when it has no failed entry. A caller that started a connect
+// and got "connecting" back uses it to report the real cause once the
+// background attempt has failed.
+func (reg *remoteHostRegistry) lastFailure(host string, port int) error {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	e, ok := reg.byConn[remoteConnectionKey(host, port)]
+	if !ok {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.failed && !e.connected {
+		return e.connectErr
+	}
+	return nil
+}
+
 // connectHost brings host up (discover-or-start the remote server, open the
 // tunnel, register the project) and returns the resulting status. Named
 // connectHost, not connect, because the registry already has a connect field.
@@ -758,6 +784,30 @@ func (reg *remoteHostRegistry) closeAll(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// recordExpandedPath remembers the path a host stored a saved "~" project under.
+func (reg *remoteHostRegistry) recordExpandedPath(host, saved, expanded string) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if reg.expandedPaths == nil {
+		reg.expandedPaths = make(map[string]map[string]string)
+	}
+	paths := reg.expandedPaths[host]
+	if paths == nil {
+		paths = make(map[string]string)
+		reg.expandedPaths[host] = paths
+	}
+	paths[saved] = expanded
+}
+
+// expandedPath returns the path a host stored a saved "~" project under, and
+// false until this process has registered that project on the host.
+func (reg *remoteHostRegistry) expandedPath(host, saved string) (string, bool) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	expanded, ok := reg.expandedPaths[host][saved]
+	return expanded, ok
 }
 
 // markRegistered records that the given (host, path) has been registered on

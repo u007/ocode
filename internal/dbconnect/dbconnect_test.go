@@ -25,6 +25,44 @@ func TestParseMalformedURL(t *testing.T) {
 	}
 }
 
+func TestParseURLRefusesLocalFileParameters(t *testing.T) {
+	// A connection URL may come from a project's .env. These parameters make
+	// pgx read a service definition, a password file or TLS material from the
+	// server's filesystem, so they are refused rather than handed to pgx.
+	for _, raw := range []string{
+		"postgres://u:p@host/db?servicefile=/tmp/pg_service.conf",
+		"postgres://u:p@host/db?service=prod",
+		"postgres://u:p@host/db?passfile=/etc/passwd",
+		"postgres://u:p@host/db?PASSFILE=/etc/passwd",
+		// pgx also reads these from the local filesystem.
+		"postgres://u:p@host/db?sslkey=/tmp/client.key",
+		"postgres://u:p@host/db?sslcert=/tmp/client.crt",
+		"postgres://u:p@host/db?sslrootcert=/tmp/root.crt",
+		// The key is percent-decoded before the comparison, exactly as pgx does.
+		"postgres://u:p@host/db?pass%66ile=/etc/passwd",
+		// '#' is DATA to pgx and a fragment to net/url, so it must not be
+		// usable to hide the parameters above from this check.
+		"postgres://u:p@host/db?x=1#&passfile=/tmp/x",
+		"postgres://u:p@host/db?x=1#&service=s",
+		"postgres://u:p@host/db?x=1#&servicefile=/tmp/pg_service.conf",
+		"postgres://u:p@host/db#frag",
+	} {
+		if _, err := ParseURL(raw); err == nil {
+			t.Errorf("ParseURL(%q) = ok, want a refusal", raw)
+		}
+	}
+	for _, raw := range []string{
+		"postgres://u:p@host/db?sslmode=disable",
+		"postgres://u:p@host/db?connect_timeout=5&application_name=x",
+		// A parameter name that merely CONTAINS a refused one is fine.
+		"postgres://u:p@host/db?myservicefile=x",
+	} {
+		if _, err := ParseURL(raw); err != nil {
+			t.Errorf("ParseURL(%q) = %v, want ok", raw, err)
+		}
+	}
+}
+
 func TestHasServerSideEffect(t *testing.T) {
 	flagged := []string{
 		"SELECT pg_terminate_backend(1)",
