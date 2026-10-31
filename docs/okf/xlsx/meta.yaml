@@ -1,0 +1,43 @@
+stack: xlsx
+title: Excel workbooks for office/admin work (create and edit .xlsx / .xlsm / legacy .xls — formulas, lookups, summaries, charts, cleanup; Python, openpyxl-centric)
+corpus_rev: 1
+# Derivation + validation threshold for this stack (rubric-guide.md default is 0.75).
+threshold: 0.9
+# Version scope: openpyxl >= 3.1 (verified on 3.1.5), pandas 2+/3 (verified on 3.0.5), LibreOffice
+# headless for recalculation and legacy .xls conversion (verified on 24.2.7; its XLOOKUP/dynamic arrays
+# arrive in 24.8, so the probe asks for older-Excel-safe functions). Answers are graded on technique, not
+# on one library: an equivalent correct approach (XlsxWriter + a reader, raw zip+XML, LibreOffice UNO,
+# Open XML SDK) earns the point.
+version_scope: "openpyxl>=3.1"
+
+# Tag vocabulary — each tag is a subscore axis. The live probe (probe/) tags its tasks with the same
+# vocabulary (probe/summarize.py TAGS), so a closed-book subscore and a live subscore are comparable.
+tags:
+  - xlsx-model       # zip of XML parts, formula vs cached value, library capabilities, _xlfn. prefix
+  - formulas         # SUMIF(S)/COUNTIF(S), absolute refs, div-by-zero, blank handling, live vs pasted
+  - lookup           # VLOOKUP exact match, INDEX/MATCH, missing keys, text-vs-number keys
+  - dates-times      # serial dates, time fractions, hours worked, boundary compares, as-of dates
+  - charts           # pie vs bar choice, ranges (Total row), openpyxl chart steps, axes, placement
+  - summary          # pivot-style summaries, SUMIFS grids, top-N without dynamic arrays
+  - cleanup          # text numbers/dates, de-duplication, canonical names, CSV traps
+  - formatting       # header/freeze/filter, number formats, widths, conditional format, print setup
+  - preserve         # editing an existing workbook without losing charts/validation/names/merges
+  - verify-safety    # keep the original, recalculate, scan for errors, check chart refs, legacy formats
+
+# Universal: the skill gate does NOT use marker detection for this corpus (internal/skill
+# universalStacks + catalogOnlyStacks, same as pdf). A spreadsheet task usually has no .xlsx on disk yet:
+# "make today's attendance sheet", "track these expenses", a workbook attached from outside the repo,
+# or a workbook deeper than the glob limit. The marker gate would miss exactly those sessions.
+# `markers` below are INFORMATION ONLY: internal/stackdetect still reports `xlsx`, the skill gate ignores it.
+detection:
+  mode: universal
+  markers:
+    - { type: file, glob: "*.xlsx" }
+    - { type: file, glob: "*/*.xlsx" }
+    - { type: file, glob: "*/*/*.xlsx" }
+    - { type: file, glob: "*.xlsm" }
+    - { type: file, glob: "*/*.xlsm" }
+    - { type: file, glob: "*/*/*.xlsm" }
+    - { type: file, glob: "*.xls" }
+    - { type: file, glob: "*/*.xls" }
+    - { type: file, glob: "*/*/*.xls" }

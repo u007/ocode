@@ -1,0 +1,713 @@
+# Excel (.xlsx) office-clerk benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Grade technique, not library: an equivalent correct approach (XlsxWriter + a reader, raw zip+XML,
+# LibreOffice UNO, Open XML SDK) earns the point. Facts below were verified on openpyxl 3.1.5,
+# pandas 3.0.5 and LibreOffice 24.2.7 (2026-10-30); see probe/ for the live counterpart of each tag.
+
+# ---------------------------------------------------------------- xlsx-model
+
+- id: xlsx-model-01
+  difficulty: medium
+  weight: 3
+  tags: [xlsx-model, formulas]
+  question: >
+    A script writes `ws["B7"] = "=SUM(B1:B5)"` with openpyxl and saves. Another script then opens the
+    file with `load_workbook(path, data_only=True)` and reads B7. What does it get, why, and what
+    happens if that second script saves the workbook?
+  answer: >
+    It gets None. A .xlsx is a zip of XML parts; a formula cell stores the formula text (`<f>`) and a
+    separate cached result (`<v>`). openpyxl writes only the formula and never calculates, so there is
+    no cached value until Excel or LibreOffice opens, recalculates and saves the file. `data_only=True`
+    returns the cached values. If the second script saves a workbook loaded with data_only=True, the
+    formulas are replaced by the cached values (or None): the file is permanently flattened.
+  rubric:
+    - { point: "openpyxl writes formulas without cached values, so data_only read gives None (needs a recalculation by Excel/LibreOffice)", score: 1 }
+    - { point: "saving a data_only workbook replaces formulas with values / loses them", score: 1 }
+    - { partial: "says 'openpyxl cannot calculate formulas' without the data_only save consequence", score: 0.5 }
+
+- id: xlsx-model-02
+  difficulty: medium
+  weight: 3
+  tags: [xlsx-model, verify-safety]
+  question: >
+    Your task says "add a Total column using formulas". There is no Excel on the machine. How do you
+    produce the file AND prove the formulas calculate correctly, and why is computing the totals in
+    Python and writing the numbers not an acceptable shortcut?
+  answer: >
+    Write the formulas (openpyxl or XlsxWriter), save to a new file, then recalculate with a headless
+    LibreOffice (`soffice --headless --convert-to xlsx --outdir out file.xlsx`) and read the result with
+    `load_workbook(out, data_only=True)` to compare against independently computed expectations and to
+    scan for #REF!/#DIV/0!/#NAME?/#VALUE!/#N/A. Typed numbers do not update when tomorrow's rows are
+    added or an input changes, so they silently go stale; the request was for live formulas.
+  rubric:
+    - { point: "recalculate with LibreOffice headless (or equivalent) then read with data_only=True to verify values", score: 1 }
+    - { point: "scan the recalculated cells for error values", score: 0.5 }
+    - { point: "pasted/computed numbers go stale when inputs change; the task asked for formulas", score: 1 }
+    - { partial: "says 'open it in Excel to check' / 'trust the formula' without a way to verify here", score: 0.5 }
+
+- id: xlsx-model-03
+  difficulty: easy
+  weight: 2
+  tags: [xlsx-model]
+  question: >
+    Compare openpyxl, XlsxWriter and `pandas.DataFrame.to_excel` for a clerk's workbook task. Which of
+    them can edit an existing .xlsx, which can write formulas and charts, and which can create a real
+    PivotTable?
+  answer: >
+    openpyxl reads and edits existing files (with some losses), writes formulas and charts. XlsxWriter
+    only creates new files (cannot read or modify), writes formulas (optionally with a cached value),
+    rich formatting and charts. `to_excel` writes values only (no formulas) via openpyxl or XlsxWriter.
+    None of them can create a PivotTable: openpyxl only preserves existing pivots, XlsxWriter has no
+    pivot support; a real PivotTable needs Excel, LibreOffice UNO (DataPilot) or hand-written XML.
+  rubric:
+    - { point: "only openpyxl edits existing files; XlsxWriter is write-new-only", score: 1 }
+    - { point: "to_excel writes values, not formulas", score: 0.5 }
+    - { point: "no library here creates real PivotTables", score: 1 }
+
+- id: xlsx-model-04
+  difficulty: hard
+  weight: 3
+  tags: [xlsx-model, formulas, lookup]
+  question: >
+    With openpyxl you write `=IFNA(VLOOKUP(A2,Customers!A:B,2,FALSE),"UNKNOWN")`, and a colleague
+    writes `=MAXIFS(D:D,B:B,"Travel")` and `=CONCAT(A2,B2)`. In the recalculated file two of the three
+    show #NAME? or the raw error. What went wrong, how do you fix it, and what else limits which
+    functions you should use?
+  answer: >
+    Functions added after the original spreadsheet specification (IFNA, MAXIFS, CONCAT, TEXTJOIN, IFS,
+    XLOOKUP, FILTER, SORT, UNIQUE ...) must be written with the `_xlfn.` prefix in the file
+    (`=_xlfn.IFNA(...)`); the bare name is not recognised and shows #NAME? (verified: IFNA, CONCAT,
+    TEXTJOIN, IFS and MAXIFS all fail bare and work prefixed). Formulas are stored in English function
+    names with comma separators regardless of the UI language. Dynamic-array functions additionally
+    need array-formula handling. Compatibility also limits the choice: XLOOKUP needs Excel 2021/365 and
+    LibreOffice >= 24.8, so for "older Excel" use VLOOKUP/INDEX-MATCH/SUMIFS/SUMPRODUCT, or the older
+    IFERROR.
+  rubric:
+    - { point: "newer functions need the _xlfn. prefix when written by a library; bare names give #NAME?", score: 1 }
+    - { point: "XLOOKUP / dynamic arrays are not available in older Excel / older LibreOffice; use VLOOKUP, INDEX-MATCH, SUMPRODUCT", score: 1 }
+    - { point: "file formulas use English names and comma separators regardless of locale", score: 0.5 }
+
+# ------------------------------------------------------------------- formulas
+
+- id: xlsx-formulas-01
+  difficulty: easy
+  weight: 3
+  tags: [formulas, summary]
+  question: >
+    State the argument order of SUMIF and of SUMIFS, and write the formula that totals Ledger!D by
+    category (Ledger!B) for the category named in A2 on one specific date in B1 (Ledger!A).
+  answer: >
+    SUMIF(range, criteria, [sum_range]) has the sum range LAST; SUMIFS(sum_range, criteria_range1,
+    criteria1, criteria_range2, criteria2, ...) has the sum range FIRST. Example:
+    `=SUMIFS(Ledger!$D$2:$D$24, Ledger!$B$2:$B$24, A2, Ledger!$A$2:$A$24, $B$1)`. All ranges must be
+    the same size. Using SUMIF's order inside SUMIFS silently sums the wrong column.
+  rubric:
+    - { point: "SUMIF: sum_range last; SUMIFS: sum_range first", score: 1 }
+    - { point: "a correct two-criteria SUMIFS with absolute ranges and equal-sized ranges", score: 1 }
+
+- id: xlsx-formulas-02
+  difficulty: medium
+  weight: 2
+  tags: [formulas]
+  question: >
+    You fill a formula down 12 rows and across 3 month columns. When do you need `$A2`, `B$1`,
+    `$B$1`? And how do you reference a cell on a sheet named "Stock Count" or "Daily Report"?
+  answer: >
+    `$` locks what follows: `$A2` locks the column (copy across keeps A, down moves the row), `B$1`
+    locks the row (a month header), `$B$1` locks both (a single input such as a report date or
+    threshold). Sheet names with spaces or punctuation need single quotes: `'Stock Count'!C2`;
+    names without spaces work bare (`Settings!$B$1`). Unquoted spaced names produce a formula error.
+  rubric:
+    - { point: "mixed references: $A2 locks column, B$1 locks row, $B$1 both; input cells absolute", score: 1 }
+    - { point: "sheet names with spaces need single quotes", score: 1 }
+
+- id: xlsx-formulas-03
+  difficulty: medium
+  weight: 3
+  tags: [formulas]
+  question: >
+    A stock-audit sheet computes Variance % as `=(Counted-System)/System` and some rows have System
+    Qty = 0. What happens, what should the cell show, and why is wrapping everything in IFERROR(...,0)
+    a poor fix?
+  answer: >
+    Division by zero gives #DIV/0!, which then breaks any SUM/AVERAGE that includes the column. Guard
+    explicitly: `=IF(C2=0,"n/a",F2/C2)` (the business rule decides what to show: n/a, blank or 0), and
+    decide separately whether "system 0 but counted > 0" must still be flagged. A blanket IFERROR also
+    hides unrelated real errors (#REF!, #NAME?, a bad lookup) and shows a plausible-looking 0 that is
+    wrong.
+  rubric:
+    - { point: "#DIV/0! propagates; guard the zero denominator with IF(denom=0, ...)", score: 1 }
+    - { point: "IFERROR(...,0) masks real errors and invents a misleading 0; zero-system rows still need a rule", score: 1 }
+
+- id: xlsx-formulas-04
+  difficulty: hard
+  weight: 3
+  tags: [formulas, dates-times]
+  question: >
+    An attendance sheet has Check-in times. Status is `=IF(C2>Settings!B1,"Late","OK")` and
+    Settings!B1 is 09:00. An employee who never punched in (C2 empty) shows as OK. Why, and what is the
+    correct precedence of checks for Absent / Late / No check-out / OK?
+  answer: >
+    An empty cell evaluates as 0 (00:00) in a comparison, so `0 > 0.375` is FALSE and the absent
+    person falls through to "OK" (verified: a blank compares as before 09:00). Test for blank first:
+    `=IF(C2="","Absent",IF(C2>Settings!$B$1,"Late",IF(D2="","No check-out","OK")))`. Order matters:
+    Absent (no check-in) before Late (a late person with no check-out is Late), then No check-out. A
+    punch exactly at 09:00 is not late (strictly greater). The threshold belongs in a Settings cell,
+    not typed into the formula.
+  rubric:
+    - { point: "empty cell compares as 0/00:00, so blank must be tested first (Absent) or it reads as on time", score: 1 }
+    - { point: "precedence Absent > Late > No check-out > OK, boundary 09:00 not late", score: 1 }
+    - { point: "shift start read from a Settings cell, not hard-coded", score: 0.5 }
+
+- id: xlsx-formulas-05
+  difficulty: medium
+  weight: 2
+  tags: [formulas, verify-safety]
+  question: >
+    A daily report must show "Total spent" for the date in cell B1. Give two designs: one that is
+    wrong and one that is right, and say how you would test that the right one is really live.
+  answer: >
+    Wrong: type the total, or hard-code the date inside the formula, or build it with TODAY() (the
+    result changes every time it is opened and cannot be reproduced for an earlier day). Right:
+    `=SUMIFS(Ledger!$D:$D,Ledger!$A:$A,$B$1)` with the date as an input cell. Test liveness by changing
+    the input (B1 to another date, or a ledger amount) in a copy, recalculating and checking that the
+    result moves to the independently computed value.
+  rubric:
+    - { point: "date as an input cell, not hard-coded; TODAY() makes the report non-reproducible", score: 1 }
+    - { point: "test by editing an input in a copy and recalculating", score: 1 }
+
+- id: xlsx-formulas-06
+  difficulty: medium
+  weight: 2
+  tags: [formulas, preserve]
+  question: >
+    A log has a Total row directly under the last entry: `=SUM(D4:D9)` in D10. Tomorrow a clerk
+    inserts a row at row 10, above Total. What happens to the formula in Excel, what happens if a
+    script does `ws.insert_rows(10)` with openpyxl, and how should the layout be designed to avoid it?
+  answer: >
+    In Excel an insert at the boundary (below the last row of the range) does NOT extend the SUM, so
+    the new row is missed unless the range is edited. openpyxl `insert_rows` moves cells but does not
+    rewrite any formula, so the moved Total still says `=SUM(D4:D9)` (verified); the script must set
+    `=SUM(D4:D10)` itself. Better layouts: sum a range that includes a spacer row, use a Table with a
+    totals row, or put totals above the data.
+  rubric:
+    - { point: "inserting at the end of a SUM range does not extend it; openpyxl insert_rows never rewrites formulas", score: 1 }
+    - { point: "fix the formula range explicitly / design with table or total above", score: 1 }
+
+# --------------------------------------------------------------------- lookup
+
+- id: xlsx-lookup-01
+  difficulty: easy
+  weight: 3
+  tags: [lookup]
+  question: >
+    Write the formula that pulls an employee's name from Roster!A:C (EmpID, Name, Dept) for the ID in
+    B2. What does the fourth argument of VLOOKUP do, and what goes wrong if it is omitted? Give the
+    INDEX/MATCH equivalent and one reason to prefer it.
+  answer: >
+    `=VLOOKUP(B2,Roster!$A$2:$C$13,2,FALSE)`. The fourth argument chooses exact match (FALSE/0); omitted
+    or TRUE means approximate match on a sorted first column, which returns a wrong neighbouring row
+    for unsorted IDs. `=INDEX(Roster!$B$2:$B$13,MATCH(B2,Roster!$A$2:$A$13,0))`; it does not depend on a
+    column number that breaks when a column is inserted, and can look left.
+  rubric:
+    - { point: "VLOOKUP(key, absolute range, col, FALSE) and the 4th argument = exact match; omitted = approximate, wrong results", score: 1 }
+    - { point: "INDEX/MATCH with match_type 0 and a valid reason (column insertion, lookup left)", score: 1 }
+
+- id: xlsx-lookup-02
+  difficulty: medium
+  weight: 2
+  tags: [lookup, formulas]
+  question: >
+    For an orders list, customers missing from the Customers sheet must show "UNKNOWN" and still not
+    produce errors in the Due Date and Days Overdue columns that depend on them. How do you build the
+    chain, and what is the difference between IFERROR and IFNA here?
+  answer: >
+    Customer: `=IFERROR(VLOOKUP(C2,Customers!$A$2:$C$6,2,FALSE),"UNKNOWN")`. Dependent columns must
+    test the failure case instead of inheriting #N/A: `Due Date =IFERROR(B2+VLOOKUP(...,3,FALSE),"")`,
+    `Days Overdue =IF(F2="",0,MAX(0,Settings!$B$1-F2))`, Status picks "Check customer" when the due date
+    is blank. IFNA catches only #N/A (a missing key) and lets other errors surface, so it is more
+    precise; IFERROR catches everything. IFNA needs the `_xlfn.` prefix when written by a library.
+  rubric:
+    - { point: "downstream columns handle the blank/unknown case rather than propagating #N/A", score: 1 }
+    - { point: "IFNA only #N/A vs IFERROR all errors (and IFNA needs _xlfn. via openpyxl)", score: 1 }
+
+- id: xlsx-lookup-03
+  difficulty: medium
+  weight: 2
+  tags: [lookup, dates-times]
+  question: >
+    VLOOKUP returns #N/A for an ID that visibly exists in both sheets ("007" in one, 7 in the other,
+    or "C001 " with a trailing space). Why, and how do you diagnose and fix it?
+  answer: >
+    Lookups compare type and exact content: the text "007" is not the number 7, and "C001 " is not
+    "C001". Diagnose with ISNUMBER/ISTEXT, LEN, or `=A2=B2`. Fix the data once at the source (convert
+    both to text or both to numbers, TRIM, replace non-breaking spaces CHAR(160)) rather than patching
+    each formula; with pandas read ID columns as `dtype=str` so leading zeros survive.
+  rubric:
+    - { point: "text vs number and stray/non-breaking spaces make keys unequal; diagnose with ISNUMBER/LEN", score: 1 }
+    - { point: "normalise the keys at the source (TRIM, consistent type, dtype=str)", score: 1 }
+
+# ---------------------------------------------------------------- dates-times
+
+- id: xlsx-dates-01
+  difficulty: medium
+  weight: 3
+  tags: [dates-times, xlsx-model]
+  question: >
+    How does Excel store a date and a time of day? A script writes the string "2026-10-28" into a
+    cell; what breaks later (SUMIFS by date, sorting, subtracting) and how do you write a proper date
+    with openpyxl? Why might a date column show 46323?
+  answer: >
+    A date is a serial number of days (1900 system; with Python the epoch is 1899-12-30, so 2026-10-28
+    is 46323) and a time is a fraction of a day (09:00 = 0.375). The display is only a number format.
+    A string "2026-10-28" is text: criteria matches, sorting and date arithmetic fail. Write a
+    `datetime.date`/`datetime` object (openpyxl converts it) and set `cell.number_format =
+    "yyyy-mm-dd"`. A column shows 46323 when the cell holds the serial but its format is General.
+  rubric:
+    - { point: "date = serial days, time = fraction of day; display is just a number format", score: 1 }
+    - { point: "text dates break criteria/sorting/arithmetic; write real date objects and set number_format", score: 1 }
+
+- id: xlsx-dates-02
+  difficulty: medium
+  weight: 2
+  tags: [dates-times, formulas]
+  question: >
+    Compute hours worked from Check-in and Check-out in two decimals, blank when a punch is missing.
+    What changes for a night shift 22:00 to 06:00?
+  answer: >
+    `=IF(OR(C2="",D2=""),"",ROUND((D2-C2)*24,2))` (times are fractions of a day, so multiply by 24).
+    For overnight shifts out < in gives a negative number; use `MOD(D2-C2,1)*24` (or add 1 when
+    D2<C2). Format the result as a number, not a time, or Excel shows 08:39 instead of 8.65.
+  rubric:
+    - { point: "(out - in) * 24 with ROUND and a blank guard", score: 1 }
+    - { point: "overnight: MOD(out-in,1) / add 1 day; format as number", score: 1 }
+
+- id: xlsx-dates-03
+  difficulty: hard
+  weight: 2
+  tags: [dates-times, formulas]
+  question: >
+    Late is defined as "check-in after 09:00". A clerk types the cutoff into formulas as 0.375 in one
+    place and `TIME(9,0,0)` in another and sees one employee flagged only sometimes. What causes
+    boundary surprises with times and decimals, and how do you make the comparison robust?
+  answer: >
+    Times and money are binary floating-point numbers; values computed through different routes (a
+    typed 0.375, TIME(9,0,0), (9*60)/1440, a time imported with seconds) may differ in the last digits
+    or by seconds, so a punch "at 09:00" can compare as slightly greater. Use one cutoff cell for the
+    whole workbook, store punches as clean times, and when values come from arithmetic round before
+    comparing (`ROUND(C2*1440,0)>ROUND(Settings!B1*1440,0)` to compare whole minutes). Likewise round
+    money with ROUND(x,2), not just a display format.
+  rubric:
+    - { point: "floating-point / seconds differences make exact boundary compares unstable", score: 1 }
+    - { point: "single cutoff cell and compare rounded values (whole minutes); ROUND money, not only format", score: 1 }
+
+- id: xlsx-dates-04
+  difficulty: medium
+  weight: 2
+  tags: [dates-times, formulas]
+  question: >
+    Orders have an Order Date and a customer payment term in days. Give the Due Date and Days Overdue
+    formulas, define precisely when an order is overdue, and explain why the "as of" date should not be
+    TODAY().
+  answer: >
+    `Due = OrderDate + Terms`. `Days Overdue = MAX(0, AsOf - Due)`. Overdue means strictly after the due
+    date, so an order due exactly on the as-of date has 0 days and is not overdue. TODAY() is volatile:
+    the sheet changes each time it is opened, a report for last Friday cannot be reproduced, and
+    checks/tests cannot pin it. Put the as-of date in an input cell (default `=TODAY()` only if the
+    user wants a live board) so the same inputs always give the same output.
+  rubric:
+    - { point: "Due = date + terms; Days Overdue = MAX(0, asof - due) with strict boundary", score: 1 }
+    - { point: "TODAY() volatile / not reproducible; use an as-of input cell", score: 1 }
+
+# --------------------------------------------------------------------- charts
+
+- id: xlsx-charts-01
+  difficulty: easy
+  weight: 2
+  tags: [charts]
+  question: >
+    Which chart for each: share of the day's expenses by category; budget vs actual per category;
+    attendance rate per day over a month; the 10 reps' ranking? Name one case where a pie chart is the
+    wrong choice.
+  answer: >
+    Share of a whole: pie (or a 100%/ranked bar if more than ~6 categories). Budget vs actual per
+    category: clustered column/bar with two series. Rate over time: line (or column). Ranking: sorted
+    horizontal bar. Pie is wrong for more than ~6 slices, tiny differences, values that do not sum to a
+    meaningful whole (rates per department), negatives, or comparing two series.
+  rubric:
+    - { point: "pie for parts of a whole; clustered bar/column for comparison; line for trend", score: 1 }
+    - { point: "a valid reason pie is wrong (many slices, not a whole, negatives, comparing series)", score: 1 }
+
+- id: xlsx-charts-02
+  difficulty: medium
+  weight: 3
+  tags: [charts, summary]
+  question: >
+    Your Summary sheet has the header in row 1, six category rows in 2-7 and a Total row in row 8. You
+    build a pie chart with `Reference(ws, min_col=2, min_row=2, max_row=8)`. What does the chart look
+    like, what is the right range, and what about a category with 0 spend?
+  answer: >
+    The Total row is included as a slice equal to the sum of all the others, so it takes 50% and every
+    real percentage is halved. Use rows 2-7 for values and A2:A7 for labels (exclude header and Total).
+    A zero value draws no visible slice but still appears in the legend; filter it out (or chart only
+    categories with spend) if that clutters, and never chart negative values in a pie.
+  rubric:
+    - { point: "Total row becomes a 50% slice; exclude Total (and header) from values and labels", score: 1 }
+    - { point: "zero slices invisible but listed; negatives invalid in a pie", score: 0.5 }
+
+- id: xlsx-charts-03
+  difficulty: medium
+  weight: 3
+  tags: [charts]
+  question: >
+    Write the openpyxl steps for a clustered column chart of Spent vs Budget (columns B and C, header
+    in row 1, categories A2:A7) with a title, axis titles and legend, placed so it does not cover the
+    table. Name two things that commonly go wrong in the rendered file.
+  answer: >
+    `ch = BarChart(); ch.type="col"; ch.grouping="clustered"; data = Reference(ws,min_col=2,max_col=3,
+    min_row=1,max_row=7); ch.add_data(data, titles_from_data=True); ch.set_categories(Reference(ws,
+    min_col=1,min_row=2,max_row=7)); ch.title=...; ch.x_axis.title=...; ch.y_axis.title=...;
+    ws.add_chart(ch,"H2")` (anchor right of the used range). Common problems: titles_from_data=False
+    or a header row inside the data range makes the first row a data point; a stacked grouping; axes
+    missing because openpyxl 3.1 writes no `c:delete val=0`, fixed with `ch.x_axis.delete = False`
+    and `ch.y_axis.delete = False`; the chart anchored over the data; wrong category ref.
+  rubric:
+    - { point: "Reference with header row + titles_from_data=True, set_categories on the label range, add_chart at an anchor clear of the data", score: 1 }
+    - { point: "axes may not render unless delete=False is set explicitly (openpyxl 3.1)", score: 1 }
+    - { point: "another valid pitfall (stacked grouping, header counted as data, wrong category range)", score: 0.5 }
+
+# -------------------------------------------------------------------- summary
+
+- id: xlsx-summary-01
+  difficulty: medium
+  weight: 3
+  tags: [summary]
+  question: >
+    The boss asks for a Region x Month pivot of the Data sheet. Can you create a PivotTable with
+    openpyxl? What are your options, and what must you tell the user about each?
+  answer: >
+    openpyxl cannot create PivotTables (it only preserves existing ones). Options: (1) a SUMIFS grid
+    with regions down, months across and total row/column — live, works in every Excel/LibreOffice,
+    but it is not a PivotTable (no drilldown or field list); (2) compute with pandas.pivot_table and
+    write the values — static, will not follow data changes; (3) a real PivotTable via LibreOffice
+    UNO DataPilot or hand-built pivotCache XML — heavy; or give instructions for creating it in
+    Excel. Whatever is chosen, say plainly which one it is and whether it updates.
+  rubric:
+    - { point: "openpyxl cannot create a PivotTable; offers SUMIFS grid and/or pandas pivot as alternatives", score: 1 }
+    - { point: "states the trade-off: formula grid is live, pandas values are static, neither is a real pivot", score: 1 }
+
+- id: xlsx-summary-02
+  difficulty: medium
+  weight: 2
+  tags: [summary, formulas]
+  question: >
+    Give the formula for the top-left body cell of a Region (rows, column A) x Month (columns, row 1)
+    grid over Data!C:C (Region), Data!B:B (Month text), Data!F:F (Amount) that can be copied across and
+    down, and the row/column/grand total formulas.
+  answer: >
+    `=SUMIFS(Data!$F$2:$F$73,Data!$C$2:$C$73,$A2,Data!$B$2:$B$73,B$1)` — `$A2` locks the region
+    column, `B$1` locks the month row. Row total `=SUM(B2:D2)`, column total `=SUM(B2:B5)`, grand
+    total `=SUM(E2:E5)` (or SUM of the row totals); avoid summing the Total row into itself.
+  rubric:
+    - { point: "SUMIFS with sum_range first and mixed references $A2 / B$1", score: 1 }
+    - { point: "totals by SUM of the body only (no circular or double counting)", score: 0.5 }
+
+- id: xlsx-summary-03
+  difficulty: hard
+  weight: 2
+  tags: [summary, formulas]
+  question: >
+    Show the three best reps by total sales without FILTER/SORT/UNIQUE (older Excel must work). What
+    problem do ties cause, and which parts can be formulas?
+  answer: >
+    Keep a helper list of reps with `=SUMIF(Data!D:D, rep, Data!F:F)`; then `LARGE(totals, k)` for the
+    k-th total and `INDEX(reps, MATCH(LARGE(...), totals, 0))` for the name, or `RANK`. Ties return the
+    same rep twice with MATCH; break ties with a tiny helper (total + ROW()/1e9) or COUNTIF. At least
+    the totals must be formulas so the ranking follows the data; if the order itself is typed, say it
+    must be refreshed.
+  rubric:
+    - { point: "LARGE + INDEX/MATCH (or RANK) on SUMIF totals", score: 1 }
+    - { point: "ties handled or acknowledged; totals live", score: 1 }
+
+# -------------------------------------------------------------------- cleanup
+
+- id: xlsx-cleanup-01
+  difficulty: medium
+  weight: 3
+  tags: [cleanup, dates-times]
+  question: >
+    An export has Amount values like "1200.50", " 75 " and "RM 45.00" stored as text, and dates like
+    "2026-10-01" and "01 Oct 2026" as text. How do you detect and convert them, and what invisible
+    characters do you watch for?
+  answer: >
+    Detect: openpyxl `cell.data_type == "s"`, ISNUMBER/ISTEXT, or pandas `dtype == object`. Convert:
+    strip whitespace (including non-breaking space \xa0 and zero-width characters), remove currency
+    symbols and thousands separators, then `float()`/`pd.to_numeric`; parse dates with explicit
+    formats (`pd.to_datetime(..., format=...)` per style, never guess day/month order on ambiguous
+    "02/03/2026") and write date objects with a date number_format. Check for failures instead of
+    letting them become NaN silently.
+  rubric:
+    - { point: "detect text-numbers/dates and convert to real numbers/date objects with a number_format", score: 1 }
+    - { point: "handle whitespace/nbsp/currency symbols; explicit date formats, report unparseable values", score: 1 }
+
+- id: xlsx-cleanup-02
+  difficulty: medium
+  weight: 3
+  tags: [cleanup]
+  question: >
+    You must remove duplicate entries from a messy sheet and keep the original untouched. In what order
+    do you normalise and de-duplicate, which rows survive, and why is hiding the duplicate rows not
+    acceptable?
+  answer: >
+    Normalise first (trim, collapse inner spaces, casing, canonical dept names, real dates and numbers),
+    then de-duplicate on the normalised key (`drop_duplicates(keep="first")`) so " alice tan " and
+    "Alice Tan" collapse. Drop empty rows. Write to a new sheet/file and leave the Raw sheet as it was.
+    Hidden rows are still in the file: they are counted by SUM/COUNT formulas, pivots, filters and
+    copy/paste, and anyone unhides them; the task was to remove them.
+  rubric:
+    - { point: "normalise before de-duplicating; keep first; drop blank rows", score: 1 }
+    - { point: "write to a separate sheet/file, original untouched", score: 0.5 }
+    - { point: "hidden rows remain in formulas/pivots and are recoverable, so are not removal", score: 1 }
+
+- id: xlsx-cleanup-03
+  difficulty: medium
+  weight: 2
+  tags: [cleanup]
+  question: >
+    Names arrive as "ben lim", "BEN LIM" and "Daniel  Wong"; departments as "ops", " Ops", "HR", "hr".
+    Why is `str.title()` alone wrong, and how do you normalise them?
+  answer: >
+    `title()` turns "hr" into "Hr", breaks acronyms and names like "McDonald" or "O'Neil", and does not
+    collapse double spaces. Collapse whitespace (`" ".join(s.split())`) for names and map departments
+    through a canonical list case-insensitively (`{"hr":"HR","ops":"Ops",...}`); flag values not in the
+    list instead of guessing.
+  rubric:
+    - { point: "title() breaks acronyms (HR) and some surnames; collapse inner spaces", score: 1 }
+    - { point: "canonical lookup list, case-insensitive; surface unknown values", score: 1 }
+
+- id: xlsx-cleanup-04
+  difficulty: easy
+  weight: 2
+  tags: [cleanup, xlsx-model]
+  question: >
+    A CSV of employees has IDs like 007 and 010, phone numbers and a UTF-8 BOM. You load it with
+    `pd.read_csv` and save to xlsx. What gets damaged and how do you prevent it?
+  answer: >
+    Default type inference turns 007 into the integer 7 (and drops the leading zeros), long numbers can
+    become floats/scientific notation, and a BOM can corrupt the first header name (`﻿ID`). Read
+    with `dtype=str` for identifier columns (verified: "007" stays "007"), `encoding="utf-8-sig"`, and
+    set the cell number_format "@" or keep strings so Excel does not convert them back. A CSV carries
+    no formulas or formatting.
+  rubric:
+    - { point: "leading zeros / long ids lost by type inference; use dtype=str", score: 1 }
+    - { point: "encoding utf-8-sig for BOM; text format for ids", score: 0.5 }
+
+# ----------------------------------------------------------------- formatting
+
+- id: xlsx-formatting-01
+  difficulty: medium
+  weight: 2
+  tags: [formatting]
+  question: >
+    Make a ledger presentable with openpyxl: header style, frozen header, filter buttons, date and
+    money formats, and column widths. Name what openpyxl cannot do automatically here, and how percent
+    values must be stored.
+  answer: >
+    Header cells: bold font and solid fill; `ws.freeze_panes = "A2"`; `ws.auto_filter.ref =
+    "A1:F24"`; per-cell `number_format` ("yyyy-mm-dd", "#,##0.00", "0.0%") without changing the value;
+    widths by `ws.column_dimensions["B"].width = max(len(text))+2`. openpyxl has no autofit — you
+    compute the widths. A percentage is stored as a fraction (0.25) with a "0%" format; writing 25 or
+    the string "25%" gives wrong maths or text.
+  rubric:
+    - { point: "freeze_panes, auto_filter.ref, number_format per column, header font/fill", score: 1 }
+    - { point: "no autofit: compute column widths; percent stored as fraction with % format", score: 1 }
+
+- id: xlsx-formatting-02
+  difficulty: medium
+  weight: 2
+  tags: [formatting, formulas]
+  question: >
+    Rows flagged "Investigate" must turn red and stay correct when tomorrow's numbers are pasted in.
+    How do you do it, and why is filling the cells red in Python wrong?
+  answer: >
+    Add conditional formatting with a formula rule over the whole data range, e.g.
+    `FormulaRule(formula=['$I2="Investigate"'], fill=red)` on `A2:I17` (relative row, locked column).
+    A static fill applied by the script marks only today's rows; when the flag changes the colour stays,
+    and stale highlights mislead the reader.
+  rubric:
+    - { point: "conditional-format formula rule over the data range with the right mixed reference", score: 1 }
+    - { point: "static fills do not update when the data changes", score: 1 }
+
+# ------------------------------------------------------------------- preserve
+
+- id: xlsx-preserve-01
+  difficulty: hard
+  weight: 3
+  tags: [preserve, verify-safety]
+  question: >
+    You must add one row to a workbook that a colleague built over the years (charts, dropdowns,
+    highlighting, named ranges, maybe macros). You plan `load_workbook` → edit → `save`. What can
+    be lost or altered, and how do you protect the colleague's work?
+  answer: >
+    openpyxl does not model everything: shapes/text boxes, form controls, slicers and some chart
+    formatting can be dropped or altered; VBA is lost unless `keep_vba=True` (and the file is saved as
+    .xlsm); images need Pillow installed; external links and some pivot features may degrade; cached
+    values are removed so other readers show blanks until recalculated. Protect it by working on a
+    copy, diffing before/after (list the zip parts, chart/drawing counts, data validations,
+    conditional formats, defined names, merged ranges), re-opening the output, and telling the user
+    what could not be preserved. If the workbook is too complex for openpyxl, edit the XML directly
+    or let LibreOffice do the edit.
+  rubric:
+    - { point: "names concrete losses (shapes/controls, VBA needs keep_vba, images need Pillow, cached values)", score: 1 }
+    - { point: "work on a copy and diff parts/features before and after", score: 1 }
+    - { point: "fallback: edit XML directly / LibreOffice, and report what cannot be preserved", score: 0.5 }
+
+- id: xlsx-preserve-02
+  difficulty: hard
+  weight: 3
+  tags: [preserve, formulas, charts]
+  question: >
+    With openpyxl you call `ws.insert_rows(10)` to add an entry above the Total row. List everything
+    that is NOT updated automatically and must be fixed by hand.
+  answer: >
+    insert_rows moves cell values and styles only. Not adjusted: formulas anywhere (the Total's
+    SUM range, formulas on other sheets pointing into this one), chart series references, defined
+    names, conditional-format and data-validation ranges, merged cells, print areas/titles, auto-filter
+    ref, hyperlinks and row heights. Fix the Total formula, extend chart series refs, repoint defined
+    names (e.g. LogTotal -> the new Total cell), check that validation and highlight ranges cover the
+    new row, and re-verify merged ranges.
+  rubric:
+    - { point: "formulas (including the Total) and chart references are not rewritten", score: 1 }
+    - { point: "defined names, conditional formatting/data validation ranges, merged cells not shifted", score: 1 }
+    - { point: "describes fixing them explicitly and checking the result", score: 0.5 }
+
+# -------------------------------------------------------------- verify-safety
+
+- id: xlsx-verify-01
+  difficulty: easy
+  weight: 3
+  tags: [verify-safety]
+  question: >
+    You are asked to "add a Summary sheet to budget.xlsx". Where do you save the result, what do you
+    check afterwards, and what do you tell the user?
+  answer: >
+    Save to a new file name (or the name the user gave) and leave budget.xlsx byte-identical; never
+    overwrite the only copy. Re-open the output, confirm every original sheet and value is unchanged,
+    the new sheet exists with the requested columns/rows, recalculate and confirm no error values and
+    that numbers match an independent calculation. Report what was done, where the file is, and any
+    limitation (e.g. "formulas, not a PivotTable").
+  rubric:
+    - { point: "save as a new file, original untouched", score: 1 }
+    - { point: "re-open, compare originals, recalculate, check errors and values", score: 1 }
+    - { point: "report limitations honestly", score: 0.5 }
+
+- id: xlsx-verify-02
+  difficulty: medium
+  weight: 2
+  tags: [verify-safety, charts]
+  question: >
+    How do you check a chart you generated without opening Excel, and which structural mistakes can
+    you detect that way?
+  answer: >
+    Inspect the saved package: xl/charts/chartN.xml gives the chart type, grouping, each series'
+    category and value references (`c:cat//c:f`, `c:val//c:f`), title, data labels and whether the axes
+    are deleted; the drawing part gives the anchor cell. That catches a Total row in the range, the
+    wrong column, a stacked chart, missing titles/labels and a chart sitting on the data. Render with
+    LibreOffice (`soffice --headless --convert-to pdf`) for an eyeball check.
+  rubric:
+    - { point: "read chart XML / series refs and anchor from the saved file", score: 1 }
+    - { point: "render via LibreOffice to PDF/PNG for a visual check", score: 0.5 }
+
+- id: xlsx-verify-03
+  difficulty: medium
+  weight: 2
+  tags: [verify-safety, xlsx-model]
+  question: >
+    The user hands you `old_report.xls`, `quarterly.xlsm` and `export.csv` and wants edits. What do you
+    do differently for each, and what must you warn about?
+  answer: >
+    `.xls` (binary): openpyxl cannot read it; convert with LibreOffice
+    (`soffice --headless --convert-to xlsx`) and say the format changed (or convert back at the end if
+    .xls must be kept). `.xlsm`: load with `keep_vba=True` and save as .xlsm, or the macros are
+    dropped; do not run or modify the macros. `.csv`: plain text — no formulas, formats, sheets or
+    charts; write results to a new .xlsx and keep the CSV unchanged, mind encoding and leading zeros.
+  rubric:
+    - { point: ".xls needs conversion (LibreOffice/xlrd path) and the format change is reported", score: 1 }
+    - { point: ".xlsm needs keep_vba=True and the .xlsm extension", score: 1 }
+    - { point: "csv has no formulas/formatting; output to a new xlsx", score: 0.5 }
+
+# ------------------------------------------------------- added: print / lists / merges / append
+
+- id: xlsx-formatting-03
+  difficulty: easy
+  weight: 1
+  tags: [formatting]
+  question: >
+    A 6-column ledger prints across two pages with the header only on page 1. Which print settings fix
+    that in openpyxl, and what does "fit to one page wide" need besides the width value?
+  answer: >
+    `ws.print_title_rows = "1:1"` repeats row 1 on every page; `ws.page_setup.orientation =
+    "landscape"`; fit-to-width needs the sheet property switched on as well:
+    `ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)` together with
+    `ws.page_setup.fitToWidth = 1` and `fitToHeight = 0` (any number of pages tall). Setting only
+    fitToWidth without fitToPage has no effect. `ws.print_area` limits what prints.
+  rubric:
+    - { point: "print_title_rows repeats the header; orientation landscape", score: 1 }
+    - { point: "fit to width needs fitToPage=True plus fitToWidth=1 (fitToHeight=0)", score: 1 }
+
+- id: xlsx-formatting-04
+  difficulty: medium
+  weight: 2
+  tags: [formatting, preserve]
+  question: >
+    Add a Category dropdown (Travel, Meals, Supplies, Misc) to a Log sheet with openpyxl so that new
+    rows entered later also get it. How, what limits the inline list, and what does validation not
+    protect against?
+  answer: >
+    `dv = DataValidation(type="list", formula1='"Travel,Meals,Supplies,Misc"', allow_blank=True);
+    ws.add_data_validation(dv); dv.add("C4:C200")` — apply the range past the current last row so
+    future rows are covered (it only applies to the cells in its range). An inline comma list is
+    limited to 255 characters; longer or changing lists should reference a range on a lists sheet
+    (`formula1="=Lists!$A$2:$A$20"`). Validation only checks typed entries: pasted values and values
+    written by scripts bypass it, so existing data is not re-checked.
+  rubric:
+    - { point: "DataValidation list added with a range extended beyond the current rows", score: 1 }
+    - { point: "255-character inline limit -> reference a range; paste/script writes bypass validation", score: 1 }
+
+- id: xlsx-preserve-03
+  difficulty: medium
+  weight: 2
+  tags: [preserve, cleanup]
+  question: >
+    A report has a merged title in A1:D1 and merged department labels in column A. What happens to the
+    cells inside a merge, and what problems do merges cause when you read, sort, filter or append rows
+    programmatically?
+  answer: >
+    Only the top-left cell of a merge holds the value; the others are MergedCell objects that read as
+    None and cannot be assigned (openpyxl raises an error for write attempts). pandas therefore reads
+    NaN for the continuation rows (forward-fill the label column). Sorting, filtering and pivots break
+    or refuse on ranges containing merges, so data tables should avoid them and keep merges to titles.
+    When inserting rows, merged ranges do not move automatically; check them afterwards.
+  rubric:
+    - { point: "value lives only in the top-left cell; the rest read None / cannot be written", score: 1 }
+    - { point: "merges break sort/filter/pivot and need forward-fill when reading; ranges do not shift on insert", score: 1 }
+
+- id: xlsx-preserve-04
+  difficulty: medium
+  weight: 3
+  tags: [preserve, formulas]
+  question: >
+    Each day a clerk's script must append the day's entries to a Log sheet that has a title, a header,
+    data rows and a Total row. How do you find the last data row with openpyxl, why can `ws.max_row`
+    mislead, and where must the new rows go?
+  answer: >
+    `ws.max_row` counts any row that holds a value or even just a style (verified: one bold empty cell
+    on row 100 makes max_row 100) and it includes the Total row, so appending at max_row+1 puts the
+    entry below the Total. Scan the key column for the last non-empty data value above the Total label
+    (`max(c.row for c in ws["A"] if c.value is not None and c.value != "Total")`, or locate the "Total"
+    row and insert there), insert the new rows above Total, copy the neighbouring row's formats, and
+    then fix the Total formula, chart ranges and defined names.
+  rubric:
+    - { point: "max_row includes formatted-empty rows and the Total row; find the last real data row by scanning/locating Total", score: 1 }
+    - { point: "insert above Total, copy styles, then repair Total/chart/defined-name references", score: 1 }

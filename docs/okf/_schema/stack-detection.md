@@ -62,6 +62,7 @@ cannot drift silently in either direction.
 | filetools | none — `mode: universal` (file edits happen in every repo; live-probe corpus) |
 | docx     | `file: *.docx`, `*.doc`, each at root, `*/`, `*/*/` (legacy `.doc` edited after conversion) |
 | pptx     | `file: *.pptx`, `*.ppt`, each at root, `*/`, `*/*/` (legacy `.ppt` edited after conversion) |
+| xlsx     | `file: *.xlsx`, `*.xlsm`, `*.xls`, each at root, `*/`, `*/*/` — **information only**, `mode: universal` (a workbook is usually created from scratch, same gap as `pdf`) |
 
 ## Activation gate (the whole point)
 
@@ -71,7 +72,7 @@ A derived skill `derived/<stack>.<model_id>.SKILL.md` activates when **both**:
 2. the active model's **canonical id** exactly equals the skill's `tuned_for`.
 
 **Exception — universal corpora.** Gate 1 does not apply to a corpus with
-`detection.mode: universal` (`conduct`, `filetools`, `hallucination`, `pdf`, `webforms`): it is admitted
+`detection.mode: universal` (`conduct`, `filetools`, `hallucination`, `pdf`, `webforms`, `xlsx`): it is admitted
 on gate 2 alone. The universal set is the named package-level `universalStacks`
 map in `internal/skill/loader.go`, consulted by `stackActive` — a new universal
 corpus must be added there. The two reasons a corpus earns a place:
@@ -167,7 +168,7 @@ that as a distinct eval.
 > "bare `git reset` — the objection is scope, not tree-wiping"); a smoothed-over
 > digest is a permanent regression, not a benchmark blip.
 >
-> **Catalog-only stacks (`pdf`, `webforms`).** These two universal corpora are
+> **Catalog-only stacks (`pdf`, `webforms`, `xlsx`).** These universal corpora are
 > admitted and advertised like any other tuning skill, but their digest is never
 > force-injected: the model decides whether to load the full body via the `skill`
 > tool. The gate is `catalogOnlyStacks` in `internal/skill/loader.go`;

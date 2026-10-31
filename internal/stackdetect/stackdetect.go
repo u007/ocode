@@ -188,6 +188,23 @@ var registry = []stack{
 			{kind: markerFile, glob: "*/*/*.ppt"},
 		},
 	},
+	{
+		// Excel workbooks to edit: .xlsx, macro-enabled .xlsm and legacy binary .xls
+		// (edited after conversion). Information only for the skill gate: the xlsx
+		// corpus is universal, since a spreadsheet is often created from scratch.
+		id: "xlsx",
+		markers: []marker{
+			{kind: markerFile, glob: "*.xlsx"},
+			{kind: markerFile, glob: "*/*.xlsx"},
+			{kind: markerFile, glob: "*/*/*.xlsx"},
+			{kind: markerFile, glob: "*.xlsm"},
+			{kind: markerFile, glob: "*/*.xlsm"},
+			{kind: markerFile, glob: "*/*/*.xlsm"},
+			{kind: markerFile, glob: "*.xls"},
+			{kind: markerFile, glob: "*/*.xls"},
+			{kind: markerFile, glob: "*/*/*.xls"},
+		},
+	},
 }
 
 // Detect returns the sorted ids of every known stack the repo at root uses.
