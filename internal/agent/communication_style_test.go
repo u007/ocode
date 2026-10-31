@@ -111,3 +111,25 @@ func TestCommunicationStyleCatalogEntry(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", e.Kind, PromptKindMainAgent)
 	}
 }
+
+// TestMarkHelperAgentTurnsOffUserFacingFragments pins the helper policy point:
+// a primary agent built by NewAgent carries all four user-facing fragments, and
+// MarkHelperAgent turns every one of them off in a single call.
+func TestMarkHelperAgentTurnsOffUserFacingFragments(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil)
+	if !a.RecapPromptEnabled() || !a.PlanPromptEnabled() ||
+		!a.SuggestedResponsesEnabled() || !a.CommunicationStyleEnabled() {
+		t.Fatalf("primary agent defaults: recap=%v plan=%v suggested=%v style=%v, want all true",
+			a.RecapPromptEnabled(), a.PlanPromptEnabled(),
+			a.SuggestedResponsesEnabled(), a.CommunicationStyleEnabled())
+	}
+
+	a.MarkHelperAgent()
+
+	if a.RecapPromptEnabled() || a.PlanPromptEnabled() ||
+		a.SuggestedResponsesEnabled() || a.CommunicationStyleEnabled() {
+		t.Fatalf("after MarkHelperAgent: recap=%v plan=%v suggested=%v style=%v, want all false",
+			a.RecapPromptEnabled(), a.PlanPromptEnabled(),
+			a.SuggestedResponsesEnabled(), a.CommunicationStyleEnabled())
+	}
+}

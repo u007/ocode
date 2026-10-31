@@ -32,7 +32,10 @@ func TestSuggestedResponsesEnabledRoundTripsThroughDisk(t *testing.T) {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
 
-	if err := SaveOcodeFeatures(true, false, false, true); err != nil {
+	if _, err := SaveOcodeFeatures(OcodeFeaturesUpdate{
+		MemoryEnabled: boolp(true), DocPromptEnabled: boolp(false),
+		SuggestedResponsesEnabled: boolp(false), CommunicationStyleEnabled: boolp(true),
+	}); err != nil {
 		t.Fatalf("SaveOcodeFeatures failed: %v", err)
 	}
 	var cfg Config
@@ -43,7 +46,10 @@ func TestSuggestedResponsesEnabledRoundTripsThroughDisk(t *testing.T) {
 		t.Fatal("suggested responses should persist as disabled after saving false")
 	}
 
-	if err := SaveOcodeFeatures(true, false, true, true); err != nil {
+	if _, err := SaveOcodeFeatures(OcodeFeaturesUpdate{
+		MemoryEnabled: boolp(true), DocPromptEnabled: boolp(false),
+		SuggestedResponsesEnabled: boolp(true), CommunicationStyleEnabled: boolp(true),
+	}); err != nil {
 		t.Fatalf("SaveOcodeFeatures failed: %v", err)
 	}
 	var cfg2 Config
@@ -64,7 +70,10 @@ func TestSuggestedResponsesEnabledWrittenToConfigFile(t *testing.T) {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
 
-	if err := SaveOcodeFeatures(true, false, false, true); err != nil {
+	if _, err := SaveOcodeFeatures(OcodeFeaturesUpdate{
+		MemoryEnabled: boolp(true), DocPromptEnabled: boolp(false),
+		SuggestedResponsesEnabled: boolp(false), CommunicationStyleEnabled: boolp(true),
+	}); err != nil {
 		t.Fatalf("SaveOcodeFeatures failed: %v", err)
 	}
 	path, err := getGlobalOcodeConfigPath()

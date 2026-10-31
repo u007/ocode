@@ -449,22 +449,14 @@ func (t TaskTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
 	subAgent.toolBatchDelay = 0
 	subAgent.isSubAgent = true
-	// A child's final result is returned to the parent as a tool result, not
-	// rendered as a user-facing response, and the child only sees the dispatch
-	// prompt — never the whole conversation. A recap block here would be noise
-	// in the parent's transcript and factually wrong, so opt out explicitly.
-	subAgent.SetRecapPromptEnabled(false)
-	subAgent.SetPlanPromptEnabled(false)
-	// The suggestions block is a MAIN-agent affordance: it rides in the
-	// assistant's own output and is rendered as one-click chips under the
-	// composer. A child's reply is returned to the parent as a TOOL RESULT,
-	// so a raw <ocode:suggestions> block would land in the parent's transcript
-	// and in the parent's live context — where it can prompt the model to emit
-	// another one. Opt out explicitly, like the recap fragment above.
-	subAgent.SetSuggestedResponsesEnabled(false)
-	// A child's reply is a tool result for the parent model, not a response the
-	// user reads, so the user-facing communication standard does not apply.
-	subAgent.SetCommunicationStyleEnabled(false)
+	// A dispatched child is a helper: its final result is returned to the parent
+	// as a TOOL RESULT, not rendered to the user, and it only sees the dispatch
+	// prompt. A recap or plan block would be noise and factually wrong in the
+	// parent's transcript, and a raw <ocode:suggestions> block would land in the
+	// parent's live context where it can prompt another one. The communication
+	// standard does not apply to a reply the user never reads. MarkHelperAgent
+	// turns all four fragments off.
+	subAgent.MarkHelperAgent()
 	// Draw concurrency slots from the same pool as the dispatcher instead of
 	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
 	// only caps direct dispatches at each nesting level independently, and

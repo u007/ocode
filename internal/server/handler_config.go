@@ -2426,29 +2426,25 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	suggested, style := true, true
-	h.mu.Lock()
-	if h.cfg != nil {
-		suggested = h.cfg.Ocode.SuggestedResponsesEnabled
-		style = h.cfg.Ocode.CommunicationStyleEnabled
-	}
-	h.mu.Unlock()
-	if req.SuggestedResponsesEnabled != nil {
-		suggested = *req.SuggestedResponsesEnabled
-	}
-	if req.CommunicationStyleEnabled != nil {
-		style = *req.CommunicationStyleEnabled
-	}
-	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled, suggested, style); err != nil {
+	// The merge of omitted optional keys against the stored values happens
+	// inside SaveOcodeFeatures' config lock, so a concurrent writer cannot
+	// slip a stale value in between a read here and the save.
+	saved, err := config.SaveOcodeFeatures(config.OcodeFeaturesUpdate{
+		MemoryEnabled:             &req.MemoryEnabled,
+		DocPromptEnabled:          &req.DocPromptEnabled,
+		SuggestedResponsesEnabled: req.SuggestedResponsesEnabled,
+		CommunicationStyleEnabled: req.CommunicationStyleEnabled,
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
 	h.mu.Lock()
 	if h.cfg != nil {
-		h.cfg.Ocode.MemoryEnabled = req.MemoryEnabled
-		h.cfg.Ocode.DocPromptEnabled = req.DocPromptEnabled
-		h.cfg.Ocode.SuggestedResponsesEnabled = suggested
-		h.cfg.Ocode.CommunicationStyleEnabled = style
+		h.cfg.Ocode.MemoryEnabled = saved.Memory
+		h.cfg.Ocode.DocPromptEnabled = saved.DocPrompt
+		h.cfg.Ocode.SuggestedResponsesEnabled = saved.SuggestedResponses
+		h.cfg.Ocode.CommunicationStyleEnabled = saved.CommunicationStyle
 	}
 	h.mu.Unlock()
 	// The suggested-responses and communication-style toggles are baked into the
@@ -2457,10 +2453,10 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 	// rebuildAgentForPreferenceChange) so in-flight work keeps its agent.
 	h.rebuildAgentsForFeatureChange("prompt feature toggles")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"memory_enabled":              req.MemoryEnabled,
-		"doc_prompt_enabled":          req.DocPromptEnabled,
-		"suggested_responses_enabled": suggested,
-		"communication_style_enabled": style,
+		"memory_enabled":              saved.Memory,
+		"doc_prompt_enabled":          saved.DocPrompt,
+		"suggested_responses_enabled": saved.SuggestedResponses,
+		"communication_style_enabled": saved.CommunicationStyle,
 	})
 }
 

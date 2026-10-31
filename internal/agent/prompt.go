@@ -136,8 +136,8 @@ Rules:
 // communicationStylePromptContent sets how the primary agent words its replies:
 // ASD-STE100 structural constraints, then software-domain overrides. Static
 // const in the cached system-role prefix: it must never vary per turn (see
-// append_stable.go). PRIMARY agents only; the helper agents that turn recap
-// off turn it off too (SetCommunicationStyleEnabled).
+// append_stable.go). PRIMARY agents only; helper agents call MarkHelperAgent,
+// which turns it off along with the other user-facing fragments.
 const communicationStylePromptContent = `# Agent Communication & Style Standard
 
 ## 1. ASD-STE100 Structural Constraints

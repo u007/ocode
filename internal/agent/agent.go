@@ -1303,6 +1303,19 @@ func (a *Agent) PlanPromptEnabled() bool {
 	return a.planPromptEnabled
 }
 
+// MarkHelperAgent turns off every fragment that addresses the user directly:
+// recap, plan, suggested responses and the communication-style standard.
+// Dispatched sub-agents, ask side-queries and the advisor return a tool result
+// to a parent model instead of a reply a person reads, so these fragments are
+// noise or harmful there. Any NEW helper agent built with NewAgent must call
+// this, so the opt-outs live in one place instead of drifting per call site.
+func (a *Agent) MarkHelperAgent() {
+	a.SetRecapPromptEnabled(false)
+	a.SetPlanPromptEnabled(false)
+	a.SetSuggestedResponsesEnabled(false)
+	a.SetCommunicationStyleEnabled(false)
+}
+
 // getPreloadedContext returns the cached context under read lock.
 func (a *Agent) getPreloadedContext() string {
 	a.preloadedContextMu.RLock()
