@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { ChangesView } from "./ChangesView";
+import { LogsView } from "./LogsView";
+import { errText, log } from "../log";
 import type { BridgeStatus } from "../bridgeClient";
 import type { Deps } from "../boot";
-import { initialState, reduce, resync, type ChatMsg } from "../chatState";
+import { initialState, reduce, resync, type ChatMsg, type PermissionReq } from "../chatState";
 import { contextBlock, withContext } from "../context";
 import { stripContext, summarizeTool } from "../format";
 import type { SessionRef } from "../identity";
@@ -12,6 +15,8 @@ import type { Step } from "../tools/journal";
 type Action = { type: "env"; env: Envelope } | { type: "resync"; sid: string; transcript: any[]; pending?: any };
 const reducer = (s: typeof initialState, a: Action) =>
   a.type === "env" ? reduce(s, a.env) : resync(s, a.sid, a.transcript, a.pending ?? {});
+/** The journal keeps at most 100 steps, so this lists all of them; the chat strip shows the newest 8. */
+const CHANGES_LIMIT = 100;
 
 export function App({ deps }: { deps: Deps }) {
   const { ocode, index, journal, port, runner, workbook, fileName, workspace } = deps;
@@ -21,15 +26,18 @@ export function App({ deps }: { deps: Deps }) {
   const [text, setText] = useState("");
   const [bridge, setBridge] = useState<BridgeStatus>("connecting");
   const [events, setEvents] = useState(false);
+  const [tab, setTab] = useState<"chat" | "logs" | "changes">("chat");
   const [error, setError] = useState<string | null>(null);
   const [changes, setChanges] = useState<Step[]>([]);
   const [notice, setNotice] = useState<string | undefined>(deps.notice);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const activeRef = useRef(active);
   activeRef.current = active;
+  // Epoch ms of the last Send. Steps written at or after it are "this turn" on the Changes tab.
+  const turnStartRef = useRef<number | null>(null);
 
-  const refreshChanges = useCallback(async () => setChanges(await journal.list(8)), [journal]);
-  const guard = useCallback(async (f: () => Promise<unknown>) => { try { setError(null); await f(); } catch (e) { setError((e as Error).message); } }, []);
+  const refreshChanges = useCallback(async () => setChanges(await journal.list(CHANGES_LIMIT)), [journal]);
+  const guard = useCallback(async (f: () => Promise<unknown>) => { try { setError(null); await f(); } catch (e) { log("error", "ui", errText(e)); setError((e as Error).message); } }, []);
 
   const openSession = useCallback((sid: string) => guard(async () => {
     setActive(sid);
@@ -50,6 +58,8 @@ export function App({ deps }: { deps: Deps }) {
     return () => ac.abort();
   }, [deps, guard, index, ocode, openSession, refreshChanges, workspace]);
 
+  useEffect(() => { if (tab === "changes") void guard(refreshChanges); }, [tab, guard, refreshChanges]);
+
   const view = active ? chat.sessions[active] : undefined;
 
   const send = () => guard(async () => {
@@ -57,17 +67,20 @@ export function App({ deps }: { deps: Deps }) {
     if (!body) return;
     setText("");
     const msg = withContext(await contextBlock(port, workbook, fileName), body);
+    turnStartRef.current = Date.now();
     if (active) { await ocode.send(active, msg); return; }
     const r = await ocode.startChat({ content: msg, projectPath: workspace, permissionMode: "normal" });
     const ref = { id: r.sessionId, title: sessionTitle(fileName), created: new Date().toISOString() };
     await index.add(ref);
-    void ocode.setTitle(r.sessionId, ref.title).catch(() => undefined); // best effort: only affects ocode's own list
+    void ocode.setTitle(r.sessionId, ref.title).catch((e) => log("warn", "ui", `could not set the session title: ${errText(e)}`)); // best effort: only affects ocode's own list
     setSessions(await index.list());
     setActive(r.sessionId);
   });
 
-  const resolve = (requestId: string, decision: "allow" | "deny") =>
-    guard(() => ocode.resolvePermission({ requestId, sessionId: active!, decision }));
+  const resolve = (p: PermissionReq, decision: "allow" | "deny" | "always_rule") => {
+    log("info", "ui", `permission ${p.tool}: ${decision}`);
+    return guard(() => ocode.resolvePermission({ requestId: p.request_id, sessionId: active!, decision }));
+  };
   const answer = (requestId: string, qq: { header?: string; question?: string }, label: string) =>
     guard(() => ocode.answerQuestion({ requestId, sessionId: active!, answers: [{ header: qq.header, question: qq.question ?? "", answers: [{ label }] }] }));
   // Undo goes through the Runner, like the agent's own calls, so it never interleaves with a write in
@@ -80,6 +93,7 @@ export function App({ deps }: { deps: Deps }) {
       await refreshChanges();
     }
   });
+  const show = (s: Step) => guard(() => port.select(s.sheet, s.address));
 
   return (
     <div className="app">
@@ -94,6 +108,15 @@ export function App({ deps }: { deps: Deps }) {
         <button disabled={!active} onClick={() => guard(async () => setText((await ocode.recap(active!)).recap))}>Recap</button>
         <button disabled={!active} onClick={() => guard(() => ocode.compact(active!))}>Compact</button>
       </header>
+      <nav className="tabs">
+        <button className={tab === "chat" ? "primary" : ""} onClick={() => setTab("chat")}>Chat</button>
+        <button className={tab === "changes" ? "primary" : ""} onClick={() => setTab("changes")}>Changes</button>
+        <button className={tab === "logs" ? "primary" : ""} onClick={() => setTab("logs")}>Logs</button>
+      </nav>
+      {tab === "logs" ? <LogsView /> : tab === "changes" ? (<>
+        {error && <div className="err" role="alert">{error}</div>}
+        <ChangesView steps={changes} turnStart={turnStartRef.current} onUndo={undo} onShow={show} />
+      </>) : <>
 
       {bridge === "evicted" && (
         <div className="err" role="alert">This workbook is open in another ocode pane. Reload this pane to take over.</div>
@@ -106,7 +129,11 @@ export function App({ deps }: { deps: Deps }) {
         {view?.permissions.map((p) => (
           <div className="card" key={p.request_id}>
             <b>{p.tool}</b> wants to run{p.summary ? `: ${p.summary}` : ""}
-            <div className="row"><button className="primary" onClick={() => resolve(p.request_id, "allow")}>Allow</button><button onClick={() => resolve(p.request_id, "deny")}>Deny</button></div>
+            <div className="row">
+              <button className="primary" onClick={() => resolve(p, "allow")}>Allow</button>
+              <button onClick={() => resolve(p, "always_rule")}>Always allow</button>
+              <button onClick={() => resolve(p, "deny")}>Deny</button>
+            </div>
           </div>
         ))}
         {view?.questions.map((q) => (
@@ -121,7 +148,7 @@ export function App({ deps }: { deps: Deps }) {
 
       {changes.length > 0 && (
         <ul className="changes">
-          {changes.map((c) => (
+          {changes.slice(0, 8).map((c) => (
             <li key={c.id}><span>{c.undone ? <s>{c.tool} {c.sheet}!{c.address}</s> : <>{c.tool} {c.sheet}!{c.address}</>}</span>
               <button disabled={c.undone} onClick={() => undo(c.id)}>Undo</button></li>
           ))}
@@ -135,6 +162,7 @@ export function App({ deps }: { deps: Deps }) {
           ? <button onClick={() => guard(() => ocode.cancel(active!))}>Stop</button>
           : <button className="primary" disabled={!text.trim()} onClick={() => void send()}>Send</button>}
       </div>
+      </>}
     </div>
   );
 }
@@ -145,6 +173,14 @@ function Message({ m, open, toggle }: { m: ChatMsg; open: boolean; toggle: () =>
       <div className="msg tool" onClick={toggle}>
         {m.status === "running" ? "… " : ""}{summarizeTool(m)}
         {open && <pre>{m.args}{m.output ? `\n→ ${m.output.slice(0, 2000)}` : ""}</pre>}
+      </div>
+    );
+  }
+  if (m.kind === "notice") {
+    return (
+      <div className="msg notice" onClick={toggle}>
+        Earlier conversation was compacted. Tap to read the summary.
+        {open && <pre>{m.text}</pre>}
       </div>
     );
   }

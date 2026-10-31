@@ -1,4 +1,5 @@
 import type { Runner } from "./runner";
+import { errText, log } from "./log";
 import { readSse } from "./sse";
 
 /**
@@ -51,6 +52,7 @@ export class BridgeClient {
     let delay = min;
     while (!this.stopped) {
       this.o.onStatus?.("connecting");
+      log("info", "bridge", "connecting to the tool stream");
       try {
         const q = `workbook=${encodeURIComponent(this.o.workbook)}&instance=${encodeURIComponent(this.instance)}`;
         const resp = await this.f(`${this.o.base}/bridge/stream?${q}`, {
@@ -60,19 +62,26 @@ export class BridgeClient {
         await readSse(resp.body, (e) => {
           if (e.event === "hello") {
             delay = min;
+            log("info", "bridge", "connected");
             this.o.onStatus?.("connected");
           } else if (e.event === "call") {
-            void this.dispatch(JSON.parse(e.data));
+            const call = JSON.parse(e.data) as { id: string; tool: string; args: unknown };
+            log("info", "bridge", `call ${call.tool} (${call.id})`);
+            void this.dispatch(call);
           } else if (e.event === "cancel") {
-            this.o.runner.cancel((JSON.parse(e.data) as { id: string }).id);
+            const id = (JSON.parse(e.data) as { id: string }).id;
+            log("warn", "bridge", `cancel ${id}`);
+            this.o.runner.cancel(id);
           } else if (e.event === "evicted") {
             // Another pane owns the workbook now. Stop for good: reconnecting would evict that pane in turn.
+            log("error", "bridge", "evicted: another pane owns this workbook");
             this.stop();
             this.o.onStatus?.("evicted");
           }
         }, this.ac.signal);
-      } catch {
+      } catch (e) {
         // network error, bridge restarted, or stop(): fall through to the reconnect wait
+        if (!this.stopped) log("warn", "bridge", `stream error: ${errText(e)}; reconnecting in ${delay} ms`);
       }
       if (this.stopped) break; // stop() or an eviction: never report "disconnected" over "evicted"
       this.o.onStatus?.("disconnected");
@@ -87,8 +96,9 @@ export class BridgeClient {
       await this.f(`${this.o.base}/bridge/result?workbook=${encodeURIComponent(this.o.workbook)}`, {
         method: "POST", headers: this.headers({ "Content-Type": "application/json" }), body: JSON.stringify({ id: call.id, ...res }),
       });
-    } catch {
+    } catch (e) {
       // The bridge will time the call out and report it to the model; there is nothing better to do here.
+      log("error", "bridge", `could not post the result of ${call.tool} (${call.id}): ${errText(e)}`);
     }
   }
 }

@@ -170,4 +170,6 @@ the start of each user message gives the workbook id, the active sheet and the s
 - Every cell write is checkpointed: list with excel_checkpoint, undo with excel_undo_step. Formatting, tables, charts
   and pivots cannot be undone that way, so say so before creating them when the user may not want them.
 - Ask before structural or destructive changes: deleting rows, sheets or contents, removing duplicates.
+- If an excel_* tool is missing or fails with "no Excel task pane is connected", load the ocode-excel skill and run
+  excel-addin/scripts/preflight.sh. Tell the user which setup step is missing; never fall back to python or openpyxl.
 `

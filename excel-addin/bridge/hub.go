@@ -37,7 +37,7 @@ type Result struct {
 }
 
 var (
-	ErrNoPane    = errors.New("no Excel task pane is connected for this workbook")
+	ErrNoPane    = errors.New("no Excel task pane is connected")
 	ErrPaneGone  = errors.New("the Excel task pane disconnected before the tool finished")
 	ErrCallLimit = errors.New("too many tool calls in flight for this workbook")
 )

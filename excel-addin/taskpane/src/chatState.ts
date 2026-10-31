@@ -2,7 +2,7 @@ import type { Envelope, TranscriptMessage } from "./ocodeClient";
 
 export interface ChatMsg {
   id: string;
-  kind: "user" | "assistant" | "tool";
+  kind: "user" | "assistant" | "tool" | "notice";
   text: string;
   tool?: string;
   args?: string;
@@ -26,13 +26,17 @@ export interface ChatState { sessions: Record<string, SessionView> }
 export const emptyView = (): SessionView => ({ messages: [], streaming: false, permissions: [], questions: [], lastSeq: 0 });
 export const initialState: ChatState = { sessions: {} };
 
+const COMPACTION_MARKER = "[ocode:compaction-summary]";
+
 /** Rebuild the visible conversation from a stored transcript (history / restore / reconnect). */
 export function fromTranscript(msgs: TranscriptMessage[]): ChatMsg[] {
   const out: ChatMsg[] = [];
   const byCall = new Map<string, ChatMsg>();
   msgs.forEach((m, i) => {
     if (m.role === "user") out.push({ id: `h${i}`, kind: "user", text: m.content });
-    else if (m.role === "assistant") {
+    else if (m.role === "system" && m.content.startsWith(COMPACTION_MARKER)) {
+      out.push({ id: `h${i}`, kind: "notice", text: m.content.slice(COMPACTION_MARKER.length).trim() });
+    } else if (m.role === "assistant") {
       if (m.content) out.push({ id: `h${i}`, kind: "assistant", text: m.content });
       for (const tc of m.tool_calls ?? []) {
         const t: ChatMsg = { id: tc.id, kind: "tool", text: "", tool: tc.function.name, args: tc.function.arguments, status: "running" };

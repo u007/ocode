@@ -1,6 +1,7 @@
 import type { ExcelPort } from "./port";
 import { Schema, validate, withDefaults } from "./schema";
 import { TOOLS, ToolError } from "./tools";
+import { log } from "./log";
 import { Journal } from "./tools/journal";
 
 export interface ContractTool { name: string; risk: string; description: string; inputSchema: Schema }
@@ -27,7 +28,14 @@ export class Runner {
   handle(call: { id: string; tool: string; args: unknown }): Promise<CallResult> {
     const ac = new AbortController();
     this.inflight.set(call.id, ac);
-    const run = this.chain.then(() => this.exec(call, ac.signal));
+    const run = this.chain.then(async () => {
+      const t0 = performance.now();
+      const res = await this.exec(call, ac.signal);
+      const ms = Math.round(performance.now() - t0);
+      if (res.ok) log("info", "tool", `${call.tool} ok`, ms);
+      else log("error", "tool", `${call.tool} failed: ${res.error}`, ms);
+      return res;
+    });
     this.chain = run.catch(() => undefined);
     return run.finally(() => this.inflight.delete(call.id));
   }

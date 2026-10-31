@@ -129,6 +129,11 @@ the old pane.
 
 ## 4. Desktop setup (do this first)
 
+**The ordered checklist, with the macOS pitfalls, is the `ocode-excel` skill (`skills/ocode-excel/SKILL.md`); check any
+step with `scripts/preflight.sh`. Corrections found on 2026-10-31: pin `npx office-addin-dev-certs@3` and
+`office-addin-manifest@3`; the manifest `<Version>` must be >= 1.0.0.0 (fixed in the template); macOS refuses writes to
+Excel's container (`wef/`) unless the terminal has Full Disk Access.** The notes below are the original rationale.
+
 Prerequisites: Excel (Windows or Mac, Microsoft 365), Go >= 1.26, Node >= 22, pnpm, a running `ocode serve`.
 
 ```bash

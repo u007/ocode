@@ -51,6 +51,29 @@ describe("chat reducer", () => {
     ]);
     expect(m.map((x) => [x.kind, x.text || x.tool, x.output])).toEqual([["user", "total?", undefined], ["assistant", "Let me look", undefined], ["tool", "excel_read_range", "42"], ["assistant", "It is 42", undefined]]);
   });
+  it("restores a compaction summary as a notice with the marker stripped", () => {
+    const m = fromTranscript([
+      { role: "user", content: "make a chart" },
+      { role: "system", content: "[ocode:compaction-summary]\n## Original Request\nmake a chart" },
+    ]);
+    expect(m).toEqual([
+      { id: "h0", kind: "user", text: "make a chart" },
+      { id: "h1", kind: "notice", text: "## Original Request\nmake a chart" },
+    ]);
+  });
+  it("ignores ordinary system messages", () => {
+    const m = fromTranscript([{ role: "system", content: "You are a spreadsheet assistant." }, { role: "user", content: "hi" }]);
+    expect(m.map((x) => [x.kind, x.text])).toEqual([["user", "hi"]]);
+  });
+  it("leaves assistant and tool messages unchanged next to a compaction notice", () => {
+    const m = fromTranscript([
+      { role: "system", content: "[ocode:compaction-summary]\nsummary" },
+      { role: "assistant", content: "", tool_calls: [{ id: "c2", function: { name: "excel_check_errors", arguments: "{}" } }] },
+      { role: "tool", content: "none", tool_call_id: "c2" },
+      { role: "assistant", content: "No errors" },
+    ]);
+    expect(m.map((x) => [x.kind, x.text || x.tool, x.output])).toEqual([["notice", "summary", undefined], ["tool", "excel_check_errors", "none"], ["assistant", "No errors", undefined]]);
+  });
   it("resync replaces the view with the transcript and the pending asks from state", () => {
     const s = resync(run(ev("text", { delta: "stale" })), "s1", [{ role: "user", content: "q" }], { permissions: [{ request_id: "p", tool: "t" }] });
     expect(s.sessions.s1.messages).toHaveLength(1);

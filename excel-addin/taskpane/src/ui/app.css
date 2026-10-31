@@ -13,8 +13,9 @@ button:disabled { opacity: .5; cursor: default; }
 .msgs { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .msg { padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { background: var(--user); align-self: flex-end; max-width: 92%; }
-.msg.tool { background: var(--tool); color: var(--muted); font-size: 12px; cursor: pointer; }
-.msg.tool pre { white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 4px 0 0; }
+.msg.tool, .msg.notice { background: var(--tool); color: var(--muted); font-size: 12px; cursor: pointer; }
+.msg.tool pre, .msg.notice pre { white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 4px 0 0; }
+.msg.notice pre { max-height: 50vh; }
 .card { border: 1px solid var(--accent); border-radius: 6px; padding: 8px; }
 .card .row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 .err { color: var(--bad); padding: 4px 8px; }
@@ -23,3 +24,20 @@ button:disabled { opacity: .5; cursor: default; }
 .changes { border-top: 1px solid var(--line); padding: 6px 8px; max-height: 120px; overflow: auto; font-size: 12px; }
 .changes li { display: flex; justify-content: space-between; gap: 6px; align-items: center; }
 .fatal { padding: 12px; color: var(--bad); white-space: pre-wrap; }
+.tabs { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.logs { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.logbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.muted { color: var(--muted); font-size: 12px; }
+.loglines { flex: 1; overflow: auto; padding: 6px 8px; font: 11.5px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+.logline { white-space: pre-wrap; word-break: break-word; }
+.logline .t, .logline .ms { color: var(--muted); }
+.logline.warn { color: #b7791f; }
+.logline.error { color: var(--bad); }
+.changes-tab { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.change-list { list-style: none; margin: 0; padding: 0; }
+.change-list li { display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent; }
+.change-list li.this-turn { background: var(--user); border-left-color: var(--accent); }
+.change-list li.undone .what { text-decoration: line-through; color: var(--muted); }
+.change-list .time { color: var(--muted); font: 11.5px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+.change-list .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.badge { font-size: 11px; padding: 0 5px; margin-left: 6px; border-radius: 3px; background: var(--accent); color: var(--accent-fg); white-space: nowrap; }

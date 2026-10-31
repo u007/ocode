@@ -2,6 +2,7 @@ import { BridgeClient, type BridgeStatus } from "./bridgeClient";
 import { BridgeJournalStore } from "./bridgeStore";
 import { FakePort } from "./fakePort";
 import { SessionIndex, workbookId } from "./identity";
+import { errText, log } from "./log";
 import { OcodeClient } from "./ocodeClient";
 import { OfficePort } from "./officePort";
 import type { ExcelPort } from "./port";
@@ -31,14 +32,16 @@ function paneKey(): string {
   if (k) {
     sessionStorage.setItem("ocode.bridge_key", k);
     url.searchParams.delete("key");
-    history.replaceState(null, "", url.toString());
+    // Excel's webview sets history.replaceState to null (seen on Mac, 2026-10-31). Hiding the key from the address
+    // bar is cosmetic and the key is already stored, so skip it there rather than crash the whole pane.
+    if (typeof history.replaceState === "function") history.replaceState(null, "", url.toString());
   }
   return sessionStorage.getItem("ocode.bridge_key") ?? "";
 }
 
 export async function boot(): Promise<Deps> {
   const fake = new URL(location.href).searchParams.has("fake");
-  if (!fake) await Office.onReady();
+  if (!fake) { const info = await Office.onReady(); log("info", "boot", `Office ready (${info.host ?? "?"}, ${info.platform ?? "?"})`); }
   const key = paneKey();
   const base = "";
   const port: ExcelPort = fake
@@ -50,8 +53,12 @@ export async function boot(): Promise<Deps> {
   const fileName = fake ? "Sample.xlsx" : decodeURIComponent(fileUrl.split(/[\\/]/).pop() || "Workbook.xlsx");
   // One id per page load: a second pane on the same workbook is told apart from a reconnect of this one.
   const instance = crypto.randomUUID();
+  log("info", "boot", `workbook ${wb}${forked ? " (new id: copied or moved)" : ""}, file ${fileName}`);
 
-  const contract = (await (await fetch(`${base}/bridge/tools`, { headers: { "X-Bridge-Key": key } })).json()) as Contract;
+  const toolsResp = await fetch(`${base}/bridge/tools`, { headers: { "X-Bridge-Key": key } });
+  if (!toolsResp.ok) throw new Error(`the bridge rejected this pane (HTTP ${toolsResp.status}): the key in the sideloaded manifest does not match the running bridge; regenerate and re-copy the manifest`);
+  const contract = (await toolsResp.json()) as Contract;
+  log("info", "boot", `loaded ${contract.tools.length} tool definitions`);
   const journal = new Journal(new BridgeJournalStore(base, key, wb));
   const runner = new Runner(port, journal, contract);
   // The bridge connects during boot, before the UI exists: remember the latest status and replay it on subscribe.
@@ -64,7 +71,8 @@ export async function boot(): Promise<Deps> {
   const ocode = new OcodeClient({ base, key });
   // Register the workspace as a project so ocode treats it as one (and shows these sessions under it).
   // Not fatal: chat can still start, but directory-bound features may refuse the path. See RESUME.md (U6).
-  await ocode.addProject(ws.path).catch((e) => console.warn("could not register the workspace as an ocode project:", e));
+  await ocode.addProject(ws.path).catch((e) => { console.warn("could not register the workspace as an ocode project:", e); log("warn", "boot", `could not register the workspace as an ocode project: ${errText(e)}`); });
+  log("info", "boot", `workspace ${ws.path}`);
   return {
     port, journal, runner, notice, workbook: wb, fileName, fake, workspace: ws.path,
     ocode, index: new SessionIndex(base, key, wb),

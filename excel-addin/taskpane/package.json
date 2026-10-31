@@ -1,13 +1,13 @@
 {
   "name": "ocode-excel-taskpane",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Excel task pane for ocode: chat side pane + Office.js tool runner",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
+    "build": "bun check . && vite build",
+    "typecheck": "bun check .",
     "test": "vitest run"
   },
   "dependencies": {

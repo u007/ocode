@@ -106,7 +106,7 @@ func (m *MCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]string{"name": "ocode-excel-bridge", "version": "0.1.0"},
+			"serverInfo":      map[string]string{"name": "ocode-excel-bridge", "version": "1.0.0"},
 		}
 	case "ping":
 		resp.Result = map[string]any{}

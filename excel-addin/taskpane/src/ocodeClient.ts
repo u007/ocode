@@ -1,3 +1,4 @@
+import { errText, log } from "./log";
 import { readSse } from "./sse";
 
 /** Envelope published by `ocode serve` on GET /api/events (internal/server/event_bus.go). */
@@ -35,16 +36,26 @@ export class OcodeClient {
   }
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const resp = await this.f(`${this.o.base}${path}`, {
-      method,
-      headers: { "X-Bridge-Key": this.o.key, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const t0 = performance.now();
+    const took = () => Math.round(performance.now() - t0);
+    let resp: Response;
+    try {
+      resp = await this.f(`${this.o.base}${path}`, {
+        method,
+        headers: { "X-Bridge-Key": this.o.key, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (e) {
+      log("error", "ocode", `${method} ${path} network error: ${errText(e)}`, took());
+      throw e;
+    }
     if (!resp.ok) {
       let msg = `${resp.status}`;
-      try { msg = ((await resp.json()) as { error?: string }).error ?? msg; } catch { /* non-JSON error body */ }
+      try { msg = ((await resp.json()) as { error?: string }).error ?? msg; } catch (e) { log("warn", "ocode", `${method} ${path}: error body is not JSON (${errText(e)})`); }
+      log("error", "ocode", `${method} ${path} -> ${resp.status} ${msg}`, took());
       throw new HttpError(resp.status, msg);
     }
+    log("info", "ocode", `${method} ${path} -> ${resp.status}`, took());
     const text = await resp.text();
     return (text ? JSON.parse(text) : undefined) as T;
   }
@@ -95,15 +106,16 @@ export class OcodeClient {
         const resp = await this.f(`${this.o.base}/api/events${q}`, { headers: { "X-Bridge-Key": this.o.key }, signal: a.signal });
         if (!resp.ok || !resp.body) throw new HttpError(resp.status, "events");
         a.onStatus?.(true);
+        log("info", "ocode", first ? "event stream connected" : "event stream reconnected");
         if (!first) a.onReconnect?.();
         first = false;
         delay = 500;
         await readSse(resp.body, (e) => {
           if (e.event !== "envelope") return;
-          try { a.onEnvelope(JSON.parse(e.data) as Envelope); } catch { /* one malformed frame must not drop the stream */ }
+          try { a.onEnvelope(JSON.parse(e.data) as Envelope); } catch (err) { log("warn", "ocode", `malformed event frame dropped: ${errText(err)}`); /* one malformed frame must not drop the stream */ }
         }, a.signal);
-      } catch {
-        /* reconnect below */
+      } catch (e) {
+        if (!a.signal.aborted) log("warn", "ocode", `event stream error: ${errText(e)}; reconnecting in ${delay} ms`);
       }
       if (a.signal.aborted) return;
       a.onStatus?.(false);

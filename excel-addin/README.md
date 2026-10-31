@@ -20,6 +20,17 @@ Design background and alternatives: [docs/plans/2026-10-30-excel-addin-sidepane.
 | `taskpane/` | TypeScript. `src/tools/` the 13 tools (pure logic), `port.ts` the only Excel surface, `officePort.ts` the Office.js implementation, `fakePort.ts` the in-memory one used by tests, `ui/` the chat pane. |
 | `manifest/` | Sideload manifest template; `scripts/gen-manifest.mjs` fills in the URL and key. |
 
+## Install in Excel
+Quick path (macOS or Windows): `cd excel-addin && make install-excel`. It installs the trusted dev certificate if missing,
+creates a stable pane key and GUID in `~/.config/ocode-excel/`, builds the pane and bridge, generates the manifest and
+sideloads it (macOS: copies to Excel's `wef` folder, needs Full Disk Access for the terminal or a Finder copy; Windows:
+`office-addin-dev-settings sideload`, untested). Then start the bridge with the same key, add the `excel` MCP entry, quit
+and reopen Excel, open Home > Add-ins > Ask ocode. **Re-run it after every `make test`**: `manifest.test.ts` overwrites
+`manifest/manifest.xml` with a test key, which makes the pane fail with "The string did not match the expected pattern".
+
+The full ordered setup (certificate, pane key, MCP entry, manifest, sideload, macOS pitfalls) is the `ocode-excel` skill:
+`skills/ocode-excel/SKILL.md`. Check it with `scripts/preflight.sh`.
+
 ## Try it without Excel
 ```
 make test            # Go (race, 31 tests) + TypeScript (153 tests)

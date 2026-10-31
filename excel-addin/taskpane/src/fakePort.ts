@@ -60,6 +60,14 @@ export class FakePort implements ExcelPort {
   }
   async activeSheet() { return this.active; }
   async selection() { return this.sel ?? { sheet: this.active, address: "A1" }; }
+  /** Like Excel: the sheet becomes active and the range becomes the selection. Cells are untouched. */
+  async select(sheet: string, address: string): Promise<void> {
+    this.log.push(`select ${sheet}!${address}`);
+    if (!parseAddress(address)) throw new Error(`"${address}" is not a valid A1 address`);
+    this.grid(sheet); // throws for an unknown sheet, as Excel does
+    this.active = sheet;
+    this.sel = { sheet, address };
+  }
 
   private rect(sheet: string, address: string): Rect {
     const r = parseAddress(address);

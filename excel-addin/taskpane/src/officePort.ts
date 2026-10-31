@@ -82,6 +82,16 @@ export class OfficePort implements ExcelPort {
     });
   }
 
+  /** UNVERIFIED: activating a sheet then selecting one of its ranges in the same batch. Changes no cell. */
+  async select(sheet: string, address: string): Promise<void> {
+    return Excel.run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItem(sheet);
+      ws.activate();
+      ws.getRange(address).select();
+      await ctx.sync();
+    });
+  }
+
   async read(sheet: string, address: string): Promise<RangeData> {
     return Excel.run(async (ctx) => {
       const r = ctx.workbook.worksheets.getItem(sheet).getRange(address);

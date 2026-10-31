@@ -1,5 +1,5 @@
 # excel-addin: bridge (Go) + taskpane (TypeScript). Nothing here is part of the root ocode build.
-.PHONY: test test-bridge test-pane build smoke manifest run-bridge
+.PHONY: test test-bridge test-pane build smoke manifest run-bridge install-excel
 
 test: test-bridge test-pane
 
@@ -20,6 +20,10 @@ smoke: build
 # Needs EXCEL_BRIDGE_PANE_KEY (16+ chars). Prints where the manifest was written.
 manifest:
 	node scripts/gen-manifest.mjs
+
+# macOS + Windows one-shot: dev cert, stable pane key, build, manifest, sideload. Re-run after `make test` (it clobbers the manifest).
+install-excel:
+	node scripts/install-excel.mjs
 
 # Desktop run: HTTPS certs from `npx office-addin-dev-certs install`, ocode serve already running.
 run-bridge: build

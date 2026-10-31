@@ -69,6 +69,8 @@ export interface ExcelPort {
   listSheets(): Promise<SheetInfo[]>;
   activeSheet(): Promise<string>;
   selection(): Promise<{ sheet: string; address: string }>;
+  /** Activate `sheet` and select `address` so the user sees it. Changes no value, format or cell. */
+  select(sheet: string, address: string): Promise<void>;
   read(sheet: string, address: string): Promise<RangeData>;
   /** Strings starting with "=" are formulas, everything else is a constant. */
   write(sheet: string, address: string, cells: CellValue[][], numberFormat?: string): Promise<void>;

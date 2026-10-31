@@ -232,7 +232,7 @@
     {
       "name": "describe_workbook",
       "risk": "read",
-      "description": "Orientation call. Lists sheets (visibility, used range), tables, named ranges, charts, pivots, calculation mode and the active sheet. Call this first in a new workbook session.",
+      "description": "Orientation call. Lists sheets (visibility, used range), tables, named ranges, charts, pivots, calculation mode and the active sheet. Call this first in a new workbook session. If it fails because no Excel task pane is connected, follow the Excel setup steps in your instructions.",
       "inputSchema": {
         "type": "object",
         "properties": {
