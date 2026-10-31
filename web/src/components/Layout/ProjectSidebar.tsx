@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { Fragment, useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useProjectState } from "../../stores/projectStore";
 import { useChatSelector, type ChatState } from "../../stores/chatStore";
 import { useTerminalState } from "../../stores/terminalStore";
@@ -109,7 +109,11 @@ type ProjectSidebarItem = {
   type: "group" | "project";
   data: Project | ProjectGroup;
   groupProjects?: Project[];
+  /** Saved linked worktrees of this project, folded under it as a sub tree. */
+  worktrees?: Project[];
 };
+
+const normProjectPath = (v: string) => v.replace(/\\/g, "/").replace(/\/+$/, "");
 
 /**
  * Single source of truth for the project-sidebar list. Both the expanded list
@@ -127,8 +131,26 @@ export function buildProjectSidebarOrder(
   // Keep the input order within each group. It is the persisted project order
   // used by the expanded sidebar and must not be replaced with a name sort.
   const sortedGroups = [...groups].sort((a, b) => a.order - b.order);
-  const projectsByGroup: Record<string, Project[]> = {};
+  // A linked worktree whose main checkout is also saved belongs under that
+  // project, not in the list. Without a saved parent it stays top-level.
+  const localPaths = new Set(projects.filter((p) => !p.host).map((p) => normProjectPath(p.path)));
+  const worktreesByParent: Record<string, Project[]> = {};
+  const topLevel: Project[] = [];
   for (const project of projects) {
+    const parent = project.host || !project.worktree_of ? "" : normProjectPath(project.worktree_of);
+    if (parent && parent !== normProjectPath(project.path) && localPaths.has(parent)) {
+      (worktreesByParent[parent] ??= []).push(project);
+    } else {
+      topLevel.push(project);
+    }
+  }
+  const withWorktrees = (project: Project): ProjectSidebarItem => ({
+    type: "project",
+    data: project,
+    worktrees: project.host ? undefined : worktreesByParent[normProjectPath(project.path)],
+  });
+  const projectsByGroup: Record<string, Project[]> = {};
+  for (const project of topLevel) {
     const key = project.group || "";
     if (!projectsByGroup[key]) projectsByGroup[key] = [];
     projectsByGroup[key].push(project);
@@ -141,7 +163,7 @@ export function buildProjectSidebarOrder(
     visibleItems.push({ type: "group", data: group, groupProjects });
     if (!group.collapsed) {
       for (const project of groupProjects) {
-        visibleItems.push({ type: "project", data: project });
+        visibleItems.push(withWorktrees(project));
       }
     }
   }
@@ -149,7 +171,7 @@ export function buildProjectSidebarOrder(
   // Ungrouped projects remain after all groups.
   const ungrouped = projectsByGroup[""] || [];
   for (const project of ungrouped) {
-    visibleItems.push({ type: "project", data: project });
+    visibleItems.push(withWorktrees(project));
   }
 
   return visibleItems;
@@ -408,6 +430,45 @@ function useInlineRename(
   }, [initialName]);
 
   return { editing, value, setValue, inputRef, start, commit, cancel, error };
+}
+
+// ── Worktree sub tree ───────────────────────────────────────────────────────
+
+interface ProjectWorktreeTreeProps {
+  project: Project;
+  worktrees: Project[];
+  isActive: (p: Project) => boolean;
+  onSelect: (p: Project) => void;
+}
+
+/** Sub tree under a project that has linked worktrees: the original checkout
+ *  first, then each worktree. Selecting a row opens that checkout's sessions. */
+function ProjectWorktreeTree({ project, worktrees, isActive, onSelect }: ProjectWorktreeTreeProps) {
+  const rows: { key: string; label: string; target: Project }[] = [
+    { key: project.path, label: "original", target: project },
+    ...worktrees.map((w) => ({ key: w.path, label: w.name, target: w })),
+  ];
+  return (
+    <div className="ml-4 border-l border-border/60 pl-1.5" role="group" aria-label={`${project.name} checkouts`}>
+      {rows.map((row) => (
+        <button
+          key={row.key}
+          type="button"
+          title={row.target.path}
+          onClick={() => onSelect(row.target)}
+          className={cn(
+            "flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            isActive(row.target)
+              ? "bg-foreground/[0.08] text-foreground"
+              : "text-muted-foreground hover:bg-foreground/[0.04]",
+          )}
+        >
+          <GitBranch className="w-3 h-3 shrink-0" />
+          <span className="truncate">{row.label}</span>
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // ── Sortable Project Row ────────────────────────────────────────────────────
@@ -1454,7 +1515,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
     () =>
       sortedItems
         .filter((item) => item.type === "project")
-        .map((item) => item.data as Project),
+        .flatMap((item) => [item.data as Project, ...(item.worktrees ?? [])]),
     [sortedItems],
   );
 
@@ -1689,11 +1750,13 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
                     );
                   }
                   const project = item.data as Project;
+                  const isProjectActive = (p: Project) =>
+                    state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "");
                   return (
+                    <Fragment key={projectDragKey(project.path, project.host)}>
                     <SortableProjectRow
-                      key={projectDragKey(project.path, project.host)}
                       project={project}
-                      isActive={state.activeProject?.path === project.path && (state.activeProject?.host ?? "") === (project.host ?? "")}
+                      isActive={isProjectActive(project)}
                       onSelect={() => {
                         selectProject(project);
                         // On mobile the list is a drawer: picking a project
@@ -1718,6 +1781,18 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
                       groups={state.groups}
                       profiles={profileNames}
                     />
+                    {item.worktrees && item.worktrees.length > 0 && (
+                      <ProjectWorktreeTree
+                        project={project}
+                        worktrees={item.worktrees}
+                        isActive={isProjectActive}
+                        onSelect={(p) => {
+                          selectProject(p);
+                          if (isMobile) onToggle();
+                        }}
+                      />
+                    )}
+                    </Fragment>
                   );
                 })}
               </div>

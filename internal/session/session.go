@@ -1607,14 +1607,26 @@ func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 // can be opened with LoadForDir. Listing sessions the server cannot open would
 // surface dead rows (see LoadAny for the Claude Code open surface).
 func listRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
-	dir, err := GetStorageDirForPath(wd)
+	allRefs, _, err := ocodeRefsForDir(wd)
 	if err != nil {
 		return nil, 0, err
+	}
+	page, total := paginateRefs(allRefs, limit, offset)
+	return page, total, nil
+}
+
+// ocodeRefsForDir returns every ocode ref stored for wd, newest first, plus the
+// set of Claude Code session ids (without the "claude:" prefix) that already
+// have an ocode clone there.
+func ocodeRefsForDir(wd string) ([]Ref, map[string]struct{}, error) {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 
 	metas := legacyOcodeMetas(dir, entries)
@@ -1626,6 +1638,7 @@ func listRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
 	metas = mergeMetas(metas, indexMetas)
 
 	allRefs := make([]Ref, 0, len(metas))
+	cloned := make(map[string]struct{})
 	for _, meta := range metas {
 		allRefs = append(allRefs, Ref{
 			ID:        meta.ID,
@@ -1634,15 +1647,24 @@ func listRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
 			UpdatedAt: meta.UpdatedAt,
 			Source:    SourceOcode,
 		})
+		if meta.CloneOf != "" {
+			cloned[meta.CloneOf] = struct{}{}
+		}
+		if original, ok := strings.CutPrefix(meta.ID, "claude-"); ok {
+			cloned[original] = struct{}{}
+		}
 	}
 
 	sort.Slice(allRefs, func(i, j int) bool {
 		return allRefs[i].UpdatedAt.After(allRefs[j].UpdatedAt)
 	})
+	return allRefs, cloned, nil
+}
 
-	total := len(allRefs)
-
-	// Apply pagination
+// paginateRefs returns the [offset, offset+limit) window of refs and the
+// pre-window total. limit <= 0 returns everything.
+func paginateRefs(refs []Ref, limit, offset int) ([]Ref, int) {
+	total := len(refs)
 	if limit > 0 {
 		start := offset
 		if start > total {
@@ -1652,10 +1674,49 @@ func listRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
 		if end > total {
 			end = total
 		}
-		allRefs = allRefs[start:end]
+		refs = refs[start:end]
 	}
+	return refs, total
+}
 
-	return allRefs, total, nil
+// claudeTitlePrefix marks a not-yet-cloned Claude Code session in a list.
+const claudeTitlePrefix = "claude: "
+
+// ListRefsWithClaudeForDir returns the ocode refs for wd plus every Claude Code
+// session in wd's Claude project dir that has no ocode clone yet, newest first.
+// Those rows carry the "claude:<id>" id and a "claude: " title prefix; opening
+// one clones it (OpenClaudeCloneForDir), after which the clone's own row
+// replaces it. The Claude dir is read from the machine running this process,
+// so a remote project lists its host's history when the host's server answers.
+func ListRefsWithClaudeForDir(wd string) ([]Ref, error) {
+	refs, _, err := ListRefsPaginatedWithClaudeForDir(wd, 0, 0)
+	return refs, err
+}
+
+// ListRefsPaginatedWithClaudeForDir is ListRefsPaginatedForDir plus the
+// uncloned Claude Code sessions of ListRefsWithClaudeForDir. The merge happens
+// before the window is cut so pages stay globally ordered.
+func ListRefsPaginatedWithClaudeForDir(wd string, limit, offset int) ([]Ref, int, error) {
+	refs, cloned, err := ocodeRefsForDir(wd)
+	if err != nil {
+		return nil, 0, err
+	}
+	claudeRefs, err := listClaudeSessionsForDir(wd)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, ref := range claudeRefs {
+		if _, ok := cloned[strings.TrimPrefix(ref.ID, "claude:")]; ok {
+			continue
+		}
+		ref.Title = claudeTitlePrefix + ref.Title
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
+	})
+	page, total := paginateRefs(refs, limit, offset)
+	return page, total, nil
 }
 
 // ListRefsPaginated returns a page of session refs with optional limit and offset.
@@ -1941,7 +2002,11 @@ func CloneClaudeSessionForDir(wd, id string) (*Session, error) {
 }
 
 func listClaudeSessions() ([]Ref, error) {
-	dir, err := getClaudeProjectDir()
+	return listClaudeSessionsForDir(effectiveWorkDir())
+}
+
+func listClaudeSessionsForDir(wd string) ([]Ref, error) {
+	dir, err := claudeProjectDirForPath(wd)
 	if err != nil {
 		return nil, err
 	}

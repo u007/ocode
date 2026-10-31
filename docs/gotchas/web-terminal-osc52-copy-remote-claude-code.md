@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Web terminal OSC 52 copy refused — Claude Code fullscreen on a remote host never reached the clipboard
-description: A program's OSC 52 copy reaches the web terminal over the websocket, outside any user gesture. The browser's transient-activation gate and WKWebView's gesture-bound clipboard both refused it, so copying from Claude Code (`"tui": "fullscreen"`) in a remote SSH terminal silently did nothing.
+description: 'A program''s OSC 52 copy reaches the web terminal over the websocket, outside any user gesture. The browser''s transient-activation gate and WKWebView''s gesture-bound clipboard both refused it, so copying from Claude Code (`"tui": "fullscreen"`) in a remote SSH terminal silently did nothing.'
 tags:
   - gotcha
   - web

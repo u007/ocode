@@ -4054,7 +4054,7 @@ func TestSessionPickerLoadsAllRefsWhenFilterActive(t *testing.T) {
 	m.pickerFilter = "session"
 
 	// First load: fetches first page (sessionPickerPageSize sessions)
-	cmd := loadSessionRefsCmd(m.pickerSessionLoadSeq, sessionPickerPageSize, 0)
+	cmd := loadSessionRefsCmd(m.workDir, m.pickerSessionLoadSeq, sessionPickerPageSize, 0)
 	// Keep executing returned commands until loading completes
 	updated, nextCmd := m.Update(cmd())
 	for nextCmd != nil {

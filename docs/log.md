@@ -9,6 +9,8 @@
 * **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
 * **Update**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
 * **Creation**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
+* **Update**: Git worktrees: project list folds linked worktrees under their main checkout as a sub tree; sessions stay per checkout ([concepts/git-worktrees.md](/concepts/git-worktrees.md))
+* **Update**: Data Storage Layout: each linked worktree has its own project slug and session dir; only the project list groups them ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
 ## 2026-10-30
 
 * **Update**: Terminal voice input (mic button in the web Terminal panel) ([concepts/terminal-voice-input.md](/concepts/terminal-voice-input.md))

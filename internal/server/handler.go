@@ -1399,7 +1399,7 @@ func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	refs, total, err := session.ListRefsPaginatedForDir(h.workDir, limit, offset)
+	refs, total, err := session.ListRefsPaginatedWithClaudeForDir(h.workDir, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 		return

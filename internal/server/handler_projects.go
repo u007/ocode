@@ -20,14 +20,10 @@ import (
 // HandleListProjects returns all saved project roots.
 func (h *Handler) HandleListProjects(w http.ResponseWriter, _ *http.Request) {
 	if h.projects == nil {
-		writeJSON(w, http.StatusOK, []projects.Project{})
+		writeJSON(w, http.StatusOK, []projectDTO{})
 		return
 	}
-	list := h.projects.List()
-	if list == nil {
-		list = []projects.Project{}
-	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, withWorktreeParents(h.projects.List()))
 }
 
 // HandleAddProject adds a new project root to the saved list.
@@ -213,7 +209,7 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	refs, err := session.ListRefsForDir(listPath)
+	refs, err := session.ListRefsWithClaudeForDir(listPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 		return

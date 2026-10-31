@@ -1178,6 +1178,8 @@ export interface Project {
   remote_host?: string;
   remote_port?: number;
   remote_distro?: string;
+  /** Main checkout path when this local project is a linked git worktree (server-derived). */
+  worktree_of?: string;
 }
 
 /** One project's persisted open-session tabs (GET/PUT /api/tabs). */

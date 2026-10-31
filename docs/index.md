@@ -116,7 +116,6 @@ and the web DB panel (`DBPanel.tsx`).
 - [Web/Desktop Server Project Scoping](concepts/web-server-project-scoping.md) - Project dirs are per-session not per-process: session project roots, project-scoped endpoint params, remote project proxying rules and the server-side terminal and browser tab lists.
 - [Web/Desktop Terminal on ghostty-web (libghostty-vt)](concepts/web-terminal-ghostty-web.md) - The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
 
-
 # gotchas
 
 - ["Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate](gotchas/git-ignore-toplevel-and-quoting.md) - Gotchas behind the web/desktop Git tab's right-click "Add to .gitignore": entries MUST resolve against the repo toplevel (git status porcelain paths are toplevel-relative, so a nested ?project= subdir double-prefixes), C-quoted porcelain names must be decoded before pattern-building, patterns are anchored/escaped, and the file is appended to (O_APPEND local / read-modify-write remote) rather than rewritten. Also records the latent remoteReadFile MISSING-sentinel bug fixed in the same change.
@@ -205,7 +204,6 @@ and the web DB panel (`DBPanel.tsx`).
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [React 19 upgrade — act() timing in tests and the skipLibCheck dependency](gotchas/react-19-upgrade-test-timing-and-typings.md) - React 19's async act() can yield to macrotasks, so tests that race an async effect or jsdom's rAF clock go flaky; dnd-kit 6 / monaco-react typings still need skipLibCheck
 - [Remote config sync clobbers `extra_allowed_paths`](gotchas/remote-config-sync-clobbers-extra-allowed-paths.md) - `BuildSyncPayload` (internal/remote/sync.go) pushes `ocodeconfig.json` to the remote host. Before the 2026-10-28 fix the local `extra_allowed_paths` was pushed verbatim (only `terminal_shell` was stripped), so macOS `/Users/...` paths arrived at a Linux host where they matched nothing; `WritePayload`'s full-file replacement also erased any grants the host had made locally. Two guards: sender strips (`stripMachineLocalConfig`); receiver preserves (`preserveMachineLocalConfig`) before writing.
-
 - [Remote connection identity is user+host+port, never Target.String() - port-blind cache keys, the per-connection exec-slot pool, and the 6-of-8 foreground reserve](gotchas/remote-connection-identity-includes-port.md) - Gotcha: remote.Target.String() omits the SSH port, so every cache keyed on it collapses distinct connections onto one entry - the ssh ControlPath hash (a command aimed at port 2222 can execute on port 22 multiplexed master), the exec-slot pool, and the still-unfixed host registry. The pool now keys on user+host+port and reserves 6 of its 8 slots for short-lived foreground work so a host full of long remote shell commands cannot starve the 10s git_status poll; long commands are refused at the sub-cap rather than queued, and the refusal message reaches the client verbatim.
 - [Remote fs actions on a "~"-rooted project: root-joined paths and $HOME quoting](gotchas/remote-fs-tilde-root-pathing.md) - Why remote file operations on a project rooted at a ~ path fail: double-joined paths, unexpanded tilde in shell-quoted commands, and the root-as-paste-destination gap.
 - [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages and git pathspecs passed to remoteGitCommand must be shell-quoted by the caller; remote lookups against path sets keep the raw spec.
@@ -256,26 +254,6 @@ and the web DB panel (`DBPanel.tsx`).
 
 # superpowers
 
-- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
-- [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.
 - [Clef decision-judge backend + per-judge model selection — design](superpowers/specs/2026-10-03-clef-judge-backend-design.md) - Design spec for adding Cloudflare Clef/Clef-Flash as a second decision-judge backend behind a Decider seam, with per-judge model selection. Measurement table (2026-10-05) rebuilt from the permanent TestJudgePayloadBudgets regression test against the 96 KB decisionStateBudgetBytes budget; the oversized permission write is projected to fit.
@@ -307,6 +285,26 @@ and the web DB panel (`DBPanel.tsx`).
 - [Reopen a locally hidden question dialog](superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md) - Implemented design spec: locally hide the QuestionDialog via X/Escape with request-ID-scoped hidden state and reopen it from the transcript's Open question button.
 - [Shared confirm dialog + confirmation coverage for destructive sidebar/actions](superpowers/specs/2026-09-25-shared-confirm-dialog-design.md) - Design record for a shared ConfirmDialog component replacing native window.confirm and bespoke confirms across six destructive web/desktop action sites.
 - [Shared Confirm Dialog Implementation Plan](superpowers/plans/2026-09-25-shared-confirm-dialog.md) - Shared Confirm Dialog implementation plan (tasks 1–8 done, task 9 pending)
+- [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
 - [System Permissions Settings Section (macOS TCC + cross-platform)](superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 - [Tab Loading Indicators — Design Spec](superpowers/specs/2026-09-24-tab-loading-indicators-design.md) - Design spec: accessible blocking initial-load overlays and non-blocking refresh spinners for web tab shells, keyed by (host, project, tab) with generation/abort stale-response rejection.
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28). Amended 2026-09-29: short plain-prose messages skip the summariser LLM entirely (§10.2 short-text gate). Amended 2026-09-29: client-side FIFO speak queue and now-playing `project · session` label (§7, §8).
@@ -325,6 +323,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [cloud-connectors-design.md](cloud-connectors-design.md)
 - [cloud-connectors-encryption.md](cloud-connectors-encryption.md)
 - [db-connector.md](concepts/db-connector.md)
+- [session-list-claude-code-sessions.md](concepts/session-list-claude-code-sessions.md)
 - [web-terminal-osc52-copy-remote-claude-code.md](gotchas/web-terminal-osc52-copy-remote-claude-code.md)
 - [2026-10-08-cloud-connectors-phase1.md](plans/2026-10-08-cloud-connectors-phase1.md)
 - [01-terminal-host-process.md](plans/2026-10-15-terminal-keep-alive/01-terminal-host-process.md)
@@ -463,4 +462,3 @@ and the web DB panel (`DBPanel.tsx`).
 - [2026-10-20-suggested-responses-design.md](superpowers/specs/2026-10-20-suggested-responses-design.md)
 - [2026-10-29-todo-stream-cards-design.md](superpowers/specs/2026-10-29-todo-stream-cards-design.md)
 - [telegram-bot.md](telegram-bot.md)
-
