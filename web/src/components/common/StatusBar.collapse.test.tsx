@@ -72,15 +72,45 @@ describe("StatusBar collapse", () => {
 
     fireEvent.click(collapseBtn);
 
-    // Collapsed: the expand chevron is pushed to the far right of the slim row.
+    // Collapsed: the trailing action group (cowork toggle + expand chevron) is
+    // pushed to the far right of the slim row, with the chevron last.
     const expandBtn = screen.getByRole("button", { name: "Expand status bar" });
-    expect(expandBtn.parentElement?.lastElementChild).toBe(expandBtn);
-    expect(expandBtn.className).toContain("ml-auto");
+    const trailing = expandBtn.parentElement as HTMLElement;
+    expect(trailing.className).toContain("ml-auto");
+    expect(trailing.lastElementChild).toBe(expandBtn);
+    expect(trailing.parentElement?.lastElementChild).toBe(trailing);
     // Regression: the collapse preference must survive the layout move.
     expect(window.localStorage.getItem(KEY)).toBe("true");
     // Still a single slim inner row.
     const root = container.firstChild as HTMLElement;
     expect(root.querySelectorAll(":scope > div")).toHaveLength(1);
+  });
+
+  it("keeps the cowork/sidebar toggle visible and clickable while collapsed", () => {
+    const onCoworkToggle = vi.fn();
+    render(<StatusBar onCoworkToggle={onCoworkToggle} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse status bar" }));
+
+    // The slim row is the ONLY trigger left, so the toggle must survive it.
+    const toggle = screen.getByRole("button", { name: "Toggle cowork panel" });
+    expect(toggle).toBeInTheDocument();
+    // It shares the trailing group with the expand chevron (chevron last).
+    const expandBtn = screen.getByRole("button", { name: "Expand status bar" });
+    expect(toggle.parentElement).toBe(expandBtn.parentElement);
+
+    fireEvent.click(toggle);
+    expect(onCoworkToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders no cowork toggle in the slim row when no handler is provided", () => {
+    render(<StatusBar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse status bar" }));
+
+    expect(
+      screen.queryByRole("button", { name: "Toggle cowork panel" }),
+    ).not.toBeInTheDocument();
   });
 
   it("collapses to a slim row that keeps the working indicator and hides the details", () => {
@@ -176,6 +206,18 @@ describe("StatusBar on phones", () => {
     expect(screen.getByRole("button", { name: "Expand status bar" })).toBeInTheDocument();
     // ...and the short viewport did NOT overwrite the desktop preference.
     expect(window.localStorage.getItem(KEY)).toBeNull();
+  });
+
+  it("shows the cowork/sidebar toggle on the phone slim row", () => {
+    const onCoworkToggle = vi.fn();
+    render(<StatusBar onCoworkToggle={onCoworkToggle} />);
+
+    // Phones start slim, so this is the default state a phone user sees.
+    const toggle = screen.getByRole("button", { name: "Toggle cowork panel" });
+    expect(toggle).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(onCoworkToggle).toHaveBeenCalledTimes(1);
   });
 
   it("expands on demand from the slim row without persisting the phone choice", () => {

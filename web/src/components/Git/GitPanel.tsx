@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   RefreshCw,
   GitBranch,
@@ -44,6 +44,11 @@ import type {
   GitStash,
   GitWorkspace,
 } from "@/api/types";
+
+// Lazy: pulls in Monaco, which only the conflict editor dialog needs.
+const ConflictEditor = lazy(() =>
+  import("./ConflictEditor").then((m) => ({ default: m.ConflictEditor })),
+);
 
 const REFRESH_INTERVAL = 10000;
 
@@ -785,6 +790,7 @@ export default function GitPanel({
   // block list re-reads on after every chunk action.
   const [openChunkPath, setOpenChunkPath] = useState<string | null>(null);
   const [chunkRefresh, setChunkRefresh] = useState(0);
+  const [editorPath, setEditorPath] = useState<string | null>(null);
   // Forget the expanded file once it leaves the conflict list, so a later
   // conflict on the same path starts collapsed instead of auto-fetching.
   useEffect(() => {
@@ -1526,6 +1532,15 @@ export default function GitPanel({
                         Blocks
                       </button>
                     )}
+                    {!projectHost && (
+                      <button
+                        onClick={() => setEditorPath(c.path)}
+                        title="Open the whole file in an editor and resolve block by block"
+                        className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60"
+                      >
+                        Editor
+                      </button>
+                    )}
                   </div>
                 </div>
                 {expanded && (
@@ -1545,6 +1560,21 @@ export default function GitPanel({
             );
           })}
         </div>
+      )}
+
+      {editorPath !== null && (
+        <Suspense fallback={null}>
+        <ConflictEditor
+          open
+          onOpenChange={(o) => {
+            if (!o) setEditorPath(null);
+          }}
+          path={editorPath}
+          project={projectPath}
+          operationKind={operation?.kind}
+          onMarkResolved={(p) => resolveConflict(p, "mark")}
+        />
+        </Suspense>
       )}
 
       {error && (

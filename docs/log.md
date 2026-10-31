@@ -3,6 +3,7 @@
 
 ## 2026-10-31
 
+* **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))
 * **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
 * **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 * **Update**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))

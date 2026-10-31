@@ -8,6 +8,9 @@ Soft-keyboard arrow keys now work (ghostty-web drops them: `keyCode === 229`, an
 - **Caret movement with no key event is unreachable from the web layer.** A keyboard that moves the caret via `setSelection` (SwiftKey's space-bar cursor swipe) fires `selectionchange` on the hidden textarea and NO keydown; nothing can translate that into pty bytes without hijacking text selection. Treat as covered-only-by-the-key-bar.
 - **`beforeinput` arrow forms do not exist**, so there is nothing more to intercept there. Backspace/Enter already work through ghostty-web's `beforeinput` (`deleteContentBackward`, `insertLineBreak`) — do not add them to the nav-key map, a second sender double-submits.
 - **Not verified on a physical device.** The fix is derived from the library source plus DOM-level tests; confirm with `chrome://inspect` (keydown/beforeinput/selectionchange logger) on a real SwiftKey/Gboard phone. If no keydown arrives, the key bar is the whole fix, not a supplement.
+## Open: the collapsed status bar sits under the floating SpeechToolbar on a phone (2026-10-31)
+
+The slim row now keeps the cowork/sidebar toggle beside the expand chevron, which fixes "no way to open the sidebar once collapsed" on desktop/web. On a phone that row is the default, and the floating `SpeechToolbar` (`fixed bottom-2 inset-x-2 z-40`, visible by default) still overlays the bottom strip and intercepts clicks for the whole bar — the pre-existing expand chevron included. A separate uncommitted change in the main checkout publishes the bar's measured height as `--speech-toolbar-height` and adds it to `.app-viewport`'s bottom padding; re-verify the toggle at 390×844 once that lands (it is what makes the row tappable).
 
 ## Open: DB connector project tab (2026-10-30)
 
