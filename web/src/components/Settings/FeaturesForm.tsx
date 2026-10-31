@@ -7,6 +7,7 @@ export default function FeaturesForm() {
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   const [docPromptEnabled, setDocPromptEnabled] = useState(false);
   const [suggestedResponsesEnabled, setSuggestedResponsesEnabled] = useState(false);
+  const [communicationStyleEnabled, setCommunicationStyleEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,6 +22,8 @@ export default function FeaturesForm() {
       // Absent on an older server: default to ON so the toggle reflects the
       // server's actual default rather than silently reading as "off".
       setSuggestedResponsesEnabled(cfg.suggested_responses_enabled ?? true);
+      // Same default-ON rule for the communication-style standard.
+      setCommunicationStyleEnabled(cfg.communication_style_enabled ?? true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -40,6 +43,7 @@ export default function FeaturesForm() {
         memoryEnabled,
         docPromptEnabled,
         suggestedResponsesEnabled,
+        communicationStyleEnabled,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -80,6 +84,20 @@ export default function FeaturesForm() {
         When on, the agent ends each reply with up to five suggested follow-ups.
         They appear as clickable options under the chat input — clicking one
         fills the composer.
+      </p>
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={communicationStyleEnabled}
+          onChange={(e) => setCommunicationStyleEnabled(e.target.checked)}
+        />
+        Communication style standard enabled
+      </label>
+      <p className="text-xs text-muted-foreground/80">
+        When on, the agent follows a plain-language standard: short active
+        sentences (ASD-STE100), conditions before actions, one action per
+        numbered step, consistent names, and code or commands before
+        explanations. You can append your own rules under Prompts.
       </p>
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
         {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}

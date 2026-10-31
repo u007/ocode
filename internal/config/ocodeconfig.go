@@ -1054,6 +1054,14 @@ type OcodeConfig struct {
 	// preference, not a model/provider capability, so switching profiles must
 	// never silently turn the suggestions on or off.
 	SuggestedResponsesEnabled bool
+	// CommunicationStyleEnabled toggles injection of the agent communication and
+	// style standard (ASD-STE100 structural constraints plus software-domain
+	// overrides) into the primary agent's system prompt. Default ON.
+	//
+	// Deliberately NOT part of ProfileDelta, for the same reason as
+	// SuggestedResponsesEnabled: it is a machine-level presentation preference,
+	// so switching profiles must never silently turn it on or off.
+	CommunicationStyleEnabled bool
 	// AutoShareOnStart starts the tailscale share exposure automatically when
 	// the desktop app boots, instead of waiting for the user to open the Share
 	// dialog. Default OFF: it publishes this instance to the tailnet, so it
@@ -1574,6 +1582,7 @@ type ocodeConfigFile struct {
 	MemoryEnabled              *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled           *bool                       `json:"doc_prompt_enabled,omitempty"`
 	SuggestedResponsesEnabled  *bool                       `json:"suggested_responses_enabled,omitempty"`
+	CommunicationStyleEnabled  *bool                       `json:"communication_style_enabled,omitempty"`
 	AutoShareOnStart           *bool                       `json:"auto_share_on_start,omitempty"`
 	ProfileDebug               *bool                       `json:"profile_debug,omitempty"`
 	TerminalScrollbackLines    *int                        `json:"terminal_scrollback_lines,omitempty"`
@@ -1680,6 +1689,7 @@ func defaultOcodeConfig() OcodeConfig {
 		QuickActions:              SeedQuickActions(),
 		MemoryEnabled:             true,
 		SuggestedResponsesEnabled: true,
+		CommunicationStyleEnabled: true,
 		SmallModelEnabled:         true,
 		RecapModelEnabled:         false,
 		ExplorerModelEnabled:      false,
@@ -2372,6 +2382,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.SuggestedResponsesEnabled = *file.SuggestedResponsesEnabled
 		}
 		delete(raw, "suggested_responses_enabled")
+	}
+
+	if _, ok := raw["communication_style_enabled"]; ok {
+		if file.CommunicationStyleEnabled != nil {
+			cfg.CommunicationStyleEnabled = *file.CommunicationStyleEnabled
+		}
+		delete(raw, "communication_style_enabled")
 	}
 
 	if _, ok := raw["auto_share_on_start"]; ok {
@@ -3165,6 +3182,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
 	payload["suggested_responses_enabled"] = cfg.SuggestedResponsesEnabled
+	payload["communication_style_enabled"] = cfg.CommunicationStyleEnabled
 	payload["auto_share_on_start"] = cfg.AutoShareOnStart
 	payload["profile_debug"] = cfg.ProfileDebug
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
@@ -4929,20 +4947,61 @@ func SaveOcodeHTRConfig(enabled bool, extensionPath, cliPath string, port int, r
 	})
 }
 
-// SaveOcodeFeatures persists the memory/doc-prompt/suggested-responses feature toggles.
+// OcodeFeaturesUpdate is a partial update of the feature toggles. A nil
+// field keeps the stored value, so a caller that does not know a toggle
+// (an older client, or the /mem and /docs commands) cannot reset it.
+type OcodeFeaturesUpdate struct {
+	MemoryEnabled             *bool
+	DocPromptEnabled          *bool
+	SuggestedResponsesEnabled *bool
+	CommunicationStyleEnabled *bool
+}
+
+// OcodeFeatures is the set of feature toggles as persisted by SaveOcodeFeatures.
+type OcodeFeatures struct {
+	Memory             bool
+	DocPrompt          bool
+	SuggestedResponses bool
+	CommunicationStyle bool
+}
+
+// SaveOcodeFeatures persists the memory/doc-prompt/suggested-responses/
+// communication-style feature toggles and returns the four resulting values.
 //
-// The three toggles share one endpoint and one saver on purpose: they are all
+// The four toggles share one endpoint and one saver on purpose: they are all
 // "inject this into the agent's prompt / prompt-adjacent behaviour" switches
-// that the web/desktop Settings form edits together. SaveOcodeFeatures is a
-// targeted load-modify-write under the config lock (never a whole-snapshot
-// save), so a concurrent writer cannot clobber unrelated keys.
-func SaveOcodeFeatures(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled bool) error {
-	return withOcodeConfigLock(func(c *OcodeConfig) error {
-		c.MemoryEnabled = memoryEnabled
-		c.DocPromptEnabled = docPromptEnabled
-		c.SuggestedResponsesEnabled = suggestedResponsesEnabled
+// that the web/desktop Settings form edits together. The merge happens inside
+// withOcodeConfigLock against the on-disk values, so a nil field keeps whatever
+// a concurrent writer stored, and the caller can mirror exactly what was
+// persisted. It is a targeted load-modify-write (never a whole-snapshot save),
+// so a concurrent writer cannot clobber unrelated keys.
+func SaveOcodeFeatures(u OcodeFeaturesUpdate) (OcodeFeatures, error) {
+	var out OcodeFeatures
+	err := withOcodeConfigLock(func(c *OcodeConfig) error {
+		if u.MemoryEnabled != nil {
+			c.MemoryEnabled = *u.MemoryEnabled
+		}
+		if u.DocPromptEnabled != nil {
+			c.DocPromptEnabled = *u.DocPromptEnabled
+		}
+		if u.SuggestedResponsesEnabled != nil {
+			c.SuggestedResponsesEnabled = *u.SuggestedResponsesEnabled
+		}
+		if u.CommunicationStyleEnabled != nil {
+			c.CommunicationStyleEnabled = *u.CommunicationStyleEnabled
+		}
+		out = OcodeFeatures{
+			Memory:             c.MemoryEnabled,
+			DocPrompt:          c.DocPromptEnabled,
+			SuggestedResponses: c.SuggestedResponsesEnabled,
+			CommunicationStyle: c.CommunicationStyleEnabled,
+		}
 		return nil
 	})
+	if err != nil {
+		return OcodeFeatures{}, err
+	}
+	return out, nil
 }
 
 // SaveAutoShareOnStart persists the auto-share-on-boot toggle.

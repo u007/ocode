@@ -55,6 +55,13 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     typesafeAutoContinueInstructions,
 		},
 		{
+			Key:         "communication_style",
+			Label:       "Communication style",
+			Description: "ASD-STE100 sentence limits, active voice, consistent naming, and code-first output for primary-agent replies.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     communicationStylePromptContent,
+		},
+		{
 			Key:         "compaction",
 			Label:       "Compaction summary",
 			Description: "Instruction for the anchored summariser that compacts a long conversation into a running summary.",

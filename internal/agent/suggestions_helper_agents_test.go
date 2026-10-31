@@ -54,12 +54,13 @@ func TestHelperAgentsDoNotGetSuggestionsFragment(t *testing.T) {
 		parent := &Agent{
 			client:      cap,
 			tools:       make(map[string]tool.Tool),
-			config:      &config.Config{Ocode: config.OcodeConfig{SuggestedResponsesEnabled: true}},
+			config:      &config.Config{Ocode: config.OcodeConfig{SuggestedResponsesEnabled: true, CommunicationStyleEnabled: true}},
 			permissions: NewPermissionManager(),
 			mode:        ModeBuild,
 		}
 		parent.permissions.SetMode(PermissionModeYOLO)
 		parent.SetSuggestedResponsesEnabled(true)
+		parent.SetCommunicationStyleEnabled(true)
 		taskTool := TaskTool{mainAgent: parent, registry: reg}
 		parent.tools["task"] = taskTool
 
@@ -73,6 +74,9 @@ func TestHelperAgentsDoNotGetSuggestionsFragment(t *testing.T) {
 			if strings.Contains(p, promptSuggestionsMarker) {
 				t.Fatalf("the sub-agent's system prompt carries the suggested-responses fragment")
 			}
+			if strings.Contains(p, promptCommunicationStyleMarker) {
+				t.Fatalf("the sub-agent's system prompt carries the communication-style fragment")
+			}
 		}
 	})
 
@@ -80,6 +84,7 @@ func TestHelperAgentsDoNotGetSuggestionsFragment(t *testing.T) {
 		cap := &suggestionsEchoClient{}
 		main := newTestAgent(cap, nil, nil, nil)
 		main.SetSuggestedResponsesEnabled(true)
+		main.SetCommunicationStyleEnabled(true)
 
 		done := make(chan struct{})
 		cancel := main.AskLoopAsync(
@@ -103,6 +108,9 @@ func TestHelperAgentsDoNotGetSuggestionsFragment(t *testing.T) {
 		for _, p := range cap.Prompts {
 			if strings.Contains(p, promptSuggestionsMarker) {
 				t.Fatalf("the ask helper's system prompt carries the suggested-responses fragment")
+			}
+			if strings.Contains(p, promptCommunicationStyleMarker) {
+				t.Fatalf("the ask helper's system prompt carries the communication-style fragment")
 			}
 		}
 	})

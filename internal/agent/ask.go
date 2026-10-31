@@ -220,12 +220,12 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 
 	child := NewAgent(client, tools, a.config, a.lspMgr)
 	child.toolBatchDelay = 0
-	child.SetRecapPromptEnabled(false)
-	child.SetPlanPromptEnabled(false)
-	// A side query's answer is injected back into the parent's context, so a
-	// raw suggestions block would end up in the parent's prompt. Opt out, like
-	// the recap fragment above.
-	child.SetSuggestedResponsesEnabled(false)
+	// An ask side-query is a helper: its answer is injected back into the
+	// parent's context, not shown to the user. A raw suggestions block would
+	// end up in the parent's prompt, and the user-facing recap, plan and
+	// communication-style fragments do not apply. MarkHelperAgent turns all
+	// four off.
+	child.MarkHelperAgent()
 	child.SetMaxSteps(maxSteps)
 	child.skipDiscovery = true
 	// Side-query agents belong to the same logical session. Share the root

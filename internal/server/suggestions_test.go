@@ -150,3 +150,52 @@ func TestWireHeadlessAgentCallbacksOmitsEmptySuggestions(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleFeaturesConfigCommunicationStyle pins that the communication-style
+// toggle round-trips through the features endpoint, and that an omitted key
+// keeps the stored value (the /mem and /docs slash commands omit it).
+func TestHandleFeaturesConfigCommunicationStyle(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.CommunicationStyleEnabled = true
+	h.mu.Unlock()
+
+	put := func(body string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.HandleSetFeaturesConfig(w, httptest.NewRequest("PUT", "/api/config/ocode/features", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+		}
+	}
+	stored := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.cfg.Ocode.CommunicationStyleEnabled
+	}
+
+	put(`{"memory_enabled":true,"doc_prompt_enabled":false}`)
+	if !stored() {
+		t.Fatal("an absent communication_style_enabled key must keep the stored value")
+	}
+	put(`{"memory_enabled":true,"doc_prompt_enabled":false,"communication_style_enabled":false}`)
+	if stored() {
+		t.Fatal("communication_style_enabled=false was not applied")
+	}
+	put(`{"memory_enabled":true,"doc_prompt_enabled":false}`)
+	if stored() {
+		t.Fatal("an absent key must not re-enable a stored false")
+	}
+
+	w := httptest.NewRecorder()
+	h.HandleGetFeaturesConfig(w, httptest.NewRequest("GET", "/api/config/ocode/features", nil))
+	var resp struct {
+		CommunicationStyleEnabled bool `json:"communication_style_enabled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.CommunicationStyleEnabled {
+		t.Error("GET reports communication_style_enabled=true, want false")
+	}
+}

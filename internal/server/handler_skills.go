@@ -375,10 +375,10 @@ func (h *Handler) rebuildAgentForPreferenceChange(sessionID, what string) {
 
 // rebuildAgentsForFeatureChange rebuilds EVERY resident agent session after a
 // feature toggle that is baked into the agent's construction (the
-// suggested-responses prompt fragment).
+// suggested-responses and communication-style prompt fragments).
 //
-// The suggested-responses toggle lives in the cached SYSTEM prompt, so an
-// agent built before the toggle keeps the old fragment until it is rebuilt.
+// These toggles live in the cached SYSTEM prompt, so an agent built before the
+// toggle keeps the old fragment until it is rebuilt.
 // Rebuilding is deferred while a turn is active (rebuildAgentForPreferenceChange),
 // so in-flight work keeps its agent and the next turn picks the change up.
 //

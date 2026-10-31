@@ -659,7 +659,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if h.RCBridge() == nil {
 		h.wireJobEventCallbacks(sessionID, ag)
 	}
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled())}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled()), communicationStyle: boolPtr(ag.CommunicationStyleEnabled())}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
 	// server never wires OnSubAgentMessage and a child's messages never reach
@@ -796,9 +796,13 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// there is nothing to compare — treat it as "no change".
 	h.mu.Lock()
 	suggestedNow := h.cfg == nil || h.cfg.Ocode.SuggestedResponsesEnabled
+	styleNow := h.cfg == nil || h.cfg.Ocode.CommunicationStyleEnabled
 	h.mu.Unlock()
 	suggestedChanged := as.suggestedResponses != nil && *as.suggestedResponses != suggestedNow
-	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged && !suggestedChanged {
+	// The communication-style fragment is baked in the same way, so it follows
+	// the same built-with-versus-current comparison.
+	styleChanged := as.communicationStyle != nil && *as.communicationStyle != styleNow
+	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged && !suggestedChanged && !styleChanged {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)

@@ -607,6 +607,10 @@ type agentSession struct {
 	// with suggestions). reconcileProfileAgent treats an unset snapshot as "no
 	// change".
 	suggestedResponses *bool
+	// communicationStyle snapshots the communication-style setting this agent
+	// was BUILT WITH, with the same pointer semantics as suggestedResponses: nil
+	// means "not recorded" and reconcileProfileAgent treats it as "no change".
+	communicationStyle *bool
 	// liveAppend mirrors a mid-turn transcript row into the in-flight
 	// live-persist view (set by wireLivePersist for headless turns). Without it,
 	// rows appended directly to messages — the auto-continue notice and resume

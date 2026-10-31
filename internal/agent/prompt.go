@@ -30,6 +30,8 @@ const (
 	// (SuggestionsBlockOpen/Close): this one names the SYSTEM fragment, the
 	// other one delimits the model's OUTPUT block.
 	promptSuggestionsMarker = "[ocode:suggested_responses]"
+	// promptCommunicationStyleMarker labels the communication-style prompt fragment.
+	promptCommunicationStyleMarker = "[ocode:communication_style]"
 )
 
 // docPromptContent is the documentation-first development prompt injected
@@ -130,6 +132,27 @@ Rules:
 - They must be specific to what you just did and what would naturally come next in this conversation. Never generic filler like "Ask a follow-up question".
 - The block is OPTIONAL. Skip it when nothing useful follows (a pure acknowledgement, a question the user must answer, a destructive action awaiting confirmation).
 - Never mention the block itself, and never repeat it in your prose.`
+
+// communicationStylePromptContent sets how the primary agent words its replies:
+// ASD-STE100 structural constraints, then software-domain overrides. Static
+// const in the cached system-role prefix: it must never vary per turn (see
+// append_stable.go). PRIMARY agents only; helper agents call MarkHelperAgent,
+// which turns it off along with the other user-facing fragments.
+const communicationStylePromptContent = `# Agent Communication & Style Standard
+
+## 1. ASD-STE100 Structural Constraints
+- Instruction limit: Maximum 20 words per action.
+- Description limit: Maximum 25 words per sentence.
+- Voice: Strictly active voice. Start procedural steps with imperative verbs (e.g., "Add", "Run", "Remove").
+- Order of operations: Always state conditions or safety warnings *before* the action.
+  - Good: "If the port is busy, kill process on :3000."
+  - Bad: "Kill the process on :3000 if the port is busy."
+- Formatting: One discrete action per numbered line.
+
+## 2. Software Domain Overrides
+- Lexicon: Do not restrict yourself to the ASD-STE100 900-word vocabulary. Use exact technical nouns (e.g., "idempotency", "goroutine", "debounce").
+- Consistency: Never rotate synonyms. If an entity is named ` + "`authService`" + `, call it ` + "`authService`" + ` everywhere. Do not switch between ` + "`authService`" + `, "authentication module", and "login handler".
+- Output delivery: Give code edits and terminal commands first. Keep descriptive explanations below the implementation.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
@@ -254,6 +277,11 @@ func (a *Agent) BasePromptMessages() []Message {
 	// ordering is stable for the cached prefix.
 	if a.PlanPromptEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptPlanMarker + "\n" + config.ApplyPromptOverride("plan", planExecutePromptContent)})
+	}
+	// Communication-style standard sits directly after plan. Static, so the
+	// ordering is stable for the cached prefix.
+	if a.CommunicationStyleEnabled() {
+		msgs = append(msgs, Message{Role: "system", Content: promptCommunicationStyleMarker + "\n" + config.ApplyPromptOverride("communication_style", communicationStylePromptContent)})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {

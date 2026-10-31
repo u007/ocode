@@ -2054,16 +2054,19 @@ export const api = {
       memory_enabled: boolean;
       doc_prompt_enabled: boolean;
       suggested_responses_enabled: boolean;
+      communication_style_enabled: boolean;
     }>("/api/config/ocode/features"),
   setFeaturesConfig: (
     memory_enabled: boolean,
     doc_prompt_enabled: boolean,
     suggested_responses_enabled?: boolean,
+    communication_style_enabled?: boolean,
   ) =>
     fetchJSON<{
       memory_enabled: boolean;
       doc_prompt_enabled: boolean;
       suggested_responses_enabled: boolean;
+      communication_style_enabled: boolean;
     }>("/api/config/ocode/features", {
       method: "PUT",
       body: JSON.stringify({
@@ -2071,10 +2074,13 @@ export const api = {
         doc_prompt_enabled,
         // Omitted when the caller does not care: the server keeps the stored
         // value for an absent key, so a 2-arg call (e.g. the /mem and /docs
-        // slash commands) does not silently reset the toggle.
+        // slash commands) does not silently reset these toggles.
         ...(suggested_responses_enabled === undefined
           ? {}
           : { suggested_responses_enabled }),
+        ...(communication_style_enabled === undefined
+          ? {}
+          : { communication_style_enabled }),
       }),
     }),
   getChatVerbosityConfig: () =>

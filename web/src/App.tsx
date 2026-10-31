@@ -1273,7 +1273,7 @@ function HomeApp() {
         // model; only a draft/no-tab pick moves the default new chats start with.
         setSessionModel: (sessionId, model, host?) => api.setSessionModel(sessionId, model, host),
         getFeaturesConfig: () => api.getFeaturesConfig(),
-        setFeaturesConfig: (memoryEnabled, docPromptEnabled, suggestedResponsesEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled),
+        setFeaturesConfig: (memoryEnabled, docPromptEnabled, suggestedResponsesEnabled, communicationStyleEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled, communicationStyleEnabled),
         getPathsInfo: () => api.getPathsInfo(),
         getPathsConfig: () => api.getPathsConfig(),
         setPathsConfig: (paths, uploadDir) => api.setPathsConfig(paths, uploadDir),
