@@ -54,49 +54,65 @@ export default function PlanPanel({ sessionId, host, onOpenRun }: PlanPanelProps
   const limit = setting === "5" || setting === "10" ? Number(setting) : plan.items.length;
   const { items, hidden } = visibleTodoItems(plan.items, limit, showAll);
 
+  // The header row and the body are SIBLINGS in the chat column (a fragment,
+  // not a wrapper), so the header is a plain `shrink-0` flex item that can
+  // never give way, and only the body (`shrink min-h-0`, capped at max-h-52)
+  // yields height and scrolls. A wrapper with `min-h-0` would shrink its
+  // header with it, and a wrapper without it would not shrink at all.
   return (
-    <div
-      className={`shrink-0 border-t border-border bg-gradient-to-b from-card to-background/80 px-3 py-2 ${
-        collapsed ? "" : "max-h-52 overflow-y-auto"
-      }`}
-    >
-      <button
-        type="button"
-        onClick={toggleCollapsed}
-        aria-expanded={!collapsed}
-        aria-label={collapsed ? "Expand plan" : "Collapse plan"}
-        className="flex w-full items-center gap-2 rounded-md text-left hover:opacity-90"
+    <>
+      <div
+        data-testid="plan-panel-header"
+        className="shrink-0 border-t border-border bg-gradient-to-b from-card to-background/80 px-3 py-2"
       >
-        <ChevronRight
-          className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
-            collapsed ? "" : "rotate-90"
-          }`}
-        />
-        <ListChecks className="h-3.5 w-3.5 text-emerald-400" />
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Plan</span>
-        <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
-          {plan.done}/{plan.total}
-        </span>
-        {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />}
-      </button>
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "Expand plan" : "Collapse plan"}
+          className="flex w-full items-center gap-2 rounded-md text-left hover:opacity-90"
+        >
+          <ChevronRight
+            className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
+              collapsed ? "" : "rotate-90"
+            }`}
+          />
+          <ListChecks className="h-3.5 w-3.5 text-emerald-400" />
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Plan</span>
+          <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-ring/60">
+            {plan.done}/{plan.total}
+          </span>
+          {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />}
+        </button>
+      </div>
       {!collapsed && (
-        <ul className="mt-1.5 space-y-1">
-          {items.map((item, i) => (
-            <TodoPlanRow key={item.id ?? `${i}-${item.text}`} item={item} onOpenRun={onOpenRun} />
-          ))}
-          {(hidden > 0 || showAll) && plan.items.length > limit && (
-            <li>
-              <button
-                type="button"
-                onClick={() => setShowAll((v) => !v)}
-                className="text-[11px] text-muted-foreground hover:text-foreground"
-              >
-                {showAll ? "Show less" : `+${hidden} more`}
-              </button>
-            </li>
-          )}
-        </ul>
+        <div
+          data-testid="plan-panel-body"
+          className="shrink min-h-0 max-h-52 overflow-y-auto bg-gradient-to-b from-card to-background/80"
+        >
+          {/* Padding lives on this inner box: a scroll box that shrinks to
+              zero still keeps its own padding, so padding on the scroller
+              itself would leave a stub. */}
+          <div className="px-3 pb-2">
+            <ul className="mt-1.5 space-y-1">
+              {items.map((item, i) => (
+                <TodoPlanRow key={item.id ?? `${i}-${item.text}`} item={item} onOpenRun={onOpenRun} />
+              ))}
+              {(hidden > 0 || showAll) && plan.items.length > limit && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setShowAll((v) => !v)}
+                    className="text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    {showAll ? "Show less" : `+${hidden} more`}
+                  </button>
+                </li>
+              )}
+            </ul>
+          </div>
+        </div>
       )}
-    </div>
+    </>
   );
 }

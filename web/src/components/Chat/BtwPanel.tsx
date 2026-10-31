@@ -51,7 +51,7 @@ export function BtwPanel({ sessionId, host }: { sessionId: string; host?: string
       role="region"
       aria-label="By the way side query"
       data-testid="btw-panel"
-      className="mx-2 mb-1 rounded-lg border border-border bg-card text-card-foreground shadow-sm"
+      className="mx-2 mb-1 shrink-0 rounded-lg border border-border bg-card text-card-foreground shadow-sm"
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5">
         <span className="shrink-0 text-xs font-medium text-muted-foreground">↳ By The Way</span>

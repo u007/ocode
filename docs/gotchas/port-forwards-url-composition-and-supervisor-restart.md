@@ -107,7 +107,7 @@ portMapsPath(target, `/${port}/disable`)    // → …/3510/disable?project=~/ap
 `web/src/api/client.ts`, called by `removePortMap` and `setPortMapEnabled` (symbol anchors
 only: that file was under concurrent edit when §4 was written and its line numbers had
 already drifted by >1000 since this page was created — re-grep rather than trust an old
-line). The five server routes are registered in `internal/server/server.go:700-704`
+line). The five server routes are registered in `internal/server/server.go:726-734`
 (`GET /api/portmaps`, `POST /api/portmaps`, `DELETE /api/portmaps/{port}`,
 `POST /api/portmaps/{port}/enable|disable`); the handlers live in
 `internal/server/handler_portmaps.go`.
@@ -253,7 +253,7 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`entry.policy.forget`, `internal/server/handler_portmaps.go:541`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
-  `internal/server/server.go:2076-2077` (`go s.handler.evictIdleLoop(stop)` /
+  `internal/server/server.go:2263-2264` (`go s.handler.evictIdleLoop(stop)` /
   `go s.handler.portMapWatchdogLoop(stop)`), stopped by the same `stop` channel.
 
 ### Deliberately out of scope
@@ -349,7 +349,7 @@ and the user had to click the project to make it connect. The watchdog could not
 it visits only registry entries (`portMapWatchdogPass` → `monitorPortMaps`), so a project that
 was never listed had no registry entry at all.
 
-`Serve()` (`internal/server/server.go:2205`) now calls `s.handler.portMapAutoStartAll()`
+`Serve()` (`internal/server/server.go:2239`) now calls `s.handler.portMapAutoStartAll()`
 (`internal/server/handler_portmaps.go:345`) at boot. It iterates the full saved project list
 (`h.projects.List()`), skips local (`Host == ""`) and WSL (`target.Kind != remote.KindSSH`)
 projects, carries the saved SSH port explicitly (`Project.RemotePort` into

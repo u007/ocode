@@ -1,4 +1,5 @@
 import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { openFile } from "../../lib/fileLinks";
 import { isHTTPURL, openExternalURL } from "../../lib/externalLinks";
 
 type MarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
@@ -36,6 +37,12 @@ function keepsDefaultHandling(href: string): boolean {
   }
 }
 
+/** A home-directory file link ("~" or "~/…") as the agent writes it in prose.
+ *  The browser cannot expand "~", so the server does it when the file opens. */
+function isHomeFileHref(href: string): boolean {
+  return href === "~" || href.startsWith("~/");
+}
+
 /**
  * The single anchor renderer for every react-markdown surface.
  *
@@ -43,9 +50,10 @@ function keepsDefaultHandling(href: string): boolean {
  * ocode's own server, and Wails has no external-navigation delegate, so the
  * default action would replace the whole app with the target page. Intercept
  * http(s) clicks and hand them to `openExternalURL`, which opens the OS
- * browser on desktop and a new tab in a browser. Every other href is still
- * prevented (see `keepsDefaultHandling`) — a chat bubble must never be able to
- * navigate the shell.
+ * browser on desktop and a new tab in a browser. A home-directory file link
+ * (`~/…`) opens in the Files tab. Every other href is still prevented (see
+ * `keepsDefaultHandling`) — a chat bubble must never be able to navigate the
+ * shell.
  *
  * `href`/`target`/`rel` are kept so middle-click, "copy link address", and
  * `Cmd`/`Ctrl`-click still behave like a real link.
@@ -62,6 +70,13 @@ export default function MarkdownLink({ href, children, node: _node, ...props }: 
         if (!href || event.defaultPrevented) return;
         if (keepsDefaultHandling(href)) return;
         event.preventDefault();
+        // A home-directory file link opens in the Files tab, the same path a
+        // file link in the terminal takes. Out-of-project files get the grant
+        // dialog there, so this never reads or opens anything directly.
+        if (isHomeFileHref(href)) {
+          openFile(href);
+          return;
+        }
         // Only genuinely absolute http(s) is worth pushing at the OS browser;
         // a relative path is not a link out of the app, it is a mistake.
         if (isHTTPURL(href)) openExternalURL(href);

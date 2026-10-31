@@ -66,7 +66,7 @@ MCP tools are enumerated **once per process** into a process-wide `mcpCache` war
 
 ## Lifecycle
 
-Overrides are **in-memory only** (the durable record is the process-wide `opencode.json` write) and are cleared on session release: the registry `onEvict` hook calls `clearMCPSessionOverrides(sessionID)` (`internal/server/handler.go:717`) so the map does not grow one entry per session id the process has ever served.
+Overrides are **in-memory only** (the durable record is the process-wide `opencode.json` write) and are cleared on session release: the registry `onEvict` hook calls `clearMCPSessionOverrides(sessionID)` (`internal/server/handler.go:763`) so the map does not grow one entry per session id the process has ever served.
 
 ## `/mcp` web command
 

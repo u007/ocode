@@ -101,6 +101,28 @@ export interface SpeechSummaryConfig {
   enabled: boolean;
 }
 
+/**
+ * A well-known Microsoft Office add-in directory offered as a permission
+ * preset in Settings -> Paths & Uploads. Granting one appends `path` to
+ * `extra_allowed_paths`; there is no separate Office permission store.
+ */
+export interface OfficeAddinPath {
+  /** Stable id ("excel", "word", ...) used as a React key. */
+  app: string;
+  label: string;
+  path: string;
+  /** The directory is present right now (Office creates `wef` on first sideload). */
+  exists: boolean;
+  /** The preset can be granted: its parent directory exists. */
+  available: boolean;
+  /** Already present in extra_allowed_paths (root-normalized server-side). */
+  allowed: boolean;
+  /** Raw extra_allowed_paths entry that matched, e.g. a "~/..." or trailing-slash form. */
+  allowed_path?: string;
+  /** Platform caveat, e.g. the Windows shared-folder catalog note. */
+  note?: string;
+}
+
 export interface CompactConfig {
   enabled: boolean;
   summary_provider: string;
@@ -1983,6 +2005,8 @@ export const api = {
       extra_allowed_paths: string[];
       upload_dir: string;
       platform?: string;
+      /** Known Microsoft Office add-in folders for the SERVER's platform. */
+      office_addin_paths?: OfficeAddinPath[];
     }>("/api/config/ocode/paths", undefined, host),
   setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
     fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>(
@@ -4853,6 +4877,10 @@ interface BrowseOriginState {
   base: string;
   htrNotice: string;
   remoteMode: boolean;
+  /** True when this SPA is not on the server's machine: pages are rendered by
+   *  the server's Chrome and streamed over the main origin, never loaded
+   *  through the separate browse listener. */
+  streamViaMain: boolean;
 }
 
 /** Last-read browse origin by host ("" = this machine). A remote host's origin
@@ -4910,17 +4938,45 @@ async function readBrowseOrigin(host: string): Promise<string> {
     base_url: string;
     htr_notice?: string;
     remote_mode?: boolean;
+    stream_via_main?: boolean;
   };
   _browseOrigins.set(host, {
     base: body.base_url,
     htrNotice: body.htr_notice ?? "",
     remoteMode: body.remote_mode ?? false,
+    streamViaMain: body.stream_via_main ?? false,
   });
   return body.base_url;
 }
 
 export function getBrowseHTRNotice(host: string): string {
   return _browseOrigins.get(host)?.htrNotice ?? "";
+}
+
+/** True when the page must be rendered by the server's Chrome and streamed over
+ *  the main origin (the SPA is on another device). */
+export function getBrowseStreamViaMain(host: string): boolean {
+  return _browseOrigins.get(host)?.streamViaMain ?? false;
+}
+
+/** URL and subprotocols for the Chrome-mode screencast socket on the MAIN
+ *  origin (`/api/browse/cdp/{key}`). Auth mirrors the terminal socket: query
+ *  token normally, `ocode.bearer.<token>` subprotocol in remote mode. `host` is
+ *  the tab's project host ("" = this machine), sent so the server can route a
+ *  remote project's stream. */
+export function browseCdpWsConnection(stateKey: string, grant: string, host: string): { url: string; protocols: string[] | undefined } {
+  const params = new URLSearchParams({ __grant: grant });
+  if (host) params.set("host", host);
+  let protocols: string[] | undefined;
+  const token = authToken();
+  if (token) {
+    if (isRemoteSession()) protocols = [`ocode.bearer.${token}`];
+    else {
+      // Browser WebSockets cannot set headers, so the token rides the query string.
+      params.set("token", token);
+    }
+  }
+  return { url: apiWsPath(`/api/browse/cdp/${encodeURIComponent(stateKey)}?${params.toString()}`), protocols };
 }
 
 /** True when the browse origin backs a remote-workspace server (`ocode serve

@@ -58,6 +58,40 @@ describe("AgentPreview", () => {
     expect(screen.getByText("agent thinking out loud")).toBeInTheDocument();
   });
 
+  it("yields height to the transcript instead of crushing it", () => {
+    mockUseAgentRuns.mockReturnValue({
+      runs: [{ ...runningRun, messages: [{ role: "assistant", content: "agent thinking out loud" }] }],
+      loaded: true,
+    });
+    render(<AgentPreview onOpenDetail={vi.fn()} />);
+    // Token-exact: the substring "shrink" also matches "shrink-0", so a
+    // `toContain("shrink")` check alone cannot fail when the regression is
+    // restored. Split on whitespace and assert membership instead.
+    const classesOf = (testId: string) => screen.getByTestId(testId).className.split(/\s+/);
+
+    // The header row is a flex sibling of the chat transcript and never gives
+    // way, so the "Agents" toggle stays reachable at any column height.
+    expect(classesOf("agent-preview-header")).toContain("shrink-0");
+
+    // Only the body yields: it shrinks, drops below its content (`min-h-0`),
+    // caps at max-h-52 and scrolls. Expanding a run takes at most that cap
+    // from the column, and the transcript gives way to it first.
+    const body = classesOf("agent-preview-body");
+    expect(body).toContain("shrink");
+    expect(body).not.toContain("shrink-0");
+    expect(body).toContain("min-h-0");
+    expect(body).toContain("overflow-y-auto");
+    expect(body).toContain("max-h-52");
+
+    // The body exists only while the rail is expanded (the default); collapsed
+    // leaves the header row alone.
+    fireEvent.click(screen.getByRole("button", { name: "Collapse agents" }));
+    expect(screen.queryByTestId("agent-preview-body")).toBeNull();
+    expect(classesOf("agent-preview-header")).toContain("shrink-0");
+    fireEvent.click(screen.getByRole("button", { name: "Expand agents" }));
+    expect(classesOf("agent-preview-body")).toContain("max-h-52");
+  });
+
   it("renders nothing when there are no runs", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
     const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);

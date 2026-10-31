@@ -3,6 +3,7 @@
 make_fixtures.py, check.py and ref.py all import this module so the fixture, the
 expected result and the reference solution can never drift apart.
 """
+import contextlib
 import datetime as dt
 import os
 import pathlib
@@ -10,7 +11,9 @@ import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import zipfile
 
 import openpyxl
@@ -301,18 +304,129 @@ def norm_date(v):
     return None
 
 
+class RecalcError(RuntimeError):
+    """The recalculation backend could not run or produced nothing.
+
+    This is an ENVIRONMENT failure (Excel missing, a permission prompt nobody answered, a
+    timeout, ...), never a statement about the workbook the model saved. check.py reports it as
+    ENV-FAIL so it is not scored as a model failure.
+    """
+
+
+# Excel's folder grant is per folder, so every recalculation is staged in this one directory:
+# a single "Grant Access" click covers all later runs. The directory is intentionally left in
+# place — an empty directory is harmless, and removing it would drop the grant.
+STAGE_DIR = pathlib.Path.home() / "xlsx-probe-excel"
+LOCK_PATH = pathlib.Path(tempfile.gettempdir()) / "xlsx-probe-excel.lock"
+EXCEL_LOCK_TIMEOUT = 900.0          # a cold Excel start plus one unanswered prompt can take minutes
+EXCEL_RUN_TIMEOUT = 180             # one recalculation, measured from process start
+
+
+@contextlib.contextmanager
+def _excel_lock(timeout=EXCEL_LOCK_TIMEOUT):
+    """Serialise recalculations: every probe process shares the one Excel instance.
+
+    Both platforms use the same contract — a non-blocking acquire in a retry loop with one
+    deadline — so a Windows waiter does not fail after ~10 s while a macOS waiter blocks
+    forever. Exceeding the deadline raises RecalcError (an environment failure)."""
+    deadline = time.monotonic() + timeout
+    with open(LOCK_PATH, "a+b") as fh:
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise RecalcError(
+                        f"timed out after {timeout:.0f}s waiting for the Excel lock ({LOCK_PATH}): {exc}"
+                    ) from exc
+                time.sleep(0.2)
+                continue
+            break
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _backend():
+    """argv prefix (runner + script) for this platform, or raise RecalcError."""
+    if sys.platform == "darwin":
+        script = HERE / "excel_recalc.applescript"
+        cmd = ["osascript", str(script)]
+    elif sys.platform == "win32":
+        script = HERE / "excel_recalc.ps1"
+        cmd = ["powershell", "-NoProfile", "-File", str(script)]
+    else:
+        raise RecalcError(f"no Microsoft Excel backend for platform {sys.platform}")
+    if not script.exists():
+        raise RecalcError(f"missing recalculation script {script} (incomplete checkout?)")
+    return cmd
+
+
+def _remove_staged(*paths):
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as exc:
+            # intentionally non-fatal: cleanup must not mask the real capture/recalc error,
+            # but an operator still needs to know a staging file was left behind.
+            print(f"warning: could not remove staging file {p}: {exc}", file=sys.stderr)
+
+
 def recalc(path, outdir=None):
-    """Recalculate through LibreOffice headless; return the path of the recalculated copy."""
+    """Recalculate through Microsoft Excel; return the path of the recalculated copy.
+
+    macOS drives Excel with AppleScript, Windows through COM (PowerShell). Anywhere else there
+    is no Excel, so it raises RecalcError (LibreOffice backend: TODO.md). The caller's file is
+    never opened for writing: both the staged input and the processed output are copies in
+    STAGE_DIR, so Excel cannot touch the artifact being graded."""
+    cmd_prefix = _backend()  # fail before any filesystem change
     path = pathlib.Path(path).resolve()
-    outdir = pathlib.Path(outdir or tempfile.mkdtemp(prefix="xlsx-recalc-"))
+    outdir = pathlib.Path(outdir or tempfile.mkdtemp(prefix="xlsx-recalc-")).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    prof = pathlib.Path(tempfile.gettempdir()) / "xlsx-probe-lo-profile"
-    cmd = ["soffice", f"-env:UserInstallation=file://{prof}", "--headless", "--calc",
-           "--convert-to", "xlsx:Calc MS Excel 2007 XML", "--outdir", str(outdir), str(path)]
-    subprocess.run(cmd, check=True, capture_output=True, timeout=180)
     out = outdir / path.name
+    if out == path:
+        raise ValueError(f"recalc output would overwrite its input: {path}")
+
+    STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    # Unique per CALL, not per process: a workbook left open by an earlier failure can never be
+    # reopened or clobbered by the next recalculation (check.py recalcs 2+ times per task).
+    fd, staged = tempfile.mkstemp(prefix="in-", suffix=".xlsx", dir=STAGE_DIR)
+    os.close(fd)
+    src_in = pathlib.Path(staged)
+    dst_in = src_in.with_name("out-" + src_in.name[len("in-"):])
+    try:
+        shutil.copyfile(path, src_in)
+        if sys.platform == "win32":
+            cmd = cmd_prefix + ["-Src", str(src_in), "-Dst", str(dst_in)]
+        else:
+            cmd = cmd_prefix + [str(src_in), str(dst_in)]
+        try:
+            with _excel_lock():
+                res = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                                     timeout=EXCEL_RUN_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise RecalcError(f"Excel recalculation timed out after {exc.timeout}s for {path}") from exc
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout or "").strip()[:300] or f"exit {res.returncode}"
+            raise RecalcError(f"Excel recalculation failed for {path}: {detail}")
+        if not dst_in.exists():
+            raise RecalcError(f"Excel produced no output for {path}")
+        shutil.copyfile(dst_in, out)
+    finally:
+        _remove_staged(src_in, dst_in)
     if not out.exists():
-        raise RuntimeError(f"LibreOffice produced no output for {path}")
+        raise RecalcError(f"Excel produced no output for {path}")
     return out
 
 

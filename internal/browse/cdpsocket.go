@@ -128,10 +128,29 @@ func marshalError(msg string) []byte {
 	return b
 }
 
+// marshalDetached tells an older viewer that another client took the shared
+// tab's screencast. Distinct from marshalError on purpose: the client treats
+// "error" as fatal (Chrome missing/unsupported) and stops reconnecting, but a
+// detached viewer keeps the panel and offers an explicit "Take over" action.
+func marshalDetached(reason string) []byte {
+	m := map[string]any{"t": "detached", "reason": reason}
+	b, _ := json.Marshal(m)
+	return b
+}
+
 // handleCDP upgrades the per-stateKey WebSocket that carries screencast frames,
 // telemetry, and input. The wire format is defined in the plan's § Interfaces
 // produced.
 func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
+	s.ServeCDP(w, r, nil)
+}
+
+// ServeCDP is handleCDP with a caller-supplied upgrade response header. The
+// main server mounts it at /api/browse/cdp/{stateKey} so a client that cannot
+// reach the separate browse listener (a phone over Tailscale) still gets the
+// Chrome screencast through the main origin; respHeader carries the echoed
+// ocode.bearer. subprotocol the main server's auth may have required.
+func (s *Server) ServeCDP(w http.ResponseWriter, r *http.Request, respHeader http.Header) {
 	// Extract stateKey from /b/{stateKey}/__cdp (Go 1.22 pattern).
 	stateKey := r.PathValue("stateKey")
 	if stateKey == "" {
@@ -174,7 +193,7 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 			return r.Header.Get("Origin") == s.spaOriginFor(stateKey)
 		},
 	}
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
 		s.log.Printf("browse cdp: upgrade failed: %v", err)
 		return
@@ -204,12 +223,17 @@ func (s *Server) handleCDP(w http.ResponseWriter, r *http.Request) {
 	}
 	sink := &cdpSink{entry: entry}
 
-	// Handle replacement: second socket for same key closes first with "replaced".
+	// Handle replacement: a second socket for the same key (a shared browser tab
+	// opened on another device) takes over. The manager keeps ONE sink per
+	// target, so the old viewer cannot keep streaming. Tell it DETACHED, not
+	// "error": an error is fatal in the client (chrome missing / unsupported),
+	// while detached asks the user to take the view back. The close code is
+	// still 1011 because the socket is going away; the frame is what the client
+	// acts on.
 	s.cdpMu.Lock()
 	if old, ok := s.cdpSocks[stateKey]; ok {
-		// Queue replaced error to old writer; it will close after.
-		old.trySend(wsOut{data: marshalError("replaced")})
-		old.trySend(wsOut{isClose: true, closeCode: 1011, closeText: "replaced"})
+		old.trySend(wsOut{data: marshalDetached("superseded")})
+		old.trySend(wsOut{isClose: true, closeCode: 1011, closeText: "superseded"})
 		// Do not delete old yet; its writer will clean up, but we replace map entry now.
 	}
 	s.cdpSocks[stateKey] = entry

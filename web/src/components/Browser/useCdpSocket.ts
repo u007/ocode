@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { mintBrowseGrant } from "../../api/client";
+import { mintBrowseGrant, getBrowseStreamViaMain, browseCdpWsConnection } from "../../api/client";
 import type { CdpClientMessage, CdpServerMessage } from "./cdpProtocol";
 import { decodeFrame } from "./cdpProtocol";
 import { browserActions, type StateKey } from "../../lib/browserStore";
@@ -53,6 +53,12 @@ export interface CdpSocketApi {
   getNodeAt(x: number, y: number): Promise<NodeResult>;
   /** Describe a node returned by getNodeAt. */
   describeNode(nodeId: number): Promise<NodeDescription>;
+  /** Non-null when another window/device took this shared tab's screencast.
+   *  The socket is closed and will NOT reconnect until `reconnect()` is called,
+   *  so the viewer keeps its panel and offers an explicit "Take over". */
+  detached: string | null;
+  /** Take the shared tab's screencast back (clears `detached`, reconnects). */
+  reconnect(): void;
 }
 
 // Reconnect backoff sequence; caps at the last value.
@@ -62,15 +68,22 @@ const BACKOFF_MS = [500, 1000, 2000, 5000];
  *  input (Part 05 wire format). Grants are minted per attempt — the server
  *  redeems them one-time on the WS URL. A close without a prior
  *  {"t":"error"} is treated as transient and retried with backoff; an error
- *  message is fatal (chrome missing / unsupported / replaced). */
+ *  message is fatal (chrome missing / unsupported / replaced). `host` is the
+ *  tab's project host ("" = this machine), the same key BrowserPanel uses to
+ *  decide chrome mode. */
 export function useCdpSocket(
   stateKey: StateKey,
   browseBase: string | null,
+  host: string,
   enabled: boolean,
   acceptFrames = true,
 ): CdpSocketApi {
   const [status, setStatus] = useState<CdpSocketStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
+  const [detached, setDetached] = useState<string | null>(null);
+  // A detached close must not schedule a reconnect (see onclose); a ref, not
+  // the state, because onclose runs outside React's render.
+  const detachedRef = useRef(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<CdpClientMessage[]>([]);
@@ -89,8 +102,8 @@ export function useCdpSocket(
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposedRef = useRef(false);
   // Latest rendered values for the async connect loop (avoids stale reads).
-  const cfgRef = useRef({ stateKey, browseBase, enabled, acceptFrames });
-  cfgRef.current = { stateKey, browseBase, enabled, acceptFrames };
+  const cfgRef = useRef({ stateKey, browseBase, host, enabled, acceptFrames });
+  cfgRef.current = { stateKey, browseBase, host, enabled, acceptFrames };
 
   const rejectPending = useCallback((err: Error, socket?: WebSocket) => {
     for (const [requestId, pending] of pendingRef.current) {
@@ -108,22 +121,31 @@ export function useCdpSocket(
   }, [rejectPending]);
 
   const connect = useCallback(() => {
-    const { stateKey: key, browseBase: base, enabled: on } = cfgRef.current;
+    const { stateKey: key, browseBase: base, host, enabled: on } = cfgRef.current;
     if (disposedRef.current || !on || !base) return;
+    // A connect is an explicit intent to be attached: clear any takeover state
+    // so the new socket is not immediately treated as detached.
+    detachedRef.current = false;
+    setDetached(null);
     const generation = connectionGenerationRef.current;
     setStatus("connecting");
-    // Chrome mode runs on this machine only; remote projects never select it.
-    const grantPromise = mintBrowseGrant(key, "");
+    const grantPromise = mintBrowseGrant(key, host);
     grantPromise
       .then((grant) => {
         if (disposedRef.current || generation !== connectionGenerationRef.current || !cfgRef.current.enabled) return;
-        const wsUrl =
-          base.replace(/^http/, "ws") +
-          "/b/" +
-          encodeURIComponent(key) +
-          "/__cdp?__grant=" +
-          encodeURIComponent(grant);
-        const ws = new WebSocket(wsUrl);
+        // A client on another device cannot reach the separate browse
+        // listener, so its screencast rides the main origin.
+        const direct = {
+          url:
+            base.replace(/^http/, "ws") +
+            "/b/" +
+            encodeURIComponent(key) +
+            "/__cdp?__grant=" +
+            encodeURIComponent(grant),
+          protocols: undefined as string[] | undefined,
+        };
+        const { url: wsUrl, protocols } = getBrowseStreamViaMain(host) ? browseCdpWsConnection(key, grant, host) : direct;
+        const ws = new WebSocket(wsUrl, protocols);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
@@ -229,8 +251,18 @@ export function useCdpSocket(
 				if (msg.error) console.error("browse: perf toggle failed:", msg.error);
 				break;
 			case "error":
-				// Fatal: chrome missing/unsupported/replaced. No reconnect.
+				// Fatal: chrome missing/unsupported. No reconnect.
 				setError(msg.message);
+				setStatus("closed");
+				wsRef.current = null;
+				ws.close();
+				break;
+			case "detached":
+				// Another window/device took the shared tab's screencast. Keep the
+				// panel and offer "Take over"; the close that follows must not
+				// reconnect (that would ping-pong the two viewers forever).
+				detachedRef.current = true;
+				setDetached(msg.reason || "superseded");
 				setStatus("closed");
 				wsRef.current = null;
 				ws.close();
@@ -259,6 +291,7 @@ export function useCdpSocket(
           rejectPending(new Error("disconnected"), ws);
           if (!current) return; // superseded socket
           if (disposedRef.current || !cfgRef.current.enabled) return;
+          if (detachedRef.current) return; // taken over: wait for reconnect()
           setStatus("reconnecting");
           scheduleReconnect();
         };
@@ -311,7 +344,19 @@ export function useCdpSocket(
       ws?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stateKey, browseBase, enabled, rejectPending]);
+  }, [stateKey, browseBase, host, enabled, rejectPending]);
+
+  // Take the shared tab back after another viewer superseded this one. Resets
+  // the backoff so the re-attach is immediate; connect() clears `detached`.
+  const reconnect = useCallback(() => {
+    if (disposedRef.current || !cfgRef.current.enabled) return;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    attemptRef.current = 0;
+    connect();
+  }, [connect]);
 
   const send = useCallback((msg: CdpClientMessage) => {
     const ws = wsRef.current;
@@ -407,5 +452,5 @@ export function useCdpSocket(
     [requestCdp],
   );
 
-  return { send, status, error, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode };
+  return { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode };
 }

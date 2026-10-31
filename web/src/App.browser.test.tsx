@@ -2,7 +2,7 @@
 // the full-width browser tab view and the side panel toggle. All heavy
 // children are stubbed; the real providers (Chat/Project/Terminal/BrowserTabs)
 // stay live so the wiring under test is genuine.
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -188,6 +188,48 @@ describe("App browser wiring", () => {
     const side = panels.find((p) => p.getAttribute("data-mode") === "side");
     expect(side).toBeTruthy();
     expect(side!.getAttribute("data-key")).toMatch(/^side:chat:/);
+  });
+
+  it("keeps the side-panel toggle inside the tab bar action row", async () => {
+    // Regression: the toggle used to be a SIBLING of the tab bar, vertically
+    // centered against the whole bar. The bar is top-aligned and its pill
+    // column wraps, so every extra wrapped row pushed the toggle further down
+    // (3 wrapped rows = 26px low) instead of leaving it on the buttons' line.
+    // Sharing the action row is what keeps it aligned at any pill count.
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    const toggle = await screen.findByRole("button", { name: /toggle browser panel/i });
+    const actions = screen.getByTestId("tabbar-actions");
+    expect(actions.contains(toggle)).toBe(true);
+    // `mx-1` (not `ml-1`): the wrapping action row must keep the right margin.
+    expect(toggle.className.split(/\s+/)).toContain("mx-1");
+    // It must share the row with the built-in controls, not merely be nested
+    // somewhere inside the bar.
+    expect(within(actions).getByRole("button", { name: /all sessions/i })).toBeTruthy();
+  });
+
+  it("hides the side-panel toggle on a phone", async () => {
+    // The side pane does not exist on mobile (shouldRenderSidePane), so App
+    // passes no trailingAction. Without this case a refactor could render the
+    // toggle on a phone with every other test still green.
+    const original = window.matchMedia;
+    window.matchMedia = ((media: string) => ({
+      matches: media.includes("max-width: 767px"),
+      media,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      renderApp();
+      await screen.findByTestId("tabbar-actions");
+      expect(screen.queryByRole("button", { name: /toggle browser panel/i })).toBeNull();
+    } finally {
+      window.matchMedia = original;
+    }
   });
 
   it("disables the side-panel toggle while a full-width browser tab is focused", async () => {

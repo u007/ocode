@@ -1,7 +1,8 @@
 #!/bin/bash
 # usage: selftest.sh [task ...]
 # Proves the checker is not vacuous: every "good" reference must PASS, every cover-up/naive variant must FAIL.
-# Runs in a scratch dir (never inside a repo). Needs python3 + openpyxl + lxml and LibreOffice (soffice).
+# Runs in a scratch dir (never inside a repo) and stages each recalculation in ~/xlsx-probe-excel.
+# Needs python3 + openpyxl + lxml and Microsoft Excel (macOS or Windows) with access to that folder.
 set -u
 SP=$(cd "$(dirname "$0")" && pwd)
 [ -d "$SP/fixtures" ] || python3 "$SP/make_fixtures.py" > /dev/null

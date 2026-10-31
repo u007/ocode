@@ -15,11 +15,11 @@ Symptom: switching back to an existing chat (e.g. `ses_2026-10-25-001110-0cee49b
 
 Root cause (three compounding):
 - `effectiveSessionModel` (`internal/server/handler_session_state.go:617`) resolved a session with no `metadata["model"]` override through `cfg.Model` — the same process-wide default that `/models` writes. Changing the default therefore moved every override-less chat.
-- `HandleChat` (`internal/server/handler.go:1279`) persisted `meta["model"]` only when the request named a model explicitly, so most chats had no pin.
+- `HandleChat` (`internal/server/handler.go:1292`) persisted `meta["model"]` only when the request named a model explicitly, so most chats had no pin.
 - Clearing a model previously deleted the key, making it indistinguishable from a legacy chat that never had one — the ledger fallback would have silently restored the cleared value (`internal/usage/usage.go:386`).
 
 Fix (three parts):
-1. `HandleChat` (`internal/server/handler.go:1279`) now always writes `meta["model"] = model` at session creation, freezing a new chat to the default in effect then. `ReadMetadataForDir` (`internal/session/session.go:2157`) replaces `LoadForDir` on the hot status-poll path.
+1. `HandleChat` (`internal/server/handler.go:1292`) now always writes `meta["model"] = model` at session creation, freezing a new chat to the default in effect then. `ReadMetadataForDir` (`internal/session/session.go:2157`) replaces `LoadForDir` on the hot status-poll path.
 2. `effectiveSessionModel` (`internal/server/handler_session_state.go:617`) reads a 3-state metadata: key absent = legacy → consult usage ledger (`LastModelForSession`); key present-empty (`""`) = explicit "follow default"; value = pinned. Pulse sessions skip the ledger (`internal/usage/usage.go:386`).
 3. `pinSessionModel` (`internal/server/handler_session_state.go:666`) writes the resolved model back to transcript metadata on the chat's next turn (`HandleChat`, `HandleSendMessage` incl. rewind, `executeTurnJob` for retries/auto-continue). `setSessionModelOverride` (`internal/server/handler_session_state.go:697`) writes the `""` clear sentinel. The web `/models` command is now scoped: `PUT /api/sessions/:id/model` for an existing chat; only a draft (`new-*`) or session-less tab changes the global default and resolves typed names against `GET /api/models` (`name` = provider-qualified id; `model` = bare name; `display_name` = label).
 

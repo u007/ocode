@@ -94,6 +94,8 @@ function nodeAttribute(node: NodeDescription | null, name: string): string | und
 export interface ChromeViewportProps {
   stateKey: StateKey;
   browseBase: string | null;
+  /** The tab's project host ("" = this machine); keys the socket's grant and stream routing. */
+  host: string;
   url: string;
   /** Whether this viewport is the visible, interactive browser surface. The
    * socket remains connected while false so the remote page stays alive, but
@@ -113,8 +115,8 @@ export interface ChromeViewportProps {
  *  page — chrome is only the address bar's status row above it. Coordinates
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
-export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = true }: ChromeViewportProps) {
-  const { send, status, error, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode } = useCdpSocket(stateKey, browseBase, true, active);
+export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active = true }: ChromeViewportProps) {
+  const { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode } = useCdpSocket(stateKey, browseBase, host, true, active);
   const surface = useBrowserStore(stateKey);
   const actions = useBrowserActions();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -961,6 +963,23 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
         position={contextMenu ?? { x: 0, y: 0 }}
         onClose={closeContextMenu}
       />
+      {detached && (
+        <div
+          data-testid="cdp-detached"
+          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-background/90 p-4 text-center"
+        >
+          <p className="text-xs text-muted-foreground">
+            Another window or device is viewing this browser tab.
+          </p>
+          <button
+            type="button"
+            onClick={reconnect}
+            className="rounded border border-border bg-background px-2.5 py-1 text-xs text-foreground hover:bg-muted"
+          >
+            Take over
+          </button>
+        </div>
+      )}
       <textarea
         ref={keyboardRef}
         data-testid="cdp-keyboard"

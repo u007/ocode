@@ -253,6 +253,20 @@ func LogsDir() (string, error) {
 	return ensureDir(filepath.Join(base, "logs"))
 }
 
+// ServersDir returns the directory holding one registry entry per live
+// `ocode serve` process. A starting server reads it to report sibling servers
+// running a different version: such a server keeps a remote host's workspace
+// alive and retires the newer remote server on every reconnect, which kills
+// in-flight turns. Absent entries are self-cleaning (the owner removes its
+// file on exit and a scanner drops records whose pid is gone).
+func ServersDir() (string, error) {
+	base, err := GlobalDataDir()
+	if err != nil {
+		return "", err
+	}
+	return ensureDir(filepath.Join(base, "servers"))
+}
+
 // UsageDir returns the usage data directory under the global data dir.
 func UsageDir() (string, error) {
 	base, err := GlobalDataDir()

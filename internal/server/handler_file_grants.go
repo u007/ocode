@@ -2,12 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/u007/ocode/internal/projects"
 )
 
 // File-access GRANTS — the editor/preview's own allowlist for directories OUTSIDE
@@ -60,7 +63,12 @@ func canonicalGrantRoot(path string) (string, bool) {
 	if trimmed == "" {
 		return "", false
 	}
-	abs, err := filepath.Abs(trimmed)
+	expanded, err := projects.ExpandHome(trimmed)
+	if err != nil {
+		log.Printf("[grant] cannot expand home directory in %q: %v", trimmed, err)
+		return "", false
+	}
+	abs, err := filepath.Abs(expanded)
 	if err != nil {
 		return "", false
 	}
@@ -187,7 +195,11 @@ func (h *Handler) HandleGrantFilePath(w http.ResponseWriter, r *http.Request) {
 // placed under the root. A path that named the granted directory itself is
 // the root; any other path is the root joined with the file's name.
 func canonicalGrantFile(requested, root string) (string, error) {
-	abs, err := filepath.Abs(strings.TrimSpace(requested))
+	expanded, err := projects.ExpandHome(strings.TrimSpace(requested))
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(expanded)
 	if err != nil {
 		return "", err
 	}

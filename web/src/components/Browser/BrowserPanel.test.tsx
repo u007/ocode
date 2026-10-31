@@ -35,11 +35,13 @@ vi.mock("../../lib/browserStore", async (importOriginal) => {
 });
 const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
 const mockBrowseRemoteMode = vi.hoisted(() => vi.fn(() => false));
+const mockStreamViaMain = vi.hoisted(() => vi.fn((_host: string) => false));
 const mockGetBrowseBase = vi.hoisted(() => vi.fn(async (_host: string) => "http://127.0.0.1:54321"));
 vi.mock("../../api/client", () => ({
   getBrowseBase: (host: string) => mockGetBrowseBase(host),
   getBrowseHTRNotice: mockHtrNotice,
   getBrowseRemoteMode: mockBrowseRemoteMode,
+  getBrowseStreamViaMain: mockStreamViaMain,
   mintBrowseGrant: vi.fn(async () => "GRANT123"),
   bypassBrowseTLS: (...args: unknown[]) => (mockBypass as unknown as (...a: unknown[]) => unknown)(...args),
   normalizeBrowseURL: (u: string) => u,
@@ -55,7 +57,7 @@ import { BrowserPanel } from "./BrowserPanel";
 // socket stack.
 vi.mock("./ChromeViewport", () => ({
   ChromeViewport: (props: Record<string, unknown>) => (
-    <div data-testid="chrome-viewport" data-url={String(props.url)}>
+    <div data-testid="chrome-viewport" data-url={String(props.url)} data-host={String(props.host)}>
       <input data-testid="chrome-focus-target" />
     </div>
   ),
@@ -68,6 +70,7 @@ describe("BrowserPanel", () => {
     mockHtrNotice.mockReturnValue("");
     mockIsRemoteSession.mockReturnValue(false);
     mockBrowseRemoteMode.mockReturnValue(false);
+    mockStreamViaMain.mockReturnValue(false);
     state.error = "";
     state.url = "https://example.com/";
     state.status = 200;
@@ -81,6 +84,22 @@ describe("BrowserPanel", () => {
     const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
     await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
     expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("renders a localhost page in Chrome (streamed) when the client is on another device", async () => {
+    mockStreamViaMain.mockReturnValue(true);
+    state.url = "https://localhost:3510/";
+    (state as unknown as Record<string, unknown>).mode = "local";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
+    await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    expect(container.querySelector("iframe")).toBeNull();
+  });
+
+  it("hands the panel's project host to ChromeViewport when the host streams over the main origin", async () => {
+    mockStreamViaMain.mockImplementation((h: string) => h === "ssh:box");
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="ssh:box" />);
+    await waitFor(() => expect(container.querySelector("[data-testid='chrome-viewport']")).toBeTruthy());
+    expect(container.querySelector("[data-testid='chrome-viewport']")?.getAttribute("data-host")).toBe("ssh:box");
   });
 
   it("blurs a backgrounded viewport so stale browser focus cannot capture input", async () => {

@@ -63,6 +63,30 @@ func (s *Server) handleRemoteBrowseConfig(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// handleRemoteBrowseCDP streams the Chrome-mode screencast of a remote host
+// (/api/browse/cdp/{key}?host=<remote>). The grant and the page live on the
+// host's browse server, so the socket is that host's own /api/browse/cdp/{key},
+// reached through the same saved-host proxy as every other remote call (its
+// admission, connect and 503-while-connecting rules, and the websocket token
+// rewrite). The host parameter is removed first: the host's handler would
+// otherwise read it as a remote request of its own.
+func (s *Server) handleRemoteBrowseCDP(w http.ResponseWriter, r *http.Request, host string) {
+	prepareRemoteCDPRequest(r, host)
+	s.handler.HandleRemoteProxy(w, r)
+}
+
+// prepareRemoteCDPRequest rewrites a main-origin CDP request into the host's
+// own /api/browse/cdp/<key> request. The host parameter is removed: the host's
+// handler would otherwise read it as a remote request of its own. Split out so
+// the rewrite is testable without a live remote workspace.
+func prepareRemoteCDPRequest(r *http.Request, host string) {
+	q := r.URL.Query()
+	q.Del("host")
+	r.URL.RawQuery = q.Encode()
+	r.SetPathValue("host", host)
+	r.SetPathValue("rest", "browse/cdp/"+r.PathValue("stateKey"))
+}
+
 // handleRemoteBrowseProxy proxies browse-origin requests to the remote host's
 // tunneled browse origin. This makes the embedded browser accessible from
 // remote clients (mobile, web) that cannot reach the loopback tunnel directly.

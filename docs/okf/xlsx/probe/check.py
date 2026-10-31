@@ -4,11 +4,13 @@
 usage: check.py <task> <workdir>
   workdir holds the pristine input (must be byte-identical to fixtures/) and the model's
   output <stem>_out.xlsx.
-Excel itself is not available. Values are read after a LibreOffice headless recalculation, and
+Values are read after a Microsoft Excel recalculation (lib.recalc), and
 for every "live formula" task the checker EDITS an input in a copy of the model's file, recalculates
 again and verifies the result moved. Pasted values, hard-coded dates/thresholds and cover-ups
 (hidden rows, chart over the data, wrong chart range) fail.
-Prints one line per check (PASS/FAIL) and a final "SCORE n/m PASS|FAIL" line.
+Prints one line per check (PASS/FAIL) and a final "SCORE n/m PASS|FAIL" line, or
+"ENV-FAIL <reason>" (exit 3) when Excel could not recalculate at all — an environment failure,
+which summarize.py excludes from the model's score.
 """
 import datetime as dt
 import hashlib
@@ -55,6 +57,16 @@ def finish():
     n = sum(results)
     print(f"SCORE {n}/{len(results)} {'PASS' if n == len(results) else 'FAIL'}")
     sys.exit(0)
+
+
+def env_fail(reason):
+    """The recalculation environment failed, not the model.
+
+    Printed as the LAST line so summarize.py can exclude the run from the model's score
+    instead of counting it as a failed task (PLAN.md §6 separates model / environment /
+    checker failures)."""
+    print(f"ENV-FAIL {reason}")
+    sys.exit(3)
 
 
 def sha(p):
@@ -161,8 +173,14 @@ def open_task(task, wd):
         finish()
     try:
         wf = openpyxl.load_workbook(out)
+    except Exception as e:                       # corrupt file: the model's problem
+        check("output opens and recalculates", False, repr(e)[:120])
+        finish()
+    try:
         wv = lib.values(out)
-    except Exception as e:                       # corrupt file / recalc failure
+    except lib.RecalcError:
+        raise                                    # Excel could not run: main() reports ENV-FAIL
+    except Exception as e:                       # recalculated file unreadable: the model's problem
         check("output opens and recalculates", False, repr(e)[:120])
         finish()
     check("output opens and recalculates", True)
@@ -675,8 +693,12 @@ def main():
     if len(sys.argv) != 3 or sys.argv[1] not in RUN:
         sys.exit(f"usage: check.py <{'|'.join(RUN)}> <workdir>")
     task, wd = sys.argv[1], pathlib.Path(sys.argv[2])
-    out, wf, wv, fx = open_task(task, wd)
-    RUN[task](out, wf, wv, fx)
+    try:
+        out, wf, wv, fx = open_task(task, wd)
+        RUN[task](out, wf, wv, fx)
+    except lib.RecalcError as e:
+        # Excel missing, an unanswered access prompt, or a timeout: never a model failure.
+        env_fail(str(e)[:200])
     finish()
 
 

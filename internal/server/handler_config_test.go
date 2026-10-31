@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -619,6 +620,66 @@ func TestHandleGetPathsConfigIncludesPlatform(t *testing.T) {
 	}
 	if got, _ := body["platform"].(string); got != runtime.GOOS {
 		t.Errorf("platform = %q, want %q", got, runtime.GOOS)
+	}
+}
+
+// GET /api/config/ocode/paths reports the Office add-in presets and marks the
+// ones already granted. The comparison must go through root normalization: a
+// stored trailing slash (or "~/...") must still read as checked.
+func TestHandleGetPathsConfigMarksOfficeAddinsAllowed(t *testing.T) {
+	h := testConfigHandler(t)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	excelPath := filepath.Join(home, "office", "excel", "wef")
+	wordPath := filepath.Join(home, "office", "word", "wef")
+	if err := os.MkdirAll(filepath.Dir(excelPath), 0o755); err != nil {
+		t.Fatalf("mkdir excel parent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(wordPath), 0o755); err != nil {
+		t.Fatalf("mkdir word parent: %v", err)
+	}
+	const excelStored = "~/office/excel/wef/"
+
+	h.officeAddinPaths = func() []paths.OfficeAddinPath {
+		return []paths.OfficeAddinPath{
+			{App: "excel", Label: "Excel", Path: excelPath, Available: true},
+			{App: "word", Label: "Word", Path: wordPath, Available: true},
+		}
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.ExtraAllowedPaths = []string{excelStored}
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	h.HandleGetPathsConfig(w, httptest.NewRequest("GET", "/api/config/ocode/paths", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		ExtraAllowedPaths []string                `json:"extra_allowed_paths"`
+		OfficeAddinPaths  []paths.OfficeAddinPath `json:"office_addin_paths"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.OfficeAddinPaths) != 2 {
+		t.Fatalf("office_addin_paths = %+v, want 2 entries", body.OfficeAddinPaths)
+	}
+	if !body.OfficeAddinPaths[0].Allowed {
+		t.Errorf("excel preset must be marked allowed (stored as ~ with a trailing separator)")
+	}
+	if body.OfficeAddinPaths[0].AllowedPath != excelStored {
+		t.Errorf("allowed_path = %q, want the raw stored entry %q", body.OfficeAddinPaths[0].AllowedPath, excelStored)
+	}
+	if body.OfficeAddinPaths[1].Allowed {
+		t.Errorf("word preset must not be marked allowed")
+	}
+	if body.OfficeAddinPaths[0].Path != excelPath {
+		t.Errorf("preset path = %q, want %q", body.OfficeAddinPaths[0].Path, excelPath)
 	}
 }
 

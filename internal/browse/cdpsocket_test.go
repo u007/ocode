@@ -713,7 +713,7 @@ func TestCDP_ClientCloseDetachesNotRevoke(t *testing.T) {
 	fake.mu.Unlock()
 }
 
-func TestCDP_SecondSocketReplacesFirst(t *testing.T) {
+func TestCDP_SecondSocketDetachesFirst(t *testing.T) {
 	s, _, ts := newBrowseWithFake(t, "http://example.com")
 	grant1 := s.MintGrant("tab:x", "http://example.com")
 	grant2 := s.MintGrant("tab:x", "http://example.com")
@@ -724,27 +724,29 @@ func TestCDP_SecondSocketReplacesFirst(t *testing.T) {
 	}
 	defer c1.Close()
 	time.Sleep(50 * time.Millisecond)
-	// Drain c1's attach state so the next read sees the replacement error.
+	// Drain c1's attach state so the next read sees the detach frame.
 	drainAttachPerfState(t, c1)
 	c2, _, err := dialer.Dial(wsURL(ts, "tab:x", grant2), http.Header{"Origin": []string{"http://example.com"}})
 	if err != nil {
 		t.Fatalf("dial2: %v", err)
 	}
 	defer c2.Close()
-	// c1 should receive replaced error then close
+	// c1 must be told it was DETACHED (not "error"): an error is fatal in the
+	// client, so a shared tab opened on a second device would permanently kill
+	// the first viewer instead of offering "Take over".
 	c1.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := c1.ReadMessage()
 	if err != nil {
-		t.Fatalf("c1 read replaced error: %v", err)
+		t.Fatalf("c1 read detach frame: %v", err)
 	}
 	var got map[string]any
 	_ = json.Unmarshal(data, &got)
-	if got["t"] != "error" || got["message"] != "replaced" {
-		t.Fatalf("c1 replaced frame = %s", string(data))
+	if got["t"] != "detached" || got["reason"] != "superseded" {
+		t.Fatalf("c1 detach frame = %s", string(data))
 	}
 	_, _, err = c1.ReadMessage()
 	if err == nil {
-		t.Fatal("c1 should be closed after replaced")
+		t.Fatal("c1 should be closed after the detach frame")
 	}
 }
 

@@ -8,8 +8,8 @@ const { useCdpSocket } = await import("./useCdpSocket");
 const { browserActions, browserStore } = await import("../../lib/browserStore");
 
 let lastApi: ReturnType<typeof useCdpSocket> | null = null;
-function Harness(props: { stateKey: "tab:abc"; base: string | null; enabled: boolean; acceptFrames?: boolean }) {
-  const api = useCdpSocket(props.stateKey, props.base, props.enabled, props.acceptFrames);
+function Harness(props: { stateKey: "tab:abc"; host: string; base: string | null; enabled: boolean; acceptFrames?: boolean }) {
+  const api = useCdpSocket(props.stateKey, props.base, props.host, props.enabled, props.acceptFrames);
   lastApi = api;
   const [status, setStatus] = useState(api.status);
   // keep a re-render on status change
@@ -70,17 +70,31 @@ class FakeWebSocket {
 }
 
 const mockGrant = vi.hoisted(() =>
-  vi.fn(async (_key: string) => "GRANT-" + Math.random().toString(36).slice(2)),
+  vi.fn(async (_key: string, _host: string) => "GRANT-" + Math.random().toString(36).slice(2)),
+);
+
+const mockStreamViaMain = vi.hoisted(() => vi.fn((_host: string) => false));
+
+const mockBrowseCdpWsConnection = vi.hoisted(() =>
+  vi.fn((key: string, grant: string, _host: string) => ({
+    url: `wss://main.example/api/browse/cdp/${key}?__grant=${grant}`,
+    protocols: undefined,
+  })),
 );
 
 vi.mock("../../api/client", () => ({
-  mintBrowseGrant: (key: string) => mockGrant(key),
+  mintBrowseGrant: (key: string, host: string) => mockGrant(key, host),
+  getBrowseStreamViaMain: (host: string) => mockStreamViaMain(host),
+  browseCdpWsConnection: (key: string, grant: string, host: string) => mockBrowseCdpWsConnection(key, grant, host),
 }));
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   mockGrant.mockClear();
+  mockStreamViaMain.mockClear();
+  mockBrowseCdpWsConnection.mockClear();
+  mockStreamViaMain.mockReturnValue(false);
   // Fake timers with immediate microtask draining: the hook's grant promise
   // chain resolves on microtasks, and waitFor polls on timers — this config
   // lets both progress deterministically.
@@ -100,7 +114,7 @@ function lastSocket(): FakeWebSocket {
 
 describe("useCdpSocket", () => {
   it("mints a grant and opens the __cdp ws URL with arraybuffer binary type", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     const grant = await mockGrant.mock.results[0].value;
@@ -112,18 +126,35 @@ describe("useCdpSocket", () => {
   });
 
   it("converts https base to wss", async () => {
-    render(<Harness stateKey="tab:abc" base="https://browse.example" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="https://browse.example" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     expect(lastSocket().url).toMatch(/^wss:\/\//);
   });
 
   it("does not connect when disabled", () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled={false} />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled={false} />);
     expect(FakeWebSocket.instances.length).toBe(0);
   });
 
+  it("streams over the main origin, not the browse listener, when the client is on another device", async () => {
+    mockStreamViaMain.mockReturnValue(true);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    expect(lastSocket().url).toMatch(/^wss:\/\/main\.example\/api\/browse\/cdp\/tab:abc\?__grant=/);
+    expect(mockBrowseCdpWsConnection).toHaveBeenCalledWith("tab:abc", expect.any(String), "");
+  });
+
+  it("uses the tab's project host for the grant, the stream check and the main-origin socket", async () => {
+    mockStreamViaMain.mockReturnValue(true);
+    render(<Harness stateKey="tab:abc" host="ssh:box" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    expect(mockGrant).toHaveBeenCalledWith("tab:abc", "ssh:box");
+    expect(mockStreamViaMain).toHaveBeenCalledWith("ssh:box");
+    expect(mockBrowseCdpWsConnection).toHaveBeenCalledWith("tab:abc", expect.any(String), "ssh:box");
+  });
+
   it("queues sends before open and flushes in order", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => {
@@ -136,7 +167,7 @@ describe("useCdpSocket", () => {
   });
 
   it("routes fileChooser messages to onFileChooser subscribers", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -154,7 +185,7 @@ describe("useCdpSocket", () => {
   });
 
   it("routes findResult messages to onFindResult subscribers", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -172,7 +203,7 @@ describe("useCdpSocket", () => {
   });
 
   it("routes console telemetry into browserActions.pushConsole", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => {
@@ -185,7 +216,7 @@ describe("useCdpSocket", () => {
   });
 
   it("routes network telemetry into browserActions.pushNetwork", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => {
@@ -198,7 +229,7 @@ describe("useCdpSocket", () => {
   });
 
   it("routes perfState into perfRecording (attach sync + toggle ack)", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => {
@@ -219,7 +250,7 @@ describe("useCdpSocket", () => {
     const bitmap = { width: 640, height: 480, close: vi.fn() } as unknown as ImageBitmap;
     const create = vi.fn(async (_blob: Blob) => bitmap);
     (globalThis as unknown as { createImageBitmap: typeof create }).createImageBitmap = create;
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     const seen: { bitmap: ImageBitmap; w: number; h: number }[] = [];
@@ -243,7 +274,7 @@ describe("useCdpSocket", () => {
     const create = vi.fn(async (_blob: Blob) => ({ close: vi.fn() } as unknown as ImageBitmap));
     (globalThis as unknown as { createImageBitmap: typeof create }).createImageBitmap = create;
     const { rerender } = render(
-      <Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled acceptFrames={false} />,
+      <Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled acceptFrames={false} />,
     );
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
@@ -259,14 +290,14 @@ describe("useCdpSocket", () => {
     expect(create).not.toHaveBeenCalled();
     expect(ws.closed).toBe(false);
 
-    rerender(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled acceptFrames />);
+    rerender(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled acceptFrames />);
     act(() => ws.serverMessage(buf));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(ws.closed).toBe(false);
   });
 
   it("correlates DOM requests and unwraps describeNode responses", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -296,7 +327,7 @@ describe("useCdpSocket", () => {
   });
 
   it("rejects DOM requests on timeout and ignores late responses", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -311,7 +342,7 @@ describe("useCdpSocket", () => {
   });
 
   it("rejects pending DOM requests when the socket disconnects", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -324,7 +355,7 @@ describe("useCdpSocket", () => {
   });
 
   it("reconnects with new grant + backoff on close without error", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const first = lastSocket();
     act(() => {
@@ -362,7 +393,7 @@ describe("useCdpSocket", () => {
   });
 
   it("error message sets error state, closes, and does not reconnect", async () => {
-    render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => {
@@ -375,8 +406,31 @@ describe("useCdpSocket", () => {
     expect(FakeWebSocket.instances.length).toBe(1); // no reconnect
   });
 
+  // A shared tab's screencast has ONE sink. When another window/device takes
+  // it, the server sends "detached" (not "error"): the viewer must keep its
+  // panel and offer "Take over", and must NOT auto-reconnect — that would
+  // ping-pong the two viewers forever.
+  it("a detached frame stops reconnecting and reconnect() re-attaches", async () => {
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => {
+      ws.serverOpen();
+      ws.serverMessage(JSON.stringify({ t: "detached", reason: "superseded" }));
+    });
+    expect(lastApi!.status).toBe("closed");
+    expect(lastApi!.detached).toBe("superseded");
+    expect(lastApi!.error).toBeNull();
+    act(() => vi.advanceTimersByTime(10000));
+    expect(FakeWebSocket.instances.length).toBe(1); // no auto-reconnect
+
+    act(() => lastApi!.reconnect());
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(2));
+    expect(lastApi!.detached).toBeNull();
+  });
+
   it("unmount closes the socket without reconnecting", async () => {
-    const { unmount } = render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    const { unmount } = render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
@@ -387,11 +441,11 @@ describe("useCdpSocket", () => {
   });
 
   it("toggle enabled=false closes the socket", async () => {
-    const { rerender } = render(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled />);
+    const { rerender } = render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
     const ws = lastSocket();
     act(() => ws.serverOpen());
-    rerender(<Harness stateKey="tab:abc" base="http://127.0.0.1:54321" enabled={false} />);
+    rerender(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled={false} />);
     expect(ws.closed).toBe(true);
   });
 });

@@ -448,3 +448,34 @@ func TestFileGrant_AllowsMediaTokenOutsideProject(t *testing.T) {
 		t.Fatalf("after grant: status = %d body=%s", rec2.Code, rec2.Body.String())
 	}
 }
+
+// A chat link spells a home-directory file as "~/…". Only the server can expand
+// it (it owns $HOME), and the expanded path is still contained: refused before a
+// grant with the containment message the web uses to offer one, readable after.
+func TestFileGrant_HomeTildePathExpandsThenContained(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	target := filepath.Join(home, ".agent", "diagrams", "fastbrowse.src.html")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("home diagram"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := newFilesHandler(t)
+	tilde := "~/.agent/diagrams/fastbrowse.src.html"
+
+	rec := httptest.NewRecorder()
+	h.HandleFileContent(rec, httptest.NewRequest("GET", "/api/files/content?path="+url.QueryEscape(tilde), nil))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "outside the project root") {
+		t.Fatalf("before grant: status = %d body = %s, want the containment refusal", rec.Code, rec.Body.String())
+	}
+
+	grantPath(t, h, target)
+
+	rec = httptest.NewRecorder()
+	h.HandleFileContent(rec, httptest.NewRequest("GET", "/api/files/content?path="+url.QueryEscape(tilde), nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "home diagram") {
+		t.Fatalf("after grant: status = %d body = %s, want the file content", rec.Code, rec.Body.String())
+	}
+}

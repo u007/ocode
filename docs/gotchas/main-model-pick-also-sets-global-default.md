@@ -15,7 +15,7 @@ timestamp: 2026-09-21T16:07:27Z
 A main-model pick (`ModelDialog` `handleSelect` `case "main"`, `internal/server/handler_session_state.go`, `web/src/components/Chat/commands.ts`) is **per chat**, not global. It writes the global default (`cfg.Model`) in exactly one case: a new/draft chat or no session at all.
 
 - **Real session** (`sessionId` present and not `new-*`) -> `api.setSessionModel(id, modelId, ...hostArgs)` ONLY (scoped to this chat; no `SET_MODEL`, no `setConfigModel`).
-- **Draft `new-*` tab** -> local `SET_SESSION_MODEL` (rides the session slice; sent as the request model on the first `api.chat`); the server pins it at creation (`internal/server/handler.go:1279` writes `meta["model"] = model`).
+- **Draft `new-*` tab** -> local `SET_SESSION_MODEL` (rides the session slice; sent as the request model on the first `api.chat`); the server pins it at creation (`internal/server/handler.go:1292` writes `meta["model"] = model`).
 - **No session id** -> `SET_MODEL` + `api.setConfigModel(modelId, ...hostArgs)` (the default that NEW chats start from).
 
 `/models <name>` (`commands.ts:1979`) resolves typed names to `ModelInfo.name` (provider-qualified id; `name` = id, `model` = bare name, `display_name` = label) and follows the same three arms (`getSessionId`).
@@ -29,7 +29,7 @@ A main-model pick (`ModelDialog` `handleSelect` `case "main"`, `internal/server/
 3. Key absent and not Pulse and `id != ""` -> newest usage-ledger row for this session (`usage.LastModelForSession` at `internal/usage/usage.go:386`; skip for Pulse sessions at `handler_session_state.go:634`).
 4. Otherwise the process-wide config model (`h.cfg.Model`, `handler_session_state.go:646`); Pulse uses `h.cfg.Ocode.PulseModel` when set (`handler_session_state.go:650`).
 
-`HandleChat` (`internal/server/handler.go:1279`) writes `meta["model"] = model` at creation for every new chat (even with no explicit pick), so a later default change does NOT move existing chats.
+`HandleChat` (`internal/server/handler.go:1292`) writes `meta["model"] = model` at creation for every new chat (even with no explicit pick), so a later default change does NOT move existing chats.
 
 `setSessionModelOverride` (`internal/server/handler_session_state.go:697`) writes the `""` sentinel for a clear; deleting the key is avoided so the chat does not silently recover the model from the ledger. `pinSessionModel` (`internal/server/handler_session_state.go:666`) only writes when the key is absent.
 

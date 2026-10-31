@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/gitexec"
+	"github.com/u007/ocode/internal/projects"
 )
 
 type FileNode struct {
@@ -971,6 +972,14 @@ func (h *Handler) resolveProjectFilePathScoped(scope filePathScope, projectRoot,
 	if containsDotDot(path) {
 		return "", "path is outside the project root"
 	}
+	// A chat link spells a home file as "~/…", which only this server can
+	// expand (it owns $HOME). The expanded path still goes through the
+	// containment checks below, so "~" never widens what may be read.
+	expanded, err := projects.ExpandHome(path)
+	if err != nil {
+		return "", "cannot expand home directory: " + err.Error()
+	}
+	path = expanded
 	if projectRoot != "" {
 		root, ok := h.fileContentRootFor(projectRoot)
 		if !ok {

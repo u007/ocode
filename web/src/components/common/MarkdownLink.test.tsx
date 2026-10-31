@@ -2,6 +2,7 @@ import { render, fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import MarkdownLink from "./MarkdownLink";
 import { OPEN_EXTERNAL_MESSAGE_PREFIX } from "../../lib/externalLinks";
+import { OPEN_FILE_EVENT, type OpenFileDetail } from "../../lib/fileLinks";
 
 type WailsWindow = Window & { _wails?: { invoke?: (message: string) => void } };
 
@@ -59,6 +60,24 @@ describe("MarkdownLink", () => {
     expect(fireEvent.click(getByText("foo.go"))).toBe(false);
     // …and it is not pushed at the OS either: it is not a resolvable link.
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("opens a home-directory file link in the Files tab, not the OS browser", () => {
+    const invoke = vi.fn();
+    (window as WailsWindow)._wails = { invoke };
+    const opened: OpenFileDetail[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent<OpenFileDetail>).detail);
+    window.addEventListener(OPEN_FILE_EVENT, listener);
+    try {
+      const { getByText } = render(
+        <MarkdownLink href="~/.agent/diagrams/fastbrowse-for-ocode.src.html">diagram</MarkdownLink>,
+      );
+      expect(fireEvent.click(getByText("diagram"))).toBe(false);
+      expect(opened).toEqual([{ path: "~/.agent/diagrams/fastbrowse-for-ocode.src.html" }]);
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(OPEN_FILE_EVENT, listener);
+    }
   });
 
   it("prevents default on a root-relative link", () => {

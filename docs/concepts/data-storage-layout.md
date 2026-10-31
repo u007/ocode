@@ -2,12 +2,12 @@
 type: Concept
 title: Data Storage Layout
 description: Cross-platform global data directory, its sub-directories, and how the project slug keys sessions.
-resource: CLAUDE.md
+resource: "CLAUDE.md"
 tags:
   - storage
   - paths
   - sessions
-timestamp: 2026-10-31T01:18:40Z
+timestamp: 2026-10-31T09:50:16Z
 ---
 # Data Storage Layout
 
@@ -39,6 +39,26 @@ Sub-directories:
   only the projects it names, an empty tab list deletes a project, and
   projects absent from the body are preserved. Never turn this back into a
   whole-map replace — that silently drops another window/process's projects.
+- `servers/` — one `serve-<pid>.json` per live server process
+  (`paths.ServersDir()`, `internal/server/serve_registry.go`), written from
+  `Server.Serve` once the listener binds (so the desktop shell and the TUI's
+  embedded server are recorded too) and removed on a clean exit, with fields
+  `pid`, `version`, `addr`, `workdir`, `started_at`. The owner holds an
+  advisory lock on the file for its lifetime; the OS drops that lock when the
+  process dies, which is what makes the owner provable — a pid alone is
+  recyclable. Diagnostic and self-cleaning only: an unlocked record whose pid
+  is gone is deleted by the next scan, an undecodable record is deleted only
+  when its owner's lock is free AND the pid in its file name is gone (a newer
+  build's format is kept), and same-version siblings are silently ignored. A
+  locked record whose address is not listening is not announced; an unlocked
+  record whose pid is alive is reported as unverified and left on disk.
+  Not authoritative state — nothing auto-kills another server. It exists so
+  two local servers of different versions that both target the same remote host
+  stop retiring each other's remote `ocode serve` on reconnect, which kills
+  in-flight turns on that host; a starting server logs a warning naming the
+  stale sibling's version, address, pid and cwd. Only a lock-verified sibling
+  gets a `stop it: kill <pid>` hint; an unverified one is reported without a
+  stop command, because its pid may belong to an unrelated process.
 
 The `{slug}` is a SHA-256 prefix of the git repo root (`git rev-parse --show-toplevel`), so
 sessions are scoped per checkout: each linked git worktree has its own slug and its own

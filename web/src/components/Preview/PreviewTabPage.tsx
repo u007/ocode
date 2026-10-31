@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
+import { PreviewWidthMenu } from "./PreviewWidthMenu";
 import { previewKindForPath, type PreviewOpenRequest } from "../../lib/previewKind";
 
 interface SelectedFile {
@@ -79,6 +80,11 @@ function PreviewTabPage({
               <RefreshCw className="h-3.5 w-3.5" />
             </button>
           )}
+          {/* Reading-column control. Markdown only: every other kind either
+              ignores it (PDF/deck/image) or is code, which stays full width.
+              No extra wrapper: the control owns its own chrome, so it looks the
+              same here as in the sidebar preview header. */}
+          {selected?.kind === "markdown" && <PreviewWidthMenu />}
         </div>
         <FilePicker
           open={filePickerOpen}

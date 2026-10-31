@@ -1639,33 +1639,41 @@ function HomeApp() {
                   browser panel: with the bar inside the center column, switching to a tab
                   whose side panel is open/closed/wider re-wrapped every pill. */}
               {activeView === "sessions" && (
-                <div className="flex items-center p-1">
-                  <div className="flex-1 min-w-0">
-                    <UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />
-                  </div>
-                  {/* The side pane is desktop-only (shouldRenderSidePane gates
-                      on isMobile), so its toggle is hidden on phones — the
-                      browser lives in the tab strip's browser pills / "New
-                      browser tab" button there. */}
-                  {!isMobile && (
-                    <button
-                      type="button"
-                      aria-label="Toggle browser panel"
-                      disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
-                      title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
-                      onClick={() => {
-                        if (!sideStateKey || activeBrowseHost === null) return;
-                        if (browserOpen) {
-                          browserActions.close(sideStateKey, activeBrowseHost);
-                        } else {
-                          browserActions.open(sideStateKey);
-                        }
-                      }}
-                      className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
-                    >
-                      🌐
-                    </button>
-                  )}
+                <div className="p-1">
+                  <UnifiedTabBar
+                    focusedKind={focusedKind}
+                    onFocusKindChange={setFocusedKind}
+                    // The side pane is desktop-only (shouldRenderSidePane gates
+                    // on isMobile), so its toggle is hidden on phones — the
+                    // browser lives in the tab strip's browser pills / "New
+                    // browser tab" button there. It is passed INTO the bar's
+                    // action row (not rendered beside the bar) so it stays
+                    // aligned with the other buttons when the pill column
+                    // wraps: the bar is top-aligned, so a sibling centered
+                    // against its full height drifted down by half the extra
+                    // wrapped rows.
+                    trailingAction={
+                      !isMobile ? (
+                        <button
+                          type="button"
+                          aria-label="Toggle browser panel"
+                          disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
+                          title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
+                          onClick={() => {
+                            if (!sideStateKey || activeBrowseHost === null) return;
+                            if (browserOpen) {
+                              browserActions.close(sideStateKey, activeBrowseHost);
+                            } else {
+                              browserActions.open(sideStateKey);
+                            }
+                          }}
+                          className="mx-1 flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border border-border disabled:opacity-40"
+                        >
+                          🌐
+                        </button>
+                      ) : undefined
+                    }
+                  />
                 </div>
               )}
             <div className="flex flex-1 min-h-0">
@@ -2009,12 +2017,24 @@ function HomeApp() {
                             data-testid="chat-ask-surface"
                             className="relative flex min-h-0 flex-1 flex-col"
                           >
-                            {/* No overflow class: ChatPanel's transcript scroller
-                                is the one vertical scroller, bounded by this
-                                flex-1 min-h-0 box. The composer is a SIBLING of
-                                this wrapper, so it stays pinned and visible on
-                                short viewports. */}
-                            <div className="relative flex-1 min-h-0">
+                            {/* No overflow class: the composer must stay in the
+                                flow, and the tab pane's overflow-hidden wrapper
+                                clips whatever does not fit. ChatPanel's
+                                transcript scroller is the one vertical scroller.
+                                The transcript slot is `flex-[1_1_10rem] min-h-0`:
+                                grow to fill the column, but with a 10rem BASIS,
+                                so it carries shrink weight. A basis-0 transcript
+                                gets no share of a squeeze and is left with
+                                whatever the panels did not take (blank messages).
+                                When the column is over-full the transcript and the
+                                panel BODIES shrink in proportion to their basis;
+                                the composer (min-content) and the panel headers
+                                (`shrink-0`) never give way. No viewport media
+                                query: the proportion does the work at every height. */}
+                            <div
+                              data-testid="chat-transcript-slot"
+                              className="relative flex-[1_1_10rem] min-h-0"
+                            >
                               <ChatPanel
                                 sessionId={tab.id}
                                 host={resolveSessionHost(projectState, tab.id)}

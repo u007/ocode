@@ -996,6 +996,7 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 		panic("EnableBrowse: invalid browse base URL: " + baseURL)
 	}
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
+	s.mux.HandleFunc("GET /api/browse/cdp/{stateKey}", s.authMiddleware(s.handleBrowseCDP))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
 	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
 	s.mux.HandleFunc("POST /api/browse/upload", s.authMiddleware(s.handleBrowseUpload))
@@ -1369,14 +1370,30 @@ func (s *Server) browsePort() int {
 // (`?host=`) browse config so a phone on the tailnet reaches a remote project's
 // browser through the same shared HTTPS URL it already uses for a local one.
 func (s *Server) browseProxyBaseURL(r *http.Request) string {
+	base, _ := s.browseOriginFor(r)
+	return base
+}
+
+// browseOriginFor resolves how this client reaches the browse origin.
+//
+// streamViaMain is true ONLY when the client is off-machine AND there is no
+// shared origin to reach: the browse proxy listener exists, but neither the
+// same-site loopback origin (this client is not local) nor a Tailscale share is
+// available. In that case the SPA must stream through the main origin's
+// /api/browse/cdp route. A tailnet client that CAN reach the shared HTTPS mount
+// gets streamViaMain=false: it loads pages in the iframe as before, and forcing
+// Chrome mode on it would replace a working page with "chrome not found" when
+// Chrome is unconfigured.
+func (s *Server) browseOriginFor(r *http.Request) (baseURL string, streamViaMain bool) {
+	local := browseClientIsLocal(r)
+	// A client that is not local cannot use the same-site origin at all. Whether
+	// that means "stream over the main origin" depends on the shared URL below,
+	// and on whether the browse proxy exists at all.
+	streamViaMain = !local
 	if s.browseProxyPort == 0 {
-		return ""
+		return "", streamViaMain
 	}
-	reqHost := r.Host
-	if h, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = h
-	}
-	reqHost = strings.Trim(reqHost, "[]")
+	reqHost := requestHostName(r)
 	// Same-site: when the SPA is loaded directly from this machine (desktop
 	// webview or a local browser), the browse origin MUST share that host
 	// so the SameSite=Lax browse cookie is treated as first-party. A
@@ -1391,19 +1408,50 @@ func (s *Server) browseProxyBaseURL(r *http.Request) string {
 	// is indistinguishable from the local desktop webview here and gets the
 	// local-origin base URL rather than the Tailscale one. No header or
 	// listener distinguishes the two reliably, so the shortcut is kept.
-	scheme := s.browseProxyScheme(r)
-	baseURL := ""
-	if !(isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(reqHost)) {
-		if s.handler.tailscaleShareSnapshot != nil {
-			if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
-				baseURL = st.BrowseURL
-			}
+	if !local && s.handler.tailscaleShareSnapshot != nil {
+		if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
+			return st.BrowseURL, false
 		}
 	}
-	if baseURL == "" {
-		baseURL = scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
+	scheme := s.browseProxyScheme(r)
+	return scheme + "://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort)), streamViaMain
+}
+
+// requestHostName returns the host part of r.Host with any port and IPv6
+// brackets removed. One derivation for every browse-origin decision, so the
+// locality predicate and the constructed fallback cannot disagree.
+func requestHostName(r *http.Request) string {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
 	}
-	return baseURL
+	return strings.Trim(host, "[]")
+}
+
+// browseClientIsLocal reports whether the SPA runs on this machine (desktop
+// webview or a local browser) rather than behind a proxy or on another device.
+// The peer address decides, never Host alone: a proxied tailnet request
+// arrives from 127.0.0.1 with a loopback Host.
+func browseClientIsLocal(r *http.Request) bool {
+	return isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(requestHostName(r))
+}
+
+// handleBrowseCDP serves the Chrome-mode screencast socket on the main origin.
+// A client that is not local cannot count on reaching the separate browse
+// listener, so it streams from this machine's Chrome through here instead.
+// The one-time grant and the SPA-origin check inside browse.ServeCDP still
+// apply on top of authMiddleware. A ?host= request is a remote host's socket:
+// it is proxied to that host and never served from this machine's Chrome.
+func (s *Server) handleBrowseCDP(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		s.handleRemoteBrowseCDP(w, r, host)
+		return
+	}
+	if s.browse == nil {
+		writeError(w, http.StatusServiceUnavailable, "browse origin not available")
+		return
+	}
+	s.browse.ServeCDP(w, r, terminalUpgradeRespHeader(r))
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
@@ -1418,18 +1466,15 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	// When the browse proxy listener is up (normal boot), point the SPA at
 	// it so browsed pages are cross-origin. Prefer the shared HTTPS URL when
 	// the instance is exposed via Tailscale (second mount on the browse port).
-	if baseURL := s.browseProxyBaseURL(r); baseURL != "" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"base_url":    baseURL,
-			"htr_notice":  s.HTRNotice(),
-			"remote_mode": s.remoteMode,
-		})
-		return
+	baseURL, streamViaMain := s.browseOriginFor(r)
+	if baseURL == "" {
+		baseURL = sameSiteBrowseBase(s.browseBase, r.Host)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
-		"htr_notice":  s.HTRNotice(),
-		"remote_mode": s.remoteMode,
+		"base_url":        baseURL,
+		"htr_notice":      s.HTRNotice(),
+		"remote_mode":     s.remoteMode,
+		"stream_via_main": streamViaMain,
 	})
 }
 
@@ -2192,6 +2237,15 @@ func (s *Server) writeRemoteStateFile(ln net.Listener, browsePort int) error {
 
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
+	// Record this process so a later `ocode serve` can name a sibling running a
+	// DIFFERENT version: such a server keeps a remote host's workspace alive and
+	// retires the newer remote server on every reconnect, which kills in-flight
+	// turns there. Registration lives here, not in Run, so the desktop shell and
+	// the TUI's embedded server are visible too — they never call Run. The
+	// record is advisory-locked for this process's lifetime, so a scanner can
+	// tell a live owner from a recycled pid. Non-fatal by design.
+	cleanupInstance := registerServeInstance(ln.Addr().String(), s.workDir)
+	defer cleanupInstance()
 	// Populate the live model caches (OpenRouter, Novita, Groq) in the background so
 	// the model-list endpoint can enrich the embedded snapshot with live models
 	// without ever blocking a request on a network fetch. The Preload* helpers
@@ -2445,6 +2499,13 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	if wd, err := os.Getwd(); err == nil {
 		srv.SetWorkDir(wd)
 	}
+
+	// Report sibling servers of a DIFFERENT version before binding: a stale
+	// server keeps its remote workspaces alive and retires the shared remote
+	// server on every reconnect, which kills in-flight turns there. Reporting
+	// only — stopping another process is destructive (it can own terminals and
+	// running turns), so that stays an explicit user action.
+	warnServeSiblings()
 
 	// Bind before opening the browser so the URL reflects the port actually
 	// bound (Listen falls forward to a free port if the requested one is busy).

@@ -12,7 +12,7 @@
 // Heavy children are stubbed; the real providers (Chat/Project/Terminal) and
 // the real HomeApp view/sub-tab wiring stay live, so the gate under test is
 // genuine. `useChat` is mocked to supply a constant pending ask.
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { createPortal } from "react-dom";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -247,6 +247,29 @@ describe("ask dialogs are confined to the active session's chat surface", () => 
     const subTabs = screen.getByTestId("session-sub-tabs");
     expect(surface.contains(subTabs)).toBe(false);
     expect(document.body.contains(subTabs)).toBe(true);
+  });
+
+  it("gives the transcript wrapper a 10rem flex BASIS, not a min-height floor", async () => {
+    // The transcript wrapper is the surface's FIRST child. Its flex-basis is
+    // what gives it shrink weight: a basis-0 transcript receives none of a
+    // squeeze, so an expanded panel could take the whole column and blank the
+    // messages pane (the reported "messages screen goes blank" bug). With a
+    // 10rem basis it yields in proportion, and min-h-0 lets it go below that
+    // when the column is genuinely over-full. The composer is never shrunk
+    // (min-content), so it is never clipped. jsdom has no layout engine, so
+    // this pins the class contract; see docs/concepts/web-chat-transcript-layout.md.
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("sessions", "chat"));
+    renderApp();
+
+    await screen.findByTestId("permission-dialog");
+    const wrapper = within(chatSurface()).getByTestId("chat-transcript-slot");
+    const classes = wrapper.className.split(/\s+/);
+    expect(classes).toContain("flex-[1_1_10rem]");
+    expect(classes).toContain("min-h-0");
+    // No viewport media-query floor: it was the magic breakpoint this replaces.
+    // Match the arbitrary-value class family, not a literal "max-height" (no
+    // Tailwind class contains that), so a reintroduced `max-h-[50vh]` is caught.
+    expect(classes.some((c) => c.startsWith("min-h-[") || c.startsWith("max-h-"))).toBe(false);
   });
 
   it("keeps the interactive version-mismatch banner OUTSIDE the confined surface", async () => {

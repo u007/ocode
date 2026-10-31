@@ -1,8 +1,22 @@
 # Directory Update Log
 
 
+## 2026-11-01
+
+* **Creation**: Chat file links with relative or `~` hrefs silently did nothing ([gotchas/chat-file-links-silent-noop.md](/gotchas/chat-file-links-silent-noop.md))
+* **Update**: File Editor Grants: home-directory `~` links open in the Files tab ([concepts/file-editor-grants.md](/concepts/file-editor-grants.md))
+
 ## 2026-10-31
 
+* **Creation**: Markdown preview: persisted paper-width reading column ([concepts/preview-width.md](/concepts/preview-width.md))
+* **Update**: Data Storage Layout ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
+* **Update**: Data Storage Layout ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
+* **Creation**: Embedded Browser — Chrome Mode Streams Over the Main Origin for Non-Local Clients ([concepts/browse-stream-via-main-origin.md](/concepts/browse-stream-via-main-origin.md))
+* **Update**: xlsx probe recalculates through Microsoft Excel (macOS gotchas) ([gotchas/xlsx-probe-excel-recalc-backend.md](/gotchas/xlsx-probe-excel-recalc-backend.md))
+* **Update**: Web Chat Transcript Layout — Flex Column and Minimum-Height Invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
+* **Creation**: xlsx probe recalculates through Microsoft Excel (macOS gotchas, backend status, closed-book baseline) ([gotchas/xlsx-probe-excel-recalc-backend.md](/gotchas/xlsx-probe-excel-recalc-backend.md))
+* **Update**: Web chat transcript layout — flex column and minimum-height invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
+* **Creation**: Web chat transcript layout — flex column and minimum-height invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
 * **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))
 * **Update**: Web UI Mobile Layout Breakage (≤767px) ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
 * **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
@@ -12,6 +26,8 @@
 * **Creation**: Web Git panel: stacked section heights ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
 * **Update**: Git worktrees: project list folds linked worktrees under their main checkout as a sub tree; sessions stay per checkout ([concepts/git-worktrees.md](/concepts/git-worktrees.md))
 * **Update**: Data Storage Layout: each linked worktree has its own project slug and session dir; only the project list groups them ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
+* **Update**: Amendment set — Data Storage Layout records the `servers/` registry as advisory-locked, registered from `Server.Serve`, with no stop command for unverified siblings ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md)); markdown preview width now uses a CLDR letter-territory list with the kind gate replacing a `prose` resolver option, fluid padding, a self-resolving Auto label, and an `aria-pressed` control ([concepts/preview-width.md](/concepts/preview-width.md)); embedded browser chrome sets `stream_via_main` only when no reachable shared origin exists, adds `detached` + Take over and `browseCdpWsConnection(stateKey, grant, host)` with new tests ([concepts/browse-stream-via-main-origin.md](/concepts/browse-stream-via-main-origin.md)); web chat transcript layout rewritten around the header/body split, a `flex-[1_1_10rem]` transcript, no viewport floor, and a non-yielding BtwPanel, so its index title now reads Shrink-Weight Invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md)); line anchors re-derived on concepts/auto-share-on-start, concepts/compaction-cancellation, concepts/per-chat-mcp-toggle and six gotchas (chat-model-follows-last-switched-model, files-tab-preview-only-routing, main-model-pick-also-sets-global-default, port-forwards-url-composition-and-supervisor-restart, remote-project-path-trust-boundary, session-snapshot-stale-derived-fields).
+
 ## 2026-10-30
 
 * **Update**: Terminal voice input (mic button in the web Terminal panel) ([concepts/terminal-voice-input.md](/concepts/terminal-voice-input.md))

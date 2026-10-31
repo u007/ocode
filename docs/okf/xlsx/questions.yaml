@@ -35,13 +35,13 @@
     produce the file AND prove the formulas calculate correctly, and why is computing the totals in
     Python and writing the numbers not an acceptable shortcut?
   answer: >
-    Write the formulas (openpyxl or XlsxWriter), save to a new file, then recalculate with a headless
-    LibreOffice (`soffice --headless --convert-to xlsx --outdir out file.xlsx`) and read the result with
+    Write the formulas (openpyxl or XlsxWriter), save to a new file, then recalculate with Excel (or a
+    headless LibreOffice: `soffice --headless --convert-to xlsx --outdir out file.xlsx`) and read the result with
     `load_workbook(out, data_only=True)` to compare against independently computed expectations and to
     scan for #REF!/#DIV/0!/#NAME?/#VALUE!/#N/A. Typed numbers do not update when tomorrow's rows are
     added or an input changes, so they silently go stale; the request was for live formulas.
   rubric:
-    - { point: "recalculate with LibreOffice headless (or equivalent) then read with data_only=True to verify values", score: 1 }
+    - { point: "recalculate with Excel or LibreOffice (or equivalent) then read with data_only=True to verify values", score: 1 }
     - { point: "scan the recalculated cells for error values", score: 0.5 }
     - { point: "pasted/computed numbers go stale when inputs change; the task asked for formulas", score: 1 }
     - { partial: "says 'open it in Excel to check' / 'trust the formula' without a way to verify here", score: 0.5 }

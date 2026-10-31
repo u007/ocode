@@ -7,11 +7,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/u007/ocode/internal/browse"
 )
 
@@ -447,5 +449,125 @@ func TestBrowseConfigEndpoint_HTTP_TLSListenerPlainRequest(t *testing.T) {
 	}
 	if body.BaseURL != "http://localhost:54321" {
 		t.Fatalf("base_url = %q, want http://localhost:54321", body.BaseURL)
+	}
+}
+
+// A client that is not on this machine (a phone behind tailscale serve arrives
+// from loopback WITH forwarding headers) must be told to stream Chrome over the
+// main origin; the desktop webview / local browser must not.
+func TestBrowseConfigStreamViaMain(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		host       string
+		headers    map[string]string
+		want       bool
+	}{
+		{"local browser", "127.0.0.1:50000", "localhost:4096", nil, false},
+		{"tailscale-proxied phone", "127.0.0.1:50000", "box.tail1.ts.net", map[string]string{"X-Forwarded-For": "100.72.233.102"}, true},
+		{"lan peer", "192.168.1.9:50000", "192.168.1.20:4096", nil, true},
+	}
+	for _, tc := range cases {
+		s := New("127.0.0.1:0", "", "", nil)
+		s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+		r := httptest.NewRequest("GET", "/api/browse/config", nil)
+		r.RemoteAddr = tc.remoteAddr
+		r.Host = tc.host
+		for k, v := range tc.headers {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		s.mux.ServeHTTP(w, r)
+		var body struct {
+			StreamViaMain bool `json:"stream_via_main"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: decode: %v", tc.name, err)
+		}
+		if body.StreamViaMain != tc.want {
+			t.Errorf("%s: stream_via_main = %v, want %v", tc.name, body.StreamViaMain, tc.want)
+		}
+	}
+}
+
+// The main-origin CDP socket must sit behind the main server's auth AND keep
+// the browse server's own checks (grant + SPA-origin match).
+func TestBrowseCDPRouteAuthAndOrigin(t *testing.T) {
+	s := New("127.0.0.1:0", "", "secret-token", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/browse/cdp/tab:x?__grant=g", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d, want 401", w.Code)
+	}
+
+	grant := s.browse.MintGrant("tab:x", "https://spa.example")
+	r := httptest.NewRequest("GET", "/api/browse/cdp/tab:x?__grant="+grant, nil)
+	r.Header.Set("Authorization", "Bearer secret-token")
+	r.Header.Set("Origin", "https://evil.example")
+	w = httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "origin mismatch") {
+		t.Fatalf("wrong origin: got %d %q, want 403 origin mismatch", w.Code, w.Body.String())
+	}
+}
+
+// Without a browse origin (the browser panel failed to start) the CDP socket
+// must answer 503, not dereference a nil browse server.
+func TestBrowseCDPWithoutBrowseOriginReturns503(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	r := httptest.NewRequest("GET", "/api/browse/cdp/key1?__grant=g", nil)
+	w := httptest.NewRecorder()
+	s.handleBrowseCDP(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+}
+
+// The main-origin route must complete a real websocket handshake and echo the
+// offered ocode.bearer.<token> subprotocol. Dropping terminalUpgradeRespHeader
+// from the route leaves every other test green while a browser handshake fails.
+func TestBrowseCDPRouteEchoesBearerSubprotocol(t *testing.T) {
+	s := New("127.0.0.1:0", "", "secret-token", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	grant := s.browse.MintGrant("tab:x", "https://spa.example")
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") +
+		"/api/browse/cdp/tab:x?__grant=" + url.QueryEscape(grant) + "&token=secret-token"
+	dialer := websocket.Dialer{Subprotocols: []string{"ocode.bearer.secret-token"}}
+	conn, resp, err := dialer.Dial(wsURL, http.Header{"Origin": []string{"https://spa.example"}})
+	if err != nil {
+		t.Fatalf("dial: %v (resp %+v)", err, resp)
+	}
+	defer conn.Close()
+	if resp == nil {
+		t.Fatal("no handshake response")
+	}
+	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != "ocode.bearer.secret-token" {
+		t.Fatalf("selected subprotocol = %q, want ocode.bearer.secret-token", got)
+	}
+}
+
+// A client that offers no subprotocol must still complete the handshake: an
+// echoed empty Sec-WebSocket-Protocol header would fail the browser.
+func TestBrowseCDPRouteWithoutSubprotocol(t *testing.T) {
+	s := New("127.0.0.1:0", "", "secret-token", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	grant := s.browse.MintGrant("tab:x", "https://spa.example")
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") +
+		"/api/browse/cdp/tab:x?__grant=" + url.QueryEscape(grant) + "&token=secret-token"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{"https://spa.example"}})
+	if err != nil {
+		t.Fatalf("dial: %v (resp %+v)", err, resp)
+	}
+	defer conn.Close()
+	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != "" {
+		t.Fatalf("selected subprotocol = %q, want none", got)
 	}
 }

@@ -353,3 +353,30 @@ describe("PreviewHost live refresh (tool-stream driven)", () => {
     expect(busHandlers.get("tool_start")?.size ?? 0).toBe(0);
   });
 });
+
+describe("PreviewHost reading-column control", () => {
+  // The column only applies to markdown prose. Showing the control for a PDF or
+  // a code file would promise a behaviour those surfaces do not have.
+  it("offers the width control for markdown and hides it for other kinds", () => {
+    const md = render(
+      <PreviewHost
+        stateKey="side:chat:md"
+        projectRoot="/proj"
+        request={{ path: "README.md", kind: "markdown", page: 1 }}
+        nonce={1}
+      />,
+    );
+    expect(screen.getByTestId("preview-width-trigger")).toBeDefined();
+    md.unmount();
+
+    render(
+      <PreviewHost
+        stateKey="side:chat:txt"
+        projectRoot="/proj"
+        request={{ path: "src/main.go", kind: "text", page: 1 }}
+        nonce={1}
+      />,
+    );
+    expect(screen.queryByTestId("preview-width-trigger")).toBeNull();
+  });
+});

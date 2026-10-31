@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-10-22T12:18:01Z
+timestamp: 2026-10-31T16:44:05Z
 ---
 
 # File Editor Grants — Editor-Only Out-of-Project Access
@@ -28,8 +28,8 @@ different thing from every other allowlist this server keeps.
 | `cfg.Ocode.ExtraAllowedPaths` | the file surfaces **and the agent's tool scope** | global config, persistent |
 | **editor grants** (`fileGrantStore`) | the file editor/preview surfaces **only** | in-memory, per server process |
 
-`handler.go:278` carries the field; `handler_file_grants.go:41` defines the
-store; `handler_file_grants.go:143` lazily creates it.
+`handler.go:302` carries the field; `handler_file_grants.go:44` defines the
+store; `handler_file_grants.go:151` lazily creates it.
 
 ### Why grants are NOT `extra_allowed_paths`
 
@@ -53,7 +53,7 @@ question.
 
 ## Endpoints
 
-`server.go:394-396`, all behind `authMiddleware`:
+`server.go:404-406`, all behind `authMiddleware`:
 
 - `POST /api/files/grant` — body `{"path": "..."}` → `{"root","path","granted","roots"}`.
   `path` is the requested file spelled under the canonical `root` (symlinks resolved;
@@ -62,31 +62,31 @@ question.
 - `DELETE /api/files/grant` — revokes
 - `GET /api/files/grants` — lists
 
-`canonicalGrantRoot` (`handler_file_grants.go:58`) makes the granted root
+`canonicalGrantRoot` (`handler_file_grants.go:61`) makes the granted root
 **symlink-resolved**, and a path naming a **file** grants its **parent
 directory** (so sibling files in that directory are reachable). Handlers:
-`HandleGrantFilePath` (`:156`), `canonicalGrantFile` (`:189`, the `path` the grant
-response returns), `HandleRevokeFilePath` (`:203`), `HandleListFileGrants` (`:224`).
+`HandleGrantFilePath` (`:164`), `canonicalGrantFile` (`:197`, the `path` the grant
+response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:236`).
 
 ## One resolver, two scopes
 
-`resolveProjectFilePath` (`handler_files.go:955`) delegates to
-`resolveProjectFilePathScoped` (`:970`) with a `filePathScope`
-(`handler_files.go:917`):
+`resolveProjectFilePath` (`handler_files.go:956`) delegates to
+`resolveProjectFilePathScoped` (`:971`) with a `filePathScope`
+(`handler_files.go:918`):
 
 - **`scopeProjectRoots`** — the SQLite browser. `resolveDBPath`
   (`handler_db.go:91`) keeps its OWN unconditional `pathWithinAllowedRoots`
   (`handler_db.go:50`) check and must **not** accept grants: the DB surface gains
   write capability later, so its blast radius is different.
-- **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:966`), used
-  by `HandleFileContent` (`:1127`), `HandleFileRaw` (`:1247`),
-  `HandleSaveFileContent` (via `writeScopeRoot`, `:1061`) and
-  `HandleMediaToken` (`:1346`). `resolveOpenPath` shares the rules
+- **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:967`), used
+  by `HandleFileContent` (`:1125`), `HandleFileRaw` (`:1240`),
+  `HandleSaveFileContent` (via `writeScopeRoot`, `:1070`) and
+  `HandleMediaToken` (`:1333`). `resolveOpenPath` shares the rules
   (`handler_open.go:95`, `:115`).
 
-`grantedRootFor` (`:1016`) is the only way a request may name a directory outside
-every project root. `fileAccessRoots` (`:1035`) = project roots + extra allowed
-paths + grants; `pathWithinAnyFileRoot` (`:1104`) checks resolved **or** lexical
+`grantedRootFor` (`:1025`) is the only way a request may name a directory outside
+every project root. `fileAccessRoots` (`:1044`) = project roots + extra allowed
+paths + grants; `pathWithinAnyFileRoot` (`:1113`) checks resolved **or** lexical
 containment (the Files tab browses symlinked folders).
 
 `HandleFileRaw` used to carry an **inline duplicate** of the containment logic;
@@ -99,7 +99,7 @@ verbatim with **no containment check at all** on `GET /api/files/content` and
 `GET /api/files/raw` — a file outside every root read back 200. The web always
 sent a `project_root`, so the UI never hit it, but the endpoint was reachable.
 `scopeEditorRoots` now confines that case
-(`handler_files.go:1007` → `pathWithinAnyFileRoot`). Do not restore the old
+(`handler_files.go:1016` → `pathWithinAnyFileRoot`). Do not restore the old
 early return.
 
 ## Read vs write asymmetry
@@ -115,7 +115,7 @@ every scope (`containsDotDot`, checked before `Join`/`Clean`, because
 
 ## Tree and search, but not the secret surface
 
-`fileTreeRootForEditor` (`handler_files.go:756`) = `fileTreeRootFor` + grants, used
+`fileTreeRootForEditor` (`handler_files.go:757`) = `fileTreeRootFor` + grants, used
 by `HandleFileTree` and `parseSearchParams`. `resolveSecretPath` deliberately
 keeps plain `fileTreeRootFor`: encrypting/decrypting a directory is a far
 stronger action than browsing it.
@@ -146,6 +146,27 @@ stronger action than browsing it.
 
 Remote (SSH/WSL) grants route through `remoteApiBase(host)`, so they land in the
 **remote** server's own grant list.
+
+## Home-directory `~` links
+
+A chat link to `~/...` opens through the same editor path as any out-of-project
+file (`MarkdownLink` → `openFile` → the Files tab). The browser cannot read
+`$HOME`, so the server expands the `~`:
+
+- `resolveProjectFilePathScoped` expands it with `projects.ExpandHome` **before**
+  the containment checks. An expanded path outside every project root is still
+  refused (`path is outside the project root`), so a `~` link needs an editor
+  grant exactly like any other absolute out-of-project path.
+- `canonicalGrantRoot` and `canonicalGrantFile` expand it too. Before this,
+  `filepath.Abs` resolved `~/x` against the server's cwd, so the grant step
+  pointed at the wrong directory.
+- `resolveOpenPath` (OS-app open and reveal) does **not** expand `~`. The desktop
+  open-external bridge stays http(s)-only, so local files never reach the OS
+  browser through it.
+
+Pinned by `TestFileGrant_HomeTildePathExpandsThenContained`
+(`internal/server/handler_file_grants_test.go`). Why other link shapes stay
+no-op: [chat file links silent no-op](../gotchas/chat-file-links-silent-noop.md).
 
 ## Verification
 

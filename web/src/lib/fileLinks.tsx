@@ -50,7 +50,7 @@ export function splitPathToken(token: string): { path: string; line?: number } {
   return { path: token };
 }
 
-function openFile(path: string, line?: number) {
+export function openFile(path: string, line?: number) {
   window.dispatchEvent(new CustomEvent<OpenFileDetail>(OPEN_FILE_EVENT, { detail: { path, line } }));
 }
 

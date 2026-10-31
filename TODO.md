@@ -6656,3 +6656,61 @@ Same session: the user had granted extra dirs, yet every aimsai2 `cd` still aske
 - [ ] Open: the CLI and web/desktop disagree on sync fatality. `runPrepareStages` intentionally swallows the `runSyncStage` error (`connect.go:193`, commented) so `ocode remote` proceeds with an outdated/partially synced host, while `RemoteWorkspace.Connect` makes any sync error fatal (every proxied request 502s). Both surface the reason (the CLI via `progress.Warn`, Connect via `syncFailureHint`), so this is a policy divergence, not a silent failure. Decide whether the CLI should also refuse (parity) or the web should degrade like the CLI.
 - [ ] The host's config currently still holds the macOS path list; the host grant
       (`/home/james/www/aimsai2`) must be re-applied once after the rebuild.
+
+## xlsx Kaizen probe: Excel-first recalculation (2026-10-31)
+- [ ] LibreOffice recalculation backend for `docs/okf/xlsx/probe/lib.py::recalc`. The probe is Excel-only now
+      (macOS AppleScript, Windows COM), so Linux and CI cannot run it (`recalc` raises on other platforms). The
+      original `soffice --headless --convert-to xlsx` implementation is in git history (commit `9bf4c1b3`). LibreOffice
+      24.2 cannot evaluate `XLOOKUP`/dynamic arrays, so expect score differences against Excel.
+- [ ] `docs/okf/xlsx/probe/excel_recalc.ps1` (Windows/COM) was written but never run on Windows.
+- [ ] Phase B live sweep and the computer-use (GUI) deepseek variant for xlsx are not run yet; see `docs/okf/xlsx/PLAN.md`.
+
+## Review follow-ups (2026-10-31 snapshot, `/review-changes`)
+- [ ] `CHANGES.md`: the 🌐 tab-bar entry sits at the BOTTOM of `[Unreleased]` while the other new entry is at the
+      top (the section is newest-first). Left in place rather than moving one ~1.5k-char line inside a file a
+      concurrent session was editing; reorder on the next changelog pass.
+- [ ] `docs/okf/xlsx/probe/lib.py::values_after_edit` leaks one `xlsx-mut-*` temp dir per call (pre-existing; each
+      holds a copy of the model's workbook). Clean it up when the probe is next touched.
+- [ ] The macOS Excel path could not be RE-verified live during the review session: `open workbook` returned an
+      AppleEvent timeout (-1712), i.e. a pending access prompt for `~/xlsx-probe-excel`; that now surfaces as
+      `ENV-FAIL` instead of a model failure (the earlier 28/28 selftest stands). Re-run
+      `probe/selftest.sh <one task>` while the folder grant is active to re-confirm the happy path end to end.
+- [ ] Bundle code anchors citing `web/src/App.tsx` / `UnifiedTabBar.tsx` lines were ALREADY stale before the
+      2026-10-31 chat-layout change (e.g. `concepts/inbound-content-guardrail.md` cites `App.tsx:2157` for the
+      `untrusted_scores` prop, which is at 2387; `UnifiedTabBar.tsx:551-554` for the new-chat button, which is at
+      1044). The layout change shifts them a further ~24 lines, but the debt predates it. Re-derive the whole
+      bundle's anchors in one pass (extract every `file.ext:NNN`, print the real line, fix or drop).
+
+## Remote session interruption diagnosis (2026-10-31)
+- [ ] **`~` project paths are still rejected by at least one host-side lookup.** On `james@217.216.72.49` the
+      remote `serve.log` repeatedly logs `serve error: path "~/www/prop" is not a project registered with this
+      server` (and once for `~/www/personal`), even though the host's `projects.json` holds the expanded
+      `/home/james/www/...` roots. Same class as the 2026-09-21 `HandleListProjectSessions` finding: a call site
+      still compares the verbatim `~` path instead of `projects.ExpandHome`. CLAUDE.md says `~` is expanded only
+      by the server owning that `$HOME` — this IS that server, so the refusal is wrong. Enumerate every
+      `"is not a project registered with this server"` return and expand in the owning-server branch only.
+- [ ] **Remote `ocode serve` leaves zombie children.** Three `[ocode] <defunct>` processes were children of the
+      running serve pid after ~1h26m uptime. Harmless at this rate, but it means some spawned child is never
+      `Wait`ed; check the terminal/browse/LSP spawn paths before it accumulates on a long-lived host.
+- [ ] **Auto-stop for a stale sibling server is NOT implemented.** `ocode serve` now records itself in
+      `<GlobalDataDir>/servers/` and warns about a live sibling whose version differs
+      (`internal/server/serve_registry.go`, `warnServeSiblings` in `server.Run`). It deliberately does not kill
+      one: that can drop the other server's terminals and running turns. A `--replace` flag (stop the verified
+      stale siblings, then bind) was proposed and is still undecided — see the 2026-10-31 conversation.
+- Not filed as a bug: the 2026-10-31 interruption of `ses_2026-10-30-141254-a65bc6d9` was version churn, not a
+  defect. The app rebuild retired the outdated v0.9.26 server (`retire outdated remote server … kill remote
+  server pid 1510824`) and that kills in-flight turns, which is already documented at
+  `docs/concepts/remote-persistent-sessions-terminals.md:75`. Measured link cost, for the record: median
+  reconnect 16.3s, max 35.4s, and every proxied request inside that window fails with `still connecting`.
+  The invisibility half is now fixed: `serve` names a different-version sibling at startup instead of silently
+  walking past it.
+
+## Excel add-in: `make install-excel` on Windows (2026-10-31)
+- `excel-addin/scripts/install-excel.mjs` Windows branch (`npx office-addin-dev-settings@3 sideload`, `go build` to `excel-bridge.exe`, pnpm via shell) is UNTESTED on Windows.
+- The Windows spawn path now uses `cmd.exe /d /s /c` with an args ARRAY instead of `shell: true` (Node joins a shell args array unquoted — DEP0190 — so a `C:\Users\Jane Doe\...` path was split). The fix follows Node's documented behaviour but still needs a real Windows run.
+- `scripts/preflight.sh` is bash only; no Windows equivalent yet.
+
+## Deferred verification from /review-changes (2026-10-31)
+- **Remote browse CDP is still unreachable.** `handleRemoteBrowseCDP` (`internal/server/handler_remote_browse.go`) is wired and its `?host=` rewrite is covered by `TestPrepareRemoteCDPRequestStripsHostAndSetsPath`, but `handleRemoteBrowseConfig` never returns `stream_via_main` and `BrowserPanel.effectiveMode` returns `local` for a remote-mode host before consulting the flag. Wiring it needs a decision first: does a remote project's Chrome run on the host (then the socket is proxied) or here (then it cannot see the host's pages)?
+- **`detached` / Take over and `stream_via_main` need one live check.** Unit + route tests cover the wire format (`TestCDP_SecondSocketDetachesFirst`, `useCdpSocket.test.tsx`), but no real two-client run has been done: open the same shared browser tab on a second window/device and confirm the first shows Take over, and that a phone with no reachable browse origin streams through the main origin.
+- **Serve-registry identity is lock-based, not nonce-based.** `serve-<pid>.json` is advisory-locked (`flock` / `LockFileEx`) and a scan trusts a record only when the lock is held. An unlocked record whose pid is alive is a pre-lock build: it is reported WITHOUT a stop command and left on disk. If a future schema change needs stronger identity (e.g. verify the version over HTTP), that is the follow-up.

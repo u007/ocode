@@ -1598,6 +1598,16 @@ func ExtraAllowedRoots() []string {
 	return getExtraAllowedRoots()
 }
 
+// NormalizeRootPath exposes the permission/confinement root normalization
+// (tilde expansion, absolute path, symlink resolution) so surfaces that compare
+// configured roots — such as GET /api/config/ocode/paths marking which Office
+// add-in presets are already granted — use the SAME form the runtime allowlist
+// stores. A missing leaf resolves through its existing parent, which is why a
+// not-yet-created "wef" directory is still a valid grant.
+func NormalizeRootPath(p string) (string, bool) {
+	return normalizeRootPath(p)
+}
+
 // CacheRoots returns the managed cache directories that confinedPath treats as
 // allowed beyond the workdir and extra roots: the tool-results cache and the
 // cloned-repo cache. Exposed so the permission scope model (AllowedRoots) and

@@ -184,7 +184,7 @@ launch.
 
 ## Reads never start an exposure
 
-`HandleGetAutoShareConfig` (`internal/server/handler_config.go:2868`) reads
+`HandleGetAutoShareConfig` (`internal/server/handler_config.go:3004`) reads
 through `tailscaleShare.status()` (`internal/server/tailscale_share.go:126`) via
 the injected `Handler.tailscaleShareSnapshot` seam, so merely opening Settings can
 never publish the instance. Only the boot hook and explicit start actions may
@@ -208,13 +208,13 @@ unauthenticated route would let any tailnet peer turn sharing on):
 
 | Method | Path | Handler |
 |--------|------|---------|
-| GET | `/api/config/ocode/auto-share` | `HandleGetAutoShareConfig` (`internal/server/handler_config.go:2868`) |
-| PUT | `/api/config/ocode/auto-share` | `HandleSetAutoShareConfig` (`internal/server/handler_config.go:2890`) |
+| GET | `/api/config/ocode/auto-share` | `HandleGetAutoShareConfig` (`internal/server/handler_config.go:3004`) |
+| PUT | `/api/config/ocode/auto-share` | `HandleSetAutoShareConfig` (`internal/server/handler_config.go:3026`) |
 
 Routes registered at `internal/server/server.go:530-531`.
 
 Response shape: `{enabled, available, running, kind?, url?, hint?}`
-(`autoShareResponse`, `internal/server/handler_config.go:2840`). The `running` and
+(`autoShareResponse`, `internal/server/handler_config.go:2976`). The `running` and
 `kind` fields were added so the Settings UI can show the live consequence of the
 flag. Reads are side-effect free and safe to poll.
 
@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:1871` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:2331` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 

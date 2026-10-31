@@ -124,6 +124,10 @@ export type CdpServerMessage =
   /** Reply to a client "find" command. active is 1-based ("3 of 10"), 0 when
    *  nothing matches; total is best-effort and may be 0 when counting fails. */
   | { t: "findResult"; query?: string; found: boolean; active: number; total: number; error?: string }
+  /** Another window/device took this shared tab's screencast (the server keeps
+   *  one sink per target). NOT fatal: the panel stays and offers "Take over".
+   *  The socket closes right after this frame and does not auto-reconnect. */
+  | { t: "detached"; reason: string }
   | { t: "error"; message: string };
 
 /** Decoded screencast frame header: CSS-pixel dimensions of the JPEG body. */

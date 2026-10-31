@@ -5,6 +5,9 @@ Reads runs/<label>/<model>/<task>.<rep>.check (last line `SCORE n/m PASS|FAIL`) 
   * per task: runs passed / run, mean check fraction, mean seconds
   * per tag: mean check fraction over the tasks carrying the tag (the Kaizen subscore axis)
 A run with no .check or no SCORE line counts as 0 (the model produced nothing checkable).
+A run whose last line is `ENV-FAIL ...` (Excel could not recalculate) is NOT scored: it is
+excluded from every denominator and reported separately, so a broken environment cannot
+masquerade as a model failure.
 """
 import collections
 import pathlib
@@ -30,29 +33,38 @@ TAGS = {
 
 def main(root):
     per_task = collections.defaultdict(list)
+    env_failed = collections.defaultdict(int)
     for chk in sorted(pathlib.Path(root).rglob("*.check")):
         task = chk.name.split(".")[0]
         last = chk.read_text().strip().splitlines()[-1:] or [""]
+        if last[0].startswith("ENV-FAIL"):
+            env_failed[task] += 1
+            continue
         m = re.match(r"SCORE (\d+)/(\d+) (PASS|FAIL)", last[0])
         frac, ok = (int(m[1]) / int(m[2]), m[3] == "PASS") if m else (0.0, False)
         meta = chk.with_suffix(".meta")
         secs = int(re.search(r"secs=(\d+)", meta.read_text())[1]) if meta.exists() and "secs=" in meta.read_text() else 0
         per_task[task].append((frac, ok, secs))
-    if not per_task:
+    if not per_task and not env_failed:
         sys.exit(f"no *.check files under {root}")
-    print(f"{'task':<20} {'pass':>5} {'mean':>6} {'secs':>6}")
-    for t, runs in per_task.items():
-        print(f"{t:<20} {sum(o for _, o, _ in runs)}/{len(runs):<3} {sum(f for f, _, _ in runs) / len(runs):6.2f} {sum(s for *_, s in runs) / len(runs):6.0f}")
-    tag = collections.defaultdict(list)
-    for t, runs in per_task.items():
-        for g in TAGS.get(t, []):
-            tag[g] += [f for f, _, _ in runs]
-    print(f"\n{'tag':<14} {'subscore':>8} {'n':>3}")
-    for g, v in sorted(tag.items()):
-        print(f"{g:<14} {sum(v) / len(v):8.2f} {len(v):>3}")
-    allruns = [f for r in per_task.values() for f, _, _ in r]
-    full = [o for r in per_task.values() for _, o, _ in r]
-    print(f"\noverall: {sum(allruns) / len(allruns):.2f} mean check fraction, {sum(full)}/{len(full)} runs fully passed")
+    if per_task:
+        print(f"{'task':<20} {'pass':>5} {'mean':>6} {'secs':>6}")
+        for t, runs in per_task.items():
+            print(f"{t:<20} {sum(o for _, o, _ in runs)}/{len(runs):<3} {sum(f for f, _, _ in runs) / len(runs):6.2f} {sum(s for *_, s in runs) / len(runs):6.0f}")
+        tag = collections.defaultdict(list)
+        for t, runs in per_task.items():
+            for g in TAGS.get(t, []):
+                tag[g] += [f for f, _, _ in runs]
+        print(f"\n{'tag':<14} {'subscore':>8} {'n':>3}")
+        for g, v in sorted(tag.items()):
+            print(f"{g:<14} {sum(v) / len(v):8.2f} {len(v):>3}")
+        allruns = [f for r in per_task.values() for f, _, _ in r]
+        full = [o for r in per_task.values() for _, o, _ in r]
+        print(f"\noverall: {sum(allruns) / len(allruns):.2f} mean check fraction, {sum(full)}/{len(full)} runs fully passed")
+    if env_failed:
+        print(f"\nenvironment failures (excluded from the score): {sum(env_failed.values())}")
+        for t, n in sorted(env_failed.items()):
+            print(f"  {t}: {n}")
 
 
 if __name__ == "__main__":

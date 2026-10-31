@@ -496,6 +496,8 @@ install-all: install install-desktop
 debug-desktop:
 	bash scripts/capture-desktop-hang.sh
 
+install-excel:
+	cd excel-addin && make install-excel
 
 # ── Restart the macOS desktop app ────────────────────────────────────────────
 # Close the running ocode.app (graceful, then forced) and relaunch it.

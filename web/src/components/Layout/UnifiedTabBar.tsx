@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { X, List, Plus, Loader2, Bell, ChevronDown, Pause } from "lucide-react";
 import {
   DndContext,
@@ -551,9 +551,16 @@ type PendingTabClose = { kind: "chat" | "browser" | "terminal"; id: string; titl
 interface Props {
   focusedKind: FocusedKind;
   onFocusKindChange: (kind: FocusedKind) => void;
+  /** Extra control appended to the action row (the side-panel browser toggle
+   *  lives in App state). It MUST be rendered here rather than beside the bar:
+   *  the pill column wraps to extra lines, and the bar is top-aligned, so a
+   *  sibling centered against the whole bar drifts down by half the wrapped
+   *  height. Sharing the action row keeps it on the first line at any pill
+   *  count. */
+  trailingAction?: ReactNode;
 }
 
-export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props) {
+export default function UnifiedTabBar({ focusedKind, onFocusKindChange, trailingAction }: Props) {
   const {
     state: projectState,
     tabs: chatTabs,
@@ -1116,7 +1123,13 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
         </div>
       </div>
 
-      <div className="shrink-0 flex flex-wrap justify-start lg:justify-end items-center gap-0.5 py-1.5">{actions}</div>
+      <div
+        data-testid="tabbar-actions"
+        className="shrink-0 flex flex-wrap justify-start lg:justify-end items-center gap-0.5 py-1.5"
+      >
+        {actions}
+        {trailingAction}
+      </div>
 
       {pendingClose && (
         <Dialog open onOpenChange={(o) => !o && cancelPendingClose()}>

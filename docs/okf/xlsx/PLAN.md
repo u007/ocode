@@ -1,8 +1,9 @@
 # Excel (xlsx) model assessment — run plan
 
 Goal: find out whether a small model can do an office/admin clerk's spreadsheet work, where it is weak,
-and (if it is weak) what a model-specific correction skill must say. Nothing here has been run against a
-real model yet. The scoring tooling was verified with reference solutions only (`probe/selftest.sh`).
+and (if it is weak) what a model-specific correction skill must say. Phase A (closed-book) has run for
+`deepseek-v4.1-flash` — see `scores/` and `answers/`. Phase B (the live probe) has not: no `probe/runs/`
+exists, and its scoring tooling was verified with reference solutions only (`probe/selftest.sh`).
 
 Everything referenced lives in `docs/okf/xlsx/`: `questions.yaml` (answer key, never shown to the model),
 `../_prompts/xlsx.md` (answer-free sheet), `probe/` (13 live tasks), `meta.yaml` (tags, threshold 0.9).
@@ -18,8 +19,8 @@ Everything referenced lives in `docs/okf/xlsx/`: `questions.yaml` (answer key, n
 
 ## 1. Preflight (about 15 minutes, no model needed)
 
-1. Machine that runs `ocode` has `python3`, `openpyxl`, `lxml` and LibreOffice (`soffice` on PATH).
-   `pip install openpyxl lxml`. The model's own shell needs `python3` and `openpyxl` too (or permission to
+1. Machine that runs `ocode` has `python3`, `openpyxl`, `lxml` and Microsoft Excel (macOS: first run may ask
+   once to "Grant Access" to `~/xlsx-probe-excel`, and to allow Automation). `pip install openpyxl lxml`. The model's own shell needs `python3` and `openpyxl` too (or permission to
    `pip install`): if it cannot import openpyxl, every task fails for an environmental reason. Check with
    `python3 -c "import openpyxl"` in the same environment `ocode run` uses.
 2. `cd docs/okf/xlsx/probe && ./selftest.sh` must end with 13 `good` = PASS and 15 covers = FAIL
@@ -126,7 +127,7 @@ deleting**. Note any of these explicitly in the write-up even if the task score 
 
 ```
 model:            <provider-stripped id>      served via: <host>      date: <YYYY-MM-DD>
-ocode version:    <ocode --version>           LibreOffice: <soffice --version>   openpyxl: <ver>
+ocode version:    <ocode --version>           Excel: <app version>   openpyxl: <ver>
 closed-book:      stack score <..>   tags: <tag=score ...>
 live sweep:       label <run1>  reps <2>   runs fully passed <n/26>   mean fraction <..>
                   tags: formulas <..> lookup <..> dates-times <..> charts <..> summary <..>
@@ -139,9 +140,9 @@ next step:        <derive skill for tags … | none>
 
 ## 7. Known limits to remember when interpreting numbers
 
-- No real Excel: values come from LibreOffice 24.2, charts are judged from XML, not rendered. Render two or
-  three outputs to PDF (`soffice --headless --convert-to pdf`) and look at them.
-- `XLOOKUP` and dynamic arrays are forbidden in the prompts (LibreOffice 24.2 cannot calculate them).
+- Values come from real Excel (`lib.recalc`); charts are judged from XML, not rendered. Render two or
+  three outputs to PDF (export from Excel) and look at them.
+- `XLOOKUP` and dynamic arrays are forbidden in the prompts (kept from the LibreOffice-era probe; "some of us run older Excel").
 - Fixtures are small; this measures correctness, not large-file performance.
 - Legacy `.xls` and `.xlsm` are covered by closed-book questions only.
 - Run the stronger baseline model before concluding anything about the small one.

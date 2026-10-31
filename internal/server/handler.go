@@ -73,6 +73,12 @@ type Handler struct {
 	// computer-use — today the per-project `ssh -N -L` port forwards
 	// (handler_portmaps.go). nil for a bare NewHandler().
 	procSup *tool.ProcessSupervisor
+	// officeAddinPaths lists the Office add-in permission presets. A FIELD, not
+	// a package var: a test pins the list without mutating process-global state
+	// (which a parallel test would race), and the handler copies the result
+	// before marking entries, so a shared stub slice is never mutated.
+	// nil falls back to paths.OfficeAddinPaths.
+	officeAddinPaths func() []paths.OfficeAddinPath
 	// portMaps owns one remote.ForwardManager per remote project for the
 	// project-scoped /api/portmaps panel. nil for a bare NewHandler(); wired
 	// by server.New from procSup.
@@ -694,6 +700,7 @@ func NewHandler() *Handler {
 	h := &Handler{
 		agents:              make(map[string]*agentSession),
 		cfg:                 cfg,
+		officeAddinPaths:    paths.OfficeAddinPaths,
 		advisorEnabled:      advisorEnabled,
 		workDir:             defaultWorkDir,
 		projects:            projStore,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
+import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, getBrowseStreamViaMain, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
@@ -85,7 +85,15 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   const effectiveMode: "local" | "chrome" = (() => {
     if (!s) return "local";
     if (host === null || getBrowseRemoteMode(host)) return "local";
+    // An explicit choice wins over the transport heuristic below: a user who
+    // picked "local iframe" on a phone keeps it, even when this device cannot
+    // reach the browse listener.
     if (s.userMode) return s.userMode;
+    // The SPA is on another device (phone over Tailscale) with no shared origin
+    // it can reach: it cannot load a page, localhost ones included, through the
+    // separate browse listener, so the server's Chrome renders it and streams
+    // frames over the main origin. A reachable Tailscale mount keeps iframe mode.
+    if (getBrowseStreamViaMain(host)) return "chrome";
     let privateHost = false;
     try {
       privateHost = isPrivateHost(new URL(normalizeBrowseURL(s.url)).host);
@@ -347,8 +355,8 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
             }}
           />
         )}
-        {showIframe && effectiveMode === "chrome" && (
-          <ChromeViewport stateKey={stateKey} browseBase={base} url={s.url} navSeq={s.historyIndex} active={active} />
+        {showIframe && effectiveMode === "chrome" && host !== null && (
+          <ChromeViewport stateKey={stateKey} browseBase={base} host={host} url={s.url} navSeq={s.historyIndex} active={active} />
         )}
         {showIframe && s.loading && (
           <div

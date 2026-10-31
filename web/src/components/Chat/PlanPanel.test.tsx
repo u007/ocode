@@ -33,6 +33,39 @@ describe("PlanPanel", () => {
     planPanelSetting = "5";
   });
 
+  it("keeps the header row non-shrinking and makes only the body shrinkable", async () => {
+    getSessionTodo.mockResolvedValue(
+      plan("ses_shrink", [
+        { id: "t1", text: "build it", state: "done" },
+        { id: "t2", text: "test it", state: "in_progress" },
+      ]),
+    );
+    render(<PlanPanel sessionId="ses_shrink" />);
+    await screen.findByText("1/2");
+    // Token-exact: the substring "shrink" also matches "shrink-0", so split on
+    // whitespace and assert membership.
+    const classesOf = (testId: string) => screen.getByTestId(testId).className.split(/\s+/);
+
+    // The header is a flex sibling of the transcript and never gives way, so
+    // the toggle stays visible however small the column gets.
+    expect(classesOf("plan-panel-header")).toContain("shrink-0");
+
+    // Only the body yields height: it shrinks, drops below its content, caps
+    // at max-h-52 and scrolls. An expanded plan therefore takes at most its
+    // cap from the column, and the transcript gives way to it first.
+    const body = classesOf("plan-panel-body");
+    expect(body).toContain("shrink");
+    expect(body).not.toContain("shrink-0");
+    expect(body).toContain("min-h-0");
+    expect(body).toContain("overflow-y-auto");
+    expect(body).toContain("max-h-52");
+
+    // The body exists only while expanded; collapsed leaves the header alone.
+    fireEvent.click(await screen.findByRole("button", { name: "Collapse plan" }));
+    expect(screen.queryByTestId("plan-panel-body")).toBeNull();
+    expect(classesOf("plan-panel-header")).toContain("shrink-0");
+  });
+
   it("renders nothing when the session has no plan", async () => {
     getSessionTodo.mockResolvedValue(plan("ses_empty", []));
     const { container } = render(<PlanPanel sessionId="ses_empty" />);

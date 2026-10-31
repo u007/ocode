@@ -140,6 +140,29 @@ describe("UnifiedTabBar", () => {
     expect(browserStore.state.byKey[keys[0]].panelOpen).toBe(true);
   });
 
+  it("renders a trailing action inside the action row, not beside the bar", () => {
+    // The side-panel toggle is passed in from App. It must live in the action
+    // cluster: the bar is top-aligned while its pill column wraps, so anything
+    // outside the row drifts vertically as pills wrap.
+    render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <UnifiedTabBar
+              focusedKind="chat"
+              onFocusKindChange={vi.fn()}
+              trailingAction={<button type="button">side toggle</button>}
+            />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+    const actions = screen.getByTestId("tabbar-actions");
+    const trailing = screen.getByRole("button", { name: "side toggle" });
+    expect(actions.contains(trailing)).toBe(true);
+    expect(within(actions).getByRole("button", { name: /all sessions/i })).toBeTruthy();
+  });
+
   it("swaps the browser tab globe for a spinner while that tab is loading", () => {
     renderBar();
     fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));

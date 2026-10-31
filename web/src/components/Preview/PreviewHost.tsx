@@ -4,6 +4,7 @@ import type { StateKey } from "../../lib/browserStore";
 import { previewKindForPath, resolvePreviewDoc, type PreviewOpenRequest } from "../../lib/previewKind";
 import { api } from "../../api/client";
 import PreviewSurface from "./PreviewSurface";
+import { PreviewWidthMenu } from "./PreviewWidthMenu";
 import LegacyOfficePane from "./LegacyOfficePane";
 import { dispatchOpenPreview } from "../../lib/previewKind";
 import { loadSidebarPreviewState, saveSidebarPreviewState, type SidebarPreviewState } from "./sidebarPreviewState";
@@ -282,6 +283,9 @@ export default function PreviewHost({
               {doc.path}
             </span>
             {osOpenState && <span className="shrink-0 text-muted-foreground">{osOpenState}</span>}
+            {/* Reading-column control. Markdown only: every other kind either
+                ignores it (PDF/deck/image) or is code, which stays full width. */}
+            {doc.kind === "markdown" && <PreviewWidthMenu />}
             {!(doc.projectHost ?? projectHost) && (
               <button type="button" onClick={() => openWithOS()} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-muted" title="Open with the OS default app (native PowerPoint/Keynote/Word playback)">
                 Open in app

@@ -2,12 +2,13 @@
 
 A closed-book sheet only measures what a model *states*. This probe gives the model a real workbook and a
 request phrased the way an office manager would phrase it, runs `ocode run -yolo`, then checks the saved
-file. Excel itself is not available, so `check.py` works from the saved XML plus a **LibreOffice headless
-recalculation**. For every "live formula" task it also **edits an input in a copy of the model's file,
+file. `check.py` works from the saved XML plus a **Microsoft Excel recalculation** (`lib.recalc`: AppleScript on
+macOS, COM/PowerShell on Windows; Excel must be installed, LibreOffice backend is a TODO). For every "live formula" task it also **edits an input in a copy of the model's file,
 recalculates again and checks the answer moved**, so pasted numbers, hard-coded dates and `TODAY()` fail.
 
 ```
-pip install openpyxl lxml            # + LibreOffice (soffice) on PATH
+pip install openpyxl lxml            # + Microsoft Excel installed (macOS or Windows)
+python3 test_recalc.py               # recalc plumbing, NO Excel needed (fake backend); runs on Linux/CI
 python3 make_fixtures.py             # fixtures/*.xlsx (generated, gitignored)
 ./selftest.sh                        # 13 "good" references must PASS, 15 cover-up/naive variants must FAIL
 OCODE_BIN=/path/to/ocode ./sweep.sh <label> <provider/model> [reps=2] [parallel=2]
@@ -59,11 +60,18 @@ fewer than 3 runs as low-n. Run each task at least twice: a small model's first 
 
 ## Known limits (read before trusting a number)
 - **Structural, not visual.** Charts are judged from `chart*.xml` and the drawing anchor, not rendered.
-  Render a sample with `soffice --headless --convert-to pdf` for an eye check.
-- **LibreOffice 24.2 cannot evaluate `XLOOKUP`/dynamic arrays** (added in 24.8), so the prompts forbid them
-  ("some of us run older Excel"). A model that uses them scores `#NAME?` here even though Excel 365 would
-  calculate them: that is a compatibility finding, not a checker bug. Newer functions written by a library
-  need the `_xlfn.` prefix (`IFNA`, `MAXIFS`, `CONCAT`, `TEXTJOIN`, `IFS` verified).
+  Export a sample to PDF from Excel for an eye check.
+- **Excel-only recalculation, serialised.** Excel is one instance, so `lib.recalc` holds a file lock (with a
+  900 s deadline) and runs one recalculation at a time; every platform stages a COPY of the input and the
+  output in `~/xlsx-probe-excel`, so Excel never opens the artifact being graded. Sandboxed Excel asks for
+  access per folder — one folder means one "Grant Access" click, though restarting Excel can ask again.
+  Staging names are unique per call and removed afterwards. The prompts still forbid
+  `XLOOKUP`/dynamic arrays ("some of us run older Excel"). Functions written by a library need the `_xlfn.`
+  prefix (`IFNA`, `MAXIFS`, `CONCAT`, `TEXTJOIN`, `IFS`) or Excel returns `#NAME?`. The Windows script
+  (`excel_recalc.ps1`) has never been run.
+- **A broken environment is not a model failure.** When Excel is missing, refuses access or times out,
+  `check.py` prints a final `ENV-FAIL <reason>` line and exits 3; `summarize.py` excludes those runs from
+  every denominator and reports them separately.
 - **Real PivotTables cannot be authored by openpyxl.** `sales-pivot` accepts a live formula grid or a real
   pivot part; for a real pivot the liveness edit is skipped (its cache is static until refreshed).
 - **Legacy `.xls` / macro `.xlsm` handling** is closed-book only (`xlsx-verify-03`): no LibreOffice-free way

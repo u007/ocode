@@ -19,9 +19,21 @@ import (
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/ocr"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/remote"
+	"github.com/u007/ocode/internal/tool"
 )
+
+// officeAddinPresets returns the Office add-in permission presets for this
+// server's platform. The seam lives on the Handler (see Handler.officeAddinPaths)
+// so a test can pin the list on every host OS without mutating a package var.
+func (h *Handler) officeAddinPresets() []paths.OfficeAddinPath {
+	if h.officeAddinPaths != nil {
+		return h.officeAddinPaths()
+	}
+	return paths.OfficeAddinPaths()
+}
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
@@ -1881,15 +1893,43 @@ func (h *Handler) HandleSetImageGenConfig(w http.ResponseWriter, r *http.Request
 // HandleGetPathsConfig reports the extra-allowed-paths and upload-directory settings.
 func (h *Handler) HandleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	paths, uploadDir := []string(nil), ""
+	extraPaths, uploadDir := []string(nil), ""
 	if h.cfg != nil {
-		paths = h.cfg.Ocode.ExtraAllowedPaths
+		extraPaths = h.cfg.Ocode.ExtraAllowedPaths
 		uploadDir = h.cfg.Ocode.UploadDir
 	}
 	h.mu.Unlock()
+
+	// Mark which Office add-in presets are already granted. Compare through
+	// the same normalization the runtime allowlist uses (tilde expansion,
+	// absolute path, symlink resolution) so a path stored as "~/..." or with a
+	// trailing slash does not read as unchecked.
+	allowedRaw := make(map[string]string, len(extraPaths))
+	for _, p := range extraPaths {
+		if norm, ok := tool.NormalizeRootPath(p); ok {
+			if _, seen := allowedRaw[norm]; !seen {
+				allowedRaw[norm] = p
+			}
+		}
+	}
+	// Copy before marking: a stub or a future shared list must never be mutated
+	// by a read-only endpoint.
+	presets := h.officeAddinPresets()
+	addins := make([]paths.OfficeAddinPath, len(presets))
+	copy(addins, presets)
+	for i := range addins {
+		if norm, ok := tool.NormalizeRootPath(addins[i].Path); ok {
+			if raw, granted := allowedRaw[norm]; granted {
+				addins[i].Allowed = true
+				addins[i].AllowedPath = raw
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"extra_allowed_paths": paths,
+		"extra_allowed_paths": extraPaths,
 		"upload_dir":          uploadDir,
+		"office_addin_paths":  addins,
 		// platform lets the web label the OS-native file-manager action
 		// ("Open in Finder" / "Open in Explorer" / "Open in File Manager")
 		// to match the machine the server actually runs on — for a remote

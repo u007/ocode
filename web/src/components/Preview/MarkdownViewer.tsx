@@ -8,6 +8,11 @@ import FileEditor from "../Files/FileEditor";
 import MarkdownLink from "../common/MarkdownLink";
 import { cn } from "../../lib/utils";
 import type { EditorAppearance } from "../../lib/editorAppearance";
+import {
+  previewColumnClass,
+  resolvePreviewWidth,
+  usePreviewWidthPreset,
+} from "../../lib/previewWidth";
 
 function extractMermaid(md: string): string | null {
   const m = md.match(/```mermaid\s+([\s\S]*?)```/);
@@ -60,6 +65,12 @@ export default function MarkdownViewer({
   const [isBinary, setIsBinary] = useState(false);
   const [forceEdit, setForceEdit] = useState(false);
   const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
+  // Reading column. `auto` resolves per locale (Letter for US customary-paper
+  // locales, A4 elsewhere); the resolved width is applied to an inner wrapper
+  // so `.prose`/`max-w-none` on the scroller still cannot cap the measure, and
+  // so a narrow sidebar pane degrades to "pane width minus the padding margin".
+  const widthPreset = usePreviewWidthPreset();
+  const columnWidth = resolvePreviewWidth(widthPreset);
 
   useEffect(() => {
     if (controlled) return;
@@ -212,8 +223,10 @@ export default function MarkdownViewer({
           <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} appearance={appearance} />
         </div>
       )}
-      <div ref={ref} onScroll={handleScroll} className={cn("prose prose-sm max-w-none min-h-0 flex-1 overflow-auto p-3 select-text", appearance !== "light" && "prose-invert")}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
+      <div ref={ref} onScroll={handleScroll} className={cn("prose prose-sm max-w-none min-h-0 flex-1 overflow-auto select-text", appearance !== "light" && "prose-invert")}>
+        <div className={previewColumnClass(columnWidth)} data-preview-column={columnWidth}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
+        </div>
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
