@@ -3,8 +3,34 @@
 
 ## 2026-11-01
 
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Web chat transcript layout: agent-run tool answers with empty content are kept, so a finished call no longer shows running ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
+* **Update**: Session-tagged snapshot gotcha: line anchors re-derived across handler, agent, discovery_glue and TUI model ([gotchas/session-snapshot-stale-derived-fields.md](/gotchas/session-snapshot-stale-derived-fields.md))
+* **Update**: Discovery Corpus Cache: discovery_glue.go and md_discovery.go line anchors re-derived after the toolsMu edits ([concepts/discovery-corpus-cache.md](/concepts/discovery-corpus-cache.md))
+* **Update**: Discovery MCP Tool Gating: a malformed pinned_mcp_servers value now fails the session build, and pinned server names are validated at chat creation (HTTP 400/500) ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))
+* **Creation**: MCP tool maps are read under toolsMu, never bare: the invariant, the fatal concurrent-map trigger, the race test, and the open GetToolDefinitions loop ([gotchas/mcp-maps-read-under-toolsmu.md](/gotchas/mcp-maps-read-under-toolsmu.md))
+* **Update**: browser_run step loop: a stale ref now costs one step and the next decision uses a fresh listing; the (already filled) hint reads the unredacted caller copy; over-budget element trimming is a binary search; line anchors re-derived ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: browser_run step loop (Jev picks each control) ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: browser_run step loop (Jev picks each control) ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Web/Desktop UI Parity — Current Status ([web-desktop-parity-todo.md](/web-desktop-parity-todo.md))
+* **Update**: Web Chat Transcript Layout — Flex Column and Shrink-Weight Invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
+* **Update**: Web Chat Transcript Layout — Flex Column and Shrink-Weight Invariant ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
+* **Deprecation**: Chat Verbosity Display — Design Spec: Accidental near-duplicate: a doc_write was issued with the wrong path (specs/ instead of superpowers/specs/) and a truncated body. The authoritative page is superpowers/specs/2026-09-24-chat-verbosity-display-design.md. ([specs/2026-09-24-chat-verbosity-display-design.md](/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Creation**: Chat Verbosity Display — Design Spec ([specs/2026-09-24-chat-verbosity-display-design.md](/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Update**: Discovery MCP Tool Gating: server-group sibling attach and per-session pinned servers ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))
+* **Update**: Discovery TypeSafe Relevance Judge: a veto beats the server-group sibling expansion ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Auto-Permission Enforced Categories: MCP tool description and risk reach the judge ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+
 * **Creation**: Chat file links with relative or `~` hrefs silently did nothing ([gotchas/chat-file-links-silent-noop.md](/gotchas/chat-file-links-silent-noop.md))
 * **Update**: File Editor Grants: home-directory `~` links open in the Files tab ([concepts/file-editor-grants.md](/concepts/file-editor-grants.md))
+* **Creation**: browser_run step loop (Jev picks each control) ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Browser agent tool: `controls` action, guarded index, and a browser_run section ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
+* **Update**: browser_run: target and value gate on choice probability; value asked in its own request; guard judges a plain view of browser results; live test recorded ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Inbound Content Guardrail: what the judge sees for browser results; cited anchors re-derived ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
 
 ## 2026-10-31
 

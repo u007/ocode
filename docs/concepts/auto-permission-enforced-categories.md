@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-10-04T12:33:27Z
+timestamp: 2026-11-01T04:27:06Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -41,13 +41,13 @@ The closed set is `typesafeConcerns` in `internal/agent/permission_typesafe.go` 
 
 ## Amendment (2026-10-28) — `secrets` relaxation reaches `verifyAutoGrant`
 
-As of the 2026-10-28 working-tree change (`agent.go:4788` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **three independent consumers** — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 890; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4777/4788), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
+As of the 2026-10-28 working-tree change (`agent.go:4860` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **three independent consumers** — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 904; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4849/4860), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
 
-1. **Judge rubric** — `state["relaxed_concerns"]` line 890; `relaxedConcernSet()`; the `secrets` note (`permission_typesafe.go`:83, verified verbatim: "Switching this off lets a credential file be read without the deterministic sensitive-path refusal, and relaxes exposing the value plus the interpreter verifier's sensitive-path gate. Writing, editing or deleting a credential file is still gated, as is repo metadata (.git/, .github/workflows/).").
+1. **Judge rubric** — `state["relaxed_concerns"]` line 904; `relaxedConcernSet()`; the `secrets` note (`permission_typesafe.go`:83, verified verbatim: "Switching this off lets a credential file be read without the deterministic sensitive-path refusal, and relaxes exposing the value plus the interpreter verifier's sensitive-path gate. Writing, editing or deleting a credential file is still gated, as is repo metadata (.git/, .github/workflows/).").
 2. **Interpreter-effect verifier** — `permission_interpreter.go`:467: `if !relaxed["secrets"] && isSensitivePath(p) { ... }`.
-3. **Deterministic `verifyAutoGrant` guard** — `agent.go`:4777 (`if isSensitivePath(path) {`) and 4788 (`readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`). Previously refused any sensitive path unconditionally; now allows a READ of secret material (`.env`, `.netrc`, ssh-key basenames, cert/key suffixes, `.aws/`) **only when `secrets` is in the relaxed set**. Writes, edits and deletes of a credential file, and every repo-metadata (`.git/`, `.github/workflows/`) operation, stay refused.
+3. **Deterministic `verifyAutoGrant` guard** — `agent.go`:4849 (`if isSensitivePath(path) {`) and 4860 (`readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`). Previously refused any sensitive path unconditionally; now allows a READ of secret material (`.env`, `.netrc`, ssh-key basenames, cert/key suffixes, `.aws/`) **only when `secrets` is in the relaxed set**. Writes, edits and deletes of a credential file, and every repo-metadata (`.git/`, `.github/workflows/`) operation, stay refused.
 
-As shipped: only a READ (`read` tool) of secret material (e.g. `.env`) is allowed by the guard when `secrets` is relaxed (`agent.go`:4788 `readableSecret := toolName == "read" && ...`); writes, edits, deletes, multiedits, multi_file_edits, replace_lines and apply_patch of a credential file stay refused, as does any operation on repo metadata (`.git/`, `.github/workflows/`). Reason: the user opted out of exposure (exposing a value), not of integrity (credential tampering — writes/edits/deletes). When enforced, both read and write ask. Regression: `internal/agent/permissions_relaxed_secrets_test.go` and `internal/agent/permissions_relaxed_secrets_writes_test.go` (`TestVerifyAutoGrantRelaxedSecretsDoesNotCoverCredentialWrites`).
+As shipped: only a READ (`read` tool) of secret material (e.g. `.env`) is allowed by the guard when `secrets` is relaxed (`agent.go`:4860 `readableSecret := toolName == "read" && ...`); writes, edits, deletes, multiedits, multi_file_edits, replace_lines and apply_patch of a credential file stay refused, as does any operation on repo metadata (`.git/`, `.github/workflows/`). Reason: the user opted out of exposure (exposing a value), not of integrity (credential tampering — writes/edits/deletes). When enforced, both read and write ask. Regression: `internal/agent/permissions_relaxed_secrets_test.go` and `internal/agent/permissions_relaxed_secrets_writes_test.go` (`TestVerifyAutoGrantRelaxedSecretsDoesNotCoverCredentialWrites`).
 
 
 ## API
@@ -275,9 +275,9 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 
 ## Amendment (2026-10-04): The permission judge resolves through `resolveDecider(slotPermission)`
 
-The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:252`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:112`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
+The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:256`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:126`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
 
-`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:214`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
+`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:241`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
 
 The fail-open contract, the confidence floors, and the opaque-floor override are unchanged. The **deterministic Go safety boundary did change** — see the amendment below.
 
@@ -329,3 +329,18 @@ Not exempt, so an out-of-scope value still vetoes: variables that make the
 toolchain load code or config from the path (`GOPATH`, `GOMODCACHE`,
 `GRADLE_USER_HOME`, `NUGET_PACKAGES`, `PYTHONPATH`, `NODE_PATH`, `GOROOT`,
 `JAVA_HOME`) and install or output targets (`GOBIN`, `CARGO_HOME`, `CARGO_TARGET_DIR`).
+
+## Amendment (2026-11-01): MCP tool description and risk reach the judge
+
+The judge saw an MCP call only as its tool name and arguments, so nothing said whether `excel_read_range` reads or writes. `buildTypesafePermissionState` now adds two state keys, and only for tools in the agent's MCP set:
+
+- **`tool_description`**: the server's own description of the tool. Present for every MCP tool the agent resolves.
+- **`tool_risk`**: the per-tool risk class the server reported in its `tools/list` response. Present only when non-empty. The Excel bridge emits `read`, `write` or `structural`.
+
+The risk class comes from the optional `risk` field on `mcp.MCPTool`, exposed through the optional `tool.RiskHintTool` interface. A server that reports no risk gets no `tool_risk` key, so the judge has the description alone and must not infer a class from its absence.
+
+These keys are judge context and decide nothing. The rubric does not name them; the judge reads them as state, like the other tool facts.
+
+**Budget.** `tool_description` is not in `bulkyStateKeys`, so it is never projected down to a preview. An unusually long description therefore counts in full against the shared state budget. If the state then does not fit, `prepareDecisionState` refuses and the human is asked. That is deliberate. A silently truncated description would give the judge a partial view of what the tool does.
+
+Covered by `TestJudgeStateCarriesMCPDescriptionAndRisk` in `internal/agent/browser_safety_test.go`, and by `TestListToolsCarriesRiskAndServerName` in `internal/mcp/client_test.go` for the risk field itself.

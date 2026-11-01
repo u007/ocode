@@ -134,6 +134,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/docs", description: "Knowledge system: on|off|status|init|update|cleanup", icon: FileText },
   { name: "/commands", description: "List every available command", icon: HelpCircle },
   { name: "/ban", description: "Banned bash prefixes: list|add|remove", icon: Shield },
+  { name: "/allow", description: "Allowed bash prefixes: list|add|remove", icon: Shield },
   { name: "/image", description: "Image gen: status|enable|disable|model|timeout", icon: Sparkles },
   { name: "/upload", description: "Show or set the upload directory", icon: FileDown },
   { name: "/connect", description: "Store a provider API key (/connect provider key)", icon: Bot },
@@ -440,9 +441,12 @@ export interface CommandContext {
     getPathsConfig?: () => Promise<{ extra_allowed_paths: string[]; upload_dir: string }>;
     setPathsConfig?: (extra_allowed_paths: string[], upload_dir: string) => Promise<unknown>;
     getMemoryStatus?: () => Promise<import("../../api/types").MemoryStatusResponse>;
-    setBashRule?: (prefix: string, level: "allow" | "deny" | "ask") => Promise<unknown>;
+    /** Write one bash prefix rule. `host` routes a remote session's write to
+     *  the server that actually runs it (bash rules are per server, not per
+     *  project, so an omitted host only ever means "this machine"). */
+    setBashRule?: (prefix: string, level: "allow" | "deny" | "ask", host?: string) => Promise<unknown>;
     /** Batch delta behind the Settings editor; `remove` is a true DELETE. */
-    setBashRules?: (delta: import("../../api/types").BashRulesDelta) => Promise<unknown>;
+    setBashRules?: (delta: import("../../api/types").BashRulesDelta, host?: string) => Promise<unknown>;
     getPermissions?: (sessionId?: string, host?: string) => Promise<PermissionsResponse>;
     getAutoContinue?: (sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
     setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }, sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
@@ -698,6 +702,9 @@ export async function dispatchCommand(
 
     case "/ban":
       return handleBan(args, ctx);
+
+    case "/allow":
+      return handleAllow(args, ctx);
 
     case "/image":
       return handleImage(args, ctx);
@@ -2714,7 +2721,7 @@ async function handleBan(args: string, ctx: CommandContext): Promise<CommandResu
     if (sub === "add") {
       const prefixes = parts.slice(1).map((p) => p.toLowerCase());
       if (!prefixes.length || !ctx.api.setBashRule) return ok("Usage: `/ban add <prefix…>` (e.g. `/ban add rm git push`).");
-      for (const p of prefixes) await ctx.api.setBashRule(p, "deny");
+      for (const p of prefixes) await ctx.api.setBashRule(p, "deny", ctx.host);
       return ok(`Banned: ${prefixes.map((p) => `\`${p}\``).join(", ")} — any bash command with these prefixes will be denied.`);
     }
     if (sub === "remove") {
@@ -2723,13 +2730,92 @@ async function handleBan(args: string, ctx: CommandContext): Promise<CommandResu
       // "ask" left an inert rule that outlived the ban and still listed under
       // "Other bash rules".
       if (!prefixes.length || !ctx.api.setBashRules) return ok("Usage: `/ban remove <prefix…>` (e.g. `/ban remove rm git push`).");
-      await ctx.api.setBashRules({ remove: prefixes });
+      await ctx.api.setBashRules({ remove: prefixes }, ctx.host);
       return ok(`Removed bash rule(s): ${prefixes.map((p) => `\`${p}\``).join(", ")} — they follow the default policy again.`);
     }
     // Bare /ban <cmd…> falls through to add (TUI parity).
     return handleBan(`add ${args}`, ctx);
   } catch (err) {
     return fail("/ban", err);
+  }
+}
+
+// ─── /allow [list|add|remove] — allowed bash prefixes ───────────────────────
+//
+// TUI parity for `runAllowCmd` (internal/tui/commands.go). Before this the web
+// had /ban but no way to PRE-approve a prefix from chat: the only allow path
+// was the permission dialog's "always allow" on a live ask, or Settings.
+//
+// The write reuses the same endpoints as /ban and the Settings editor
+// (POST /api/permissions/bash-rule, PUT /api/permissions/bash-rules), so the
+// rule is persisted by the server's targeted load-modify-write saver and
+// applied to every live agent. No rule logic is duplicated here.
+//
+// `add`/`remove` JOIN the remaining words into ONE prefix ("git push",
+// "npm test") — the TUI behaviour and the whole point of allow rules. /ban
+// splits its argument per word instead; keep the difference deliberate.
+async function handleAllow(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getPermissions) return unsupported("/allow");
+  const usage = "Usage: `/allow [list|add <prefix…>|remove <prefix…>]` — a bare `/allow <cmd…>` is shorthand for add.";
+  try {
+    const perms = await ctx.api.getPermissions(activeSessionId(ctx), ctx.host);
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const sub = parts[0]?.toLowerCase();
+
+    const renderList = () => {
+      const allowed = perms.bash_rules.filter((r) => r.level === "allow");
+      if (!allowed.length) return "**Allowed bash prefixes:** (none) — add one with `/allow add <prefix…>`.";
+      return ["**Allowed bash prefixes:**", ...allowed.map((r) => `- \`${r.tool}\``)].join("\n");
+    };
+
+    if (!sub || sub === "list") return ok(renderList());
+
+    let action: "add" | "remove" = "add";
+    let prefix = "";
+    if (sub === "add" || sub === "remove") {
+      action = sub;
+      prefix = parts.slice(1).join(" ").trim();
+    } else {
+      // Bare `/allow <cmd…>` is shorthand for add, exactly like /ban.
+      prefix = args.trim();
+    }
+    // Normalize like /ban does, so both commands address the same rule key.
+    prefix = prefix.toLowerCase();
+    if (!prefix) return ok(usage);
+
+    const existing = perms.bash_rules.find((r) => r.tool === prefix);
+
+    if (action === "remove") {
+      // Only an allow rule is removable here; a ban or ask rule on the same
+      // prefix belongs to /ban and the Settings editor.
+      if (existing?.level !== "allow") return ok(`\`${prefix}\` is not an allowed bash prefix.`);
+      if (!ctx.api.setBashRules) return unsupported("/allow");
+      await ctx.api.setBashRules({ remove: [prefix] }, ctx.host);
+      return ok(`Removed bash rule for \`${prefix}\` — it now follows the default policy.`);
+    }
+
+    if (existing?.level === "allow") {
+      return ok(`Bash command prefix \`${prefix}\` is already allowed.`);
+    }
+    if (!ctx.api.setBashRule) return unsupported("/allow");
+    try {
+      await ctx.api.setBashRule(prefix, "allow", ctx.host);
+    } catch (err) {
+      // The server runs agent.ValidateBashPrefixRule, which refuses a bare
+      // `git` allow (it would auto-approve every git subcommand). Surface its
+      // reason instead of a generic failure.
+      if ((err as { status?: number })?.status === 400) {
+        return ok(`Cannot allow \`${prefix}\`: ${errText(err)}`);
+      }
+      throw err;
+    }
+    return ok(
+      existing?.level === "deny"
+        ? `Allowed bash command prefix \`${prefix}\` (replaced its ban).`
+        : `Allowed bash command prefix \`${prefix}\`.`,
+    );
+  } catch (err) {
+    return fail("/allow", err);
   }
 }
 

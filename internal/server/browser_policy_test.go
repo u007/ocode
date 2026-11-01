@@ -16,7 +16,7 @@ var browserMutatingActions = []string{
 
 // browserReadActionNames are the actions the read-only agent types keep.
 var browserReadActionNames = []string{
-	"console", "find", "network", "screenshot", "scroll", "snapshot", "tabs", "text", "wait",
+	"console", "controls", "find", "network", "screenshot", "scroll", "snapshot", "tabs", "text", "wait",
 }
 
 // readOnlyAgentTypes are the subagent types the browser tool refuses mutations for.
@@ -74,6 +74,7 @@ func TestBrowserRefusal_ReadOnlyAgentsRefuseEveryMutatingAction(t *testing.T) {
 func TestBrowserRefusal_ReadOnlyAgentsKeepEveryReadAction(t *testing.T) {
 	args := map[string]string{
 		"console":    `{"action":"console"}`,
+		"controls":   `{"action":"controls"}`,
 		"find":       `{"action":"find","target":"button"}`,
 		"network":    `{"action":"network"}`,
 		"screenshot": `{"action":"screenshot"}`,

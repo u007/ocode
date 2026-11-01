@@ -404,6 +404,10 @@ type Agent struct {
 	client   LLMClient
 	tools    map[string]tool.Tool
 	mcpTools map[string]struct{}
+	// mcpServers maps MCP tool name -> server name; filled by addMCPTools when the tool implements tool.MCPServerTool.
+	mcpServers map[string]string
+	// pinnedMCPServers are the server names whose tools every discovery sync attaches. Set per session by SetPinnedMCPServers.
+	pinnedMCPServers []string
 	// guardExecuted records the tool-call ids whose in-scope tool actually ran,
 	// so the content guardrail never judges a result the host wrote in place
 	// of one (a policy denial, a permission ask). See guardExecutedToolResult.
@@ -1336,6 +1340,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		client:         client,
 		tools:          toolMap,
 		mcpTools:       make(map[string]struct{}),
+		mcpServers:     make(map[string]string),
 		config:         cfg,
 		mode:           ModeBuild,
 		lspMgr:         lspMgr,
@@ -1450,6 +1455,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		a.SetAdvisorConfig(AdvisorConfigFromConfig(cfg))
 	}
 	a.tools["task"] = &TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
+	// browser_run binds to this agent and needs its browser tool, which the
+	// caller passed in tools, so it is registered here, after the tool map exists.
+	a.bindBrowserRun()
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
 	a.tools["knowledge_lookup"] = &KnowledgeLookupTool{mainAgent: a}
@@ -4201,12 +4209,18 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 			// synchronously and act on the answer. The PERMISSION_ASK: sentinel
 			// path is used only when no callback is set (the main agent's flow,
 			// where the TUI handles the sentinel in appendAgentMessage).
-			if a.OnPermissionAsk != nil {
+			// A per-call asker on ctx (browser_run's sub-steps on the main agent,
+			// which has no OnPermissionAsk) takes precedence over the agent's own.
+			asker := a.OnPermissionAsk
+			if ctxAsker := permissionAskerFromContext(ctx); ctxAsker != nil {
+				asker = ctxAsker
+			}
+			if asker != nil {
 				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
 				if decision.Request != nil {
 					req = *decision.Request
 				}
-				resp := a.OnPermissionAsk(req)
+				resp := asker(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
 					return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
@@ -6809,6 +6823,22 @@ func attributePermAsker(f func(PermissionRequest) PermissionResponse, name strin
 	}
 }
 
+// permissionAskerKey is the context key for a per-call permission asker.
+type permissionAskerKey struct{}
+
+// withPermissionAsker returns ctx carrying f as the permission asker for the tool
+// calls made under it. A call whose context carries an asker blocks on it for a
+// human answer, the same way a sub-agent blocks on OnPermissionAsk.
+func withPermissionAsker(ctx context.Context, f func(PermissionRequest) PermissionResponse) context.Context {
+	return context.WithValue(ctx, permissionAskerKey{}, f)
+}
+
+// permissionAskerFromContext returns the asker carried by ctx, or nil.
+func permissionAskerFromContext(ctx context.Context) func(PermissionRequest) PermissionResponse {
+	f, _ := ctx.Value(permissionAskerKey{}).(func(PermissionRequest) PermissionResponse)
+	return f
+}
+
 // DispatchSubagent runs the named subagent synchronously with the given prompt
 // and returns its final text output. It uses the agent's configured task tool
 // so all existing subagent wiring (permissions, small model, activity tracking)
@@ -6864,10 +6894,15 @@ func (a *Agent) addMCPTools(tools []tool.Tool) {
 	for _, t := range tools {
 		a.tools[t.Name()] = t
 		a.mcpTools[t.Name()] = struct{}{}
+		if st, ok := t.(tool.MCPServerTool); ok {
+			a.mcpServers[t.Name()] = st.MCPServer()
+		}
 	}
 }
 
 func (a *Agent) MCPToolNames() []string {
+	a.toolsMu.RLock()
+	defer a.toolsMu.RUnlock()
 	names := make([]string, 0, len(a.mcpTools))
 	for name := range a.mcpTools {
 		names = append(names, name)
@@ -6876,6 +6911,8 @@ func (a *Agent) MCPToolNames() []string {
 }
 
 func (a *Agent) RestoreMCPToolNames(names []string) {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
 	for _, name := range names {
 		a.mcpTools[name] = struct{}{}
 	}
@@ -6891,6 +6928,8 @@ type mcpLoadResult struct {
 }
 
 func (a *Agent) MCPToolCount() int {
+	a.toolsMu.RLock()
+	defer a.toolsMu.RUnlock()
 	return len(a.mcpTools)
 }
 

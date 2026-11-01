@@ -1,5 +1,18 @@
 import type { ChatMsg } from "./chatState";
 
+/**
+ * Compact token count for the context gauge: 999, 12.4k, 1M. Rounds to one decimal and drops a trailing ".0", and a
+ * value that would print as "1000.0k" moves up to the M unit (999950 is "1M", not "1000k").
+ */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) throw new RangeError(`token count must be a finite non-negative number, got ${n}`);
+  const v = Math.round(n);
+  if (v < 1000) return String(v);
+  if (v < 999_950) return `${oneDecimal(v / 1000)}k`;
+  return `${oneDecimal(v / 1_000_000)}M`;
+}
+const oneDecimal = (x: number) => (Math.round(x * 10) / 10).toFixed(1).replace(/\.0$/, "");
+
 const CTX = /^\[ocode:excel\][\s\S]*?\[\/ocode:excel\]\s*/;
 
 /** The workbook context block rides on every user message; the reader should only see what they typed. */

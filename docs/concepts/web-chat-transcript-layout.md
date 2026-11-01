@@ -10,7 +10,7 @@ tags:
   - agent-preview
   - flex
   - invariant
-timestamp: 2026-10-31T23:30:00Z
+timestamp: 2026-11-01T05:28:30Z
 ---
 # Web Chat Transcript Layout — Flex Column and Shrink-Weight Invariant
 
@@ -104,3 +104,9 @@ panels back into one `shrink-0` wrapper, or dropping the 10rem basis fails them.
 - `skills/ocode-web/SKILL.md` item 80 — the same rules in skill form.
 - `docs/gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md` — the separate
   tail-pin / virtualizer scroll contract; do not conflate the two.
+
+## Agent-run cards render through the chat's own blocks
+
+`web/src/components/Agents/RunNode.tsx` used to hand-roll its transcript (plain pre-wrap text, `tool(args.slice(0,120))`, untruncated results). Every entry now goes through `RunTranscriptEntry`, which reuses the chat transcript's components: `AssistantText` (markdown), `ThinkingBlock` (thinking policy), and `ToolBlock` (independent tool-call / tool-output gates, including the 20-line tail preview). A tool call and the role-"tool" message answering it are grouped into ONE block by tool-call id — the run DTO carries it (`runMessagesDTO` / `runToolCallDTO.ID` in `internal/server/handler_runs.go`, which also keeps reasoning-only entries and empty-content tool answers, so a call whose tool returned "" still shows as done rather than running).
+
+Those surfaces (the chat's Agents rail, the Agents tab list/detail) render outside `ChatPanel`, so `web/src/components/Agents/agentRunDisplay.tsx` (`AgentRunDisplayScope`) supplies the shared `useChatVerbosity()` policy plus its own disclosure store. It is a PASS-THROUGH when a `ChatDisplayContext` provider already exists, so the inline `task` card keeps the chat's policy and store. Regression tests: `Agents/RunNode.test.tsx` ("RunNode chat display parity"), `Chat/AgentPreview.test.tsx`, `Agents/agentRunDisplay.test.tsx`, and the Go `TestRunMessagesDTOCarriesToolCallIDAndKeepsReasoningOnlyEntries` and `TestRunMessagesDTOKeepsEmptyToolResultWithCallID`.

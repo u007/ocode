@@ -7,11 +7,12 @@ const getPermissions = vi.fn();
 const setBashRules = vi.fn();
 const setBashRule = vi.fn();
 
-function ctx() {
+function ctx(host?: string) {
   return {
     commandName: "ban",
     args: "",
     getSessionId: () => "ses_ban",
+    ...(host ? { host } : {}),
     api: { getPermissions, setBashRules, setBashRule },
   } as never;
 }
@@ -31,7 +32,7 @@ describe("/ban command", () => {
 
   it("remove deletes the prefix through the batch delta (no 'ask' downgrade)", async () => {
     const res = await dispatchCommand("/ban remove Sed", ctx());
-    expect(setBashRules).toHaveBeenCalledWith({ remove: ["sed"] });
+    expect(setBashRules).toHaveBeenCalledWith({ remove: ["sed"] }, undefined);
     expect(setBashRule).not.toHaveBeenCalled();
     expect(res.handled).toBe(true);
     expect(res.messages?.[0]?.content).toContain("Removed bash rule(s)");
@@ -40,12 +41,21 @@ describe("/ban command", () => {
 
   it("remove takes several prefixes in one delta", async () => {
     await dispatchCommand("/ban remove rm sed", ctx());
-    expect(setBashRules).toHaveBeenCalledWith({ remove: ["rm", "sed"] });
+    expect(setBashRules).toHaveBeenCalledWith({ remove: ["rm", "sed"] }, undefined);
   });
 
   it("add still writes a deny rule", async () => {
     await dispatchCommand("/ban add sed", ctx());
-    expect(setBashRule).toHaveBeenCalledWith("sed", "deny");
+    expect(setBashRule).toHaveBeenCalledWith("sed", "deny", undefined);
     expect(setBashRules).not.toHaveBeenCalled();
+  });
+
+  it("threads the remote host through the read and every write", async () => {
+    await dispatchCommand("/ban add sed", ctx("devbox"));
+    expect(getPermissions).toHaveBeenCalledWith("ses_ban", "devbox");
+    expect(setBashRule).toHaveBeenCalledWith("sed", "deny", "devbox");
+
+    await dispatchCommand("/ban remove sed", ctx("devbox"));
+    expect(setBashRules).toHaveBeenCalledWith({ remove: ["sed"] }, "devbox");
   });
 });

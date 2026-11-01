@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,15 +48,22 @@ func NewHandler(cfg Config) (http.Handler, *Hub, error) {
 		return nil, nil, fmt.Errorf("invalid ocode URL %q", cfg.OcodeURL)
 	}
 	hub := NewHub()
-	mcp := NewMCP(hub, c)
-	if cfg.CallTimeout > 0 {
-		mcp.CallTimeout = cfg.CallTimeout
-	}
 	st, err := newStateStore(cfg.DataDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	s := &srv{cfg: cfg, hub: hub, contract: c, state: st}
+	wsRoot := cfg.WorkspaceRoot
+	if wsRoot == "" {
+		wsRoot, _ = defaultWorkspaceRoot() // on error stays "": chat and project registration are then refused
+	}
+	s := &srv{cfg: cfg, hub: hub, contract: c, state: st, target: target, workspaceRoot: wsRoot, sessionLocks: map[string]*sync.Mutex{}}
+	mcp, err := NewMCP(hub, c, s.localTools())
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.CallTimeout > 0 {
+		mcp.CallTimeout = cfg.CallTimeout
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -84,13 +92,16 @@ func NewHandler(cfg Config) (http.Handler, *Hub, error) {
 	mux.Handle("POST /bridge/workspace/{workbook}", s.auth(http.HandlerFunc(s.workspace)))
 	mux.Handle("GET /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.getState)))
 	mux.Handle("PUT /bridge/state/{workbook}/{key}", s.auth(http.HandlerFunc(s.putState)))
-	wsRoot := cfg.WorkspaceRoot
-	if wsRoot == "" {
-		wsRoot, _ = defaultWorkspaceRoot() // on error stays "": chat and project registration are then refused
-	}
+	mux.Handle("POST /bridge/sessions/{workbook}", s.auth(http.HandlerFunc(s.postSession)))
+	mux.Handle("GET /bridge/auto-permission", s.auth(http.HandlerFunc(s.getAutoPermission)))
+	mux.Handle("PUT /bridge/auto-permission", s.auth(http.HandlerFunc(s.putAutoPermission)))
+	mux.Handle("GET /bridge/session-mode/{id}", s.auth(http.HandlerFunc(s.getSessionMode)))
+	mux.Handle("GET /bridge/connected-providers", s.auth(http.HandlerFunc(s.getConnectedProviders)))
+	mux.Handle("POST /bridge/pane-info", s.auth(http.HandlerFunc(s.paneInfo)))
 	mux.Handle("/api/", s.auth(allowAPI(wsRoot, proxy)))
-	// MCP is for ocode on the same machine: loopback only, same key.
+	// MCP and the workbook listing are for ocode on the same machine: loopback only, same key.
 	mux.Handle("/mcp", s.auth(s.loopbackOnly(mcp)))
+	mux.Handle("GET /bridge/workbooks", s.auth(s.loopbackOnly(http.HandlerFunc(s.workbooks))))
 	if cfg.StaticDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(cfg.StaticDir)))
 	}
@@ -102,6 +113,15 @@ type srv struct {
 	hub      *Hub
 	contract contract
 	state    *stateStore
+	// target is the parsed OcodeURL; the auto-permission routes call ocode through it.
+	target *url.URL
+	// workspaceRoot is the directory holding one workspace per workbook; "" when none could be resolved.
+	workspaceRoot string
+	// autoPermMu serializes the auto-permission GET-then-PUT (autopermission.go).
+	autoPermMu sync.Mutex
+	// sessionMu guards sessionLocks; sessionLocks holds one lock per workbook for its session index (paneinfo.go).
+	sessionMu    sync.Mutex
+	sessionLocks map[string]*sync.Mutex
 }
 
 // security rejects cross-site browser requests to the authenticated routes and adds basic headers.
@@ -182,6 +202,11 @@ func (s *srv) stream(w http.ResponseWriter, r *http.Request) {
 	wb := r.URL.Query().Get("workbook")
 	if wb == "" {
 		http.Error(w, "workbook is required", http.StatusBadRequest)
+		return
+	}
+	// The id names state and workspace folders on disk, so it must be a safe path element (the pane's ids are UUIDs).
+	if !validWorkbookName(wb) {
+		http.Error(w, "workbook id may only hold letters, digits, dot, dash and underscore", http.StatusBadRequest)
 		return
 	}
 	// instance identifies one page load of the pane: the same instance reconnecting replaces its

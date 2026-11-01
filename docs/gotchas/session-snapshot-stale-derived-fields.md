@@ -10,7 +10,7 @@ tags:
   - sidebar
   - tui-status
   - derived-field
-timestamp: 2026-10-01T17:11:03Z
+timestamp: 2026-11-01T05:24:00Z
 ---
 # Session-tagged snapshot: override base fields but recompute ALL derived fields
 
@@ -24,9 +24,9 @@ Affected builders:
 - `publishTurnStatusSnapshot` (`internal/server/handler_session_state.go`)
 - `finishSessionTitle` (`internal/server/title_gen.go`) — also never pinned the effective model at all.
 
-The web main-model pick is a per-session override: `ModelDialog.tsx:361` → `PUT /api/sessions/{id}/model` → `HandleSetSessionModel` → `pushSessionStatusSnapshot`.
+The web main-model pick is a per-session override: `ModelDialog.tsx:513` → `setSessionModel` (`web/src/api/client.ts`, `PUT /api/sessions/{id}/model`) → `HandleSetSessionModel` → `pushSessionStatusSnapshot`.
 
-**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1733` → `reconcileProfileAgent` defined at `agent_session.go:701`, called at `agent_session.go:1944`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6263`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:284`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6182/3359`). The TUI-bridged path was already correct (`internal/tui/model.go:16564-16572` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
+**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1770` → `reconcileProfileAgent` defined at `agent_session.go:783`, called at `handler.go:1773`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6359`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:332`, `discoveryModelRoot`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6302/3641`). The TUI-bridged path was already correct (`internal/tui/model.go:17019-17023` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
 
 ## Durable rule
 
@@ -40,7 +40,7 @@ The web main-model pick is a per-session override: `ModelDialog.tsx:361` → `PU
 
 `applySessionModelPrompt(snap, baseModel, baseCWD)` (`internal/server/model_context.go`) recomputes the banner **only when `MainModel`/`CWD` changed**, guarded to avoid a second disk scan (resolving a `.OCODE.md` shells out to git for tracked files via `agent.readContextFileAt`). When neither changed, the existing `buildStatusSnapshot` value is kept.
 
-Wired into all four session-tagged builders at `handler_session_state.go:282` (`HandleSessionStatus`), `:590` (`publishTurnStatusSnapshot`), `:676` (`pushSessionStatusSnapshot`) and `title_gen.go:152` (`finishSessionTitle`).
+Wired into all four session-tagged builders at `handler_session_state.go:282` (`HandleSessionStatus`), `:591` (`publishTurnStatusSnapshot`), `:740` (`pushSessionStatusSnapshot`) and `title_gen.go:152` (`finishSessionTitle`).
 
 ## Tests
 

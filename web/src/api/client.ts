@@ -4103,19 +4103,19 @@ export const api = {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
     return fetchJSON<MemoryStatusResponse>(`/api/memory/status${query}`);
   },
-  setBashRule: (prefix: string, level: "allow" | "deny" | "ask") =>
+  setBashRule: (prefix: string, level: "allow" | "deny" | "ask", host?: string) =>
     fetchJSON<{ prefix: string; level: string }>("/api/permissions/bash-rule", {
       method: "POST",
       body: JSON.stringify({ prefix, level }),
-    }),
+    }, host),
   // Batch write behind the Settings → Permissions rule editor. The body is a
   // DELTA, never a replacement map: a rule another surface added between the
   // editor's load and its save (TUI /ban, the /ban slash command) must survive.
-  setBashRules: (delta: BashRulesDelta) =>
+  setBashRules: (delta: BashRulesDelta, host?: string) =>
     fetchJSON<{ bash_rules: PermissionRule[] }>("/api/permissions/bash-rules", {
       method: "PUT",
       body: JSON.stringify(delta),
-    }),
+    }, host),
   getAutoContinue: (sessionId?: string, host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>(
       sessionId

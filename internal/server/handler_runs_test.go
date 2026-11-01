@@ -139,3 +139,53 @@ func TestHandleRunsStreamEmitsInitialFrame(t *testing.T) {
 		t.Fatalf("expected worker run in stream frame, got: %q", body)
 	}
 }
+
+// The web agent card renders run messages through the chat transcript's own
+// components, which group a tool call with its result by id and show reasoning.
+func TestRunMessagesDTOKeepsEmptyToolResultWithCallID(t *testing.T) {
+	call := agent.ToolCall{ID: "call_empty"}
+	call.Function.Name = "bash"
+	call.Function.Arguments = `{"command":"true"}`
+
+	msgs := runMessagesDTO([]agent.Message{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{call}},
+		// A tool that legitimately returns "" must still answer its call.
+		{Role: "tool", ToolID: "call_empty", Content: ""},
+		// An empty non-tool entry stays dropped.
+		{Role: "assistant", Content: ""},
+	})
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages (empty tool result kept, empty assistant dropped), got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Role != "tool" || msgs[1].ToolID != "call_empty" {
+		t.Fatalf("empty tool result lost its call id: %+v", msgs[1])
+	}
+}
+
+func TestRunMessagesDTOCarriesToolCallIDAndKeepsReasoningOnlyEntries(t *testing.T) {
+	call := agent.ToolCall{ID: "call_1"}
+	call.Function.Name = "bash"
+	call.Function.Arguments = `{"command":"ls"}`
+
+	msgs := runMessagesDTO([]agent.Message{
+		{Role: "assistant", ReasoningContent: "thinking only"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{call}},
+		{Role: "tool", ToolID: "call_1", Content: "file.go"},
+		// Empty entries stay dropped.
+		{Role: "assistant", Content: ""},
+	})
+
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages (reasoning-only kept, empty dropped), got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ReasoningContent != "thinking only" {
+		t.Fatalf("reasoning-only entry lost: %+v", msgs[0])
+	}
+	if len(msgs[1].ToolCalls) != 1 || msgs[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool call id not carried: %+v", msgs[1].ToolCalls)
+	}
+	if msgs[2].ToolID != "call_1" {
+		t.Fatalf("tool message lost its call id: %+v", msgs[2])
+	}
+}

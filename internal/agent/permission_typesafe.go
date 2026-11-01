@@ -530,7 +530,7 @@ func (a *Agent) browserPageContext(args json.RawMessage) (map[string]any, bool) 
 // scroll only moves the viewport and tabs only lists the strip.
 var browserUserTabReadActions = map[string]bool{
 	"text": true, "snapshot": true, "find": true, "console": true,
-	"network": true, "screenshot": true, "wait": true,
+	"controls": true, "network": true, "screenshot": true, "wait": true,
 }
 
 // browserSensitiveUploadDecision turns an upload that would hand a
@@ -716,6 +716,19 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 		"working_directory": a.effectiveWorkDir(),
 		"allow_destructive": a.autoPermissionAllowsDestructive(),
 		"project_context":   redactFileText(a.buildPermissionContextScripts(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource, false), maskReg),
+	}
+	// Jev judges an MCP call on its name and arguments alone otherwise. The
+	// server's own description and risk class are the only facts that say whether
+	// a call such as excel_read_range reads or writes.
+	a.toolsMu.RLock()
+	_, isMCP := a.mcpTools[toolName]
+	mcpTool, ok := a.tools[toolName]
+	a.toolsMu.RUnlock()
+	if isMCP && ok {
+		state["tool_description"] = mcpTool.Description()
+		if hint, hasRisk := mcpTool.(tool.RiskHintTool); hasRisk && hint.Risk() != "" {
+			state["tool_risk"] = hint.Risk()
+		}
 	}
 	// A browser action's judged facts include the page it acts on, so a click on
 	// a page the agent did not open is never judged blind.

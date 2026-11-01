@@ -177,13 +177,17 @@ func (a *Agent) ensureDiscovery() {
 // preserved by re-seeding the union of current attached IDs that were NOT
 // pinned before plus the new pinned IDs.
 //
+// The pinned set also covers every tool of each pinned MCP server (see pinnedIDs),
+// so a server's tools that arrive after the session was created attach on the
+// next sync.
+//
 // No-op when discovery is off or the session has not been created yet.
 // Safe to call mid-session (e.g. after the user pins or unpins a skill).
 func (a *Agent) SyncPinnedSkills() {
 	if a.disco == nil || !a.disco.enabled || a.disco.session == nil {
 		return
 	}
-	pinned := a.pinnedSkillIDs()
+	pinned := a.pinnedIDs()
 	pinnedSet := make(map[string]struct{}, len(pinned))
 	for _, id := range pinned {
 		pinnedSet[id] = struct{}{}
@@ -226,6 +230,48 @@ func (a *Agent) SyncPinnedSkills() {
 	a.disco.session = discovery.NewSession(a.disco.engine)
 	a.disco.session.Seed(kept)
 	a.disco.lastPinned = pinnedSet
+}
+
+// SetPinnedMCPServers sets the MCP servers whose tools stay attached for this
+// session. The names are copied, sorted and deduplicated; SyncPinnedSkills
+// applies the change on the next discovery pass.
+func (a *Agent) SetPinnedMCPServers(names []string) {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	a.pinnedMCPServers = out
+}
+
+// PinnedMCPServers returns a copy of the pinned MCP server names.
+func (a *Agent) PinnedMCPServers() []string {
+	return append([]string(nil), a.pinnedMCPServers...)
+}
+
+// pinnedIDs returns the IDs that stay attached regardless of ranking: the pinned
+// skills, plus "mcp:<tool>" for every tool of a pinned MCP server.
+func (a *Agent) pinnedIDs() []string {
+	ids := a.pinnedSkillIDs()
+	pinnedServers := make(map[string]struct{}, len(a.pinnedMCPServers))
+	for _, server := range a.pinnedMCPServers {
+		pinnedServers[server] = struct{}{}
+	}
+	a.toolsMu.RLock()
+	mcpServers := maps.Clone(a.mcpServers)
+	a.toolsMu.RUnlock()
+	var mcpIDs []string
+	for name, server := range mcpServers {
+		if _, ok := pinnedServers[server]; ok {
+			mcpIDs = append(mcpIDs, "mcp:"+name)
+		}
+	}
+	sort.Strings(mcpIDs)
+	return append(ids, mcpIDs...)
 }
 
 // pinnedSkillIDs returns the configured pinned-skill IDs ("skill:<name>").
@@ -332,11 +378,8 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 	for _, s := range skill.KaizenSkillsForModel(root, activeModel) {
 		docs = append(docs, skillDoc(s))
 	}
-	for name := range a.mcpTools {
-		t, ok := a.tools[name]
-		if !ok {
-			continue
-		}
+	_, mcpTools := a.mcpToolSnapshot()
+	for name, t := range mcpTools {
 		docs = append(docs, discovery.Doc{ID: "mcp:" + name, Kind: "mcp", Name: name, Text: name + ": " + t.Description()})
 	}
 	// Project markdown docs (summaries generated in the background; only files
@@ -344,6 +387,21 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 	docs = append(docs, a.mdDocs()...)
 	sort.Slice(docs, func(i, j int) bool { return docs[i].ID < docs[j].ID })
 	return docs
+}
+
+// mcpToolSnapshot returns the MCP tool count and the registered MCP tools keyed
+// by name, read under toolsMu. Callers iterate and call tool methods on the copy,
+// so no lock is held across them.
+func (a *Agent) mcpToolSnapshot() (int, map[string]tool.Tool) {
+	a.toolsMu.RLock()
+	defer a.toolsMu.RUnlock()
+	tools := make(map[string]tool.Tool, len(a.mcpTools))
+	for name := range a.mcpTools {
+		if t, ok := a.tools[name]; ok {
+			tools[name] = t
+		}
+	}
+	return len(a.mcpTools), tools
 }
 
 // RunDiscovery ranks the query and grows the sticky set. No-op when discovery is
@@ -374,6 +432,9 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 		return
 	}
 	a.ensureDiscovery()
+	// Before the early returns below, so pinned MCP tools attach even on a cold
+	// corpus or an empty query. Self-guarding: a no-op when discovery is off.
+	a.SyncPinnedSkills()
 	// Record the turn's messages for the discover_more judge BEFORE any early
 	// return below. The cold-cache deferral is precisely the turn where nothing
 	// is attached and the model must fall back to discover_more, so that is
@@ -465,19 +526,27 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// judge (or a judge error) there are no scores, so nothing is injected.
 	a.maybeAutoInjectSkill(keep, judgeScores, tail)
 	ids := make([]string, 0, len(keep))
+	names := make([]string, 0, len(keep))
 	for _, d := range keep {
 		ids = append(ids, d.ID)
+		names = append(names, d.Name)
 	}
-	a.disco.session.Seed(ids)
-	if len(keep) > 0 && a.OnDiscovery != nil {
-		names := make([]string, 0, len(keep))
-		for _, d := range keep {
-			names = append(names, d.Name)
-		}
+	seeded := a.expandMCPServerGroups(ids, judgeVetoedIDs(candidates, keep))
+	a.disco.session.Seed(seeded)
+	// expandMCPServerGroups keeps the input IDs first, so seeded[len(ids):] are
+	// exactly the sibling tools the server group added.
+	for _, id := range seeded[len(ids):] {
+		names = append(names, strings.TrimPrefix(id, "mcp:"))
+	}
+	if len(names) > 0 && a.OnDiscovery != nil {
 		a.OnDiscovery(strings.Join(names, ", "))
 	}
-	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total [%s] (q=%.60q)",
-		len(keep), len(a.disco.session.Attached()), judgeNote, query))
+	groupNote := ""
+	if extra := len(seeded) - len(ids); extra > 0 {
+		groupNote = fmt.Sprintf(" (+%d via server group)", extra)
+	}
+	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total [%s] (q=%.60q)%s",
+		len(keep), len(a.disco.session.Attached()), judgeNote, query, groupNote))
 }
 
 // startBackgroundWarm warms the corpus off the turn's critical path with a
@@ -526,7 +595,7 @@ type DiscoveryStatusInfo struct {
 
 // DiscoveryStatus reports the current discovery state (for /discover status, /context).
 func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
-	st := DiscoveryStatusInfo{MCPTotal: len(a.mcpTools)}
+	st := DiscoveryStatusInfo{MCPTotal: a.MCPToolCount()}
 	if a.config != nil {
 		st.Model = a.config.Ocode.Discovery.EmbeddingModel
 		st.Backend = a.config.Ocode.Discovery.EmbeddingBackend
@@ -582,13 +651,9 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 // estimate is bytes/4 — close enough for a human-readable number in /context;
 // exact tokenization is not needed for a planning figure.
 func (a *Agent) DiscoveryGatedTokens() (attached, total, gatedToks, indexToks int) {
-	total = len(a.mcpTools)
+	total, mcpTools := a.mcpToolSnapshot()
 	indexChars := 0
-	for name := range a.mcpTools {
-		t, ok := a.tools[name]
-		if !ok {
-			continue
-		}
+	for name, t := range mcpTools {
 		indexChars += len(name) + 1
 		if a.discoveryAllows(name) {
 			attached++
@@ -613,12 +678,26 @@ func (a *Agent) markMCPFrom(parent *Agent) {
 	if parent == nil {
 		return
 	}
+	// Snapshot the parent under its own lock, then release it before taking
+	// a's lock. The two agents' locks are never held at once.
+	parent.toolsMu.RLock()
+	parentMCPTools := maps.Clone(parent.mcpTools)
+	parentMCPServers := maps.Clone(parent.mcpServers)
+	parent.toolsMu.RUnlock()
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
 	if a.mcpTools == nil {
 		a.mcpTools = make(map[string]struct{})
 	}
+	if a.mcpServers == nil {
+		a.mcpServers = make(map[string]string)
+	}
 	for name := range a.tools {
-		if _, ok := parent.mcpTools[name]; ok {
+		if _, ok := parentMCPTools[name]; ok {
 			a.mcpTools[name] = struct{}{}
+			if server, known := parentMCPServers[name]; known {
+				a.mcpServers[name] = server
+			}
 		}
 	}
 }
@@ -645,13 +724,85 @@ func (a *Agent) discoveryAllows(name string) bool {
 	if a.disco == nil || !a.disco.enabled {
 		return true
 	}
-	if _, isMCP := a.mcpTools[name]; !isMCP {
+	a.toolsMu.RLock()
+	_, isMCP := a.mcpTools[name]
+	a.toolsMu.RUnlock()
+	if !isMCP {
 		return true
 	}
 	if a.disco.session == nil {
 		return false
 	}
 	return a.disco.session.IsAttached("mcp:" + name)
+}
+
+// expandMCPServerGroups widens a set of discovery IDs to whole MCP servers. The
+// judge (or the embedder) approved one tool of a server, so that server's other
+// tools attach with it: they are used together, and a per-tool gate would strand
+// the siblings behind another discover_more round trip. The sticky set is
+// grow-only, so the wider attach re-primes the prompt cache once.
+//
+// Siblings the judge vetoed in this same call (vetoed) stay out. They are
+// re-judged on a later turn like any other veto. Siblings the judge never saw
+// attach with the approved tool.
+//
+// The input IDs come first, in their original order and undeduplicated; the
+// siblings are appended, sorted. An "mcp:" ID whose tool has no known server
+// expands to itself. A restored name set (RestoreMCPToolNames) carries names
+// only, so that is expected here, not a fallback.
+func (a *Agent) expandMCPServerGroups(ids []string, vetoed map[string]struct{}) []string {
+	out := make([]string, 0, len(ids))
+	out = append(out, ids...)
+	inSet := make(map[string]struct{}, len(ids))
+	servers := make(map[string]struct{})
+	// One snapshot serves both passes below, so the server map cannot change
+	// between the lookup and the sibling scan.
+	a.toolsMu.RLock()
+	mcpServers := maps.Clone(a.mcpServers)
+	a.toolsMu.RUnlock()
+	for _, id := range ids {
+		inSet[id] = struct{}{}
+		name, isMCP := strings.CutPrefix(id, "mcp:")
+		if !isMCP {
+			continue
+		}
+		if server, known := mcpServers[name]; known {
+			servers[server] = struct{}{}
+		}
+	}
+	var siblings []string
+	for name, server := range mcpServers {
+		if _, want := servers[server]; !want {
+			continue
+		}
+		id := "mcp:" + name
+		if _, dup := inSet[id]; dup {
+			continue
+		}
+		if _, judgedOut := vetoed[id]; judgedOut {
+			continue
+		}
+		siblings = append(siblings, id)
+	}
+	sort.Strings(siblings)
+	return append(out, siblings...)
+}
+
+// judgeVetoedIDs returns the candidate IDs the judge removed from the ranked set.
+// An unjudged pass, or a judge failure that kept every candidate, has keep ==
+// candidates, so the result is empty.
+func judgeVetoedIDs(candidates, keep []discovery.Doc) map[string]struct{} {
+	kept := make(map[string]struct{}, len(keep))
+	for _, d := range keep {
+		kept[d.ID] = struct{}{}
+	}
+	vetoed := make(map[string]struct{})
+	for _, d := range candidates {
+		if _, ok := kept[d.ID]; !ok {
+			vetoed[d.ID] = struct{}{}
+		}
+	}
+	return vetoed
 }
 
 // discoveryQueryFromMessages builds the query from the last user message plus a
@@ -1002,11 +1153,14 @@ func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 	ids := make([]string, 0, len(keep))
+	names := make([]string, 0, len(keep))
 	for _, d := range keep {
 		ids = append(ids, d.ID)
+		names = append(names, d.Name)
 	}
-	a.disco.session.Seed(ids)
-	emitDebug("DISCOVERY", fmt.Sprintf("discover_more(%.40q) → +%d tools (judge kept %d/%d)", p.Need, len(keep), len(keep), len(candidates)))
+	seeded := a.expandMCPServerGroups(ids, judgeVetoedIDs(candidates, keep))
+	a.disco.session.Seed(seeded)
+	emitDebug("DISCOVERY", fmt.Sprintf("discover_more(%.40q) → +%d tools (judge kept %d/%d)", p.Need, len(seeded), len(keep), len(candidates)))
 	if len(keep) == 0 {
 		// Distinguish "nothing matched" from "everything matched was judged out
 		// of scope" — the model should retry with a different need rather than
@@ -1016,9 +1170,10 @@ func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
 		}
 		return "No additional tools matched that need. Available tools are listed in the discovery index.", nil
 	}
-	names := make([]string, 0, len(keep))
-	for _, d := range keep {
-		names = append(names, d.Name)
+	// expandMCPServerGroups keeps the input IDs first, so seeded[len(ids):] are
+	// exactly the sibling tools the server group added.
+	for _, id := range seeded[len(ids):] {
+		names = append(names, strings.TrimPrefix(id, "mcp:"))
 	}
 	sort.Strings(names)
 	return "Attached: " + strings.Join(names, ", ") + ". They are available on your next step.", nil

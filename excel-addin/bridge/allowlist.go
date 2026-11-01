@@ -33,6 +33,7 @@ var allowedAPIRoutes = []apiRoute{
 	newAPIRoute("GET", "/api/sessions/{id}"),
 	newAPIRoute("GET", "/api/sessions/{id}/state"),
 	newAPIRoute("GET", "/api/sessions/{id}/recap"),
+	newAPIRoute("GET", "/api/sessions/{id}/context"),
 	newAPIRoute("POST", "/api/sessions/{id}/message"),
 	newAPIRoute("POST", "/api/sessions/{id}/cancel"),
 	newAPIRoute("POST", "/api/sessions/{id}/retry"),
@@ -42,6 +43,7 @@ var allowedAPIRoutes = []apiRoute{
 	newAPIRoute("POST", "/api/sessions/{id}/rewinds"),
 	newAPIRoute("GET", "/api/sessions/{id}/user-messages"),
 	newAPIRoute("POST", "/api/permissions/resolve"),
+	newAPIRoute("PUT", "/api/permissions/mode"),
 	newAPIRoute("POST", "/api/questions"),
 	newAPIRoute("GET", "/api/models"),
 	newAPIRoute("POST", "/api/projects"),
@@ -55,10 +57,12 @@ func newAPIRoute(method, pattern string) apiRoute {
 // allowAPI forwards only allowlisted (method, path) pairs to next. It must sit behind auth, so an
 // unauthenticated caller gets 401 before the route is even checked.
 //
-// Two routes can start work anywhere on the machine, so their request bodies are constrained too: POST /api/chat
-// (a new session runs an agent in `project_path`, in the `permission_mode` it asks for) and POST /api/projects
-// (registers a directory). Both must stay inside workspaceRoot, and a chat may not ask for yolo or any other
-// mode that skips permission prompts. With no workspaceRoot those two routes are refused (fail closed).
+// Some routes change what ocode does with the request, so their bodies are constrained too (bodyConstrained):
+// POST /api/chat (a new session runs an agent in `project_path`, in the `permission_mode` it asks for, with the MCP
+// servers it pins), POST /api/projects (registers a directory) and PUT /api/permissions/mode (sets a session's
+// permission mode). Chat and projects must stay inside workspaceRoot. A chat may not ask for sandbox, may pin only
+// the excel MCP server (pinnedServersOK), and a mode may only be one of allowedChatModes or allowedPermissionModes.
+// With no workspaceRoot the chat and project routes are refused (fail closed).
 func allowAPI(workspaceRoot string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := safeAPIPath(r)
@@ -66,7 +70,7 @@ func allowAPI(workspaceRoot string, next http.Handler) http.Handler {
 			refuseAPI(w)
 			return
 		}
-		if r.Method == http.MethodPost && (p == "/api/chat" || p == "/api/projects") {
+		if bodyConstrained(r.Method, p) {
 			if !constrainBody(w, r, p, workspaceRoot) {
 				return
 			}
@@ -76,10 +80,29 @@ func allowAPI(workspaceRoot string, next http.Handler) http.Handler {
 	})
 }
 
-// allowedChatModes are the permission modes a pane-started session may use. "yolo" (no prompts) and the rest are refused.
-var allowedChatModes = map[string]bool{"": true, "normal": true, "locked": true}
+// allowedChatModes are the permission modes a pane-started session may use: ask (normal), locked, and yolo (no
+// prompts). yolo is allowed on purpose: the pane's permission picker offers it behind a confirm (RESUME.md,
+// 2026-11-01). sandbox is still refused.
+var allowedChatModes = map[string]bool{"": true, "normal": true, "locked": true, "yolo": true}
 
-// constrainBody validates the JSON body of /api/chat and /api/projects and puts the original bytes back for the proxy.
+// allowedPermissionModes are the modes PUT /api/permissions/mode may set on one session. The field is required.
+var allowedPermissionModes = map[string]bool{"normal": true, "locked": true, "yolo": true}
+
+// apiSessionIDRe is apiIDPattern anchored to the whole value: the session id in a PUT /api/permissions/mode body.
+var apiSessionIDRe = regexp.MustCompile("^" + apiIDPattern + "$")
+
+// bodyConstrained reports whether constrainBody checks the JSON body of this (method, path) pair.
+func bodyConstrained(method, p string) bool {
+	switch {
+	case method == http.MethodPost && (p == "/api/chat" || p == "/api/projects"):
+		return true
+	case method == http.MethodPut && p == "/api/permissions/mode":
+		return true
+	}
+	return false
+}
+
+// constrainBody validates the JSON body of a bodyConstrained route and puts the original bytes back for the proxy.
 func constrainBody(w http.ResponseWriter, r *http.Request, route, root string) bool {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
@@ -104,11 +127,15 @@ func constrainBody(w http.ResponseWriter, r *http.Request, route, root string) b
 	case "/api/chat":
 		pp, ok1 := str("project_path")
 		mode, ok2 := str("permission_mode")
-		okBody = ok1 && ok2 && allowedChatModes[mode] && insideRoot(root, pp)
+		okBody = ok1 && ok2 && allowedChatModes[mode] && insideRoot(root, pp) && pinnedServersOK(m) && bodyKeysExact(m, "project_path", "permission_mode", "pinned_mcp_servers")
 	case "/api/projects":
 		pp, ok1 := str("path")
 		host, ok2 := str("host")
-		okBody = ok1 && ok2 && host == "" && m["port"] == nil && insideRoot(root, pp)
+		okBody = ok1 && ok2 && host == "" && m["port"] == nil && insideRoot(root, pp) && bodyKeysExact(m, "path", "host", "port")
+	case "/api/permissions/mode":
+		mode, ok1 := str("mode")
+		sid, ok2 := str("session_id")
+		okBody = ok1 && ok2 && allowedPermissionModes[mode] && apiSessionIDRe.MatchString(sid) && bodyKeysExact(m, "mode", "session_id")
 	}
 	if !okBody {
 		refuseAPI(w)
@@ -116,6 +143,39 @@ func constrainBody(w http.ResponseWriter, r *http.Request, route, root string) b
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
+	return true
+}
+
+// excelMCPServer is the one MCP server a pane chat may pin: the bridge's own tools, named as in ocode's `mcp` map.
+const excelMCPServer = "excel"
+
+// pinnedServersOK accepts an absent or null pinned_mcp_servers, or exactly the JSON array ["excel"]. A pin attaches
+// every tool of the named server from the first turn, so any other array, a string, a non-string element, an empty
+// list or a duplicate is refused.
+func pinnedServersOK(m map[string]any) bool {
+	v, present := m["pinned_mcp_servers"]
+	if !present || v == nil {
+		return true
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) != 1 {
+		return false
+	}
+	name, ok := arr[0].(string)
+	return ok && name == excelMCPServer
+}
+
+// bodyKeysExact refuses a body with a key that differs from one of the names the checks read only by letter case
+// or Unicode case folding. ocode decodes bodies with encoding/json into structs, and that matches "MODE" or a long-s
+// "ſession_id" to the field tagged "mode" or "session_id", while the exact-name lookups above would not see the key.
+func bodyKeysExact(m map[string]any, names ...string) bool {
+	for k := range m {
+		for _, n := range names {
+			if k != n && strings.EqualFold(k, n) {
+				return false
+			}
+		}
+	}
 	return true
 }
 

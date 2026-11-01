@@ -1,4 +1,4 @@
-import type { ExcelPort } from "./port";
+import type { ExcelPort, WorkbookInfo } from "./port";
 import { Schema, validate, withDefaults } from "./schema";
 import { TOOLS, ToolError } from "./tools";
 import { log } from "./log";
@@ -8,6 +8,9 @@ export interface ContractTool { name: string; risk: string; description: string;
 export interface Contract { version: number; tools: ContractTool[] }
 export interface CallResult { ok: boolean; content?: string; error?: string }
 
+/** Returned for any tool whose risk is not "read" while the workbook is read-only or in Protected View. */
+export const READ_ONLY_REFUSAL = "The workbook is read-only / in Protected View, so ocode cannot change it. Enable editing in Excel first.";
+
 /**
  * Executes tool calls from the bridge one at a time (so a write and its read-back never interleave
  * with another call), validates arguments against the shared contract, and supports cancellation.
@@ -16,9 +19,15 @@ export class Runner {
   private inflight = new Map<string, AbortController>();
   private chain: Promise<unknown> = Promise.resolve();
   private byName: Map<string, ContractTool>;
+  private infoSource: () => WorkbookInfo | null = () => null;
 
   constructor(private port: ExcelPort, private journal: Journal, contract: Contract) {
     this.byName = new Map(contract.tools.map((t) => [t.name, t]));
+  }
+
+  /** Where the write guard reads the workbook's state. null means unknown, and nothing is refused on an unknown state. */
+  setInfoSource(fn: () => WorkbookInfo | null): void {
+    this.infoSource = fn;
   }
 
   cancel(id: string) {
@@ -48,6 +57,10 @@ export class Runner {
     const args = (call.args ?? {}) as Record<string, unknown>;
     const errs = validate(def.inputSchema, args);
     if (errs.length) return { ok: false, error: `Invalid arguments: ${errs.join("; ")}` };
+    const info = this.infoSource();
+    if (def.risk !== "read" && info !== null && (info.readOnly === true || info.protectedView === true)) {
+      return { ok: false, error: READ_ONLY_REFUSAL };
+    }
     // "workbook" only routes the call inside the bridge; the tools never see it.
     const { workbook: _routing, ...rest } = args;
     void _routing;

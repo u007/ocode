@@ -60,7 +60,8 @@
                     <bt:Image size="80" resid="Icon.80"/>
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
-                    <TaskpaneId>ocodePane</TaskpaneId>
+                    <!-- The special id lets Excel open this pane with a workbook once the user turns on auto-open for it in the overflow menu (sets the Office.AutoShowTaskpaneWithDocument document setting). -->
+                    <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
                     <SourceLocation resid="Pane.Url"/>
                   </Action>
                 </Control>

@@ -544,7 +544,20 @@ rules are re-read lazily from two files: the global `ocodeconfig.json` and the p
 - Sandbox mode is unaffected: an allowed bash call still goes through the judge
   (`agent.go` `sandbox.judge` gate).
 
-## 10. TUI commands
+## 10. TUI and web/desktop slash commands
+
+`/permissions`, `/ban`, `/allow`, `/yolo` and `/sandbox` exist on BOTH surfaces. The web/desktop
+handlers live in `web/src/components/Chat/commands.ts` and write through the same server paths as
+the TUI (`POST /api/permissions/bash-rule`, `PUT /api/permissions/bash-rules`), so there is one
+rule store and one validator. Browser/desktop notes:
+
+- `/allow add` and `/allow remove` JOIN the remaining words into ONE prefix (`git push`), matching
+  the TUI; `/ban add` splits per word. Prefixes are lowercased on both web commands.
+- `/ban remove` and `/allow remove` are real DELETEs; each refuses a rule of the opposite level.
+- The server runs `agent.ValidateBashPrefixRule`, so a bare `git` allow is refused (the web shows
+  the server's reason). `SetBashPrefixRule` alone would silently discard it.
+- Both commands pass the active session's `host`, so a remote SSH/WSL session writes the rule on
+  the host whose server runs the agent (`docs/gotchas/remote-session-config-host-routing.md`).
 
 | Command | Action |
 |---|---|

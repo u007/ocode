@@ -1,5 +1,6 @@
 import { errText, log } from "./log";
 import { readSse } from "./sse";
+import type { ModelInfo } from "./models";
 
 /** Envelope published by `ocode serve` on GET /api/events (internal/server/event_bus.go). */
 export interface Envelope {
@@ -17,6 +18,11 @@ export interface TranscriptMessage {
   tool_calls?: { id: string; function: { name: string; arguments: string } }[];
   tool_call_id?: string;
 }
+
+/** Token occupancy of one session, as ocode's context gauge reports it (GET /api/sessions/{id}/context). */
+export interface ContextInfo { current_tokens: number; max_tokens: number; model: string }
+/** A permission mode the bridge accepts for one session (PUT /api/permissions/mode). */
+export type PermissionMode = "normal" | "locked" | "yolo";
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -60,10 +66,11 @@ export class OcodeClient {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  /** Start a session with its first message. Output arrives over events(). */
+  /** Start a session with its first message, pinned to the excel MCP server (the bridge refuses any other pin). Output arrives over events(). */
   startChat(a: { content: string; projectPath: string; model?: string; permissionMode?: "normal" | "yolo" | "locked" | "sandbox" }) {
     return this.req<{ sessionId: string; model: string }>("POST", "/api/chat", {
       content: a.content, project_path: a.projectPath, model: a.model, permission_mode: a.permissionMode, async: true,
+      pinned_mcp_servers: PINNED_MCP_SERVERS,
     });
   }
   send(id: string, content: string, rewindToken?: string) {
@@ -79,7 +86,7 @@ export class OcodeClient {
   cancel(id: string) { return this.req<unknown>("POST", `/api/sessions/${enc(id)}/cancel`, {}); }
   retry(id: string) { return this.req<unknown>("POST", `/api/sessions/${enc(id)}/retry`, {}); }
   setTitle(id: string, title: string) { return this.req<unknown>("PUT", `/api/sessions/${enc(id)}/title`, { title }); }
-  listModels() { return this.req<unknown>("GET", "/api/models"); }
+  listModels() { return this.req<ModelInfo[]>("GET", "/api/models"); }
   setModel(id: string, model: string) { return this.req<unknown>("PUT", `/api/sessions/${enc(id)}/model`, { model }); }
   resolvePermission(a: { requestId: string; sessionId: string; decision: "allow" | "deny" | "always_rule" }) {
     return this.req<unknown>("POST", "/api/permissions/resolve", { request_id: a.requestId, session_id: a.sessionId, decision: a.decision });
@@ -87,6 +94,15 @@ export class OcodeClient {
   answerQuestion(a: { requestId: string; sessionId: string; answers: unknown[] }) {
     return this.req<unknown>("POST", "/api/questions", { request_id: a.requestId, session_id: a.sessionId, answers: a.answers });
   }
+  getContext(id: string) { return this.req<ContextInfo>("GET", `/api/sessions/${enc(id)}/context`); }
+  /** Bridge-owned: the session's saved permission mode, and nothing else of ocode's status (bridge/sessionmode.go). */
+  getSavedMode(id: string) { return this.req<{ permission_mode: string }>("GET", `/bridge/session-mode/${enc(id)}`); }
+  setPermissionMode(id: string, mode: PermissionMode) { return this.req<unknown>("PUT", "/api/permissions/mode", { mode, session_id: id }); }
+  /** Bridge-owned: ocode's server-wide LLM auto-permission switch. It affects every ocode session on this server. */
+  getAutoPermission() { return this.req<{ enabled: boolean }>("GET", "/bridge/auto-permission"); }
+  setAutoPermission(enabled: boolean) { return this.req<{ enabled: boolean }>("PUT", "/bridge/auto-permission", { enabled }); }
+  /** Bridge-owned: the ids of the providers ocode reports as connected. Credentials never reach the pane. */
+  connectedProviders() { return this.req<{ providers: string[] }>("GET", "/bridge/connected-providers"); }
   /** Arm a rewind to a user message; the returned token goes into the next send(). */
   prepareRewind(id: string, a: { targetIndex: number; targetContent: string; userSeq: number }) {
     return this.req<{ token: string }>("POST", `/api/sessions/${enc(id)}/rewinds`, a);
@@ -126,3 +142,5 @@ export class OcodeClient {
 }
 
 const enc = encodeURIComponent;
+/** The MCP servers a pane chat pins at creation: the bridge's own Excel tools, attached from the first turn. */
+const PINNED_MCP_SERVERS = ["excel"];

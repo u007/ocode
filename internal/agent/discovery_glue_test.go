@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1043,5 +1044,248 @@ func TestRankFailureKeepsTheGateClosed(t *testing.T) {
 	}
 	if want := []string{"read"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("a rank failure must leave the gate closed: got %v want %v", names, want)
+	}
+}
+
+// --- MCP server groups and pinned MCP servers ----------------------------
+
+// mcpServerGlueTool is an MCP tool for these tests: a discoveryGlueTool that
+// also reports its server, which addMCPTools records for group expansion.
+type mcpServerGlueTool struct {
+	discoveryGlueTool
+	server string
+}
+
+func (m mcpServerGlueTool) MCPServer() string { return m.server }
+
+func serverGroupTool(name, desc, server string) tool.Tool {
+	return mcpServerGlueTool{discoveryGlueTool: discoveryGlueTool{name: name, desc: desc}, server: server}
+}
+
+// newServerGroupAgent builds a discovery-enabled agent with the given MCP tools.
+// Registration goes through addMCPTools, so the server map is filled by the same
+// path production uses.
+func newServerGroupAgent(t *testing.T, tools ...tool.Tool) *Agent {
+	t.Helper()
+	a := newGateAgent()
+	a.config = &config.Config{}
+	a.mcpServers = map[string]string{}
+	a.addMCPTools(tools)
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 64}, t.TempDir())
+	a.disco = &discoveryState{enabled: true, engine: eng, session: discovery.NewSession(eng)}
+	return a
+}
+
+func TestExpandMCPServerGroupsAddsSiblingsOfSameServer(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "modify workbook values", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+	got := a.expandMCPServerGroups([]string{"mcp:alpha_read"}, nil)
+	want := []string{"mcp:alpha_read", "mcp:alpha_write"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expandMCPServerGroups = %v, want %v", got, want)
+	}
+	a.disco.session.Seed(got)
+	if !a.discoveryAllows("alpha_write") {
+		t.Fatal("sibling of an attached server tool must pass the gate")
+	}
+	if a.discoveryAllows("beta_x") {
+		t.Fatal("tool of another server must stay gated")
+	}
+}
+
+func TestExpandMCPServerGroupsUnknownServerExpandsToItself(t *testing.T) {
+	// newGateAgent registers MCP names without servers, the shape a restored
+	// name set has. Expansion is then the identity, which is expected here.
+	a := newGateAgent()
+	in := []string{"mcp:Notion/search"}
+	if got := a.expandMCPServerGroups(in, nil); !reflect.DeepEqual(got, in) {
+		t.Fatalf("expandMCPServerGroups = %v, want %v", got, in)
+	}
+}
+
+// TestPinnedAndExpandMCPServersRaceAddMCPTools guards the mcpServers and mcpTools
+// maps. addMCPTools writes them under toolsMu from one goroutine while discovery
+// reads them from another. Run with -race: unlocked readers fail with a data race.
+func TestPinnedAndExpandMCPServersRaceAddMCPTools(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+	)
+	a.pinnedMCPServers = []string{"gamma"}
+	const rounds = 300
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range rounds {
+			a.addMCPTools([]tool.Tool{serverGroupTool("gamma_"+strconv.Itoa(i), "gamma tool", "gamma")})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range rounds {
+			a.pinnedIDs()
+			a.expandMCPServerGroups([]string{"mcp:alpha_read"}, nil)
+			a.MCPToolNames()
+			a.discoveryAllows("alpha_read")
+			a.DiscoveryGatedTokens()
+			sub := &Agent{tools: map[string]tool.Tool{"alpha_read": fakeTool{"alpha_read"}}}
+			sub.markMCPFrom(a)
+		}
+	}()
+	wg.Wait()
+}
+
+func TestDiscoverMoreListsServerSiblings(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "modify workbook values", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+	out, err := discoverMoreTool{agent: a}.Execute([]byte(`{"need":"read spreadsheet range cells"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "alpha_read") || !strings.Contains(out, "alpha_write") {
+		t.Fatalf("discover_more must list the ranked tool and its server sibling; out=%q", out)
+	}
+	if strings.Contains(out, "beta_x") {
+		t.Fatalf("discover_more must not list another server's tool; out=%q", out)
+	}
+}
+
+func TestRunDiscoveryAttachesServerSiblingsOfRankedTool(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "modify workbook values", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+	useNonTypesafeFactory(t)
+
+	a.RunDiscovery("read spreadsheet range cells")
+
+	if !a.disco.session.IsAttached("mcp:alpha_read") {
+		t.Fatal("the ranked tool must attach")
+	}
+	if !a.disco.session.IsAttached("mcp:alpha_write") {
+		t.Fatal("the ranked tool's server sibling must attach with it")
+	}
+	if a.disco.session.IsAttached("mcp:beta_x") {
+		t.Fatal("a tool of an unrelated server must not attach")
+	}
+}
+
+func TestRunDiscoveryAttachesPinnedServerAddedAfterSessionCreated(t *testing.T) {
+	a := newServerGroupAgent(t, serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"))
+	useNonTypesafeFactory(t)
+	a.SetPinnedMCPServers([]string{"beta"})
+	// The beta server connects after the discovery session already exists.
+	a.addMCPTools([]tool.Tool{serverGroupTool("beta_x", "weather forecast tomorrow", "beta")})
+
+	a.RunDiscovery("read spreadsheet range cells")
+
+	if !a.disco.session.IsAttached("mcp:beta_x") {
+		t.Fatal("a pinned server's tool that arrived after session creation must attach on the next turn")
+	}
+}
+
+func TestSyncPinnedMCPServersSeedsAndUnpins(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "modify workbook values", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+
+	a.SetPinnedMCPServers([]string{"alpha"})
+	a.SyncPinnedSkills()
+	attached := a.disco.session.Attached()
+	if !containsStr(attached, "mcp:alpha_read") || !containsStr(attached, "mcp:alpha_write") {
+		t.Fatalf("pinned server must attach every one of its tools; got %v", attached)
+	}
+	if containsStr(attached, "mcp:beta_x") {
+		t.Fatalf("unpinned server must not attach; got %v", attached)
+	}
+
+	a.SetPinnedMCPServers(nil)
+	a.SyncPinnedSkills()
+	attached = a.disco.session.Attached()
+	if containsStr(attached, "mcp:alpha_read") || containsStr(attached, "mcp:alpha_write") {
+		t.Fatalf("unpinned server's tools must be removed; got %v", attached)
+	}
+}
+
+func TestSetPinnedMCPServersSortsAndDedupes(t *testing.T) {
+	a := &Agent{}
+	a.SetPinnedMCPServers([]string{"beta", "alpha", "beta"})
+	if got, want := a.PinnedMCPServers(), []string{"alpha", "beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PinnedMCPServers() = %v, want %v", got, want)
+	}
+}
+
+// TestRunDiscoveryVetoedSiblingNotAttachedByServerGroup pins that a judge veto
+// wins over server-group expansion: alpha_write is ranked and vetoed, so it must
+// stay out even though its server's approved tool (alpha_read) attaches. The
+// sibling alpha_describe was never a candidate, so it still attaches with the group.
+func TestRunDiscoveryVetoedSiblingNotAttachedByServerGroup(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_describe", "describe sheet layout", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:alpha_write": true}, 0)
+	useJudgeFactory(t, srv)
+
+	a.RunDiscovery("read spreadsheet range cells")
+
+	if !h.asked("mcp:alpha_write") {
+		t.Fatalf("the vetoed sibling must have been a candidate; questions=%v", h.body["questions"])
+	}
+	if a.disco.session.IsAttached("mcp:alpha_write") {
+		t.Fatal("a sibling the judge vetoed must not attach through the server group")
+	}
+	if !a.disco.session.IsAttached("mcp:alpha_read") {
+		t.Fatal("the approved tool must attach")
+	}
+	if !a.disco.session.IsAttached("mcp:alpha_describe") {
+		t.Fatal("a sibling the judge never saw must attach with the approved tool")
+	}
+	if a.disco.session.IsAttached("mcp:beta_x") {
+		t.Fatal("a tool of an unrelated server must not attach")
+	}
+}
+
+// TestDiscoverMoreVetoedSiblingNotAttached is the discover_more twin of the
+// runDiscovery veto test: the judge's veto on a sibling holds through expansion.
+func TestDiscoverMoreVetoedSiblingNotAttached(t *testing.T) {
+	a := newServerGroupAgent(t,
+		serverGroupTool("alpha_read", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_write", "read spreadsheet range cells", "alpha"),
+		serverGroupTool("alpha_describe", "describe sheet layout", "alpha"),
+		serverGroupTool("beta_x", "weather forecast tomorrow", "beta"),
+	)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{"mcp:alpha_write": true}, 0)
+	useJudgeFactory(t, srv)
+
+	out, err := (discoverMoreTool{agent: a}).Execute([]byte(`{"need":"read spreadsheet range cells"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.asked("mcp:alpha_write") {
+		t.Fatalf("the vetoed sibling must have been a candidate; questions=%v", h.body["questions"])
+	}
+	if a.disco.session.IsAttached("mcp:alpha_write") {
+		t.Fatal("a sibling the judge vetoed must not attach through discover_more's server group")
+	}
+	if !a.disco.session.IsAttached("mcp:alpha_read") || !a.disco.session.IsAttached("mcp:alpha_describe") {
+		t.Fatalf("the approved tool and its unjudged sibling must attach; out=%q", out)
+	}
+	if strings.Contains(out, "alpha_write") {
+		t.Fatalf("reply must not claim the vetoed sibling was attached: %q", out)
+	}
+	if a.disco.session.IsAttached("mcp:beta_x") {
+		t.Fatal("a tool of an unrelated server must not attach")
 	}
 }

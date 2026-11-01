@@ -1037,6 +1037,8 @@ type OcodeConfig struct {
 	ContentGuard JudgeModelConfig
 	// Goal selects the decision-judge model that decides whether a /goal condition is met.
 	Goal JudgeModelConfig
+	// BrowserRun selects the decision-judge model for the browser_run tool's step loop.
+	BrowserRun JudgeModelConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -1535,6 +1537,10 @@ type goalConfigFile struct {
 	JudgeModel string `json:"judge_model,omitempty"`
 }
 
+type browserRunConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
 // browserConfigFile is the on-disk mirror of BrowserConfig. Extensions is read
 // purely to detect (and reject) the reserved-but-unimplemented key.
 type browserConfigFile struct {
@@ -1579,6 +1585,7 @@ type ocodeConfigFile struct {
 	NetworkGuard               networkGuardConfigFile      `json:"network_guard"`
 	ContentGuard               contentGuardConfigFile      `json:"content_guard"`
 	Goal                       goalConfigFile              `json:"goal"`
+	BrowserRun                 browserRunConfigFile        `json:"browser_run"`
 	MemoryEnabled              *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled           *bool                       `json:"doc_prompt_enabled,omitempty"`
 	SuggestedResponsesEnabled  *bool                       `json:"suggested_responses_enabled,omitempty"`
@@ -1704,6 +1711,7 @@ func defaultOcodeConfig() OcodeConfig {
 		NetworkGuard:             defaultJudgeModelConfig(),
 		ContentGuard:             defaultJudgeModelConfig(),
 		Goal:                     defaultJudgeModelConfig(),
+		BrowserRun:               defaultJudgeModelConfig(),
 		RecapTimeoutSeconds:      120,
 		UndoMaxAgeDelta:          10,
 		MaxConcurrentAgents:      2,
@@ -2041,6 +2049,10 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["goal"]; ok {
 		applyJudgeModelConfig(&cfg.Goal.JudgeModel, file.Goal.JudgeModel)
 		delete(raw, "goal")
+	}
+	if _, ok := raw["browser_run"]; ok {
+		applyJudgeModelConfig(&cfg.BrowserRun.JudgeModel, file.BrowserRun.JudgeModel)
+		delete(raw, "browser_run")
 	}
 
 	if _, ok := raw["browser"]; ok {

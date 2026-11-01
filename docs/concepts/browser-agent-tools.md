@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Browser agent tool — agents see and drive the Chrome tabs of their session's machine
-description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
+description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
 tags:
   - browser
   - agent
@@ -17,7 +17,7 @@ tags:
 
 # Browser agent tool
 
-Agents of a web/desktop session get one tool, `browser`. It drives Chrome
+Agents of a web/desktop session get one tool, `browser`, and the step loop `browser_run` built on it (see the section below). It drives Chrome
 over CDP on the machine that runs the session. For a local project that is this
 machine. A remote project's session runs on its host (`ocode serve --remote`), so
 the tool drives the host's Chrome. The TUI's own chat agent does not get the tool; sessions on the TUI's `/rc` server do, because that server starts the embedded browser (`StartBrowse` in `internal/tui/model.go`). Nothing in the TUI's own agent is wired.
@@ -50,7 +50,7 @@ the tool drives the host's Chrome. The TUI's own chat agent does not get the too
   therefore gets a fresh screenshot cache and its own opened-tab list, and it shares
   the project and surfaces with its parent.
 - **Read-only agent types.** `explore` and `context` may only run the read actions
-  (`tabs`, `snapshot`, `find`, `text`, `console`, `network`, `screenshot`, `wait`,
+  (`tabs`, `snapshot`, `find`, `text`, `console`, `network`, `controls`, `screenshot`, `wait`,
   `scroll`). Every other action is refused for them by `browserTool.Refusal`
   (`browserReadOnlyAgents`, `browserReadOnlyActions`). `scout`, `general`, `debug`,
   `docs` and the main agent keep full control. The refusal is checked in
@@ -157,6 +157,7 @@ ask is what gates that network access, as it does for bash.
 | `wait` | `target` or `text`, `gone`, `timeout`, `frame` | until the element or text appears (or, with `gone`, is absent) | allow on an agent-opened tab; ask on a user tab |
 | `console` | `max` | newest console and exception entries since the tab was attached | allow on an agent-opened tab; ask on a user tab |
 | `network` | `max` | newest request records since the tab was attached (no headers, cookies or bodies) | allow on an agent-opened tab; ask on a user tab |
+| `controls` | none | the page's interactive elements as one JSON object, each with its `@eN` ref and operations, read after the page settles (see the `browser_run` section) | allow on an agent-opened tab; ask on a user tab |
 | `scroll` | `direction` | one viewport up or down (`window.scrollBy`) | allow (on any tab, by design: it only moves the viewport) |
 | `click` | `target` (and `frame`), or `x` and `y` | the element (scrolled into view; the click lands at its content-box centre, and is refused if another element covers that point), or a point of the last screenshot | ask |
 | `type` | `text`, optional `target` (and `frame`) | `Input.insertText` into the focused field, or focus the named field and insert there | ask |
@@ -173,9 +174,9 @@ ask is what gates that network access, as it does for bash.
 | `back`, `forward`, `reload` | none | history or reload | ask |
 
 The observe set (`browserObserveActions`) is `tabs`, `screenshot`, `text`,
-`scroll`, `snapshot`, `find`, `wait`, `console` and `network`. `Decide` allows them
+`scroll`, `snapshot`, `find`, `wait`, `console`, `controls` and `network`. `Decide` allows them
 by name, but it cannot see which page is targeted. So the read actions other than
-`scroll` and `tabs` (`text`, `snapshot`, `find`, `console`, `network`, `screenshot`,
+`scroll` and `tabs` (`text`, `snapshot`, `find`, `controls`, `console`, `network`, `screenshot`,
 `wait`, listed as `browserUserTabReadActions`) are checked again at consult time,
 in `Agent.browserUserTabReadDecision`. A read of a tab the agent did not open
 (`opened_by_agent` false, or an unresolvable tab) asks, through the same
@@ -371,6 +372,7 @@ successful results, as it scans `webfetch`:
 | `find` | matched elements' text and selectors | `browser find results` |
 | `console` | console and exception text | `browser console` |
 | `network` | request URLs and error text | `browser network log` |
+| `controls` | the JSON index: control labels, values and context names, and the viewport text | `browser controls index` |
 | `fill_form` | the read-back report, with page values | `browser fill_form report` |
 | `pick` | the option text the element now shows | `browser pick result` |
 | `select` | the option text the `<select>` now shows | `browser select result` |
@@ -381,6 +383,11 @@ action, whose result is local status text (`click`, `fill`, `check`, `upload`,
 `wait`, `key`, and so on). A frame's `snapshot` and `find` are guarded like the top
 document.
 
+The judge does not read a browser result raw. The host's wrapper line is removed, and a
+`controls` result is judged as plain lines (title, url, text, then one line per control). The
+delivered content and the ask dialog keep the raw result. The guard's own page,
+[inbound-content-guardrail](inbound-content-guardrail.md), has the measurements.
+
 **Screenshots are an injection channel and are not guarded.** A page can paint text
 into a screenshot, and the model reads it as an image. The text guard cannot see
 pixels. Wiring the guard to images would need a vision judge, which the decision
@@ -390,6 +397,19 @@ Known gap: the guard reads a tool's successful result. A browser error comes bac
 an error, not a result, so it is not scanned. An error that quotes page text is
 therefore unscanned. Examples: a `pick` that lists the page's options, and a `fill`
 that reads back a value it did not set. Tracked in TODO.md.
+
+## browser_run
+
+`browser_run` is an agent-layer tool, not a browser action. It runs a step loop over
+`browser`. Each step reads `controls`, asks Jev (slot `browser_run`) which one control to
+act on, and runs that action as a normal `browser` call. The sub-steps meet the same
+permission asks, refusals, judge and content guard described above, and Stop cancels the
+run. Only the run's final result enters the transcript. The loop calls no chat model.
+The tool is registered only when the agent has a `browser` tool. The built-in `scout`,
+`debug` and `docs` definitions get it, and so do the unlisted `general` and `review`
+definitions. `explore` and `context` do not. The design, the status set, the decision
+floors and the known content-guard gap are in
+[browser-run-jev-step-loop](browser-run-jev-step-loop.md).
 
 ## Limits
 
@@ -460,6 +480,9 @@ that reads back a value it did not set. Tracked in TODO.md.
   lists, `mainAgentOnlyTools`. `internal/agent/permissions.go`: the `browser` branch.
   `internal/agent/permission_typesafe.go`: `browserDecision`,
   `browserUserTabReadDecision` (the consult-time read gate).
+- `internal/agent/browser_run.go` (the step loop), `internal/browse/cdp/pagedom_controls.go`
+  (`Settle`, `Controls`, `controlsFingerprint`), `internal/browse/cdp/pagedom_read.go` (the
+  `controls` caps), `internal/server/browser_tool.go` (the `controls` action).
 - **Page-exposed callable surface.** Installing the vendored bundle exposes `window.__htrcliDom` on the page's main world (`window`), providing `exec`, `evaluate`, `getLocalStorage`, and `fetchFromCS` (the last can make a credentialed POST carrying a page JWT). The ocode Go layer sends only the closed DOM/form action set (`browser` actions), so the model cannot reach the rest; page scripts can. This is a documented limit, not a protected boundary — the guard is the scope of the tool definition, not a sandbox around the page.
 
 - Tests: `internal/browse/cdp/manager_headless_test.go`,

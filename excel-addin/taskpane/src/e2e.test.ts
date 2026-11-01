@@ -17,6 +17,8 @@ import { Journal } from "./tools/journal";
 
 const hasGo = spawnSync("go", ["version"]).status === 0;
 const KEY = "e2e-key";
+/** Answered by the bridge itself (bridge/localtools.go). They are never in /bridge/tools, so never sent to a pane. */
+const LOCAL_TOOLS = ["list_workbooks", "read_workbook_chat", "send_workbook_chat"];
 const freePort = () => new Promise<number>((res) => { const s = createServer(); s.listen(0, "127.0.0.1", () => { const p = (s.address() as any).port; s.close(() => res(p)); }); });
 
 describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
@@ -50,7 +52,11 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
       req.on("end", () => {
         seen.push({ auth: req.headers.authorization, key: req.headers["x-bridge-key"] as string, path: req.url, body });
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ sessionId: "ses_1", model: "m", sessions: [], content: "" }));
+        // The status route returns ocode's whole TUIStatus; the secrets here must never reach the pane.
+        const reply = req.url === "/api/sessions/ses_1/status"
+          ? { permission_mode: "locked", cwd: "/SECRET/cwd", model_prompt: "SECRET-PROMPT", lsp_servers: [{ command: "SECRET-LSP" }] }
+          : { sessionId: "ses_1", model: "m", sessions: [], content: "" };
+        res.end(JSON.stringify(reply));
       });
     });
     const up = await new Promise<number>((r) => upstream.listen(0, "127.0.0.1", () => r((upstream.address() as any).port)));
@@ -66,9 +72,14 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
 
   afterAll(() => { client?.stop(); proc?.kill(); upstream?.close(); });
 
-  it("lists exactly the contract tools, unprefixed", async () => {
-    const out = await mcp("tools/list", {});
-    expect(out.result.tools.map((t: any) => t.name)).toEqual((contractJson as any).tools.map((t: any) => t.name));
+  it("/bridge/tools is the pane contract only; tools/list adds the three bridge-local tools, sorted", async () => {
+    const contract = contractJson as unknown as Contract;
+    const paneRes = await fetch(`${base}/bridge/tools`, { headers: { "X-Bridge-Key": KEY } });
+    const paneNames = ((await paneRes.json()) as Contract).tools.map((t) => t.name);
+    expect(paneNames).toEqual(contract.tools.map((t) => t.name));
+    expect(paneNames.filter((n) => LOCAL_TOOLS.includes(n))).toEqual([]);
+    const listed: string[] = (await mcp("tools/list", {})).result.tools.map((t: { name: string }) => t.name);
+    expect(listed).toEqual([...paneNames, ...LOCAL_TOOLS].sort());
   });
 
   it("an MCP tools/call reaches Excel (FakePort) and the evaluated result comes back", async () => {
@@ -131,14 +142,47 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
     const last = seen[seen.length - 1];
     expect(last).toMatchObject({ auth: "Bearer ocode-secret", path: "/api/chat" });
     expect(last.key).toBeUndefined();
-    expect(JSON.parse(last.body!)).toMatchObject({ content: "hello", project_path: `${wsRoot}/wb1`, async: true });
+    expect(JSON.parse(last.body!)).toMatchObject({ content: "hello", project_path: `${wsRoot}/wb1`, async: true, pinned_mcp_servers: ["excel"] });
     expect((await fetch(`${base}/api/sessions`)).status).toBe(401);
   });
 
-  it("the proxy refuses what a leaked pane key could abuse: yolo chats, folders outside the workspace, and non-pane routes", async () => {
+  it("a yolo chat is forwarded: the pane offers it behind a confirm", async () => {
+    const oc = new OcodeClient({ base, key: KEY });
+    await oc.startChat({ content: "x", projectPath: `${wsRoot}/wb1`, permissionMode: "yolo" });
+    const last = seen[seen.length - 1];
+    expect(last).toMatchObject({ auth: "Bearer ocode-secret", path: "/api/chat" });
+    expect(JSON.parse(last.body!)).toMatchObject({ permission_mode: "yolo" });
+  });
+
+  it("a chat pinning any other MCP server is refused before ocode sees it", async () => {
+    const before = seen.length;
+    const r = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "X-Bridge-Key": KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "x", project_path: `${wsRoot}/wb1`, permission_mode: "normal", pinned_mcp_servers: ["filesystem"] }),
+    });
+    expect(r.status).toBe(403);
+    expect(seen.length).toBe(before);
+  });
+
+  it("a chat's saved mode comes through the bridge's narrow route: the pane gets only permission_mode", async () => {
+    const before = seen.length;
+    expect(await new OcodeClient({ base, key: KEY }).getSavedMode("ses_1")).toEqual({ permission_mode: "locked" });
+    expect(seen.length).toBe(before + 1);
+    expect(seen[seen.length - 1]).toMatchObject({ auth: "Bearer ocode-secret", path: "/api/sessions/ses_1/status" });
+  });
+
+  it("the raw status route is not proxied: 403, and ocode is never asked", async () => {
+    const before = seen.length;
+    const r = await fetch(`${base}/api/sessions/ses_1/status`, { headers: { "X-Bridge-Key": KEY } });
+    expect(r.status).toBe(403);
+    expect(seen.length).toBe(before);
+  });
+
+  it("the proxy refuses what a leaked pane key could abuse: sandbox chats, folders outside the workspace, and non-pane routes", async () => {
     const oc = new OcodeClient({ base, key: KEY });
     const before = seen.length;
-    await expect(oc.startChat({ content: "x", projectPath: `${wsRoot}/wb1`, permissionMode: "yolo" })).rejects.toMatchObject({ status: 403 });
+    await expect(oc.startChat({ content: "x", projectPath: `${wsRoot}/wb1`, permissionMode: "sandbox" })).rejects.toMatchObject({ status: 403 });
     await expect(oc.startChat({ content: "x", projectPath: "/etc", permissionMode: "normal" })).rejects.toMatchObject({ status: 403 });
     await expect(oc.addProject("/home")).rejects.toMatchObject({ status: 403 });
     const r = await fetch(`${base}/api/terminal`, { headers: { "X-Bridge-Key": KEY } });
@@ -156,8 +200,27 @@ describe.skipIf(!hasGo)("pane <-> bridge <-> MCP (real Go bridge)", () => {
   it("the session index round-trips through the bridge", async () => {
     const idx = new SessionIndex(base, KEY, "wb1");
     expect(await idx.list()).toEqual([]);
-    await idx.add({ id: "ses_1", title: "[Excel] Budget.xlsx", created: "2026-10-30" });
-    await idx.add({ id: "ses_2", title: "[Excel] Budget.xlsx", created: "2026-10-31" });
+    await idx.add({ id: "ses_1", title: "[Excel] Budget.xlsx", created: "2026-10-30T09:00:00Z" });
+    await idx.add({ id: "ses_2", title: "[Excel] Budget.xlsx", created: "2026-10-31T09:00:00Z" });
     expect((await idx.list()).map((s) => s.id)).toEqual(["ses_2", "ses_1"]);
+  });
+
+  it("two panes adding sessions to the same workbook at once both survive", async () => {
+    const idx = new SessionIndex(base, KEY, "wb-race");
+    await Promise.all([
+      idx.add({ id: "ses_a", title: "[Excel] A.xlsx", created: "2026-10-30T09:00:00Z" }),
+      idx.add({ id: "ses_b", title: "[Excel] A.xlsx", created: "2026-10-30T09:00:01Z" }),
+    ]);
+    expect((await idx.list()).map((s) => s.id).sort()).toEqual(["ses_a", "ses_b"]);
+  });
+
+  it("re-adding an id returns the index unchanged and keeps its position", async () => {
+    const idx = new SessionIndex(base, KEY, "wb-reorder");
+    await idx.add({ id: "ses_x1", title: "[Excel] X.xlsx", created: "2026-10-30T09:00:00Z" });
+    await idx.add({ id: "ses_x2", title: "[Excel] X.xlsx", created: "2026-10-31T09:00:00Z" });
+    const before = await idx.list();
+    expect(before.map((s) => s.id)).toEqual(["ses_x2", "ses_x1"]);
+    expect(await idx.add({ id: "ses_x1", title: "[Excel] X.xlsx", created: "2026-10-30T09:00:00Z" })).toEqual(before);
+    expect(await idx.list()).toEqual(before);
   });
 });

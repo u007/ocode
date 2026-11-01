@@ -42,6 +42,7 @@ type contentGuardEvalCase struct {
 	Command string `yaml:"command"`
 	URL     string `yaml:"url"`
 	Query   string `yaml:"query"`
+	Action  string `yaml:"action"`
 	MCP     bool   `yaml:"mcp"`
 	Output  string `yaml:"output"`
 	Ladder  string `yaml:"ladder"`
@@ -58,6 +59,8 @@ func (c contentGuardEvalCase) args(t *testing.T) string {
 		m["url"] = c.URL
 	case c.Query != "":
 		m["query"] = c.Query
+	case c.Action != "":
+		m["action"] = c.Action
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -234,11 +237,12 @@ func TestContentGuardJudgeEval(t *testing.T) {
 	for vi, v := range variants {
 		cells[vi] = make([]contentGuardEvalCell, len(corpus.Cases))
 		for ci, c := range corpus.Cases {
-			src := contentGuardSourceFor(a, c.Tool, c.args(t))
+			args := c.args(t)
+			src := contentGuardSourceFor(a, c.Tool, args)
 			if src == nil {
 				t.Fatalf("%s: not in the guardrail's scope, so production would never judge it", c.ID)
 			}
-			state := a.buildContentGuardState(src, c.Output)
+			state := a.buildContentGuardState(src, contentGuardScanView(c.Tool, args, c.Output))
 			if c.Tool == "bash" && v.bashState != nil {
 				state = v.bashState(c, state)
 			}

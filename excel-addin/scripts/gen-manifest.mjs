@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// usage: node scripts/gen-manifest.mjs [--base https://localhost:3443] [--key <pane key>]
-// Writes manifest/manifest.xml (gitignored: it embeds the pane key). The key must equal the bridge's
-// EXCEL_BRIDGE_PANE_KEY; generate one once and keep it in your shell profile or a secrets manager.
+// usage: node scripts/gen-manifest.mjs [--base https://localhost:3443] [--key <pane key>] [--guid <uuid>] [--out <path>]
+// Writes manifest/manifest.xml unless --out names another file. The default is gitignored: it embeds the pane key.
+// The key must equal the bridge's EXCEL_BRIDGE_PANE_KEY; generate one once and keep it in your shell profile or a secrets manager.
 import { readFileSync, writeFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : d; };
@@ -35,7 +35,9 @@ if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{1
   console.error("--guid must be a UUID (8-4-4-4-12 hex)");
   process.exit(1);
 }
+if (process.argv.includes("--out") && !arg("out")) { console.error("--out needs a path, e.g. --out /tmp/manifest.xml"); process.exit(1); }
+const outPath = resolve(arg("out", join(root, "manifest/manifest.xml")));
 const out = template
   .replaceAll("{{BASE_URL}}", xml(base)).replaceAll("{{KEY}}", xml(key)).replaceAll("{{GUID}}", xml(guid));
-writeFileSync(join(root, "manifest/manifest.xml"), out);
-console.log(`wrote excel-addin/manifest/manifest.xml for ${base}`);
+writeFileSync(outPath, out);
+console.log(`wrote ${outPath} for ${base}`);

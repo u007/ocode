@@ -75,9 +75,14 @@ func (s *stateStore) put(wb, key string, b []byte) error {
 	return os.Rename(tmp.Name(), p)
 }
 
+// validWorkbookName reports whether a workbook id is a safe path element for state and workspace folders.
+func validWorkbookName(wb string) bool {
+	return stateNameRE.MatchString(wb) && wb != "." && wb != ".."
+}
+
 func validState(w http.ResponseWriter, r *http.Request) (wb, key string, ok bool) {
 	wb, key = r.PathValue("workbook"), r.PathValue("key")
-	if !stateNameRE.MatchString(wb) || !stateNameRE.MatchString(key) || wb == "." || wb == ".." || key == "." || key == ".." {
+	if !validWorkbookName(wb) || !stateNameRE.MatchString(key) || key == "." || key == ".." {
 		http.Error(w, "invalid workbook or key", http.StatusBadRequest)
 		return "", "", false
 	}
@@ -116,6 +121,13 @@ func (s *srv) putState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "state must be a JSON object or array", http.StatusBadRequest)
 		return
 	}
+	if key == sessionsKey {
+		// POST /bridge/sessions reads and rewrites this key too; the same lock keeps a PUT from landing between
+		// that read and its write.
+		lock := s.sessionsLock(wb)
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	if err := s.state.put(wb, key, b); err != nil {
 		http.Error(w, "state write failed", http.StatusInternalServerError)
 		return
@@ -126,7 +138,7 @@ func (s *srv) putState(w http.ResponseWriter, r *http.Request) {
 // workspace creates (idempotently) and returns the directory ocode sessions for a workbook are rooted in.
 func (s *srv) workspace(w http.ResponseWriter, r *http.Request) {
 	wb := r.PathValue("workbook")
-	if !stateNameRE.MatchString(wb) || wb == "." || wb == ".." {
+	if !validWorkbookName(wb) {
 		http.Error(w, "invalid workbook", http.StatusBadRequest)
 		return
 	}

@@ -2,10 +2,11 @@ import { BridgeClient, type BridgeStatus } from "./bridgeClient";
 import { BridgeJournalStore } from "./bridgeStore";
 import { FakePort } from "./fakePort";
 import { SessionIndex, workbookId } from "./identity";
+import { InfoReporter } from "./infoReporter";
 import { errText, log } from "./log";
 import { OcodeClient } from "./ocodeClient";
 import { OfficePort } from "./officePort";
-import type { ExcelPort } from "./port";
+import type { ExcelPort, WorkbookInfo } from "./port";
 import { Runner, type Contract } from "./runner";
 import { Journal } from "./tools/journal";
 
@@ -22,6 +23,8 @@ export interface Deps {
   runner: Runner;
   /** One-line notice to show once, e.g. when this workbook was copied and got a fresh id. */
   notice?: string;
+  /** The latest workbook state collected (null until the first collection). The write guard and the status strip read it. */
+  info: () => WorkbookInfo | null;
   onBridgeStatus(cb: (s: BridgeStatus) => void): void;
 }
 
@@ -61,6 +64,8 @@ export async function boot(): Promise<Deps> {
   log("info", "boot", `loaded ${contract.tools.length} tool definitions`);
   const journal = new Journal(new BridgeJournalStore(base, key, wb));
   const runner = new Runner(port, journal, contract);
+  const reporter = new InfoReporter({ base, key, workbook: wb, collect: () => port.workbookInfo() });
+  runner.setInfoSource(() => reporter.current());
   // The bridge connects during boot, before the UI exists: remember the latest status and replay it on subscribe.
   let cb: (s: BridgeStatus) => void = () => undefined;
   let last: BridgeStatus = "connecting";
@@ -73,9 +78,10 @@ export async function boot(): Promise<Deps> {
   // Not fatal: chat can still start, but directory-bound features may refuse the path. See RESUME.md (U6).
   await ocode.addProject(ws.path).catch((e) => { console.warn("could not register the workspace as an ocode project:", e); log("warn", "boot", `could not register the workspace as an ocode project: ${errText(e)}`); });
   log("info", "boot", `workspace ${ws.path}`);
+  reporter.start();
   return {
     port, journal, runner, notice, workbook: wb, fileName, fake, workspace: ws.path,
-    ocode, index: new SessionIndex(base, key, wb),
+    ocode, index: new SessionIndex(base, key, wb), info: () => reporter.current(),
     onBridgeStatus: (f) => { cb = f; f(last); },
   };
 }

@@ -110,11 +110,11 @@ differently from what section 1-3 describe:
 - **`create_chart` total rows:** only a FINAL row labelled exactly Total / Totals / Subtotal / Grand total is an error;
   anywhere else it is a warning. `include_total_rows=true` overrides.
 - **`format_range` borders** set inside borders only when the range has more than one row / column.
-- **The bridge proxy is an allowlist** (`bridge/allowlist.go`): only the 18 (method, path) pairs the pane uses reach
+- **The bridge proxy is an allowlist** (`bridge/allowlist.go`): only the 20 (method, path) pairs the pane uses reach (18 before 2026-11-01)
   ocode; the rest is 403. `POST /api/chat` and `POST /api/projects` additionally must name a folder strictly inside the
-  workspace root, `permission_mode` must be absent/`normal`/`locked` (never `yolo`), and remote hosts are refused. A
-  leaked pane key therefore cannot start an unprompted agent elsewhere on the machine. Adding a pane route is a
-  security decision.
+  workspace root, `permission_mode` must be absent/`normal`/`locked` (never `yolo`; **yolo changed on 2026-11-01, see
+  section 3c**), and remote hosts are refused. A leaked pane key therefore cannot start an unprompted agent elsewhere on
+  the machine. Adding a pane route is a security decision.
 - **Data location:** state and workspaces default to `<ocode data dir>/excel/{state,workspaces}` (mirrors
   `internal/paths.GlobalDataDir`; keep `bridge/datadir.go` in sync). The old `~/.ocode-excel` is not migrated.
   `--data-dir` / `--workspace-root` override.
@@ -126,6 +126,160 @@ New **unverified-in-Excel** members (add to checklist B): `setNumberFormats` (fo
 the borders change on a 1-cell, 1-row and 1-column range. Known remaining limits: undo itself is not atomic across
 formats and values beyond a best-effort format restore; a call enqueued in the instant of an eviction can still run on
 the old pane.
+
+## 3c. Permission modes (2026-11-01)
+
+The pane gets a permission picker: **Ask** (`normal`), **Auto** (the Jev judge auto-allows) and **YOLO** (no prompts).
+The user chose this. The pane UI is not built yet; this section covers the bridge side only.
+
+- **yolo is allowed for pane chats.** The bridge used to refuse it so a leaked pane key could not start an unprompted
+  agent. Now `POST /api/chat` accepts `permission_mode` absent/`normal`/`locked`/`yolo`; `sandbox` is still refused.
+  The pane must show a confirm before choosing YOLO.
+- **`PUT /api/permissions/mode` is proxied.** Body `{"mode": "normal"|"locked"|"yolo", "session_id": "<id>"}`, both
+  keys required, matched exactly. It sets one session's mode. ocode checks that the session exists, not that it belongs
+  to a workbook, so a leaked pane key can change any session's mode. The same key can already resolve any permission
+  ask, so the added risk is small, but it is real.
+- **Auto is server-wide.** `GET /bridge/auto-permission` returns `{"enabled": bool}`. `PUT /bridge/auto-permission` takes
+  `{"enabled": bool}` and returns `{"enabled": bool}`. These are bridge-owned routes, not proxied, so the `/api/`
+  allowlist did not grow. The PUT reads ocode's `/api/config/ocode/permissions-auto`, changes only `enabled`, and writes
+  the whole block back (ocode's PUT replaces the block). Turning Auto on affects every ocode session on the machine, not
+  only Excel workbooks. ocode errors come back as 502 with the status and message. The read and write are not atomic
+  against edits made in ocode's own UI.
+- **Pre-existing bypass, closed in the same change.** Go's JSON decoder matches keys case-insensitively, but the body
+  checks compared exact names. `{"project_path": "<ws>", "PROJECT_PATH": "/etc"}` passed while ocode started the chat in
+  `/etc`, and `{"path": "<ws>", "PATH": "/home"}` registered `/home` as a project. A key that differs from a checked name
+  only by case or Unicode folding (`bodyKeysExact`) is now refused. Tests: `bridge/allowlist_body_test.go`.
+- **The pane controls (2026-11-01).** `ocodeClient.ts` calls the new routes. The status strip under the tabs holds the
+  Ask | Auto | YOLO picker (`ui/controls.tsx`, mapping in `modes.ts`), the model picker (connected providers only,
+  `models.ts`) and the context gauge (`GET /api/sessions/{id}/context`, `gauge.ts`). Selecting YOLO asks for a confirm
+  each time. Recap and Compact sit in the ⋯ menu; Compact confirms first. The pane reads a chat's saved mode through the
+  bridge's `GET /bridge/session-mode/{id}` (see 3d).
+- **`GET /api/sessions/{id}/context` is allowlisted** (read-only). Its `report` (`internal/contextbudget`) lists token
+  sizes, prompt text, MCP tool definitions and ambient file names; the builder has no credential field. Passed through unchanged.
+- **`GET /api/auth/connect` is NOT allowlisted.** It returns `masked` (the last 4 characters of each stored key) and
+  the OAuth account in `statusDetail`. The bridge reads it server-side and answers `GET /bridge/connected-providers`
+  with `{"providers": [ids]}` only, where a provider counts as connected when ocode's status is `✓` (env, stored key,
+  OAuth or config). Code: `bridge/providers.go`; tests: `bridge/providers_test.go`.
+- The e2e test (`taskpane/src/e2e.test.ts`) now expects a yolo chat to be forwarded and a sandbox chat to be refused.
+
+## 3d. ocode desktop sees workbooks and their chats (2026-11-01)
+
+ocode (through the `excel` MCP server) can now see which workbooks have a connected pane, read their chats and message
+them. `tools.json` is unchanged. The three tools below are bridge-local (`bridge/localtools.go`): the bridge answers them,
+they never reach a pane, and they are merged into `tools/list` sorted with the contract tools.
+
+**Pane info.** The pane posts `POST /bridge/pane-info?workbook=<id>` with the pane key (like `/bridge/result`). The body
+has exactly these nine keys:
+
+| key | type |
+|---|---|
+| `fileName`, `path`, `host`, `platform` | string (`path` is `""` if never saved) |
+| `state` | `"new"`, `"saved"`, `"modified"` or `"unknown"`; any other value is 400 |
+| `blank`, `readOnly`, `protectedView` | bool or `null` |
+| `sheets` | integer, 0 or more |
+
+Missing or unknown keys, a wrong type, or `null` in a non-nullable field: 400. Body over 16 KiB: 413. No connected pane
+for the workbook: 404 (no record is created). Success: 204. The record lives on the pane: `connectedAt` (attach time) and
+`lastSeen` (last post) are kept there, and both go when the pane detaches. A re-attached pane must post again.
+
+**Workbook listing.** `GET /bridge/workbooks?limit=&offset=` (pane key, loopback only, like `/mcp`) returns
+`{"total", "workbooks": [...]}`. Entries are sorted by `fileName`, then workbook id. `limit` is 1 to 200 (default 50),
+`offset` is 0 or more (default 0); anything else is 400. Each entry has `workbook`, `fileName`, `path`, `host`,
+`platform`, `state`, `blank`, `readOnly`, `protectedView`, `sheets`, `connectedAt`, `lastSeen`, `workspace` and
+`sessions`. A pane that never posted shows `state: "unknown"`, empty strings and nulls. `workspace` is `""` until the
+folder exists. `sessions` is the ids from the pane's `sessions` state key, newest first, at most 20.
+
+**Local tools.** `workbook` is optional and resolves like the `excel_*` tools: one connected pane is used, several or
+none is an error. So the chat tools only reach workbooks with a connected pane.
+
+| tool | risk | arguments | result |
+|---|---|---|---|
+| `list_workbooks` | read | `limit` 1..200 (50), `offset` >= 0 (0) | the listing above |
+| `read_workbook_chat` | read | `workbook?`, `session?` (default: newest in the index; must be in the index), `limit` 1..100 (20) | `{session, title, total, messages: [{role, content, tool_calls}]}`, oldest first, system messages dropped |
+| `send_workbook_chat` | write | `workbook?`, `message` 1..8000 characters, `session?` (must be in the index) | `{session, started}` |
+
+- Message `content` is cut to 2000 characters with `…[truncated N chars]`. `tool_calls` holds tool names only. A tool
+  message has empty content, so tool result bodies never reach the model.
+- `send_workbook_chat` with `session` calls `POST /api/sessions/{id}/message`. Without it, it calls `POST /api/chat`
+  with `project_path` = the workbook workspace, `permission_mode: "normal"` and `async: true`. Every message is prefixed
+  `[from ocode desktop] `.
+- **`send_workbook_chat` makes the pane's agent act** (it can change the workbook). It is risk `write` and runs in
+  `normal` permission mode only.
+- ocode session ids must match `[A-Za-z0-9_-]{1,128}` because they reach a URL path.
+
+**Decision: a new chat is not written to the `sessions` index.** The pane's `SessionIndex.add` is a read-modify-write
+(GET the list, then PUT the whole list). The bridge does not serialize with it, so a bridge append between the pane's GET
+and PUT would be lost, or would overwrite the pane's entry. So `send_workbook_chat` without `session` returns the new
+session id and leaves the index alone. Consequences, all open:
+
+1. The pane does not list a desktop-started chat (it only shows its own index).
+2. `send_workbook_chat` cannot continue it: the id is not in the index, so the call is refused. Each call without
+   `session` starts another chat.
+3. Fix options, for a decision: (a) a bridge-owned state key (for example `desktop-sessions`) that only the bridge
+   writes, checked as membership next to `sessions`. This is race-free, but the pane still does not show those chats.
+   (b) Change the pane so it appends through a bridge endpoint that is atomic. This touches `taskpane/`, so it is not in
+   this change.
+
+**Other changes.** The `/bridge/stream` `workbook` must match `[A-Za-z0-9._-]{1,128}` (400 otherwise): the id names
+state and workspace folders on disk. The bridge's own ocode calls go through `ocodeRequest`, which takes a query string
+and a per-call read limit. Session transcript windows read up to 16 MiB; a larger response is an error, never a cut body.
+
+**Tests.** `bridge/paneinfo_test.go` and `bridge/localtools_test.go` use an `httptest` fake ocode and a fake pane. They
+cover the pane-info validation table, `lastSeen` and detach on the hub, listing order, pagination and bounds, loopback and
+key checks, and each tool's happy path and refusals (unknown workbook, several workbooks, session outside the index, ocode
+500, oversize and empty message, no workspace folder). Mutation spot-checks in a scratch copy were caught by the tests:
+removing the session-index membership check, removing the truncation marker, and dropping the loopback guard.
+
+**Not verified.** Only a fake ocode was used. The ocode response shapes come from reading `internal/server` and
+`internal/agent` (`SessionDetail`, `agent.Message`, `ChatRequest`), not from a live `ocode serve`. Unverified: that
+`POST /api/chat` accepts a workspace that the pane registered as a project, that a bridge-started chat appears in ocode's
+own session list, and the real Excel pane's behaviour.
+
+**2026-11-01 update: the bridge now writes the session index.** This supersedes the decision above. Fix option (a) was
+not taken and (b) is still open, but the pane now gets a bridge endpoint:
+
+- `POST /bridge/sessions/{workbook}` (pane key, like `/bridge/state`). Body: one `{id, title, created}`. `id` matches
+  `apiSessionIDRe`, `title` is at most 200 characters (may be empty), `created` is RFC 3339. Unknown keys, trailing data,
+  an empty body or a bad workbook id: 400. Body over 4 KiB: 413. Success: 200 with the whole index, newest first. A
+  re-posted id leaves the index unchanged. A stored index that is not a list: 500, nothing written.
+- Every writer of the `sessions` key takes one per-workbook lock: this POST and `PUT /bridge/state/{workbook}/sessions`.
+  The lock is in-process only.
+- `send_workbook_chat` without `session` registers the new chat through the same helper: title `[desktop] ` plus the first
+  60 characters of the message, `created` = now (UTC). If registration fails after the chat started, the tool errors and
+  names the session id.
+- **Pane action (pane agent):** switch `SessionIndex.add` in `taskpane/src/identity.ts` to `POST /bridge/sessions/{workbook}`
+  and drop its GET-then-PUT. Until then the lock does not protect the pane: a whole-list PUT built from an older GET still
+  overwrites a POST that landed in between. The pane's `add` also moves a re-added id to the front; the bridge keeps the
+  existing entry, so the pane must accept that.
+- Side effect: `read_workbook_chat` with no `session` now defaults to the newest index entry, which can be a desktop chat.
+
+**Tests.** `bridge/sessions_test.go` covers the POST table, idempotency, 50 concurrent POSTs (all survive), a PUT racing
+POSTs (the index ends with the PUT list, and every later append is kept), a check that PUT and POST both wait on the
+lock, and `send_workbook_chat` registering then continuing a chat. Removing the lock in `addSession` fails the concurrent
+POST test; removing it from the PUT path fails the lock-wait test. The PUT-vs-POST race test alone does not catch a
+missing lock.
+
+**2026-11-01 update: `send_workbook_chat` posts into an existing chat only in `normal` mode.** It first calls `GET /api/sessions/{id}/status` and reads `permission_mode`; yolo, locked, sandbox, a missing or unknown value, or a failed status call is refused before the message POST.
+Tests: `TestSendWorkbookChatOnlyPostsIntoANormalChat` (`bridge/localtools_test.go`) and `TestSendWorkbookChatContinuationRefusesAChatSwitchedToYolo` (`bridge/sessions_test.go`).
+
+**2026-11-01 update: pinned MCP server and a chat's saved mode.** Pane chats and `send_workbook_chat` new chats send
+`pinned_mcp_servers: ["excel"]` on `POST /api/chat` (ocode core: `ChatRequest.PinnedMCPServers`, honoured at session
+creation only). `constrainBody` accepts that key only when absent, null, or exactly `["excel"]` (`pinnedServersOK`); a
+case variant of the key is refused by `bodyKeysExact`. The raw `GET /api/sessions/{id}/status` is not proxied. When a
+chat opens, the pane reads its mode from the bridge's `GET /bridge/session-mode/{id}`, which returns only
+`{"permission_mode"}` (`refreshSavedMode` in `ui/App.tsx`, mapping `savedModeView` in
+`modes.ts`): yolo shows YOLO, normal shows Ask or Auto from the server-wide switch, and locked or sandbox show a read-only
+chip with the picker unchanged. A failed read is logged as a warning only. The "pane cannot read a session's mode"
+statement in 3c is resolved (TODO.md entry marked done).
+**Exposure of the status route:** the body is ocode's whole `TUIStatus` (cwd, `extra_allowed_paths`, `lsp_servers` with
+launch commands, `model_prompt`, `modified_files`), not only the mode, and the handler starts the project's LSP manager and
+warm-up (`internal/server/handler_session_state.go`, `lspManagerFor`), so a GET can start language servers. The raw route
+is therefore off the `/api/` allowlist. The bridge calls it itself (`sessionPermissionMode` in `bridge/sessionmode.go`) and
+answers the pane with `permission_mode` alone, so the body's other fields never leave the bridge. The LSP warm-up still runs
+on each read.
+Tests: `TestChatPinnedMCPServersBodyIsConstrained` (`bridge/allowlist_body_test.go`), the raw route's 403 in
+`bridge/allowlist_test.go`, the narrow route in `bridge/sessionmode_test.go`, the new-chat body in `bridge/localtools_test.go`, `taskpane/src/modes.test.ts`,
+`ocodeClient.test.ts` and `e2e.test.ts`.
 
 ## 4. Desktop setup (do this first)
 
@@ -304,3 +458,16 @@ Order of work once on the desktop: section 5 A and B -> settle U7 and the permis
 
 | date | Excel version / platform | item | result | notes |
 |---|---|---|---|---|
+
+## 2026-11-01: first real-Excel checklist (nothing below has been seen in Excel yet)
+Reload the pane after `make install-excel` + re-copy of the manifest (the template's `TaskpaneId` changed), then paste the Logs tab. Mark each line PASS / FAIL:
+1. Tabs Chat / Logs / Changes render; status strip shows the Ask|Auto|YOLO picker, model dropdown, context gauge, file chips.
+2. File chip is right for: a new unsaved workbook (`new`), a saved one (`saved`), after typing a cell (`modified`), an empty one (`blank`), a read-only file (`read-only`).
+3. Ask "write 3 numbers in A1:A3": a permission card appears; Always allow works on the next ask.
+4. Changes tab lists the write; Undo restores A1:A3; Show selects the range.
+5. Logs tab shows `tool write_range ok (N ms)` and the ocode requests.
+6. Model dropdown lists only connected models; switching changes the gauge's model.
+7. Compact asks first, then the chat reloads with the "Earlier conversation was compacted" notice.
+8. "⋯" menu: "Open ocode automatically for this workbook" toggles (UNVERIFIED Office settings API).
+9. `GET /bridge/workbooks` (pane key) lists this workbook with path and state.
+Known not undoable yet: format_range, create_table, create_chart, create_pivot (see TODO.md).

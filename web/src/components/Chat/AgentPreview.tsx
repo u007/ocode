@@ -3,6 +3,7 @@ import { Bot, ChevronRight } from "lucide-react";
 import { useProjectState } from "../../stores/projectStore";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
 import RunNode from "../Agents/RunNode";
+import { AgentRunDisplayScope } from "../Agents/agentRunDisplay";
 import {
   loadAgentPreviewCollapsed,
   saveAgentPreviewCollapsed,
@@ -85,9 +86,11 @@ export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
         >
           {/* Padding on an inner box, not the scroller: see PlanPanel.tsx. */}
           <div className="space-y-0.5 px-3 pb-2 pt-1.5">
-            {runs.map((run) => (
-              <RunNode key={run.id} run={run} depth={0} onOpenDetail={onOpenDetail} defaultOpen={false} />
-            ))}
+            <AgentRunDisplayScope>
+              {runs.map((run) => (
+                <RunNode key={run.id} run={run} depth={0} onOpenDetail={onOpenDetail} defaultOpen={false} />
+              ))}
+            </AgentRunDisplayScope>
           </div>
         </div>
       )}

@@ -46,6 +46,7 @@ func TestJudgeModelConfigDefaults(t *testing.T) {
 		{"Search.JudgeModel", cfg.Search.JudgeModel},
 		{"NetworkGuard.JudgeModel", cfg.NetworkGuard.JudgeModel},
 		{"ContentGuard.JudgeModel", cfg.ContentGuard.JudgeModel},
+		{"BrowserRun.JudgeModel", cfg.BrowserRun.JudgeModel},
 	}
 	for _, c := range checks {
 		if c.got != "typesafe/jev-latest" {
@@ -67,7 +68,8 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 	  "doc_search":    {"judge_model": "typesafe/jev-1.13.0"},
 	  "search":        {"judge_model": "typesafe/jev-latest"},
 	  "network_guard": {"judge_model": "cloudflare-workers/@cf/cloudflare/clef"},
-	  "content_guard": {"judge_model": "typesafe/jev-1.13.0"}
+	  "content_guard": {"judge_model": "typesafe/jev-1.13.0"},
+	  "browser_run":   {"judge_model": "cloudflare-workers/@cf/cloudflare/clef-flash"}
 	}`
 	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -83,6 +85,7 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 		"Search.JudgeModel":       "typesafe/jev-latest",
 		"NetworkGuard.JudgeModel": "cloudflare-workers/@cf/cloudflare/clef",
 		"ContentGuard.JudgeModel": "typesafe/jev-1.13.0",
+		"BrowserRun.JudgeModel":   "cloudflare-workers/@cf/cloudflare/clef-flash",
 	}
 	got := map[string]string{
 		"Discovery.JudgeModel":    cfg.Ocode.Discovery.JudgeModel,
@@ -90,6 +93,7 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 		"Search.JudgeModel":       cfg.Ocode.Search.JudgeModel,
 		"NetworkGuard.JudgeModel": cfg.Ocode.NetworkGuard.JudgeModel,
 		"ContentGuard.JudgeModel": cfg.Ocode.ContentGuard.JudgeModel,
+		"BrowserRun.JudgeModel":   cfg.Ocode.BrowserRun.JudgeModel,
 	}
 	for k, w := range want {
 		if got[k] != w {
@@ -114,7 +118,8 @@ func TestJudgeModelConfigBlankKeepsDefault(t *testing.T) {
 	configDir := isolateConfigEnv(t)
 	body := `{
 	  "discovery":  {"judge_model": ""},
-	  "doc_search": {"judge_model": "   "}
+	  "doc_search": {"judge_model": "   "},
+	  "browser_run": {"judge_model": ""}
 	}`
 	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -128,5 +133,8 @@ func TestJudgeModelConfigBlankKeepsDefault(t *testing.T) {
 	}
 	if got := cfg.Ocode.DocSearch.JudgeModel; got != "typesafe/jev-latest" {
 		t.Errorf("whitespace judge_model cleared the slot: DocSearch.JudgeModel = %q", got)
+	}
+	if got := cfg.Ocode.BrowserRun.JudgeModel; got != "typesafe/jev-latest" {
+		t.Errorf("empty judge_model cleared the slot: BrowserRun.JudgeModel = %q", got)
 	}
 }

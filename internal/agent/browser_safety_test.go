@@ -180,3 +180,62 @@ func TestBrowserNavigateIsAnEgressTarget(t *testing.T) {
 		t.Fatalf("click produced egress targets: %+v", n)
 	}
 }
+
+// riskHintGlueTool is an MCP tool whose server reported a risk class.
+type riskHintGlueTool struct {
+	mcpServerGlueTool
+	risk string
+}
+
+func (r riskHintGlueTool) Risk() string { return r.risk }
+
+// TestJudgeStateCarriesMCPDescriptionAndRisk pins that the auto-permission judge
+// sees the server's own description and risk class for an MCP call. Without them
+// a call such as excel_read_range is judged on its name and arguments alone.
+func TestJudgeStateCarriesMCPDescriptionAndRisk(t *testing.T) {
+	ag := newTestAgent(nil, nil, &config.Config{}, nil)
+	ag.addMCPTools([]tool.Tool{riskHintGlueTool{
+		mcpServerGlueTool: mcpServerGlueTool{discoveryGlueTool{name: "excel_read_range", desc: "Read a range of cells"}, "excel"},
+		risk:              "read",
+	}})
+
+	state := ag.buildTypesafePermissionState("excel_read_range", json.RawMessage(`{"range":"A1:B2"}`), nil)
+	if state["tool_description"] != "Read a range of cells" {
+		t.Fatalf("tool_description = %v, want the server's description", state["tool_description"])
+	}
+	if state["tool_risk"] != "read" {
+		t.Fatalf("tool_risk = %v, want the server's risk class", state["tool_risk"])
+	}
+}
+
+// TestJudgeStateMCPWithoutRiskCarriesDescriptionOnly pins that a server which
+// reports no risk class adds no tool_risk key, rather than an empty one.
+func TestJudgeStateMCPWithoutRiskCarriesDescriptionOnly(t *testing.T) {
+	ag := newTestAgent(nil, nil, &config.Config{}, nil)
+	ag.addMCPTools([]tool.Tool{mcpServerGlueTool{
+		discoveryGlueTool: discoveryGlueTool{name: "excel_write_range", desc: "Write values into a range"},
+		server:            "excel",
+	}})
+
+	state := ag.buildTypesafePermissionState("excel_write_range", json.RawMessage(`{}`), nil)
+	if state["tool_description"] != "Write values into a range" {
+		t.Fatalf("tool_description = %v, want the server's description", state["tool_description"])
+	}
+	if _, has := state["tool_risk"]; has {
+		t.Fatalf("tool_risk must be absent when the server reported none, got %v", state["tool_risk"])
+	}
+}
+
+// TestJudgeStateBuiltinToolCarriesNoMCPFacts pins that a built-in tool gets
+// neither MCP key: its description is not server-supplied.
+func TestJudgeStateBuiltinToolCarriesNoMCPFacts(t *testing.T) {
+	ag := newTestAgent(nil, []tool.Tool{discoveryGlueTool{name: "read", desc: "Read a file"}}, &config.Config{}, nil)
+
+	state := ag.buildTypesafePermissionState("read", json.RawMessage(`{"path":"a.txt"}`), nil)
+	if _, has := state["tool_description"]; has {
+		t.Fatalf("built-in tool must not carry tool_description, got %v", state["tool_description"])
+	}
+	if _, has := state["tool_risk"]; has {
+		t.Fatalf("built-in tool must not carry tool_risk, got %v", state["tool_risk"])
+	}
+}

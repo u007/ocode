@@ -54,6 +54,16 @@ type PageContextTool interface {
 	PageContext(args json.RawMessage) (map[string]any, bool)
 }
 
+// MCPServerTool is implemented by tools that come from an MCP server; MCPServer returns the configured server name (the prefix of the tool name).
+type MCPServerTool interface {
+	MCPServer() string
+}
+
+// RiskHintTool is implemented by tools whose source reports a risk class (an MCP server's per-tool "risk" field). Risk returns "" when none was reported.
+type RiskHintTool interface {
+	Risk() string
+}
+
 // AgentScopedTool is implemented by a tool that keeps per-agent mutable state
 // (for example a screenshot cache or the tabs an agent opened). A subagent is
 // handed ForAgent(name) instead of the parent's instance, so the two never share

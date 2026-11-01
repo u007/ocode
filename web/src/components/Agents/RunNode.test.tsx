@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import RunNode from "./RunNode";
+import { ChatDisplayTestProvider } from "../Chat/chatDisplayTestUtils";
 import type { AgentRun, AgentRunMessage } from "../../api/types";
 
 const baseRun: AgentRun = {
@@ -366,5 +367,141 @@ describe("RunNode transcript scrolling", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The agent card renders its transcript through the SAME chat components the
+// main LLM loop uses, so the Chat display setting applies here too.
+// ---------------------------------------------------------------------------
+
+function renderWithDisplay(run: AgentRun, preset: "full" | "balanced" | "quiet" = "full") {
+  return render(
+    <ChatDisplayTestProvider preset={preset}>
+      <RunNode run={run} depth={0} />
+    </ChatDisplayTestProvider>,
+  );
+}
+
+function toolRun(output: string): AgentRun {
+  return {
+    ...baseRun,
+    messages: [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-1", name: "bash", arguments: '{"command":"seq 1 30"}' }],
+      },
+      { role: "tool", toolCallId: "call-1", content: output },
+    ],
+  };
+}
+
+describe("RunNode chat display parity", () => {
+  const thirtyLines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join("\n");
+
+  it("renders a tool call with its result once, truncated to the chat's 20-line tail preview", () => {
+    renderWithDisplay(toolRun(thirtyLines));
+
+    // One merged block: the call carries the tool name/args hint, and the
+    // result is not a second unnamed block.
+    expect(screen.getByText(/🔧/)).toBeInTheDocument();
+    expect(screen.getAllByText("line 30")).toHaveLength(1);
+    expect(screen.getByText("line 11")).toBeInTheDocument();
+    // The first ten lines are behind the expander, exactly like the transcript.
+    expect(screen.queryByText("line 1")).toBeNull();
+    expect(screen.getByText(/10 earlier lines/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText(/10 earlier lines/));
+    expect(screen.getByText("line 1")).toBeInTheDocument();
+  });
+
+  it("honours a collapsed tool-output setting (quiet)", () => {
+    renderWithDisplay(toolRun(thirtyLines), "quiet");
+    expect(screen.queryByText("line 30")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /show output/i }));
+    expect(screen.getByText("line 30")).toBeInTheDocument();
+  });
+
+  it("honours a collapsed tool-call setting (balanced)", () => {
+    const longCommand = `{"command":"echo ${"x".repeat(120)}"}`;
+    const run: AgentRun = {
+      ...baseRun,
+      messages: [
+        { role: "assistant", content: "", toolCalls: [{ id: "call-1", name: "bash", arguments: longCommand }] },
+      ],
+    };
+    renderWithDisplay(run, "balanced");
+
+    const callToggle = screen.getByRole("button", { name: /🔧/ });
+    expect(callToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/^\$ echo x/)).toBeNull();
+
+    fireEvent.click(callToggle);
+    expect(screen.getByText(/^\$ echo x/)).toBeInTheDocument();
+  });
+
+  it("renders assistant prose as markdown like the main chat", () => {
+    const run: AgentRun = { ...baseRun, messages: [{ role: "assistant", content: "**bold** summary" }] };
+    const { container } = renderWithDisplay(run);
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+  });
+
+  it("renders reasoning through the chat's thinking disclosure", () => {
+    const run: AgentRun = {
+      ...baseRun,
+      messages: [{ role: "assistant", content: "answer", reasoningContent: "private reasoning" }],
+    };
+    renderWithDisplay(run, "balanced");
+    expect(screen.getByText(/Thinking/)).toBeInTheDocument();
+    expect(screen.queryByText("private reasoning")).toBeNull();
+  });
+
+  it("keeps tool OUTPUT open under balanced (gate is per category, not per preset)", () => {
+    renderWithDisplay(toolRun(thirtyLines), "balanced");
+
+    // balanced collapses tool-CALL details...
+    expect(screen.getByRole("button", { name: /🔧/ })).toHaveAttribute("aria-expanded", "false");
+    // ...but tool OUTPUT stays expanded, so the 20-line tail preview is visible.
+    expect(screen.getByText("line 30")).toBeInTheDocument();
+    expect(screen.getByText(/10 earlier lines/)).toBeInTheDocument();
+  });
+
+  it("shows a finished call whose result is empty as done, not running", () => {
+    const run: AgentRun = {
+      ...baseRun,
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "bash", arguments: '{"command":"true"}' }],
+        },
+        { role: "tool", toolCallId: "call-1", content: "" },
+      ],
+    };
+    renderWithDisplay(run);
+
+    expect(screen.getByText(/\$ true/)).toBeInTheDocument();
+    expect(screen.queryByText("running…")).toBeNull();
+  });
+
+  it("renders legacy transcripts without call ids unmerged, plus reasoning-only entries", () => {
+    // Older persisted child sessions carry no tool-call ids: the call and the
+    // result cannot be paired, so both render as their own blocks.
+    const run: AgentRun = {
+      ...baseRun,
+      messages: [
+        { role: "assistant", content: "", reasoningContent: "legacy reasoning" },
+        { role: "assistant", content: "", toolCalls: [{ name: "bash", arguments: '{"command":"ls"}' }] },
+        { role: "tool", content: "legacy result" },
+      ],
+    };
+    renderWithDisplay(run);
+
+    expect(screen.getByText("legacy reasoning")).toBeInTheDocument();
+    // Two separate tool blocks: the call (with its "$ ls" hint) and the result.
+    expect(screen.getAllByText(/🔧/)).toHaveLength(2);
+    expect(screen.getByText(/\$ ls/)).toBeInTheDocument();
+    expect(screen.getByText("legacy result")).toBeInTheDocument();
   });
 });

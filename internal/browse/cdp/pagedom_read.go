@@ -31,6 +31,20 @@ const (
 	// waitMaxTimeout bounds one wait.
 	waitMaxTimeout   = 30 * time.Second
 	waitPollInterval = 100 * time.Millisecond
+	// settleQuietWindow is how long the page must stay free of DOM mutations
+	// before Settle reports it quiet, and settleMaxWait bounds the whole settle.
+	settleQuietWindow = 200 * time.Millisecond
+	settleMaxWait     = 5 * time.Second
+	// controlsMaxElements caps how many controls one Controls read keeps.
+	controlsMaxElements = 160
+	// controlLabelMax clips a control's accessible name and its context name.
+	controlLabelMax = 120
+	// controlValueMax clips a control's value.
+	controlValueMax = 200
+	// viewportTextMaxChars caps the page text Controls returns, in UTF-16 units.
+	viewportTextMaxChars = 6 * 1024
+	// fingerprintHexLen is how many hex digits of the SHA-256 a fingerprint keeps.
+	fingerprintHexLen = 16
 )
 
 // findUniqueFn returns the element a CSS path matches when it matches exactly
@@ -90,11 +104,25 @@ func (t *Target) Snapshot(ctx context.Context, frame string, refs *RefTable) (st
 	if refs == nil {
 		return "", nil, errors.New("snapshot: nil RefTable; pass the agent's ref table")
 	}
+	nodes, err := t.axNodesFor(ctx, "snapshot", frame)
+	if err != nil {
+		return "", nil, err
+	}
+	w := &snapshotWriter{byID: axIndex(nodes), refs: refs}
+	w.walk(&nodes[0], 0, false)
+	return w.text(), w.minted, nil
+}
+
+// axNodesFor reads the accessibility tree of the top document (frame "") or of
+// an <iframe> and returns its nodes, so nodes[0] is the root. verb names the
+// action in the errors. A tree over axNodeBudget, or an empty one, is refused
+// rather than read partway.
+func (t *Target) axNodesFor(ctx context.Context, verb, frame string) ([]axNode, error) {
 	params := map[string]any{"depth": axMaxDepth}
 	if frame != "" {
 		frameID, err := t.resolveFrameID(ctx, frame)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		params["frameId"] = frameID
 	}
@@ -102,20 +130,33 @@ func (t *Target) Snapshot(ctx context.Context, frame string, refs *RefTable) (st
 		Nodes []axNode `json:"nodes"`
 	}
 	if err := t.conn.Call(ctx, t.sessionID, "Accessibility.getFullAXTree", params, &res); err != nil {
-		return "", nil, fmt.Errorf("snapshot: Accessibility.getFullAXTree: %w", err)
+		return nil, fmt.Errorf("%s: Accessibility.getFullAXTree: %w", verb, err)
 	}
 	if len(res.Nodes) > axNodeBudget {
-		return "", nil, fmt.Errorf("snapshot: the accessibility tree has %d nodes, over the %d-node budget; use find or text instead of snapshot", len(res.Nodes), axNodeBudget)
+		return nil, fmt.Errorf("%s: the accessibility tree has %d nodes, over the %d-node budget; use find or text instead of %s", verb, len(res.Nodes), axNodeBudget, verb)
 	}
 	if len(res.Nodes) == 0 {
-		return "", nil, errors.New("snapshot: the accessibility tree is empty")
+		return nil, fmt.Errorf("%s: the accessibility tree is empty", verb)
 	}
-	w := &snapshotWriter{byID: make(map[string]*axNode, len(res.Nodes)), refs: refs}
-	for i := range res.Nodes {
-		w.byID[res.Nodes[i].NodeID] = &res.Nodes[i]
+	return res.Nodes, nil
+}
+
+// axIndex maps each node id to its node. The map points into nodes, so nodes
+// must outlive it.
+func axIndex(nodes []axNode) map[string]*axNode {
+	byID := make(map[string]*axNode, len(nodes))
+	for i := range nodes {
+		byID[nodes[i].NodeID] = &nodes[i]
 	}
-	w.walk(&res.Nodes[0], 0, false)
-	return w.text(), w.minted, nil
+	return byID
+}
+
+// axTransparent reports whether a node is skipped in favour of its children: an
+// ignored node, a structural none or generic, an inline text box, and a
+// StaticText whose parent already carries the text in its name.
+func axTransparent(n *axNode, role string, suppressText bool) bool {
+	return n.Ignored || role == "none" || role == "generic" || role == "InlineTextBox" ||
+		(role == "StaticText" && suppressText)
 }
 
 // snapshotWriter accumulates a snapshot's lines under the element and byte caps.
@@ -136,9 +177,7 @@ func (w *snapshotWriter) walk(n *axNode, depth int, suppressText bool) {
 		return
 	}
 	role := axString(n.Role)
-	transparent := n.Ignored || role == "none" || role == "generic" || role == "InlineTextBox" ||
-		(role == "StaticText" && suppressText)
-	if transparent {
+	if axTransparent(n, role, suppressText) {
 		for _, id := range n.ChildIDs {
 			if c := w.byID[id]; c != nil {
 				w.walk(c, depth, suppressText)

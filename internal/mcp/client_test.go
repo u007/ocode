@@ -94,6 +94,40 @@ func TestRemoteClientAttachesStoredTokenWithoutStaticOAuth(t *testing.T) {
 	}
 }
 
+func TestListToolsCarriesRiskAndServerName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeMCPResult(w, map[string]any{"tools": []any{
+			map[string]any{"name": "read_range", "description": "Read a range", "risk": "read"},
+			map[string]any{"name": "plain", "description": "No risk reported"},
+		}})
+	}))
+	t.Cleanup(server.Close)
+
+	name := mcpTestServerName(t)
+	client, err := NewRemoteClient(name, config.MCPConfig{Type: "remote", URL: server.URL, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := client.ListTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("ListTools returned %d tools, want 2", len(tools))
+	}
+	if got := tools[0].Risk(); got != "read" {
+		t.Fatalf("reported risk = %q, want %q", got, "read")
+	}
+	if got := tools[1].Risk(); got != "" {
+		t.Fatalf("absent risk = %q, want empty", got)
+	}
+	for _, tl := range tools {
+		if got := tl.MCPServer(); got != name {
+			t.Fatalf("MCPServer() of %s = %q, want %q", tl.Name(), got, name)
+		}
+	}
+}
+
 func TestRemoteClientReportsPlainTextHTTPStatusBeforeJSONDecode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

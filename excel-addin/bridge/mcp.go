@@ -4,8 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -39,17 +42,36 @@ func loadContract() (contract, error) {
 type MCP struct {
 	hub         *Hub
 	tools       map[string]toolDef
+	local       map[string]localTool
 	listed      []toolDef
 	CallTimeout time.Duration
 }
 
-func NewMCP(h *Hub, c contract) *MCP {
-	m := &MCP{hub: h, tools: map[string]toolDef{}, CallTimeout: 90 * time.Second}
-	for _, t := range c.Tools {
+// NewMCP lists the contract tools (run in a pane) and the local tools (answered by the bridge). They are sorted
+// together by name, so tools/list stays sorted. A name defined twice is an error.
+func NewMCP(h *Hub, c contract, local []localTool) (*MCP, error) {
+	m := &MCP{hub: h, tools: map[string]toolDef{}, local: map[string]localTool{}, CallTimeout: 90 * time.Second}
+	add := func(t toolDef) error {
+		if _, dup := m.tools[t.Name]; dup {
+			return fmt.Errorf("tool %q is defined twice", t.Name)
+		}
 		m.tools[t.Name] = t
 		m.listed = append(m.listed, t)
+		return nil
 	}
-	return m
+	for _, t := range c.Tools {
+		if err := add(t); err != nil {
+			return nil, err
+		}
+	}
+	for _, l := range local {
+		if err := add(l.def); err != nil {
+			return nil, err
+		}
+		m.local[l.def.Name] = l
+	}
+	sort.Slice(m.listed, func(i, j int) bool { return m.listed[i].Name < m.listed[j].Name })
+	return m, nil
 }
 
 type rpcRequest struct {
@@ -138,6 +160,18 @@ func (m *MCP) call(ctx context.Context, params json.RawMessage) (any, *rpcError)
 	args := p.Arguments
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage("{}")
+	}
+	if l, ok := m.local[p.Name]; ok {
+		text, err := l.run(ctx, args)
+		if err != nil {
+			log.Printf("excel bridge: local tool %s failed: %v", p.Name, err)
+			var me *modelError
+			if errors.As(err, &me) {
+				return textResult(me.msg, true), nil
+			}
+			return textResult(p.Name+" failed; the bridge logged the cause.", true), nil
+		}
+		return textResult(text, false), nil
 	}
 	var probe struct {
 		Workbook string `json:"workbook"`

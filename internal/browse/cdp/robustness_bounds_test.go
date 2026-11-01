@@ -10,29 +10,33 @@ import (
 	"testing"
 )
 
-// TestRefTableCapsGrowthAndNeverReusesRefs: the table stops growing at maxRefs.
-// Minting one more node clears it, so every held ref is unknown while the new
-// ref works and no ref string repeats.
+// TestRefTableCapsGrowthAndNeverReusesRefs: the table stops growing at maxRefs
+// and evicts the LEAST-RECENTLY-USED ref, so refs the caller just touched keep
+// working while a long re-rendering run keeps minting. No ref string repeats.
 func TestRefTableCapsGrowthAndNeverReusesRefs(t *testing.T) {
 	var refs RefTable
 	held := make([]string, 0, maxRefs)
 	for i := 0; i < maxRefs; i++ {
 		held = append(held, refs.Mint(int64(i+1)))
 	}
+	// Touch the first ref, then re-mint it: both mark it most recent, so it is
+	// held[1] that becomes the eviction candidate.
 	if id, err := refs.Lookup(held[0]); err != nil || id != 1 {
 		t.Fatalf("Lookup(%s) = %d, %v; want 1", held[0], id, err)
 	}
-	// Re-minting a node already in the table at the cap must not clear it.
 	if again := refs.Mint(1); again != held[0] {
 		t.Fatalf("re-mint at the cap = %q, want the existing %q", again, held[0])
 	}
-	if _, err := refs.Lookup(held[len(held)-1]); err != nil {
-		t.Fatalf("re-mint at the cap dropped an existing ref: %v", err)
-	}
 
 	fresh := refs.Mint(int64(maxRefs + 5))
-	if _, err := refs.Lookup(held[len(held)-1]); err == nil || !strings.Contains(err.Error(), "unknown ref") {
-		t.Fatalf("Lookup(old ref after the cap clear) err = %v, want unknown ref", err)
+	if _, err := refs.Lookup(held[1]); err == nil || !strings.Contains(err.Error(), "unknown ref") {
+		t.Fatalf("Lookup(least-recently-used ref after eviction) err = %v, want unknown ref", err)
+	}
+	if id, err := refs.Lookup(held[0]); err != nil || id != 1 {
+		t.Fatalf("Lookup(recently used %s) = %d, %v; want it kept", held[0], id, err)
+	}
+	if _, err := refs.Lookup(held[len(held)-1]); err != nil {
+		t.Fatalf("Lookup(most recently minted ref) err = %v, want it kept", err)
 	}
 	if id, err := refs.Lookup(fresh); err != nil || id != int64(maxRefs+5) {
 		t.Fatalf("Lookup(%s) = %d, %v; want the new node", fresh, id, err)
@@ -43,8 +47,11 @@ func TestRefTableCapsGrowthAndNeverReusesRefs(t *testing.T) {
 	}
 	for _, old := range held {
 		if old == fresh {
-			t.Fatalf("ref %q was reused after the clear", fresh)
+			t.Fatalf("ref %q was reused after eviction", fresh)
 		}
+	}
+	if len(refs.refs) != maxRefs {
+		t.Fatalf("live refs = %d, want %d (evict one per mint at the cap)", len(refs.refs), maxRefs)
 	}
 }
 

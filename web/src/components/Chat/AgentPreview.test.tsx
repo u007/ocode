@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import AgentPreview from "./AgentPreview";
+import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
 import { AGENT_PREVIEW_COLLAPSED_STORAGE_KEY } from "./agentPreviewPersistence";
 import type { AgentRun } from "../../api/types";
 
@@ -28,6 +30,16 @@ vi.mock("../../hooks/useAgentRuns", () => ({
 }));
 
 describe("AgentPreview", () => {
+  // Run cards render the chat's ThinkingBlock/ToolBlock, so the rail needs the
+  // Chat display context. In the app it comes from AgentRunDisplayScope (or the
+  // ChatPanel provider when a run card is inline in the transcript).
+  function renderPreview(
+    element: ReactNode,
+    preset: "full" | "balanced" | "quiet" = "full",
+  ) {
+    return render(<ChatDisplayTestProvider preset={preset}>{element}</ChatDisplayTestProvider>);
+  }
+
   beforeEach(() => {
     window.localStorage.removeItem(AGENT_PREVIEW_COLLAPSED_STORAGE_KEY);
   });
@@ -35,7 +47,7 @@ describe("AgentPreview", () => {
   it("calls onOpenDetail with the run id when a run name is clicked", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [runningRun], loaded: true });
     const onOpenDetail = vi.fn();
-    render(<AgentPreview onOpenDetail={onOpenDetail} />);
+    renderPreview(<AgentPreview onOpenDetail={onOpenDetail} />);
 
     fireEvent.click(screen.getByText("code-reviewer"));
 
@@ -47,7 +59,7 @@ describe("AgentPreview", () => {
       runs: [{ ...runningRun, messages: [{ role: "assistant", content: "agent thinking out loud" }] }],
       loaded: true,
     });
-    const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);
+    const { container } = renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
 
     // the rail shows the summary row but not the transcript by default
     expect(screen.getByText("code-reviewer")).toBeInTheDocument();
@@ -63,7 +75,7 @@ describe("AgentPreview", () => {
       runs: [{ ...runningRun, messages: [{ role: "assistant", content: "agent thinking out loud" }] }],
       loaded: true,
     });
-    render(<AgentPreview onOpenDetail={vi.fn()} />);
+    renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
     // Token-exact: the substring "shrink" also matches "shrink-0", so a
     // `toContain("shrink")` check alone cannot fail when the regression is
     // restored. Split on whitespace and assert membership instead.
@@ -94,14 +106,14 @@ describe("AgentPreview", () => {
 
   it("renders nothing when there are no runs", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
-    const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);
+    const { container } = renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
 
     expect(container).toBeEmptyDOMElement();
   });
 
   it("collapses to just the header when the header toggle is clicked", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [runningRun], loaded: true });
-    render(<AgentPreview onOpenDetail={vi.fn()} />);
+    renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
 
     expect(screen.getByText("code-reviewer")).toBeInTheDocument();
 
@@ -117,7 +129,7 @@ describe("AgentPreview", () => {
   it("starts collapsed when the stored preference says so", () => {
     window.localStorage.setItem(AGENT_PREVIEW_COLLAPSED_STORAGE_KEY, "true");
     mockUseAgentRuns.mockReturnValue({ runs: [runningRun], loaded: true });
-    render(<AgentPreview onOpenDetail={vi.fn()} />);
+    renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
 
     expect(screen.queryByText("code-reviewer")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Expand agents" })).toHaveAttribute("aria-expanded", "false");
@@ -126,11 +138,35 @@ describe("AgentPreview", () => {
   it("re-expands from the collapsed header and persists the choice", () => {
     window.localStorage.setItem(AGENT_PREVIEW_COLLAPSED_STORAGE_KEY, "true");
     mockUseAgentRuns.mockReturnValue({ runs: [runningRun], loaded: true });
-    render(<AgentPreview onOpenDetail={vi.fn()} />);
+    renderPreview(<AgentPreview onOpenDetail={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Expand agents" }));
 
     expect(screen.getByText("code-reviewer")).toBeInTheDocument();
     expect(window.localStorage.getItem(AGENT_PREVIEW_COLLAPSED_STORAGE_KEY)).toBe("false");
+  });
+
+  it("renders run messages through the chat transcript components and its display setting", () => {
+    const toolRun: AgentRun = {
+      ...runningRun,
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "bash", arguments: '{"command":"echo hi"}' }],
+        },
+        { role: "tool", toolCallId: "call-1", content: "alpha output" },
+      ],
+    };
+    mockUseAgentRuns.mockReturnValue({ runs: [toolRun], loaded: true });
+
+    // Quiet collapses tool output, so the run card shows the result gate only.
+    renderPreview(<AgentPreview onOpenDetail={vi.fn()} />, "quiet");
+    fireEvent.click(screen.getByText("running"));
+
+    const gate = screen.getByRole("button", { name: /show output/i });
+    expect(screen.queryByText("alpha output")).toBeNull();
+    fireEvent.click(gate);
+    expect(screen.getByText("alpha output")).toBeInTheDocument();
   });
 });

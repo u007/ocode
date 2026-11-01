@@ -7,11 +7,11 @@ tags:
   - web
   - tui
   - cron
-timestamp: 2026-10-17T08:53:20Z
+timestamp: 2026-11-01T03:53:49Z
 ---
 # Web/Desktop UI Parity — Current Status
 
-Last updated: 2026-10-14. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
+Last updated: 2026-11-01. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
 `web/` React app, so "web" and "desktop" are the same UI surface — gaps
 below apply to both.
 
@@ -80,6 +80,7 @@ below apply to both.
 ### 7. Other achieved items
 
 - **Terminal tabs:** WebSocket + ghostty-web (libghostty-vt; `docs/concepts/web-terminal-ghostty-web.md`) (`web/src/components/Terminal/`); shells survive reload via detach/reattach (`docs/architecture/terminal-detach-reattach.md`). Tab name follows the program's OSC 0/2 window title (claude code, ocode TUI) unless the user renamed the tab (`terminalDisplayTitle` in `terminalStore.tsx`).
+- **Permission slash commands (`/allow`):** the web/desktop SPA gained `/allow [list|add|remove]` beside `/permissions` and `/ban` (`handleAllow` in `web/src/components/Chat/commands.ts`, mirroring the TUI's `runAllowCmd`). All three reuse the existing endpoints (`GET /api/permissions`, `POST /api/permissions/bash-rule`, `PUT /api/permissions/bash-rules`) — no new endpoint or rule logic; the server validates with `agent.ValidateBashPrefixRule` (a bare `git` allow is refused) and persists via `config.SaveSingleBashPrefixRule`. `/allow add|remove` joins the remaining words into one prefix ("git push") while `/ban add` splits per word; both lowercase the prefix. `/allow` and `/ban` now pass the active session's `host` to `api.setBashRule`/`api.setBashRules`, fixing remote SSH/WSL sessions that previously wrote the local config (`docs/gotchas/remote-session-config-host-routing.md`). Tests: `web/src/components/Chat/commands.allow.test.tsx` (12 cases) plus host-threading/arity cases in `commands.ban.test.tsx`.
 - **Settings:** 20-section overlay (`web/src/components/Settings/`).
 - **Git panel:** `GitPanel` (`web/src/components/Git/`).
 - **Logs panel:** `LogPanel` + `LogsForm` (`web/src/components/Logs/`).

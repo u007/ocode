@@ -24,6 +24,9 @@ const (
 	// slotPulseActivation gates whether a Pulse stop indicator wakes the Pulse
 	// assistant (JudgePulseActivation).
 	slotPulseActivation judgeSlot = "pulse_activation"
+	// slotBrowserRun is the decision judge for the browser_run tool's step loop
+	// (config key browser_run.judge_model).
+	slotBrowserRun judgeSlot = "browser_run"
 )
 
 // defaultJudgeModel is what every slot resolves to when nothing is configured.
@@ -96,6 +99,8 @@ func (a *Agent) slotModel(slot judgeSlot) string {
 		v = oc.ContentGuard.JudgeModel
 	case slotGoal:
 		v = oc.Goal.JudgeModel
+	case slotBrowserRun:
+		v = oc.BrowserRun.JudgeModel
 	case slotPulseActivation:
 		v = oc.PulseActivationModel
 	}

@@ -77,9 +77,10 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   compaction, small-model or interpreter-effects paths. `*TypesafeClient`
   satisfies it unchanged; `isDecisionModel` is the single place that decides
   which ids route to a decision backend. `resolveDecider(slot)` resolves one of
-  nine `judgeSlot`s (permission, auto_continue, discovery, doc_search,
-  code_search, network_guard, content_guard, goal, pulse_activation); all currently default to
-  `typesafe/jev-latest`. Judges label their requests with `deciderLabel(client)`
+  ten `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  code_search, network_guard, content_guard, goal, pulse_activation,
+  browser_run); all currently default to `typesafe/jev-latest`. Judges label
+  their requests with `deciderLabel(client)`
   — provider-qualified, never a hardcoded prefix — so the usage ledger does not
   book one backend's tokens to another.
   **Never** widen `Decider` with a `Chat` method, and never cache a nil decision
@@ -414,6 +415,23 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
   `internal/tui/model.go:21833`), so the TUI's carry-forward copy cannot overwrite it.
+
+## browser_run step loop (`browser_run`)
+`browser_run` (`internal/agent/browser_run.go`) lets Jev pick each click of a browser task.
+Statuses, floors and the permission story: `docs/concepts/browser-run-jev-step-loop.md`. Invariants:
+
+- **Sub-steps go through `handleToolCallWithContext`, never a direct `ExecuteCtx`.** That path
+  carries the refusal, the permission ask, the judge and the content guard. A direct call skips all four.
+- **The loop never calls a chat model, `navigate` or `open`.** Its only model is the
+  `browser_run` decision slot, and Jev acts only on controls the page offers.
+- **A mutation is never retried.** A stale ref or a failed read costs a step or a read retry;
+  a click, fill, check or key is sent once.
+- **`slotBrowserRun` has its own floors**: operation confidence 0.55; target and value chosen-option probability 0.60; done noul 0.85.
+  Never reuse the permission floor, and never fall back to another backend.
+- **`data` values never enter a Jev request.** Only key names do. An over-budget state stops the run
+  as `page_too_dense` rather than being sent.
+- **The loop never passes the `PERMISSION_ASK` sentinel through.** Main-agent asks use a per-call
+  asker; with no blocking asker the run stops as `needs_approval`.
 
 ## Task Output Contracts (`expected_output`)
 An optional `expected_output` on a `task` dispatch is verified (shape, not truth)
@@ -752,6 +770,15 @@ touches tools or the base prompt:
   `docs/concepts/discovery-typesafe-judge.md`,
   `docs/concepts/discovery-mcp-tool-gating.md`,
   `docs/concepts/doc-search-relevance-judge.md`.
+  Two deliberate widenings, both still grow-only: **MCP tools attach per server**
+  (`expandMCPServerGroups`: one judged-in tool of a server seeds its siblings, except a
+  sibling the judge vetoed in that same pass, `judgeVetoedIDs`), and **pinned MCP servers**
+  (`Agent.SetPinnedMCPServers`, from the session-metadata key `pinned_mcp_servers` that
+  `POST /api/chat` accepts only on the creating request) are seeded by `SyncPinnedSkills`
+  on every `runDiscovery`, never ranked or judged. The server name comes from
+  `tool.MCPServerTool` (set in `addMCPTools`); a restored name set has none and expands to
+  itself. The auto-permission judge state for an MCP call carries `tool_description` and
+  `tool_risk` (the server's optional per-tool `risk` from `tools/list`, `tool.RiskHintTool`).
 - **Role determines caching, not array position.** `collectAndRemoveSystemMessages`
   hoists EVERY `system`-role message (tail ones too) into the cached `system` field, so a
   tail `system` injection that varies per turn busts the whole system cache. Volatile tail

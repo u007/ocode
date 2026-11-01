@@ -115,7 +115,7 @@ var DefaultSubAgents = []SubAgentSpec{
 		Name:         "scout",
 		Description:  "External docs, dependency research",
 		SystemPrompt: scoutSubAgentPrompt,
-		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "rgrep", "list", "read", "webfetch", "websearch", "browser", "skill", "load_skill"},
+		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "rgrep", "list", "read", "webfetch", "websearch", "browser", "browser_run", "skill", "load_skill"},
 	},
 	{
 		Name:         "context",

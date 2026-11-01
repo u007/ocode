@@ -1987,7 +1987,7 @@ func NewPermissionManager() *PermissionManager {
 		defaultRules[name] = PermissionAllow
 	}
 	pm.rules.set(defaultRules)
-	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
+	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen", "browser_run"} {
 		pm.SetRule(name, PermissionAllow)
 	}
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "browser", "sqlite_exec"} {
@@ -5708,6 +5708,7 @@ func bashCommand(args json.RawMessage) string {
 var browserObserveActions = map[string]bool{
 	"tabs": true, "screenshot": true, "text": true, "scroll": true,
 	"snapshot": true, "find": true, "wait": true, "console": true, "network": true,
+	"controls": true,
 }
 
 // browserURLRefusal denies a browser navigate or open whose URL is refused
@@ -5735,6 +5736,16 @@ func (pm *PermissionManager) browserURLRefusal(args json.RawMessage) (Permission
 	return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: reason}, true
 }
 
+// browserRunStep is the browser_run step a browser call belongs to. The dialog
+// shows it, so the user can see which step of the loop is asking. Goal is the
+// run's goal and Label is the page's text for the element, so both are clipped.
+type browserRunStep struct {
+	Goal  string `json:"goal"`
+	N     int    `json:"n"`
+	Of    int    `json:"of"`
+	Label string `json:"label"`
+}
+
 // browserAction builds a one-line summary of a browser tool call for the
 // permission dialog, e.g. "navigate https://example.com" or "click at 412,300".
 func browserAction(pm *PermissionManager, args json.RawMessage) string {
@@ -5750,6 +5761,8 @@ func browserAction(pm *PermissionManager, args json.RawMessage) string {
 		Target string   `json:"target"`
 		Fields []any    `json:"fields"`
 		Files  []string `json:"files"`
+
+		RunStep *browserRunStep `json:"run_step"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		pm.emitDebug("perm", fmt.Sprintf("browserAction: arguments unparseable, summary is the bare tool name (tool=browser): %v", err))
@@ -5804,6 +5817,13 @@ func browserAction(pm *PermissionManager, args json.RawMessage) string {
 	}
 	if summary == "" {
 		return "browser"
+	}
+	// Typed text is never shown. The step's label is element text and is quoted.
+	if step := params.RunStep; step != nil {
+		summary = fmt.Sprintf("browser_run step %d/%d (%s): %s", step.N, step.Of, clipLabel(step.Goal, 80), summary)
+		if step.Label != "" {
+			summary += " " + fmt.Sprintf("%q", clipLabel(step.Label, 60))
+		}
 	}
 	return summary
 }

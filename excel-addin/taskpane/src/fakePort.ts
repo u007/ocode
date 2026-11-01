@@ -2,7 +2,7 @@
 // (numbers, cell refs, + - * /, parentheses, SUM, COUNT) and the same observable behaviour the tools rely on.
 import { MAX_COL, MAX_ROW, Rect, cellAddress, clampTo, colToLetters, intersects, lettersToCol, parseAddress, shiftFormula } from "./a1";
 import type {
-  CellValue, ChartInfo, ChartSpec, ExcelPort, FormatSpec, NameInfo, PivotInfo, PivotSpec, RangeData, SheetInfo, TableInfo, ValueType,
+  CellValue, ChartInfo, ChartSpec, ExcelPort, FormatSpec, NameInfo, PivotInfo, PivotSpec, RangeData, SheetInfo, TableInfo, ValueType, WorkbookInfo,
 } from "./port";
 import { chartFootprint } from "./tools/chartpivot";
 
@@ -20,6 +20,13 @@ export class FakePort implements ExcelPort {
   charts: ChartInfo[] = [];
   pivots: PivotInfo[] = [];
   settings = new Map<string, string>();
+  /** The auto-open setting. A boolean here, not the string map: the real setting is a boolean too. */
+  autoOpenOn = false;
+  /** What workbookInfo() reports. `sheets` is always the real sheet count, so it is not stored here. */
+  info: Omit<WorkbookInfo, "sheets"> = {
+    fileName: "Book1.xlsx", path: "/fake/Book1.xlsx", host: "Excel", platform: "Fake",
+    state: "saved", blank: false, readOnly: false, protectedView: false,
+  };
   formats: { sheet: string; address: string; spec: FormatSpec }[] = [];
   calcs = 0;
   /** Operations performed, in order, for assertions about what a tool did NOT do. */
@@ -58,6 +65,7 @@ export class FakePort implements ExcelPort {
       return { name, visibility: this.hidden.has(name) ? "Hidden" : "Visible", usedAddress: u ? `${cellAddress(u.c1, u.r1)}:${cellAddress(u.c2, u.r2)}` : null };
     });
   }
+  async workbookInfo(): Promise<WorkbookInfo> { return { ...this.info, sheets: this.sheets.size }; }
   async activeSheet() { return this.active; }
   async selection() { return this.sel ?? { sheet: this.active, address: "A1" }; }
   /** Like Excel: the sheet becomes active and the range becomes the selection. Cells are untouched. */
@@ -254,7 +262,13 @@ export class FakePort implements ExcelPort {
   async calculate() { this.calcs++; }
   async getSetting(k: string) { return this.settings.get(k) ?? null; }
   async setSetting(k: string, v: string) { this.settings.set(k, v); }
+  async autoOpen() { return this.autoOpenOn; }
+  async setAutoOpen(on: boolean) { this.autoOpenOn = on; this.log.push(`auto-open ${on ? "on" : "off"}`); }
 
+  /** Test helper: change some of what workbookInfo() reports, e.g. `setInfo({ readOnly: true })`. */
+  setInfo(patch: Partial<Omit<WorkbookInfo, "sheets">>) {
+    this.info = { ...this.info, ...patch };
+  }
   /** Test helper: set a raw cell (value or "=formula"). */
   set(sheet: string, address: string, v: CellValue) {
     const r = parseAddress(address)!;

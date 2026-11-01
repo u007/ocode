@@ -1,6 +1,7 @@
 package cdp
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,53 +22,70 @@ const maxRefs = 2000
 // survives scrolling, and resolveRef reports when the node is gone. The zero
 // value is ready to use.
 //
-// The table is bounded at maxRefs live refs. Minting a new node at the cap
-// clears the table first, which invalidates every ref held so far; that is safe
-// because a stale ref already errors and the caller re-runs snapshot or find.
-// The counter never resets, so a ref string is never reused.
+// The table is bounded at maxRefs live refs and evicts LEAST-RECENTLY-USED
+// entries one at a time, so a page that re-renders its nodes on every read does
+// not invalidate the refs the caller is still working with. Minting or looking
+// up a ref marks it recent. The counter never resets, so a ref string is never
+// reused. An evicted ref is unknown, which already errors and makes the caller
+// re-run snapshot, find or controls.
 type RefTable struct {
 	mu     sync.Mutex
 	next   int
-	byRef  map[string]int64
-	byNode map[int64]string
+	refs   map[string]*refEntry
+	byNode map[int64]*refEntry
+	order  *list.List // front is the most recently used entry
+}
+
+// refEntry is one live ref. elem is its node in RefTable.order.
+type refEntry struct {
+	ref  string
+	node int64
+	elem *list.Element
 }
 
 // Mint returns the ref for backendNodeID, minting a new one only the first
-// time that node is seen, so repeated snapshots and finds stay stable. At
-// maxRefs live refs a new node clears the table first; see the type comment.
+// time that node is seen, so repeated snapshots and finds stay stable. At the
+// cap the least-recently-used ref is evicted first; see the type comment.
 func (r *RefTable) Mint(backendNodeID int64) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ref, ok := r.byNode[backendNodeID]; ok {
-		return ref
+	if e, ok := r.byNode[backendNodeID]; ok {
+		r.order.MoveToFront(e.elem)
+		return e.ref
 	}
-	if r.byRef == nil {
-		r.byRef = make(map[string]int64)
-		r.byNode = make(map[int64]string)
+	if r.refs == nil {
+		r.refs = make(map[string]*refEntry)
+		r.byNode = make(map[int64]*refEntry)
+		r.order = list.New()
 	}
-	if len(r.byRef) >= maxRefs {
-		// Start a fresh generation. next is deliberately not reset, so the ref
-		// strings minted after this clear are all new.
-		r.byRef = make(map[string]int64)
-		r.byNode = make(map[int64]string)
+	if r.order.Len() >= maxRefs {
+		if back := r.order.Back(); back != nil {
+			old := back.Value.(*refEntry)
+			r.order.Remove(back)
+			delete(r.refs, old.ref)
+			delete(r.byNode, old.node)
+		}
 	}
 	r.next++
-	ref := "@e" + strconv.Itoa(r.next)
-	r.byRef[ref] = backendNodeID
-	r.byNode[backendNodeID] = ref
-	return ref
+	e := &refEntry{ref: "@e" + strconv.Itoa(r.next), node: backendNodeID}
+	e.elem = r.order.PushFront(e)
+	r.refs[e.ref] = e
+	r.byNode[backendNodeID] = e
+	return e.ref
 }
 
-// Lookup returns the backendNodeId behind ref. An unknown ref is an error; the
-// caller must mint refs by snapshot or find before acting on them.
+// Lookup returns the backendNodeId behind ref, marking it recently used. An
+// unknown ref is an error; the caller must mint refs by snapshot or find before
+// acting on them.
 func (r *RefTable) Lookup(ref string) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id, ok := r.byRef[ref]
+	e, ok := r.refs[ref]
 	if !ok {
 		return 0, fmt.Errorf("unknown ref %q: mint refs with snapshot or find first", ref)
 	}
-	return id, nil
+	r.order.MoveToFront(e.elem)
+	return e.node, nil
 }
 
 // cdpNoNodeMessage is the CDP error for a backendNodeId the browser no longer

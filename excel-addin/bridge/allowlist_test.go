@@ -72,6 +72,7 @@ func TestAPIAllowlistForwardsEveryPaneRouteWithOcodeToken(t *testing.T) {
 		{"GET", "/api/sessions/ses_abc-1.2_X"},
 		{"GET", "/api/sessions/ses_abc/state"},
 		{"GET", "/api/sessions/ses_abc/recap"},
+		{"GET", "/api/sessions/ses_abc/context"},
 		{"POST", "/api/sessions/ses_abc/message"},
 		{"POST", "/api/sessions/ses_abc/cancel"},
 		{"POST", "/api/sessions/ses_abc/retry"},
@@ -81,11 +82,13 @@ func TestAPIAllowlistForwardsEveryPaneRouteWithOcodeToken(t *testing.T) {
 		{"POST", "/api/sessions/ses_abc/rewinds"},
 		{"GET", "/api/sessions/ses_abc/user-messages"},
 		{"POST", "/api/permissions/resolve"},
+		{"PUT", "/api/permissions/mode"},
 		{"POST", "/api/questions"},
 		{"GET", "/api/models"},
 		{"POST", "/api/projects"},
 	}
-	// /api/chat and /api/projects carry a body that must name a folder inside the workspace root.
+	// /api/chat and /api/projects carry a body that must name a folder inside the workspace root; the mode route
+	// carries a mode and a session id (allowlist_body_test.go).
 	wsRoot, err := defaultWorkspaceRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +101,8 @@ func TestAPIAllowlistForwardsEveryPaneRouteWithOcodeToken(t *testing.T) {
 			resp = doAPI(t, s.URL, rt.method, rt.path, `{"content":"x","project_path":"`+ws+`","permission_mode":"normal"}`)
 		case "/api/projects":
 			resp = doAPI(t, s.URL, rt.method, rt.path, `{"path":"`+ws+`"}`)
+		case "/api/permissions/mode":
+			resp = doAPI(t, s.URL, rt.method, rt.path, `{"mode":"normal","session_id":"ses_abc"}`)
 		default:
 			resp = doAPI(t, s.URL, rt.method, rt.path)
 		}
@@ -125,7 +130,8 @@ func TestAPIAllowlistRefusesEverythingElseWithoutForwarding(t *testing.T) {
 		{"GET", "/api/terminal"},
 		{"POST", "/api/terminal"},
 		{"PUT", "/api/permissions/yolo"},
-		{"PUT", "/api/permissions/mode"},
+		{"PUT", "/api/permissions/mode"}, // no body: constrainBody refuses it (see allowlist_body_test.go)
+		{"GET", "/api/permissions/mode"}, // wrong method on an allowed path
 		{"POST", "/api/permissions/bash-rule"},
 		{"GET", "/api/files/content"},
 		{"POST", "/api/git/commit"},
@@ -135,9 +141,17 @@ func TestAPIAllowlistRefusesEverythingElseWithoutForwarding(t *testing.T) {
 		{"GET", "/api/sessions/x/terminal"},
 		{"POST", "/api/shell"},
 		{"GET", "/api/chat"},                          // wrong method on an allowed path
+		{"POST", "/api/sessions/x/context"},           // wrong method on an allowed path
+		{"GET", "/api/auth/connect"},                  // masked key tails: only /bridge/connected-providers reads it
+		{"PUT", "/api/auth/connect/openai"},           // writes a provider credential
 		{"GET", "/api/permissions/resolve"},           // wrong method
 		{"DELETE", "/api/sessions/x/state"},           // wrong method
 		{"GET", "/api/sessions/x/title"},              // wrong method
+		{"GET", "/api/sessions/ses_abc/status"},       // raw status route: not proxied, the pane reads the mode via /bridge/session-mode/{id}
+		{"GET", "/api/sessions/x/status"},             // raw status route, any id
+		{"POST", "/api/sessions/x/status"},            // wrong method on the status route
+		{"PUT", "/api/sessions/x/status"},             // wrong method on the status route
+		{"GET", "/api/sessions/x/status/extra"},       // extra segment after status
 		{"POST", "/api/sessions"},                     // wrong method
 		{"GET", "/api/sessions/x/state/extra"},        // extra segment
 		{"GET", "/api/sessions/a.b/c/state"},          // id cannot contain a slash

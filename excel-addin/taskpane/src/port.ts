@@ -26,6 +26,25 @@ export interface NameInfo { name: string; refersTo: string }
 export interface ChartInfo { name: string; sheet: string; type: string; title: string; dataAddress: string; anchor: string }
 export interface PivotInfo { name: string; sheet: string; address: string }
 
+/**
+ * The state of the open workbook, reported to the bridge. A field the host cannot confirm is null (or "unknown"),
+ * never a guess.
+ */
+export interface WorkbookInfo {
+  fileName: string;
+  /** Where the file is, as the host reports it. "" when the workbook was never saved. */
+  path: string;
+  host: string;
+  platform: string;
+  /** "new": never saved. "modified": unsaved changes. "saved": none. "unknown": the host cannot say. */
+  state: "new" | "saved" | "modified" | "unknown";
+  /** True when no worksheet has any values. */
+  blank: boolean | null;
+  readOnly: boolean | null;
+  protectedView: boolean | null;
+  sheets: number;
+}
+
 export interface FormatSpec {
   bold?: boolean;
   fill?: string;
@@ -67,6 +86,7 @@ export interface PivotSpec {
 
 export interface ExcelPort {
   listSheets(): Promise<SheetInfo[]>;
+  workbookInfo(): Promise<WorkbookInfo>;
   activeSheet(): Promise<string>;
   selection(): Promise<{ sheet: string; address: string }>;
   /** Activate `sheet` and select `address` so the user sees it. Changes no value, format or cell. */
@@ -97,4 +117,8 @@ export interface ExcelPort {
   calculate(): Promise<void>;
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
+  /** True when this workbook opens the task pane by itself (the document setting Office.AutoShowTaskpaneWithDocument is true). */
+  autoOpen(): Promise<boolean>;
+  /** Turns auto-open on or off for this workbook and saves the workbook file. Only ever called from an explicit user action. */
+  setAutoOpen(on: boolean): Promise<void>;
 }

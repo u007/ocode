@@ -689,7 +689,9 @@ export interface SSESessionEvent {
 export interface AgentRunMessage {
   role: string;
   content: string;
-  toolCalls?: { name: string; arguments: string }[];
+  /** `id` matches the role-"tool" message's `toolCallId`, so the agent card can
+   *  render a call together with its result like the chat transcript does. */
+  toolCalls?: { id?: string; name: string; arguments: string }[];
   toolCallId?: string;
   reasoningContent?: string;
 }

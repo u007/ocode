@@ -1156,6 +1156,36 @@ func readTodoUpdatedEvent(projectRoot, sessionID string) (TodoUpdatedEvent, bool
 	}, true, nil
 }
 
+// validatePinnedMCPServers rejects pinned MCP server names that cannot be
+// honoured: an empty name, a duplicate, or a name not configured under the MCP
+// map. It runs before a session is created so a rejected request leaves no
+// session behind.
+func (h *Handler) validatePinnedMCPServers(names []string) (int, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	h.mu.Lock()
+	cfg := h.cfg
+	h.mu.Unlock()
+	if cfg == nil {
+		return http.StatusInternalServerError, fmt.Errorf("config not loaded")
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" {
+			return http.StatusBadRequest, fmt.Errorf("pinned MCP server name is empty")
+		}
+		if seen[name] {
+			return http.StatusBadRequest, fmt.Errorf("pinned MCP server %q is listed more than once", name)
+		}
+		seen[name] = true
+		if _, ok := cfg.MCP[name]; !ok {
+			return http.StatusBadRequest, fmt.Errorf("pinned MCP server %q is not configured", name)
+		}
+	}
+	return 0, nil
+}
+
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var req ChatRequest
 	if err := readBodyJSON(r, &req); err != nil {
@@ -1273,6 +1303,10 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
 		}
+		if status, err := h.validatePinnedMCPServers(req.PinnedMCPServers); err != nil {
+			writeError(w, status, err.Error())
+			return
+		}
 		sid = session.NewSessionID()
 		createdSession = true
 		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
@@ -1294,6 +1328,9 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			if mode, ok := normalizePermissionMode(req.PermissionMode); ok {
 				meta[permissionModeMetadataKey] = string(mode)
 			}
+		}
+		if len(req.PinnedMCPServers) > 0 {
+			meta[pinnedMCPServersMetadataKey] = req.PinnedMCPServers
 		}
 		if err := h.saveSession(sid, "", nil, meta); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

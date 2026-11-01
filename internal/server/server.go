@@ -3315,6 +3315,10 @@ type ChatRequest struct {
 	// session: the web has no session id to PUT the override to yet. Ignored
 	// for an existing session (use PUT /api/permissions/mode with its id).
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// PinnedMCPServers names MCP servers whose tools stay attached for this
+	// session, so discovery never gates them. Honoured only on the request that
+	// creates the session; ignored for an existing session.
+	PinnedMCPServers []string `json:"pinned_mcp_servers,omitempty"`
 	// Async, when set, makes the endpoint acknowledge with 202 as soon as the
 	// turn is dispatched instead of holding the HTTP connection open until the
 	// agent finishes. The web UI sets it: a browser allows only six concurrent

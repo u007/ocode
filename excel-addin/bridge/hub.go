@@ -59,6 +59,11 @@ type pane struct {
 	// eviction) and is then closed, so the handler can tell the pane why its stream ends.
 	done chan string
 	once sync.Once
+	// connectedAt is when Attach registered the pane. info is what the pane last posted to /bridge/pane-info (nil
+	// until the first post) and lastSeen is when. All three are guarded by Hub.mu; info is replaced, never mutated.
+	connectedAt time.Time
+	info        *PaneInfo
+	lastSeen    time.Time
 }
 
 // finish ends the pane exactly once. A non-empty reason is delivered on done before it closes.
@@ -112,7 +117,7 @@ func NewHub() *Hub {
 // fail with ErrPaneGone. The returned done channel delivers the eviction reason, if any, and then
 // closes.
 func (h *Hub) Attach(workbook, instance string) (events <-chan Event, done <-chan string, detach func()) {
-	p := &pane{workbook: workbook, instance: instance, events: make(chan Event, 32), gone: make(chan struct{}), done: make(chan string, 1)}
+	p := &pane{workbook: workbook, instance: instance, events: make(chan Event, 32), gone: make(chan struct{}), done: make(chan string, 1), connectedAt: time.Now()}
 	h.mu.Lock()
 	old := h.panes[workbook]
 	h.panes[workbook] = p
@@ -151,6 +156,39 @@ func (h *Hub) failPane(p *pane) {
 	for _, c := range gone {
 		c.ch <- Result{OK: false, Error: ErrPaneGone.Error()} // buffered 1
 	}
+}
+
+// paneRecord is one connected pane as the workbook listing reads it. info is nil until the pane first posts.
+type paneRecord struct {
+	workbook    string
+	connectedAt time.Time
+	lastSeen    time.Time
+	info        *PaneInfo
+}
+
+// SetPaneInfo stores what a pane reported and when. It reports false when no pane is connected for the
+// workbook, so a late post never creates a record.
+func (h *Hub) SetPaneInfo(workbook string, info *PaneInfo, at time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p, ok := h.panes[workbook]
+	if !ok {
+		return false
+	}
+	p.info = info
+	p.lastSeen = at
+	return true
+}
+
+// Panes snapshots every connected pane, in no particular order.
+func (h *Hub) Panes() []paneRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]paneRecord, 0, len(h.panes))
+	for _, p := range h.panes {
+		out = append(out, paneRecord{workbook: p.workbook, connectedAt: p.connectedAt, lastSeen: p.lastSeen, info: p.info})
+	}
+	return out
 }
 
 // Workbooks lists connected workbook ids, sorted.

@@ -6714,3 +6714,58 @@ Same session: the user had granted extra dirs, yet every aimsai2 `cd` still aske
 - **Remote browse CDP is still unreachable.** `handleRemoteBrowseCDP` (`internal/server/handler_remote_browse.go`) is wired and its `?host=` rewrite is covered by `TestPrepareRemoteCDPRequestStripsHostAndSetsPath`, but `handleRemoteBrowseConfig` never returns `stream_via_main` and `BrowserPanel.effectiveMode` returns `local` for a remote-mode host before consulting the flag. Wiring it needs a decision first: does a remote project's Chrome run on the host (then the socket is proxied) or here (then it cannot see the host's pages)?
 - **`detached` / Take over and `stream_via_main` need one live check.** Unit + route tests cover the wire format (`TestCDP_SecondSocketDetachesFirst`, `useCdpSocket.test.tsx`), but no real two-client run has been done: open the same shared browser tab on a second window/device and confirm the first shows Take over, and that a phone with no reachable browse origin streams through the main origin.
 - **Serve-registry identity is lock-based, not nonce-based.** `serve-<pid>.json` is advisory-locked (`flock` / `LockFileEx`) and a scan trusts a record only when the lock is held. An unlocked record whose pid is alive is a pre-lock build: it is reported WITHOUT a stop command and left on disk. If a future schema change needs stronger identity (e.g. verify the version over HTTP), that is the follow-up.
+
+## Excel add-in: YOLO from the pane is not server-verified (2026-11-01)
+- The user chose to allow `yolo` from the pane (chat start and `PUT /api/permissions/mode`), confirmed only by a UI dialog. The bridge does not verify the confirm, and `session_id` is not limited to sessions the bridge created. Harden: record session ids returned by `POST /api/chat` per workbook and refuse the mode route for any other id; optionally require a short-lived bridge-issued nonce for yolo. Security review finding, accepted for now.
+
+## Excel add-in: pane cannot read a session's permission mode (2026-11-01)
+- `GET /api/sessions/{id}/state` and the session payload do not carry `permission_mode`, so the pane's picker assumes `normal` when a session opens and shows Ask or Auto from the server-wide auto-permission switch. A session left in YOLO shows as Ask until the user picks again. `GET /api/sessions/{id}/status` does return `permission_mode` (`TUIStatus`), but that route is not on the bridge allowlist. Decision needed: allow it (read-only, but check what else it returns) or leave the picker as is. (done 2026-11-01)
+- The pane's connected-provider list is read once at pane start (`GET /bridge/connected-providers`). A provider connected in ocode while the pane is open needs a pane reload.
+
+## Excel add-in: open items from the 2026-11-01 advisor review
+- Run the xlsx probe tasks (docs/okf/xlsx/probe, 13 office-clerk tasks) with deepseek THROUGH the add-in and score them with the Excel checker; record results in a dated section of excel-addin/RESUME.md. Not started: blocked on one real Excel session of the pane (RESUME.md section 5).
+- `manifest.test.ts` overwrites the real `manifest/manifest.xml` with a test key. Give `scripts/gen-manifest.mjs` an `--out` option and have the test write to a temp dir (this broke the user's pane once).
+- Security combination to harden: `send_workbook_chat` + YOLO from the pane + server-wide Auto let any ocode agent with the `excel` MCP drive a YOLO workbook session. Fix with the session-id tracking item above; consider refusing `send_workbook_chat` into a YOLO session.
+- Undo coverage: `format_range`, `create_table`, `create_chart`, `create_pivot` are not recorded for undo; add a coverage test over `risk !== "read"` tools in tools.json.
+
+## Excel add-in: pinned MCP servers (agreed with the ocode-core session, 2026-11-01)
+- When ocode core lands `pinned_mcp_servers` on `POST /api/chat` (JSON array of MCP server names, honoured at session creation only): add the key to `constrainBody` in `excel-addin/bridge/allowlist.go` (array of strings, only `["excel"]` accepted, case-fold key check applies), send `["excel"]` from `OcodeClient.startChat` and from `send_workbook_chat`, with tests. Core will message when it lands. (done 2026-11-01)
+- Update `docs/plans/2026-10-30-excel-addin-sidepane.md` (header still says NOT STARTED).
+
+## Excel add-in: sessions index follow-ups (2026-11-01)
+- `apiSessionIDRe` (allows dots, no length cap) vs `sessionIDPattern` (no dots, max 128) in bridge/localtools.go disagree: a dotted id can be registered by `POST /bridge/sessions/{wb}` but is then refused by `read_workbook_chat`/`send_workbook_chat`. Unify.
+- The stored sessions index has no cap (the pane has none either); GET listing caps at 20.
+
+## browser_run v2 (Jev step loop, 2026-11-01)
+Out of scope for v1. Design: `docs/superpowers/specs/2026-11-01-browser-run-jev-step-loop-design.md`. Concept: `docs/concepts/browser-run-jev-step-loop.md`.
+- Relevance pre-filter (one noul per control) for pages with more than 160 controls. v1 keeps the first 160 in document order and reports `omitted`.
+- `pick`, `select`, `upload` and `type` operations, with option lists, and `frame` targeting.
+- Model-written field text (fastbrowse's field-text call). v1 types only caller-supplied `data`.
+- Verbatim-quote citations in the result.
+- Cross-tab operations and dialogs.
+- Content-guard ask gap: on the main agent, a content-guard ask on a sub-step result becomes `needs_approval`, not a blocking ask, because the guard reads `OnPermissionAsk` (`internal/agent/content_guard_typesafe.go:832`). Route the guard through the per-call asker that `browser_run` attaches.
+- Measurement on the kaizen webforms corpus: run with and without `browser_run`, and compare main-model input tokens per task, Jev calls, wall-clock time and checker pass rate. Re-tune the 0.55, 0.60, 0.85, 160 and 30 KB starting thresholds there.
+
+## browser_run / controls: open review findings (2026-11-01)
+
+From the `/review-changes` pass over the uncommitted browser_run + Excel add-in set. Fixed in that pass: `data` values reaching the judge, `settled`/`text_truncated` signalling, `_projection.fields`, the controls fingerprint text blind spot, `RefTable` all-or-nothing eviction, the content guard judging `browser_run`'s own notice, the pane's `decodeURIComponent` throw, and the fatal `max_tokens<=0` context read. Remaining, not yet done:
+
+- **`browser_run` stale-ref branch is untested** (`internal/agent/browser_run.go:353`). It holds the two rules that keep the loop bounded (the ref must still be listed; `r.acted++` charges a step). A regression dropping the increment loops forever with no failing test.
+- **The stall reset `unchanged = 0` is untested** (`internal/agent/browser_run.go:377`). No test alternates fingerprints, so deleting the line still passes.
+- **No argument/threshold tests**: `goal` required, `max_steps` bounds, the reserved `none` data key, the 0.85 `done` boundary (0.84 continues), and a rejected `done` answer not becoming a pick.
+- **`page_too_dense` is unreachable for a dense page** (`internal/agent/browser_run.go:690`): the trim loop empties `elements` first, so only a huge `goal` can still exceed the budget. `TestBrowserRunPageTooDenseSendsNothingToTheJudge` pins that wrong trigger. Either report it when `elements` had to be emptied, or add `maxLength` to `goal`.
+- **`contentGuardControlsBody` is a hand-maintained partial decode** of `browserControlsOutput` (`internal/agent/content_guard_typesafe.go:408`); a future page-authored field would be dropped from the judged view silently. Render generically or assert the key coverage.
+- **`run_step` is forgeable and its goal is unquoted** (`internal/agent/permissions.go:5823`): a direct `browser` call can claim "browser_run step N/M", and a goal containing a newline injects a line into the dialog summary. Ignore `run_step` unless the call id matches `_run<N>`, and collapse the goal's whitespace.
+- **`browser_run` has no content-guard eval case** (`internal/agent/testdata/contentguard_eval/cases.yaml`), and the scope table in `content_guard_typesafe_test.go` still omits it.
+- **Settle can cost the full 5 s on a ticking page** (`internal/browse/cdp/pagedom_read.go:39`): any mutation resets the quiet timer, so a clock, carousel or progress bar means every `controls` read waits the cap and returns `settled=false`, with no log.
+- **`addMCPTools` writes `a.mcpServers` without lazy init** (`internal/agent/agent.go:6898`); `markMCPFrom` nil-guards the same map. No live path today, but a literal-built agent panics.
+- **`SetPinnedMCPServers` accepts empty names** (`internal/agent/discovery_glue.go:238`); `markMCPFrom` does not propagate pinned servers to sub-agents (pinning is main-agent-only).
+- **`tier=human_ask` logs `callback=false`** for a call that blocked on the ctx asker (`internal/agent/agent.go:4207`).
+- **`controls` text slice is UTF-16** (`internal/browse/cdp/pagedom_controls.go:213`), so a cut between a surrogate pair yields U+FFFD.
+- **`controls` omits `slider` and `listbox`** (`internal/browse/cdp/pagedom_controls.go:59`), and a labelled `generic` wrapper does not push its name as `context`.
+- **The pane's Ask segment turns off server-wide auto-permission** (`excel-addin/taskpane/src/ui/App.tsx`) but only the Auto segment shows the "applies to ALL sessions" note.
+- **The pinned MCP server name is hardcoded `"excel"`** (`excel-addin/bridge/allowlist.go:150`); a differently-named MCP entry makes the pin a silent no-op.
+- **`send_workbook_chat` has a check-then-post race** (`excel-addin/bridge/localtools.go:389`): the mode can change to yolo between `requireNormalChat` and the POST.
+- **The bridge's `auth` is a no-op when `PaneKey` is empty** (`excel-addin/bridge/server.go:161`, pre-existing), now also guarding the server-wide auto-permission routes.
+- **The manifest `TaskpaneId` is now the global `Office.AutoShowTaskpaneWithDocument`**; side-loaded manifests must be regenerated (RESUME.md should say so).
+- **Bundle docs for this set are untracked** (`docs/concepts/browser-run-jev-step-loop.md`, the design spec, the plan directory). Committing the code without them leaves the invariants undocumented.

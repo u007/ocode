@@ -4,7 +4,7 @@
 // documentation, not on running in Excel; excel-addin/RESUME.md lists the checks to do on a desktop.
 import { parseAddress, shiftFormula } from "./a1";
 import type {
-  CellValue, ChartInfo, ChartKind, ChartSpec, ExcelPort, FormatSpec, NameInfo, PivotInfo, PivotSpec, RangeData, SheetInfo, TableInfo, ValueType,
+  CellValue, ChartInfo, ChartKind, ChartSpec, ExcelPort, FormatSpec, NameInfo, PivotInfo, PivotSpec, RangeData, SheetInfo, TableInfo, ValueType, WorkbookInfo,
 } from "./port";
 
 /** "Sheet 1!A1:B2" or "'Sheet 1'!A1" -> {sheet, address}. */
@@ -14,6 +14,25 @@ export function splitQualified(a: string): { sheet: string; address: string } {
   let sheet = a.slice(0, i);
   if (sheet.startsWith("'") && sheet.endsWith("'")) sheet = sheet.slice(1, -1).replace(/''/g, "'");
   return { sheet, address: a.slice(i + 1) };
+}
+
+/** Document setting Office reads to open the task pane when this workbook opens (see the manifest TaskpaneId). */
+const AUTO_OPEN_KEY = "Office.AutoShowTaskpaneWithDocument";
+
+/**
+ * The last path segment of a workbook path, percent-decoded when it is valid encoding. decodeURIComponent throws on a
+ * bare "%" (a file named "Report 100%.xlsx"), and that would fail the whole workbookInfo read, which the write guard
+ * depends on, so a failed decode falls back to the raw segment. Pure.
+ */
+export function fileNameOf(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  try {
+    return decodeURIComponent(base);
+  } catch {
+    // intentionally not logged: a filename that is not valid percent-encoding is a
+    // normal input, and this runs every 10 s; logging it would spam the pane.
+    return base;
+  }
 }
 
 /** A box in points, as Office.js reports Chart and Range positions. */
@@ -61,6 +80,51 @@ export class OfficePort implements ExcelPort {
         visibility: s.visibility as SheetInfo["visibility"],
         usedAddress: used[i].isNullObject ? null : splitQualified(used[i].address).address,
       }));
+    });
+  }
+
+  /**
+   * UNVERIFIED on a desktop: built from @types/office-js and Microsoft's docs, not run in Excel. Requirement sets
+   * gate each property: readOnly needs ExcelApi 1.8, isDirty needs 1.9; a property whose set is missing is reported
+   * as null (or "unknown"). Office.js has no documented Protected View property, so protectedView is always null.
+   */
+  async workbookInfo(): Promise<WorkbookInfo> {
+    const req = Office.context.requirements;
+    const hasReadOnly = req.isSetSupported("ExcelApi", "1.8");
+    const hasDirty = req.isSetSupported("ExcelApi", "1.9");
+    // "" when the workbook was never saved (Office.context.document.url is empty for an unsaved file).
+    const path = Office.context.document.url ?? "";
+    return Excel.run(async (ctx) => {
+      const wb = ctx.workbook;
+      const props = ["name"];
+      if (hasReadOnly) props.push("readOnly");
+      if (hasDirty) props.push("isDirty");
+      wb.load(props.join(","));
+      const sheets = wb.worksheets;
+      sheets.load("items/name");
+      await ctx.sync();
+      // Values only, like listSheets: a sheet with formatting but no values still counts as blank.
+      const used = sheets.items.map((s) => {
+        const u = s.getUsedRangeOrNullObject(true);
+        u.load("address");
+        return u;
+      });
+      await ctx.sync();
+      let state: WorkbookInfo["state"] = "unknown";
+      if (path === "") state = "new";
+      else if (hasDirty) state = wb.isDirty ? "modified" : "saved";
+      return {
+        fileName: path === "" ? wb.name : fileNameOf(path),
+        path,
+        host: String(Office.context.host ?? "unknown"),
+        platform: String(Office.context.platform ?? "unknown"),
+        state,
+        blank: used.every((u) => u.isNullObject),
+        readOnly: hasReadOnly ? wb.readOnly : null,
+        // UNVERIFIED: no documented task-pane property reports Protected View; null until one is confirmed.
+        protectedView: null,
+        sheets: sheets.items.length,
+      };
     });
   }
 
@@ -316,5 +380,24 @@ export class OfficePort implements ExcelPort {
   async setSetting(key: string, value: string): Promise<void> {
     Office.context.document.settings.set(key, value);
     await new Promise<void>((res, rej) => Office.context.document.settings.saveAsync((r) => (r.status === Office.AsyncResultStatus.Succeeded ? res() : rej(new Error(r.error.message)))));
+  }
+
+  /**
+   * UNVERIFIED on a desktop: the setting is read as a boolean `true`, which is what Excel's auto-open trigger checks
+   * (the manifest TaskpaneId). Getting a boolean from settings.get is documented, not run in Excel.
+   */
+  async autoOpen(): Promise<boolean> {
+    return Office.context.document.settings.get(AUTO_OPEN_KEY) === true;
+  }
+
+  /**
+   * UNVERIFIED on a desktop: turning it off REMOVES the setting rather than writing false, so the saved file carries no
+   * trace of it. Whether Excel treats a removed key the same as false is documented, not run in Excel.
+   */
+  async setAutoOpen(on: boolean): Promise<void> {
+    const settings = Office.context.document.settings;
+    if (on) settings.set(AUTO_OPEN_KEY, true);
+    else settings.remove(AUTO_OPEN_KEY);
+    await new Promise<void>((res, rej) => settings.saveAsync((r) => (r.status === Office.AsyncResultStatus.Succeeded ? res() : rej(new Error(r.error.message)))));
   }
 }

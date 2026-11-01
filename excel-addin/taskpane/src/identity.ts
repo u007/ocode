@@ -50,11 +50,18 @@ export class SessionIndex {
     return (await r.json()) as SessionRef[];
   }
 
-  async add(ref: SessionRef): Promise<void> {
-    const all = (await this.list()).filter((s) => s.id !== ref.id);
-    all.unshift(ref);
-    const r = await this.f(this.url(), { method: "PUT", headers: { "X-Bridge-Key": this.key, "Content-Type": "application/json" }, body: JSON.stringify(all) });
+  /**
+   * Registers one chat. The bridge does the read-modify-write atomically, so two panes adding at once both survive.
+   * Re-adding an id changes nothing (it keeps its position). Returns the whole index, newest first.
+   */
+  async add(ref: SessionRef): Promise<SessionRef[]> {
+    const r = await this.f(`${this.base}/bridge/sessions/${encodeURIComponent(this.wb)}`, {
+      method: "POST",
+      headers: { "X-Bridge-Key": this.key, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: ref.id, title: ref.title, created: ref.created }),
+    });
     if (!r.ok) throw new Error(`session index write ${r.status}`);
+    return (await r.json()) as SessionRef[];
   }
 }
 

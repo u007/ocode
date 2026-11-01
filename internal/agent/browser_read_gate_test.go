@@ -16,6 +16,7 @@ var browserUserTabReadArgs = map[string]string{
 	"snapshot":   `{"action":"snapshot","tab":"b1"}`,
 	"find":       `{"action":"find","tab":"b1","target":"button"}`,
 	"console":    `{"action":"console","tab":"b1"}`,
+	"controls":   `{"action":"controls","tab":"b1"}`,
 	"network":    `{"action":"network","tab":"b1"}`,
 	"screenshot": `{"action":"screenshot","tab":"b1"}`,
 	"wait":       `{"action":"wait","tab":"b1","text":"Done"}`,

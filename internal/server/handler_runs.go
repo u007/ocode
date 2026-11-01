@@ -9,8 +9,11 @@ import (
 	"github.com/u007/ocode/internal/agent"
 )
 
-// runToolCallDTO is a single tool call inside an assistant message.
+// runToolCallDTO is a single tool call inside an assistant message. ID matches
+// the corresponding role-"tool" message's ToolID so the web agent transcript
+// can group a call with its result, exactly like the chat transcript does.
 type runToolCallDTO struct {
+	ID        string `json:"id,omitempty"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
@@ -96,19 +99,7 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		ended := r.EndedAt
 		dto.EndedAt = &ended
 	}
-	for _, m := range r.TranscriptPublic() {
-		if m.Content == "" && len(m.ToolCalls) == 0 {
-			continue
-		}
-		md := runMessageDTO{Role: m.Role, Content: m.Content, ToolID: m.ToolID, ReasoningContent: m.ReasoningContent}
-		for _, tc := range m.ToolCalls {
-			md.ToolCalls = append(md.ToolCalls, runToolCallDTO{
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			})
-		}
-		dto.Messages = append(dto.Messages, md)
-	}
+	dto.Messages = runMessagesDTO(r.TranscriptPublic())
 	if r.Sub != nil && r.Sub.Runs() != nil {
 		// Children are kept in registry (chronological) order to mirror the TUI
 		// strip; the list is small and bounded by active sub-agents.
@@ -117,6 +108,33 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		}
 	}
 	return dto
+}
+
+// runMessagesDTO converts a run transcript to the wire shape. The web agent
+// card renders these through the chat's own ThinkingBlock / ToolBlock, so:
+//   - a reasoning-only entry is KEPT (it is visible content in the chat UI), and
+//   - a tool call carries its ID, which matches the answering role-"tool"
+//     message's ToolID so the card can group call + result into one block, and
+//   - a role-"tool" answer is KEPT even with empty content (a tool may legitimately
+//     return ""), since dropping it loses the ToolID and leaves the call pending.
+func runMessagesDTO(transcript []agent.Message) []runMessageDTO {
+	out := make([]runMessageDTO, 0, len(transcript))
+	for _, m := range transcript {
+		isToolAnswer := m.Role == "tool" && m.ToolID != ""
+		if !isToolAnswer && m.Content == "" && len(m.ToolCalls) == 0 && m.ReasoningContent == "" {
+			continue
+		}
+		md := runMessageDTO{Role: m.Role, Content: m.Content, ToolID: m.ToolID, ReasoningContent: m.ReasoningContent}
+		for _, tc := range m.ToolCalls {
+			md.ToolCalls = append(md.ToolCalls, runToolCallDTO{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
+		out = append(out, md)
+	}
+	return out
 }
 
 // activeAgentForRuns resolves which agent's run registry to expose. In /rc mode

@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import AgentsPanel from "./AgentsPanel";
+import { ChatDisplayTestProvider } from "../Chat/chatDisplayTestUtils";
 import type { AgentRun } from "../../api/types";
 
 const runs: AgentRun[] = [
@@ -35,9 +37,16 @@ vi.mock("../../hooks/useAgentRuns", () => ({
 }));
 
 describe("AgentsPanel", () => {
+  // Every run card renders the chat's own ThinkingBlock/ToolBlock now, so the
+  // panel needs the Chat display context it would inherit from ChatPanel in the
+  // app. Production panels get it from AgentRunDisplayScope.
+  function renderPanel(element: ReactNode) {
+    return render(<ChatDisplayTestProvider>{element}</ChatDisplayTestProvider>);
+  }
+
   it("shows the empty state when there are no runs", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
-    render(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={vi.fn()} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={vi.fn()} />);
 
     expect(screen.getByText("No agent runs yet in this session.")).toBeInTheDocument();
   });
@@ -45,7 +54,7 @@ describe("AgentsPanel", () => {
   it("renders the run list and opens a run's detail view on click", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const onSelectRun = vi.fn();
-    render(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={onSelectRun} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={onSelectRun} />);
 
     expect(screen.getByText("code-reviewer")).toBeInTheDocument();
     fireEvent.click(screen.getByText("code-reviewer"));
@@ -70,7 +79,7 @@ describe("AgentsPanel", () => {
       },
     ];
     mockUseAgentRuns.mockReturnValue({ runs: twoRuns, loaded: true });
-    render(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={vi.fn()} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId={null} onSelectRun={vi.fn()} />);
 
     // Rows start collapsed so a spawned crew does not balloon the list.
     expect(screen.queryByText("alpha output")).toBeNull();
@@ -94,7 +103,7 @@ describe("AgentsPanel", () => {
 
   it("renders the selected run's full tree, including nested children, in detail view", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
-    render(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />);
 
     expect(screen.getByText("reviewed")).toBeInTheDocument();
     expect(screen.getByText("sub-linter")).toBeInTheDocument();
@@ -103,7 +112,7 @@ describe("AgentsPanel", () => {
   it("calls onSelectRun(null) when the back button is clicked", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const onSelectRun = vi.fn();
-    render(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={onSelectRun} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={onSelectRun} />);
 
     fireEvent.click(screen.getByText("Agents"));
     expect(onSelectRun).toHaveBeenCalledWith(null);
@@ -111,7 +120,7 @@ describe("AgentsPanel", () => {
 
   it("shows a loading state while the tree has not arrived yet instead of falling through", () => {
     mockUseAgentRuns.mockReturnValue({ runs: [], loaded: false });
-    render(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />);
 
     expect(screen.getByText("Loading agent run…")).toBeInTheDocument();
     expect(
@@ -121,7 +130,7 @@ describe("AgentsPanel", () => {
 
   it("surfaces a selected run that is missing from the loaded tree instead of silently showing the list", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
-    render(<AgentsPanel sessionId="session-1" selectedRunId="gone-run" onSelectRun={vi.fn()} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId="gone-run" onSelectRun={vi.fn()} />);
 
     expect(
       screen.getByText("This agent run is no longer available in the current session's run list."),
@@ -133,7 +142,7 @@ describe("AgentsPanel", () => {
   it("back button in the missing-run view clears the selection", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const onSelectRun = vi.fn();
-    render(<AgentsPanel sessionId="session-1" selectedRunId="gone-run" onSelectRun={onSelectRun} />);
+    renderPanel(<AgentsPanel sessionId="session-1" selectedRunId="gone-run" onSelectRun={onSelectRun} />);
 
     fireEvent.click(screen.getByText("Back to all runs"));
     expect(onSelectRun).toHaveBeenCalledWith(null);
@@ -173,7 +182,9 @@ describe("AgentsPanel", () => {
   it("resets a freshly selected run's detail scroll offset to the top", () => {
     mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const { rerender } = render(
-      <AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />,
+      <ChatDisplayTestProvider>
+        <AgentsPanel sessionId="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />
+      </ChatDisplayTestProvider>,
     );
     const scroller = document.querySelector<HTMLElement>(".overflow-y-auto")!;
     let top = 900;
@@ -187,7 +198,11 @@ describe("AgentsPanel", () => {
       },
     });
 
-    rerender(<AgentsPanel sessionId="session-1" selectedRunId="run-2" onSelectRun={vi.fn()} />);
+    rerender(
+      <ChatDisplayTestProvider>
+        <AgentsPanel sessionId="session-1" selectedRunId="run-2" onSelectRun={vi.fn()} />
+      </ChatDisplayTestProvider>,
+    );
 
     expect(top).toBe(0);
   });

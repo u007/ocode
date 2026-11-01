@@ -3,9 +3,9 @@ import type { CellValue, ValueType } from "../port";
 import { DATA_NOTICE, ERROR_RE, ToolCtx, ToolError, checkAbort, errorsIn, isBlank, rectOfData, resolveRect, usedRect } from "./util";
 
 export async function describeWorkbook(ctx: ToolCtx) {
-  const [sheets, active, tables, names, pivots, calc, sel] = await Promise.all([
+  const [sheets, active, tables, names, pivots, calc, sel, info] = await Promise.all([
     ctx.port.listSheets(), ctx.port.activeSheet(), ctx.port.listTables(), ctx.port.listNames(), ctx.port.listPivots(),
-    ctx.port.calculationMode(), ctx.port.selection(),
+    ctx.port.calculationMode(), ctx.port.selection(), ctx.port.workbookInfo(),
   ]);
   const out = [];
   for (const s of sheets) {
@@ -16,7 +16,8 @@ export async function describeWorkbook(ctx: ToolCtx) {
       charts: ch.map((c) => ({ name: c.name, type: c.type, title: c.title, ...(c.dataAddress ? { data: c.dataAddress } : {}) })),
     });
   }
-  return { active_sheet: active, selection: sel, calculation_mode: calc, sheets: out, tables, named_ranges: names, pivots };
+  const file = { fileName: info.fileName, path: info.path, state: info.state, blank: info.blank, readOnly: info.readOnly, protectedView: info.protectedView };
+  return { file, active_sheet: active, selection: sel, calculation_mode: calc, sheets: out, tables, named_ranges: names, pivots };
 }
 
 export async function getSelection(ctx: ToolCtx, a: { max_cells: number }) {

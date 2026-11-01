@@ -23,7 +23,7 @@ func TestPermissions_BrowserDefaultAsk(t *testing.T) {
 // read of a tab the agent did not open is asked about later, at consult time (see
 // browserDecision and browser_read_gate_test.go).
 func TestPermissions_BrowserObserveActionsAllowed(t *testing.T) {
-	for _, action := range []string{"tabs", "screenshot", "text", "scroll", "snapshot", "find", "wait", "console", "network"} {
+	for _, action := range []string{"tabs", "screenshot", "text", "scroll", "snapshot", "find", "wait", "console", "controls", "network"} {
 		t.Run(action, func(t *testing.T) {
 			pm := NewPermissionManager()
 			dec := pm.Decide("browser", json.RawMessage(`{"action":"`+action+`"}`))
@@ -63,6 +63,9 @@ func TestPermissions_BrowserMutatingActionsAsk(t *testing.T) {
 		{"reload", `{"action":"reload"}`, "reload"},
 		{"unknown", `{"action":"eval"}`, "eval"},
 		{"missing", `{}`, "browser"},
+		{"run_step click", `{"action":"click","target":"@e4","run_step":{"goal":"buy a ticket","n":2,"of":5,"label":"Buy tickets"}}`, `browser_run step 2/5 (buy a ticket): click "@e4" "Buy tickets"`},
+		{"run_step with tab", `{"action":"click","target":"@e4","tab":"b1","run_step":{"goal":"g","n":1,"of":2,"label":"Go"}}`, `browser_run step 1/2 (g): click "@e4" (tab b1) "Go"`},
+		{"run_step no label", `{"action":"reload","run_step":{"goal":"refresh","n":1,"of":1}}`, "browser_run step 1/1 (refresh): reload"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +94,7 @@ func TestPermissions_BrowserTypeSummaryHidesText(t *testing.T) {
 		`{"action":"fill","target":"#pw","value":"s3cret-pass"}`,
 		`{"action":"select","target":"#pw","value":"s3cret-pass"}`,
 		`{"action":"fill_form","fields":[{"selector":"#pw","value":"s3cret-pass"}]}`,
+		`{"action":"type","text":"s3cret-pass","run_step":{"goal":"log in","n":1,"of":3,"label":"Password"}}`,
 	} {
 		pm := NewPermissionManager()
 		dec := pm.Decide("browser", json.RawMessage(args))
@@ -100,12 +104,29 @@ func TestPermissions_BrowserTypeSummaryHidesText(t *testing.T) {
 	}
 }
 
+// TestPermissions_BrowserRunStepSummaryClipsGoalAndLabel pins the clip lengths of
+// a browser_run step in the dialog: the goal at 80 runes, the label at 60, each
+// with an ellipsis when it was cut.
+func TestPermissions_BrowserRunStepSummaryClipsGoalAndLabel(t *testing.T) {
+	args := `{"action":"click","target":"@e4","run_step":{"goal":"` + strings.Repeat("g", 81) +
+		`","n":1,"of":3,"label":"` + strings.Repeat("l", 61) + `"}}`
+	pm := NewPermissionManager()
+	dec := pm.Decide("browser", json.RawMessage(args))
+	if dec.Request == nil {
+		t.Fatalf("expected Ask, got %s", dec.Level)
+	}
+	want := `browser_run step 1/3 (` + strings.Repeat("g", 80) + `…): click "@e4" "` + strings.Repeat("l", 60) + `…"`
+	if dec.Request.Command != want {
+		t.Fatalf("command = %q, want %q", dec.Request.Command, want)
+	}
+}
+
 // TestPermissions_BrowserDenyRuleOverridesObserve pins that a user deny on the
 // tool is honoured even for the read-only actions.
 func TestPermissions_BrowserDenyRuleOverridesObserve(t *testing.T) {
 	pm := NewPermissionManager()
 	pm.SetRule("browser", PermissionDeny)
-	for _, action := range []string{"text", "snapshot", "find", "wait", "console", "network"} {
+	for _, action := range []string{"text", "snapshot", "find", "wait", "console", "controls", "network"} {
 		if dec := pm.Decide("browser", json.RawMessage(`{"action":"`+action+`"}`)); dec.Level != PermissionDeny {
 			t.Fatalf("observe action %s under deny = %s, want Deny", action, dec.Level)
 		}

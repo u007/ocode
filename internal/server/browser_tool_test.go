@@ -82,6 +82,7 @@ type fakeSurface struct {
 	targetErr    error
 	snapshotText string
 	snapshotRefs []cdp.RefElement
+	controlsPage cdp.ControlsPage
 	findOut      cdp.FindOutput
 	console      []cdp.ConsoleEntry
 	consoleDrop  int
@@ -162,6 +163,13 @@ func (f *fakeSurface) Snapshot(ctx context.Context, frame string, refs *cdp.RefT
 		return "", nil, err
 	}
 	return f.snapshotText, f.snapshotRefs, nil
+}
+
+func (f *fakeSurface) Controls(ctx context.Context, refs *cdp.RefTable) (cdp.ControlsPage, error) {
+	if err := f.elementAction(refs, "controls"); err != nil {
+		return cdp.ControlsPage{}, err
+	}
+	return f.controlsPage, nil
 }
 
 func (f *fakeSurface) FindElements(ctx context.Context, frame, selector string, max int, refs *cdp.RefTable) (cdp.FindOutput, error) {
@@ -780,7 +788,7 @@ func TestBrowserActionsSortedAndCoverElementActions(t *testing.T) {
 	if !slices.IsSorted(browserActions) {
 		t.Fatalf("browserActions is not sorted: %v", browserActions)
 	}
-	for _, want := range []string{"check", "click", "console", "fill", "fill_form", "find", "network", "pick", "select", "snapshot", "uncheck", "upload", "wait"} {
+	for _, want := range []string{"check", "click", "console", "controls", "fill", "fill_form", "find", "network", "pick", "select", "snapshot", "uncheck", "upload", "wait"} {
 		if !slices.Contains(browserActions, want) {
 			t.Errorf("action %s missing from the enum", want)
 		}
@@ -1055,6 +1063,123 @@ func TestBrowserTool_SnapshotWrapsTreeAsUntrustedAndNamesFrame(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("snapshot output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestBrowserTool_ControlsIsJSONAfterHeaderAndKeepsScreenshot pins the controls
+// read: a header line, then one JSON object with exactly the contract keys, the
+// page text under "text", and the held screenshot left in place.
+func TestBrowserTool_ControlsIsJSONAfterHeaderAndKeepsScreenshot(t *testing.T) {
+	surf := &fakeSurface{
+		png: solidPNG(t, 800, 500), cssW: 800, cssH: 500,
+		controlsPage: cdp.ControlsPage{
+			URL:               "https://shop.example/cart",
+			Title:             "Cart",
+			Fingerprint:       "fp1",
+			ViewportText:      "Total $10 & \"tax\"\nline two",
+			ViewportTruncated: true,
+			Settled:           true,
+			Controls: []cdp.Control{{
+				Ref: "@e2", Role: "button", Label: "Checkout",
+				States: []string{}, Operations: []string{"click"},
+			}},
+			Omitted: 3,
+		},
+	}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	if _, err := browserCall(t, b, `{"action":"screenshot"}`); err != nil {
+		t.Fatalf("screenshot: %v", err)
+	}
+	out, err := browserCall(t, b, `{"action":"controls"}`)
+	if err != nil {
+		t.Fatalf("controls: %v", err)
+	}
+	header, body, found := strings.Cut(out, "\n")
+	if !found || !strings.Contains(header, "untrusted web content") {
+		t.Fatalf("controls output lacks the untrusted header line:\n%s", out)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &keys); err != nil {
+		t.Fatalf("controls body is not one JSON object: %v\n%s", err, body)
+	}
+	wantKeys := []string{"controls", "fingerprint", "omitted", "settled", "text", "text_truncated", "title", "url"}
+	if len(keys) != len(wantKeys) {
+		t.Errorf("controls has %d keys, want %d: %s", len(keys), len(wantKeys), body)
+	}
+	for _, k := range wantKeys {
+		if _, ok := keys[k]; !ok {
+			t.Errorf("controls lacks key %q: %s", k, body)
+		}
+	}
+	var got browserControlsOutput
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode controls body: %v", err)
+	}
+	if got.URL != "https://shop.example/cart" || got.Title != "Cart" || got.Fingerprint != "fp1" ||
+		!got.Settled || got.Text != surf.controlsPage.ViewportText || !got.TextTruncated || got.Omitted != 3 {
+		t.Errorf("controls fields = %+v, want the page's fields", got)
+	}
+	if len(got.Controls) != 1 || got.Controls[0].Ref != "@e2" || got.Controls[0].Label != "Checkout" {
+		t.Errorf("controls listing = %+v, want one @e2 Checkout", got.Controls)
+	}
+	if calls := surf.got(); strings.Join(calls, "|") != "screenshot|controls" {
+		t.Errorf("surface calls = %v, want screenshot then controls", calls)
+	}
+	b.mu.Lock()
+	held := b.shot != nil
+	b.mu.Unlock()
+	if !held {
+		t.Fatal("controls dropped the held screenshot; it is a read")
+	}
+}
+
+// TestBrowserTool_ControlsEmptyPageEmitsEmptyArrays pins that a page with no
+// controls encodes controls and the states and operations as [], not null.
+func TestBrowserTool_ControlsEmptyPageEmitsEmptyArrays(t *testing.T) {
+	surf := &fakeSurface{controlsPage: cdp.ControlsPage{Controls: []cdp.Control{}}}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"controls"}`)
+	if err != nil {
+		t.Fatalf("controls: %v", err)
+	}
+	if !strings.Contains(out, `"controls":[]`) {
+		t.Fatalf("empty controls not encoded as []:\n%s", out)
+	}
+}
+
+// TestBrowserTool_ControlsTakesNoTargetOrFrame pins that controls is refused with a
+// target or a frame before any Chrome call.
+func TestBrowserTool_ControlsTakesNoTargetOrFrame(t *testing.T) {
+	surf := &fakeSurface{}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	for _, bad := range []string{
+		`{"action":"controls","target":"@e1"}`,
+		`{"action":"controls","frame":"#pay"}`,
+	} {
+		if _, err := browserCall(t, b, bad); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	if got := surf.got(); len(got) != 0 {
+		t.Fatalf("refused controls calls reached the surface: %v", got)
+	}
+}
+
+// TestBrowserTool_ControlsIsAllowedForReadOnlyAgents pins that the read-only
+// subagent types may run controls, and that controls does not widen their set to
+// mutating actions.
+func TestBrowserTool_ControlsIsAllowedForReadOnlyAgents(t *testing.T) {
+	surf := &fakeSurface{controlsPage: cdp.ControlsPage{Controls: []cdp.Control{}}}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	b.agentName = "explore"
+	if r := b.Refusal(json.RawMessage(`{"action":"controls"}`)); r != "" {
+		t.Fatalf("explore refused controls: %s", r)
+	}
+	if _, err := browserCall(t, b, `{"action":"controls"}`); err != nil {
+		t.Fatalf("explore controls: %v", err)
+	}
+	if r := b.Refusal(json.RawMessage(`{"action":"click","x":1,"y":1}`)); r == "" {
+		t.Fatal("explore may click; controls must not widen the read-only set")
 	}
 }
 

@@ -4,6 +4,8 @@ import type { AgentRun, AgentRunMessage } from "../../api/types";
 import ScrollNavButtons from "../common/ScrollNavButtons";
 import { useStickToBottom } from "../../hooks/useStickToBottom";
 import { useNow } from "../../hooks/useNow";
+import { AssistantText } from "../Chat/MessageBubble";
+import { ThinkingBlock, ToolBlock } from "../Chat/TurnParts";
 
 // statusStyles maps a run status to its dot, glow and accent-bar treatment.
 export function statusStyles(status: string): { dot: string; bar: string; text: string } {
@@ -86,13 +88,32 @@ export interface RunReasoning {
   answerStarted: boolean;
 }
 
-// messageLine renders one transcript entry as a chip-prefixed row.
-// `reasoning`, when given, renders the entry's reasoning instead of the
-// built-in "Thinking" box.
-function messageLine(msg: AgentRunMessage, i: number, reasoning?: (text: string) => ReactNode) {
-  const label = msg.role === "user" ? "task" : msg.role === "assistant" ? "agent" : msg.role;
+/** Whether a content string produces visible output (bare newlines do not). */
+function hasText(content: string | undefined | null): boolean {
+  return !!content && content.trim().length > 0;
+}
+
+/** Index a run transcript the way the chat transcript groups a tool call with
+ *  its result: `callIds` marks calls rendered inline (so their role-"tool"
+ *  message is skipped), `results` maps a call id to the output it produced. */
+function indexRunCalls(messages: AgentRunMessage[]) {
+  const callIds = new Set<string>();
+  const results = new Map<string, string>();
+  for (const m of messages) {
+    for (const tc of m.toolCalls ?? []) {
+      if (tc.id) callIds.add(tc.id);
+    }
+    if (m.role === "tool" && m.toolCallId) results.set(m.toolCallId, m.content);
+  }
+  return { callIds, results };
+}
+
+// RunChipLine renders a non-assistant transcript entry (the seeded task prompt
+// or injected background context) as a chip-prefixed row.
+function RunChipLine({ msg }: { msg: AgentRunMessage }) {
+  const label = msg.role === "user" ? "task" : msg.role;
   return (
-    <div key={i} className="space-y-1 text-xs leading-relaxed">
+    <div className="space-y-1 text-xs leading-relaxed">
       <div className="flex gap-2">
         <span
           className={`mt-px h-fit shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
@@ -103,31 +124,100 @@ function messageLine(msg: AgentRunMessage, i: number, reasoning?: (text: string)
         </span>
         <div className="min-w-0 flex-1 text-foreground">
           {msg.content && <span className="whitespace-pre-wrap break-words">{msg.content}</span>}
-          {msg.toolCalls?.map((tc, j) => (
-            <div key={j} className="font-mono text-[11px] text-muted-foreground">
-              <span className="text-muted-foreground">→</span> {tc.name}
-              {tc.arguments ? (
-                <span className="text-foreground">({tc.arguments.slice(0, 120)})</span>
-              ) : (
-                <span className="text-foreground">()</span>
-              )}
-            </div>
-          ))}
         </div>
       </div>
-      {msg.reasoningContent && reasoning && reasoning(msg.reasoningContent)}
-      {msg.reasoningContent && !reasoning && (
-        <div className="ml-[1.75rem] max-h-40 overflow-y-auto overscroll-contain rounded-md border border-border/60 bg-card/50 px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Thinking
-          </div>
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
-            {msg.reasoningContent}
-          </pre>
-        </div>
-      )}
     </div>
   );
+}
+
+// RunTranscriptEntry renders one transcript entry the same way the main chat
+// transcript does: markdown for assistant prose, the chat's own ThinkingBlock
+// (so the thinking policy applies), and the chat's ToolBlock (so tool-call and
+// tool-output disclosure — including the 20-line tail preview — are identical).
+function RunTranscriptEntry({
+  msg,
+  index,
+  runId,
+  running,
+  lastReasoning,
+  messageCount,
+  renderedCallIds,
+  callResults,
+  renderReasoning,
+}: {
+  msg: AgentRunMessage;
+  index: number;
+  runId: string;
+  running: boolean;
+  lastReasoning: number;
+  messageCount: number;
+  renderedCallIds: Set<string>;
+  callResults: Map<string, string>;
+  renderReasoning?: (reasoning: RunReasoning) => ReactNode;
+}) {
+  const blockBase = `run:${runId}:${index}`;
+  const isLatest = running && index === lastReasoning;
+  const answerStarted = hasText(msg.content) || index < messageCount - 1;
+
+  if (msg.role === "tool") {
+    // The call that produced this result renders it inline (above that call),
+    // so a second block would duplicate the output. An UNPAIRED result (no call
+    // in the transcript, e.g. a truncated transcript) still renders on its own.
+    if (msg.toolCallId && renderedCallIds.has(msg.toolCallId)) return null;
+    if (!hasText(msg.content)) return null;
+    return (
+      <ToolBlock
+        tool="result"
+        output={msg.content}
+        callKey={`${blockBase}:call`}
+        outputKey={`${blockBase}:output`}
+      />
+    );
+  }
+
+  if (msg.role === "assistant") {
+    const calls = msg.toolCalls ?? [];
+    const reasoning: RunReasoning | null = msg.reasoningContent
+      ? {
+          text: msg.reasoningContent,
+          blockKey: `${blockBase}:thinking`,
+          isLatest,
+          answerStarted,
+        }
+      : null;
+    return (
+      <>
+        {reasoning
+          ? renderReasoning
+            ? renderReasoning(reasoning)
+            : (
+                <ThinkingBlock
+                  text={reasoning.text}
+                  blockKey={reasoning.blockKey}
+                  isLatest={reasoning.isLatest}
+                  answerStarted={reasoning.answerStarted}
+                />
+              )
+          : null}
+        {calls.map((tc, j) => {
+          const callId = tc.id ?? `${index}:${j}`;
+          return (
+            <ToolBlock
+              key={callId}
+              tool={tc.name}
+              command={tc.arguments}
+              output={tc.id ? callResults.get(tc.id) : undefined}
+              callKey={`${blockBase}:call:${callId}`}
+              outputKey={`${blockBase}:output:${callId}`}
+            />
+          );
+        })}
+        {hasText(msg.content) ? <AssistantText content={msg.content} /> : null}
+      </>
+    );
+  }
+
+  return <RunChipLine msg={msg} />;
 }
 
 interface RunNodeProps {
@@ -142,10 +232,10 @@ interface RunNodeProps {
   // spawned agent starts as one compact summary row until the user expands
   // it; detail views (AgentsPanel) keep the expanded default.
   defaultOpen?: boolean;
-  // renderReasoning, when given, renders every transcript entry's reasoning
-  // (and is passed down to nested runs). The inline chat card uses it to show
-  // child thinking through the chat's own thinking component and setting; the
-  // rail omits it and keeps the built-in box.
+  // renderReasoning, when given, replaces the built-in ThinkingBlock for every
+  // transcript entry's reasoning (and is passed down to nested runs). The
+  // built-in path already follows the chat display policy; the inline chat card
+  // still supplies its own for an explicit identity.
   renderReasoning?: (reasoning: RunReasoning) => ReactNode;
 }
 
@@ -167,6 +257,7 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true, 
   run.messages.forEach((m, i) => {
     if (m.reasoningContent) lastReasoning = i;
   });
+  const callIndex = indexRunCalls(run.messages);
   const hasResult = Boolean(run.result?.trim());
   const hasDetail = run.messages.length > 0 || run.children.length > 0 || hasResult;
   const s = statusStyles(run.status);
@@ -270,23 +361,20 @@ export default function RunNode({ run, depth, onOpenDetail, defaultOpen = true, 
                 data-testid="agent-transcript"
                 className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5 rounded-md bg-card/70 p-2 ring-1 ring-inset ring-ring/80"
               >
-                {run.messages.map((m, i) =>
-                  messageLine(
-                    m,
-                    i,
-                    renderReasoning &&
-                      ((text) =>
-                        renderReasoning({
-                          text,
-                          blockKey: `run:${run.id}:${i}:thinking`,
-                          // The latest reasoning of a live run follows the chat's
-                          // latest-thinking rule; the answer has started once that
-                          // entry has text or anything came after it.
-                          isLatest: running && i === lastReasoning,
-                          answerStarted: Boolean(m.content.trim()) || i < run.messages.length - 1,
-                        })),
-                  ),
-                )}
+                {run.messages.map((m, i) => (
+                  <RunTranscriptEntry
+                    key={i}
+                    msg={m}
+                    index={i}
+                    runId={run.id}
+                    running={running}
+                    lastReasoning={lastReasoning}
+                    messageCount={run.messages.length}
+                    renderedCallIds={callIndex.callIds}
+                    callResults={callIndex.results}
+                    renderReasoning={renderReasoning}
+                  />
+                ))}
               </div>
               <ScrollNavButtons
                 scrollRef={messagesRef}

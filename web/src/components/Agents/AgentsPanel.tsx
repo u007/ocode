@@ -2,6 +2,7 @@ import { memo, useEffect, useRef } from "react";
 import { ArrowLeft, Bot } from "lucide-react";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
 import RunNode, { elapsed, statusStyles } from "./RunNode";
+import { AgentRunDisplayScope } from "./agentRunDisplay";
 import ScrollNavButtons from "../common/ScrollNavButtons";
 import type { AgentRun } from "../../api/types";
 
@@ -65,7 +66,9 @@ function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: AgentsPanelProps
             ref={detailScrollRef}
             className="h-full overflow-y-auto overscroll-contain p-3"
           >
-            <RunNode run={selected} depth={0} />
+            <AgentRunDisplayScope>
+              <RunNode run={selected} depth={0} />
+            </AgentRunDisplayScope>
           </div>
           <ScrollNavButtons scrollRef={detailScrollRef} watch={selectedRunId} />
         </div>
@@ -123,15 +126,17 @@ function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: AgentsPanelProps
               drill-in swap. Rows start collapsed so a freshly spawned crew
               doesn't balloon the list; the focused full-screen view is still
               one click away on the run name. */}
-          {runs.map((run) => (
-            <RunNode
-              key={run.id}
-              run={run}
-              depth={0}
-              defaultOpen={false}
-              onOpenDetail={onSelectRun}
-            />
-          ))}
+          <AgentRunDisplayScope>
+            {runs.map((run) => (
+              <RunNode
+                key={run.id}
+                run={run}
+                depth={0}
+                defaultOpen={false}
+                onOpenDetail={onSelectRun}
+              />
+            ))}
+          </AgentRunDisplayScope>
         </div>
       </div>
       <ScrollNavButtons scrollRef={listScrollRef} watch={runs} />

@@ -28,10 +28,17 @@ type MCPTool struct {
 	name   string
 	desc   string
 	schema map[string]interface{}
+	risk   string
 }
 
 func (t MCPTool) Name() string        { return t.name }
 func (t MCPTool) Description() string { return t.desc }
+
+// MCPServer returns the configured name of the server this tool came from.
+func (t MCPTool) MCPServer() string { return t.server.name }
+
+// Risk returns the server's per-tool risk class, or "" when it reported none.
+func (t MCPTool) Risk() string { return t.risk }
 func (t MCPTool) Definition() map[string]any {
 	return map[string]any{
 		"name":        t.name,
@@ -738,6 +745,9 @@ func (c *MCPClient) ListTools() ([]MCPTool, error) {
 			Name        string                 `json:"name"`
 			Description string                 `json:"description"`
 			InputSchema map[string]interface{} `json:"inputSchema"`
+			// Risk is an optional per-tool class (read | write | structural) that
+			// some servers report; standard MCP servers omit it.
+			Risk string `json:"risk"`
 		} `json:"tools"`
 	}
 
@@ -752,6 +762,7 @@ func (c *MCPClient) ListTools() ([]MCPTool, error) {
 			name:   c.name + "_" + t.Name,
 			desc:   t.Description,
 			schema: t.InputSchema,
+			risk:   t.Risk,
 		})
 	}
 	return tools, nil

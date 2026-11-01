@@ -81,6 +81,11 @@ describe("read tools", () => {
     expect(d.sheets[0]).toMatchObject({ name: "Summary", used_range: "A1:C8" });
     expect(d.active_sheet).toBe("Summary");
   });
+  it("describe_workbook says what state the file is in", async () => {
+    port.setInfo({ fileName: "Budget.xlsx", path: "/Users/me/Budget.xlsx", state: "modified", blank: false, readOnly: true, protectedView: null });
+    const d = await okOut("describe_workbook", {});
+    expect(d.file).toEqual({ fileName: "Budget.xlsx", path: "/Users/me/Budget.xlsx", state: "modified", blank: false, readOnly: true, protectedView: null });
+  });
   it("profile_range finds text numbers, text dates, whitespace, NBSP, duplicates and blank rows", async () => {
     port.addSheet("Raw", [
       ["Date", "Employee", "Amount"],

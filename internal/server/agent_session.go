@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"os"
 	"strings"
@@ -112,6 +113,37 @@ func (as *agentSession) seedSpend(usd float64) {
 		if micros <= cur || as.spentMicros.CompareAndSwap(cur, micros) {
 			return
 		}
+	}
+}
+
+// pinnedMCPServersMetadataKey is the session-metadata key holding the MCP server
+// names pinned at session creation (ChatRequest.PinnedMCPServers). Discovery
+// keeps every tool of a pinned server attached for the session.
+const pinnedMCPServersMetadataKey = "pinned_mcp_servers"
+
+// pinnedMCPServersFromMetadata reads the persisted pinned MCP server names. An
+// absent key is nil with no error. A JSON round trip yields []any, so both that
+// and []string are accepted. Any other type, or a non-string element, is an error.
+func pinnedMCPServersFromMetadata(md map[string]any) ([]string, error) {
+	raw, ok := md[pinnedMCPServersMetadataKey]
+	if !ok {
+		return nil, nil
+	}
+	switch v := raw.(type) {
+	case []string:
+		return v, nil
+	case []any:
+		names := make([]string, 0, len(v))
+		for i, elem := range v {
+			name, isString := elem.(string)
+			if !isString {
+				return nil, fmt.Errorf("%s[%d] is %T, want string", pinnedMCPServersMetadataKey, i, elem)
+			}
+			names = append(names, name)
+		}
+		return names, nil
+	default:
+		return nil, fmt.Errorf("%s is %T, want a list of strings", pinnedMCPServersMetadataKey, raw)
 	}
 }
 
@@ -683,6 +715,16 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		if gs, ok := agent.GoalStateFromMetadata(prev.Metadata); ok {
 			ag.RestoreGoal(gs)
 		}
+		// A malformed value fails the build rather than running unpinned, which
+		// would silently drop MCP servers the user asked to keep attached. The
+		// agent is shut down first so the failed build leaks nothing.
+		pinned, err := pinnedMCPServersFromMetadata(prev.Metadata)
+		if err != nil {
+			slog.Error("session pinned MCP servers unreadable; session not built", "session", sessionID, "err", err)
+			ag.Shutdown()
+			return nil, "pinned-mcp", fmt.Errorf("session %s pinned MCP servers: %w", sessionID, err)
+		}
+		ag.SetPinnedMCPServers(pinned)
 	}
 	// Accumulate side-path spend and token usage (advisor, compaction, title,
 	// recap, sub-agent tasks, …) into this session's own totals. The main turn's
