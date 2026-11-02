@@ -80,8 +80,8 @@ func TestPageSaveFileRequestRefusesOverCap(t *testing.T) {
 	const nonce = "9f2c4e1a7b3d5f60a1b2c3d4e5f60718"
 	page := &application.OriginInfo{Origin: "https://127.0.0.1:52100/"}
 
-	// One byte over the decoded cap: the encoded length check must refuse it
-	// before any decoding happens.
+	// Longer than the base64 form of the cap: the encoded length check must refuse
+	// it before any decoding happens.
 	over := strings.Repeat("A", base64.StdEncoding.EncodedLen(desktopSaveMaxBytes)+4)
 	if _, ok := pageSaveFileRequest(saveMessage(t, nonce, saveFileRequest{Name: "big.bin", Data: over}), page, host, nonce); ok {
 		t.Fatal("pageSaveFileRequest accepted a file over desktopSaveMaxBytes")

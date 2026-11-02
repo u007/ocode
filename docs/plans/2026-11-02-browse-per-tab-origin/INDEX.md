@@ -28,7 +28,7 @@ a TanStack SPA tab there still fails. Only local desktop/web clients get root mo
   subprotocol on 101; never fall back to the local browse server.
 - Cross-upstream subresources keep a same-origin route under a reserved prefix
   `/__ocode/b/…` (never `/b/`, real apps use it). Top-level navigation to a
-  different upstream redirects to that upstream's own origin.
+  different upstream is a nav event + 204 handled by the SPA (not a redirect: the new origin has no auth cookie).
 - Browse auth cookie name is per-tab (cookies are not port-isolated), derived by
   encoding/hash of the stateKey (stateKeys contain `:`, illegal in cookie names).
   The binding check (`t.StateKey != stateKey`) also defeats cookie tossing.

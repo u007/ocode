@@ -16,6 +16,11 @@ status: active
 
 # Embedded Browser — Chrome Mode Streams Over the Main Origin for Non-Local Clients
 
+> **Cross-reference (2026-11-02):** local clients now load their iframe from a root-mounted
+> per-tab origin (`POST /api/browse/tab-origin`). Non-local clients get 409 from that endpoint,
+> and the Chrome-mode flow described here is unchanged. See
+> [browse-per-tab-origin.md](browse-per-tab-origin.md).
+
 ## Problem
 
 The web SPA's embedded browser loads a page in an iframe served by a separate

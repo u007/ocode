@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -318,15 +319,130 @@ func TestRemoteTabConnectingIsServiceUnavailable(t *testing.T) {
 		<-release
 		return nil, errors.New("late")
 	}
-	go func() { _, _ = reg.workspaceForPort(remoteTabHost, "/home/user/project", 0) }()
-	for connects.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
 	defer close(release)
+	go func() { _, _ = reg.workspaceForPort(remoteTabHost, "/home/user/project", 0) }()
+	waitForConnectStart(t, &connects)
 
 	resp, body := remoteTabGet(t, rep.URL)
 	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "2" {
 		t.Fatalf("status = %d Retry-After %q body %q, want 503 with Retry-After 2", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+}
+
+// TestRemoteTabOriginConnectingRetriesThenSucceeds: opening a remote tab origin while
+// the host's connect runs is 503 with a positive Retry-After, which is the SPA's
+// connecting retry. The same call succeeds once the connect completes.
+func TestRemoteTabOriginConnectingRetriesThenSucceeds(t *testing.T) {
+	f := newRemoteTabFixture(t, remoteTabUpstream("unused.example"))
+	reg := f.s.handler.remoteHosts
+	reg.drop(remoteTabHost, 0)
+
+	release := make(chan struct{})
+	releaseConnect := sync.OnceFunc(func() { close(release) })
+	defer releaseConnect()
+	var connects atomic.Int32
+	reg.connect = func(remote.Target, string) (remoteHostWorkspace, error) {
+		connects.Add(1)
+		<-release
+		return f.ws, nil
+	}
+	go func() { _, _ = reg.workspaceForPort(remoteTabHost, "/home/user/project", 0) }()
+	waitForConnectStart(t, &connects)
+
+	const sk = "tab:origin-retry"
+	body := tabOriginBody(t, map[string]string{"state_key": sk, "url": "http://" + f.upHost + "/app/dashboard", "host": remoteTabHost})
+	w := postTabOrigin(f.s, body, "127.0.0.1:4096")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("connecting: status = %d body %q, want 503", w.Code, w.Body.String())
+	}
+	retry, err := strconv.Atoi(w.Header().Get("Retry-After"))
+	if err != nil || retry <= 0 {
+		t.Fatalf("connecting: Retry-After = %q, want a positive number of seconds", w.Header().Get("Retry-After"))
+	}
+
+	releaseConnect()
+	rep := decodeTabOrigin(t, postTabOrigin(f.s, body, "127.0.0.1:4096"))
+	if !strings.HasPrefix(rep.URL, rep.Origin+"/app/dashboard?__grant=") {
+		t.Fatalf("after connect: url = %q, want origin + upstream path and __grant", rep.URL)
+	}
+}
+
+// waitForConnectStart blocks until a stubbed connect has begun, or fails the test
+// after five seconds so a connect that never starts cannot hang the suite.
+func waitForConnectStart(t *testing.T, connects *atomic.Int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for connects.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("connect did not start within 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// useHostAPI points the fixture's host at a new API server running api, and
+// reconnects so the proxy's grant call reaches it.
+func (f *remoteTabFixture) useHostAPI(t *testing.T, api http.Handler) {
+	t.Helper()
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+	f.ws.apiURL = srv.URL
+	f.s.handler.remoteHosts.drop(remoteTabHost, 0)
+	connectTestHost(t, f.s.handler, remoteTabHost, "/home/user/project")
+}
+
+// TestRemoteTabGrantForwardsRetryAfterOnAnyStatus: a host that refuses the grant with
+// Retry-After (here 429) hands that header to the client with its status.
+func TestRemoteTabGrantForwardsRetryAfterOnAnyStatus(t *testing.T) {
+	f := newRemoteTabFixture(t, remoteTabUpstream("unused.example"))
+	f.useHostAPI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		http.Error(w, "too many grants", http.StatusTooManyRequests)
+	}))
+
+	body := tabOriginBody(t, map[string]string{"state_key": "tab:limited", "url": "http://" + f.upHost + "/app/dashboard", "host": remoteTabHost})
+	w := postTabOrigin(f.s, body, "127.0.0.1:4096")
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "7" {
+		t.Fatalf("status = %d Retry-After %q body %q, want 429 with Retry-After 7", w.Code, w.Header().Get("Retry-After"), w.Body.String())
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode error reply: %v", err)
+	}
+	if want := "tab origin: remote grant: too many grants"; out.Error != want {
+		t.Fatalf("error = %q, want %q", out.Error, want)
+	}
+}
+
+// TestRemoteTabGrantErrorBodyIsCapped: a host's error reply is embedded in the local
+// error at most maxRemoteErrorBody bytes, cut on a rune boundary and marked with "…".
+func TestRemoteTabGrantErrorBodyIsCapped(t *testing.T) {
+	f := newRemoteTabFixture(t, remoteTabUpstream("unused.example"))
+	// 600 two-byte runes is 1200 bytes; 512 bytes is exactly 256 runes, so the cut is clean.
+	long := strings.Repeat("é", 600)
+	f.useHostAPI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, long, http.StatusBadRequest)
+	}))
+
+	body := tabOriginBody(t, map[string]string{"state_key": "tab:long", "url": "http://" + f.upHost + "/app/dashboard", "host": remoteTabHost})
+	w := postTabOrigin(f.s, body, "127.0.0.1:4096")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body %q, want 400", w.Code, w.Body.String())
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode error reply: %v", err)
+	}
+	const prefix = "tab origin: remote grant: "
+	if !strings.HasPrefix(out.Error, prefix) {
+		t.Fatalf("error = %q, want prefix %q", out.Error, prefix)
+	}
+	if want := strings.Repeat("é", 256) + "…"; out.Error != prefix+want {
+		t.Fatalf("embedded body = %q, want %q", strings.TrimPrefix(out.Error, prefix), want)
 	}
 }
 

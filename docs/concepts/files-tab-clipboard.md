@@ -110,6 +110,7 @@ Both work for local and remote (`host=`) projects; the tree is one component and
 
 ### Right-click Download (`FileTree.tsx` menus, `api.fsDownload`)
 
+- Saves go through `saveBlobAsFile` (`web/src/lib/saveBlob.ts`). In the desktop app the bytes go to the shell's native save panel (`cmd/ocode-desktop/save_file.go`); WKWebView drops blob `<a download>` clicks silently. A file over the 64 MiB desktop save limit fails with a download notice.
 - A **Download** item appears on file rows in both the tree view and the columns view, and only on files. It runs on the effective selection (`effectivePaths`), so a multi-selection downloads each file in turn; a folder in that selection fails on its own entry and is reported, and the rest still save.
 - Files are fetched one at a time (WebKit allows about six connections per origin). The client fetches a Blob with auth headers and saves it via `saveBlobAsFile` (`web/src/lib/saveBlob.ts`). The object URL is revoked on a 10 s timer, as in `csvExport.ts` and `PdfViewer.tsx`.
 - The progress label reuses the upload progress line (`Downloading 1/3…`); the outcome notice is `Downloaded 2 files` or `Downloaded 0 files — <name>: <error>`.

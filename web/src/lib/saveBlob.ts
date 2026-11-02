@@ -1,4 +1,4 @@
-import { isDesktopShell, saveDesktopFile } from "./wails";
+import { assertDesktopSaveSize, isDesktopShell, saveDesktopFile } from "./wails";
 
 /**
  * Save a Blob as a file. In the desktop app the bytes go to the shell's native
@@ -12,6 +12,9 @@ import { isDesktopShell, saveDesktopFile } from "./wails";
  */
 export async function saveBlobAsFile(blob: Blob, filename: string): Promise<void> {
   if (isDesktopShell()) {
+    // Check the size before arrayBuffer(): reading an oversize blob would
+    // allocate it whole just to be refused.
+    assertDesktopSaveSize(filename, blob.size);
     saveDesktopFile(filename, new Uint8Array(await blob.arrayBuffer()));
     return;
   }

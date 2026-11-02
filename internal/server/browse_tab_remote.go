@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/browse"
 )
@@ -14,6 +15,25 @@ import (
 // maxBrowseRevokeBody caps the revoke body the remote API proxy reads to find the
 // panel. A revoke names one state key, so anything larger is refused, not cut short.
 const maxBrowseRevokeBody = 1 << 16
+
+// maxRemoteErrorBody caps how much of a host's error reply is embedded in the local
+// error message. A host reply is untrusted and can be arbitrarily large.
+const maxRemoteErrorBody = 512
+
+// capRemoteErrorBody returns a host's error reply for embedding in a local error,
+// cut to maxRemoteErrorBody bytes with "…" marking the cut. The cut lands on a rune
+// boundary so the result stays valid UTF-8.
+func capRemoteErrorBody(reply []byte) string {
+	reply = bytes.TrimSpace(reply)
+	if len(reply) <= maxRemoteErrorBody {
+		return string(reply)
+	}
+	cut := maxRemoteErrorBody
+	for cut > 0 && !utf8.RuneStart(reply[cut]) {
+		cut--
+	}
+	return string(reply[:cut]) + "…"
+}
 
 // remoteTabTunnel is the tunnel resolver of a forwarding tab for projectHost: the
 // host's browse origin, reached over the workspace tunnel exactly as the prefix
@@ -36,14 +56,21 @@ func (s *Server) mintRemoteGrant(w http.ResponseWriter, r *http.Request, host, s
 		writeError(w, http.StatusInternalServerError, "tab origin: encode grant request: "+err.Error())
 		return "", false
 	}
-	status, reply, err := s.remoteBrowseCall(r, host, "grant", body)
+	call, err := s.remoteBrowseCall(r, host, "grant", body)
 	if err != nil {
 		log.Printf("tab origin: remote grant for %s on %s: %v", stateKey, host, err)
 		writeError(w, http.StatusBadGateway, "tab origin: remote grant: "+err.Error())
 		return "", false
 	}
+	status, reply := call.statusCode(), call.body.Bytes()
 	if status != http.StatusOK {
-		writeError(w, status, fmt.Sprintf("tab origin: remote grant: %s", bytes.TrimSpace(reply)))
+		// A host asks the client to wait with Retry-After: a connect still running
+		// is 503, a rate limit 429. The SPA retries on that header, so it must reach
+		// the client whatever the status.
+		if retry := call.header.Get("Retry-After"); retry != "" {
+			w.Header().Set("Retry-After", retry)
+		}
+		writeError(w, status, fmt.Sprintf("tab origin: remote grant: %s", capRemoteErrorBody(reply)))
 		return "", false
 	}
 	var out struct {
@@ -63,20 +90,21 @@ func (s *Server) mintRemoteGrant(w http.ResponseWriter, r *http.Request, host, s
 
 // remoteBrowseCall sends one browse API call to host's /api/browse/{action} through
 // the host's API proxy, the way the SPA's /api/remote/{host}/api/browse/{action} call
-// does. It returns the host's status and body. Admission and the connect are the
-// proxy's own, so a caller that must not dial checks the connection first.
-func (s *Server) remoteBrowseCall(r *http.Request, host, action string, body []byte) (int, []byte, error) {
+// does. It returns the host's reply: status, headers and body. Admission and the
+// connect are the proxy's own, so a caller that must not dial checks the connection
+// first.
+func (s *Server) remoteBrowseCall(r *http.Request, host, action string, body []byte) (*bufferedResponse, error) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "/api/remote/"+host+"/api/browse/"+action, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, fmt.Errorf("build remote browse %s request: %w", action, err)
+		return nil, fmt.Errorf("build remote browse %s request: %w", action, err)
 	}
 	req.SetPathValue("host", host)
 	req.SetPathValue("rest", "browse/"+action)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", requestOrigin(r))
-	out := newBufferedResponse()
-	s.handler.HandleRemoteProxy(out, req)
-	return out.statusCode(), out.body.Bytes(), nil
+	reply := newBufferedResponse()
+	s.handler.HandleRemoteProxy(reply, req)
+	return reply, nil
 }
 
 // revokeRemoteBrowse tells a remote host to revoke stateKey's browse session, as the
@@ -101,13 +129,13 @@ func (s *Server) revokeRemoteBrowse(r *http.Request, host, stateKey string) {
 		log.Printf("browse revoke: encode remote revoke for %s: %v", stateKey, err)
 		return
 	}
-	status, reply, err := s.remoteBrowseCall(r, host, "revoke", body)
+	call, err := s.remoteBrowseCall(r, host, "revoke", body)
 	if err != nil {
 		log.Printf("browse revoke: remote revoke for %s on %s: %v", stateKey, host, err)
 		return
 	}
-	if status != http.StatusNoContent && status != http.StatusOK {
-		log.Printf("browse revoke: remote revoke for %s on %s: status %d: %s", stateKey, host, status, bytes.TrimSpace(reply))
+	if status := call.statusCode(); status != http.StatusNoContent && status != http.StatusOK {
+		log.Printf("browse revoke: remote revoke for %s on %s: status %d: %s", stateKey, host, status, bytes.TrimSpace(call.body.Bytes()))
 	}
 }
 

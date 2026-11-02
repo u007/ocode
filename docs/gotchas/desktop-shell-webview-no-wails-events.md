@@ -46,7 +46,7 @@ unavailable**:
   `Events.On`; it will compile, register listeners, and silently deliver
   nothing.
 
-The canonical comment lives at `cmd/ocode-desktop/main.go:628-632` (above
+The canonical comment lives at `cmd/ocode-desktop/main.go:633-637` (above
 `msgFocusWindow`).
 
 ## The pattern (shell → page)
@@ -62,15 +62,15 @@ window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-pulse"))`)
 
 `ExecJS` runs arbitrary JS in the page **regardless of how the page was
 loaded**, which is exactly why it works where `EmitEvent` does not
-(`main.go:629-632`).
+(`main.go:634-637`).
 
 Existing signals using this exact mechanism:
 
 | Event | Emitted from | Receiver |
 |---|---|---|
-| `ocode:open-pulse` | `openPulseInPage` (`main.go:637`), tray/app menu | `web/src/components/Pulse/PulseShellSignal.tsx` (`PULSE_SHELL_EVENT`) |
-| `ocode:open-settings` | app menu Settings… (`main.go:710`, `:742`) | `web/src/components/Settings/SettingsPanel.tsx` |
-| `ocode:share-session` / `ocode:share-desktop` / `ocode:copy-desktop-url` | share menu + tray (`main.go:538`, `:541`, `:773`, `:777`, `:782`) | mounted listeners in the SPA |
+| `ocode:open-pulse` | `openPulseInPage` (`main.go:642`), tray/app menu | `web/src/components/Pulse/PulseShellSignal.tsx` (`PULSE_SHELL_EVENT`) |
+| `ocode:open-settings` | app menu Settings… (`main.go:715`, `:747`) | `web/src/components/Settings/SettingsPanel.tsx` |
+| `ocode:share-session` / `ocode:share-desktop` / `ocode:copy-desktop-url` | share menu + tray (`main.go:543`, `:546`, `:778`, `:782`, `:787`) | mounted listeners in the SPA |
 | `ocode:quit-blocked` | `notifyQuitBlocked` (`main.go:75-76`) | `installQuitBlockedListener()` in `web/src/App.tsx` |
 
 Page side: a **React receiver component** that registers
@@ -89,7 +89,7 @@ is needed.
 Page → shell does **not** use this pattern: it travels the minimal
 `window._wails.invoke` bridge (`web/src/lib/wails.ts`, e.g.
 `focusDesktopWindow`) into `application.Options.RawMessageHandler`
-(`main.go:578-580`), because the *full* Wails runtime module is also
+(`main.go:583-585`), because the *full* Wails runtime module is also
 unavailable in the page. So:
 
 - **page → shell**: minimal `_wails.invoke` raw messages (`ocode:focus-window`,

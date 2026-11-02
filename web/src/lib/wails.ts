@@ -105,6 +105,13 @@ export function printDesktopDocument(html: string, target: Window = window): boo
  */
 export const MAX_DESKTOP_SAVE_BYTES = 64 * 1024 * 1024;
 
+/** Throws when a desktop save of `bytes` decoded bytes would exceed MAX_DESKTOP_SAVE_BYTES. */
+export function assertDesktopSaveSize(name: string, bytes: number): void {
+  if (bytes > MAX_DESKTOP_SAVE_BYTES) {
+    throw new Error(`save: ${name} is ${bytes} bytes, over the ${MAX_DESKTOP_SAVE_BYTES}-byte desktop save limit`);
+  }
+}
+
 /** True when the page runs inside the desktop shell's webview. */
 export function isDesktopShell(target: Window = window): boolean {
   return Boolean((target as WailsWindow)._wails?.invoke);
@@ -125,9 +132,7 @@ export function saveDesktopFile(name: string, data: Uint8Array, target: Window =
   if (!clipboardNonce) {
     throw new Error(`save: ${name} not sent, the page has no desktop nonce`);
   }
-  if (data.byteLength > MAX_DESKTOP_SAVE_BYTES) {
-    throw new Error(`save: ${name} is ${data.byteLength} bytes, over the ${MAX_DESKTOP_SAVE_BYTES}-byte desktop save limit`);
-  }
+  assertDesktopSaveSize(name, data.byteLength);
   const body = JSON.stringify({ name, data: bytesToBase64(data) });
   if (!invokeWails(`ocode:save-file:${clipboardNonce}:${body}`, target)) {
     throw new Error(`save: ${name} not sent, the desktop bridge is missing`);

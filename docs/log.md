@@ -17,6 +17,12 @@
 * **Update**: Reopen a locally hidden question dialog: 2026-11-02 amendment makes a dismissed question reopenable and answerable ([superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md](/superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md))
 * **Update**: Interrupted Turn Notice: a dismissed tail can be answered from its card ([concepts/interrupted-turn-notice.md](/concepts/interrupted-turn-notice.md))
 * **Creation**: Question dismiss, reopen and answer: the three question states, transition gates and client-local reopen ([concepts/question-dismiss-reopen-answer.md](/concepts/question-dismiss-reopen-answer.md))
+* **Creation**: Embedded Browser — Per-Tab Root-Mounted Origin for Root-Basepath SPAs ([concepts/browse-per-tab-origin.md](/concepts/browse-per-tab-origin.md))
+* **Update**: Embedded Browser — Chrome Mode Streams: cross-reference to the per-tab origin ([concepts/browse-stream-via-main-origin.md](/concepts/browse-stream-via-main-origin.md))
+* **Update**: Embedded Browser — Root-Relative Redirect: cross-reference, the 307 now serves prefix-mode clients only ([concepts/browse-root-relative-redirect.md](/concepts/browse-root-relative-redirect.md))
+* **Update**: Web/Desktop Server Project Scoping: embedded-browser paragraph notes the per-tab origin for local clients ([concepts/web-server-project-scoping.md](/concepts/web-server-project-scoping.md))
+* **Update**: Per-tab browse origin plan 04: remote binding in the request header, marker in the reply ([plans/2026-11-02-browse-per-tab-origin/04-remote.md](/plans/2026-11-02-browse-per-tab-origin/04-remote.md))
+* **Update**: Per-tab browse origin plan 05: shipped POST /api/browse/tab-origin contract and 409 handling ([plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md](/plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md))
 
 ## 2026-11-01
 

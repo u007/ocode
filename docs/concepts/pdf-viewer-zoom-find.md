@@ -73,7 +73,7 @@ Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale
 ## Print & Download
 
 - Both reuse an independent `blobRef` Blob snapshot of the PDF bytes taken at load — pdf.js may transfer (detach) the ArrayBuffer handed to `getDocument`, so always snapshot `new Blob([buf.slice(0)])` BEFORE calling `getDocument`; reset `blobRef.current = null` in the load effect's cleanup.
-- **Download**: object URL → temp anchor with `download` = path basename (appends `.pdf` if missing) → revoke after 10s (Safari navigates to `about:blank` if revoked synchronously).
+- **Download**: `saveBlobAsFile(blob, basename)` (`web/src/lib/saveBlob.ts`; the basename appends `.pdf` if missing). In a browser that is an object URL on a temp anchor, revoked after 10s (Safari navigates to `about:blank` if revoked synchronously). In the desktop app the bytes go to the shell over the `ocode:save-file:` bridge message and the native save panel opens (`cmd/ocode-desktop/save_file.go`), because WKWebView drops blob `<a download>` clicks without any error. The desktop save is unverified live; see `TODO.md`.
 - **Print**: opens `PrintPreviewDialog` with the PDF blob URL in a sandboxed iframe (`sandbox=""`); Close dismisses without printing. The blob URL is revoked on dialog close. No native print dialog or popup tab.
 - Buttons in the toolbar next to Find: Print, Download (disabled until `total > 0`).
 

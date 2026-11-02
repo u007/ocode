@@ -16,6 +16,8 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiPath, authHeaders, remoteApiBase } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
+import { saveBlobAsFile } from "@/lib/saveBlob";
+import { reportActionError } from "@/lib/actionErrors";
 import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 
@@ -57,27 +59,32 @@ function fileAPIURL(name: string, projectQuery: string, apiBase: string): string
   return apiPath(`${apiBase}/api/uploads/file?name=${encodeURIComponent(name)}${projectQuery}`);
 }
 
+async function fetchAssetBlob(
+  name: string,
+  projectQuery: string,
+  apiBase: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const r = await fetch(fileAPIURL(name, projectQuery, apiBase), { headers: authHeaders(), signal });
+  if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
+  return r.blob();
+}
+
 async function fetchBlob(
   name: string,
   projectQuery: string,
   apiBase: string,
   signal?: AbortSignal
 ): Promise<string> {
-  const r = await fetch(fileAPIURL(name, projectQuery, apiBase), { headers: authHeaders(), signal });
-  if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
-  return URL.createObjectURL(await r.blob());
+  return URL.createObjectURL(await fetchAssetBlob(name, projectQuery, apiBase, signal));
 }
 
 async function triggerDownload(name: string, projectQuery: string, apiBase: string): Promise<void> {
   try {
-    const url = await fetchBlob(name, projectQuery, apiBase);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(url);
+    await saveBlobAsFile(await fetchAssetBlob(name, projectQuery, apiBase), name);
   } catch (e) {
     console.error("download failed:", e);
+    reportActionError(e, `Download ${name}`);
   }
 }
 

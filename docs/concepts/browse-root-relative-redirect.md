@@ -59,6 +59,12 @@ explains the cause (see Referrer policy). The desktop listener sends the same bo
 - **The mount split is unambiguous** (`^((?:/api/remote/[^/]+/browse)?)(/b/.*)$`): the
   host segment cannot contain `/`, so an upstream path containing `/b/` is harmless.
 
+> **Cross-reference (2026-11-02):** a tab loaded on its own root-mounted origin (see
+> [browse-per-tab-origin.md](browse-per-tab-origin.md)) never reaches this redirect. Its root
+> is the upstream, so root-relative imports resolve on the binding. The 307 described here
+> still serves prefix-mode clients (tailnet and phone). Whether the HMR socket connects on a
+> tab origin is unverified.
+
 ## Referrer policy
 
 The redirect works only when the browser sends the full `/b/` path in `Referer`. The

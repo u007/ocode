@@ -84,7 +84,10 @@ through `/api/remote/{host}/api/browse/*`, so the host's own browse server mints
 and records them, and records the browser's `Origin` for the capture script's
 postMessage target. A `localhost` page in a remote project is therefore a
 `localhost` on the host. Local projects still use this machine's browse origin
-(no `host` param). Rules that keep this honest:
+(no `host` param). Since 2026-11-02, a desktop or web client on this machine loads local and
+remote tabs on a per-tab root-mounted origin (`POST /api/browse/tab-origin`, see
+[browse-per-tab-origin.md](browse-per-tab-origin.md)). The prefix URLs above are the fallback,
+used when that endpoint answers 409 (a non-local client or a remote-mode server). Rules that keep this honest:
 
 - **The unauthenticated browse proxy never dials.** `handleRemoteBrowseProxy` sits
   outside `authMiddleware`, so it only reuses a workspace the authenticated
