@@ -8,7 +8,7 @@ tags:
   - asks
   - ui
   - server
-timestamp: 2026-09-24T08:00:00Z
+timestamp: 2026-11-02T04:00:00Z
 ---
 When a turn ends with an answered ask but no assistant reply, ocode treats it as **interrupted**. The concept below covers how the server detects this state, how the client consumes it, and where the limits lie.
 
@@ -58,7 +58,7 @@ In short: **dismissal = stop; unanswered ask still wins; answered ask still unfi
 
 ## UI
 
-`ChatPanel` renders the notice as an inline row at the transcript end — it is **not** a transcript entry, so it never appears in the message list or search index. The row has `role="status"` and is suppressed while `wasInterrupted`, a turn is active, streaming, live parts exist, a pending ask is open, the transcript is empty, the tab is `new-*`, or there is a load error. The notice also does not appear after a dismissed question — the tail reads as `stopped`, so the session is not interrupted. Continue hides optimistically; App sends the literal `"continue"` message.
+`ChatPanel` renders the notice as an inline row at the transcript end — it is **not** a transcript entry, so it never appears in the message list or search index. The row has `role="status"` and is suppressed while `wasInterrupted`, a turn is active, streaming, live parts exist, a pending ask is open, the transcript is empty, the tab is `new-*`, or there is a load error. The notice also does not appear after a dismissed question — the tail reads as `stopped`, so the session is not interrupted. A dismissed tail can still be answered from its transcript card, and that answer runs a normal continuation (see [question dismiss, reopen and answer](question-dismiss-reopen-answer.md)). Continue hides optimistically; App sends the literal `"continue"` message.
 
 ## Accepted behaviour & limits
 

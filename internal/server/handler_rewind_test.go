@@ -248,8 +248,8 @@ func TestRewindPrepareRejectsActiveTurnAndInvalidTarget(t *testing.T) {
 	cancelToken := f.arm(2, "replace me", 2)
 	f.handler.sessions.setTurnActive(f.id, true)
 	activeCancel := f.request(http.MethodDelete, "/api/sessions/"+f.id+"/rewinds/"+cancelToken, nil, true)
-	if activeCancel.Code != http.StatusConflict {
-		t.Fatalf("active cancel status = %d, want 409: %s", activeCancel.Code, activeCancel.Body.String())
+	if activeCancel.Code != http.StatusOK {
+		t.Fatalf("active cancel status = %d, want 200: %s", activeCancel.Code, activeCancel.Body.String())
 	}
 	f.handler.sessions.setTurnActive(f.id, false)
 

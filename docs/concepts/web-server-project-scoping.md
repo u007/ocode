@@ -163,8 +163,9 @@ Rules:
   project binding). New session-scoped calls must pass that host — plus an
   `X-Ocode-Project` header when they carry a path — or they hit the wrong
   machine. Local calls pass no host and keep byte-identical URLs.
-- **A version-mismatched remote server is retired on connect.** `EnsureRemoteServer`
-  kills an alive, healthy server whose version differs from the local build, starts
+- **An older remote server is retired on connect.** `EnsureRemoteServer`
+  kills an alive, healthy server whose version is older than the local build (a newer
+  one is reused; dev or non-`X.Y.Z` versions replace on any difference), starts
   a fresh one, then reaps every other-version `ocode serve` on the host
   (`killOtherVersionServers`) — leftovers held memory and starved sshd. Running
   turns and terminals on the old server are not drained. Explicit restart remains

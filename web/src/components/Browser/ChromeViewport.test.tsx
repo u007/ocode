@@ -333,6 +333,71 @@ describe("ChromeViewport", () => {
     expect(mockApi.send).not.toHaveBeenCalled();
   });
 
+  it("types a re-delivered IME commit once, not twice", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+
+    // A phone soft keyboard that commits the same word twice (measured on the
+    // terminal: identical events, 60 ms apart sends once, 250 ms apart sends
+    // twice). The remote page must receive ONE insertText either way.
+    fireEvent.compositionEnd(keyboard, { data: "ls" });
+    fireEvent.compositionEnd(keyboard, { data: "ls" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([{ t: "insertText", text: "ls" }]);
+
+    // A deliberately different word still goes through.
+    fireEvent.compositionEnd(keyboard, { data: "la" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "insertText", text: "ls" },
+      { t: "insertText", text: "la" },
+    ]);
+  });
+
+  it("types an identical IME word again after a typed space, not dropped as a re-delivery", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+
+    // "ok", space, "ok" within a second: the space is a real keystroke that ends
+    // the first word, so the second "ok" must reach the page.
+    fireEvent.compositionEnd(keyboard, { data: "ok" });
+    fireEvent.keyDown(keyboard, { key: " ", code: "Space" });
+    fireEvent.compositionEnd(keyboard, { data: "ok" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "insertText", text: "ok" },
+      expect.objectContaining({ t: "key", kind: "down", key: " ", text: " " }),
+      { t: "insertText", text: "ok" },
+    ]);
+  });
+
+  it("types an identical IME word again after a paste, not dropped as a re-delivery", () => {
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const keyboard = container.querySelector("textarea[data-testid='cdp-keyboard']") as HTMLTextAreaElement;
+    act(() => fireFrame());
+    mockApi.send.mockClear();
+
+    fireEvent.compositionEnd(keyboard, { data: "ok" });
+    const paste = new Event("paste", { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+    paste.clipboardData = { getData: (type: string) => (type === "text/plain" ? "ok" : "") };
+    act(() => {
+      keyboard.dispatchEvent(paste);
+    });
+    fireEvent.compositionEnd(keyboard, { data: "ok" });
+    expect(mockApi.send.mock.calls.map((c) => c[0])).toEqual([
+      { t: "insertText", text: "ok" },
+      { t: "insertText", text: "ok" },
+      { t: "insertText", text: "ok" },
+    ]);
+  });
+
   it("translates browser-chrome shortcuts into navigation commands", () => {
     // Non-mac host: Ctrl is primary, Alt+Arrow is history.
     vi.stubGlobal("navigator", { ...navigator, platform: "Win32" });

@@ -57,3 +57,64 @@ describe("writeDesktopClipboard", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+describe("printDesktopDocument", () => {
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+    vi.resetModules();
+  });
+
+  // The nonce is read at module load, so each case loads a fresh copy.
+  async function loadWithNonce() {
+    window.history.replaceState({}, "", "/?clip=abc123");
+    vi.resetModules();
+    return import("./wails");
+  }
+
+  const prefix = "ocode:print-document:abc123:";
+
+  it("sends nothing and reports false when the page has no nonce", async () => {
+    window.history.replaceState({}, "", "/session/abc?token=t");
+    vi.resetModules();
+    const { printDesktopDocument } = await import("./wails");
+    const invoke = vi.fn();
+    const target = { _wails: { invoke } } as unknown as Window;
+
+    expect(printDesktopDocument("<p>doc</p>", target)).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("sends a message whose total size is exactly the limit", async () => {
+    const { printDesktopDocument, MAX_PRINT_DOCUMENT_BYTES } = await loadWithNonce();
+    const invoke = vi.fn();
+    const target = { _wails: { invoke } } as unknown as Window;
+    const html = "x".repeat(MAX_PRINT_DOCUMENT_BYTES - prefix.length);
+
+    expect(printDesktopDocument(html, target)).toBe(true);
+    expect(invoke).toHaveBeenCalledWith(`${prefix}${html}`);
+  });
+
+  it("throws and sends nothing when the message is over the limit", async () => {
+    const { printDesktopDocument, MAX_PRINT_DOCUMENT_BYTES } = await loadWithNonce();
+    const invoke = vi.fn();
+    const target = { _wails: { invoke } } as unknown as Window;
+    const html = "x".repeat(MAX_PRINT_DOCUMENT_BYTES - prefix.length + 1);
+
+    expect(() => printDesktopDocument(html, target)).toThrow(
+      `print: document is ${MAX_PRINT_DOCUMENT_BYTES + 1} bytes, over the ${MAX_PRINT_DOCUMENT_BYTES}-byte print limit`,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("measures UTF-8 bytes, not characters", async () => {
+    const { printDesktopDocument, MAX_PRINT_DOCUMENT_BYTES } = await loadWithNonce();
+    const invoke = vi.fn();
+    const target = { _wails: { invoke } } as unknown as Window;
+    // Each "é" is 2 UTF-8 bytes, so half the limit in characters is over the limit in bytes.
+    const html = "é".repeat(MAX_PRINT_DOCUMENT_BYTES / 2);
+
+    expect(html.length).toBeLessThan(MAX_PRINT_DOCUMENT_BYTES);
+    expect(() => printDesktopDocument(html, target)).toThrow("over the 8388608-byte print limit");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});

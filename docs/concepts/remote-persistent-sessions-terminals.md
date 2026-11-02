@@ -64,7 +64,7 @@ Terminal IDs persist in localStorage per project (`web/src/components/Terminal/t
 
 ### Remote server version policy
 
-`EnsureRemoteServer` (`internal/remote/serve.go`) kills an alive, healthy but version-mismatched server and starts a fresh one at the local version, then reaps every other-version `ocode serve` left on the host (`killOtherVersionServers`). Terminals on the old server are not drained. `ServeState.Outdated` (bool, `json:"-"`) is now only set transiently; a freshly started server is never Outdated.
+`EnsureRemoteServer` (`internal/remote/serve.go`) kills an alive, healthy server that is older than the local version (`shouldReplaceRemote`) and starts a fresh one at the local version; a newer server is reused, so two clients of different versions on one host do not retire each other's server in turn. Versions that are not plain `X.Y.Z` (dev builds) replace on any difference. It then reaps every other-version `ocode serve` left on the host (`killOtherVersionServers`). Terminals on the old server are not drained. `ServeState.Outdated` (bool, `json:"-"`) is now only set transiently; a freshly started server is never Outdated.
 
 ### Lifecycle endpoints
 

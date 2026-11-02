@@ -326,6 +326,7 @@ const PlainToolBlock = memo(function PlainToolBlock({
   highlight = "",
   onOpenQuestion,
   onOpenPermission,
+  questionDismissed = false,
   callKey = "tool-call",
   outputKey = "tool-output",
   forceOpen = false,
@@ -347,6 +348,10 @@ const PlainToolBlock = memo(function PlainToolBlock({
   /** Set for a `permission` call still waiting on the user: shows that same
    *  request again after the dialog is locally hidden. */
   onOpenPermission?: () => void;
+  /** Set with `onOpenQuestion` when the prompt was dismissed and is reopenable.
+   *  The user did not get to answer it, so the card says it can still be
+   *  answered instead of "awaiting your answer". */
+  questionDismissed?: boolean;
   /** Stable transcript identity plus region. Manual disclosure survives remounts. */
   callKey?: string;
   outputKey?: string;
@@ -417,6 +422,10 @@ const PlainToolBlock = memo(function PlainToolBlock({
   // stream, or by the "DIFF:" first line on replayed history (no tool name).
   const isDiffOutput =
     TOOL_OUTPUT_LANG[tool] === "diff" || (displayOutput ?? "").startsWith("DIFF:");
+  // The find bar marks matches by wrapping text in <mark>, which a JSON tree
+  // (keys and values as spans) cannot carry, so JSON falls back to plain text
+  // while a query is active.
+  const jsonTree = highlight.trim() === "";
   // Concise summary for tools whose raw argument JSON is noise in the
   // transcript (read/write/bash). When present, the header shows it instead of
   // the bare tool name and the raw-args block below is suppressed.
@@ -461,7 +470,9 @@ const PlainToolBlock = memo(function PlainToolBlock({
               <span className="ml-1 animate-pulse text-amber-400/70">running…</span>
             )}
             {(onOpenQuestion || onOpenPermission) && (
-              <span className="ml-1 text-amber-400/70">awaiting your answer</span>
+              <span className="ml-1 text-amber-400/70">
+                {questionDismissed ? "dismissed · you can still answer" : "awaiting your answer"}
+              </span>
             )}
           </button>
           {copyText !== "" && (
@@ -479,7 +490,7 @@ const PlainToolBlock = memo(function PlainToolBlock({
             onClick={onOpenQuestion}
             className="mt-2 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-500/15"
           >
-            Open question
+            {questionDismissed ? "Answer question" : "Open question"}
           </button>
         )}
         {onOpenPermission && (
@@ -501,7 +512,7 @@ const PlainToolBlock = memo(function PlainToolBlock({
               </pre>
             )}
             {command && !argsHint && (
-              isJsonString(command) ? (
+              jsonTree && isJsonString(command) ? (
                 <div className="rounded bg-card/70 p-2">
                   <JsonTree content={command} />
                 </div>
@@ -537,7 +548,7 @@ const PlainToolBlock = memo(function PlainToolBlock({
         )}
         {output !== undefined && output !== "" && outputOpen && (
           <div className="rounded bg-card/70 p-2" data-copy-content="">
-            {isJsonString(displayOutput ?? "") ? (
+            {jsonTree && isJsonString(displayOutput ?? "") ? (
               <JsonTree content={displayOutput ?? ""} />
             ) : (
             <div className="font-mono text-[11px] text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
@@ -558,7 +569,7 @@ const PlainToolBlock = memo(function PlainToolBlock({
               })}
             </div>
             )}
-            {collapsible && !isJsonString(displayOutput ?? "") && (
+            {collapsible && !(jsonTree && isJsonString(displayOutput ?? "")) && (
               <button
                 type="button"
                 onClick={() => disclosure.set(previewKey, !expanded)}

@@ -295,6 +295,45 @@ describe("useChat question visibility", () => {
     expect(mockCancelQuestion).not.toHaveBeenCalled();
   });
 
+  // A reopened dismissed prompt exists only in this browser: the server already
+  // dismissed it, so hiding or cancelling it must not call the endpoints.
+  it("closes a reopened prompt locally without calling the server", () => {
+    const { result } = renderWithSession("sess-reopen-hide");
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-reopen-hide",
+        question: { request_id: "q-1", questions: [], reopened: true },
+      });
+    });
+
+    act(() => result.current.chat.hideQuestion("q-1"));
+
+    expect(result.current.chat.pendingQuestion).toBeNull();
+    expect(result.current.chat.hiddenQuestionRequestId).toBeNull();
+    expect(mockCancelQuestion).not.toHaveBeenCalled();
+  });
+
+  it("answers 'Don't answer' on a reopened prompt locally without calling the server", async () => {
+    const { result } = renderWithSession("sess-reopen-cancel");
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-reopen-cancel",
+        question: { request_id: "q-1", questions: [], reopened: true },
+      });
+    });
+
+    let cancelled: boolean | undefined;
+    await act(async () => {
+      cancelled = await result.current.chat.cancelQuestion("q-1");
+    });
+
+    expect(cancelled).toBe(true);
+    expect(result.current.chat.pendingQuestion).toBeNull();
+    expect(mockCancelQuestion).not.toHaveBeenCalled();
+  });
+
   it("retains the explicit final cancellation for the footer action", async () => {
     const { result } = renderWithSession("sess-dont-answer");
     act(() => {

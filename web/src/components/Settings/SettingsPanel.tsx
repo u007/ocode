@@ -87,45 +87,56 @@ export type SettingsGroupId =
 interface GroupDef {
   id: SettingsGroupId;
   label: string;
+  category?: string;
 }
 
 const OCODE_GROUPS: GroupDef[] = [
-  { id: "backend", label: "Backend" },
-  { id: "browser", label: "Browser" },
-  { id: "vault", label: "Passwords" },
-  { id: "tts", label: "Speech playback" },
-  { id: "stt", label: "Speech to text" },
-  { id: "connectors", label: "Connectors" },
-  { id: "profiles", label: "Profiles" },
-  { id: "profile-debug", label: "Profile Debug" },
-  { id: "model-defaults", label: "Model Defaults & Recap" },
-  { id: "commit-msg", label: "Commit Message" },
-  { id: "git", label: "Git" },
-  { id: "compact", label: "Compact" },
-  { id: "speech-summary", label: "Speech Summary" },
-  { id: "chat-display", label: "Chat display" },
-  { id: "quick-actions", label: "Quick actions" },
-  { id: "advisor", label: "Advisor" },
-  { id: "pulse-assistant", label: "Pulse assistant" },
-  { id: "prompts", label: "System Prompts" },
-  { id: "permissions", label: "Permissions" },
-  { id: "system-permissions", label: "System Permissions" },
-  { id: "security", label: "Security & Redaction" },
-  { id: "terminal", label: "Terminal" },
-  { id: "logs", label: "Logs" },
-  { id: "ocr", label: "OCR" },
-  { id: "computer-use", label: "Computer Use" },
-  { id: "discovery", label: "Discovery" },
-  { id: "tui", label: "TUI" },
-  { id: "editor", label: "Editor Mode" },
-  { id: "imagegen", label: "Image Generation" },
-  { id: "paths", label: "Paths & Uploads" },
-  { id: "limits", label: "Limits" },
-  { id: "features", label: "Features" },
-  { id: "auto-share", label: "Auto Share" },
-  { id: "plugins", label: "Plugins & Local Models" },
-  { id: "skills", label: "Skills" },
-  { id: "theme", label: "Theme" },
+  // Models & Providers
+  { id: "backend", label: "Backend", category: "Models & Providers" },
+  { id: "model-defaults", label: "Model Defaults & Recap", category: "Models & Providers" },
+  // Chat & Composition
+  { id: "chat-display", label: "Chat display", category: "Chat & Composition" },
+  { id: "commit-msg", label: "Commit Message", category: "Chat & Composition" },
+  { id: "compact", label: "Compact", category: "Chat & Composition" },
+  { id: "quick-actions", label: "Quick actions", category: "Chat & Composition" },
+  { id: "speech-summary", label: "Speech Summary", category: "Chat & Composition" },
+  { id: "advisor", label: "Advisor", category: "Chat & Composition" },
+  { id: "auto-share", label: "Auto Share", category: "Chat & Composition" },
+  { id: "prompts", label: "System Prompts", category: "Chat & Composition" },
+  { id: "features", label: "Features", category: "Chat & Composition" },
+  // Voice & Media
+  { id: "tts", label: "Speech playback", category: "Voice & Media" },
+  { id: "stt", label: "Speech to text", category: "Voice & Media" },
+  { id: "ocr", label: "OCR", category: "Voice & Media" },
+  { id: "imagegen", label: "Image Generation", category: "Voice & Media" },
+  // Permissions & Security
+  { id: "permissions", label: "Permissions", category: "Permissions & Security" },
+  { id: "system-permissions", label: "System Permissions", category: "Permissions & Security" },
+  { id: "security", label: "Security & Redaction", category: "Permissions & Security" },
+  { id: "vault", label: "Passwords", category: "Permissions & Security" },
+  // Terminal & Tools
+  { id: "terminal", label: "Terminal", category: "Terminal & Tools" },
+  { id: "computer-use", label: "Computer Use", category: "Terminal & Tools" },
+  { id: "browser", label: "Browser", category: "Terminal & Tools" },
+  { id: "git", label: "Git", category: "Terminal & Tools" },
+  // Discovery & Skills
+  { id: "discovery", label: "Discovery", category: "Discovery & Skills" },
+  { id: "connectors", label: "Connectors", category: "Discovery & Skills" },
+  { id: "plugins", label: "Plugins & Local Models", category: "Discovery & Skills" },
+  { id: "skills", label: "Skills", category: "Discovery & Skills" },
+  // Appearance
+  { id: "theme", label: "Theme", category: "Appearance" },
+  { id: "tui", label: "TUI", category: "Appearance" },
+  { id: "editor", label: "Editor Mode", category: "Appearance" },
+  // Files & Data
+  { id: "paths", label: "Paths & Uploads", category: "Files & Data" },
+  { id: "logs", label: "Logs", category: "Files & Data" },
+  { id: "limits", label: "Limits", category: "Files & Data" },
+  // Profiles
+  { id: "profiles", label: "Profiles", category: "Profiles" },
+  { id: "profile-debug", label: "Profile Debug", category: "Profiles" },
+  // Pulse
+  { id: "pulse-assistant", label: "Pulse assistant", category: "Pulse" },
 ];
 
 const OPENCODE_GROUPS: GroupDef[] = [
@@ -264,20 +275,30 @@ function NavSection({
       <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
-      {groups.map((g) => (
-        <button
-          key={g.id}
-          type="button"
-          onClick={() => onSelect(g.id)}
-          className={`w-full text-left px-3 py-1.5 text-sm rounded-md transition-colors ${
-            active === g.id
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          }`}
-        >
-          {g.label}
-        </button>
-      ))}
+      {groups.map((g, i) => {
+        const newCategory = g.category && (i === 0 || groups[i - 1].category !== g.category);
+        return (
+          <div key={g.id} className="mb-2">
+            {newCategory && (
+              <div className="px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+                {g.category}
+              </div>
+            )}
+            <button
+              key={g.id}
+              type="button"
+              onClick={() => onSelect(g.id)}
+              className={`w-full text-left px-3 py-1.5 text-sm rounded-md transition-colors ${
+                active === g.id
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              {g.label}
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

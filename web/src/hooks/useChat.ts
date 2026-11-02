@@ -449,6 +449,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const cancelQuestion = useCallback(
     async (requestId: string): Promise<boolean> => {
       if (!sessionId) return false;
+      // A reopened prompt exists only in this browser (the server already
+      // dismissed it), so there is nothing to cancel server-side.
+      if (pendingQuestion?.reopened && pendingQuestion.request_id === requestId) {
+        dispatch({ type: "QUESTION_RESOLVED", sessionId, requestId });
+        return true;
+      }
       try {
         await api.cancelQuestion(requestId, sessionId, projectHost);
         dispatch({ type: "QUESTION_DISMISSED", sessionId, requestId });
@@ -468,15 +474,21 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         return false;
       }
     },
-    [dispatch, sessionId, projectHost],
+    [dispatch, sessionId, projectHost, pendingQuestion],
   );
 
   const hideQuestion = useCallback(
     (requestId: string) => {
       if (!sessionId) return;
+      // Closing a reopened prompt clears it entirely: its transcript card then
+      // shows the reopen button again, which is the way back to the question.
+      if (pendingQuestion?.reopened && pendingQuestion.request_id === requestId) {
+        dispatch({ type: "QUESTION_RESOLVED", sessionId, requestId });
+        return;
+      }
       dispatch({ type: "QUESTION_HIDE", sessionId, requestId });
     },
-    [dispatch, sessionId],
+    [dispatch, sessionId, pendingQuestion],
   );
 
   const showQuestion = useCallback(

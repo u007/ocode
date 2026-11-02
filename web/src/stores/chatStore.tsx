@@ -21,7 +21,7 @@ export const SENTINEL_WAITING = "WAITING_FOR_USER_RESPONSE";
 export const QUESTION_DISMISSED_RESULT =
   "The user dismissed the question prompt without answering.";
 
-function trailingToolRunStart(messages: Message[]): number {
+export function trailingToolRunStart(messages: Message[]): number {
   let i = messages.length;
   while (i > 0 && messages[i - 1].role === "tool") i--;
   return i;
@@ -87,6 +87,44 @@ export function parseQuestionFromMessage(msg: Message): QuestionRequest | null {
   } catch {
     return null;
   }
+}
+
+/** True when a tool result is the dismissal notice the server writes for an
+ *  unanswered question prompt (see QUESTION_DISMISSED_RESULT). */
+export function isDismissedQuestionResult(content: string): boolean {
+  return content.trim() === QUESTION_DISMISSED_RESULT;
+}
+
+function isQuestionPrompt(value: unknown): value is QuestionPrompt {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "question" in value &&
+    typeof value.question === "string" &&
+    "header" in value &&
+    typeof value.header === "string" &&
+    "options" in value &&
+    Array.isArray(value.options)
+  );
+}
+
+/** Recovers the questions of a `question` tool call from its arguments JSON, so
+ *  a dismissed prompt (whose result no longer carries them) can be reopened.
+ *  Returns null unless the arguments hold a non-empty prompt list. Pure parser:
+ *  malformed arguments are an expected outcome, so the caller shows no reopen
+ *  affordance instead of an error. */
+export function questionsFromToolCallArgs(args: string): QuestionPrompt[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    // intentionally not logged: unparseable tool arguments are a normal, non-reopenable case
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("questions" in parsed)) return null;
+  const questions = parsed.questions;
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+  return questions.every(isQuestionPrompt) ? questions : null;
 }
 
 export function extractPendingFromMessages(messages: Message[]): {
@@ -244,6 +282,10 @@ export interface ContentGuardScore {
 export interface QuestionRequest {
   request_id: string;
   questions: QuestionPrompt[];
+  /** True when the user reopened a dismissed prompt from the transcript. The
+   *  server holds no pending ask for it: reopening is client-local, so hide and
+   *  cancel never call the server for it. */
+  reopened?: boolean;
 }
 
 /** Per-session chat state — one entry per open tab, keyed by session id (or
@@ -800,6 +842,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => {
         const pending = extractPendingFromMessages(action.messages);
         const capped = capMessages(action.messages);
+        // A reopened prompt is client-local, so the transcript cannot re-derive
+        // it: keep it while open instead of closing the dialog under the user.
+        const question = s.pendingQuestion?.reopened ? s.pendingQuestion : pending.pendingQuestion;
         return {
           ...s,
           messages: capped.messages,
@@ -812,8 +857,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           windowStartServerIndex: Math.max(0, action.messages.length - capped.messages.length),
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
-          pendingQuestion: pending.pendingQuestion,
-          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          pendingQuestion: question,
+          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, question),
           hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
           // Restore the suggestions the last reply proposed. The transcript is
           // the source of truth on a reload — the live "suggestions" event
@@ -1191,6 +1236,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // stays idempotent; when the sentinel is not in the loaded page (deep
       // history / hydrated ask) the turn-end snapshot is the only source and
       // the local rewrite is a no-op.
+      //
+      // A dismissed result is rewritten too: the user can reopen a dismissed
+      // prompt (see QuestionRequest.reopened) and answer it while the dismissal
+      // is still the trailing tool round.
       return updateSession(state, action.sessionId, (s) => {
         if (isStaleQuestionAction(s, action.requestId)) return s;
         const answers = JSON.stringify(action.answers);
@@ -1200,7 +1249,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             replaced ||
             m.role !== "tool" ||
             m.tool_call_id !== action.requestId ||
-            !m.content.includes(SENTINEL_QUESTION_PROMPT)
+            !(m.content.includes(SENTINEL_QUESTION_PROMPT) || isDismissedQuestionResult(m.content))
           ) {
             return m;
           }
@@ -1478,6 +1527,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           };
         }
         const capped = capMessages(action.messages, action.total);
+        // Same reopened-prompt guard as SET_MESSAGES: a client-local prompt the
+        // transcript cannot re-derive stays open across the mirror snapshot.
+        const question = s.pendingQuestion?.reopened ? s.pendingQuestion : pending.pendingQuestion;
         return {
           ...s,
           messages: capped.messages,
@@ -1491,8 +1543,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           initialized: true,
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
-          pendingQuestion: pending.pendingQuestion,
-          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          pendingQuestion: question,
+          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, question),
           hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
           // Restore the suggestions the last reply proposed. This is the
           // RELOAD path: the live "suggestions" event only fires when a reply

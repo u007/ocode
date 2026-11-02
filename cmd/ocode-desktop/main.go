@@ -265,7 +265,13 @@ func main() {
 		// RawMessageHandler receives every webview message that does not start
 		// with "wails:". The SPA sends quit-guard transitions here through the
 		// minimal _wails.invoke bridge (the full Wails runtime is never loaded).
-		RawMessageHandler: func(_ application.Window, message string, origin *application.OriginInfo) {
+		RawMessageHandler: func(window application.Window, message string, origin *application.OriginInfo) {
+			// Print windows show user documents, so their bridge access is limited
+			// to the ready message. Nothing else they send reaches the handling below.
+			if isPrintWindow(window) {
+				handlePrintWindowMessage(window, message)
+				return
+			}
 			quitGuard.HandleRawMessage(message)
 			// The Pulse dashboard can be opened from the tray or the app menu
 			// while ocode is in the background, so the page asks us to raise
@@ -292,8 +298,13 @@ func main() {
 				if text, ok := pageClipboardText(message, origin, dw.host, dw.clipNonce); ok {
 					writePageClipboard(text)
 				}
+				if html, ok := pagePrintHTML(message, origin, dw.host, dw.clipNonce); ok {
+					openPrintWindow(html)
+				}
 			} else if strings.HasPrefix(message, msgClipboardWrite) {
 				log.Printf("ocode-desktop: refused clipboard write: window not ready")
+			} else if strings.HasPrefix(message, msgPrintDocument) {
+				log.Printf("ocode-desktop: refused print request: window not ready")
 			}
 		},
 		SingleInstance: &application.SingleInstanceOptions{
@@ -665,47 +676,53 @@ const msgOpenExternal = "ocode:open-external:"
 // the system clipboard. The text follows the prefix verbatim.
 const msgClipboardWrite = "ocode:clipboard-write:"
 
-// pageClipboardText extracts the text of a clipboard-write message. The wire
-// format is msgClipboardWrite + nonce + ":" + text. Only the ocode page itself
-// may write, and it must prove it holds the per-launch nonce (the ?clip= query
-// param on the window URL). Two checks, both required:
+// pageClipboardText extracts the text of a clipboard-write message. The page's
+// own guard against unsolicited OSC 52 writes lives in TerminalPanel.tsx.
+func pageClipboardText(message string, origin *application.OriginInfo, appHost, nonce string) (string, bool) {
+	return pageBridgePayload(message, msgClipboardWrite, "clipboard write", origin, appHost, nonce)
+}
+
+// pageBridgePayload extracts the payload of a page → shell message that must be
+// authenticated, such as a clipboard write or a print request. The wire format
+// is prefix + nonce + ":" + payload, and what names the request in refusal log
+// lines. Only the ocode page itself may send one, and it must prove it holds the
+// per-launch nonce (the ?clip= query param on the window URL). Two checks, both
+// required:
 //
 //   - The nonce must match the one the window was opened with. A cross-origin
 //     iframe cannot read the top window's location, so it never learns the
 //     nonce. This closes the gap the host check leaves open on Linux.
 //   - The host check: appHost is the host:port the window was opened on. A page
-//     loaded in an iframe (embedded browser, preview) must not be able to set
-//     the user's clipboard through the shell. The host is compared rather than
-//     OriginInfo.IsMainFrame, which Wails fills in only on darwin. darwin and
-//     Windows report the sending frame's URL; Linux reports the webview's top
-//     URL, so there the host check alone cannot tell an iframe apart.
-//
-// The page's own guard against unsolicited OSC 52 writes lives in TerminalPanel.tsx.
-func pageClipboardText(message string, origin *application.OriginInfo, appHost, nonce string) (string, bool) {
-	payload, ok := strings.CutPrefix(message, msgClipboardWrite)
+//     loaded in an iframe (embedded browser, preview) must not be able to reach
+//     the clipboard or open print windows through the shell. The host is compared
+//     rather than OriginInfo.IsMainFrame, which Wails fills in only on darwin.
+//     darwin and Windows report the sending frame's URL; Linux reports the
+//     webview's top URL, so there the host check alone cannot tell an iframe apart.
+func pageBridgePayload(message, prefix, what string, origin *application.OriginInfo, appHost, nonce string) (string, bool) {
+	payload, ok := strings.CutPrefix(message, prefix)
 	if !ok {
 		return "", false
 	}
-	gotNonce, text, _ := strings.Cut(payload, ":")
+	gotNonce, body, _ := strings.Cut(payload, ":")
 	// An empty expected nonce must never match, so a window that somehow has
-	// none refuses every write.
+	// none refuses every request.
 	if nonce == "" || subtle.ConstantTimeCompare([]byte(gotNonce), []byte(nonce)) != 1 {
-		log.Printf("ocode-desktop: refused clipboard write: bad nonce")
+		log.Printf("ocode-desktop: refused %s: bad nonce", what)
 		return "", false
 	}
-	if text == "" {
+	if body == "" {
 		return "", false
 	}
 	if origin == nil {
-		log.Printf("ocode-desktop: refused clipboard write with no sender origin")
+		log.Printf("ocode-desktop: refused %s with no sender origin", what)
 		return "", false
 	}
 	u, err := url.Parse(origin.Origin)
 	if err != nil || appHost == "" || u.Host != appHost {
-		log.Printf("ocode-desktop: refused clipboard write from a frame outside the ocode page")
+		log.Printf("ocode-desktop: refused %s from a frame outside the ocode page", what)
 		return "", false
 	}
-	return text, true
+	return body, true
 }
 
 // writePageClipboard sets the system clipboard. The text is deliberately never

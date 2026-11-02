@@ -38,6 +38,7 @@ import type { CellAdjust, GhosttyKeybind } from "./terminalAppearance";
 import { actionForEvent, buildKeybindTable, type KeybindAction } from "./ghosttyKeybinds";
 import { attachMouseReporting, sendWheelReport } from "./terminalMouse";
 import { attachImeHygiene } from "./terminalImeHygiene";
+import { createTerminalInputGuard, isTerminalGeneratedReply } from "./terminalInputGuard";
 import { softKeyboardNavigationSequence } from "./terminalSoftKeyboard";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
@@ -518,6 +519,14 @@ export default function TerminalPanel({
   const takeoverRef = useRef(false);
   const [takenOver, setTakenOver] = useState(false);
   const takenOverRef = useRef(false);
+  // Set when a keystroke arrives while the socket is not attached. Nothing is
+  // buffered (replaying stale keys into a shell is dangerous), so the drop is
+  // announced instead of silent — this is the "typing does nothing" report.
+  const [inputPaused, setInputPaused] = useState(false);
+  // IME double-commit guard (terminalInputGuard.ts). Panel state rather than a
+  // per-effect object, so the upload, voice, paste and key paths outside the
+  // terminal effect can record the bytes they send. Stable for the panel's life.
+  const [inputGuard] = useState(() => createTerminalInputGuard());
   // Rendered form of attachedRef: true once the server's attach frame arrives on
   // the live socket, cleared when that socket goes away. Gates the voice button,
   // since term.paste (like every keystroke) is dropped until the handshake is done.
@@ -570,11 +579,12 @@ export default function TerminalPanel({
       // the filename alone still helps.
       const paths = names.map((n) => `.ocode/uploads/${n}`);
       const text = paths.join(" ") + " ";
+      inputGuard.noteInput();
       sock.send(text);
     } catch (err) {
       console.error("terminal: file upload failed:", err);
     }
-  }, [projectPath, host]);
+  }, [projectPath, host, inputGuard]);
 
   // Voice input: the transcript is pasted as ONE paste, never sent. The send
   // rule is the same as the chat composer's: the user reviews it and presses Return.
@@ -595,9 +605,10 @@ export default function TerminalPanel({
     // which runs each line. Keep the transcript on one line. Control characters
     // are removed too: ESC (0x1b), 0x03 and 0x04 would otherwise be interpreted
     // by the shell, and this text is model output, not something the user typed.
+    inputGuard.noteInput();
     term.paste(text.replace(/\s*[\u0000-\u001f\u007f]+\s*/g, " ").trim());
     term.focus();
-  }, []);
+  }, [inputGuard]);
   const voice = useTerminalVoice(insertVoiceTranscript);
 
   // ── Context menu (right-click) — Supacode-style ────────────────
@@ -1044,11 +1055,14 @@ export default function TerminalPanel({
       // honored for multiline payloads; it flows through onData to the pty.
       // Pasting is input: it ends the selection like a typed key does.
       if (term.hasSelection()) term.clearSelection();
+      // A paste is never an IME re-delivery: end any pending commit first, or a
+      // paste of the word just composed would be dropped by the guard.
+      inputGuard.noteInput();
       term.paste(text);
     };
     el.addEventListener("paste", onPaste, true);
     return () => el.removeEventListener("paste", onPaste, true);
-  }, []);
+  }, [inputGuard]);
 
   // ── Soft-keyboard navigation keys ─────────────────────────────────
   // Phone keyboards with an arrow row (SwiftKey, Gboard cursor keys) send
@@ -1074,11 +1088,12 @@ export default function TerminalPanel({
       if (!seq) return;
       e.preventDefault();
       e.stopPropagation();
+      inputGuard.noteInput();
       term.input(seq, true);
     };
     el.addEventListener("keydown", onSoftKeyDown, true);
     return () => el.removeEventListener("keydown", onSoftKeyDown, true);
-  }, []);
+  }, [inputGuard]);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
   // successful project-metadata snapshot, while a deliberate host identity
@@ -1133,6 +1148,15 @@ export default function TerminalPanel({
       throw err;
     }
     const detachImeHygiene = term.textarea ? attachImeHygiene(term.textarea) : null;
+    // ghostty-web de-duplicates a re-delivered IME commit only inside its own
+    // 100 ms window (`BEFORE_INPUT_IGNORE_MS`), so a phone that re-commits the
+    // same word later sends it to the pty twice and the shell runs it twice
+    // (measured: 60 ms gap → one frame, 250 ms gap → two; see
+    // terminalInputGuard.ts). Record each commit and drop the re-delivery in
+    // `term.onData` below. Captured now because dispose() clears term.textarea.
+    const imeInput = term.textarea ?? null;
+    const noteImeCommit = (ev: CompositionEvent) => inputGuard.noteComposition(ev.data ?? "");
+    imeInput?.addEventListener("compositionend", noteImeCommit);
     // Links: registerUrlLinkProvider handles http(s) URLs (e.g. Vite's localhost
     // link) on any plain left click (ghostty-web's own only fire on ctrl/cmd+click);
     // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
@@ -1219,7 +1243,10 @@ export default function TerminalPanel({
       if (ev.key === "Enter" && ev.shiftKey) {
         selectionSnapshotRef.current = "";
         const sock = socketRef.current;
-        if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
+        if (sock && sock.readyState === WebSocket.OPEN) {
+          inputGuard.noteInput();
+          sock.send("\x1b[13;2u");
+        }
         // Handled: ghostty-web must not also encode this Enter as "\r", or the
         // pty would see Shift+Enter immediately followed by Enter.
         return true;
@@ -1522,6 +1549,9 @@ export default function TerminalPanel({
     // reattaches to (or, if the shell was just killed, respawns) the terminal
     // under the closed tab's id.
     let disposed = false;
+    // Set when the session is over for good (clean exit). Typing then has nothing
+    // to reconnect to, so it must not raise the "reconnecting" notice.
+    let sessionEnded = false;
     const restoreController = new AbortController();
     let serverHistoryRestored = false;
     let serverHistoryPartial = false;
@@ -1597,6 +1627,9 @@ export default function TerminalPanel({
       const previous = socketRef.current;
       sock = nextSocket;
       socketRef.current = nextSocket;
+      // A new socket is a new attachment: a commit recorded on the old one must
+      // not swallow a re-delivery on this one.
+      inputGuard.reset();
       if (
         previous &&
         previous !== nextSocket &&
@@ -1622,6 +1655,7 @@ export default function TerminalPanel({
       // counter on every call would pin the backoff at its 1s floor and hammer
       // an unreachable remote. onopen resets it once a socket actually opens.
       attachedRef.current = false;
+      sessionEnded = false;
       setShellReady(false);
 
       connectSocketRef.current = () => connectSocket();
@@ -1711,6 +1745,7 @@ export default function TerminalPanel({
             // The handshake is done: from here term.onData may drive the pty.
             attachedRef.current = true;
             setShellReady(true);
+            setInputPaused(false);
             if (!msg.resumed || isHistoryAttach) {
               // Stale mouse modes survive two ways:
               //   - a fresh shell (previous session gone: remote SSH timeout/
@@ -1789,6 +1824,12 @@ export default function TerminalPanel({
           takenOverRef.current = true;
           reconnectingRef.current = false;
           setTakenOver(true);
+          setInputPaused(false);
+          // A phone keeps its soft keyboard bound to the hidden textarea; if it
+          // stays focused the user types into a socket that is no longer
+          // attached and sees nothing. Blur closes the keyboard and matches the
+          // blocking overlay ("typing here is paused").
+          termRef.current?.blur();
           writeBanner(
             "\r\n\x1b[33m[another client took over this terminal — reconnecting is paused]\x1b[0m\r\n",
           );
@@ -1801,6 +1842,8 @@ export default function TerminalPanel({
           // no reconnect. A clean 1000 close with no manual flag means
           // the pty read loop ended (the shell itself exited); reconnecting
           // here would spawn a fresh shell under a different id.
+          sessionEnded = true;
+          setInputPaused(false);
           writeBanner("\r\n\x1b[33m[terminal session ended]\x1b[0m\r\n");
           // The server persists the full pty transcript to history before
           // it closes this socket (exit teardown syncs/closes the log
@@ -2014,7 +2057,18 @@ export default function TerminalPanel({
     const dataSub = term.onData((data) => {
       // Wait for the attach handshake: mouse reports the terminal still holds from a
       // dead session must not reach the new pty before the fresh-shell reset.
-      if (attachedRef.current && sock?.readyState === WebSocket.OPEN) sock.send(data);
+      if (!attachedRef.current || sock?.readyState !== WebSocket.OPEN) {
+        // Dropping is correct; dropping INVISIBLY is what read as "typing is
+        // broken". Announce it and clear the notice on the attach frame. Only real
+        // keystrokes raise it: the terminal's own replies (focus, DA/CPR, mouse) are
+        // not typing, and after a clean exit the "session ended" line already says so.
+        if (!sessionEnded && !isTerminalGeneratedReply(data)) setInputPaused(true);
+        return;
+      }
+      // A soft keyboard can deliver one commit twice; only frames that repeat a
+      // commit we already sent are dropped (see terminalInputGuard.ts).
+      if (!inputGuard.accept(data)) return;
+      sock.send(data);
     });
 
     // On wake (network back / tab visible), skip the exponential backoff and
@@ -2058,6 +2112,7 @@ export default function TerminalPanel({
       el.removeEventListener("touchend", onTouchEnd);
       el.removeEventListener("touchcancel", onTouchEnd);
       detachImeHygiene?.();
+      imeInput?.removeEventListener("compositionend", noteImeCommit);
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
       el.removeEventListener("pointerdown", onInputPointerDown, true);
@@ -2328,14 +2383,16 @@ export default function TerminalPanel({
       )}
       {takenOver && (
         <div
-          role="status"
+          role="alert"
+          data-testid="terminal-taken-over"
           data-terminal-chrome=""
-          className="absolute inset-x-0 bottom-2 z-10 mx-auto flex w-fit max-w-[90%] items-center gap-3 rounded-md border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs text-amber-200 shadow-lg"
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background/90 p-4 text-center"
         >
-          <span>Taken over by another client — reconnecting is paused.</span>
+          <p className="text-xs text-amber-200">This terminal is open in another window or device.</p>
+          <p className="text-[11px] text-muted-foreground">Typing here is paused so nothing is lost.</p>
           <button
             type="button"
-            className="rounded border border-amber-500/50 px-2 py-0.5 font-medium hover:bg-amber-500/10"
+            className="rounded border border-amber-500/50 px-2.5 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/10"
             onClick={() => {
               // Deliberate hand-back: clear the guard, then reconnect, which
               // evicts the other client's socket (single attachment slot).
@@ -2347,6 +2404,15 @@ export default function TerminalPanel({
           >
             Take over
           </button>
+        </div>
+      )}
+      {inputPaused && !takenOver && (
+        <div
+          role="status"
+          data-terminal-chrome=""
+          className="absolute inset-x-0 top-2 z-10 mx-auto w-fit max-w-[90%] rounded-md border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs text-amber-200 shadow-lg"
+        >
+          Reconnecting — input is paused until this terminal is attached.
         </div>
       )}
       {findOpen && (

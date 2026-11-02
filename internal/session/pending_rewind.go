@@ -404,6 +404,20 @@ func cancelPendingRewindOnce(dir, id, token string) error {
 	if !exists {
 		return fmt.Errorf("session %s: %w", id, ErrPendingRewindNotFound)
 	}
+	// Atomic check-then-delete: read the row under the same transaction so a
+	// concurrent commit cannot flip the status between a status probe and the
+	// delete. Committed/expired rows are not deleted (they stay discoverable
+	// for lost-response recovery / expiry reporting).
+	resource, err := readPendingRewind(tx, id, token)
+	if err != nil {
+		return err
+	}
+	if resource.Status == PendingRewindStatusCommitted {
+		return fmt.Errorf("session %s: %w", id, ErrPendingRewindAlreadyCommitted)
+	}
+	if resource.Status == PendingRewindStatusArmed && !time.Now().Before(resource.ExpiresAt) {
+		return fmt.Errorf("session %s: %w", id, ErrPendingRewindExpired)
+	}
 	result, err := tx.Exec(`DELETE FROM pending_rewinds WHERE session_id = ? AND token = ? AND status IN ('armed', 'stale')`, id, token)
 	if err != nil {
 		return fmt.Errorf("session: cancel pending rewind %s: delete resource: %w", id, err)

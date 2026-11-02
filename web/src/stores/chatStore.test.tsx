@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { MAX_SLICE_MESSAGES, QUESTION_DISMISSED_RESULT, chatReducer, extractAskContext, getSessionSlice, getTurnState, initialState } from "./chatStore";
+import {
+  MAX_SLICE_MESSAGES,
+  QUESTION_DISMISSED_RESULT,
+  chatReducer,
+  extractAskContext,
+  getSessionSlice,
+  getTurnState,
+  initialState,
+  isDismissedQuestionResult,
+  questionsFromToolCallArgs,
+} from "./chatStore";
 import type { LivePart, Message } from "../api/types";
 import type { ChatState } from "./chatStore";
 
@@ -1675,5 +1685,97 @@ describe("SET_SESSION_ADVISOR_CONFIG", () => {
       status: { advisor_model: "deepseek/deepseek-v4-pro" },
     });
     expect(getSessionSlice(state, "a").advisorModel).toBe("openai/gpt-5.1");
+  });
+});
+
+describe("chatStore reopened dismissed question", () => {
+  const questions = [{ header: "Deploy", question: "Where?", options: [{ label: "Staging" }] }];
+  const dismissedTranscript: Message[] = [
+    { role: "user", content: "deploy" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "q1",
+          type: "function",
+          function: { name: "question", arguments: JSON.stringify({ questions }) },
+        },
+      ],
+    },
+    { role: "tool", content: QUESTION_DISMISSED_RESULT, tool_call_id: "q1" },
+  ];
+  const reopened = { request_id: "q1", questions, reopened: true };
+
+  it("isDismissedQuestionResult matches only the dismissal notice", () => {
+    expect(isDismissedQuestionResult(QUESTION_DISMISSED_RESULT)).toBe(true);
+    expect(isDismissedQuestionResult(`${QUESTION_DISMISSED_RESULT}\n`)).toBe(true);
+    expect(isDismissedQuestionResult('[{"label":"Staging"}]')).toBe(false);
+    expect(isDismissedQuestionResult("QUESTION_PROMPT:[]")).toBe(false);
+  });
+
+  it("QUESTION_ANSWERED rewrites a dismissed result with the answers", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "a", messages: dismissedTranscript });
+    state = chatReducer(state, { type: "QUESTION_REQUEST", sessionId: "a", question: reopened });
+    const answers = [{ header: "Deploy", question: "Where?", answers: [{ label: "Staging" }] }];
+    state = chatReducer(state, { type: "QUESTION_ANSWERED", sessionId: "a", requestId: "q1", answers });
+
+    const slice = getSessionSlice(state, "a");
+    expect(slice.pendingQuestion).toBeNull();
+    expect(slice.messages.find((m) => m.tool_call_id === "q1")?.content).toBe(JSON.stringify(answers));
+  });
+
+  it("SET_MESSAGES keeps a reopened prompt open across a transcript mirror", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "a", messages: dismissedTranscript });
+    state = chatReducer(state, { type: "QUESTION_REQUEST", sessionId: "a", question: reopened });
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "a", messages: dismissedTranscript });
+    expect(getSessionSlice(state, "a").pendingQuestion).toEqual(reopened);
+  });
+
+  it("MERGE_SNAPSHOT keeps a reopened prompt open across a full-page snapshot", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "a", messages: dismissedTranscript });
+    state = chatReducer(state, { type: "QUESTION_REQUEST", sessionId: "a", question: reopened });
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: dismissedTranscript,
+      total: dismissedTranscript.length,
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion).toEqual(reopened);
+  });
+
+  it("a mirror still clears a server-derived prompt that is no longer in the transcript", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "QUESTION_REQUEST", sessionId: "a", question: { request_id: "q1", questions } });
+    state = chatReducer(state, { type: "SET_MESSAGES", sessionId: "a", messages: dismissedTranscript });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+  });
+});
+
+describe("questionsFromToolCallArgs", () => {
+  const questions = [{ header: "Deploy", question: "Where?", options: [{ label: "Staging" }] }];
+
+  it("returns the questions from a valid question call's arguments", () => {
+    expect(questionsFromToolCallArgs(JSON.stringify({ questions }))).toEqual(questions);
+  });
+
+  it("returns null for arguments that cannot describe a prompt", () => {
+    expect(questionsFromToolCallArgs("{not json")).toBeNull();
+    expect(questionsFromToolCallArgs("null")).toBeNull();
+    expect(questionsFromToolCallArgs("{}")).toBeNull();
+    expect(questionsFromToolCallArgs(JSON.stringify({ questions: [] }))).toBeNull();
+    expect(questionsFromToolCallArgs(JSON.stringify({ questions: "Where?" }))).toBeNull();
+    expect(
+      questionsFromToolCallArgs(JSON.stringify({ questions: [{ header: "Deploy", options: [] }] })),
+    ).toBeNull();
+    expect(
+      questionsFromToolCallArgs(JSON.stringify({ questions: [{ header: "Deploy", question: "Where?" }] })),
+    ).toBeNull();
+    expect(
+      questionsFromToolCallArgs(JSON.stringify({ questions: [{ question: "Where?", options: [] }] })),
+    ).toBeNull();
   });
 });

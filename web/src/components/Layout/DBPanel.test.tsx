@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DBPanel from "./DBPanel";
 import { ApiError, api } from "../../api/client";
 
@@ -100,7 +100,7 @@ describe("DBPanel", () => {
     render(<DBPanel projectPath="/proj" />);
     const pw = await screen.findByLabelText("Master password");
     fireEvent.change(pw, { target: { value: "hunter2" } });
-    fireEvent.click(screen.getByRole("button", { name: /Unlock/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlock & connect" }));
 
     await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "hunter2", "/proj"));
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
@@ -113,13 +113,24 @@ describe("DBPanel", () => {
 
     render(<DBPanel projectPath="/proj" />);
     fireEvent.change(await screen.findByLabelText("Master password"), { target: { value: "wrong" } });
-    fireEvent.click(screen.getByRole("button", { name: /Unlock/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlock & connect" }));
 
     expect(await screen.findByRole("alert")).toHaveProperty(
       "textContent",
       "master password does not open connection prod",
     );
-    expect(screen.getByRole("button", { name: /Unlock/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Unlock & connect" })).toBeTruthy();
+  });
+
+  it("explains that a locked URL is encrypted and needs the master password to connect", async () => {
+    mockList.mockResolvedValue({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] });
+
+    render(<DBPanel projectPath="/proj" />);
+
+    expect(
+      await screen.findByText("The URL is encrypted and never shown again. Enter your master password to connect."),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Unlock & connect" })).toBeTruthy();
   });
 
   it("opens a table in the Data view and reads it through the keyed browse endpoint", async () => {
@@ -315,24 +326,127 @@ describe("DBPanel", () => {
     expect(mockLock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE));
   });
 
-  it("adds a connection with the password and selects it", async () => {
+  it("adds a connection with the password, selects it, and unlocks it straight away", async () => {
     mockList
       .mockResolvedValueOnce({ connections: [] })
-      .mockResolvedValueOnce({ connections: [{ name: "stage", driver: "postgres", unlocked: false, fromEnv: false }] });
+      .mockResolvedValueOnce({ connections: [{ name: "stage", driver: "postgres", unlocked: false, fromEnv: false }] })
+      .mockResolvedValue({ connections: [{ name: "stage", driver: "postgres", unlocked: true, fromEnv: false }] });
     mockAdd.mockResolvedValue({ name: "stage" });
+    mockUnlock.mockResolvedValue({ unlocked: ["stage"], failed: [] });
+    mockTables.mockResolvedValue({ tables: ["users"], hasMore: false });
 
     render(<DBPanel projectPath="/proj" />);
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "stage" } });
     fireEvent.change(screen.getByLabelText("Connection URL"), {
       target: { value: "postgres://app:pw@db/app" },
     });
-    fireEvent.change(screen.getByLabelText("Master password (encrypts the URL)"), {
+    fireEvent.change(screen.getByLabelText("Create master password"), {
+      target: { value: "master" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm master password"), {
       target: { value: "master" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
     await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master"));
-    expect(await screen.findByLabelText("Master password")).toBeTruthy();
+    await waitFor(() => expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "master", "/proj"));
+    expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Unlock & connect" })).toBeNull();
+  });
+
+  it("keeps the saved connection locked and shows the error when the auto-unlock fails", async () => {
+    mockList
+      .mockResolvedValueOnce({ connections: [] })
+      .mockResolvedValue({ connections: [{ name: "stage", driver: "postgres", unlocked: false, fromEnv: false }] });
+    mockAdd.mockResolvedValue({ name: "stage" });
+    mockUnlock.mockRejectedValue(new Error("master password does not open connection stage"));
+
+    render(<DBPanel projectPath="/proj" />);
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "stage" } });
+    fireEvent.change(screen.getByLabelText("Connection URL"), {
+      target: { value: "postgres://app:pw@db/app" },
+    });
+    fireEvent.change(screen.getByLabelText("Create master password"), { target: { value: "master" } });
+    fireEvent.change(screen.getByLabelText("Confirm master password"), { target: { value: "master" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      "Connection stage was saved, but unlocking it failed: master password does not open connection stage. Unlock it manually with the master password.",
+    );
+    expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master");
+    expect(screen.getByRole("button", { name: "Unlock & connect" })).toBeTruthy();
+  });
+
+  it("clears the add form and does not report a saved connection as a failed add when the auto-unlock fails", async () => {
+    mockList
+      .mockResolvedValueOnce({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] })
+      .mockResolvedValue({
+        connections: [
+          { name: "prod", driver: "postgres", unlocked: false, fromEnv: false },
+          { name: "stage", driver: "postgres", unlocked: false, fromEnv: false },
+        ],
+      });
+    mockAdd.mockResolvedValue({ name: "stage" });
+    mockUnlock.mockRejectedValue(new Error("master password does not open connection stage"));
+
+    render(<DBPanel projectPath="/proj" />);
+    const addForm = (await screen.findByText("Add another connection")).closest("details") as HTMLElement;
+    fireEvent.click(within(addForm).getByText("Add another connection"));
+    fireEvent.change(within(addForm).getByLabelText("Name"), { target: { value: "stage" } });
+    fireEvent.change(within(addForm).getByLabelText("Connection URL"), {
+      target: { value: "postgres://app:pw@db/app" },
+    });
+    fireEvent.change(within(addForm).getByLabelText(/^Master password/), { target: { value: "master" } });
+    fireEvent.click(within(addForm).getByRole("button", { name: "Save connection" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Connection stage was saved");
+    expect(alert.textContent).not.toMatch(/failed to add|could not add/i);
+    expect((within(addForm).getByLabelText("Name") as HTMLInputElement).value).toBe("");
+    expect(mockAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Save on first setup until the master password is confirmed", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+
+    render(<DBPanel projectPath="/proj" />);
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "stage" } });
+    fireEvent.change(screen.getByLabelText("Connection URL"), {
+      target: { value: "postgres://app:pw@db/app" },
+    });
+    fireEvent.change(screen.getByLabelText("Create master password"), { target: { value: "master" } });
+    fireEvent.change(screen.getByLabelText("Confirm master password"), { target: { value: "masterr" } });
+    expect((screen.getByRole("button", { name: "Save connection" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Confirm master password"), { target: { value: "master" } });
+    expect((screen.getByRole("button", { name: "Save connection" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(mockAdd).not.toHaveBeenCalled();
+  });
+
+  it("asks to create and confirm the master password on first setup, with autofill kept out of the URL", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+
+    render(<DBPanel projectPath="/proj" />);
+    const url = await screen.findByLabelText("Connection URL");
+    expect(url.getAttribute("data-1p-ignore")).toBe("true");
+    expect(url.getAttribute("data-lpignore")).toBe("true");
+    fireEvent.change(url, { target: { value: "postgres://app:pw@db/app" } });
+
+    expect(screen.getByLabelText("Create master password").getAttribute("autocomplete")).toBe("new-password");
+    expect(screen.getByLabelText("Confirm master password").getAttribute("autocomplete")).toBe("new-password");
+    expect(screen.getByText(/Choose a new password now/)).toBeTruthy();
+    expect(screen.queryByLabelText("Master password")).toBeNull();
+  });
+
+  it("asks for the password that must match the first one when adding another connection", async () => {
+    mockList.mockResolvedValue({ connections: [{ name: "prod", driver: "postgres", unlocked: false, fromEnv: false }] });
+
+    render(<DBPanel projectPath="/proj" />);
+    const pw = await screen.findByLabelText("Master password (must match the one you created first)");
+    expect(pw.getAttribute("autocomplete")).toBe("off");
+    expect(screen.queryByLabelText("Create master password")).toBeNull();
+    expect(screen.queryByLabelText("Confirm master password")).toBeNull();
   });
 
   it("loads an environment-backed connection from .env with no master password", async () => {
@@ -445,7 +559,7 @@ describe("DBPanel", () => {
 
     // The server's IsTemplate requires a shell-valid name, so this stays a
     // literal URL and still needs the master password.
-    expect((screen.getByLabelText(/Master password/) as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Create master password") as HTMLInputElement).disabled).toBe(false);
   });
 
   it("saves an environment URL without a master password", async () => {
@@ -463,5 +577,7 @@ describe("DBPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
     await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("env2", "${DATABASE_URL}", ""));
+    // An environment URL is loaded from .env, never auto-unlocked on save.
+    expect(mockUnlock).not.toHaveBeenCalled();
   });
 });

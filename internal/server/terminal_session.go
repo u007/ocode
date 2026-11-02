@@ -377,6 +377,11 @@ func (s *terminalSession) attach(ws *websocket.Conn, resumed bool, historyOffset
 	// displaced client auto-reconnects on its next wake and takes the slot
 	// back, and the two clients ping-pong.
 	if superseded != nil {
+		// The single attachment slot changed hands. Log the addresses: a phone
+		// taking a terminal from the desktop looked like "input stopped working"
+		// on the displaced client, and without this line the takeover was
+		// invisible in the log.
+		log.Printf("terminal %s: superseded socket remote=%s (new remote=%s)", s.id, superseded.RemoteAddr(), ws.RemoteAddr())
 		frame, err := json.Marshal(terminalDetachMsg{Type: "detached", Reason: terminalDetachReasonSuperseded})
 		switch {
 		case err != nil:

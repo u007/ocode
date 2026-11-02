@@ -3,14 +3,39 @@ import { RefreshCw } from "lucide-react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
 import { PreviewWidthMenu } from "./PreviewWidthMenu";
-import { previewKindForPath, type PreviewOpenRequest } from "../../lib/previewKind";
+import { previewKindForPath, type PreviewKind, type PreviewOpenRequest } from "../../lib/previewKind";
+import { api } from "../../api/client";
+import { PrintPreviewButton } from "./PrintPreviewButton";
 
 interface SelectedFile {
   path: string;
-  kind: string;
+  kind: PreviewKind;
   projectRoot?: string;
   projectHost?: string;
   page?: number;
+}
+
+// Every PreviewKind, typed so adding a kind to the union fails to compile until
+// it is listed here.
+const PREVIEW_KINDS: Record<PreviewKind, true> = {
+  pdf: true,
+  docx: true,
+  pptx: true,
+  excel: true,
+  image: true,
+  audio: true,
+  video: true,
+  mermaid: true,
+  markdown: true,
+  html: true,
+  json: true,
+  sqlite: true,
+  text: true,
+};
+
+/** Narrows an untyped kind string (e.g. parsed from a `preview_open` directive). */
+function isPreviewKind(value: string): value is PreviewKind {
+  return Object.prototype.hasOwnProperty.call(PREVIEW_KINDS, value);
 }
 
 function PreviewTabPage({
@@ -47,7 +72,7 @@ function PreviewTabPage({
     if (!nonce || !request) return;
     setSelected({
       path: request.path,
-      kind: request.kind ?? previewKindForPath(request.path) ?? "text",
+      kind: isPreviewKind(request.kind) ? request.kind : previewKindForPath(request.path) ?? "text",
       projectRoot: request.projectRoot ?? projectRoot,
       projectHost: request.projectHost ?? projectHost,
       page: request.page,
@@ -80,6 +105,15 @@ function PreviewTabPage({
               <RefreshCw className="h-3.5 w-3.5" />
             </button>
           )}
+          {selected && (
+            <PrintPreviewButton
+              iconOnly
+              kind={selected.kind}
+              title={selected.path.split("/").pop() || selected.path}
+              load={async () => (await api.getFileContent(selected.path, selected.projectRoot, selected.projectHost)).content}
+              className="shrink-0 rounded border border-border bg-background p-1.5 hover:bg-muted transition-colors"
+            />
+          )}
           {/* Reading-column control. Markdown only: every other kind either
               ignores it (PDF/deck/image) or is code, which stays full width.
               No extra wrapper: the control owns its own chrome, so it looks the
@@ -106,7 +140,7 @@ function PreviewTabPage({
           <PreviewSurface
             key={refreshNonce}
             path={selected.path}
-            kind={selected.kind as any}
+            kind={selected.kind}
             projectRoot={selected.projectRoot}
             projectHost={selected.projectHost}
             page={selected.page}

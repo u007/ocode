@@ -323,7 +323,10 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// sockets for the same brand-new id spawn exactly one shell: losers get
 	// created=false and a done channel, then reattach to the winner.
 	existing, created, done := h.terminalSessions.reserveForProject(terminalID, project)
-	log.Printf("terminal %s: websocket attach project=%q spawn=%t", terminalID, project, created)
+	// remote= is what makes a phone report diagnosable: a client that never sent
+	// keystrokes and one whose frames were dropped elsewhere look identical in
+	// the log without knowing which socket (and address) was attached.
+	log.Printf("terminal %s: websocket attach project=%q spawn=%t remote=%s", terminalID, project, created, r.RemoteAddr)
 	if remoteAdmissionLocked {
 		h.remoteProjectMu.Unlock()
 		remoteAdmissionLocked = false
@@ -390,7 +393,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		log.Printf("terminal %s: reattached (pid %d)", terminalID, existing.pid())
+		log.Printf("terminal %s: reattached (pid %d) remote=%s", terminalID, existing.pid(), r.RemoteAddr)
 		h.serveTerminalSocket(existing, ws)
 		return
 	}

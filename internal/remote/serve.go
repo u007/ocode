@@ -9,6 +9,7 @@ import (
 	"net"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,10 +32,10 @@ type ServeState struct {
 	Token      string    `json:"token"`
 	Version    string    `json:"version"`
 	StartedAt  time.Time `json:"startedAt"`
-	// Outdated reports that a reused server runs a different version than the
-	// connecting client. It is derived at discovery time and never persisted to
-	// the state file (json:"-"), so a state file written by an older server is
-	// unaffected by the field.
+	// Outdated reports that a discovered server runs an older version than the
+	// connecting client. It is set only transiently in retireOrReuse, right before
+	// the older server is retired, and never persisted to the state file
+	// (json:"-"). EnsureRemoteServer never returns a state with Outdated set.
 	Outdated bool `json:"-"`
 }
 
@@ -169,13 +170,13 @@ func healthProbeCmd(port int) string {
 	)
 }
 
-// serverHealthy reports whether a discovered ServeState describes a server
-// this client can reuse: the process must still be running and it must either
+// serverHealthy reports whether a discovered ServeState describes a live server
+// that answers health: the process must still be running and it must either
 // answer /api/health with 200 or be unmeasurable on this host (no curl — see
-// probeServer). Version is deliberately not part of this decision — a
-// version-mismatched but healthy server is reused (EnsureRemoteServer flags it
-// Outdated) rather than replaced, so its terminals and in-flight turns are not
-// orphaned.
+// probeServer). Version is deliberately not part of this check; callers decide
+// what a version mismatch means. EnsureRemoteServer retires a healthy server
+// from an older version and starts a fresh one at the local version, and
+// settleOnStateFileServer skips the orphan reap for such a server.
 func serverHealthy(t Transport, state ServeState) bool {
 	alive, healthy, _ := probeServer(t, state)
 	return alive && healthy
@@ -286,48 +287,94 @@ func StartFreshServer(t Transport, ver string, slot ServeSlot) (ServeState, erro
 }
 
 // EnsureRemoteServer implements the reuse-vs-fresh decision table: discover →
-// alive and healthy → reuse (flagging Outdated when the version differs);
-// anything else (missing, dead, unhealthy) → start fresh at the local version.
-// reused reports which path was taken, for progress reporting.
-func EnsureRemoteServer(t Transport, ver string, slot ServeSlot) (state ServeState, reused bool, err error) {
+// missing or dead → start fresh at the local version; alive and healthy at the
+// local version → reuse it; alive and healthy at an older version → kill it
+// (its terminals end with it) and start fresh at the local version; alive and
+// healthy at a newer version → reuse it, since the local client is the one that
+// is behind (see shouldReplaceRemote); alive but not answering /api/health →
+// error, since it is never replaced implicitly.
+// reused reports whether the existing server was kept. retiredVersion is the
+// version of the server this call killed, or "" when none was killed. It is
+// set even when the replacement then fails to start, because the kill already
+// happened.
+func EnsureRemoteServer(t Transport, ver string, slot ServeSlot) (state ServeState, reused bool, retiredVersion string, err error) {
 	if err := slot.valid(); err != nil {
-		return ServeState{}, false, err
+		return ServeState{}, false, "", err
 	}
 	existing, ok, err := discoverServer(t, slot)
 	if err != nil {
-		return ServeState{}, false, err
+		return ServeState{}, false, "", err
 	}
 	if ok {
 		alive, healthy, err := probeServer(t, existing)
 		if err != nil {
-			return ServeState{}, false, err
+			return ServeState{}, false, "", err
 		}
 		if alive && !healthy {
 			// A live pid that does not answer /api/health is wedged, or just slow
 			// behind a flaky link. Replacing it would kill its terminals; the
 			// explicit Restart action is the way to retire it.
-			return ServeState{}, false, fmt.Errorf("remote server pid %d is running but not answering /api/health; restart it explicitly", existing.PID)
+			return ServeState{}, false, "", fmt.Errorf("remote server pid %d is running but not answering /api/health; restart it explicitly", existing.PID)
 		}
 		if alive {
 			return retireOrReuse(t, ver, slot, existing)
 		}
 	}
-	return startAndSettle(t, ver, slot)
+	fresh, _, err := startAndSettle(t, ver, slot)
+	return fresh, false, "", err
 }
 
-// retireOrReuse handles a live, healthy server: reuse it when it matches the
-// local version, otherwise retire it and start a fresh one.
-func retireOrReuse(t Transport, ver string, slot ServeSlot, existing ServeState) (ServeState, bool, error) {
-	existing.Outdated = existing.Version != ver
-	if !existing.Outdated {
-		return existing, true, nil
+// retireOrReuse handles a live, healthy server: reuse it unless the local
+// version is newer, in which case retire it and start a fresh one. A newer
+// remote server is kept: if the older client retired it, two clients on one
+// host would keep killing each other's server and its terminals.
+func retireOrReuse(t Transport, ver string, slot ServeSlot, existing ServeState) (ServeState, bool, string, error) {
+	if !shouldReplaceRemote(ver, existing.Version) {
+		if existing.Version != ver {
+			log.Printf("remote: keeping server pid %d at v%s (newer than local v%s)", existing.PID, existing.Version, ver)
+		}
+		return existing, true, "", nil
 	}
+	existing.Outdated = true
 	// A patch update leaves the previous version's server running and
 	// holding memory; retire it and start one at the local version.
+	log.Printf("remote: retiring older server pid %d (remote v%s, local v%s)", existing.PID, existing.Version, ver)
 	if err := KillServer(t, existing.PID, slot); err != nil {
-		return ServeState{}, false, fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
+		return ServeState{}, false, "", fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
 	}
-	return startAndSettle(t, ver, slot)
+	fresh, _, err := startAndSettle(t, ver, slot)
+	return fresh, false, existing.Version, err
+}
+
+// shouldReplaceRemote reports whether a live, healthy server at version remote
+// is retired for a client at version local. When both are plain X.Y.Z
+// versions, only a strictly newer local version replaces it. Otherwise nothing
+// is provably older (dev builds, pre-release or "v"-prefixed strings), so any
+// difference replaces it, as it did before version ordering existed.
+func shouldReplaceRemote(local, remote string) bool {
+	lp, lok := parseReleaseVersion(local)
+	rp, rok := parseReleaseVersion(remote)
+	if lok && rok {
+		return slices.Compare(lp[:], rp[:]) > 0
+	}
+	return local != remote
+}
+
+// parseReleaseVersion parses a plain dotted release version such as "0.9.28"
+// into its major, minor and patch numbers. Any other shape reports ok=false.
+func parseReleaseVersion(v string) (parts [3]int, ok bool) {
+	fields := strings.Split(v, ".")
+	if len(fields) != 3 {
+		return parts, false
+	}
+	for i, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil || strings.ContainsAny(f, "+-") {
+			return parts, false
+		}
+		parts[i] = n
+	}
+	return parts, true
 }
 
 // startAndSettle launches a fresh server and reaps leftovers around it.

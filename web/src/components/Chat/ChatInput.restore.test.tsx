@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ChatInput from "./ChatInput";
+import { ApiError } from "../../api/client";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
 import {
   __resetPendingRewindForTests,
@@ -107,6 +108,39 @@ describe("ChatInput pending rewind", () => {
     await waitFor(() => expect(textarea().value).toBe("my prior draft"));
     expect(cancelRewind).toHaveBeenCalledWith("ses-1", "a".repeat(64), "devbox");
     expect(loadPendingRewind("devbox", "ses-1")).toBeNull();
+  });
+
+  it("clears the armed state when cancel reports the rewind is already committed", async () => {
+    savePendingRewind({
+      version: 1,
+      host: "devbox",
+      sessionId: "ses-1",
+      token: "d".repeat(64),
+      draft: "recovered draft",
+      previousDraft: "prior draft",
+      targetPreview: "recovered",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    cancelRewind.mockRejectedValue(new ApiError("pending rewind has already been committed", 410));
+    getRewind.mockResolvedValue({
+      token: "d".repeat(64),
+      session_id: "ses-1",
+      status: "armed",
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      target_index: 4,
+      committed_user_seq: 0,
+    });
+
+    render(<ChatInput sessionTabId="ses-1" isActive />);
+
+    await waitFor(() => expect(screen.getByText("Pending rewind")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel restore" }));
+
+    await waitFor(() => expect(loadPendingRewind("devbox", "ses-1")).toBeNull());
+    expect(screen.queryByText("Pending rewind")).toBeNull();
+    expect(textarea().value).toBe("recovered draft");
+    expect(screen.getByText(/expired or was already used/i)).toBeInTheDocument();
   });
 
   it("clears an armed banner when the server reports the rewind already committed", async () => {

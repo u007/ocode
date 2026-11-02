@@ -6,6 +6,11 @@ allowed-tools: Bash(htrcli:*), Bash(go run ./cmd/htrcli:*), Bash(make htrcli-*)
 
 # htrcli — HTR NControl CLI
 
+## When to use this vs the browser tools
+
+- If the agent has a `browser_run` tool (an ocode web or desktop session), prefer `browser_run` for multi-step page tasks, and the `browser` tool for single reads or actions.
+- Use htrcli from the shell only when those tools are absent (for example the TUI), or for things they cannot do: recording, network mocking, contexts, raw `command`.
+
 Go CLI for controlling browser tabs via the HTR NControl remote control API.
 Supports **two transports** — extension (default) and direct CDP:
 

@@ -384,25 +384,25 @@ was a real bug found in review. `App.tsx` also keys the panel by `host:path` and
 mounts it only for projects whose DB tab was actually visited.
 
 An environment-backed connection (`fromEnv`) gets a **"Load from .env"** action
-with no password field (`DBPanel.tsx:498`): the unlock call sends the empty
-password plus `project_path` (`DBPanel.tsx:285`), and the server grants only the
+with no password field (`DBPanel.tsx:522`): the unlock call sends the empty
+password plus `project_path` (`DBPanel.tsx:270`), and the server grants only the
 template connections. The button carries `aria-busy` while loading. A remote
 project (non-empty host) does NOT get the action; it shows "Not available for a
-remote project" (`DBPanel.tsx:479`), because this endpoint is not host-threaded and
+remote project" (`DBPanel.tsx:503`), because this endpoint is not host-threaded and
 its `.env` lives on the other machine. A sealed connection keeps the
 master-password form. The add form mirrors the rule: `isEnvTemplate(url)`
 (`DBPanel.tsx:47`, the server's exact `${[A-Za-z_][A-Za-z0-9_]*}` rule) disables the
-password field and lets Save proceed without it (`DBPanel.tsx:800`). The connection
-picker shows the `from_env` flag (`DBPanel.tsx:379`) and a tooltip explaining it.
-A partial unlock lists the failed connections in a warning (`DBPanel.tsx:399`). A
+password field and lets Save proceed without it (`DBPanel.tsx:378`). The connection
+picker shows the `from_env` flag (`DBPanel.tsx:400`) and a tooltip explaining it.
+A partial unlock lists the failed connections in a warning (`DBPanel.tsx:420`). A
 failed connection-list load shows the error and a Retry instead of an endless
-spinner (`DBPanel.tsx:344` error branch / `DBPanel.tsx:347` Retry button).
+spinner (`DBPanel.tsx:351` error branch / `DBPanel.tsx:359` Retry button).
 
 The panel is no longer mounted when there is no active project: it renders "Select
 a project to use the database connector." instead. The add form now says an env URL
 is not usable for a remote project.
 
-Tests: `DBPanel.test.tsx` (22 cases, including the password-less environment flow,
+Tests: `DBPanel.test.tsx` (27 cases, including the password-less environment flow,
 partial failures, retry and the remote guard — and it now also asserts that the
 GRANTED connection actually loads its tables), `web/src/api/client.dbConnect.test.ts`
 (wire mapping: `from_env` -> `fromEnv`, `project_path`, null normalisation) and

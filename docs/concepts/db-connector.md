@@ -123,7 +123,12 @@ Browser pass (headless Chrome, isolated `HOME`, Postgres 16): add and unlock, ta
 
 The DB connector is a **project-level top tab** (beside Assets), not a chat session sub-tab, because an environment-backed connection resolves against the active project. `web/src/components/Layout/DBPanel.tsx` and `DBTableBrowser.tsx`:
 
-- Add form (first run and "Add another connection"). Connection picker. A `${NAME}` environment URL needs no master password (the field is disabled); a literal URL still needs it. An environment-backed connection shows **Load from .env** instead of a password prompt. Per-panel unlock; the password is cleared on success.
+- Add form (first run and "Add another connection"). A `${NAME}` environment URL needs no master password (the field is disabled). A literal URL does need one, and the label depends on whether a connection is already saved:
+  - **First setup** (no connection saved): **Create master password**, plus a **Confirm master password** field. Save stays disabled until both match. The hint says the password is new, not an existing account password, and cannot be recovered if forgotten. Both fields use `autoComplete="new-password"`.
+  - **Later saves**: **Master password (must match the one you created first)**, `autoComplete="off"`. The server rejects a mismatch.
+  - The URL input has `data-1p-ignore` and `data-lpignore`, so password managers do not offer to fill it.
+- **Auto-unlock on save.** After a literal connection saves, the panel unlocks it with the password just typed (`unlockWith`, the same path as the Unlock button). It is then selected and its tables load. A template is not auto-unlocked. If that unlock fails, the connection stays saved and locked, and the error shows in the panel alert.
+- **Locked card** (literal connections): the copy reads "The URL is encrypted and never shown again. Enter your master password to connect." The button is **Unlock & connect**. An environment-backed connection shows **Load from .env** instead of a password prompt. Per-panel unlock; the password is cleared on success.
 - Table list: paginated (100 per page, "Load more tables" appends). Clicking a table opens its Data view.
 - Right pane has a Data and a Query tab. The Data view (`DBTableBrowser`) has:
   - a read-only filter field, applied on Apply or Enter;
@@ -141,7 +146,7 @@ The DB connector is a **project-level top tab** (beside Assets), not a chat sess
 - Calls go through `api.dbConnect*` in `web/src/api/client.ts`. They are not host-threaded: connections are global, so a remote-project session never routes them through `?host=`. A remote project's `.env` is not readable here, so the panel shows "Not available for a remote project" instead of offering the action.
 - A failed connection-list load shows the error and a Retry (not an endless spinner). A partial unlock shows the `failed` connections in a warning while the granted ones are usable; the password form is absent for `from_env` connections.
 - Shared cell conversion (`dbConnectCells.ts`): `toCell`, `pgInputToCell`, and `toResultSet`.
-- Unit tests: `DBPanel.test.tsx` (22 cases, including the password-less environment flow, partial failures, retry and the remote guard) and `DBTableBrowser.test.tsx` (10 cases).
+- Unit tests: `DBPanel.test.tsx` (27 cases, including auto-unlock on save and its failure, first-setup confirmation, the locked-card copy, the password-less environment flow, partial failures, retry and the remote guard) and `DBTableBrowser.test.tsx` (10 cases).
 
 ## Known limits
 

@@ -45,11 +45,14 @@ describe("syntax highlighting", () => {
     expect(container.querySelector('span[style*="color"]')).toBeNull();
   });
 
+  // A JSON object command now renders as a collapsible JsonTree (442258db), not
+  // HighlightedCode, so this covers the scalar JSON that still takes the
+  // highlighted pre path.
   it("colors tool command json", async () => {
     const { container } = render(
       <ToolBlock
         tool="grep"
-        command={'{"pattern":"ls -la"}'}
+        command={'"ls -la"'}
         output={"$ ls -la\ntotal 0"}
       />,
     );

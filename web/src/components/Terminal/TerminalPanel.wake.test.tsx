@@ -237,7 +237,15 @@ describe("TerminalPanel takeover", () => {
     const written = term.write.mock.calls.map((c) => String(c[0])).join("");
     expect(written).toContain("another client took over");
     expect(written).not.toContain("[terminal session ended]");
-    expect(screen.getByText(/Taken over by another client/)).toBeTruthy();
+    // A displaced client silently dropped every keystroke; the panel now says
+    // so with a blocking overlay that covers the terminal, and takes focus off
+    // the hidden textarea so a phone closes its soft keyboard instead of typing
+    // into a socket that is no longer attached.
+    const overlay = screen.getByTestId("terminal-taken-over");
+    expect(overlay.className).toContain("inset-0");
+    expect(screen.getByText(/open in another window or device/i)).toBeTruthy();
+    expect(screen.getByText(/typing here is paused/i)).toBeTruthy();
+    expect(term.blur).toHaveBeenCalled();
   });
 
   it("reconnects only when the user explicitly takes the terminal back", async () => {
@@ -246,5 +254,112 @@ describe("TerminalPanel takeover", () => {
       screen.getByText("Take over").click();
     });
     expect(h.sockets.length).toBe(2);
+  });
+
+  it("does not carry an IME commit from the old socket onto the new one", async () => {
+    // Pinned clock: both commits sit inside the 600 ms duplicate window.
+    const nowSpy = vi.spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const first = await mountAndOpen();
+      const term = FakeTerminal.instances[0];
+      act(() => {
+        first.onmessage?.({ data: JSON.stringify({ type: "attach", resumed: true }) });
+      });
+      act(() => {
+        term.textarea?.dispatchEvent(new CompositionEvent("compositionend", { data: "ls", bubbles: true }));
+        term.input("ls", true);
+      });
+      expect(first.send).toHaveBeenCalledWith("ls");
+
+      act(() => {
+        first.onmessage?.({ data: JSON.stringify({ type: "detached", reason: "superseded" }) });
+        first.readyState = MockSocket.CLOSED;
+        first.onclose?.({ wasClean: true, code: 1000, reason: "" });
+      });
+      act(() => {
+        screen.getByText("Take over").click();
+      });
+      const second = h.sockets[1];
+      act(() => {
+        second.onopen?.();
+        second.onmessage?.({ data: JSON.stringify({ type: "attach", resumed: true }) });
+      });
+      act(() => {
+        term.textarea?.dispatchEvent(new CompositionEvent("compositionend", { data: "ls", bubbles: true }));
+        term.input("ls", true);
+      });
+      expect(second.send).toHaveBeenCalledWith("ls");
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+// Keystrokes sent while the socket is not attached used to vanish with no
+// trace ("typing sometimes isn't working"). Nothing is buffered — replaying
+// stale keys into a shell is dangerous — but the panel now says the input is
+// paused, and the notice clears when the attach frame lands.
+describe("TerminalPanel input while detached", () => {
+  it("shows that input is paused, then sends again once attached", async () => {
+    const socket = await mountAndOpen();
+    const term = FakeTerminal.instances[0];
+    expect(screen.queryByText(/input is paused/i)).toBeNull();
+
+    act(() => term.input("ls", true));
+    expect(socket.send).not.toHaveBeenCalledWith("ls");
+    expect(screen.getByText(/input is paused/i)).toBeTruthy();
+
+    act(() => {
+      socket.onmessage?.({ data: JSON.stringify({ type: "attach", resumed: true }) });
+    });
+    expect(screen.queryByText(/input is paused/i)).toBeNull();
+    act(() => term.input("ls", true));
+    expect(socket.send).toHaveBeenCalledWith("ls");
+  });
+
+  it("does not raise the notice for the terminal's own replies", async () => {
+    const socket = await mountAndOpen();
+    const term = FakeTerminal.instances[0];
+    act(() => {
+      // Focus in/out, DA reply, cursor-position report, SGR mouse report.
+      for (const reply of ["\x1b[I", "\x1b[O", "\x1b[?62;22c", "\x1b[12;40R", "\x1b[<0;10;5M"]) {
+        term.input(reply, true);
+      }
+    });
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(screen.queryByText(/input is paused/i)).toBeNull();
+
+    act(() => term.input("l", true));
+    expect(screen.getByText(/input is paused/i)).toBeTruthy();
+  });
+
+  it("keeps the notice up through an unexpected drop, which will reconnect", async () => {
+    const socket = await mountAndOpen();
+    const term = FakeTerminal.instances[0];
+    act(() => term.input("ls", true));
+    expect(screen.getByText(/input is paused/i)).toBeTruthy();
+
+    act(() => {
+      socket.readyState = MockSocket.CLOSED;
+      socket.onclose?.({ wasClean: false, code: 1006, reason: "" });
+    });
+    expect(screen.getByText(/input is paused/i)).toBeTruthy();
+  });
+
+  it("clears the notice when the shell exits, and does not raise it again for typing after", async () => {
+    const socket = await mountAndOpen();
+    const term = FakeTerminal.instances[0];
+    act(() => term.input("ls", true));
+    expect(screen.getByText(/input is paused/i)).toBeTruthy();
+
+    act(() => {
+      socket.readyState = MockSocket.CLOSED;
+      socket.onclose?.({ wasClean: true, code: 1000, reason: "" });
+    });
+    expect(screen.queryByText(/input is paused/i)).toBeNull();
+
+    // Nothing will reattach: the "session ended" line is the only notice.
+    act(() => term.input("ls", true));
+    expect(screen.queryByText(/input is paused/i)).toBeNull();
   });
 });

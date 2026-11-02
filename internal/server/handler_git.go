@@ -678,33 +678,155 @@ func diffFilesForDir(dir string, staged bool, pathFilter string) []GitDiffFile {
 	return files
 }
 
+// GitRef is one decoration on a commit: a local branch, a remote-tracking
+// branch, a tag, or the HEAD entry.
+type GitRef struct {
+	Name    string `json:"name"`    // "main", "origin/main", "v1.2"
+	Kind    string `json:"kind"`    // "head" | "remote" | "tag"
+	Current bool   `json:"current"` // true for the checked-out branch, or for detached HEAD
+}
+
 // GitCommit describes a single commit for the SourceTree-style log view.
 type GitCommit struct {
-	Hash    string `json:"hash"`
-	Short   string `json:"short"`
-	Message string `json:"message"`
-	Author  string `json:"author"`
-	Email   string `json:"email"`
-	Date    string `json:"date"`
+	Hash    string   `json:"hash"`
+	Short   string   `json:"short"`
+	Message string   `json:"message"`
+	Author  string   `json:"author"`
+	Email   string   `json:"email"`
+	Date    string   `json:"date"`
+	Parents []string `json:"parents"` // full parent hashes, first parent first; never null
+	Refs    []GitRef `json:"refs"`    // decorations; never null
+}
+
+// gitLogFormat is the --pretty value both log transports use. Fields are
+// NUL-separated and the subject comes last, so parseGitLogLine can split on
+// the NUL count without the subject ever being cut.
+const gitLogFormat = "--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%P%x00%D%x00%s"
+
+// gitLogOptions are the query options shared by both log transports.
+type gitLogOptions struct {
+	limit int
+	skip  int
+	all   bool
+}
+
+// parseGitLogOptions reads ?limit=, ?skip= and ?all= from the request. An
+// unparseable limit keeps the default; skip must be a non-negative integer
+// when given, and anything else is refused.
+func parseGitLogOptions(r *http.Request) (gitLogOptions, error) {
+	q := r.URL.Query()
+	opts := gitLogOptions{limit: 50, all: q.Get("all") == "1"}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.limit = n
+		}
+	}
+	opts.limit = clampGitLogLimit(opts.limit)
+	if v := q.Get("skip"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return gitLogOptions{}, fmt.Errorf("skip must be a non-negative integer")
+		}
+		opts.skip = n
+	}
+	return opts, nil
+}
+
+// gitLogArgs builds the argv for one page of history. --date-order keeps
+// parents after their children, which the graph layout depends on.
+func gitLogArgs(opts gitLogOptions) []string {
+	args := []string{
+		"log",
+		"-n", strconv.Itoa(opts.limit),
+		"--skip", strconv.Itoa(opts.skip),
+		"--decorate=full",
+		"--date-order",
+		gitLogFormat,
+	}
+	if opts.all {
+		args = append(args, "--all")
+	}
+	return args
+}
+
+// parseGitLog parses the output of a gitLogArgs run. It never returns nil,
+// and a line that lacks a field is skipped.
+func parseGitLog(out string) []GitCommit {
+	commits := []GitCommit{}
+	for _, line := range strings.Split(out, "\n") {
+		if c, ok := parseGitLogLine(line); ok {
+			commits = append(commits, c)
+		}
+	}
+	return commits
+}
+
+// parseGitLogLine parses one commit line written with gitLogFormat.
+func parseGitLogLine(line string) (GitCommit, bool) {
+	fields := strings.SplitN(line, "\x00", 8)
+	if len(fields) < 8 {
+		return GitCommit{}, false
+	}
+	parents := strings.Fields(fields[5])
+	if parents == nil {
+		parents = []string{}
+	}
+	return GitCommit{
+		Hash:    fields[0],
+		Short:   fields[1],
+		Author:  fields[2],
+		Email:   fields[3],
+		Date:    fields[4],
+		Parents: parents,
+		Refs:    parseGitDecorations(fields[6]),
+		Message: fields[7],
+	}, true
+}
+
+// parseGitDecorations turns a %D decoration list, written with
+// --decorate=full, into refs. The result is never nil. Entries that are not
+// HEAD, a local branch, a remote-tracking branch or a tag (stash, notes) are
+// skipped, and so is refs/remotes/<remote>/HEAD, the symbolic default-branch
+// pointer a clone creates (it is not a branch of its own). Ref names cannot
+// contain spaces, so ", " is an unambiguous separator even when a name holds
+// a comma.
+func parseGitDecorations(s string) []GitRef {
+	refs := []GitRef{}
+	for _, entry := range strings.Split(s, ", ") {
+		if name, ok := strings.CutPrefix(entry, "HEAD -> refs/heads/"); ok {
+			refs = append(refs, GitRef{Name: name, Kind: "head", Current: true})
+		} else if entry == "HEAD" {
+			refs = append(refs, GitRef{Name: "HEAD", Kind: "head", Current: true})
+		} else if name, ok := strings.CutPrefix(entry, "refs/heads/"); ok {
+			refs = append(refs, GitRef{Name: name, Kind: "head"})
+		} else if name, ok := strings.CutPrefix(entry, "refs/remotes/"); ok {
+			if strings.HasSuffix(name, "/HEAD") {
+				continue
+			}
+			refs = append(refs, GitRef{Name: name, Kind: "remote"})
+		} else if name, ok := strings.CutPrefix(entry, "tag: refs/tags/"); ok {
+			refs = append(refs, GitRef{Name: name, Kind: "tag"})
+		}
+	}
+	return refs
 }
 
 // HandleGitLog returns recent commit history, newest first. Supports
-// ?limit= (clamped to 1..200, default 50) and ?project=.
+// ?limit= (clamped to 1..200, default 50), ?skip=N (paging offset),
+// ?all=1 (every branch, remote and tag) and ?project=.
 func (h *Handler) HandleGitLog(w http.ResponseWriter, r *http.Request) {
+	opts, err := parseGitLogOptions(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if host := hostParam(r); host != "" {
 		rw, lerr := h.remoteWorkFor(host, r.URL.Query().Get("project"))
 		if lerr != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": lerr.Error()})
 			return
 		}
-		limit := 50
-		if v := r.URL.Query().Get("limit"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				limit = n
-			}
-		}
-		limit = clampGitLogLimit(limit)
-		commits, gerr := remoteGitLog(r.Context(), rw, limit)
+		commits, gerr := remoteGitLog(r.Context(), rw, opts)
 		if gerr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": gerr.Error()})
 			return
@@ -717,42 +839,13 @@ func (h *Handler) HandleGitLog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
-		}
-	}
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	out, err := gitRunInDir(dir, "log",
-		"-n", strconv.Itoa(limit),
-		"--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s")
+	out, err := gitRunInDir(dir, gitLogArgs(opts)...)
 	if err != nil {
 		// Not a repo or no commits yet → empty list (never null).
 		writeJSON(w, http.StatusOK, []GitCommit{})
 		return
 	}
-	commits := make([]GitCommit, 0, limit)
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Split(line, "\x00")
-		if len(fields) < 6 {
-			continue
-		}
-		commits = append(commits, GitCommit{
-			Hash:    fields[0],
-			Short:   fields[1],
-			Author:  fields[2],
-			Email:   fields[3],
-			Date:    fields[4],
-			Message: fields[5],
-		})
-	}
-	writeJSON(w, http.StatusOK, commits)
+	writeJSON(w, http.StatusOK, parseGitLog(out))
 }
 
 // HandleGitShow returns the diff of a single commit (?commit=<rev>), parsed

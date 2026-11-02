@@ -46,7 +46,8 @@ export function focusDesktopWindow(target: Window = window): boolean {
 
 // The per-launch secret the desktop shell appends to the window URL as ?clip=
 // (cmd/ocode-desktop/main.go). Read once at module load: the router may rewrite
-// the location later, and the shell only accepts writes that echo this value.
+// the location later, and the shell only accepts clipboard writes and print
+// requests that echo this value.
 const clipboardNonce = new URLSearchParams(window.location.search).get("clip");
 
 /**
@@ -62,4 +63,37 @@ export function writeDesktopClipboard(text: string, target: Window = window): bo
     return false;
   }
   return invokeWails(`ocode:clipboard-write:${clipboardNonce}:${text}`, target);
+}
+
+/**
+ * Largest print request sent over the bridge, in UTF-8 bytes of the whole
+ * message (prefix, nonce and document). The shell enforces no size limit of its
+ * own; this cap is the SPA's guard against an unbounded single bridge string.
+ */
+export const MAX_PRINT_DOCUMENT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Hand a complete HTML document to the desktop shell for printing. The shell
+ * renders it in its own native window and runs the native print panel, because
+ * WKWebView ignores window.print(). See cmd/ocode-desktop/print.go. Returns
+ * false in a plain browser, and when the page was not opened with the
+ * clipboard nonce (the shell checks the same nonce for print requests).
+ *
+ * Throws when the request exceeds MAX_PRINT_DOCUMENT_BYTES; nothing is sent.
+ *
+ * The bridge has no acknowledgement: invokeWails returns void on the shell side
+ * and the shell sends no reply. A `true` result therefore means the message was
+ * posted, not that the shell accepted or printed it. A refusal (bad nonce, sender
+ * outside the ocode page) is only logged on the Go side.
+ */
+export function printDesktopDocument(html: string, target: Window = window): boolean {
+  if (!clipboardNonce) {
+    return false;
+  }
+  const message = `ocode:print-document:${clipboardNonce}:${html}`;
+  const bytes = new TextEncoder().encode(message).length;
+  if (bytes > MAX_PRINT_DOCUMENT_BYTES) {
+    throw new Error(`print: document is ${bytes} bytes, over the ${MAX_PRINT_DOCUMENT_BYTES}-byte print limit`);
+  }
+  return invokeWails(message, target);
 }

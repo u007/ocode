@@ -211,23 +211,10 @@ func (h *Handler) HandleCancelPendingRewind(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	lock := h.sessionTurnLock(id)
-	lock.Lock()
-	defer lock.Unlock()
-	if h.sessions.IsTurnActive(id) {
-		writeError(w, http.StatusConflict, "cannot cancel rewind while turn is active")
-		return
-	}
-
-	resource, err := session.PendingRewindStatusForDir(entry.ProjectRoot, id, token)
-	if err != nil {
-		writePendingRewindError(w, "cancel", id, err)
-		return
-	}
-	if resource.Status == session.PendingRewindStatusCommitted {
-		writeError(w, http.StatusGone, "pending rewind has already been committed")
-		return
-	}
+	// CancelPendingRewindForDir performs the status check and the delete in a
+	// single transaction (see session package), so there is no unlocked gap in
+	// which a concurrent commit could flip the outcome. Its typed errors map to
+	// the same status codes the previous two-step probe produced.
 	if err := session.CancelPendingRewindForDir(entry.ProjectRoot, id, token); err != nil {
 		writePendingRewindError(w, "cancel", id, err)
 		return

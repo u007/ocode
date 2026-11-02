@@ -129,7 +129,7 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "0.8.85", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(ft, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -141,6 +141,9 @@ func TestEnsureRemoteServerReusesLiveMatchingServer(t *testing.T) {
 	}
 	if state.Outdated {
 		t.Errorf("expected Outdated=false for a matching version, got true")
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a reused server", retiredVersion)
 	}
 	for _, c := range ft.execCalls {
 		if c == launchServerCmd("0.8.85", "") {
@@ -169,7 +172,7 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	_ = origExec
 	// Simulate "file now exists" by having a second fakeTransport wrapper
 	// switch its answer after the launch call is observed.
-	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -181,6 +184,9 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	}
 	if state.Outdated {
 		t.Errorf("expected a freshly started server to be not Outdated, got true")
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a dead server replaced fresh", retiredVersion)
 	}
 }
 
@@ -227,12 +233,15 @@ func TestEnsureRemoteServerRetiresMismatchedAliveServer(t *testing.T) {
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
 	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd("2.0.0", ""), freshStateJSON: string(freshData)}
-	state, reused, err := EnsureRemoteServer(k, "2.0.0", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(k, "2.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reused || state != fresh {
 		t.Errorf("got reused=%v state=%+v, want a fresh %+v", reused, state, fresh)
+	}
+	if retiredVersion != "1.0.0" {
+		t.Errorf("retiredVersion = %q, want %q", retiredVersion, "1.0.0")
 	}
 	var killedOld, launched, reaped bool
 	for _, c := range ft.execCalls {
@@ -264,7 +273,7 @@ func TestEnsureRemoteServerReplacesDeadMismatchedServer(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 1} // dead
 	ft.execResults[launchServerCmd("0.8.85", "")] = ExecResult{ExitCode: 0}
 
-	state, reused, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(&pollAfterLaunchFake{fakeTransport: ft, freshStateJSON: string(freshData)}, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -273,6 +282,9 @@ func TestEnsureRemoteServerReplacesDeadMismatchedServer(t *testing.T) {
 	}
 	if state != fresh {
 		t.Errorf("got %+v, want %+v", state, fresh)
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a dead server replaced fresh", retiredVersion)
 	}
 	if state.Outdated {
 		t.Errorf("expected freshly started server to be not Outdated, got true")
@@ -290,12 +302,91 @@ func TestEnsureRemoteServerMatchingVersionNotOutdated(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "2.0.0", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(ft, "2.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !reused || state.Outdated {
 		t.Fatalf("reused=%v outdated=%v, want reused=true outdated=false", reused, state.Outdated)
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a reused server", retiredVersion)
+	}
+}
+
+// TestShouldReplaceRemote pins the version ordering behind the replace policy:
+// only a strictly newer local version retires a healthy remote server. Plain
+// X.Y.Z versions compare numerically; anything else falls back to inequality.
+func TestShouldReplaceRemote(t *testing.T) {
+	cases := []struct {
+		name          string
+		local, remote string
+		want          bool
+	}{
+		{"local older keeps newer remote", "1.0.0", "2.0.0", false},
+		{"equal reuses", "2.0.0", "2.0.0", false},
+		{"local newer replaces older remote", "2.0.0", "1.0.0", true},
+		{"patch compares numerically", "0.9.28", "0.9.9", true},
+		{"minor beats higher patch", "0.10.0", "0.9.99", true},
+		{"older patch never replaces", "0.9.9", "0.9.28", false},
+		{"dev local replaces on difference", "dev", "0.9.28", true},
+		{"dev remote replaced on difference", "0.9.28", "dev", true},
+		{"equal dev strings reuse", "dev", "dev", false},
+		{"prerelease suffix is unparseable", "0.9.28", "0.9.28-rc1", true},
+		{"v prefix is unparseable", "v0.9.28", "0.9.28", true},
+		{"signed component is unparseable", "+1.0.0", "0.9.28", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldReplaceRemote(tc.local, tc.remote); got != tc.want {
+				t.Errorf("shouldReplaceRemote(%q, %q) = %v, want %v", tc.local, tc.remote, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnsureRemoteServerVersionOrdering: end to end, an older remote server is
+// retired and replaced, while an equal or newer one is reused untouched.
+func TestEnsureRemoteServerVersionOrdering(t *testing.T) {
+	cases := []struct {
+		name          string
+		local, remote string
+		wantRetire    bool
+	}{
+		{"local older reuses newer remote", "1.0.0", "2.0.0", false},
+		{"equal reuses", "2.0.0", "2.0.0", false},
+		{"local newer retires older remote", "2.0.0", "1.0.0", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: tc.remote}
+			data, _ := json.Marshal(existing)
+			fresh := ServeState{PID: 77, Port: 4100, Token: "new", Version: tc.local}
+			freshData, _ := json.Marshal(fresh)
+
+			ft := newFakeTransport()
+			ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
+			ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
+			ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
+
+			k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd(tc.local, ""), freshStateJSON: string(freshData)}
+			state, reused, retiredVersion, err := EnsureRemoteServer(k, tc.local, "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if k.killed != tc.wantRetire || k.launched != tc.wantRetire {
+				t.Errorf("killed=%v launched=%v, want both %v", k.killed, k.launched, tc.wantRetire)
+			}
+			if tc.wantRetire {
+				if reused || state != fresh || retiredVersion != tc.remote {
+					t.Errorf("got reused=%v state=%+v retiredVersion=%q, want fresh %+v retiring %q", reused, state, retiredVersion, fresh, tc.remote)
+				}
+				return
+			}
+			if !reused || state != existing || retiredVersion != "" {
+				t.Errorf("got reused=%v state=%+v retiredVersion=%q, want reused %+v", reused, state, retiredVersion, existing)
+			}
+		})
 	}
 }
 
@@ -324,7 +415,7 @@ func (p *pollAfterLaunchFake) Exec(command string) (ExecResult, error) {
 // raceProneFake models the realistic timing StartFreshServer must be safe
 // against: before launch, `cat` returns a stale (already on disk) state file
 // — exactly what EnsureRemoteServer sees when serverHealthy rejects a
-// discovered server as dead/mismatched/unhealthy but the old process never
+// discovered server as dead/unhealthy but the old process never
 // got around to deleting its own file. Once the launch command runs, `cat`
 // must never again see that stale content — the launch command's `rm -f`
 // now runs synchronously, so by the time Exec("launch...") returns, the file
@@ -579,12 +670,15 @@ func TestEnsureRemoteServerAdoptsSiblingStatePID(t *testing.T) {
 	ft.execResults[healthProbeCmd(4200)] = ExecResult{Stdout: "200"}
 	fake := &scriptedStateFake{fakeTransport: ft, replies: []string{"", string(aJSON), string(bJSON)}}
 
-	state, reused, err := EnsureRemoteServer(fake, ver, "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(fake, ver, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reused || state != b {
 		t.Fatalf("reused=%v state=%+v, want the state-file server %+v", reused, state, b)
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a same-version reuse", retiredVersion)
 	}
 	for _, sig := range []string{"-TERM", "-KILL"} {
 		if !slices.Contains(ft.execCalls, orphanSlotServersCmd(ver, "", 200, sig)) {
@@ -607,7 +701,7 @@ func TestEnsureRemoteServerSkipsReapWhenStateFileMissing(t *testing.T) {
 	ft := newFakeTransport()
 	fake := &scriptedStateFake{fakeTransport: ft, replies: []string{"", string(aJSON), ""}}
 
-	state, _, err := EnsureRemoteServer(fake, ver, "")
+	state, _, _, err := EnsureRemoteServer(fake, ver, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -768,7 +862,7 @@ func assertNoLaunchOrKill(t *testing.T, ft *fakeTransport) {
 func TestEnsureRemoteServerTransportErrorOnDiscoverDoesNotLaunch(t *testing.T) {
 	ft := newFakeTransport()
 	ft.execErrs[stateCatCmd("")] = errors.New("ssh: connection timed out")
-	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+	if _, _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
 		t.Fatal("expected error when the host cannot be reached")
 	}
 	assertNoLaunchOrKill(t, ft)
@@ -780,7 +874,7 @@ func TestEnsureRemoteServerTransportErrorOnPidCheckDoesNotLaunch(t *testing.T) {
 	ft := newFakeTransport()
 	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execErrs[pidAliveCmd(42)] = errors.New("ssh: connection reset")
-	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+	if _, _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
 		t.Fatal("expected error when the pid check could not reach the host")
 	}
 	assertNoLaunchOrKill(t, ft)
@@ -793,7 +887,7 @@ func TestEnsureRemoteServerAliveButUnhealthyDoesNotLaunch(t *testing.T) {
 	ft.execResults[stateCatCmd("")] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "000"}
-	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+	if _, _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
 		t.Fatal("expected error for a live pid that is not answering health")
 	}
 	assertNoLaunchOrKill(t, ft)
@@ -837,7 +931,7 @@ func TestEnsureRemoteServerHealthProbeRemoteExitIsAnAnswer(t *testing.T) {
 		err:           errors.New(`ssh u@h "curl …": exit 7: `),
 	}
 
-	_, _, err := EnsureRemoteServer(ft, "0.8.85", "")
+	_, _, _, err := EnsureRemoteServer(ft, "0.8.85", "")
 	if err == nil {
 		t.Fatal("expected an error for a live pid that is not answering /api/health")
 	}
@@ -858,12 +952,15 @@ func TestEnsureRemoteServerWithoutCurlReusesLiveServer(t *testing.T) {
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: probeCurlMissing}
 
-	state, reused, err := EnsureRemoteServer(ft, "0.8.85", "")
+	state, reused, retiredVersion, err := EnsureRemoteServer(ft, "0.8.85", "")
 	if err != nil {
 		t.Fatalf("a verifiable pid with an unusable probe must reuse the server, got %v", err)
 	}
 	if !reused {
 		t.Fatal("expected reused=true for a live server whose health cannot be measured")
+	}
+	if retiredVersion != "" {
+		t.Errorf("retiredVersion = %q, want empty for a reused server", retiredVersion)
 	}
 	if state.PID != 42 || state.Port != 4096 {
 		t.Fatalf("got %+v, want the discovered server", state)
@@ -887,7 +984,7 @@ func TestEnsureRemoteServerSignaledPidProbeDoesNotLaunch(t *testing.T) {
 		err:           errors.New("signal: killed"),
 	}
 
-	if _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
+	if _, _, _, err := EnsureRemoteServer(ft, "0.8.85", ""); err == nil {
 		t.Fatal("a killed probe gave no verdict; expected an error instead of a relaunch")
 	}
 	assertNoLaunchOrKill(t, base)

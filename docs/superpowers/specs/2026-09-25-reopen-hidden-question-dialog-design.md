@@ -9,7 +9,7 @@ tags:
   - question
   - design
   - state
-timestamp: 2026-10-09T02:48:01Z
+timestamp: 2026-11-02T04:00:00Z
 ---
 # Reopen a locally hidden question dialog — design
 
@@ -124,7 +124,19 @@ Write failing tests first.
 
 ## Non-goals
 
-- No reversible server dismissal (the server-side `Don't answer` stays final).
+- ~~No reversible server dismissal (the server-side `Don't answer` stays final).~~ Reversed 2026-11-02, see Amendment 2026-11-02.
 - No read-only history viewer for dismissed questions.
-- No backend changes (endpoint, schema, or broadcast).
+- ~~No backend changes (endpoint, schema, or broadcast).~~ Narrowed 2026-11-02: the answer path accepts a dismissed tail and loads the session first, see Amendment 2026-11-02.
 - No TUI behavior change.
+
+## Amendment 2026-11-02: dismissed question is reopenable
+
+Date: 2026-11-02. This amendment supersedes the two struck non-goals above and the "final server-side dismissal" wording in Approved behavior item 2. Shipped on the web and desktop client and in the server answer path.
+
+- **Reopen from the card.** While the dismissed `question` call is the trailing tool round, its transcript card shows the header "dismissed · you can still answer" and an `Answer question` button. The button is hidden while a turn is active.
+- **Client-local reopen.** Clicking the button dispatches `QUESTION_REQUEST` with a prompt rebuilt from the call's arguments and `reopened: true`. Closing a reopened prompt dispatches `QUESTION_RESOLVED` without an API call. It does not ring the attention sound.
+- **Answer through the unchanged endpoint.** Submitting uses `POST /api/questions`. `applyQuestionAnswer` and the `HandleAnswerQuestion` lookup accept a dismissed tail. A request with `session_id` loads the session from disk first, so the answer works after a server restart.
+- **Cancel endpoint unchanged.** `POST /api/questions/cancel` behaves as before. A repeat dismissal returns 404 because the row no longer matches the pending-sentinel lookup.
+- **Known gap.** The TUI `/rc` bridge drops an answer for an already-dismissed prompt. Tracked in `TODO.md`.
+
+Design rationale and the gate on both sides: [question dismiss, reopen and answer](../../concepts/question-dismiss-reopen-answer.md).

@@ -231,11 +231,7 @@ func (h *Handler) HandleGitWorktreeCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	// check-ref-format echoes a valid name unchanged. It rejects a leading
-	// "-" (which would otherwise read as an option) and "@{-N}" (which would
-	// otherwise expand to another branch), so comparing the echo catches both.
-	name, err := gitRunInDir(dir, "check-ref-format", "--branch", req.Branch)
-	if err != nil || name != req.Branch {
+	if !gitBranchNameValid(dir, req.Branch) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid branch name %q", req.Branch))
 		return
 	}

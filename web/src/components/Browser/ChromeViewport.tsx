@@ -5,6 +5,7 @@ import { LoadingSpinner } from "./LoadingSpinner";
 import { uploadBrowseFiles } from "../../api/client";
 import { ContextMenu, type ContextMenuItem } from "../Layout/ContextMenu";
 import { openExternalURL } from "../../lib/externalLinks";
+import { createTerminalInputGuard } from "../Terminal/terminalInputGuard";
 
 /** CDP modifier bitmask (Input.dispatchMouseEvent/KeyEvent convention). */
 const MOD_ALT = 1;
@@ -124,6 +125,13 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
   // editor, so composition (CJK, dead keys, emoji) and paste events only fire
   // for an editable element; every key still goes to the remote page.
   const keyboardRef = useRef<HTMLTextAreaElement | null>(null);
+  // A phone soft keyboard can commit the same composed text twice; the remote
+  // page would then receive two `insertText` commands for one word. Same guard
+  // the terminal uses (see Terminal/terminalInputGuard.ts), scoped here to
+  // composition commits only — pasted text is a deliberate action and never
+  // deduplicated.
+  const inputGuardRef = useRef<ReturnType<typeof createTerminalInputGuard> | null>(null);
+  if (!inputGuardRef.current) inputGuardRef.current = createTerminalInputGuard();
   // Hidden native picker answering the page's intercepted <input type=file>.
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRef = useRef(active);
@@ -842,6 +850,9 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
       send({ t: "getSelection" });
     }
     pressedKeys.current.set(e.code, { key: e.key, code: e.code });
+    // A keystroke ends any pending IME commit, so an identical word composed
+    // after it is new (see terminalInputGuard.ts).
+    inputGuardRef.current!.noteInput();
     send({
       t: "key", kind: "down", key: e.key, code: e.code, text: keyText(e), modifiers: mods,
       ...(e.repeat ? { autoRepeat: true } : {}),
@@ -916,14 +927,23 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
   };
 
   const onCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
-    if (e.data) send({ t: "insertText", text: e.data });
+    if (e.data) {
+      const guard = inputGuardRef.current!;
+      guard.noteComposition(e.data);
+      // One soft-keyboard commit, one insertText: a re-delivered commit of the
+      // same text is dropped (the terminal has the same guard on term.onData).
+      if (guard.accept(e.data)) send({ t: "insertText", text: e.data });
+    }
     e.currentTarget.value = "";
   };
 
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault();
     const text = e.clipboardData.getData("text/plain");
-    if (text) send({ t: "insertText", text });
+    if (text) {
+      inputGuardRef.current!.noteInput();
+      send({ t: "insertText", text });
+    }
   };
 
   // Focus left the viewport (tab switch, alt-tab, click elsewhere): release

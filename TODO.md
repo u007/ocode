@@ -1,5 +1,26 @@
 # TODO
 
+## Open: reopen-and-answer of a dismissed question in TUI `/rc` bridge mode (2026-11-02)
+
+The web/desktop transcript card can reopen a dismissed `question` prompt and `POST /api/questions` answers it (headless serve). In `/rc` bridge mode the server forwards the answer to the TUI, but the TUI matches resolutions only against `m.rcPendingQuestion` (`internal/tui/model.go`, `rcResolveMsg` handling), which is nil after a dismissal, so the answer is dropped as stale and the web dialog closes with nothing happening.
+
+- **Teach the TUI to accept an answer for a dismissed tail.** On an unmatched resolution with `Answers`, find the tool message by `findToolMessageIndexByToolID`, require `raw.Content == tool.QuestionDismissedResult` and that it is still the trailing tool round, rebuild the prompts from the assistant tool call's `questions` arguments, then route through `submitRCQuestionAnswers`.
+
+## Open: git history graph on remote projects (2026-11-02)
+
+`POST /api/git/ref-action` (checkout, branch, merge, cherry-pick, revert, reset, tag, branch-delete) is local-only: a remote host answers 501 "ref actions are not supported for remote projects yet" (`internal/server/handler_git_refs.go`), and the web History sub-tab disables every mutating menu item for a remote project. The log side (`parents`/`refs`/`all`/`skip`) already works over the remote transport (`remoteGitLog`).
+
+- **Port ref actions to the remote transport.** Build the validated argv and run it through `remoteGitMutation` with `remoteGitMutationCommand`, the same path `remoteGitOperation` uses. That helper sets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR` and `GIT_LITERAL_PATHSPECS` but not `GIT_TERMINAL_PROMPT=0` or `GIT_MERGE_AUTOEDIT=no`, so check that merge, cherry-pick and revert cannot hang before dropping the 501 guard.
+
+## Open: terminal input on a phone — what the IME fix does NOT cover (2026-11-02)
+
+The duplicate word is fixed (`terminalInputGuard.ts`: a re-delivered `compositionend` commit is dropped by content, not by ghostty-web's 100 ms window). Measured cause and validation are in `CHANGES.md`. Deferred:
+
+- **Two clients still share one terminal slot; only the silent drop is fixed.** Terminal tabs are server-shared (`internal/termtabs`), so the desktop app AND a browser/phone client on the same project mount the same ids and race for `attach()`'s single slot. Shipped 2026-11-02: the displaced client gets a blocking overlay ("open in another window or device" + Take over), the hidden textarea is blurred so a phone's keyboard closes, and a pre-attach/reconnect keystroke raises an "input is paused" notice instead of vanishing; the server now logs `remote=` on attach/reattach and on every supersede. Still open: nothing stops the OTHER client from taking the slot back on its own reconnect (a client that never received the `detached` frame auto-reconnects through backoff), so a takeover can still flip-flop — decide whether a reconnect should yield when another client attached more recently.
+- **A re-commit that arrives as a NEW composition is not suppressed.** The guard compares a frame against the last *accepted* one, so if a keyboard starts a fresh composition and commits identical text inside the 600 ms window it looks like a deliberate repeat and is let through. Re-measure with a real device before widening it — suppressing more risks swallowing real input.
+- **`terminalImeHygiene.ts` is xterm-era and now dead-wrong.** Its doc comment describes xterm's textarea value-diff (CompositionHelper); ghostty-web never reads `textarea.value` for input (only for copy, `ghostty-web.js:2342`). Its only remaining effect is clearing the mobile IME's editable 50 ms after a commit, which is the kind of thing that provokes the re-commit it was written to avoid. Not removed with the IME fix because removal is a separate, unproven change — verify on a device, then delete it.
+- **Not verified on a physical device.** The IME repro is CDP-driven (`Input.imeSetComposition` + `Input.insertText`), which matches the Android event shape but is not Gboard. Confirm with `chrome://inspect` (compositionstart/update/end + beforeinput logger) that the second delivery now stops.
+
 ## Open: mobile terminal keys beyond a keydown (2026-10-31)
 
 Soft-keyboard arrow keys now work (ghostty-web drops them: `keyCode === 229`, and nav keys encode from `event.code` only). `web/src/components/Terminal/terminalSoftKeyboard.ts` + a capture-phase listener in `TerminalPanel.tsx` claim only soft-keyboard-shaped events, so hardware/numpad/Kitty encodings stay ghostty-web's. Deferred:

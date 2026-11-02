@@ -3,6 +3,7 @@ import { Columns2, Eye, Moon, Pencil, Sun } from "lucide-react";
 import type { FileEditorProps } from "./FileEditor";
 import PreviewSurface from "../Preview/PreviewSurface";
 import LegacyOfficePane from "../Preview/LegacyOfficePane";
+import { PrintPreviewButton } from "../Preview/PrintPreviewButton";
 import { isLegacyOfficePath, previewOnlyKindForPath, splitPreviewKindForPath } from "../../lib/previewKind";
 import { useResizableSplit } from "../../hooks/useResizableSplit";
 import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
@@ -115,6 +116,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   // preview-only so they reach the split branch with Monaco still mounted.
   // Other images (png/jpg/etc.) and Excel formats (xlsx/xls) remain preview-only.
   const splitKind = splitPreviewKindForPath(props.path);
+  const fileName = props.path.split("/").pop() || props.path;
   if (splitKind && !props.isBinary) {
     return (
       <div className="flex h-full min-h-0 flex-col">
@@ -144,20 +146,29 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
             ))}
           </div>
 
-          {/* Light/dark override for the Monaco pane AND the rendered preview.
-              Lives here (not in FileEditor's header) because the editor pane is
-              hidden in Preview mode; this toolbar is visible in all three. */}
-          <button
-            type="button"
-            onClick={() => toggleEditorAppearance()}
-            aria-pressed={appearance === "light"}
-            aria-label="Toggle light or dark theme"
-            title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
-            className="ml-auto flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            {appearance === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
-            <span className="hidden sm:inline">{appearance === "light" ? "Dark" : "Light"}</span>
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            {/* Prints the LIVE editor text, unsaved edits included. */}
+            <PrintPreviewButton
+              kind={splitKind}
+              title={fileName}
+              load={() => props.content}
+              className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            />
+            {/* Light/dark override for the Monaco pane AND the rendered preview.
+                Lives here (not in FileEditor's header) because the editor pane is
+                hidden in Preview mode; this toolbar is visible in all three. */}
+            <button
+              type="button"
+              onClick={() => toggleEditorAppearance()}
+              aria-pressed={appearance === "light"}
+              aria-label="Toggle light or dark theme"
+              title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
+              className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {appearance === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+              <span className="hidden sm:inline">{appearance === "light" ? "Dark" : "Light"}</span>
+            </button>
+          </div>
         </div>
 
         <div ref={split.containerRef} className="relative flex min-h-0 flex-1 overflow-hidden">

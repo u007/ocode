@@ -1,7 +1,20 @@
 # Directory Update Log
 
 
+
+## 2026-11-02
+
+* **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+* **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+* **Creation**: Web Git history graph (History sub-view, commit graph, ref-action menu) ([concepts/web-git-history-graph.md](/concepts/web-git-history-graph.md))
+* **Update**: Web Git panel: cross-reference to the History sub-view ([concepts/web-git-panel-sections.md](/concepts/web-git-panel-sections.md))
+* **Update**: Reopen a locally hidden question dialog: 2026-11-02 amendment makes a dismissed question reopenable and answerable ([superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md](/superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md))
+* **Update**: Interrupted Turn Notice: a dismissed tail can be answered from its card ([concepts/interrupted-turn-notice.md](/concepts/interrupted-turn-notice.md))
+* **Creation**: Question dismiss, reopen and answer: the three question states, transition gates and client-local reopen ([concepts/question-dismiss-reopen-answer.md](/concepts/question-dismiss-reopen-answer.md))
+
 ## 2026-11-01
+
+* **Creation**: Preview Print / Save as PDF: Print button for markdown, html, text and json previews. Content-built document; browser route through a sandboxed iframe; desktop route through a per-window print with the print-window bridge invariant ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
 
 * **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
 * **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))

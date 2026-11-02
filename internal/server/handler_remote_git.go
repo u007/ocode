@@ -349,30 +349,13 @@ func remoteSpecIsSafe(p string) bool {
 }
 
 // remoteGitLog is HandleGitLog's commit list over the transport.
-func remoteGitLog(ctx context.Context, rw remoteWork, limit int) ([]GitCommit, error) {
-	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path,
-		"log", "-n", strconv.Itoa(limit),
-		"--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s"))
+func remoteGitLog(ctx context.Context, rw remoteWork, opts gitLogOptions) ([]GitCommit, error) {
+	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, gitLogArgs(opts)...))
 	if err != nil {
 		// Not a repo or no commits yet → empty list (never null).
 		return []GitCommit{}, nil
 	}
-	commits := make([]GitCommit, 0, limit)
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Split(line, "\x00")
-		if len(fields) < 6 {
-			continue
-		}
-		commits = append(commits, GitCommit{
-			Hash:    fields[0],
-			Short:   fields[1],
-			Author:  fields[2],
-			Email:   fields[3],
-			Date:    fields[4],
-			Message: fields[5],
-		})
-	}
-	return commits, nil
+	return parseGitLog(out), nil
 }
 
 // remoteGitShow resolves a commit and returns its parsed diff — the

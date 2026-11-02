@@ -116,6 +116,8 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   const [addName, setAddName] = useState("");
   const [addUrl, setAddUrl] = useState("");
   const [addPassword, setAddPassword] = useState("");
+  // Only read on first setup, where the typed master password must be confirmed.
+  const [addConfirm, setAddConfirm] = useState("");
   const [unlockPassword, setUnlockPassword] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -255,62 +257,84 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     }
   };
 
+  // Unlocks every connection this password opens, for this panel's surface.
+  const unlockWith = async (password: string) => {
+    // The project path lets the server resolve an environment-backed
+    // connection against THIS project's .env / .env.local. The password is
+    // empty for that flow; only sealed connections need it.
+    //
+    // A remote project's files (including .env) live on the other machine and
+    // this endpoint is not host-threaded, so its path must never be sent: the
+    // server would either refuse it or, worse, match a same-named local dir.
+    try {
+      const res = await api.dbConnectUnlock(surface, password, projectHost ? undefined : projectPath);
+      setUnlockFailures(res.failed);
+      // Apply the server's answer locally as well, so a failed refresh below
+      // cannot leave the panel claiming the opposite of what the server did:
+      // granted connections become unlocked, failed ones lose the flag, and
+      // anything the attempt did not mention keeps its previous state (the
+      // password-less flow MERGES, so a sealed connection already unlocked
+      // stays unlocked and is never listed in `unlocked`).
+      const grantedNames = new Set(res.unlocked);
+      const failedNames = new Set(res.failed.map((f) => f.name));
+      setConnections((prev) =>
+        prev
+          ? prev.map((c) => ({
+              ...c,
+              unlocked: !failedNames.has(c.name) && (c.unlocked || grantedNames.has(c.name)),
+            }))
+          : prev,
+      );
+    } finally {
+      // A rejected attempt can still have changed the grant, and the panel
+      // must not keep claiming a connection is locked when the server has
+      // it (or vice versa). Keep the original unlock error if this fails.
+      await refresh().catch((err: unknown) => {
+        console.warn("db panel: refresh after unlock failed", errorText(err));
+      });
+    }
+    // No explicit loadTables: the [selected, unlocked] effect above reloads
+    // when the connection becomes unlocked, and doing both sent two requests.
+  };
+
+  const unlockConnection = () =>
+    withBusy("unlock", async () => {
+      // The password is empty for an environment-backed connection (see unlockWith).
+      await unlockWith(current?.fromEnv ? "" : unlockPassword);
+      setUnlockPassword("");
+    });
+
   const addConnection = () =>
     withBusy("add", async () => {
       const name = addName.trim();
+      const password = addPassword;
       // A template URL is saved in the clear and needs no password; a literal
       // URL is sealed under it. The server enforces the same rule.
-      await api.dbConnectAdd(name, addUrl.trim(), addPassword);
+      const literal = !addIsTemplate;
+      await api.dbConnectAdd(name, addUrl.trim(), password);
       setAddUrl("");
       setAddPassword("");
+      setAddConfirm("");
       setAddName("");
       // The connection set changed; a failure recorded for a name that was just
       // (re)added no longer describes the saved state.
       setUnlockFailures((prev) => prev.filter((f) => f.name !== name));
       await refresh();
       setSelected(name);
-    });
-
-  const unlockConnection = () =>
-    withBusy("unlock", async () => {
-      // The project path lets the server resolve an environment-backed
-      // connection against THIS project's .env / .env.local. The password is
-      // empty for that flow; only sealed connections need it.
-      //
-      // A remote project's files (including .env) live on the other machine and
-      // this endpoint is not host-threaded, so its path must never be sent: the
-      // server would either refuse it or, worse, match a same-named local dir.
-      const password = current?.fromEnv ? "" : unlockPassword;
-      try {
-        const res = await api.dbConnectUnlock(surface, password, projectHost ? undefined : projectPath);
-        setUnlockFailures(res.failed);
-        setUnlockPassword("");
-        // Apply the server's answer locally as well, so a failed refresh below
-        // cannot leave the panel claiming the opposite of what the server did:
-        // granted connections become unlocked, failed ones lose the flag, and
-        // anything the attempt did not mention keeps its previous state (the
-        // password-less flow MERGES, so a sealed connection already unlocked
-        // stays unlocked and is never listed in `unlocked`).
-        const grantedNames = new Set(res.unlocked);
-        const failedNames = new Set(res.failed.map((f) => f.name));
-        setConnections((prev) =>
-          prev
-            ? prev.map((c) => ({
-                ...c,
-                unlocked: !failedNames.has(c.name) && (c.unlocked || grantedNames.has(c.name)),
-              }))
-            : prev,
-        );
-      } finally {
-        // A rejected attempt can still have changed the grant, and the panel
-        // must not keep claiming a connection is locked when the server has
-        // it (or vice versa). Keep the original unlock error if this fails.
-        await refresh().catch((err: unknown) => {
-          console.warn("db panel: refresh after unlock failed", errorText(err));
-        });
+      // A literal URL was just sealed under this password, so it is unlocked
+      // now. A template is not sealed: it loads through "Load from .env".
+      if (literal) {
+        // The save already committed and the form is cleared, so an unlock failure
+        // must not read as a failed add: a retry would hit the duplicate-name error.
+        try {
+          await unlockWith(password);
+        } catch (err: unknown) {
+          console.warn("db panel: auto-unlock after add failed", name, errorText(err));
+          setPanelError(
+            `Connection ${name} was saved, but unlocking it failed: ${errorText(err)}. Unlock it manually with the master password.`,
+          );
+        }
       }
-      // No explicit loadTables: the [selected, unlocked] effect above reloads
-      // when the connection becomes unlocked, and doing both sent two requests.
     });
 
   const lockConnections = () =>
@@ -355,6 +379,14 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       </div>
     );
   }
+
+  // Only one add form renders at a time: the first-run form when nothing is saved,
+  // the "Add another connection" form otherwise. The first save fixes the master
+  // password, so its confirmation must match; later saves are checked by the server.
+  const firstSetup = connections.length === 0;
+  const addPasswordMismatch = firstSetup && !addIsTemplate && addPassword !== addConfirm;
+  const addSaveDisabled =
+    busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword) || addPasswordMismatch;
 
   return (
     <div
@@ -420,12 +452,15 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             name={addName}
             url={addUrl}
             password={addPassword}
+            confirmPassword={addConfirm}
+            firstSetup={true}
             isRemote={!!projectHost}
             onName={setAddName}
             onUrl={setAddUrl}
             onPassword={setAddPassword}
+            onConfirmPassword={setAddConfirm}
           />
-          <Button type="submit" size="sm" disabled={busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword)}>
+          <Button type="submit" size="sm" disabled={addSaveDisabled}>
             Save connection
           </Button>
         </form>
@@ -512,6 +547,10 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Lock className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} is locked
               </div>
+              {/* Outside the label: it must not become part of the field's accessible name. */}
+              <p className="text-[11px] text-muted-foreground">
+                The URL is encrypted and never shown again. Enter your master password to connect.
+              </p>
               <form
                 className="flex items-end gap-2"
                 onSubmit={(e) => {
@@ -535,7 +574,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                   disabled={busy !== null || !unlockPassword}
                   aria-busy={busy === "unlock"}
                 >
-                  <Unlock className="mr-1 h-3.5 w-3.5" /> Unlock
+                  <Unlock className="mr-1 h-3.5 w-3.5" /> Unlock &amp; connect
                 </Button>
               </form>
             </>
@@ -553,12 +592,15 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 name={addName}
                 url={addUrl}
                 password={addPassword}
+                confirmPassword={addConfirm}
+                firstSetup={false}
                 isRemote={!!projectHost}
                 onName={setAddName}
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
+                onConfirmPassword={setAddConfirm}
               />
-              <Button type="submit" size="sm" variant="outline" disabled={busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword)}>
+              <Button type="submit" size="sm" variant="outline" disabled={addSaveDisabled}>
                 Save connection
               </Button>
             </form>
@@ -734,24 +776,33 @@ function AddFields({
   name,
   url,
   password,
+  confirmPassword,
+  firstSetup,
   isRemote,
   onName,
   onUrl,
   onPassword,
+  onConfirmPassword,
 }: {
   name: string;
   url: string;
   password: string;
+  confirmPassword: string;
+  /** No connection is saved yet, so this password becomes the master password. */
+  firstSetup: boolean;
   /** A remote project's .env lives on the host, and the dbconnect routes are not
    *  host-threaded, so an env template saved here can never be loaded. */
   isRemote: boolean;
   onName: (v: string) => void;
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
+  onConfirmPassword: (v: string) => void;
 }) {
   // A URL that references an environment variable is not a secret, so the
   // password field is neither required nor meaningful for it.
   const template = isEnvTemplate(url.trim());
+  // The first literal save creates the master password, so it is typed twice.
+  const creating = firstSetup && !template;
   return (
     <div className="space-y-2">
       <label className="block space-y-1 text-xs font-medium text-muted-foreground">
@@ -765,6 +816,8 @@ function AddFields({
             type={template ? "text" : "password"}
             autoComplete="off"
             placeholder={"postgres://user:pass@host:5432/db  or  ${DATABASE_URL}"}
+            data-1p-ignore="true"
+            data-lpignore="true"
             value={url}
             onChange={(e) => onUrl(e.target.value)}
             className="h-8 font-mono text-xs"
@@ -791,20 +844,38 @@ function AddFields({
       </div>
       <div className="space-y-1">
         <label className="block text-xs font-medium text-muted-foreground">
-          {template ? "Master password (not needed for an environment URL)" : "Master password (encrypts the URL)"}
+          {template
+            ? "Master password (not needed for an environment URL)"
+            : creating
+              ? "Create master password"
+              : "Master password (must match the one you created first)"}
           <Input
             type="password"
-            autoComplete="off"
+            autoComplete={creating ? "new-password" : "off"}
             value={password}
             onChange={(e) => onPassword(e.target.value)}
             disabled={template}
             className="h-8 text-xs"
           />
         </label>
+        {creating && (
+          <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+            Confirm master password
+            <Input
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => onConfirmPassword(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </label>
+        )}
         <p className="text-[11px] text-muted-foreground">
           {template
             ? "Nothing is stored or encrypted: the value is read from the project's .env files when the connection is loaded."
-            : "Required for a literal URL: it seals the value that is saved."}
+            : creating
+              ? "Choose a new password now. It is not an existing account password. You will enter it each time you connect, and it cannot be recovered if forgotten."
+              : "Required for a literal URL: it seals the value that is saved."}
         </p>
       </div>
     </div>

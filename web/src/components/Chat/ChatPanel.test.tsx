@@ -14,7 +14,13 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } 
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
 import { useLayoutEffect, useEffect, useRef } from "react";
 import ChatPanel from "./ChatPanel";
-import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
+import {
+  ChatProvider,
+  QUESTION_DISMISSED_RESULT,
+  useChatDispatch,
+  useChatSelector,
+  getSessionSlice,
+} from "../../stores/chatStore";
 import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
 import { __resetChatVerbosityForTests } from "../../lib/chatVerbosity";
 import type { ChatVerbosityConfig, Message } from "../../api/types";
@@ -1606,6 +1612,95 @@ describe("ChatPanel", () => {
       questions: [{ header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] }],
     });
     expect(hiddenQuestionRequestId).toBeNull();
+  });
+
+  describe("reopening a dismissed question", () => {
+    const questions = [
+      { header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] },
+    ];
+    const questionCall = (args: string): Message => ({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "q-1", function: { name: "question", arguments: args } }],
+    });
+    const dismissed: Message = { role: "tool", content: QUESTION_DISMISSED_RESULT, tool_call_id: "q-1" };
+
+    it("offers 'Answer question' on a dismissed card and reopens it with the original questions", async () => {
+      const msgs: Message[] = [mk("user", "deploy"), questionCall(JSON.stringify({ questions })), dismissed];
+      let pending: unknown = null;
+      function Probe() {
+        pending = useChatSelector((s) => getSessionSlice(s, "sess-dismissed").pendingQuestion);
+        return null;
+      }
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-dismissed" messages={msgs} />
+          <ChatPanel sessionId="sess-dismissed" />
+          <Probe />
+        </ChatProvider>,
+      );
+      await tick();
+      await flushRAF();
+      expect(pending).toBeNull();
+
+      expect(screen.getByText("dismissed · you can still answer")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Answer question" }));
+      expect(pending).toEqual({ request_id: "q-1", questions, reopened: true });
+    });
+
+    it("offers no reopen button once a later message follows the dismissal", async () => {
+      const msgs: Message[] = [
+        mk("user", "deploy"),
+        questionCall(JSON.stringify({ questions })),
+        dismissed,
+        mk("user", "never mind"),
+      ];
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-dismissed-later" messages={msgs} />
+          <ChatPanel sessionId="sess-dismissed-later" />
+        </ChatProvider>,
+      );
+      await tick();
+      await flushRAF();
+      expect(screen.queryByRole("button", { name: "Answer question" })).toBeNull();
+    });
+
+    it("offers no reopen button when the call's arguments do not hold the questions", async () => {
+      const msgs: Message[] = [mk("user", "deploy"), questionCall("{not json"), dismissed];
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-dismissed-args" messages={msgs} />
+          <ChatPanel sessionId="sess-dismissed-args" />
+        </ChatProvider>,
+      );
+      await tick();
+      await flushRAF();
+      expect(screen.queryByRole("button", { name: "Answer question" })).toBeNull();
+    });
+
+    it("offers no reopen button while a turn is active", async () => {
+      const msgs: Message[] = [mk("user", "deploy"), questionCall(JSON.stringify({ questions })), dismissed];
+      let dispatch: ReturnType<typeof useChatDispatch> | null = null;
+      function Probe() {
+        dispatch = useChatDispatch();
+        return null;
+      }
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-dismissed-turn" messages={msgs} />
+          <ChatPanel sessionId="sess-dismissed-turn" />
+          <Probe />
+        </ChatProvider>,
+      );
+      await tick();
+      await flushRAF();
+      expect(screen.getByRole("button", { name: "Answer question" })).toBeTruthy();
+
+      act(() => dispatch!({ type: "SET_TURN_STATE", sessionId: "sess-dismissed-turn", turnActive: true }));
+      await tick();
+      expect(screen.queryByRole("button", { name: "Answer question" })).toBeNull();
+    });
   });
 
   it("offers 'Open question' on the LIVE tool card while a mid-turn ask is hidden", async () => {

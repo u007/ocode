@@ -21,6 +21,9 @@ const (
 // pending ask (no dialog reopens on reload/reconcile) while the model still
 // learns that the question went unanswered when the next turn runs. The turn
 // is NOT resumed on dismissal — the user's next message starts a fresh turn.
+// The web transcript card can reopen a dismissed question, and POST
+// /api/questions accepts the answer while the dismissed result is still the
+// trailing tool round.
 const QuestionDismissedResult = "The user dismissed the question prompt without answering."
 
 // ToolCancelledResult is the tool result written for a tool call that the user

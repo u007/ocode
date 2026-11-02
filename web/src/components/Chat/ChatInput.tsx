@@ -799,6 +799,19 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         });
       })
       .catch((err) => {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+          // The capability is no longer usable (expired, already committed,
+          // or invalidated by a conversation change). Drop the armed state so
+          // the UI does not stay stuck on a Cancel button that can never
+          // succeed, but keep the restored draft for the user.
+          clearPendingRewind(projectHost, sessionTabId);
+          setPendingRewind(null);
+          const message =
+            "This restore expired or was already used. Your draft is preserved; restore the message again.";
+          reportActionErrorMessage(message);
+          setPendingRewindError(message);
+          return;
+        }
         const message = describeActionError(err, "Cancel restore");
         reportActionErrorMessage(message);
         setPendingRewindError(message);

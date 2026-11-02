@@ -19,6 +19,8 @@ import type {
   GitOperationResult,
   GitWorkspace,
   GitHunkRequest,
+  GitRefActionRequest,
+  GitRefActionResult,
   GitStash,
   GitWorktree,
   ThemeResponse,
@@ -2221,12 +2223,20 @@ export const api = {
   getGitWorkspace: (project?: string, host?: string) =>
     fetchJSON<GitWorkspace>(`/api/git/workspace${projQuery(project, host)}`),
 
-  /** Recent commits, newest first. */
-  gitLog: (project?: string, limit = 50, host?: string) => {
+  /** Recent commits, newest first. `all` lists every branch, remote and tag
+   *  (the history graph's "All branches" scope); `skip` pages past the first
+   *  `skip` commits. */
+  gitLog: (
+    project?: string,
+    opts?: { limit?: number; skip?: number; all?: boolean },
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     if (host) params.set("host", host);
-    params.set("limit", String(limit));
+    params.set("limit", String(opts?.limit ?? 50));
+    if (opts?.skip) params.set("skip", String(opts.skip));
+    if (opts?.all) params.set("all", "1");
     return fetchJSON<GitCommit[]>(`/api/git/log?${params.toString()}`);
   },
 
@@ -2243,6 +2253,16 @@ export const api = {
     fetchJSON<GitWorkspace>(`/api/git/hunk${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify(req),
+    }),
+
+  /** Branch / commit actions from the history graph (checkout, merge,
+   *  cherry-pick, reset, tag, …). A git refusal comes back as a 409 whose
+   *  message is git's own text. reset-hard is sent with confirm:true: the
+   *  history panel asks the user before it calls this. */
+  gitRefAction: (req: GitRefActionRequest, project?: string, host?: string) =>
+    fetchJSON<GitRefActionResult>(`/api/git/ref-action${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify(req.action === "reset-hard" ? { ...req, confirm: true } : req),
     }),
 
   // ── Git file actions (driven by the web file-tree context menu) ──

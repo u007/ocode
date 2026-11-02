@@ -150,6 +150,13 @@ describe("AttentionSoundBridge", () => {
     expect(playAlertSound).toHaveBeenCalledTimes(1);
   });
 
+  it("does not chime when the user reopens a dismissed question", () => {
+    renderBridge({ tabs: [{ id: "s1", projectPath: "/proj" }], activeTabId: null });
+    fire({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });
+    fire({ type: "QUESTION_REQUEST", sessionId: "s1", question: { ...question, reopened: true } });
+    expect(playAlertSound).not.toHaveBeenCalled();
+  });
+
   it("chimes when a background chat stalls", () => {
     renderBridge({ tabs: [{ id: "s1", projectPath: "/proj" }], activeTabId: null });
     fire({ type: "SET_TURN_STATE", sessionId: "s1", turnActive: true });

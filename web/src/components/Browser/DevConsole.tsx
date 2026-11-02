@@ -1,5 +1,7 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, Copy, X } from "lucide-react";
 import type { ConsoleEvent, NetworkEvent, ResponseBody } from "../../lib/browserStore";
+import { copyTextToClipboard } from "../../lib/clipboard";
 
 export interface DevConsoleProps {
   consoleEvents: ConsoleEvent[];
@@ -36,6 +38,9 @@ const levelBadge: Record<string, string> = {
 const DEFAULT_HEIGHT = 240;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT_RATIO = 0.6;
+const COPY_FLASH_MS = 1500;
+
+type CopyState = "idle" | "copied" | "failed";
 
 function statusClass(status: number): string {
   if (status >= 500) return "text-red-400";
@@ -83,6 +88,24 @@ function formatPerfValue(key: string, value: number): string {
   return value.toFixed(2);
 }
 
+/** Plain-text lines for the rows the active tab shows (filtered, in display order). */
+function tabCopyLines(
+  tab: "console" | "network" | "performance",
+  consoleRows: ConsoleEvent[],
+  netRows: NetworkEvent[],
+  perfRows: [string, number][],
+): string[] {
+  if (tab === "console") return consoleRows.map((e) => `${e.level.toUpperCase()} ${e.text}`);
+  if (tab === "network") {
+    return netRows.map((e) =>
+      [e.status || "—", e.method, e.url, e.blocked ? "blocked" : "", formatDuration(e.durationMs), formatSize(e.size)]
+        .filter(Boolean)
+        .join(" "),
+    );
+  }
+  return perfRows.map(([key, value]) => `${perfLabels[key] ?? key}: ${formatPerfValue(key, value)}`);
+}
+
 export function DevConsole(props: DevConsoleProps) {
   const [tab, setTab] = useState<"console" | "network" | "performance">("console");
   const [filter, setFilter] = useState("");
@@ -91,6 +114,7 @@ export function DevConsole(props: DevConsoleProps) {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [bodyTab, setBodyTab] = useState<"headers" | "body">("headers");
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const [copyState, setCopyState] = useState<CopyState>("idle");
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const consoleRows = useMemo(
@@ -101,6 +125,24 @@ export function DevConsole(props: DevConsoleProps) {
     () => props.networkEvents.filter((e) => e.url.toLowerCase().includes(filter.toLowerCase())),
     [props.networkEvents, filter],
   );
+  const perfRows = useMemo(
+    () => Object.entries(props.perfMetrics).sort(([a], [b]) => a.localeCompare(b)),
+    [props.perfMetrics],
+  );
+  const copyLines = useMemo(
+    () => tabCopyLines(tab, consoleRows, netRows, perfRows),
+    [tab, consoleRows, netRows, perfRows],
+  );
+
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = window.setTimeout(() => setCopyState("idle"), COPY_FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
+
+  const onCopy = () => {
+    void copyTextToClipboard(copyLines.join("\n")).then((ok) => setCopyState(ok ? "copied" : "failed"));
+  };
 
   const onDragStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
@@ -137,7 +179,7 @@ export function DevConsole(props: DevConsoleProps) {
   return (
     <div
       ref={containerRef}
-      className="flex flex-col shrink-0 border-t border-neutral-700 dark:border-neutral-800 bg-neutral-900 dark:bg-neutral-950 text-xs font-mono select-none min-h-0"
+      className="flex flex-col shrink-0 border-t border-neutral-700 dark:border-neutral-800 bg-neutral-900 dark:bg-neutral-950 text-xs font-mono min-h-0"
       style={open ? { height } : undefined}
     >
       {open && (
@@ -152,13 +194,13 @@ export function DevConsole(props: DevConsoleProps) {
             if (e.key === "ArrowUp") { e.preventDefault(); setHeight((h) => Math.min(h + step, 600)); }
             else if (e.key === "ArrowDown") { e.preventDefault(); setHeight((h) => Math.max(h - step, MIN_HEIGHT)); }
           }}
-          className="h-1.5 cursor-row-resize flex items-center justify-center hover:bg-neutral-700 active:bg-neutral-600 transition-colors shrink-0 group"
+          className="h-1.5 cursor-row-resize flex items-center justify-center hover:bg-neutral-700 active:bg-neutral-600 transition-colors shrink-0 group select-none"
         >
           <div className="w-8 h-0.5 rounded-full bg-neutral-600 group-hover:bg-neutral-400" />
         </div>
       )}
       {/* Tab bar */}
-      <div className="flex items-center gap-0 px-1 shrink-0 border-b border-neutral-700 dark:border-neutral-800">
+      <div className="flex items-center gap-0 px-1 shrink-0 border-b border-neutral-700 dark:border-neutral-800 select-none">
         <button
           aria-label={open ? "Collapse console" : "Expand console"}
           aria-expanded={open}
@@ -232,10 +274,27 @@ export function DevConsole(props: DevConsoleProps) {
             </button>
           </>
         )}
+        <button
+          type="button"
+          aria-label={`Copy ${tab} output`}
+          title={`Copy ${tab} output`}
+          data-state={copyState}
+          disabled={copyLines.length === 0}
+          onClick={onCopy}
+          className="flex items-center px-1 py-0.5 ml-1 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {copyState === "copied" ? (
+            <Check className="h-3 w-3 text-green-400" />
+          ) : copyState === "failed" ? (
+            <X className="h-3 w-3 text-red-400" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+        </button>
       </div>
       {/* Content */}
       {open && (
-        <div className="flex-1 overflow-auto text-[11px] leading-relaxed">
+        <div className="flex-1 overflow-auto text-[11px] leading-relaxed select-text">
           {/* Console tab */}
           {tab === "console" && (
             <div className="px-2 py-1">
@@ -245,7 +304,7 @@ export function DevConsole(props: DevConsoleProps) {
                 consoleRows.map((e, i) => (
                   <div key={i} className={`flex items-start gap-1.5 py-px ${levelColor[e.level] ?? "text-neutral-200"}`}>
                     {levelBadge[e.level] && (
-                      <span className="text-[10px] font-semibold uppercase opacity-70 shrink-0 mt-px">{levelBadge[e.level]}</span>
+                      <span className="text-[10px] font-semibold uppercase opacity-70 shrink-0 mt-px select-none">{levelBadge[e.level]}</span>
                     )}
                     <span className="break-all">{e.text}</span>
                   </div>
@@ -268,7 +327,12 @@ export function DevConsole(props: DevConsoleProps) {
                     <div key={id}>
                       <div
                         className={`flex items-center gap-2 px-2 py-0.5 border-b border-neutral-800/50 hover:bg-neutral-800/30 ${hasDetails ? "cursor-pointer" : ""}`}
-                        onClick={() => hasDetails && toggleRow(id)}
+                        onClick={() => {
+                          // A drag-selection inside the row ends in a click; don't let it toggle the row.
+                          const selection = window.getSelection();
+                          if (selection && !selection.isCollapsed) return;
+                          if (hasDetails) toggleRow(id);
+                        }}
                       >
                         <span className={`w-16 shrink-0 font-medium ${statusClass(e.status)}`}>
                           {e.status || "—"}
@@ -281,7 +345,7 @@ export function DevConsole(props: DevConsoleProps) {
                         <span className="shrink-0 text-neutral-500 tabular-nums w-16 text-right">{formatDuration(e.durationMs)}</span>
                         <span className="shrink-0 text-neutral-500 tabular-nums w-14 text-right">{formatSize(e.size)}</span>
                         {hasDetails && (
-                          <span className="shrink-0 text-neutral-600">{isExpanded ? "▾" : "▸"}</span>
+                          <span className="shrink-0 text-neutral-600 select-none">{isExpanded ? "▾" : "▸"}</span>
                         )}
                       </div>
                       {/* Expanded detail */}
@@ -408,9 +472,7 @@ export function DevConsole(props: DevConsoleProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.entries(props.perfMetrics)
-                      .sort(([a], [b]) => a.localeCompare(b))
-                      .map(([key, value]) => (
+                    {perfRows.map(([key, value]) => (
                         <tr key={key} className="border-b border-neutral-800/50">
                           <td className="py-0.5 pr-4 text-neutral-300">{perfLabels[key] ?? key}</td>
                           <td className="py-0.5 text-right tabular-nums text-neutral-200">{formatPerfValue(key, value)}</td>

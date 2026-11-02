@@ -77,6 +77,12 @@ describe("PreviewTabPage activation", () => {
     await waitFor(() => expect(consume).toHaveBeenCalledTimes(2));
   });
 
+  it("falls back to the path's kind when the request carries an unknown kind", async () => {
+    render(<PreviewTabPage nonce={1} request={req({ kind: "bogus" as PreviewOpenRequest["kind"] })} />);
+    const surface = await screen.findByTestId("preview-surface");
+    expect(surface.getAttribute("data-kind")).toBe("markdown");
+  });
+
   it("does nothing without an activation (keeps the file-picker placeholder)", () => {
     render(<PreviewTabPage nonce={0} request={null} />);
     expect(screen.queryByTestId("preview-surface")).toBeNull();

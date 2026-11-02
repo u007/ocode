@@ -67,6 +67,14 @@ func isQuestionAsk(content string) bool {
 		strings.Contains(content, tool.SentinelWaitingForUser)
 }
 
+// isQuestionDismissed reports whether a tool result is a question prompt the
+// user dismissed without answering (tool.QuestionDismissedResult). Mirror of
+// dismissedQuestion in internal/session/transcript_tail.go, which this package
+// cannot reuse because it is unexported there.
+func isQuestionDismissed(content string) bool {
+	return strings.TrimSpace(content) == tool.QuestionDismissedResult
+}
+
 // tailIsQuestionAsk reports whether the most recent tool-call round still has
 // an unresolved question prompt anywhere in it. Mirror of tailIsPermissionAsk
 // in run_states.go — see trailingToolRunStart for why the whole round (not
@@ -82,16 +90,19 @@ func tailIsQuestionAsk(msgs []agent.Message) bool {
 
 // applyQuestionAnswer replaces the pending question prompt (a tool result at the
 // tail whose ToolID matches requestID) with the answer JSON, in place. It
-// returns true when a matching unanswered prompt was found. Replacing in place
-// — rather than appending a second tool result like the TUI does and relying on
-// session sanitisation — keeps exactly one tool result per tool_use_id, which
-// the re-Step sends straight to the provider without a duplicate-id 400.
+// returns true when a matching unanswered prompt was found. A dismissed prompt
+// (tool.QuestionDismissedResult) is answerable too while it is still the tail,
+// because the transcript card can reopen it; the answer then replaces the
+// dismissal. Replacing in place — rather than appending a second tool result
+// like the TUI does and relying on session sanitisation — keeps exactly one
+// tool result per tool_use_id, which the re-Step sends straight to the provider
+// without a duplicate-id 400.
 func applyQuestionAnswer(msgs []agent.Message, requestID, answerJSON string) bool {
 	if len(msgs) == 0 {
 		return false
 	}
 	last := &msgs[len(msgs)-1]
-	if last.Role != "tool" || last.ToolID != requestID || !isQuestionAsk(last.Content) {
+	if last.Role != "tool" || last.ToolID != requestID || (!isQuestionAsk(last.Content) && !isQuestionDismissed(last.Content)) {
 		return false
 	}
 	last.Content = answerJSON
@@ -109,7 +120,9 @@ func applyQuestionAnswer(msgs []agent.Message, requestID, answerJSON string) boo
 // Unlike HandleAnswerQuestion this does NOT re-Step the agent: there is no
 // answer to act on, so the session simply goes idle and the user's next message
 // starts an ordinary turn. Re-stepping would spend a model round-trip narrating
-// a non-answer and could raise a fresh ask the user must dismiss again.
+// a non-answer and could raise a fresh ask the user must dismiss again. The
+// dismissed result can still be answered from the transcript card while it is
+// the trailing tool round (see HandleAnswerQuestion).
 //
 // In /rc bridge mode the dismissal is forwarded to the TUI (which owns the
 // agent and its own dialog), mirroring HandleAnswerQuestion.
@@ -192,7 +205,9 @@ func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) 
 // HandleAnswerQuestion resolves a pending `question` prompt raised by the agent
 // and continues the turn. Body: {request_id, session_id?, answers}. It mirrors
 // the TUI answer path (submitQuestionAnswers): inject the selected answers as
-// the question tool result, then re-run the agent.
+// the question tool result, then re-run the agent. A dismissed prompt
+// (tool.QuestionDismissedResult) is answerable too while it is the trailing
+// tool round, so the transcript card can reopen it.
 //
 // In /rc bridge mode the TUI owns the agent and its own question dialog, so the
 // answers are forwarded over the bridge as RCResolution{Answers} and the TUI
@@ -241,6 +256,19 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A dismissed question is a "come back later" state: it may be answered
+	// after a server restart, when its session is no longer in h.agents. Its
+	// tool result is plain prose, so the transcript survives a session load
+	// (unlike a live sentinel), and loading it here lets findPendingSession see
+	// it. This runs only on the answer path; dismissing never loads a session.
+	if req.SessionID != "" {
+		if _, err := h.getOrCreateAgentSession(req.SessionID); err != nil {
+			log.Printf("serve: question answer: load session %s: %v", req.SessionID, err)
+			writeError(w, http.StatusNotFound, "no pending question found for request_id")
+			return
+		}
+	}
+
 	// Locate the session whose pending question matches request_id. Prefer the
 	// explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be answered out
@@ -248,7 +276,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// background continuation (dispatchAskContinuation); every error path below
 	// must therefore unlock as.mu explicitly.
 	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
-		return m.Role == "tool" && isQuestionAsk(m.Content)
+		return m.Role == "tool" && (isQuestionAsk(m.Content) || isQuestionDismissed(m.Content))
 	})
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")

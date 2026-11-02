@@ -6,6 +6,9 @@ import {
   getSessionSlice,
   parsePermissionFromMessage,
   parseQuestionFromMessage,
+  isDismissedQuestionResult,
+  questionsFromToolCallArgs,
+  trailingToolRunStart,
   type PermissionRequest,
   type QuestionRequest,
 } from "../../stores/chatStore";
@@ -79,6 +82,23 @@ function scrollElementTo(el: HTMLElement, top: number, behavior: ScrollBehavior)
   } else {
     el.scrollTop = top;
   }
+}
+
+/** The question a dismissed `question` call can reopen. The dismissal result no
+ *  longer carries the prompts, so they are rebuilt from the call's arguments. Only
+ *  offered while the dismissal is still the trailing tool round, the one place
+ *  the server accepts an answer. */
+function dismissedQuestionFor(
+  tc: import("../../api/types").ToolCall,
+  resultContent: string,
+  resultIdx: number,
+  trailingStart: number,
+): QuestionRequest | undefined {
+  if (tc.function.name !== "question") return undefined;
+  if (!isDismissedQuestionResult(resultContent) || resultIdx < trailingStart) return undefined;
+  const questions = questionsFromToolCallArgs(tc.function.arguments);
+  if (!questions) return undefined;
+  return { request_id: tc.id, questions, reopened: true };
 }
 
 interface ChatPanelProps {
@@ -324,6 +344,10 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           /** The unanswered `question` prompt this call is paused on, so the
            *  card can re-open its dialog on demand. */
           pendingQuestion?: QuestionRequest;
+          /** The dismissed `question` prompt this call's result records, rebuilt
+           *  from the call's arguments so its card can reopen it on demand. Set
+           *  only while the dismissal is the trailing tool round. */
+          dismissedQuestion?: QuestionRequest;
           /** The unanswered `permission` prompt this call is paused on, so the
            *  card can re-open its dialog on demand. */
           pendingPermission?: PermissionRequest;
@@ -375,6 +399,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
       }
     });
     const entries: RenderEntry[] = [];
+    const trailingStart = trailingToolRunStart(messages);
     // Pre-mark ids that will be consumed by upcoming assistant groups so that
     // when we later encounter the tool message we can skip it. Building the
     // set in a first pass keeps the second pass strictly forward and avoids
@@ -399,7 +424,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           // is not re-attached to a later duplicate id.
           if (hit && !consumed.has(tc.id)) {
             consumed.add(tc.id);
-            return { tc, resultContent: hit.content, resultIdx: hit.idx, resultImages: hit.images };
+            return {
+              tc,
+              resultContent: hit.content,
+              resultIdx: hit.idx,
+              resultImages: hit.images,
+              dismissedQuestion: dismissedQuestionFor(tc, hit.content, hit.idx, trailingStart),
+            };
           }
           if (hit) {
             // Duplicate id — show the call without a second copy of the same result.
@@ -1909,7 +1940,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             forceOpen={forceOpen}
                           />
                         ) : null}
-                        {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, pendingPermission }) => (
+                        {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
                           <ToolBlock
                             key={tc.id}
                             tool={tc.function.name}
@@ -1919,6 +1950,10 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             toolCallId={tc.id}
                             sessionId={sessionId}
                             highlight={highlight}
+                            questionDismissed={!!dismissedQuestion && !pendingQuestion}
+                            // A dismissed prompt is reopened as a LOCAL dialog (the
+                            // server holds no ask for it) and is answerable only while
+                            // the dismissal is the trailing round with no turn running.
                             onOpenQuestion={
                               pendingQuestion
                                 ? () =>
@@ -1927,7 +1962,14 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                                       sessionId,
                                       requestId: pendingQuestion.request_id,
                                     })
-                                : undefined
+                                : dismissedQuestion && !slice.turnActive
+                                  ? () =>
+                                      dispatch({
+                                        type: "QUESTION_REQUEST",
+                                        sessionId,
+                                        question: dismissedQuestion,
+                                      })
+                                  : undefined
                             }
                             onOpenPermission={
                               pendingPermission

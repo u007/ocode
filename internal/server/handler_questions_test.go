@@ -988,3 +988,151 @@ func TestDismissQuestionAllowsNextTurnAndHidesSentinel(t *testing.T) {
 		t.Fatalf("dismissal result not present in persisted transcript: %v", messageContents(loaded.Messages))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Answering a dismissed question: the dismissal result is answerable from the
+// transcript card while it is still the trailing tool round.
+// ---------------------------------------------------------------------------
+
+func TestApplyQuestionAnswerAcceptsDismissedPrompt(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "deploy"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: tool.QuestionDismissedResult},
+	}
+	answer := `[{"question":"Where should I deploy?","answers":[{"label":"Staging"}]}]`
+	if !applyQuestionAnswer(msgs, "call-1", answer) {
+		t.Fatalf("dismissed prompt at the tail should accept an answer")
+	}
+	if last := msgs[len(msgs)-1]; last.Content != answer {
+		t.Fatalf("dismissal not replaced in place: %q", last.Content)
+	}
+
+	plain := []agent.Message{
+		{Role: "user", Content: "deploy"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: "some other tool output"},
+	}
+	if applyQuestionAnswer(plain, "call-1", answer) {
+		t.Fatalf("plain tool output must not accept an answer")
+	}
+}
+
+func TestHandleAnswerQuestionAfterDismissResolvesAndContinues(t *testing.T) {
+	h := NewHandler()
+	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: tool.QuestionDismissedResult},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	waitForAskContinuation(t, as)
+
+	answered := as.messages[2]
+	if isQuestionDismissed(answered.Content) {
+		t.Fatalf("dismissal was not replaced by the answer: %q", answered.Content)
+	}
+	if !strings.Contains(answered.Content, `"label":"Staging"`) {
+		t.Fatalf("answer JSON not injected: %q", answered.Content)
+	}
+	if last := as.messages[len(as.messages)-1]; last.Role != "assistant" || last.Content == "" {
+		t.Fatalf("expected assistant continuation, got %+v", last)
+	}
+
+	sawResolved := false
+	for drained := false; !drained; {
+		select {
+		case ev := <-sub:
+			if ev.Event == "question_resolved" {
+				sawResolved = true
+			}
+		default:
+			drained = true
+		}
+	}
+	if !sawResolved {
+		t.Fatalf("expected a question_resolved mirror event")
+	}
+}
+
+// A message after the dismissed round means the question is superseded: it is
+// no longer the trailing round, so the answer is refused as not found.
+func TestHandleAnswerQuestionAfterDismissSupersededIs404(t *testing.T) {
+	h := NewHandler()
+	as := &agentSession{
+		agent: agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: tool.QuestionDismissedResult},
+			{Role: "user", Content: "something else"},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if as.messages[2].Content != tool.QuestionDismissedResult {
+		t.Fatalf("superseded dismissal was rewritten: %q", as.messages[2].Content)
+	}
+}
+
+// After a restart the session is only on disk. The answer path must load it
+// before looking for the question. The request_id is deliberately wrong so no
+// continuation Step runs (a real one would call the configured provider). The
+// 404 is expected; the assertion is that the persisted session is now live.
+func TestHandleAnswerQuestionAfterDismissLoadsSessionFromDisk(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	h := newPulseAssistantHandler(t, home)
+	projectRoot := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, projectRoot)
+
+	dismissed := []agent.Message{
+		{Role: "user", Content: "deploy", UserSeq: 1},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: tool.QuestionDismissedResult},
+	}
+	if err := session.SaveForDir(projectRoot, id, "", dismissed, map[string]any{"model": pulseTestModel}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if h.lookupAgentSession(id) != nil {
+		t.Fatal("precondition: persisted session must not be live")
+	}
+
+	body := `{"request_id":"no-such-call","session_id":"` + id + `","answers":[]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for the wrong request_id (body=%s)", rec.Code, rec.Body.String())
+	}
+	if h.lookupAgentSession(id) == nil {
+		t.Fatal("answer path did not load the persisted session into h.agents")
+	}
+}

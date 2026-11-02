@@ -33,6 +33,8 @@ import { conflictSideLabels } from "./conflictSideLabels";
 import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
 import { ConflictChunks } from "./ConflictChunks";
 import WorktreesSection from "./WorktreesSection";
+import GitSubTabs, { type GitView } from "./GitSubTabs";
+import GitHistoryPanel from "./GitHistoryPanel";
 import type {
   GitConflictChunkChoice,
   GitCommit,
@@ -63,6 +65,8 @@ const COMMIT_BOX_MAX_HEIGHT = 132;
 // Persisted to localStorage (versioned key, same pattern as CoworkSidebar's
 // "ocode.ui.sidebar.v2") so the layout survives reloads.
 const GIT_PANEL_SECTIONS_KEY = "ocode.ui.git-panel.v1";
+// Which Git sub-view (working-tree changes or commit history) was open last.
+const GIT_VIEW_KEY = "ocode.ui.git-view.v1";
 
 interface PanelSections {
   staged: boolean;
@@ -252,6 +256,15 @@ function lineColor(line: string): string {
   return "text-muted-foreground";
 }
 
+function loadGitView(): GitView {
+  try {
+    return window.localStorage.getItem(GIT_VIEW_KEY) === "history" ? "history" : "changes";
+  } catch {
+    // intentionally not logged: localStorage is unavailable in private mode; the default view applies.
+    return "changes";
+  }
+}
+
 /** Human-facing label for a stash reflog subject. %gs is either
  *  "WIP on <branch>: <base subject>" or "On <branch>: <message>"; the part
  *  after the first ": " is what the user actually cares about. */
@@ -260,7 +273,7 @@ function stashLabel(subject: string): string {
   return idx >= 0 ? subject.slice(idx + 2) : subject;
 }
 
-function timeAgo(iso: string): string {
+export function timeAgo(iso: string): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
   const diff = Date.now() - then;
@@ -338,6 +351,10 @@ export default function GitPanel({
   const noticeTimer = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [sections, setSections] = useState<PanelSections>(loadPanelSections);
+  const [view, setView] = useState<GitView>(loadGitView);
+  // Bumped on every successful refresh so the history view can pick up commits
+  // made outside it (a commit or push from the terminal, or this panel's own actions).
+  const [refreshToken, setRefreshToken] = useState(0);
   const [fileFilter, setFileFilter] = useState("");
   const [contextMenu, setContextMenu] = useState<{
     items: ContextMenuItem[];
@@ -417,7 +434,7 @@ export default function GitPanel({
     return runKeyedLoad(async () => {
       const [ws, log, stashList] = await Promise.all([
         api.getGitWorkspace(projectPath, projectHost),
-        api.gitLog(projectPath, 50, projectHost),
+        api.gitLog(projectPath, { limit: 50 }, projectHost),
         // A failed stash-list probe (older server, transient error) must not
         // take down the whole workspace refresh.
         api.gitStashList(projectPath, projectHost).catch(() => [] as GitStash[]),
@@ -436,6 +453,7 @@ export default function GitPanel({
         setWorkspace(ws);
         setCommits(log);
         setStashes(stashList);
+        setRefreshToken((t) => t + 1);
         if (!background) setError(null);
         // A pull that stopped on a conflict leaves a sticky error reading
         // "git pull failed: CONFLICT ...". Once the operation banner is up,
@@ -512,6 +530,15 @@ export default function GitPanel({
       // for the current session.
     }
   }, [sections]);
+
+  const changeView = (next: GitView) => {
+    try {
+      window.localStorage.setItem(GIT_VIEW_KEY, next);
+    } catch {
+      // intentionally not logged: localStorage is unavailable; the choice lasts this session only.
+    }
+    setView(next);
+  };
 
   const toggleSection = (key: keyof PanelSections) =>
     setSections((s) => ({ ...s, [key]: !s[key] }));
@@ -1307,6 +1334,7 @@ export default function GitPanel({
               </span>
             )}
           </span>
+          <GitSubTabs value={view} onChange={changeView} />
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
           <input
@@ -1593,6 +1621,23 @@ export default function GitPanel({
         </div>
       )}
 
+      {view === "history" && (
+        <GitHistoryPanel
+          projectPath={projectPath}
+          projectHost={projectHost}
+          active={active}
+          workspace={workspace}
+          onWorkspaceChanged={(ws) => {
+            setWorkspace(ws);
+            void load({ background: true });
+          }}
+          onShowChanges={() => changeView("changes")}
+          refreshToken={refreshToken}
+        />
+      )}
+
+      {view === "changes" && (
+      <>
       {/* Body — a side-by-side split from the desktop layout up. On a phone the
           file list is an overlay drawer (closed by default) so the diff keeps
           the full width instead of both panes sharing a narrow screen. */}
@@ -2010,6 +2055,8 @@ export default function GitPanel({
           Commit &amp; Push
         </button>
       </div>
+      </>
+      )}
 
       {/* Force-push confirmation dialog */}
       <Dialog open={pendingForcePush} onOpenChange={(open) => !open && setPendingForcePush(false)}>
@@ -2543,7 +2590,7 @@ function FileDiff({
 }
 
 /** Read-only diff of a commit (from git show). */
-function CommitDiff({ files }: { files: GitDiffFile[] }) {
+export function CommitDiff({ files }: { files: GitDiffFile[] }) {
   if (files.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-sm text-muted-foreground">

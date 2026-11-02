@@ -856,6 +856,46 @@ export interface GitCommit {
   email: string;
   /** ISO-8601 timestamp from git (--date=iso-strict). */
   date: string;
+  /** Full parent hashes, first-parent first. Merge commits have two or more. */
+  parents: string[];
+  /** Branch, remote-branch and tag decorations on this commit. */
+  refs: GitRef[];
+}
+
+/** One decoration on a commit in the history graph. */
+export interface GitRef {
+  name: string;
+  kind: "head" | "remote" | "tag";
+  /** True for the checked-out branch. */
+  current: boolean;
+}
+
+/** Action the history view can run through POST /api/git/ref-action. */
+export type GitRefAction =
+  | "checkout"
+  | "branch"
+  | "branch-checkout"
+  | "branch-delete"
+  | "merge"
+  | "cherry-pick"
+  | "revert"
+  | "reset-soft"
+  | "reset-mixed"
+  | "reset-hard"
+  | "tag";
+
+export interface GitRefActionRequest {
+  action: GitRefAction;
+  /** Commit hash, or a branch name (local, or origin/x). */
+  target: string;
+  /** Required for branch, branch-checkout and tag. */
+  name?: string;
+}
+
+/** Success body of POST /api/git/ref-action. */
+export interface GitRefActionResult {
+  workspace: GitWorkspace;
+  output: string;
 }
 
 /** Full SourceTree-style snapshot: status + staged diffs + unstaged diffs. */

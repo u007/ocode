@@ -25,9 +25,11 @@ function chatAttentionSignature(state: ChatState): string {
   for (const id of Object.keys(state.sessions).sort()) {
     const slice = state.sessions[id];
     if (!slice) continue;
+    // A reopened dismissed prompt is the user's own action, not a new server ask,
+    // so it must not ring the sound.
     out += `${id}:${slice.turnActive ? 1 : 0}${slice.turnStalled ? 1 : 0}${
       slice.pendingPermission ? 1 : 0
-    }${slice.pendingQuestion ? 1 : 0}|`;
+    }${slice.pendingQuestion && !slice.pendingQuestion.reopened ? 1 : 0}|`;
   }
   return out;
 }
