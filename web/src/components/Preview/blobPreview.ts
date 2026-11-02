@@ -1,3 +1,5 @@
+import { saveBlobAsFile } from "@/lib/saveBlob";
+
 /**
  * Pure helpers for the BLOB viewer.
  *
@@ -85,22 +87,12 @@ export function describeBlobCell(info: BlobCellInfo): string {
     : formatBytes(info.bytes);
 }
 /**
- * Offer bytes as a file download.
- *
- * The object URL is revoked on a timer, not immediately: Safari and the desktop
- * app's WKWebView navigate to about:blank when the URL they just clicked is
- * revoked synchronously, which reads as the download having failed.
+ * Offer bytes as a file download (browser anchor, or the desktop save panel).
+ * See saveBlobAsFile for the save path and its rejection cases.
  */
-export function downloadBytes(filename: string, data: ArrayBuffer | Uint8Array, mediaType: string): void {
+export function downloadBytes(filename: string, data: ArrayBuffer | Uint8Array, mediaType: string): Promise<void> {
   const blob = new Blob([data as BlobPart], { type: mediaType || "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return saveBlobAsFile(blob, filename);
 }
 
 /** A filename for a downloaded blob: the column, then an extension for its type. */

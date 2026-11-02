@@ -19,6 +19,28 @@ type target struct {
 	Path     string // always starts with "/"
 	RawQuery string
 	Local    bool // host resolves to loopback/RFC1918 by literal inspection
+	// RootMounted marks a target served by a root-mounted tab listener
+	// (tab_origin.go). The document path IS the upstream path there, so URL
+	// rewriting emits same-upstream URLs as plain paths, not /b/ routes.
+	// Zero for every prefix-mode target.
+	RootMounted bool
+	// Foreign marks a target reached through the reserved /__ocode/b/ route of a
+	// root-mounted tab origin (tab_origin.go): Scheme/Host name an upstream other
+	// than the listener's binding, which is BindScheme/BindHost. Zero otherwise.
+	Foreign    bool
+	BindScheme string
+	BindHost   string
+}
+
+// binding returns the upstream a root-mounted origin serves at its own root:
+// the target's own upstream, or the listener's binding for a foreign target.
+// Rewriting and capture compare against the binding, never the target, because
+// a path on the origin always resolves to the binding.
+func (t target) binding() (scheme, host string) {
+	if t.Foreign {
+		return t.BindScheme, t.BindHost
+	}
+	return t.Scheme, t.Host
 }
 
 // parseTarget splits the browse path. Shape: /b/{stateKey}/{scheme}/{host}/{rest...}

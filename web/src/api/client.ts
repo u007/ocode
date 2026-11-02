@@ -4909,10 +4909,17 @@ const _browseOrigins = new Map<string, BrowseOriginState>();
 /** In-flight origin reads by host, so panels mounting together share one request. */
 const _browseOriginReads = new Map<string, Promise<string>>();
 
+/** Hosts whose tab-origin call answered 409 "tab origin unavailable" (a client
+ *  on another device, a stream-via-main client, or a remote-mode server). Like
+ *  streamViaMain, this is remembered for the session: such a host is loaded in
+ *  prefix mode from then on, without asking again. */
+const _tabOriginUnavailable = new Set<string>();
+
 /** Test-only: clear the browse origin state. */
 export function __resetBrowseBaseCache(): void {
   _browseOrigins.clear();
   _browseOriginReads.clear();
+  _tabOriginUnavailable.clear();
 }
 
 /** Browse config for a host. Local is `/api/browse/config`; a remote host asks
@@ -5017,6 +5024,63 @@ export async function mintBrowseGrant(stateKey: string, host: string): Promise<s
   if (!res.ok) throw new Error(`browse grant: ${res.status}`);
   const body = (await res.json()) as { grant: string };
   return body.grant;
+}
+
+/** Answer of the tab-origin call. `tab` is the tab's root-mounted origin and the
+ *  URL to load in the iframe (grant included). `unavailable` means this client
+ *  cannot use a root-mounted origin for the host: load in prefix mode. `connecting`
+ *  means the remote host is still connecting; retry after `retryAfterMs`. */
+export type BrowseTabOrigin =
+  | { kind: "tab"; origin: string; url: string }
+  | { kind: "unavailable" }
+  | { kind: "connecting"; retryAfterMs: number };
+
+/** The server's error text from a failed browse call: its JSON `error` field,
+ *  or the raw body (a proxy's plain-text page) when it is not JSON. */
+function browseErrorMessage(status: number, raw: string): string {
+  try {
+    const body = JSON.parse(raw) as { error?: unknown };
+    if (typeof body.error === "string") return body.error;
+  } catch {
+    // intentionally not logged: a non-JSON error body is shown as it is
+  }
+  return raw.trim() || `HTTP ${status}`;
+}
+
+/** Opens the root-mounted origin for one tab's upstream URL. `host` is the tab's
+ *  project host ("" = this machine); it travels in the body, because this call is
+ *  always answered by the local server. A 409 "tab origin unavailable" is the
+ *  capability answer: it is remembered for the host and returned as `unavailable`.
+ *  Every other failure throws with the server's message; a 503 with Retry-After is
+ *  `connecting`. Nothing is cached beyond the unavailable memory. */
+export async function openBrowseTabOrigin(
+  stateKey: string,
+  url: string,
+  host: string,
+): Promise<BrowseTabOrigin> {
+  if (_tabOriginUnavailable.has(host)) return { kind: "unavailable" };
+  const res = await authedFetch("/api/browse/tab-origin", {
+    method: "POST",
+    body: JSON.stringify({ state_key: stateKey, url, host }),
+  });
+  if (res.ok) {
+    const body = (await res.json()) as { origin: string; url: string };
+    return { kind: "tab", origin: body.origin, url: body.url };
+  }
+  const raw = await res.text();
+  const message = browseErrorMessage(res.status, raw);
+  if (res.status === 409 && message.startsWith("tab origin unavailable")) {
+    _tabOriginUnavailable.add(host);
+    return { kind: "unavailable" };
+  }
+  const retryAfter = res.headers.get("Retry-After");
+  if (res.status === 503 && retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return { kind: "connecting", retryAfterMs: seconds * 1000 };
+    }
+  }
+  throw new ApiError(`tab origin: ${message}`, res.status, raw);
 }
 
 /** Best-effort revoke of a browse session (called on panel close). */

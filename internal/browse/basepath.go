@@ -26,6 +26,21 @@ import (
 // hostile or malformed header cannot inject a scheme or an authority.
 const BasePathHeader = "X-Ocode-Browse-Base-Path"
 
+// RootModeHeader asks a browse origin on another machine (a remote host's) for
+// root-mounted output, as a ListenTab origin serves it. A local tab origin
+// forwarding a request sends it (tab_remote.go), with the tab's binding as
+// "scheme://host": the upstream the tab's root serves. The binding cannot come
+// from the /b/ path alone, because a foreign upstream is forwarded on that same
+// path. The origin answers RootModeHeader: RootModeMarker on every response it
+// produced in root mode, which is how the sender tells a host that honoured the
+// request from an older one that ignored it. The request path never selects the
+// mode.
+const RootModeHeader = "X-Ocode-Browse-Root-Mode"
+
+// RootModeMarker is the RootModeHeader response value that proves the origin
+// answered in root-mounted mode.
+const RootModeMarker = "1"
+
 // basePathFor returns the normalized mount prefix for a request: "" for a
 // root-mounted origin, or "/api/remote/host/browse" style prefix. A malformed
 // value is ignored (treated as root-mounted) rather than trusted, because the

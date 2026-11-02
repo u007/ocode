@@ -97,3 +97,49 @@ export function printDesktopDocument(html: string, target: Window = window): boo
   }
   return invokeWails(message, target);
 }
+
+/**
+ * Largest file saved through the desktop shell, in decoded bytes. The shell
+ * enforces the same limit (cmd/ocode-desktop/save_file.go, desktopSaveMaxBytes);
+ * this is the SPA's guard before the bytes are base64-encoded into one bridge string.
+ */
+export const MAX_DESKTOP_SAVE_BYTES = 64 * 1024 * 1024;
+
+/** True when the page runs inside the desktop shell's webview. */
+export function isDesktopShell(target: Window = window): boolean {
+  return Boolean((target as WailsWindow)._wails?.invoke);
+}
+
+/**
+ * Save bytes through the desktop shell's native save panel. WKWebView drops a
+ * blob `<a download>` click without any error, so a desktop save has to go
+ * through the shell (cmd/ocode-desktop/save_file.go). The shell sends no reply:
+ * a return means the request was posted, while a refusal or a failed write is
+ * logged and shown by the shell.
+ *
+ * Throws when the page has no clipboard nonce (the shell refuses the save), when
+ * the bridge is missing, or when the file exceeds MAX_DESKTOP_SAVE_BYTES. Nothing
+ * is sent in those cases.
+ */
+export function saveDesktopFile(name: string, data: Uint8Array, target: Window = window): void {
+  if (!clipboardNonce) {
+    throw new Error(`save: ${name} not sent, the page has no desktop nonce`);
+  }
+  if (data.byteLength > MAX_DESKTOP_SAVE_BYTES) {
+    throw new Error(`save: ${name} is ${data.byteLength} bytes, over the ${MAX_DESKTOP_SAVE_BYTES}-byte desktop save limit`);
+  }
+  const body = JSON.stringify({ name, data: bytesToBase64(data) });
+  if (!invokeWails(`ocode:save-file:${clipboardNonce}:${body}`, target)) {
+    throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
+  }
+}
+
+/** Base64 without spreading the whole array into one call (that overflows the stack for multi-MB files). */
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}

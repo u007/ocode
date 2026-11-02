@@ -4,6 +4,12 @@
 
 ## 2026-11-02
 
+* **Update**: browser_run screenshot view: set-of-marks screenshot for pages the text view cannot judge, text-entry controls masked before the image, TypeSafe image assets, scroll offset as progress, 64 px viewport floor ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+* **Update**: Preview Print / Save as PDF ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+* **Update**: browser_run step loop: "Routing the model to browser_run" (skill description, webfetch JavaScript-shell hint, prompt fragment when a browser tool is bound) ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Browser tool on a remote host: htrcli surface maps pick, upload, frames, scroll, typeless type, console and network, with a 120 s network capture window per tab ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
+* **Update**: Browser tool on a remote host drives the client's browser through its htrcli daemon, with identity-checked element refs and explicit errors for the verbs the daemon cannot answer ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
 * **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 * **Update**: Web/Desktop Terminal on ghostty-web (libghostty-vt) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 * **Creation**: Web Git history graph (History sub-view, commit graph, ref-action menu) ([concepts/web-git-history-graph.md](/concepts/web-git-history-graph.md))

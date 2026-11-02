@@ -69,6 +69,20 @@ type TypesafeAnswer struct {
 	Confidence    float64            `json:"confidence,omitzero"`
 }
 
+// TypesafeAsset is one image sent with a decision request. TypeSafe replaces the
+// placeholder string that names it, wherever that string appears in the state or
+// the questions, with the image. Images are experimental: the request must carry
+// TypesafeImagesHeader or TypeSafe refuses them.
+type TypesafeAsset struct {
+	Type       string `json:"type"`
+	Format     string `json:"format"`
+	DataBase64 string `json:"data_base64"`
+}
+
+// TypesafeImagesHeader opts a request in to image assets. It is sent only with a
+// request that carries assets.
+const TypesafeImagesHeader = "TypeSafe-Danger-Zone-Images"
+
 type TypesafeUsage struct {
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
@@ -98,6 +112,18 @@ func (c *TypesafeClient) Decide(state any, questions map[string]TypesafeQuestion
 //
 // state may be a string, a JSON object/array, or nil.
 func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+	return c.decide(ctx, state, questions, nil)
+}
+
+// DecideWithAssetsCtx is DecideCtx with images. Each assets key is a placeholder
+// string that appears in the state or the questions, and TypeSafe swaps in the
+// image. Without assets the request is the same as DecideCtx's.
+func (c *TypesafeClient) DecideWithAssetsCtx(ctx context.Context, state any, questions map[string]TypesafeQuestion, assets map[string]TypesafeAsset) (*TypesafeResponse, error) {
+	return c.decide(ctx, state, questions, assets)
+}
+
+// decide is the one request path behind DecideCtx and DecideWithAssetsCtx.
+func (c *TypesafeClient) decide(ctx context.Context, state any, questions map[string]TypesafeQuestion, assets map[string]TypesafeAsset) (*TypesafeResponse, error) {
 	if len(questions) == 0 {
 		return nil, errors.New("typesafe: at least one question is required")
 	}
@@ -109,7 +135,7 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 		ctx, cancel = context.WithTimeout(ctx, typesafeRequestTimeout)
 		defer cancel()
 	}
-	body, err := c.marshalRequestBody(state, questions)
+	body, err := c.marshalRequestBody(state, questions, assets)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +146,9 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if len(assets) > 0 {
+		req.Header.Set(TypesafeImagesHeader, "true")
+	}
 
 	// No http.Client.Timeout: the request context governs the deadline (with
 	// the fallback applied above), so a per-call budget can shorten it and a
@@ -150,7 +179,7 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 // clef's buildBody directly: clef is meant to be a drop-in replacement, and the
 // only thing that may legitimately differ between the two bodies is the model
 // selector. See ClefClient.buildBody for why that selector differs.
-func (c *TypesafeClient) marshalRequestBody(state any, questions map[string]TypesafeQuestion) ([]byte, error) {
+func (c *TypesafeClient) marshalRequestBody(state any, questions map[string]TypesafeQuestion, assets map[string]TypesafeAsset) ([]byte, error) {
 	// Same shared guard as ClefClient.buildBody — one definition, so the two
 	// backends cannot drift on what counts as an acceptable state.
 	prepared, projected, err := prepareDecisionState(state)
@@ -160,11 +189,17 @@ func (c *TypesafeClient) marshalRequestBody(state any, questions map[string]Type
 	if projected {
 		emitDebug("AGENT", fmt.Sprintf("typesafe: projected bulky state fields down to fit the %d byte decision budget", decisionStateBudgetBytes))
 	}
-	body, err := json.Marshal(map[string]any{
+	req := map[string]any{
 		"state":     prepared,
 		"model":     c.Model,
 		"questions": questions,
-	})
+	}
+	// The assets key is added only with images, so a text request's body keeps
+	// the bytes it had before images existed.
+	if len(assets) > 0 {
+		req["assets"] = assets
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
 	}

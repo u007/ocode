@@ -3,8 +3,10 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { api } from "../../api/client";
 import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsyncIterator";
+import { saveBlobAsFile } from "@/lib/saveBlob";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import { usePdfFind } from "./usePdfFind";
+import { PrintPreviewDialog } from "./PrintPreviewDialog";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
 
 // WebKit has no ReadableStream async iteration, which pdf.js's getTextContent()
@@ -187,10 +189,12 @@ export default function PdfViewer({
   const [renderTick, setRenderTick] = useState(0);
   /** Bumped when a new document lands; resets the find bar state. */
   const [docVersion, setDocVersion] = useState(0);
-  const [spaceHeld, setSpaceHeld] = useState(false);
-  const [dragging, setDragging] = useState(false);
+ const [spaceHeld, setSpaceHeld] = useState(false);
+ const [dragging, setDragging] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [printSrc, setPrintSrc] = useState<string | null>(null);
 
-  const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
+ const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const canvasRefs = useRef(new Map<number, HTMLCanvasElement>());
   const textRefs = useRef(new Map<number, HTMLDivElement>());
@@ -631,62 +635,21 @@ export default function PdfViewer({
   /** Download the original PDF bytes under their file name. */
   const downloadPdf = useCallback(() => {
     const blob = blobRef.current;
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = pdfFileName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // Safari/WKWebView keep navigating to about:blank if the URL is revoked
-    // synchronously; give the download a beat to start.
-    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    if (!blob) throw new Error(`download: ${pdfFileName} bytes are not loaded`);
+    void saveBlobAsFile(blob, pdfFileName);
   }, [pdfFileName]);
 
   /** Print via a hidden iframe hosting the PDF blob: the browser's own PDF
    *  engine renders it and its print dialog opens. Fallback chain: iframe →
-   *  popup tab → forced download (popup blocked). */
+  *  popup tab → forced download (popup blocked). */
   const printPdf = useCallback(() => {
     const blob = blobRef.current;
     if (!blob) return;
     const url = URL.createObjectURL(blob);
-    const frame = document.createElement("iframe");
-    frame.style.position = "fixed";
-    frame.style.right = "0";
-    frame.style.bottom = "0";
-    frame.style.width = "1px";
-    frame.style.height = "1px";
-    frame.style.opacity = "0";
-    frame.style.border = "0";
-    frame.src = url;
-    frame.setAttribute("aria-hidden", "true");
-    frame.tabIndex = -1;
-    frame.onload = () => {
-      try {
-        frame.contentWindow?.focus();
-        frame.contentWindow?.print();
-      } catch {
-        // Cross-origin/sandboxed frame refused print() — open a tab instead.
-        window.open(url, "_blank");
-      }
-      window.setTimeout(() => {
-        frame.remove();
-        URL.revokeObjectURL(url);
-      }, 60_000); // keep the frame alive while the dialog is open
-    };
-    document.body.appendChild(frame);
-    // WKWebView sometimes never fires onload for blob: frames; if the print
-    // dialog did not take over within a second, surface the PDF in a tab.
-    window.setTimeout(() => {
-      if (frame.isConnected) {
-        frame.remove();
-        const win = window.open(url, "_blank");
-        if (!win) downloadPdf(); // popups blocked → last resort: download
-        else window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      }
-    }, 1000);
-  }, [downloadPdf]);
+    setPrintSrc(url);
+    setPrintOpen(true);
+    return;
+  }, []);
 
   const rotate = useCallback(() => {
     const doc = docRef.current;
@@ -986,6 +949,7 @@ export default function PdfViewer({
   const toggleOn = "rounded px-1.5 py-0.5 bg-muted text-foreground";
   const toggleOff = "rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted";
   return (
+    <>
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1 text-xs">
         <button type="button" disabled={!total || safe <= 1} onClick={() => gotoPage(safe - 1)} className={idleBtn} aria-label="Previous page">←</button>
@@ -1001,7 +965,7 @@ export default function PdfViewer({
         <button type="button" disabled={!total} onClick={fitPage} className={idleBtn} aria-label="Fit page" title="Fit whole page">Page</button>
         <button type="button" disabled={!total} onClick={rotate} className={idleBtn} aria-label="Rotate clockwise" title="Rotate 90° clockwise">⟳</button>
         <span className="flex-1" />
-        <button type="button" disabled={!total} onClick={printPdf} className={idleBtn} aria-label="Print" title="Print (browser print dialog)">Print</button>
+        <button type="button" disabled={!total} onClick={printPdf} className={idleBtn} aria-label="Print" title="Open print preview">Print</button>
         <button type="button" disabled={!total} onClick={downloadPdf} className={idleBtn} aria-label="Download" title={`Download ${pdfFileName}`}>Download</button>
         <button type="button" disabled={!total} onClick={find.show} className={idleBtn} aria-label="Find in document" title="Find (Ctrl/⌘ F)">Find</button>
       </div>
@@ -1164,5 +1128,18 @@ export default function PdfViewer({
       <style>{`.pdf-text-layer span{color:transparent;}.pdf-text-layer span::selection{background:rgba(59,130,246,.35);}`}</style>
       {sel && <SelectionToolbar sel={sel} path={path} label={`p.${safe}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
+    <PrintPreviewDialog
+      open={printOpen}
+      onOpenChange={(next) => {
+        if (!next && printSrc) {
+          URL.revokeObjectURL(printSrc);
+          setPrintSrc(null);
+        }
+        setPrintOpen(next);
+      }}
+      src={printSrc}
+      title={pdfFileName}
+    />
+    </>
   );
 }

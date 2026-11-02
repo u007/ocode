@@ -15,6 +15,7 @@ The Git tab has two sub-views, switched by `GitSubTabs`: **Changes** (the existi
 
 - The sub-view choice persists in `localStorage` under `ocode.ui.git-view.v1` (`GIT_VIEW_KEY` in `GitPanel.tsx`).
 - The branch scope select (All branches / Current branch) persists under `ocode.ui.git-history-scope.v1` (`SCOPE_KEY` in `GitHistoryPanel.tsx`).
+- The commit-list / detail split is draggable (drag the horizontal divider, or use Arrow Up/Down while focused on it). The split ratio persists under `ocode.ui.git-history-split.v1` (`SPLIT_KEY` in `GitHistoryPanel.tsx`) and defaults so the detail pane takes 40% of the height. Double-clicking the divider resets it to the default.
 - `GitPanel` renders `GitHistoryPanel` in place of the body split and the commit box when the view is `history`. The header, the operation banner and the conflicts section stay.
 - `GitPanel` bumps `refreshToken` on every successful refresh. The history panel reloads its first page when the token changes, so commits made outside the UI appear.
 

@@ -1959,7 +1959,7 @@ export default function FileTree({
         const name = paths[i].split(/[\\/]/).pop() || paths[i];
         setUploadProgress(`Downloading ${i + 1}/${paths.length}…`);
         try {
-          saveBlobAsFile(await api.fsDownload(anchorPath(paths[i]), requestRoot, projectHost), name);
+          await saveBlobAsFile(await api.fsDownload(anchorPath(paths[i]), requestRoot, projectHost), name);
           done++;
         } catch (err) {
           // Kept as data, not rethrown: one failed file must not stop the rest.

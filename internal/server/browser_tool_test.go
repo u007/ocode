@@ -88,9 +88,11 @@ type fakeSurface struct {
 	consoleDrop  int
 	network      []cdp.NetworkEntry
 	networkDrop  int
-	pickRes      cdp.PickResult
-	reports      []cdp.FieldReport
-	uploadMsg    string
+	// readErr is returned by the console and network reads when set.
+	readErr   error
+	pickRes   cdp.PickResult
+	reports   []cdp.FieldReport
+	uploadMsg string
 	// refSeen is the ref table each element action was handed, in call order.
 	refSeen []*cdp.RefTable
 }
@@ -184,14 +186,14 @@ func (f *fakeSurface) Wait(ctx context.Context, frame string, spec cdp.WaitSpec)
 	return f.targetErr
 }
 
-func (f *fakeSurface) ConsoleEntries(max int) ([]cdp.ConsoleEntry, int) {
+func (f *fakeSurface) ConsoleEntries(max int) ([]cdp.ConsoleEntry, int, error) {
 	f.record(fmt.Sprintf("console max=%d", max))
-	return f.console, f.consoleDrop
+	return f.console, f.consoleDrop, f.readErr
 }
 
-func (f *fakeSurface) NetworkEntries(max int) ([]cdp.NetworkEntry, int) {
+func (f *fakeSurface) NetworkEntries(max int) ([]cdp.NetworkEntry, int, error) {
 	f.record(fmt.Sprintf("network max=%d", max))
-	return f.network, f.networkDrop
+	return f.network, f.networkDrop, f.readErr
 }
 
 func (f *fakeSurface) ClickElement(ctx context.Context, frame, target string, refs *cdp.RefTable) (string, error) {
@@ -998,6 +1000,19 @@ func TestBrowserTool_FindDefaultsClampsAndRejectsNonPositiveMax(t *testing.T) {
 	}
 }
 
+// TestBrowserTool_FailedConsoleAndNetworkReadsAreErrors pins that a read the surface
+// could not make reaches the model as an error, never as an empty list.
+func TestBrowserTool_FailedConsoleAndNetworkReadsAreErrors(t *testing.T) {
+	surf := &fakeSurface{readErr: errors.New("client daemon unreachable")}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	for _, action := range []string{"console", "network"} {
+		out, err := browserCall(t, b, `{"action":"`+action+`"}`)
+		if err == nil || !strings.Contains(err.Error(), "client daemon unreachable") {
+			t.Fatalf("%s with a failed read = (%q, %v); want the read error", action, out, err)
+		}
+	}
+}
+
 // TestBrowserTool_ConsoleAndNetworkBoundsAndUntrustedLabel pins the console and
 // network bounds (the tool's max reaches the surface), and that both outputs
 // are labelled untrusted and report what was evicted.
@@ -1076,11 +1091,15 @@ func TestBrowserTool_ControlsIsJSONAfterHeaderAndKeepsScreenshot(t *testing.T) {
 			URL:               "https://shop.example/cart",
 			Title:             "Cart",
 			Fingerprint:       "fp1",
+			ViewportWidth:     800,
+			ViewportHeight:    500,
+			ScrollY:           240,
 			ViewportText:      "Total $10 & \"tax\"\nline two",
 			ViewportTruncated: true,
 			Settled:           true,
 			Controls: []cdp.Control{{
 				Ref: "@e2", Role: "button", Label: "Checkout",
+				Box: &cdp.ControlBox{X: 10, Y: 20, W: 100, H: 30}, InViewport: true,
 				States: []string{}, Operations: []string{"click"},
 			}},
 			Omitted: 3,
@@ -1102,7 +1121,7 @@ func TestBrowserTool_ControlsIsJSONAfterHeaderAndKeepsScreenshot(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &keys); err != nil {
 		t.Fatalf("controls body is not one JSON object: %v\n%s", err, body)
 	}
-	wantKeys := []string{"controls", "fingerprint", "omitted", "settled", "text", "text_truncated", "title", "url"}
+	wantKeys := []string{"controls", "fingerprint", "omitted", "scroll_x", "scroll_y", "settled", "text", "text_truncated", "title", "url", "viewport_height", "viewport_width"}
 	if len(keys) != len(wantKeys) {
 		t.Errorf("controls has %d keys, want %d: %s", len(keys), len(wantKeys), body)
 	}
@@ -1121,6 +1140,12 @@ func TestBrowserTool_ControlsIsJSONAfterHeaderAndKeepsScreenshot(t *testing.T) {
 	}
 	if len(got.Controls) != 1 || got.Controls[0].Ref != "@e2" || got.Controls[0].Label != "Checkout" {
 		t.Errorf("controls listing = %+v, want one @e2 Checkout", got.Controls)
+	}
+	if got.ViewportWidth != 800 || got.ViewportHeight != 500 || got.ScrollY != 240 {
+		t.Errorf("controls viewport = %dx%d scrolled %v, want 800x500 scrolled 240", got.ViewportWidth, got.ViewportHeight, got.ScrollY)
+	}
+	if c := got.Controls[0]; c.Box == nil || *c.Box != (cdp.ControlBox{X: 10, Y: 20, W: 100, H: 30}) || !c.InViewport {
+		t.Errorf("control box = %+v in_viewport %t, want 10,20 100x30 in view", c.Box, c.InViewport)
 	}
 	if calls := surf.got(); strings.Join(calls, "|") != "screenshot|controls" {
 		t.Errorf("surface calls = %v, want screenshot then controls", calls)

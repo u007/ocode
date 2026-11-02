@@ -265,13 +265,18 @@ type Server struct {
 	// remoteMode mirrors Options.RemoteMode: external hosts route through
 	// the reverse-proxy pipeline instead of CDP/chrome mode. See handleBrowse.
 	remoteMode bool
+
+	// tabs holds the root-mounted per-tab listeners (ListenTab), keyed by their
+	// immutable binding. Guarded by tabsMu; closed by Revoke and Close.
+	tabsMu sync.Mutex
+	tabs   map[tabKey]*tabServer
 }
 
 func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry), bypass: make(map[string]map[string]bool), cookies: newCookieJar()}
+	s := &Server{apiToken: apiToken, auth: newAuthStore(), log: logger, mux: http.NewServeMux(), cdpSocks: make(map[string]*cdpSocketEntry), bypass: make(map[string]map[string]bool), cookies: newCookieJar(), tabs: make(map[tabKey]*tabServer)}
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
@@ -550,9 +555,11 @@ func (s *Server) Revoke(stateKey string) {
 	delete(s.procTitle, stateKey)
 	delete(s.procURL, stateKey)
 	s.procMu.Unlock()
+	s.closeTabListeners(func(k tabKey) bool { return k.stateKey == stateKey })
 }
 
 func (s *Server) Close(ctx context.Context) error {
+	s.closeTabListeners(func(tabKey) bool { return true })
 	if s.cdp != nil {
 		return s.cdp.Close(ctx)
 	}
@@ -692,12 +699,19 @@ func (s *Server) Listen(addr string) (net.Listener, string, error) {
 // stub 200 for a valid target; Parts 03/06 replace the stub with real
 // external/local proxying.
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	if isRootModeRequest(r) {
+		s.handleRootModeBrowse(w, r)
+		return
+	}
 	// The mount prefix under which this origin is reached ("" = root-mounted).
 	// A reverse proxy in front of the origin sets it; every absolute path the
 	// origin emits (redirect, cookie path, body rewrite, capture script) is
 	// prefixed with it. See basepath.go.
 	basePath := basePathFor(r)
-	stateKey, redirect, ok := s.auth.authenticate(w, r, basePath)
+	// parseTarget is pure, so it runs first: a grant redeemed here enters local
+	// mode only for a local target (t.Local is false when the parse failed).
+	t, perr := parseTarget(r.URL.Path, r.URL.RawQuery)
+	stateKey, redirect, ok := s.auth.authenticate(w, r, basePath, browseCookie, t.Local)
 	if !ok {
 		http.Error(w, "browse: unauthorized", http.StatusUnauthorized)
 		return
@@ -706,12 +720,20 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirect, http.StatusFound)
 		return
 	}
-	t, err := parseTarget(r.URL.Path, r.URL.RawQuery)
-	if err != nil {
-		s.log.Printf("browse: parseTarget failed for %q: %v", r.URL.Path, err)
+	if perr != nil {
+		s.log.Printf("browse: parseTarget failed for %q: %v", r.URL.Path, perr)
 		http.Error(w, "browse: bad target", http.StatusBadRequest)
 		return
 	}
+	s.serveBoundTarget(w, r, t, stateKey, browseCookie, basePath)
+}
+
+// serveBoundTarget runs the checks every browse origin shares once a request's
+// target is known: the cookie-vs-target state-key binding, the local-mode gate
+// and the local/chrome dispatch. Prefix mode (handleBrowse) and a root-mounted
+// tab listener (serveTab) both call it; only how t and stateKey were obtained
+// differs. cookieName is the session cookie this origin reads.
+func (s *Server) serveBoundTarget(w http.ResponseWriter, r *http.Request, t target, stateKey, cookieName, basePath string) {
 	if t.StateKey != stateKey {
 		// Cookie belongs to a different panel; never cross state keys.
 		http.Error(w, "browse: state key mismatch", http.StatusForbidden)
@@ -719,16 +741,17 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	// Authenticate has already validated the session against this request, so
 	// the cookie is present unless this is the grant-redeem request (which
-	// redirects above before the gate runs). Guard nonetheless.
+	// redirects before this runs). Guard nonetheless.
 	cookieVal := ""
-	if c, err := r.Cookie(browseCookie); err == nil {
+	if c, err := r.Cookie(cookieName); err == nil {
 		cookieVal = c.Value
 	}
 	// effectiveLocal additionally routes external hosts through the local-mode
 	// reverse proxy in remote-workspace mode (Server.remoteMode) — see
-	// Options.RemoteMode. t.Local itself (the literal-private-host check)
-	// never changes.
-	effectiveLocal := t.Local || s.remoteMode
+	// Options.RemoteMode — and every foreign route (t.Foreign), whose
+	// subresources reach the page only through the proxy. t.Local itself (the
+	// literal-private-host check) never changes.
+	effectiveLocal := t.Local || s.remoteMode || t.Foreign
 	// Server-authoritative local-mode gate (spec § Local mode). External pages
 	// must never navigate (or fetch) the panel into local mode: local upstreams
 	// are only reachable while this session is marked local, and a session is
@@ -755,12 +778,24 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "browse: local navigation requires user action", http.StatusForbidden)
 			return
 		}
-	} else if isDocumentRequest(r) {
+	} else if isDocumentRequest(r) && !t.Foreign {
 		// Serving an external document moves the session BACK out of local
 		// mode: the next local-mode request from this session is refused until
 		// a fresh local grant re-enters it. Subresources do not flip the mode —
-		// an external <img> on a local page is still local traffic.
+		// an external <img> on a local page is still local traffic. A foreign
+		// document is never served here, so it leaves the session's mode as it is.
 		s.auth.setLocalDoc(cookieVal, false)
+	}
+	urlStr := t.Scheme + "://" + t.Host + t.Path
+	if t.RawQuery != "" {
+		urlStr += "?" + t.RawQuery
+	}
+	if t.Foreign && isDocumentRequest(r) {
+		// A foreign upstream's document is never served on the tab origin. The
+		// SPA navigates to it instead, through that upstream's own tab origin.
+		s.emitNav(NavEvent{StateKey: t.StateKey, URL: urlStr, Status: 0, Mode: foreignNavMode(t.Local)})
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	if effectiveLocal {
 		s.handleLocal(w, r, t, basePath)
@@ -768,10 +803,6 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	// Non-local (chrome) mode: never proxy. The SPA switches to ChromeViewport
 	// and the target navigates via the CDP socket. No upstream fetch happens here.
-	urlStr := t.Scheme + "://" + t.Host + t.Path
-	if t.RawQuery != "" {
-		urlStr += "?" + t.RawQuery
-	}
 	if isDocumentRequest(r) {
 		s.emitNav(NavEvent{StateKey: t.StateKey, URL: urlStr, Status: 0, Mode: "chrome"})
 	}

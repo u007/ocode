@@ -1,4 +1,5 @@
 import type { DBResultSet, DBCell } from "../../api/client";
+import { saveBlobAsFile } from "@/lib/saveBlob";
 
 /**
  * CSV export for the SQLite browser's grids.
@@ -51,22 +52,11 @@ export function resultToCsv(result: DBResultSet): string {
 }
 
 /**
- * Offer `text` as a file download.
- *
- * The object URL is revoked on a timer rather than immediately: Safari (and the
- * desktop app's WKWebView) navigates to about:blank when the URL it just
- * clicked is revoked synchronously, which reads as the download failing.
+ * Offer `text` as a file download (browser anchor, or the desktop save panel).
+ * See saveBlobAsFile for the save path and its rejection cases.
  */
-export function downloadCsv(filename: string, text: string): void {
-  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+export function downloadCsv(filename: string, text: string): Promise<void> {
+  return saveBlobAsFile(new Blob([text], { type: "text/csv;charset=utf-8" }), filename);
 }
 
 /**

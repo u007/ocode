@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +36,8 @@ type brFakeBrowser struct {
 	staleRef   string // a click on this ref fails as a stale ref, as the browser tool reports it
 	userTab    bool
 	onControls func(n int) // runs before the nth controls read is answered (1-based)
+	// shot is the PNG the last screenshot call holds, which ExecuteImage returns.
+	shot []byte
 
 	mu       sync.Mutex
 	calls    []brCall
@@ -44,9 +50,29 @@ type brCall struct {
 }
 
 var (
-	_ tool.PageContextTool = (*brFakeBrowser)(nil)
-	_ tool.Tool            = (*brFakeBrowser)(nil)
+	_ tool.PageContextTool    = (*brFakeBrowser)(nil)
+	_ tool.Tool               = (*brFakeBrowser)(nil)
+	_ tool.ImageProducingTool = (*brFakeBrowser)(nil)
 )
+
+// ProducesImage reports that a screenshot call returns an image, as the real tool does.
+func (b *brFakeBrowser) ProducesImage(args json.RawMessage) bool {
+	var m map[string]any
+	if err := json.Unmarshal(args, &m); err != nil {
+		return false
+	}
+	return m["action"] == "screenshot"
+}
+
+// ExecuteImage returns the PNG the last screenshot call held.
+func (b *brFakeBrowser) ExecuteImage(json.RawMessage) ([]byte, string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.shot == nil {
+		return nil, "", errors.New("fake browser: no screenshot scripted")
+	}
+	return b.shot, "image/png", nil
+}
 
 func newBrFakeBrowser(t *testing.T, pages ...brPage) *brFakeBrowser {
 	return &brFakeBrowser{t: t, pages: pages}
@@ -126,6 +152,10 @@ type brPage struct {
 	// value is the settled, unclipped page.
 	unsettled     bool
 	textTruncated bool
+	// viewportW and viewportH are the viewport's size in CSS pixels.
+	viewportW, viewportH int
+	// scrollX and scrollY are the document's scroll offset in CSS pixels.
+	scrollX, scrollY float64
 }
 
 func brShopPage(fingerprint string) brPage {
@@ -144,14 +174,18 @@ func brShopPage(fingerprint string) brPage {
 func brControlsResult(t *testing.T, p brPage) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
-		"url":            "https://shop.example/cart",
-		"title":          "Cart",
-		"fingerprint":    p.fingerprint,
-		"settled":        !p.unsettled,
-		"text":           p.text,
-		"text_truncated": p.textTruncated,
-		"controls":       p.controls,
-		"omitted":        0,
+		"url":             "https://shop.example/cart",
+		"title":           "Cart",
+		"fingerprint":     p.fingerprint,
+		"settled":         !p.unsettled,
+		"text":            p.text,
+		"text_truncated":  p.textTruncated,
+		"controls":        p.controls,
+		"omitted":         0,
+		"viewport_width":  p.viewportW,
+		"viewport_height": p.viewportH,
+		"scroll_x":        p.scrollX,
+		"scroll_y":        p.scrollY,
 	})
 	if err != nil {
 		t.Errorf("marshal controls: %v", err)
@@ -166,8 +200,16 @@ type brFakeJev struct {
 	t       *testing.T
 	replies []map[string]any
 
-	mu     sync.Mutex
-	bodies []string
+	mu      sync.Mutex
+	bodies  []string
+	headers []http.Header
+}
+
+// header returns the request headers of decision request i.
+func (j *brFakeJev) header(i int) http.Header {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.headers[i]
 }
 
 // decisionCalls reports how many decision requests the fake judge has received.
@@ -187,6 +229,7 @@ func (j *brFakeJev) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.bodies = append(j.bodies, string(raw))
+	j.headers = append(j.headers, r.Header.Clone())
 	i := len(j.bodies) - 1
 	if i >= len(j.replies) {
 		j.t.Errorf("decision call %d was not scripted", i+1)
@@ -948,5 +991,413 @@ func TestBrowserRunIsRegisteredOnlyBesideABrowserTool(t *testing.T) {
 	}
 	if level := with.permissions.Check(browserRunToolName); level != PermissionAllow {
 		t.Fatalf("browser_run default rule = %v, want allow", level)
+	}
+}
+
+// brWhitePNG is a white screenshot of w x h pixels.
+func brWhitePNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := range img.Pix {
+		img.Pix[i] = 0xff
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode screenshot: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// brDensePage is a page of n controls on a 1280x800 viewport. The first control is
+// a text field that holds a value, on the screen. Of the rest, the first inView are
+// buttons on the screen and the others lie far below it.
+func brDensePage(fingerprint string, n, inView int) brPage {
+	p := brPage{fingerprint: fingerprint, text: "Options", viewportW: 1280, viewportH: 800}
+	p.controls = append(p.controls, browserRunControl{
+		Ref: "@e1", Role: "textbox", Label: "Secret field", Value: "jordan@example.com",
+		States: []string{}, Operations: []string{"click", "fill"},
+		Box: &browserRunBox{X: 10, Y: 700, W: 300, H: 40}, InViewport: true,
+	})
+	for i := 2; i <= n; i++ {
+		c := browserRunControl{
+			Ref: fmt.Sprintf("@e%d", i), Role: "button", Label: fmt.Sprintf("Secret label %d", i),
+			States: []string{}, Operations: []string{"click"},
+		}
+		if i <= inView+1 {
+			c.Box = &browserRunBox{X: float64(10 + (i%8)*150), Y: float64(10 + (i/8)*40), W: 120, H: 30}
+			c.InViewport = true
+		} else {
+			c.Box = &browserRunBox{X: 10, Y: 3000, W: 120, H: 30}
+		}
+		p.controls = append(p.controls, c)
+	}
+	return p
+}
+
+// brRequestAssets returns the assets object of a decision request body.
+func brRequestAssets(t *testing.T, body string) map[string]TypesafeAsset {
+	t.Helper()
+	var req struct {
+		Assets map[string]TypesafeAsset `json:"assets"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("decode decision request: %v", err)
+	}
+	return req.Assets
+}
+
+// brTextOnlyJudge is a decision backend without the image method. It embeds only
+// the Decider methods, so it is not an imageDecider.
+type brTextOnlyJudge struct{ Decider }
+
+func (brTextOnlyJudge) Chat(_ []Message, _ []map[string]any) (*Message, error) {
+	return nil, ErrTypesafeDecisionOnly
+}
+
+// newBrTextOnlyAgent builds the browser_run agent of newBrowserRunAgent, with a judge
+// that cannot take images.
+func newBrTextOnlyAgent(t *testing.T, br tool.Tool, jev *brFakeJev) *Agent {
+	t.Helper()
+	ag := newBrowserRunAgent(t, br, jev)
+	srv := httptest.NewServer(jev)
+	t.Cleanup(srv.Close)
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, model string) LLMClient {
+		if model != defaultJudgeModel {
+			return nil
+		}
+		return brTextOnlyJudge{Decider: newTypesafeClient("k", "jev-latest", srv.URL)}
+	}
+	return ag
+}
+
+// TestBrowserRunTextViewUnchangedForSmallPage: a page that fits the text state is
+// judged in the text view, with no image, no header and no screenshot call.
+func TestBrowserRunTextViewUnchangedForSmallPage(t *testing.T) {
+	br := newBrFakeBrowser(t, brShopPage("a"))
+	jev := &brFakeJev{t: t, replies: []map[string]any{brDoneReply()}}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=done")
+
+	state := jev.decodeState(t, 0)
+	want := []string{"goal", "date", "page", "data_keys", "recent_actions", "elements", "omitted_elements"}
+	if len(state) != len(want) {
+		t.Fatalf("text state keys = %v, want exactly %v", state, want)
+	}
+	for _, k := range want {
+		if _, ok := state[k]; !ok {
+			t.Fatalf("text state lacks %q", k)
+		}
+	}
+	if pg := state["page"].(map[string]any); pg["text"] != "Your cart is empty." {
+		t.Fatalf("text view dropped the page text: %v", pg)
+	}
+	if assets := brRequestAssets(t, jev.request(0)); assets != nil {
+		t.Fatalf("text view sent assets: %v", assets)
+	}
+	if h := jev.header(0).Get(TypesafeImagesHeader); h != "" {
+		t.Fatalf("text view sent the images header %q", h)
+	}
+	if n := len(br.callsFor("screenshot")); n != 0 {
+		t.Fatalf("text view took %d screenshots, want none", n)
+	}
+}
+
+// TestBrowserRunScreenshotViewWhenControlsOverflow: a page with more controls than
+// the text view offers is judged on a screenshot. The state and questions carry no
+// page text, labels or values, and the one image is in the assets.
+func TestBrowserRunScreenshotViewWhenControlsOverflow(t *testing.T) {
+	br := newBrFakeBrowser(t, brDensePage("dense", 170, 60), brShopPage("after"))
+	br.shot = brWhitePNG(t, 1600, 1000)
+	jev := &brFakeJev{t: t, replies: []map[string]any{brActStep("click", "@e2", 0.9), brDoneReply()}}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=done", "steps=1")
+	if n := jev.requestCount(); n != 2 {
+		t.Fatalf("decision requests = %d, want 2 (screenshot step, then text done)", n)
+	}
+
+	state := jev.decodeState(t, 0)
+	if state["view"] != "screenshot" {
+		t.Fatalf("view = %v, want screenshot", state["view"])
+	}
+	pg := state["page"].(map[string]any)
+	if _, ok := pg["text"]; ok {
+		t.Fatalf("screenshot state carries page text: %v", pg)
+	}
+	if elements := state["elements"].([]any); len(elements) != 61 {
+		t.Fatalf("elements = %d, want the 61 controls on the screen", len(elements))
+	}
+	if off := state["offscreen_elements"].(float64); off != 109 {
+		t.Fatalf("offscreen_elements = %v, want 109", off)
+	}
+	for _, secret := range []string{"Secret label", "Secret field", "jordan@example.com", "Options"} {
+		if strings.Contains(jev.request(0), secret) {
+			t.Fatalf("screenshot request carries %q", secret)
+		}
+	}
+
+	assets := brRequestAssets(t, jev.request(0))
+	placeholder, _ := state["screenshot"].(string)
+	if len(assets) != 1 || assets[placeholder].Type != "image" || assets[placeholder].Format != "png" {
+		t.Fatalf("assets = %v, want one png under the state's placeholder %q", assets, placeholder)
+	}
+	raw, err := base64.StdEncoding.DecodeString(assets[placeholder].DataBase64)
+	if err != nil {
+		t.Fatalf("decode asset: %v", err)
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("asset is not a png: %v", err)
+	}
+	if cfg.Width > 1280 || cfg.Height > 800 || cfg.Width != 1280 || cfg.Height != 800 {
+		t.Fatalf("image = %dx%d, want the 1600x1000 page scaled to 1280x800", cfg.Width, cfg.Height)
+	}
+	if h := jev.header(0).Get(TypesafeImagesHeader); h != "true" {
+		t.Fatalf("screenshot request header = %q, want true", h)
+	}
+	if h := jev.header(1).Get(TypesafeImagesHeader); h != "" {
+		t.Fatalf("text request sent the images header %q", h)
+	}
+	if n := len(br.callsFor("screenshot")); n != 1 {
+		t.Fatalf("screenshots = %d, want 1", n)
+	}
+}
+
+// TestBrowserRunScreenshotMasksTextEntryBeforeAnyMark: the text field's box is solid
+// black in the image, and the page around it is not.
+func TestBrowserRunScreenshotMasksTextEntryBeforeAnyMark(t *testing.T) {
+	br := newBrFakeBrowser(t, brDensePage("dense", 170, 60), brShopPage("after"))
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t, replies: []map[string]any{brDoneReply()}}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+	runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+
+	assets := brRequestAssets(t, jev.request(0))
+	var raw []byte
+	for _, a := range assets {
+		b, err := base64.StdEncoding.DecodeString(a.DataBase64)
+		if err != nil {
+			t.Fatalf("decode asset: %v", err)
+		}
+		raw = b
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode image: %v", err)
+	}
+	// The text field is at (10,700) 300x40 on a 1280x800 viewport, so its centre is
+	// clear of the number tag at its top-left corner.
+	for _, p := range []image.Point{{160, 720}, {200, 735}, {280, 705}} {
+		r, g, b, a := img.At(p.X, p.Y).RGBA()
+		if r != 0 || g != 0 || b != 0 || a != 0xffff {
+			t.Fatalf("text field pixel %v = (%d,%d,%d,%d), want opaque black", p, r, g, b, a)
+		}
+	}
+	r, g, b, _ := img.At(600, 400).RGBA()
+	if r == 0 && g == 0 && b == 0 {
+		t.Fatalf("background pixel is black; the mask must not cover the page")
+	}
+}
+
+// TestBrowserRunScreenshotBudgetRefusesBeforeAnyScreenshot: a state that cannot fit
+// beside an image stops the run before the browser is asked for a screenshot.
+func TestBrowserRunScreenshotBudgetRefusesBeforeAnyScreenshot(t *testing.T) {
+	br := newBrFakeBrowser(t, brDensePage("dense", 170, 60))
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+strings.Repeat("g", 31_000)+`"}`)
+	brAssertContains(t, out, "status=page_too_dense", "byte budget left beside the image")
+	if n := len(br.callsFor("screenshot")); n != 0 {
+		t.Fatalf("screenshots = %d, want none", n)
+	}
+	if n := jev.requestCount(); n != 0 {
+		t.Fatalf("decision requests = %d, want none", n)
+	}
+}
+
+// TestBrowserRunWithoutImageDeciderNamesTheScreenshotView: a judge that cannot take
+// images keeps the text view, and a page too dense for it stops the run with a
+// detail that names the TypeSafe requirement. No screenshot is taken.
+func TestBrowserRunWithoutImageDeciderNamesTheScreenshotView(t *testing.T) {
+	br := newBrFakeBrowser(t, brDensePage("dense", 170, 60))
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t}
+	ag := newBrTextOnlyAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+strings.Repeat("g", 31_000)+`"}`)
+	brAssertContains(t, out, "status=page_too_dense", "The screenshot view needs a TypeSafe decision backend")
+	if n := len(br.callsFor("screenshot")); n != 0 {
+		t.Fatalf("screenshots = %d, want none", n)
+	}
+	if n := jev.requestCount(); n != 0 {
+		t.Fatalf("decision requests = %d, want none", n)
+	}
+}
+
+// TestBrowserRunScreenshotNeedsBoxes: a listing whose controls carry no boxes stops
+// the screenshot view with a clear error, not a blank image.
+func TestBrowserRunScreenshotNeedsBoxes(t *testing.T) {
+	page := brDensePage("dense", 170, 60)
+	for i := range page.controls {
+		page.controls[i].Box = nil
+		page.controls[i].InViewport = false
+	}
+	br := newBrFakeBrowser(t, page)
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=error", "no control on the page has a box")
+	if n := jev.requestCount(); n != 0 {
+		t.Fatalf("decision requests = %d, want none", n)
+	}
+}
+
+// TestBrowserRunShotMasksTextEntryPastTheDrawCap: the drawn set is capped, but a text
+// field past the cap that is on the screen is still masked.
+func TestBrowserRunShotMasksTextEntryPastTheDrawCap(t *testing.T) {
+	var controls []browserRunControl
+	for i := 1; i <= 170; i++ {
+		c := browserRunControl{Ref: fmt.Sprintf("@e%d", i), Role: "button", Operations: []string{"click"}, InViewport: true,
+			Box: &browserRunBox{X: 10, Y: float64(i), W: 50, H: 10}}
+		if i == 170 {
+			c.Role = "textbox"
+			c.Operations = []string{"click", "fill"}
+		}
+		controls = append(controls, c)
+	}
+	drawn, masked, err := browserRunShotControls(browserRunPage{Controls: controls})
+	if err != nil {
+		t.Fatalf("browserRunShotControls: %v", err)
+	}
+	if len(drawn) != browserRunMaxControls {
+		t.Fatalf("drawn = %d, want the cap %d", len(drawn), browserRunMaxControls)
+	}
+	if len(masked) != 1 || masked[0].Ref != "@e170" {
+		t.Fatalf("masked = %v, want the text field @e170 past the draw cap", masked)
+	}
+}
+
+// brScrollReply is the reply to a step that chose scroll_down.
+func brScrollReply() map[string]any {
+	return map[string]any{"done": brDoneAnswer(0.1), "operation": brChoiceAnswer("scroll_down", 0.9)}
+}
+
+// TestBrowserRunScrollOnScreenshotViewIsProgress: three scrolls over a listing that
+// does not change, with the scroll offset moving each time, are progress on the
+// screenshot view, so the run is not stalled and the goal is reached on the fourth
+// decision.
+func TestBrowserRunScrollOnScreenshotViewIsProgress(t *testing.T) {
+	pages := make([]brPage, 4)
+	for i := range pages {
+		pages[i] = brDensePage("dense", 170, 60)
+		pages[i].scrollY = float64(800 * i)
+	}
+	br := newBrFakeBrowser(t, pages...)
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t, replies: []map[string]any{brScrollReply(), brScrollReply(), brScrollReply(), brDoneReply()}}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=done", "steps=3")
+	if n := len(br.callsFor("scroll")); n != 3 {
+		t.Fatalf("scroll calls = %d, want 3", n)
+	}
+	if n := jev.requestCount(); n != 4 {
+		t.Fatalf("decision requests = %d, want 4", n)
+	}
+}
+
+// TestBrowserRunScrollWithoutMovementStillStallsOnScreenshotView: when the offset does
+// not move either, the screenshot view stalls as the text view does.
+func TestBrowserRunScrollWithoutMovementStillStallsOnScreenshotView(t *testing.T) {
+	br := newBrFakeBrowser(t, brDensePage("dense", 170, 60))
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t, replies: []map[string]any{brScrollReply(), brScrollReply(), brScrollReply()}}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=stalled")
+}
+
+// TestBrowserRunTinyViewportStopsBeforeAScreenshot: a viewport side under 64 px is
+// refused before the screenshot is taken, so no image is sent that the decision
+// model would reject.
+func TestBrowserRunTinyViewportStopsBeforeAScreenshot(t *testing.T) {
+	page := brDensePage("dense", 170, 60)
+	page.viewportW = 40
+	br := newBrFakeBrowser(t, page)
+	br.shot = brWhitePNG(t, 1280, 800)
+	jev := &brFakeJev{t: t}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+	brAssertContains(t, out, "status=error", "side under 64 px")
+	if n := len(br.callsFor("screenshot")); n != 0 {
+		t.Fatalf("screenshots = %d, want none", n)
+	}
+	if n := jev.requestCount(); n != 0 {
+		t.Fatalf("decision requests = %d, want none", n)
+	}
+}
+
+// TestBrowserRunShotDrawsAtDevicePixelRatio: a screenshot at 2x device pixels covers
+// the same viewport, so the masks and outlines land on the same CSS positions as at
+// 1x. Each mapping is by image pixels per CSS pixel, per axis, after scaling.
+func TestBrowserRunShotDrawsAtDevicePixelRatio(t *testing.T) {
+	drawn := []browserRunControl{{Ref: "@e7", Role: "button", InViewport: true,
+		Box: &browserRunBox{X: 500, Y: 100, W: 120, H: 30}}}
+	masked := []browserRunControl{{Ref: "@e1", Role: "textbox", InViewport: true,
+		Box: &browserRunBox{X: 10, Y: 700, W: 300, H: 40}}}
+	page := browserRunPage{ViewportWidth: 1280, ViewportHeight: 800}
+
+	raw, w, h, err := browserRunDrawShot(brWhitePNG(t, 2560, 1600), page, drawn, masked)
+	if err != nil {
+		t.Fatalf("browserRunDrawShot: %v", err)
+	}
+	if w != 1280 || h != 800 {
+		t.Fatalf("image = %dx%d, want 1280x800", w, h)
+	}
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode image: %v", err)
+	}
+	isBlack := func(x, y int) bool {
+		r, g, b, a := img.At(x, y).RGBA()
+		return r == 0 && g == 0 && b == 0 && a == 0xffff
+	}
+	isMark := func(x, y int) bool {
+		r, g, b, _ := img.At(x, y).RGBA()
+		mr, mg, mb, _ := browserRunShotMark.RGBA()
+		return r == mr && g == mg && b == mb
+	}
+	if !isBlack(10, 720) || !isBlack(309, 720) {
+		t.Fatalf("text field edges (10,720) and (309,720) are not black; the mask is off by the device ratio")
+	}
+	if isBlack(9, 720) || isBlack(310, 720) {
+		t.Fatalf("pixels just outside the text field are black; the mask is too large")
+	}
+	if !isMark(500, 115) {
+		t.Fatalf("button outline at (500,115) is not drawn; the outline is off by the device ratio")
+	}
+	if isMark(499, 115) {
+		t.Fatalf("pixel (499,115) outside the button is drawn")
 	}
 }

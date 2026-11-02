@@ -1,6 +1,6 @@
 ---
 name: htrcli
-description: HTR NControl CLI (htrcli) usage guide. Read this before running any htrcli commands. Covers connecting to the HTR NControl server, listing and switching tabs, navigating pages, interacting with elements (click, fill, type, select, press, keydown/keyup, mousedown/mouseup/mousemove/drag with xy= viewport coordinates and @eN refs), extracting text and data (text/html/attr/value/find), taking screenshots, executing JavaScript in the page's main world, managing browser sessions, recording video, session recordings (start/stop/list/get/export/delete — works on Chrome and Firefox), network capture/mocking, console watching, dialog handling, and more. Includes a form-filling guide (pick/fill-form/--frame, datepickers, react-select, iframes, submit-and-verify) and the list of what works over --cdp. Use when the user asks to control a browser, interact with a website, fill a form, click something, drag, press keys, extract data, take a screenshot, or automate any browser task via HTR NControl.
+description: If the agent has a `browser_run` or `browser` tool, use those instead; this skill is for shells without browser tools (the TUI) and for recording, network mocking, contexts and raw commands. HTR NControl CLI (htrcli) usage guide. Read this before running any htrcli commands. Covers connecting to the HTR NControl server, listing and switching tabs, navigating pages, interacting with elements (click, fill, type, select, press, keydown/keyup, mousedown/mouseup/mousemove/drag with xy= viewport coordinates and @eN refs), extracting text and data (text/html/attr/value/find), taking screenshots, executing JavaScript in the page's main world, managing browser sessions, recording video, session recordings (start/stop/list/get/export/delete — works on Chrome and Firefox), network capture/mocking, console watching, dialog handling, and more. Includes a form-filling guide (pick/fill-form/--frame, datepickers, react-select, iframes, submit-and-verify) and the list of what works over --cdp. Use when the user asks to control a browser, interact with a website, fill a form, click something, drag, press keys, extract data, take a screenshot, or automate any browser task via HTR NControl.
 allowed-tools: Bash(htrcli:*), Bash(go run ./cmd/htrcli:*), Bash(make htrcli-*)
 ---
 
@@ -10,6 +10,7 @@ allowed-tools: Bash(htrcli:*), Bash(go run ./cmd/htrcli:*), Bash(make htrcli-*)
 
 - If the agent has a `browser_run` tool (an ocode web or desktop session), prefer `browser_run` for multi-step page tasks, and the `browser` tool for single reads or actions.
 - Use htrcli from the shell only when those tools are absent (for example the TUI), or for things they cannot do: recording, network mocking, contexts, raw `command`.
+- On a remote (SSH) project the `browser` and `browser_run` tools already drive the client's local browser through this same daemon (reverse-forwarded to the host's port 3845), including dense pages via `browser_run`'s screenshot view. Shelling out to htrcli from the host costs one chat-model round trip per command; `browser_run` costs one for the whole task.
 
 Go CLI for controlling browser tabs via the HTR NControl remote control API.
 Supports **two transports** — extension (default) and direct CDP:
@@ -25,6 +26,8 @@ htrcli (Go) ──CDP──► Chrome DevTools Protocol (:9222)
 The extension transport works with both Chrome and Firefox; CDP transport works
 with Chrome only.
 
+An agent host that drives htrcli through the daemon API (ocode's `browser`/`browser_run` tools on a remote host do this): see `docs/agent-host.md` in the htrcli repository and `docs/concepts/browser-agent-tools.md` here.
+
 ## Agent quick rules (read this first; skip the probing)
 
 Everything you need is in this file. Do **not** run `htrcli --help`, `htrcli <cmd> --help`, `htrcli health`,
@@ -36,24 +39,29 @@ each probe costs a round trip.
 2. **Tab.** `--cdp` without `--tab` drives the **first page target**, which may be someone else's tab, and
    `open` replaces its page. If more than one tab exists, run `htrcli --cdp tabs list` once and pass
    `--tab <id>` on every command. Never navigate a tab you did not open or were not given.
-3. **Look once, then act.** One `htrcli --cdp snapshot` (or one `eval` that lists
+3. **Navigate by clicking, not by URL.** After entering the site, follow its links and buttons the way a user
+   would: `find` the link/button, `click` it, then verify the page. Do not `open` a URL you constructed or guessed
+   from the site's structure. Use `open` only for the entry URL you were given, or when no on-page path exists
+   (and say so). Clicking runs the site's own navigation (SPA routing, referrer, state set along the way); a typed
+   URL can 404 or skip steps the site expects.
+4. **Look once, then act.** One `htrcli --cdp snapshot` (or one `eval` that lists
    `tag/type/name/id/label/required` of every `input,select,textarea,button`) tells you the whole form. Do not
    re-inspect between fields unless the page changed.
-4. **Batch.** Do not issue one tool call per field. Put all steps for a form in **one bash script** (or use
+5. **Batch.** Do not issue one tool call per field. Put all steps for a form in **one bash script** (or use
    `fill-form`, below), finish with a single read-back, and fix only what the read-back shows wrong.
-5. **Scrolling is automatic.** An element that is rendered but below the fold is scrolled into view before
+6. **Scrolling is automatic.** An element that is rendered but below the fold is scrolled into view before
    `fill`/`click`/`check`/... act. "not visible" now means hidden/collapsed/zero-size (open its step, accordion or
-   menu first), not "off screen". `scroll` itself is not available over `--cdp`.
-6. **Pick the right verb for the widget** (table below), and **verify**: read values back, submit **once**, then
+   menu first), not "off screen".
+7. **Pick the right verb for the widget** (table below), and **verify**: read values back, submit **once**, then
    confirm from the outcome (confirmation text/URL, or `network wait`, see below).
-7. **Never** fill a field you were not given data for, solve a CAPTCHA, enter card details, or submit when told
+8. **Never** fill a field you were not given data for, solve a CAPTCHA, enter card details, or submit when told
    not to. Hidden/off-screen inputs (honeypots) stay empty.
 
 ### Over `--cdp`: what is and is not available
 
 | Works | Not available over `--cdp` (use `eval` or the extension transport) |
 |---|---|
-| open, find/findAll, snapshot, text/value/attr/html, click/dblclick/rightclick, fill, type, select, check/uncheck, clear, press/keydown/keyup, mouse*, drag, upload, eval, screenshot, tabs list, **pick**, **fill-form**, **--frame**, console read/watch, network read/watch/wait | scroll, back/forward/reload, tabs get, dialog handle/list, fetch, printpdf, network mock/block/unmock, trace export, screenshot --annotate |
+| open, find/findAll, snapshot, text/value/attr/html, click/dblclick/rightclick, fill, type, select, check/uncheck, clear, press/keydown/keyup, mouse*, drag, upload, eval, screenshot (incl. `--annotate`), tabs list/get/new/close (Chrome only), **pick**, **fill-form**, **--frame**, console read/watch, network read/watch/wait, **emulate** (viewport, color-scheme, user-agent), **cdp** (raw DevTools method), **scroll**, **back/forward**, **printpdf**, **dialog handle** (foreground waiter, see Dialog handling) | dialog list (no buffer survives between `--cdp` commands), fetch, network mock/block/unmock, trace export |
 
 ### Filling forms: verb per widget
 
@@ -63,6 +71,7 @@ each probe costs a round trip.
 | native `<select>` | `pick "<sel>" "<option text or value>"` (verifies; plain `select` silently selects nothing for a label it can't match) |
 | custom dropdown / react-select / autocomplete (role=combobox) | `pick "<sel>" "<full option text>"`: opens, types, waits for the options, clicks the best match, and checks the widget shows it. Never `fill`/`click` the tiny input. |
 | checkbox / radio | `check "<sel>"` / `uncheck "<sel>"` (idempotent; `click` toggles). Target by `input[value=x]` or `label=...`, not position. |
+| contenteditable (rich text: Gmail reply box, Docs body) | `type "<sel>" "<value>"` — **appends** at the caret end; it never wipes the quoted text or the signature. `fill` **replaces** the whole content (correct for a spreadsheet cell, wrong for a reply box). |
 | JS datepicker text input | `type "<sel>" "03/14/2026"` (trusted keystrokes; `fill` leaves the widget's own state empty and it reverts), in the widget's format; then click elsewhere and read the value back |
 | calendar popup (grid of day buttons) | click the trigger, click next/prev until the month label matches, click the day |
 | range / colour input | `eval` set `.value` and dispatch `input`+`change` events (bubbles), then read back |
@@ -86,7 +95,9 @@ Values: string/number as written (text, date, time), option text/value for `<sel
 checkboxes (`true` only for radios), a path (or array) for file inputs, `null` skips. Comboboxes behave like `pick`.
 Each selector must match exactly one element. All fields are attempted even after a failure, then a table
 `Selector / Requested / Actual / Status` (`OK|MISMATCH|FAILED|SKIPPED`) is printed; the exit code is non-zero on
-any `FAILED`/`MISMATCH`.
+any `FAILED`/`MISMATCH`. Read-back is exact: `<select>`/combobox rows compare against what the fill verified
+it set (never a substring of the request), and text rows are compared after the browser's own value
+sanitization, so an empty or partial request cannot pass for a field the fill never touched.
 
 **Submit and verify (do this once).** To confirm a submission, start the wait first, then click:
 
@@ -166,7 +177,11 @@ htrcli install --browser chrome  --uninstall           # remove manifest
 
 Chrome and Firefox may both be registered and connected at once —
 `htrcli tabs list` shows tabs from both, and `--tab <id>` routes to whichever
-browser owns that tab.
+browser owns that tab. Each browser numbers its own tabs, so the same ID can
+exist in both: `tabs get` and `tabs close` then fail until you add
+`--browser chrome|firefox`. Plain `--tab <id>` on other commands takes the
+earliest-connected browser that owns the ID. With `--browser`, `--tab <id>` is
+strict: the tab must belong to that browser, or the command fails.
 
 ### Tray icon
 
@@ -194,6 +209,7 @@ CDP use it directly.
 # Start a dedicated Chrome controlled by htrcli
 htrcli browser start                 # visible window
 htrcli browser start --headless      # no window
+htrcli browser start --chrome-arg --no-sandbox   # extra Chrome flag for this start (repeatable)
 
 htrcli browser status                # probe the debugging port
 htrcli browser stop                  # kill the managed Chrome
@@ -210,7 +226,7 @@ htrcli --cdp eval "document.title"
 
 | Transport | `--tab` value | Example |
 |---|---|---|
-| extension (`ext`, default) | numeric tab ID from `htrcli tabs list` | `--tab 43` |
+| extension (`ext`, default) | numeric tab ID from `htrcli tabs list` (per browser; see below) | `--tab 43` |
 | CDP (`cdp`) | 32-char hex CDP target ID | `--tab 8E17C9D2...` |
 
 **Configuration:**
@@ -219,7 +235,29 @@ htrcli --cdp eval "document.title"
 htrcli config set-transport cdp        # make --cdp the default
 htrcli config set-cdp-port 9222        # debugging port (default 9222)
 htrcli config set-chrome-path /path/to/chrome   # if not auto-detected
+htrcli config set-chrome-args -- --no-sandbox   # extra flags for every htrcli-launched Chrome (no args clears)
 ```
+
+Extra Chrome flags are also settable per start with `--chrome-arg` (repeatable). `HTRCLI_CHROME_ARGS` replaces the config list and is whitespace-split. `--remote-debugging-port`, `--remote-debugging-address` and `--user-data-dir` are rejected. Containers without user namespaces need `--no-sandbox --disable-dev-shm-usage`. Chrome's output goes to `chrome-stderr.log` in its profile directory (`~/.htrcli/chrome-profile/`, or `~/.htrcli/contexts/<name>/` for a context), and a failed start quotes its tail in the error.
+
+**Emulation (`--cdp` only):**
+
+```bash
+htrcli --cdp emulate viewport 390x844 --scale 3 --mobile   # viewport, device scale, mobile + touch
+htrcli --cdp emulate color-scheme dark                     # light | dark | none
+htrcli --cdp emulate user-agent "<string>"                 # empty string removes it
+htrcli --cdp emulate show                                  # stored emulation for this port
+htrcli --cdp emulate reset                                 # remove it all for this port
+```
+
+Settings persist in `~/.htrcli/emulation.json` per CDP port and re-apply at
+the start of every `--cdp` page command, because CDP emulation ends with each
+session. Browser-level commands (`tabs new`, `tabs close`, `browser hide`,
+`browser show`) skip it. Each set command prints the values the page reports back. Emulation is
+per port, not per tab. A tab opened by `tabs new` is emulated from its first
+htrcli command. A value the browser rejects is not saved. The command fails, and later
+commands keep the setting stored before it. A stored entry that cannot be applied
+fails only its own port; clear it with `HTRCLI_CDP_PORT=<port> htrcli --cdp emulate reset`.
 
 ## Global flags
 
@@ -238,7 +276,7 @@ htrcli config set-chrome-path /path/to/chrome   # if not auto-detected
 ## The core loop
 
 ```bash
-htrcli open <url>              # 1. Navigate to a page (waits for page load)
+htrcli open <url>              # 1. Enter the site at the URL you were given (waits for page load)
 htrcli find "input[name=q]"    # 2. Locate the element you want to act on
 htrcli click "input[name=q]"   # 3. Act on it (auto-waits for actionability)
 htrcli find "input[name=q]"    # 4. Re-inspect after any page change
@@ -247,6 +285,12 @@ htrcli find "input[name=q]"    # 4. Re-inspect after any page change
 `open`, `back`, `forward`, and `reload` block until the destination page
 finishes loading (up to 25s). Clicks that *trigger* a navigation also block
 for the destination page to finish loading.
+
+`reload` works over BOTH transports. Over `--cdp` it issues `Page.reload` and
+waits for `Page.loadEventFired` — it is NOT a re-navigate of the same URL,
+because a repeat navigate can be served as a same-document navigation that
+leaves the page's in-memory JS state alive. That distinction is what makes
+"this survived a reload" mean "this was persisted".
 
 Selectors (`"input[name=q]"`, `"#submit"`, `"role=button"`, `"text=Submit"`)
 and **refs** (`@e3`, `@e7`) work directly in all interaction commands. All
@@ -351,11 +395,20 @@ htrcli drag "#handle" "#dropzone"                         # Selector → selecto
 htrcli drag "xy=100,200" "xy=300,400"                      # Coords → coords
 htrcli drag "#handle" "xy=500,300" --steps 10 --delay 20  # Mixed + tuning
 htrcli drag @e1 @e2                                         # Ref → ref (CDP resolves via backendNodeId)
+
+Both endpoints are resolved in one page-side pass, so scrolling for one cannot move the
+other; if source and destination cannot both be visible in the viewport at once, `drag`
+errors instead of dispatching at stale coordinates.
 ```
 
 Supported key names: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown,
 ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, F1–F12,
 Control+a–z, Alt+a–z, Shift+a–z, Meta+a–z.
+
+`fill` cannot set an **empty** value: the empty string is dropped from the
+command payload, so `fill "#q" ""` fails with `requires a "value"`. To empty a
+field, use `clear` — it also dispatches `input`/`change`, so a live filter or
+validation re-runs.
 
 ### Viewport coordinates (`xy=`)
 
@@ -388,7 +441,7 @@ Use `mousemove` to position the cursor without pressing a button; pair `mousedow
 
 `htrcli drag <source> <target> [--steps 5] [--delay 0]` dispatches an interpolated drag: `mousePressed` at source → N `mouseMoved` steps → `mouseReleased` at target.
 
-- Both endpoints accept any selector form (CSS, `@eN`, or `xy=X,Y`) and can be mixed (`"#handle"` → `"xy=500,300"`). On CDP, `@eN` refs are resolved in the command layer via the persistent `RefStore` (`~/.htrcli/refs.json`) → `backendNodeId` → `DOM.getBoxModel` + `Page.getLayoutMetrics` → viewport center. Stale refs fail explicitly. See `docs/gotchas/cdp-drag-element-ref-coordinate-resolution.md`.
+- Both endpoints accept any selector form (CSS, `@eN`, or `xy=X,Y`) and can be mixed (`"#handle"` → `"xy=500,300"`). On CDP, `@eN` refs are looked up in the command layer via the persistent `RefStore` (`~/.htrcli/refs.json`) → `backendNodeId`, then handed to the page-side drag resolver as a live element handle (`DOM.resolveNode` + `Runtime.callFunctionOn`), so a ref is scrolled into view and re-read in the same pass as a selector endpoint — never a pixel captured before the other endpoint's scroll. Stale refs fail explicitly. See `docs/gotchas/cdp-drag-element-ref-coordinate-resolution.md`.
 - **Bounds**: `--steps` is clamped to `1..100` (default `5`; values `<1` become `5`); `--delay` is clamped to `0..2000` ms (default `0`). See `docs/gotchas/drag-input-bounds.md`.
 - On the extension transport, Firefox drag dispatches pointer/mouse events with `elementFromPoint` hit-testing at source, intermediate steps, and destination — not on `document.body`.
 - **Known limitation — native HTML5 DnD is NOT synthesized**: `drag` dispatches `pointerdown`/`mousedown` → `pointermove`/`mousemove` → `pointerup`/`mouseup` only. It does **not** fire `dragstart`/`dragover`/`drop` with `DataTransfer`. Most custom sortables/sliders listen to pointer/mouse events and work; native `draggable=true` drop zones and file-drop handlers require `eval` with a manual `DataTransfer`. See `TODO.md` and `src/contentScript/commandExecutor.ts:handleDrag`.
@@ -454,6 +507,171 @@ htrcli page | grep Ready                 # should show "complete"
 htrcli eval 'document.readyState'        # "loading" | "interactive" | "complete"
 ```
 
+### `wait` — block until something appears (or is gone)
+
+```bash
+htrcli wait --selector "#thread-list" --timeout 10000
+htrcli wait --text "Message forwarded" --timeout 5000
+htrcli wait --url "/sent" --timeout 5000
+```
+
+`wait` polls internally and fails loudly on timeout; it never falls back to
+success. Use `--gone` (with `--selector`) to block until **no element
+matches** — the way to prove an archive/delete/move actually removed the row:
+
+```bash
+htrcli click ".row[data-idx='3'] .archive"
+htrcli wait --selector ".row[data-idx='3']" --gone --timeout 5000
+```
+
+"Gone" means absent from the DOM, not hidden: a `display:none` element still
+matches and the wait times out. `--gone` cannot be combined with `--text` or
+`--url`.
+
+A selector that never matched also satisfies `--gone` immediately, so on a row
+that might not exist yet, `wait --selector` for its presence first — otherwise
+a typo passes vacuously.
+
+## Retrying flaky commands
+
+Some pages are slow or intermittently fail (a click races a re-render, a list
+is still loading). `retry` runs another htrcli subcommand and re-runs it with
+exponential backoff on a non-zero exit. It is **opt-in** — normal commands
+never retry — and every failed attempt is printed to stderr, so a failure is
+never silent. The command exits non-zero when all attempts fail.
+
+```bash
+htrcli retry --times 3 --delay 500 -- wait --selector ".results-table" --timeout 8000
+htrcli retry --times 5 --delay 250 --max-delay 5000 -- extract table "table"
+htrcli retry --times 3 -- --transport cdp wait --selector ".results-table"   # transport AFTER `--`
+```
+
+- `--times N` — retries after the first attempt (default 3; total attempts = N+1)
+- `--delay MS` — initial backoff (default 500ms; doubles each attempt)
+- `--max-delay MS` — cap on the backoff (default 10000ms)
+
+**Put a transport selector AFTER the `--`.** `htrcli --transport cdp retry -- …` also works (the parent forwards the flags it was given), but the after-`--` form is the one that always has.
+
+**`retry` re-runs the WHOLE subcommand**, so it must not wrap a non-idempotent
+action: a `click` on submit, `fill-form`, `tabs new`/`tabs close`, or a send can
+fire twice. Retry only reads and waits (`wait`, `text`, `find`, `collect`,
+`extract`, `page`). Use it for genuinely transient failures only; if a selector
+is wrong, retrying just delays the error — fix the selector instead.
+
+## Benchmarking
+
+`htrcli bench run <scenario-file>` runs a JSON scenario file and writes a
+report. It is how the office-task benchmark
+(`docs/benchmarks/office-task-benchmark.md`) is executed.
+
+```bash
+htrcli bench run docs/benchmarks/scenarios/b01-gmail-find-emails.json --transport cdp
+htrcli bench run scenario.json --out /tmp/report.json
+```
+
+A scenario is a list of steps, each a raw htrcli argv plus its expectations:
+
+```json
+{
+  "scenarios": [
+    {
+      "id": "B01",
+      "requires_auth": true,
+      "steps": [
+        {"argv": ["open", "https://mail.google.com/"],
+         "expect": {"exit": 0},
+         "retry": 2}
+      ]
+    }
+  ]
+}
+```
+
+- `expect` may assert `exit` (default 0), `stdoutContains`,
+  `stdoutNotContains` and `jsonPath` (`{"path": "rows.0.Name",
+  "equals": "Alice"}`).
+- `retry: N` reuses the `retry` subcommand, so the backoff policy lives in
+  one place.
+- `optional: true` downgrades a failing step to PARTIAL.
+- `requires_auth: true` is reported as NOT_RUN, never as PASS.
+- `${VAR}` in an argv expands from the environment.
+
+`capture` carries a value from one step into a later one — the only way to
+benchmark a task that aggregates (read a figure on page A, use it on page C):
+
+```json
+{"argv": ["extract", "list", "#metrics .metric", "--fields", "metric:.name,q4:.q4"],
+ "capture": {"revenue": "items.0.q4"}},
+{"argv": ["fill", "#summary", "Revenue closed at ${revenue}."]}
+```
+
+- The path is the same dotted form as `jsonPath`, read from the step's stdout.
+- A capture is taken only from a step whose expectations PASSED, lives for one
+  scenario, is never re-scanned (a value containing `${...}` stays literal), and
+  a path that does not resolve FAILS the step — it never becomes an empty string.
+- Captures win over environment variables of the same name.
+- `${VAR}` also expands inside `stdoutContains`, `stdoutNotContains` and
+  `jsonPath.equals`, so an expectation can reference a fixture URL without
+  hard-coding the machine's path. Captures expand there too, which is how a
+  scenario asserts "the record opened on the id I just captured"; a capture
+  shadows an env var of the same name in both places.
+- A reference must look like a shell variable: `${name}` or `$name`, where the
+  name starts with a letter or underscore. **Every other `$` is literal**, so
+  currency and prices are safe (`"$4,760.50"` stays as written). This used to
+  go through `os.Expand`, which read the `$4` in `$4,760.50` as a variable named
+  `4` and rewrote it to `${4},760.50` — silently changing the expected value as
+  soon as any capture existed. An unknown name keeps its ORIGINAL form (`${x}`
+  stays `${x}`, `$x` stays `$x`), so a typo fails as an obvious mismatch.
+
+`jsonPath` reads the step's raw stdout, so the envelope decides the path:
+`--json text|attr|value` wraps the result as `{"data": ...}` (path `data`),
+but an EMPTY attribute value is dropped entirely (`data` is `omitempty`), so
+the path is missing rather than `""` — assert an empty/absent state by
+visibility (`wait --selector "<sel>.visible" --gone`) instead, and pair it with
+a positive `wait` on the same selector so it is proven able to match,
+`--json extract` nests it (`data.items.0.body`), while a bare `extract` prints
+the payload itself (`items.0.body`, `count`). The office scenarios use the bare
+form for `extract`.
+
+A **live counter is not a validator**. If a page shows "12 / 280" and also
+refuses over-limit submits, those are usually two separate comparisons, so
+asserting the counter's text proves nothing about the submit path. Prove the
+boundary with a real submit at the limit and one over it.
+
+Assert after a **re-render**, not just after the click: an app that rebuilds
+its list (mail, messaging, tables) will happily pass an immediate
+`aria-pressed`/text check even when the state was only written to the DOM. Do
+the next action — send a message, switch channel, re-filter — then re-assert.
+A mutation that writes only the DOM and skips the model passes every other
+check and fails exactly this one.
+
+### Two composers on one page (message threads)
+
+A thread panel adds a second `contenteditable` next to the channel composer.
+`fill` targets by selector, so the risk is not "which input" but **which write
+target**: both send on Enter and both look identical. Prove the destination, not
+the keystroke:
+
+```bash
+htrcli click "#messages .message[data-message-id='m2'] .reply"   # open m2's thread
+htrcli fill "#thread-input" "Numbers reconcile — approving"      # the THREAD input
+htrcli press Enter
+htrcli extract list "#messages .message" --fields body:.body     # channel unchanged
+htrcli --json attr "#messages .message[data-message-id='m2']" data-reply-count
+```
+
+- Give the parents **different** pre-existing counts (m1=0, m2=2). A reply that
+  lands on the wrong parent is then a numeric mismatch, not "some count changed".
+- Assert the reply text is ABSENT from the channel (`stdoutNotContains`), not
+  only that it appears in the thread — an optimistic thread render can hide a
+  channel-level commit.
+- Switch channel and back, then re-read the count: that is the only check that
+  separates model state from a DOM append.
+
+Verdicts: PASS / PARTIAL / FAIL / NOT_RUN. The report holds the per-step
+exit code, attempts, wall time and output, plus the per-scenario
+`commands`/`wall_ms`/`retries`/`failure_mode` metrics.
+
 ## Screenshots
 
 ### Viewport (default)
@@ -478,7 +696,7 @@ htrcli screenshot --full-page --annotate "#nav,.content"   # full page + annotat
 ```
 
 `--annotate` takes a comma-separated list of selectors to draw numbered
-overlay boxes on before capture (extension transport only).
+overlay boxes on before capture. Over `--cdp` a selector that matches nothing fails the command, and the overlay is removed after the capture.
 
 ### Format options
 
@@ -498,7 +716,20 @@ htrcli screenshot --json | jq -r '.data.screenshot' | base64 -d > img.png
 
 ```bash
 htrcli find <selector>              # Element info (tag, text, selector, xpath, visibility, bounding box)
-htrcli findAll <selector>           # All matching elements
+htrcli findAll <selector>           # All matching elements (viewport only!)
+htrcli collect <selector>            # Every match in a VIRTUALIZED list (scrolls + accumulates)
+htrcli collect <selector> --max-items 100        # Stop after N rows
+htrcli collect <selector> --max-steps 200        # Scroll-step ceiling (default 200)
+htrcli collect <selector> --step-delay 120       # ms between scroll steps (default 120)
+htrcli collect <selector> --ref      # Mint refs for every collected row, at harvest time
+htrcli collect <selector> --visible  # Drop rows that are not rendered (SPA kept the old view)
+htrcli extract table <selector>     # HTML table -> {columns, rows}
+htrcli extract list <selector>       # List of items -> {items}
+htrcli extract list <selector> --fields "name:.name,age:.age"
+htrcli extract list <selector> --fields "title:.title,due:@data-due"   # @attr = an attribute
+# Zero matches is an ERROR (Element not found), deliberately: a typo'd selector
+# must not read as "no data". To assert emptiness, use :empty instead:
+#   htrcli wait --selector "#thread-replies:empty"
 htrcli find <selector> --ref        # Mint a persistent ref (@eN) for later use
 htrcli findAll <selector> --ref     # Mint refs for every match
 htrcli text <selector>              # Text content
@@ -508,21 +739,76 @@ htrcli html <selector>              # innerHTML
 htrcli snapshot                     # Accessibility snapshot tree with refs
 ```
 
+**Virtualized lists:** `findAll` only sees the rows currently in the DOM. Long
+lists (Gmail threads, Drive rows, chat messages, Sheets) recycle row elements,
+so `findAll` returns a truncated slice. Use `collect`, which finds the list's
+scroll container, scrolls it step by step and accumulates every row it sees:
+
+```bash
+htrcli collect "tr.zA" --json    # every Gmail row
+```
+
+It reports `steps`, `truncated`, `truncatedBy`, `scrolled` and `keyStrategy`:
+
+| `keyStrategy` | meaning | risk |
+|---|---|---|
+| `key` | rows carry `data-id` / `data-item-id` / `data-msg-id` | none — reliable |
+| `text` | rows have no id; de-duplicated by text | rows with identical text may be merged |
+| `index` | rows have neither id nor text | node-identity de-duplication — may duplicate or drop rows |
+
+`truncatedBy` says what stopped collection early: `maxItems` (the `--max-items`
+cap) or `maxSteps` (the step limit, raise `--max-steps`). It is `null` when the
+list was read to its end. The caveats are printed as warnings on stderr in the
+default output, so check them before trusting a row count.
+
+Add `--visible` when the list sits on a page that keeps old rows mounted (Gmail
+does: 87 `tr.zA` matches for 37 conversations). Hidden rows are dropped at
+harvest time and are NOT marked as seen, so a row that a later scroll renders is
+still collected — the filter cannot silently lose a row:
+
+```bash
+htrcli collect "tr.zA" --visible --json
+```
+
+A host without `Element.checkVisibility` (Chrome <105, Firefox <125) makes
+`--visible` fail rather than return hidden rows, so a real browser is required.
+
 ## Tab management
 
 ```bash
-htrcli tabs list                           # list all connected tabs
-htrcli tabs get 123                        # get info for specific tab
+htrcli tabs list                           # list all connected tabs (Chrome and Firefox)
+htrcli tabs list --browser firefox         # only Firefox tabs (chrome|firefox)
+htrcli tabs get 123                        # get info for a tab
+htrcli tabs get 123 --browser chrome       # same, when the ID also exists in another browser
+htrcli tabs new https://example.com        # open a URL in a new tab (not activated); prints its ID
+htrcli tabs new https://example.com --browser firefox
+htrcli tabs close 123 --browser chrome     # close a tab
 
 # Target a specific tab for commands
 htrcli --tab 123 find "input[name=q]"
 htrcli --tab 123 click "input[name=q]"
 ```
 
+`--browser` on the `tabs` subcommands is a strict filter: it never falls back
+to the other browser, and it is separate from the global `--browser` hint used
+by tab-less commands. Pass it after `tabs`, e.g. `htrcli tabs list --browser
+firefox`.
+
+- `tabs new <url>` opens the tab from the extension's background worker, so no
+  connected page is needed. With `--browser`, only that browser answers and the
+  command fails if it is not connected; without it, the earliest-connected
+  browser answers. The output names the browser, e.g. `Opened tab 7 (chrome)`,
+  and `--json` carries it as `browser`. Pass the ID to `--tab`.
+- `tabs close <id>` runs in the owning browser's background worker, so it no
+  longer needs another tab in that browser. It still resolves the ID against the
+  connected http(s) tabs, so a tab must be connected before it can be closed.
+- Over `--cdp`, `tabs list`, `tabs get`, `tabs new`, and `tabs close` work on
+  Chrome. `--browser firefox` is rejected because CDP only drives Chrome.
+
 ## Navigation
 
 ```bash
-htrcli open https://example.com          # navigate to URL
+htrcli open https://example.com          # entry point only; within the site, click links instead (quick rule 3)
 htrcli back [steps]                      # browser back — 1 step, or N steps (e.g. back 3)
 htrcli forward [steps]                   # browser forward — 1 step, or N steps
 htrcli reload                            # reload page
@@ -573,8 +859,7 @@ htrcli fetch <url> --json                # raw JSON output
 htrcli printpdf output.pdf               # save current page as PDF
 ```
 
-Uses the extension path to generate a PDF without a save-as dialog.
-Extension-only; not available in direct `--cdp` mode.
+Generates a PDF without a save-as dialog, with backgrounds. Works on both transports.
 
 ### Upload files (no file picker)
 
@@ -677,6 +962,21 @@ htrcli dialog handle --action respond --text "my answer"
 # List handled dialogs since cursor 0
 htrcli dialog list --since 0
 ```
+
+Over `--cdp` there is no daemon to arm a policy in, so `dialog handle` is a
+foreground waiter. It blocks until the next dialog opens or `--timeout` (ms,
+default 10000) passes, answers it, prints what it was, and exits. Start it in
+the background before the action that opens the dialog:
+
+```bash
+htrcli --cdp dialog handle --action accept --timeout 10000 &
+htrcli --cdp click "#delete"      # opens confirm(); the waiter accepts it
+wait
+```
+
+`--timeout` has no effect on the extension transport, which only arms the policy. `dialog list` is not
+available over `--cdp`: each `--cdp` command is a new session, so no dialog
+buffer survives between commands.
 
 ## Video recording (Chrome/CDP only)
 
@@ -852,6 +1152,394 @@ htrcli command '{"action":"findAll","target":{"selector":"a"}}'
 htrcli command '{"action":"wait","target":{"selector":".loaded"},"options":{"timeout":5000}}'
 ```
 
+`command` sends htrcli's extension action JSON and is not available over `--cdp`. Over `--cdp`, use `cdp <Domain.method> [params-json]` to send one raw DevTools Protocol method, for example `htrcli --cdp cdp Page.getLayoutMetrics`. Each `cdp` call opens its own session, so session-scoped state such as `Emulation.*` lasts only for that call. Use `emulate` for persistent emulation.
+
+## Office apps: Gmail, Calendar, Docs, Sheets, Tasks
+
+These recipes were verified against the local fixtures in
+`docs/benchmarks/fixtures/` (same DOM shapes as the real apps, no real data).
+**Run them against a test account only** — a send, an invite, a share or a
+cell edit is a real write.
+
+Run the fixtures yourself:
+
+```bash
+make bench-smoke                              # the harness smoke scenario
+htrcli --cdp open "file://$PWD/docs/benchmarks/fixtures/gmail.html"
+```
+
+### Gmail — find emails (B01)
+
+Gmail's SPA leaves the PREVIOUS view's rows in the DOM: after an `is:unread` search a plain `tr.zA` matched **87 rows for 37
+conversations** (37 visible, 50 hidden — 36 of the hidden ones read). Pass
+`--visible` so hidden rows are dropped; no CSS selector can do it.
+
+```bash
+htrcli --cdp open "https://mail.google.com/mail/u/0/#search/is%3Aunread"
+htrcli --cdp wait --selector "div[role='main']" --timeout 15000
+htrcli --cdp extract list "tr.zA" --visible \
+  --fields "sender:span.yP||span.zF,subject:span.bog||span.bqe,date:@td.xW span@title"
+```
+
+Selectors verified against a live inbox (2026-10-27) — the class names differ
+by row state, which is why the fields use `||` alternatives:
+
+| Field | Forms |
+|---|---|
+| sender | `span.yP` (carries `email`), `span.zF` (name only) |
+| sender address | `@span.yP@email` |
+| subject | `span.bog` (read), `span.bqe` (unread) |
+| snippet | `span.y2` |
+| date | `@td.xW span@title` (full), `span.bq3` (short) |
+
+- `--visible` drops items that `checkVisibility` reports as hidden (Chrome 105+,
+  Firefox 125+). It is **opt-in** because older hosts lack that API. A host
+  without it makes `--visible` fail with an error instead of returning hidden
+  rows as if the list had been filtered.
+- `A||B` = alternatives, first NON-EMPTY value wins. `||` is used rather than
+  `|` because `|` is live CSS (`[lang|=en]`); a `||` inside a quoted attribute
+  value is not a separator.
+- `@<css>@<attr>` asks for a DESCENDANT's attribute
+  (`date:@td.xW span@title`). The dot in the help's `@.link@href` example is the
+  CSS class marker, not syntax.
+- `collect` accepts `--visible` too: an SPA keeps its previous view in the
+  DOM, so a collection can accumulate rows the user cannot see (Gmail: 87
+  matches for 37 conversations). A row hidden on one pass is NOT marked as
+  seen, so it is still collected if a later scroll renders it. With `--ref` it
+  also stops you minting refs to rows that cannot be clicked.
+
+`extract list` returns `{"count": N, "items": [{sender, subject, date}]}`.
+A selector that names the ROWS (`.row`, `tr`) returns one item per match; a
+selector that names the CONTAINER (`ul#items`) returns the container's
+children. Both are supported — do not pick the first match and assume the
+rest.
+
+`collect` prints a warning when it de-duplicates by text (`keyStrategy`), which
+means identical-looking rows may have been merged. Prefer a stable field
+(`data-id`, a link href) when the list has one.
+
+### Gmail — reply (B02)
+
+The reply box is a **contenteditable** that already holds the quoted thread
+and your signature.
+
+- `type` **appends** (it places the caret at the end). It never wipes the
+  signature or the quoted text.
+- `fill` **replaces** the whole content — never use it on a reply box.
+
+```bash
+htrcli --cdp click "div[role='textbox']"          # focus the reply box
+htrcli --cdp type "div[role='textbox']" "Thanks — see the attached."
+htrcli --cdp text "div[role='textbox']"           # READ BACK before sending
+```
+
+Always read the box back before sending. If the text does not contain your
+body **and** the signature, stop and fix it — do not send.
+
+### Mail actions — forward, label, archive (B08)
+
+Three actions that each verify differently.
+
+**Forward.** Open the forward compose, address it with `fill`, type the note
+with `type` (the quoted original is contenteditable, so `type` appends), then
+send and confirm the toast:
+
+```bash
+htrcli --cdp click ".row[data-idx='1'] .forward"
+htrcli --cdp wait --selector "#forward-panel:not([hidden])" --timeout 5000
+htrcli --cdp fill "#forward-to" "dave@example.com"
+htrcli --cdp type "#forward-body" "Numbers look good."
+htrcli --cdp click "#forward-send"
+htrcli --cdp wait --text "Message forwarded" --timeout 5000
+htrcli --cdp --json attr "#sent-log li" "data-to"   # dave@example.com
+```
+
+**Label.** Gmail's label menu is a custom popup, not a native `<select>`, so
+there is nothing for `select` to set. Tick the checkbox, then apply:
+
+```bash
+htrcli --cdp click ".row[data-idx='2'] .label"
+htrcli --cdp wait --selector "#label-menu:not([hidden])" --timeout 5000
+htrcli --cdp check "[aria-label='Finance']"
+htrcli --cdp click "#label-apply"
+htrcli --cdp --json attr ".row[data-idx='2']" "data-labels"   # Finance
+```
+
+**Archive.** Click archive, then prove the row is gone. `wait --gone` is the
+only way to assert absence:
+
+```bash
+htrcli --cdp click ".row[data-idx='3'] .archive"
+htrcli --cdp wait --selector ".row[data-idx='3']" --gone --timeout 5000
+htrcli --cdp --json attr "#archive-count" "data-count"   # 1
+```
+
+A hidden row still matches, so if the app only hides the row the `--gone`
+wait times out — that is the signal that the action did not really remove it.
+
+### Calendar — create an event (B03)
+
+Date and time fields are **JS datepickers**: `fill` sets the text but leaves
+the widget's own state empty and it reverts. Use `type` and read back.
+
+Guest autocomplete is a combobox: use `pick` with the full option text, never
+`fill` on the small input.
+
+```bash
+htrcli --cdp fill "#title" "Team sync"
+htrcli --cdp type "#date" "10/22/2026"              # widget's own format
+htrcli --cdp type "#time" "09:30"
+htrcli --cdp value "#date"                          # read back
+htrcli --cdp pick "#guest-input" "Dana Example"     # combobox
+htrcli --cdp value "#guest-input"                   # read back
+```
+
+The day picker is a grid of buttons: click the trigger, click next/prev until
+the month label matches, then click the day. There is no `pick` for a date
+grid.
+
+**Native `<input type="date">` is the opposite case** and is common on real
+HR/booking/expense portals: `fill` works, because the value is assigned through
+the native setter and the browser normalizes it to `YYYY-MM-DD`. Two traps:
+a string in any other format is silently discarded (`value` becomes `""`, no
+error, no event worth trusting), and the displayed text follows the browser's
+locale, so assert `--json value` (the normalized ISO string), never the
+visible date. Read it back after filling:
+
+```bash
+htrcli --cdp fill "#start-date" "2026-04-06"
+htrcli --cdp --json value "#start-date"    # "2026-04-06" — or "" if it was rejected
+```
+
+`<input type="datetime-local">` behaves the same way with the
+`YYYY-MM-DDTHH:mm` format (`fill "#schedule-at" "2026-04-06T14:30"` →
+`value` reads back `2026-04-06T14:30`). Its `min` attribute does NOT block a
+programmatic fill — only the page's own check will refuse an out-of-range
+time, so assert the page's error, not `:invalid` styling.
+
+### Multi-step forms and surveys (wizards)
+
+A survey or checkout wizard is several steps over one model. **There is no
+`checked` readback verb**, so assert a radio or checkbox through a selector that
+encodes the state, and read a `<select>` back with `--json value`:
+
+```bash
+htrcli --cdp check "#role-remote"                          # radio: same verb as a checkbox
+htrcli --cdp wait --selector "#role-remote:checked"        # state, not presence
+htrcli --cdp wait --selector "body[data-submitted='1']"    # any attribute the app exposes
+htrcli --cdp select "#q-team" "51-200"                     # native select: option VALUE
+htrcli --cdp --json value "#q-team"                        # "51-200"
+```
+
+Two traps, both of which make a passing test lie:
+
+- **A hidden step keeps its DOM values.** If the wizard hides step 1 rather than
+  re-rendering it, the radio is still checked after you navigate back, so
+  `:checked` proves nothing about whether the app restored its state. Read the
+  value from the summary/review surface the app builds from its model, after a
+  Back/Next round trip made with the app's own buttons:
+  `htrcli --cdp click "#back-3"`, `htrcli --cdp click "#next-2"`, then
+  `htrcli --cdp --json text "#review tr[data-answer=tooling] .v"`. A value there can
+  only come from the model. To check that a `:checked` restore assertion is
+  meaningful, break the restore on a scratch copy of the page and confirm the
+  assertion fails.
+- **A multi-select must accumulate.** Ticking two boxes and asserting the field
+  shows only one is a real failure; assert the full joined value, not a
+  substring, or a last-write-wins bug reads as correct.
+
+Validate at the exact boundary the page claims (a "10 characters minimum" needs
+9 refused **and** 10 accepted), and prove a submission is refused twice by
+clicking Submit again and re-reading the record count.
+
+### Docs — edit and share (B05)
+
+The editing surface is a contenteditable, not an `<input>`: `fill` is not the
+verb. Type into the surface, and use `press` for formatting (headings, lists).
+
+```bash
+htrcli --cdp click "#doc-surface"                   # focus the document body
+htrcli --cdp type "#doc-surface" "New paragraph."
+htrcli --cdp press "Enter"
+htrcli --cdp text "#doc-surface"                    # read back
+```
+
+Share opens a dialog: fill the people field, then confirm the dialog reports
+the new permission. `pick` is the verb for a share-to combobox.
+
+### Sheets — data entry and formulas (B06)
+
+Cells are contenteditable. `fill` replaces a cell's content (correct for a
+cell); `type` appends (wrong for a cell).
+
+```bash
+htrcli --cdp click '[data-col="A"][data-row="1"]'
+htrcli --cdp fill '[data-col="A"][data-row="1"]' "Widget"
+htrcli --cdp fill '[data-col="B"][data-row="1"]' "12"
+htrcli --cdp text '[data-col="A"][data-row="1"]'   # read back
+```
+
+Cell navigation is keyboard-driven: `press "Tab"` moves right, `press "Enter"`
+moves down. Read the grid back as a table when you need the values:
+
+```bash
+htrcli --cdp extract table "#grid"
+```
+
+`extract table` never drops a data row: only a `<thead>` row or an all-`<th>`
+first row is treated as a header row. A grid made of `<td>` cells — like this
+Sheets fixture — has no implied header, so every row comes back as data and
+columns are named `col1`, `col2`, … from the widest row. (Previously a
+`<td>`-only first row was silently consumed as column headers, losing its
+values; benchmark scenario S06 now guards this.)
+
+A formula cell is typed like any other cell (`=SUM(A1:A9)`); the computed
+value is what the grid shows after the sheet recalculates — read it back
+before trusting it.
+
+### Tasks — todo lists and reminders (B04)
+
+Google Tasks has **two ways** to add a task, and they need different verbs.
+
+**Quick-add**: one field. The whole task, including its date, is typed into
+it and committed with `Enter`.
+
+```bash
+htrcli --cdp type "#quick-add" "Send the report 10/22/2026 5pm"
+htrcli --cdp press "Enter"          # commit — the field is not submitted by typing
+```
+
+**Full form**: a details panel, and the date is chosen from a **popover grid
+of day buttons** — there is no date field to type into. Click the trigger,
+then click the day.
+
+```bash
+htrcli --cdp click "#show-details"   # reveal the panel
+htrcli --cdp fill "#task-title" "Book the room"
+htrcli --cdp click "#date-trigger"   # open the date popover
+htrcli --cdp click "#day-grid button[data-day='2026-10-23']"
+htrcli --cdp attr "#date-trigger" "data-due"   # read the chosen date back
+htrcli --cdp click "#save"
+```
+
+**The checkbox is an ARIA checkbox**, not an `<input type=checkbox>`: it is a
+`<div role="checkbox" aria-checked="false">`. `check` / `uncheck` drive
+`aria-checked` and dispatch a click so the app's own handler runs. They are
+idempotent — the state ends up as asked either way.
+
+```bash
+htrcli --cdp check   "#task-list [role=checkbox]"
+htrcli --cdp uncheck "#task-list [role=checkbox]"
+htrcli --cdp attr    "#task-list [role=checkbox]" "aria-checked"   # read back
+```
+
+A task's state usually lives in **attributes**, not in text, so `extract list`
+must be told to read attributes:
+
+```bash
+# "@data-due"      the item's OWN attribute
+# "@.link@href"    a DESCENDANT's attribute (selector@attribute)
+# "[data-due]"     an attribute value — a descendant match, else the item itself
+# ".title"         a descendant's TEXT
+htrcli --cdp extract list "#task-list .task" \
+  --fields "title:.title,due:@data-due"
+```
+
+A pure attribute selector (`[data-due]`) returns the attribute's **value**,
+not the matched element's text. A plain selector (`.title`) returns the
+descendant's text; a descendant wins over the item itself.
+
+### Booking (B07)
+
+Date pickers, seat maps and payment. Fill the search form, read the available
+slots back, pick one, and **stop before any card entry** — a benchmark run
+must never enter payment details. Book a clearly-labelled test slot and
+cancel it after capturing the confirmation number.
+
+### Expense report — line items + receipt upload (B09)
+
+Two things make an expense form different from a plain form: the line items
+are added dynamically, and the receipt is a file.
+
+**Line items.** Adding a row re-renders the table, so wait for the NEW row's
+field before filling it. Give each row a stable field (`#amount-1`,
+`#amount-2`) and read the running total back — that is the real check that
+every row landed.
+
+```bash
+htrcli --cdp fill "#date-1" "10/22/2026"
+htrcli --cdp select "#category-1" "travel"     # option VALUE, not the label
+htrcli --cdp fill "#amount-1" "125.50"
+htrcli --cdp text "#total-display"             # 125.50
+
+htrcli --cdp click "#add-line"
+htrcli --cdp wait --selector "#date-2" --timeout 5000
+htrcli --cdp fill "#date-2" "10/23/2026"
+htrcli --cdp select "#category-2" "meals"
+htrcli --cdp fill "#amount-2" "42.75"
+htrcli --cdp text "#total-display"             # 168.25
+```
+
+**Receipt.** `upload` sets the files on a real `<input type=file>` without an
+OS picker. It takes a **path on disk**, so pass an absolute path (or a
+`${VAR}` the scenario runner expands). Read the filename back to prove the
+file was attached — a file input that was never set looks identical to one
+that was.
+
+```bash
+htrcli --cdp upload "#receipt" "/abs/path/receipt.txt"
+htrcli --cdp text "#receipt-name"              # receipt.txt
+htrcli --cdp text "#receipt-size"              # 62
+```
+
+Then submit and capture the reference:
+
+```bash
+htrcli --cdp click "#submit"
+htrcli --cdp --json attr "#confirm" "data-ref" # EXR-700001
+htrcli --cdp --json attr "#confirm" "data-total"  # 168.25
+```
+
+`upload` **replaces** any existing selection. To attach several files, pass a
+comma-separated list: `upload "#receipt" "a.pdf,b.pdf"`. It works over both
+transports; the Chrome/CDP path uses `DOM.setFileInputFiles`, the extension
+path sends the bytes.
+
+### File management — upload, move, share (B10)
+
+Cloud drives (Drive/OneDrive/Dropbox) combine three actions that each need a
+different verb: upload, move, share.
+
+**Move with a click, not a drag.** Most drives implement "move to folder" as
+native HTML5 drag-and-drop, which is **not synthesized** and will silently do
+nothing. Look for the click-based path instead — usually a per-file "Move to"
+menu or a folder `<select>`. Prefer that:
+
+```bash
+htrcli --cdp select "tr[data-name='report.txt'] select.folder" "projects"
+htrcli --cdp attr  "tr[data-name='report.txt']" "data-folder"   # projects
+```
+
+**Share is usually a DOM dialog, not a native one.** Click the row's Share
+button, wait for the dialog, read the link back with `value` (an `<input>`
+link has no text content), choose the permission, then apply:
+
+```bash
+htrcli --cdp click "tr[data-name='report.txt'] button.share"
+htrcli --cdp wait --selector "#share-modal.visible" --timeout 5000
+htrcli --cdp --json value "#share-link"          # https://files.example/s/ABC123
+htrcli --cdp select "#share-permission" "edit"   # option VALUE, not the label
+htrcli --cdp click "#share-done"
+htrcli --cdp --json attr "tr[data-name='report.txt']" "data-permission"  # edit
+```
+
+Use `value` for the link, not `text` — reading `text` on an `<input>` returns
+its label/hint, not what it contains. Only use `dialog handle` when the page
+raises a **native** `alert`/`confirm`; a styled modal is ordinary DOM.
+
+**Prove the rest of the page did not change.** A file manager is a shared
+list, so assert an untouched row still has its original folder/permission —
+that catches a selector that matched the wrong row.
+
 ## Common workflows
 
 ### Log in to a site
@@ -1008,13 +1696,16 @@ after the page loads.
 | `htrcli config set-transport <type>` | Set default transport (ext/cdp) |
 | `htrcli config set-cdp-port <port>` | Set CDP debugging port |
 | `htrcli config set-chrome-path <path>` | Set Chrome binary path |
+| `htrcli config set-chrome-args [arg...]` | Set extra Chrome args for htrcli-launched Chrome (no args clears) |
 | `htrcli config set-amo-api-key <key>` | Set AMO API key |
 | `htrcli config set-amo-api-secret <secret>` | Set AMO API secret |
 | `htrcli config show` | Show current config |
 | `htrcli install` | Register as native messaging host |
 | `htrcli serve` | Start native messaging daemon (:3845) |
-| `htrcli tabs list` | List connected tabs |
-| `htrcli tabs get <id>` | Get tab info |
+| `htrcli tabs list [--browser chrome\|firefox]` | List connected tabs, optionally one browser |
+| `htrcli tabs get <id> [--browser chrome\|firefox]` | Get tab info |
+| `htrcli tabs new <url> [--browser chrome\|firefox]` | Open a URL in a new tab; prints its ID and browser |
+| `htrcli tabs close <id> [--browser chrome\|firefox]` | Close a tab |
 | `htrcli open <url>` | Navigate to URL |
 | `htrcli back [steps]` | Browser back — 1 step or N steps (`back 3` loops sequentially, reports partial progress) |
 | `htrcli forward [steps]` | Browser forward — 1 step or N steps |
@@ -1039,7 +1730,9 @@ after the page loads.
 | `htrcli scroll <dir> [px]` | Scroll page |
 | `htrcli clear <sel>` | Clear input field |
 | `htrcli find <sel>` | Find element info |
-| `htrcli findAll <sel>` | Find all elements matching selector |
+| `htrcli findAll <sel>` | Find all elements matching selector (viewport only) |
+| `htrcli collect <sel>` | Collect every match in a virtualized list (scrolls) |
+| `htrcli extract table\|list <sel>` | Extract structured data (table rows / list items); `--fields "name:sel,due:@attr"`; `--container` when the selector names a wrapper |
 | `htrcli text <sel>` | Get text content |
 | `htrcli value <sel>` | Get input value |
 | `htrcli attr <sel> <attr>` | Get attribute |
@@ -1047,6 +1740,7 @@ after the page loads.
 | `htrcli snapshot` | Accessibility snapshot tree with refs |
 | `htrcli eval <js>` | Execute JavaScript (page main world) |
 | `htrcli command <json>` | Send raw JSON command |
+| `htrcli --cdp cdp <Domain.method> [params-json]` | Send one raw DevTools Protocol method (--cdp only; stateless per call) |
 | `htrcli fetch <url>` | Fetch URL via background (includes cookies) |
 | `htrcli printpdf <path>` | Print page to PDF via the extension path (no save-as prompt) |
 | `htrcli upload <sel> <file>` | Set files on a file input (no file picker) |
@@ -1055,6 +1749,9 @@ after the page loads.
 | `htrcli network read` | Read buffered network requests |
 | `htrcli network watch` | Stream network entries until timeout |
 | `htrcli network wait` | Block until a matching request completes |
+| `htrcli wait` | Block until a DOM condition holds (--selector/--text/--url) |
+| `htrcli retry -- <cmd>` | Run a subcommand with exponential-backoff retries (opt-in, loud) |
+| `htrcli bench run <file>` | Run a benchmark scenario file and write a JSON report |
 | `htrcli network mock` | Mock responses for matching requests |
 | `htrcli network block` | Block (fail) matching requests |
 | `htrcli network unmock` | Remove mock/block rules |

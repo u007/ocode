@@ -52,6 +52,18 @@ type Decider interface {
 	GetModel() string
 }
 
+// imageDecider is a Decider that also takes images. It is an optional extension,
+// not part of Decider, so a decision backend that cannot take images stays
+// narrow. Callers that need the image view check for it with a type assertion,
+// and a backend without it does not get the image view.
+type imageDecider interface {
+	DecideWithAssetsCtx(ctx context.Context, state any, questions map[string]TypesafeQuestion, assets map[string]TypesafeAsset) (*TypesafeResponse, error)
+}
+
+// The screenshot view depends on *TypesafeClient taking images, so a change that
+// drops the method fails to compile rather than quietly removing the view.
+var _ imageDecider = (*TypesafeClient)(nil)
+
 // slotModel returns the model id configured for a slot.
 //
 // permission and auto_continue are deliberately NOT read here: those two already

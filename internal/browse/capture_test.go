@@ -9,7 +9,7 @@ import (
 
 func TestInjectCaptureInsertsBootstrapAndScript(t *testing.T) {
 	in := []byte(`<!doctype html><html><head><title>x</title></head><body>hi</body></html>`)
-	out := string(injectCapture(in, "tab:abc", "http://127.0.0.1:5000", ""))
+	out := string(injectCapture(in, target{StateKey: "tab:abc"}, "http://127.0.0.1:5000", ""))
 
 	// Bootstrap must carry the exact stateKey + spaOrigin.
 	if !strings.Contains(out, `window.__OCODE_BROWSE__`) {
@@ -35,7 +35,7 @@ func TestInjectCaptureFallbackNoHead(t *testing.T) {
 	// A fragment without <head> should still receive the script (before </html>
 	// or appended), so capture never silently no-ops.
 	in := []byte(`<html><body>hi</body></html>`)
-	out := string(injectCapture(in, "tab:x", "http://o", ""))
+	out := string(injectCapture(in, target{StateKey: "tab:x"}, "http://o", ""))
 	if !strings.Contains(out, `src="/__ocode_capture.js"`) {
 		t.Fatalf("fallback injection missing: %s", out)
 	}

@@ -109,13 +109,16 @@ func (t *Target) Click(ctx context.Context, x, y float64) error {
 	return t.Mouse(ctx, MouseEvent{Kind: "up", X: x, Y: y, Button: "left", ClickCount: 1})
 }
 
+// pageScrollFraction is the share of the viewport height one ScrollPage moves.
+const pageScrollFraction = 0.8
+
 // ScrollPage scrolls the window by most of one viewport height: dir is 1 for
 // down and -1 for up. Scrollable containers inside the page are not targeted.
 func (t *Target) ScrollPage(ctx context.Context, dir int) error {
 	if dir != 1 && dir != -1 {
 		return fmt.Errorf("scroll direction must be 1 (down) or -1 (up), got %d", dir)
 	}
-	expr := fmt.Sprintf("window.scrollBy(0, %d * window.innerHeight * 0.8)", dir)
+	expr := fmt.Sprintf("window.scrollBy(0, %d * window.innerHeight * %g)", dir, pageScrollFraction)
 	return t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
 		map[string]any{"expression": expr, "returnByValue": true}, nil)
 }

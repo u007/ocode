@@ -252,7 +252,7 @@ func TestJudges_BothBackendsSatisfyTheSameContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clef buildBody: %v", err)
 	}
-	jevBody, err := jev.marshalRequestBody(map[string]any{"tool": "bash"}, q)
+	jevBody, err := jev.marshalRequestBody(map[string]any{"tool": "bash"}, q, nil)
 	if err != nil {
 		t.Fatalf("typesafe marshalRequestBody: %v", err)
 	}

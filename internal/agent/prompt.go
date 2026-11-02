@@ -32,7 +32,13 @@ const (
 	promptSuggestionsMarker = "[ocode:suggested_responses]"
 	// promptCommunicationStyleMarker labels the communication-style prompt fragment.
 	promptCommunicationStyleMarker = "[ocode:communication_style]"
+	// promptBrowserRoutingMarker labels the browser-routing prompt fragment.
+	promptBrowserRoutingMarker = "[ocode:browser_routing]"
 )
+
+// browserRoutingPromptContent steers the model off webfetch and the shell for
+// JavaScript-heavy sites. It is emitted only when the session has a browser tool.
+const browserRoutingPromptContent = "For sites that need JavaScript, a login or clicks, use browser_run (multi-step) or browser (single read/action); webfetch is for static pages only."
 
 // docPromptContent is the documentation-first development prompt injected
 // when DocPromptEnabled is true. It requires inspection and alignment checks
@@ -282,6 +288,14 @@ func (a *Agent) BasePromptMessages() []Message {
 	// ordering is stable for the cached prefix.
 	if a.CommunicationStyleEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptCommunicationStyleMarker + "\n" + config.ApplyPromptOverride("communication_style", communicationStylePromptContent)})
+	}
+	// Browser routing follows the communication style. The browser tool is bound
+	// at construction and never removed, so this fragment is fixed for the session.
+	a.toolsMu.RLock()
+	_, hasBrowser := a.tools["browser"]
+	a.toolsMu.RUnlock()
+	if hasBrowser {
+		msgs = append(msgs, Message{Role: "system", Content: promptBrowserRoutingMarker + "\n" + browserRoutingPromptContent})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {

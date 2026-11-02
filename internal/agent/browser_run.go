@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,6 +129,19 @@ type browserRunControl struct {
 	States     []string `json:"states"`
 	Context    string   `json:"context,omitempty"`
 	Operations []string `json:"operations"`
+	// Box and InViewport place the control on the screenshot. They are for the
+	// screenshot view only, and the text state never carries them.
+	Box        *browserRunBox `json:"box,omitempty"`
+	InViewport bool           `json:"in_viewport,omitempty"`
+}
+
+// browserRunBox is a control's rectangle in CSS pixels of the viewport. Its keys
+// mirror the browser tool's controls JSON.
+type browserRunBox struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
 }
 
 // browserRunPage is the controls JSON after its header line.
@@ -145,6 +159,26 @@ type browserRunPage struct {
 	TextTruncated bool                `json:"text_truncated"`
 	Controls      []browserRunControl `json:"controls"`
 	Omitted       int                 `json:"omitted"`
+	// ViewportWidth and ViewportHeight are the viewport's size in CSS pixels, the
+	// space every control box is in.
+	ViewportWidth  int `json:"viewport_width"`
+	ViewportHeight int `json:"viewport_height"`
+	// ScrollX and ScrollY are the document's scroll offset in CSS pixels. A scroll
+	// moves the control boxes without changing the listing.
+	ScrollX float64 `json:"scroll_x"`
+	ScrollY float64 `json:"scroll_y"`
+}
+
+// capControls keeps the first browserRunMaxControls controls and counts the rest as
+// omitted. The text view offers only these; the screenshot view works from the
+// whole listing.
+func (p browserRunPage) capControls() browserRunPage {
+	if len(p.Controls) <= browserRunMaxControls {
+		return p
+	}
+	p.Omitted += len(p.Controls) - browserRunMaxControls
+	p.Controls = p.Controls[:browserRunMaxControls]
+	return p
 }
 
 func (p browserRunPage) control(ref string) (browserRunControl, bool) {
@@ -167,10 +201,24 @@ type browserRunRecord struct {
 }
 
 func (rec browserRunRecord) describe() string {
+	return rec.format(strconv.Quote(clipLabel(rec.label, 80)))
+}
+
+// describeUnlabelled is describe without the control's label, for the screenshot
+// view, whose requests carry no page text.
+func (rec browserRunRecord) describeUnlabelled() string {
+	return rec.format("")
+}
+
+// format renders the step. An empty quoted label is left out.
+func (rec browserRunRecord) format(quotedLabel string) string {
 	var b strings.Builder
 	b.WriteString(rec.op)
 	if rec.ref != "" {
-		fmt.Fprintf(&b, " %s %s %s", rec.ref, rec.role, strconv.Quote(clipLabel(rec.label, 80)))
+		b.WriteString(" " + rec.ref + " " + rec.role)
+		if quotedLabel != "" {
+			b.WriteString(" " + quotedLabel)
+		}
 	}
 	if rec.dataKey != "" {
 		b.WriteString(" ← data." + rec.dataKey)
@@ -323,6 +371,8 @@ type browserRunRun struct {
 	jevCalls int
 	acted    int
 	steps    []browserRunRecord
+	// shotView is true when the last decision was made on the screenshot view.
+	shotView bool
 }
 
 // execute runs the loop until a stop status, and returns the last page it read.
@@ -378,10 +428,14 @@ func (r *browserRunRun) execute(decider Decider) (browserRunEnd, browserRunPage)
 			r.steps[idx].outcome = "ok"
 			return *rend, page
 		}
-		if next.Fingerprint != page.Fingerprint {
+		switch {
+		case next.Fingerprint != page.Fingerprint:
 			r.steps[idx].outcome = "page changed"
 			unchanged = 0
-		} else {
+		case r.scrolledView(page, next):
+			r.steps[idx].outcome = "scrolled"
+			unchanged = 0
+		default:
 			r.steps[idx].outcome = "ok"
 			unchanged++
 		}
@@ -496,16 +550,180 @@ func (r *browserRunRun) act(dec browserRunDecision) (string, *browserRunEnd) {
 	return r.subStep(args)
 }
 
+// browserRunView is the decision request for one step: the state it carries, the
+// controls that state offers, and how the judge is asked about them.
+type browserRunView struct {
+	state any
+	// shown is the page the state carries. Only its controls may be chosen.
+	shown browserRunPage
+	// describe names a control in the questions.
+	describe func(browserRunControl) string
+	// note is added to every question's instructions. The text view has none.
+	note string
+	// send makes one decision request with the questions.
+	send func(questions map[string]TypesafeQuestion) (*TypesafeResponse, error)
+	// shot is set for the screenshot view only.
+	shot *browserRunShot
+}
+
+// instruct adds the view's note to an instruction.
+func (v browserRunView) instruct(text string) string {
+	if v.note == "" {
+		return text
+	}
+	return text + " " + v.note
+}
+
+// scrolledView reports whether the last step moved the viewport on the screenshot
+// view. The listing stays the same while the boxes move, so a scroll is progress
+// there. On the text view it is not: a page whose text and controls do not change
+// is still a stall.
+func (r *browserRunRun) scrolledView(prev, next browserRunPage) bool {
+	return r.shotView && (next.ScrollX != prev.ScrollX || next.ScrollY != prev.ScrollY)
+}
+
 // decide asks the decision model for the next action, in one request.
 func (r *browserRunRun) decide(decider Decider, page browserRunPage) (browserRunDecision, *browserRunEnd) {
+	v, end := r.view(decider, page)
+	r.shotView = v.shot != nil
+	if end != nil {
+		return browserRunDecision{}, end
+	}
+	return r.choose(decider, v)
+}
+
+// view picks the request for this step. The text view is used whenever the page's
+// controls all fit the text state. The screenshot view is used when the page has
+// more controls than the text view offers, or when the text state does not fit the
+// budget. A decision backend that cannot take images keeps the text view, and a
+// state that does not fit stops the run.
+func (r *browserRunRun) view(decider Decider, page browserRunPage) (browserRunView, *browserRunEnd) {
+	img, canShot := decider.(imageDecider)
+	if canShot && (page.Omitted > 0 || len(page.Controls) > browserRunMaxControls) {
+		return r.screenshotView(decider, img, page)
+	}
 	state, shown, err := r.state(page)
 	if err != nil {
-		return browserRunDecision{}, browserRunStop(browserRunPageTooDense, err.Error())
+		if canShot {
+			return r.screenshotView(decider, img, page)
+		}
+		return browserRunView{}, browserRunStop(browserRunPageTooDense, fmt.Sprintf("%v. The screenshot view needs a TypeSafe decision backend, and the browser_run judge %s is not one.", err, deciderLabel(decider)))
 	}
+	return browserRunView{
+		state:    state,
+		shown:    shown,
+		describe: browserRunDescribeControl,
+		send: func(questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+			return decider.DecideCtx(r.ctx, state, questions)
+		},
+	}, nil
+}
+
+// screenshotView builds the screenshot view for this step. The state and its budget
+// are checked before the screenshot is taken, so a page that is too dense costs no
+// browser call.
+func (r *browserRunRun) screenshotView(decider Decider, img imageDecider, page browserRunPage) (browserRunView, *browserRunEnd) {
+	drawn, masked, err := browserRunShotControls(page)
+	if err != nil {
+		return browserRunView{}, browserRunStop(browserRunError, err.Error())
+	}
+	placeholder, err := browserRunPlaceholder()
+	if err != nil {
+		return browserRunView{}, browserRunStop(browserRunError, err.Error())
+	}
+	state := map[string]any{
+		"goal": r.goal,
+		"date": time.Now().Format("2006-01-02"),
+		"view": "screenshot",
+		"page": map[string]any{
+			"url":      page.URL,
+			"title":    page.Title,
+			"settled":  page.Settled,
+			"viewport": map[string]any{"w": page.ViewportWidth, "h": page.ViewportHeight},
+		},
+		"screenshot":         placeholder,
+		"elements":           browserRunShotElements(drawn),
+		"data_keys":          r.dataKeys,
+		"recent_actions":     r.recentActions(browserRunRecord.describeUnlabelled),
+		"offscreen_elements": page.Omitted + len(page.Controls) - len(drawn),
+	}
+	size, err := marshalledDecisionStateSize(state)
+	if err != nil {
+		return browserRunView{}, browserRunStop(browserRunError, err.Error())
+	}
+	shotBudget := browserRunStateBudgetBytes - imageStateAllowanceBytes
+	if size > shotBudget {
+		return browserRunView{}, browserRunStop(browserRunPageTooDense, fmt.Sprintf("the screenshot view's state is %d bytes, over the %d byte budget left beside the image", size, shotBudget))
+	}
+	if page.ViewportWidth < browserRunShotMinSide || page.ViewportHeight < browserRunShotMinSide {
+		return browserRunView{}, browserRunStop(browserRunError, fmt.Sprintf("the viewport is %dx%d, and the decision model rejects an image with a side under %d px, so the screenshot view cannot be sent", page.ViewportWidth, page.ViewportHeight, browserRunShotMinSide))
+	}
+	if len(page.Controls) > 0 && !browserRunHasBox(page.Controls) {
+		return browserRunView{}, browserRunStop(browserRunError, "no control on the page has a box, so the screenshot view cannot place them")
+	}
+	raw, end := r.screenshot()
+	if end != nil {
+		return browserRunView{}, end
+	}
+	shot, w, h, err := browserRunDrawShot(raw, page, drawn, masked)
+	if err != nil {
+		return browserRunView{}, browserRunStop(browserRunError, err.Error())
+	}
+	assets := map[string]TypesafeAsset{placeholder: {
+		Type:       "image",
+		Format:     "png",
+		DataBase64: base64.StdEncoding.EncodeToString(shot),
+	}}
+	return browserRunView{
+		state:    state,
+		shown:    browserRunPage{Controls: drawn},
+		describe: browserRunDescribeShotControl,
+		note:     browserRunShotNote,
+		send: func(questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+			return img.DecideWithAssetsCtx(r.ctx, state, questions, assets)
+		},
+		shot: &browserRunShot{width: w, height: h, drawn: len(drawn), masked: len(masked)},
+	}, nil
+}
+
+// screenshot takes a screenshot through the browser tool, as readControls reads the
+// controls: the same sub-step path, so refusals and approvals apply. The tool holds
+// the PNG it took, and that PNG is read back here.
+func (r *browserRunRun) screenshot() ([]byte, *browserRunEnd) {
+	args := map[string]any{"action": "screenshot"}
+	if _, end := r.subStep(args); end != nil {
+		if end.status == browserRunNeedsApproval {
+			end.detail = "taking a screenshot of the page would need approval. Ask the user to change the permission mode."
+		}
+		return nil, end
+	}
+	rawArgs, err := json.Marshal(args)
+	if err != nil {
+		return nil, browserRunStop(browserRunError, fmt.Sprintf("encode screenshot arguments: %v", err))
+	}
+	r.owner.toolsMu.RLock()
+	shooter, ok := r.owner.tools["browser"].(tool.ImageProducingTool)
+	r.owner.toolsMu.RUnlock()
+	if !ok {
+		return nil, browserRunStop(browserRunError, "the browser tool does not return screenshot images")
+	}
+	raw, mime, err := shooter.ExecuteImage(rawArgs)
+	if err != nil {
+		return nil, browserRunStop(browserRunError, fmt.Sprintf("read the screenshot: %v", err))
+	}
+	if mime != "image/png" {
+		return nil, browserRunStop(browserRunError, "the screenshot is "+mime+", not image/png")
+	}
+	return raw, nil
+}
+
+// choose makes the decision for one view: the done, operation, target and value
+// answers, each floored as it always was.
+func (r *browserRunRun) choose(decider Decider, v browserRunView) (browserRunDecision, *browserRunEnd) {
 	// The questions offer only the controls the state carries, so a target is
 	// never chosen from an element the decision model did not see.
-	questions := r.questions(browserRunCandidates(shown))
-	resp, end := r.ask(decider, state, questions)
+	questions := r.questions(browserRunCandidates(v.shown), v)
+	resp, end := r.ask(decider, v, questions)
 	if end != nil {
 		return browserRunDecision{}, end
 	}
@@ -550,13 +768,13 @@ func (r *browserRunRun) decide(decider Decider, page browserRunPage) (browserRun
 		return browserRunDecision{}, browserRunStop(browserRunUnsure, fmt.Sprintf("target probability %.2f is below the %.2f floor", p, browserRunMinChoiceProbability))
 	}
 	r.owner.emitDebug("BROWSER_RUN", browserRunAnswerDebug(targetKey, target))
-	ctrl, ok := shown.control(target.Choice)
+	ctrl, ok := v.shown.control(target.Choice)
 	if !ok {
 		return browserRunDecision{}, browserRunStop(browserRunError, fmt.Sprintf("decision chose ref %s, which is not on the page", target.Choice))
 	}
 	dec := browserRunDecision{op: op.Choice, control: ctrl}
 	if op.Choice == brOpFill {
-		key, end := r.decideValue(decider, state, ctrl)
+		key, end := r.decideValue(decider, v, ctrl)
 		if end != nil {
 			return browserRunDecision{}, end
 		}
@@ -567,10 +785,11 @@ func (r *browserRunRun) decide(decider Decider, page browserRunPage) (browserRun
 }
 
 // ask makes one decision request and counts it toward jev_calls. A judge error or an
-// empty response stops the run.
-func (r *browserRunRun) ask(decider Decider, state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, *browserRunEnd) {
+// empty response stops the run. The screenshot view logs each request's image and
+// its input tokens.
+func (r *browserRunRun) ask(decider Decider, v browserRunView, questions map[string]TypesafeQuestion) (*TypesafeResponse, *browserRunEnd) {
 	label := deciderLabel(decider)
-	resp, err := decider.DecideCtx(r.ctx, state, questions)
+	resp, err := v.send(questions)
 	r.jevCalls++
 	if err != nil {
 		return nil, browserRunStop(browserRunError, fmt.Sprintf("decision judge %s failed: %v", label, err))
@@ -579,6 +798,9 @@ func (r *browserRunRun) ask(decider Decider, state any, questions map[string]Typ
 		return nil, browserRunStop(browserRunError, fmt.Sprintf("decision judge %s returned no response", label))
 	}
 	r.owner.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, label)
+	if s := v.shot; s != nil {
+		r.owner.emitDebug("BROWSER_RUN", fmt.Sprintf("view=screenshot step=%d image=%dx%d drawn=%d masked=%d input_tokens=%d", r.acted+1, s.width, s.height, s.drawn, s.masked, resp.Usage.InputTokens))
+	}
 	return resp, nil
 }
 
@@ -586,9 +808,9 @@ func (r *browserRunRun) ask(decider Decider, state any, questions map[string]Typ
 // request. Answers in one request cannot see each other, so a value asked alongside
 // the target had no field to match. The request reuses the step's prepared state, so
 // the key names reach the judge and the data values never do.
-func (r *browserRunRun) decideValue(decider Decider, state any, ctrl browserRunControl) (string, *browserRunEnd) {
-	q := r.valueQuestion(ctrl)
-	resp, end := r.ask(decider, state, map[string]TypesafeQuestion{brValueKey: q})
+func (r *browserRunRun) decideValue(decider Decider, v browserRunView, ctrl browserRunControl) (string, *browserRunEnd) {
+	q := r.valueQuestion(v, ctrl)
+	resp, end := r.ask(decider, v, map[string]TypesafeQuestion{brValueKey: q})
 	if end != nil {
 		return "", end
 	}
@@ -611,14 +833,14 @@ func (r *browserRunRun) decideValue(decider Decider, state any, ctrl browserRunC
 
 // valueQuestion asks which data key belongs in ctrl. The criteria are the key names
 // and none; the instructions name the field, so the judge can match a key to it.
-func (r *browserRunRun) valueQuestion(ctrl browserRunControl) TypesafeQuestion {
+func (r *browserRunRun) valueQuestion(v browserRunView, ctrl browserRunControl) TypesafeQuestion {
 	values := map[string]string{browserRunNoneChoice: "no data key fits this field"}
 	for _, k := range r.dataKeys {
 		values[k] = "the value of data key " + k
 	}
 	return TypesafeQuestion{
 		Type:         "choice",
-		Instructions: "The field to fill is " + browserRunFieldDescription(ctrl) + ". " + brValueInstructions,
+		Instructions: v.instruct("The field to fill is " + browserRunFieldDescription(v, ctrl) + ". " + brValueInstructions),
 		Criteria:     values,
 	}
 }
@@ -626,8 +848,8 @@ func (r *browserRunRun) valueQuestion(ctrl browserRunControl) TypesafeQuestion {
 // browserRunFieldDescription names a control for the value question. The field's
 // current text is never quoted: a value a previous step typed must not reach the
 // decision model, so only the fact that the field already holds something is said.
-func browserRunFieldDescription(c browserRunControl) string {
-	s := browserRunDescribeControl(c)
+func browserRunFieldDescription(v browserRunView, c browserRunControl) string {
+	s := v.describe(c)
 	if c.Value != "" {
 		s += " (already filled)"
 	}
@@ -645,6 +867,8 @@ func browserRunRedactedControls(controls []browserRunControl) []browserRunContro
 	out := make([]browserRunControl, len(controls))
 	for i, c := range controls {
 		c.Value = ""
+		c.Box = nil
+		c.InViewport = false
 		out[i] = c
 	}
 	return out
@@ -658,24 +882,24 @@ func browserRunAnswerDebug(name string, ans TypesafeAnswer) string {
 
 // questions builds the one question set for a step. Each target question lists the
 // controls that offer its operation, so a target is only ever chosen from candidates.
-func (r *browserRunRun) questions(cands map[string][]browserRunControl) map[string]TypesafeQuestion {
+func (r *browserRunRun) questions(cands map[string][]browserRunControl, v browserRunView) map[string]TypesafeQuestion {
 	ops := map[string]string{
 		brOpScrollDown: brOpCriteria[brOpScrollDown],
 		brOpPressEnter: brOpCriteria[brOpPressEnter],
 		brOpStuck:      brOpCriteria[brOpStuck],
 	}
 	questions := map[string]TypesafeQuestion{
-		brDoneKey: {Type: "noul", Instructions: brDoneInstructions},
+		brDoneKey: {Type: "noul", Instructions: v.instruct(brDoneInstructions)},
 	}
 	for op, list := range cands {
 		ops[op] = brOpCriteria[op]
 		targets := make(map[string]string, len(list))
 		for _, c := range list {
-			targets[c.Ref] = browserRunDescribeControl(c)
+			targets[c.Ref] = v.describe(c)
 		}
-		questions["target_"+op] = TypesafeQuestion{Type: "choice", Instructions: brTargetInstructions, Criteria: targets}
+		questions["target_"+op] = TypesafeQuestion{Type: "choice", Instructions: v.instruct(brTargetInstructions), Criteria: targets}
 	}
-	questions[brOperationKey] = TypesafeQuestion{Type: "choice", Instructions: brOperationInstructions, Criteria: ops}
+	questions[brOperationKey] = TypesafeQuestion{Type: "choice", Instructions: v.instruct(brOperationInstructions), Criteria: ops}
 	return questions
 }
 
@@ -684,6 +908,7 @@ func (r *browserRunRun) questions(cands map[string][]browserRunControl) map[stri
 // projection field, then elements are dropped from the end and counted in
 // omitted_elements. A state still over budget is refused, not sent.
 func (r *browserRunRun) state(page browserRunPage) (any, browserRunPage, error) {
+	page = page.capControls()
 	text := page.Text
 	elements := browserRunRedactedControls(page.Controls)
 	omitted := page.Omitted
@@ -698,7 +923,7 @@ func (r *browserRunRun) state(page browserRunPage) (any, browserRunPage, error) 
 			"date":             time.Now().Format("2006-01-02"),
 			"page":             map[string]any{"url": page.URL, "title": page.Title, "text": text, "settled": page.Settled},
 			"data_keys":        r.dataKeys,
-			"recent_actions":   r.recentActions(),
+			"recent_actions":   r.recentActions(browserRunRecord.describe),
 			"elements":         elements,
 			"omitted_elements": omitted,
 		}
@@ -782,15 +1007,15 @@ func (r *browserRunRun) state(page browserRunPage) (any, browserRunPage, error) 
 	return prepared, page, nil
 }
 
-// recentActions returns the last few steps as the main model reads them.
-func (r *browserRunRun) recentActions() []string {
+// recentActions returns the last few steps, each rendered by describe.
+func (r *browserRunRun) recentActions(describe func(browserRunRecord) string) []string {
 	start := len(r.steps) - browserRunRecentActions
 	if start < 0 {
 		start = 0
 	}
 	out := make([]string, 0, len(r.steps)-start)
 	for _, rec := range r.steps[start:] {
-		out = append(out, rec.describe())
+		out = append(out, describe(rec))
 	}
 	return out
 }
@@ -818,8 +1043,8 @@ func (r *browserRunRun) format(end browserRunEnd, page browserRunPage) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// parseBrowserRunPage reads the controls JSON that follows the header line, and
-// caps the offered controls at browserRunMaxControls, counting the rest as omitted.
+// parseBrowserRunPage reads the controls JSON that follows the header line. It keeps
+// every control the browser tool listed: each view applies its own cap.
 func parseBrowserRunPage(raw string) (browserRunPage, error) {
 	_, body, found := strings.Cut(raw, "\n")
 	if !found {
@@ -828,10 +1053,6 @@ func parseBrowserRunPage(raw string) (browserRunPage, error) {
 	var page browserRunPage
 	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &page); err != nil {
 		return browserRunPage{}, fmt.Errorf("controls JSON does not parse: %w", err)
-	}
-	if len(page.Controls) > browserRunMaxControls {
-		page.Omitted += len(page.Controls) - browserRunMaxControls
-		page.Controls = page.Controls[:browserRunMaxControls]
 	}
 	return page, nil
 }

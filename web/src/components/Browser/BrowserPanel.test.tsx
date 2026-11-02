@@ -17,6 +17,9 @@ const state = {
   error: "",
   consoleEvents: [],
   networkEvents: [],
+  responseBodies: {},
+  perfMetrics: {},
+  perfRecording: false,
 };
 const actions = {
   navigate: vi.fn(), back: vi.fn(), forward: vi.fn(),
@@ -37,12 +40,16 @@ const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
 const mockBrowseRemoteMode = vi.hoisted(() => vi.fn(() => false));
 const mockStreamViaMain = vi.hoisted(() => vi.fn((_host: string) => false));
 const mockGetBrowseBase = vi.hoisted(() => vi.fn(async (_host: string) => "http://127.0.0.1:54321"));
+// Default: this client cannot use a root-mounted origin, so the panel loads in prefix mode.
+const mockOpenTabOrigin = vi.hoisted(() => vi.fn(async (_key: string, _url: string, _host: string): Promise<unknown> => ({ kind: "unavailable" })));
+const mockMintGrant = vi.hoisted(() => vi.fn(async () => "GRANT123"));
 vi.mock("../../api/client", () => ({
   getBrowseBase: (host: string) => mockGetBrowseBase(host),
   getBrowseHTRNotice: mockHtrNotice,
   getBrowseRemoteMode: mockBrowseRemoteMode,
   getBrowseStreamViaMain: mockStreamViaMain,
-  mintBrowseGrant: vi.fn(async () => "GRANT123"),
+  mintBrowseGrant: mockMintGrant,
+  openBrowseTabOrigin: (key: string, url: string, host: string) => mockOpenTabOrigin(key, url, host),
   bypassBrowseTLS: (...args: unknown[]) => (mockBypass as unknown as (...a: unknown[]) => unknown)(...args),
   normalizeBrowseURL: (u: string) => u,
   isRemoteSession: mockIsRemoteSession,
@@ -67,6 +74,8 @@ describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetBrowseBase.mockImplementation(async () => "http://127.0.0.1:54321");
+    mockOpenTabOrigin.mockImplementation(async () => ({ kind: "unavailable" }));
+    mockMintGrant.mockImplementation(async () => "GRANT123");
     mockHtrNotice.mockReturnValue("");
     mockIsRemoteSession.mockReturnValue(false);
     mockBrowseRemoteMode.mockReturnValue(false);
@@ -246,9 +255,11 @@ describe("BrowserPanel", () => {
       const f = container.querySelector("iframe");
       expect(f?.getAttribute("src")).toContain("__grant=GRANT123");
     });
+    const frame = container.querySelector("iframe")!.contentWindow;
     act(() => {
       window.dispatchEvent(new MessageEvent("message", {
         origin: "http://127.0.0.1:54321",
+        source: frame,
         data: { type: "ocode:browse:console", stateKey: "tab:abc", level: "log", args: ["hi"], ts: 1 },
       }));
     });
@@ -256,10 +267,19 @@ describe("BrowserPanel", () => {
     act(() => {
       window.dispatchEvent(new MessageEvent("message", {
         origin: "https://evil.example",
+        source: frame,
         data: { type: "ocode:browse:console", stateKey: "tab:abc", level: "log", args: ["x"], ts: 2 },
       }));
     });
     expect(actions.pushConsole).toHaveBeenCalledTimes(1); // foreign origin dropped
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        origin: "http://127.0.0.1:54321",
+        source: window,
+        data: { type: "ocode:browse:console", stateKey: "tab:abc", level: "log", args: ["y"], ts: 3 },
+      }));
+    });
+    expect(actions.pushConsole).toHaveBeenCalledTimes(1); // right origin, wrong window: dropped
   });
 
   it("shows the chrome-mode banner with an exit when userMode is chrome", async () => {
@@ -386,6 +406,59 @@ describe("BrowserPanel", () => {
     await act(async () => { resolveLocal!("http://127.0.0.1:1"); });
     expect(iframe.getAttribute("src")).toContain("http://localhost:40263/b/");
     expect(iframe.getAttribute("src")).not.toContain("127.0.0.1:1");
+  });
+
+  it("loads a local tab through its root-mounted origin, with the grant in that URL", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/app/dashboard";
+    mockOpenTabOrigin.mockImplementation(async () => ({
+      kind: "tab",
+      origin: "http://localhost:41001",
+      url: "http://localhost:41001/app/dashboard?__grant=TABGRANT",
+    }));
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
+    const iframe = await waitFor(() => container.querySelector("iframe")!);
+    await waitFor(() => expect(iframe.getAttribute("src")).toBe("http://localhost:41001/app/dashboard?__grant=TABGRANT"));
+    expect(mockOpenTabOrigin).toHaveBeenCalledWith("tab:abc", "http://localhost:3000/app/dashboard", "");
+    expect(mockMintGrant).not.toHaveBeenCalled();
+    // The tab's own origin gates messages; the prefix base no longer does.
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        origin: "http://127.0.0.1:54321",
+        source: iframe.contentWindow,
+        data: { type: "ocode:browse:console", stateKey: "tab:abc", level: "log", args: ["old"], ts: 1 },
+      }));
+    });
+    expect(actions.pushConsole).not.toHaveBeenCalled();
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", {
+        origin: "http://localhost:41001",
+        source: iframe.contentWindow,
+        data: { type: "ocode:browse:console", stateKey: "tab:abc", level: "log", args: ["tab"], ts: 2 },
+      }));
+    });
+    expect(actions.pushConsole).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a tab-origin failure as the tab's error and never loads prefix mode", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    mockOpenTabOrigin.mockImplementation(async () => { throw new Error("tab origin: host is not a saved project"); });
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="user@box" />);
+    await waitFor(() => expect(actions.setError).toHaveBeenCalledWith("tab:abc", "tab origin: host is not a saved project"));
+    expect(mockMintGrant).not.toHaveBeenCalled();
+    expect(container.querySelector("iframe")?.getAttribute("src")).toBeFalsy();
+  });
+
+  it("retries a connecting remote host after Retry-After, then loads the tab", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    mockOpenTabOrigin
+      .mockImplementationOnce(async () => ({ kind: "connecting", retryAfterMs: 5 }))
+      .mockImplementationOnce(async () => ({ kind: "tab", origin: "http://localhost:41002", url: "http://localhost:41002/?__grant=G2" }));
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="user@box" />);
+    const iframe = await waitFor(() => container.querySelector("iframe")!);
+    await waitFor(() => expect(iframe.getAttribute("src")).toBe("http://localhost:41002/?__grant=G2"));
+    expect(mockOpenTabOrigin).toHaveBeenCalledTimes(2);
+    expect(actions.setError).not.toHaveBeenCalled();
   });
 
   it("re-reads a remote host's origin for every load", async () => {

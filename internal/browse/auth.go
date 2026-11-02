@@ -91,6 +91,19 @@ func (a *authStore) redeem(grant string, localDoc bool) (cookie, stateKey string
 	return cookie, e.stateKey, true
 }
 
+// grantStateKey reports the stateKey a live grant was minted for, without
+// consuming it. A tab listener uses it to refuse a grant minted for another
+// panel before redeem sets a cookie on the listener's origin.
+func (a *authStore) grantStateKey(grant string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, present := a.grants[grant]
+	if !present || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.stateKey, true
+}
+
 func (a *authStore) sessionStateKey(cookie string) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -147,17 +160,18 @@ func (a *authStore) revoke(stateKey string) {
 // (localDoc=true) — the sole way private-host mode is entered. Remote-workspace
 // mode changes the transport used for public hosts, not this security state.
 //
+// local is whether the request's target is a local upstream; the caller knows
+// it (prefix mode parses it from the path, a tab listener has it bound).
+// cookieName is the session cookie this origin reads and sets: browseCookie for
+// the prefix origin, a per-tab name for a tab listener (tab_origin.go).
+//
 // basePath is the mount prefix the origin is served under ("" = root-mounted).
 // It must be applied to BOTH the session cookie's Path and the redemption
 // redirect: a redirect to a bare "/b/..." would leave the mount and land on
 // the wrong origin, and a cookie scoped to "/b/" would never be sent for the
 // prefixed path. See basepath.go.
-func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request, basePath string) (string, string, bool) {
+func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request, basePath, cookieName string, local bool) (string, string, bool) {
 	if g := r.URL.Query().Get("__grant"); g != "" {
-		local := false
-		if t, err := parseTarget(r.URL.Path, r.URL.RawQuery); err == nil {
-			local = t.Local
-		}
 		cookieVal, stateKey, ok := a.redeem(g, local)
 		if !ok {
 			return "", "", false
@@ -170,16 +184,21 @@ func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request, basePat
 		// Path is the mount prefix itself ("" = root) so it covers every
 		// path the origin serves under this mount.
 		http.SetCookie(w, &http.Cookie{
-			Name: browseCookie, Value: cookieVal, Path: cookiePath(basePath),
+			Name: cookieName, Value: cookieVal, Path: cookiePath(basePath),
 			HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		})
 		clean := *r.URL
+		// Origin-form requests carry no scheme or host. An absolute-form
+		// request URI does, and must not turn the redirect into an
+		// off-origin one.
+		clean.Scheme = ""
+		clean.Host = ""
 		q := clean.Query()
 		q.Del("__grant")
 		clean.RawQuery = q.Encode()
 		return stateKey, withBasePath(basePath, clean.String()), true
 	}
-	c, err := r.Cookie(browseCookie)
+	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return "", "", false // no cookie, no grant: reject.
 	}

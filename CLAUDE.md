@@ -429,7 +429,11 @@ Statuses, floors and the permission story: `docs/concepts/browser-run-jev-step-l
 - **`slotBrowserRun` has its own floors**: operation confidence 0.55; target and value chosen-option probability 0.60; done noul 0.85.
   Never reuse the permission floor, and never fall back to another backend.
 - **`data` values never enter a Jev request.** Only key names do. An over-budget state stops the run
-  as `page_too_dense` rather than being sent.
+  as `page_too_dense` rather than being sent, or falls to the screenshot view when the backend takes images.
+- **In the screenshot view, text-entry controls are masked before the image is attached.** The image
+  still shows the visible page, so page text can appear in it; only text-entry controls are masked. Jev
+  picks only among drawn refs, and the image is not text-guarded. Images are sent only by `*TypesafeClient`
+  (`imageDecider`), never by a `Decider` that is not one.
 - **The loop never passes the `PERMISSION_ASK` sentinel through.** Main-agent asks use a per-call
   asker; with no blocking asker the run stops as `needs_approval`.
 

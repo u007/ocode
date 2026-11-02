@@ -20,12 +20,14 @@ import type {
 } from "@/api/types";
 import { CommitDiff, timeAgo } from "./GitPanel";
 import { GRAPH_PALETTE_SIZE, layoutCommitGraph, type GraphEdge, type GraphRow } from "./commitGraph";
+import { useResizableSplit } from "../../hooks/useResizableSplit";
 
 const PAGE_SIZE = 200;
 const ROW_HEIGHT = 28;
 const GRAPH_LANE_WIDTH = 14;
 const TABLE_MIN_WIDTH = 720;
 const SCOPE_KEY = "ocode.ui.git-history-scope.v1";
+const SPLIT_KEY = "ocode.ui.git-history-split.v1";
 const NOTICE_MS = 5000;
 
 type HistoryScope = "all" | "current";
@@ -169,6 +171,18 @@ export default function GitHistoryPanel({
   // while any runs, so a poll never supersedes the load the user is waiting on.
   const inFlight = useRef(0);
   const detailSeq = useRef(0);
+
+  // Vertical split between the commit list and the commit detail pane. ratio is
+  // the fraction of the container height taken by the list (top pane); the
+  // detail pane takes the remainder. Default 0.6 reproduces the former fixed
+  // h-[40%] detail. Persisted to localStorage so the split survives a reload.
+  const split = useResizableSplit({
+    storageKey: SPLIT_KEY,
+    orientation: "vertical",
+    defaultRatio: 0.6,
+    minRatio: 0.2,
+    maxRatio: 0.85,
+  });
 
   const { commits } = list;
   const rows = useMemo(() => layoutCommitGraph(commits), [commits]);
@@ -536,116 +550,231 @@ export default function GitHistoryPanel({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        {loading && commits.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-muted-foreground">Loading history…</div>
-        ) : (
-          <div role="table" aria-label="Commit history" style={{ minWidth: TABLE_MIN_WIDTH }}>
-            <div
-              role="row"
-              className="sticky top-0 z-10 grid items-center border-b border-border bg-background text-xs text-muted-foreground"
-              style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
-            >
-              <div role="columnheader" className="pl-2">Graph</div>
-              <div role="columnheader">Description</div>
-              <div role="columnheader">Author</div>
-              <div role="columnheader">Date</div>
-              <div role="columnheader">Commit</div>
+      <div className="min-h-0 flex-1 relative overflow-hidden">
+        {selectedHash ? (
+          <div
+            ref={split.containerRef}
+            className="flex h-full min-h-0 flex-col overflow-hidden"
+          >
+            <div className="flex-1 min-h-0 overflow-auto">
+              {loading && commits.length === 0 ? (
+                <div className="px-3 py-6 text-center text-sm text-muted-foreground">Loading history…</div>
+              ) : (
+                <div role="table" aria-label="Commit history" style={{ minWidth: TABLE_MIN_WIDTH }}>
+                  <div
+                    role="row"
+                    className="sticky top-0 z-10 grid items-center border-b border-border bg-background text-xs text-muted-foreground"
+                    style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
+                  >
+                    <div role="columnheader" className="pl-2">Graph</div>
+                    <div role="columnheader">Description</div>
+                    <div role="columnheader">Author</div>
+                    <div role="columnheader">Date</div>
+                    <div role="columnheader">Commit</div>
+                  </div>
+
+                  {dirty && (
+                    <div
+                      role="row"
+                      data-testid="git-history-uncommitted"
+                      onClick={onShowChanges}
+                      className="grid cursor-pointer items-center text-xs italic hover:bg-muted/40"
+                      style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
+                    >
+                      <div role="cell" className="h-full">
+                        <svg width={graphWidth} height={ROW_HEIGHT} aria-hidden="true">
+                          <line
+                            x1={GRAPH_LANE_WIDTH / 2}
+                            y1={ROW_HEIGHT / 2}
+                            x2={GRAPH_LANE_WIDTH / 2}
+                            y2={ROW_HEIGHT}
+                            strokeDasharray="2 2"
+                            strokeWidth={2}
+                            className="stroke-muted-foreground"
+                          />
+                          <circle
+                            cx={GRAPH_LANE_WIDTH / 2}
+                            cy={ROW_HEIGHT / 2}
+                            r={4}
+                            strokeWidth={2}
+                            strokeDasharray="2 2"
+                            className="fill-background stroke-muted-foreground"
+                          />
+                        </svg>
+                      </div>
+                      <div role="cell" className="truncate pr-2 text-muted-foreground">Uncommitted changes</div>
+                      <div role="cell" />
+                      <div role="cell" />
+                      <div role="cell" className="font-mono text-muted-foreground">*</div>
+                    </div>
+                  )}
+
+                  {commits.map((c, i) => (
+                    <CommitRow
+                      key={c.hash}
+                      commit={c}
+                      row={rows[i]}
+                      graphWidth={graphWidth}
+                      columns={columns}
+                      selected={c.hash === selectedHash}
+                      onSelect={() => void selectCommit(c.hash)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setMenu({ hash: c.hash, position: { x: e.clientX, y: e.clientY } });
+                      }}
+                    />
+                  ))}
+
+                  {!loading && commits.length === 0 && (
+                    <div className="px-3 py-6 text-center text-sm text-muted-foreground">No commits</div>
+                  )}
+                  {list.hasMore && (
+                    <div className="p-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        data-testid="git-history-load-more"
+                        disabled={loadingMore}
+                        onClick={() => void loadMore()}
+                      >
+                        {loadingMore ? "Loading…" : "Load more"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
-            {dirty && (
-              <div
-                role="row"
-                data-testid="git-history-uncommitted"
-                onClick={onShowChanges}
-                className="grid cursor-pointer items-center text-xs italic hover:bg-muted/40"
-                style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
-              >
-                <div role="cell" className="h-full">
-                  <svg width={graphWidth} height={ROW_HEIGHT} aria-hidden="true">
-                    <line
-                      x1={GRAPH_LANE_WIDTH / 2}
-                      y1={ROW_HEIGHT / 2}
-                      x2={GRAPH_LANE_WIDTH / 2}
-                      y2={ROW_HEIGHT}
-                      strokeDasharray="2 2"
-                      strokeWidth={2}
-                      className="stroke-muted-foreground"
-                    />
-                    <circle
-                      cx={GRAPH_LANE_WIDTH / 2}
-                      cy={ROW_HEIGHT / 2}
-                      r={4}
-                      strokeWidth={2}
-                      strokeDasharray="2 2"
-                      className="fill-background stroke-muted-foreground"
-                    />
-                  </svg>
+            <div
+              role="separator"
+              aria-valuenow={Math.round(split.ratio * 100)}
+              aria-valuemin={Math.round(split.minRatio * 100)}
+              aria-valuemax={Math.round(split.maxRatio * 100)}
+              aria-label="Resize commit detail preview"
+              tabIndex={0}
+              onPointerDown={split.onPointerDown}
+              onKeyDown={split.onKeyDown}
+              onDoubleClick={split.resetToDefault}
+              className="shrink-0 h-1 cursor-row-resize bg-border hover:bg-accent active:bg-accent select-none"
+            />
+
+            <div
+              data-testid="git-history-detail"
+              className="shrink-0 border-t border-border flex flex-col"
+              style={{ height: `${Math.round((1 - split.ratio) * 100)}%` }}
+            >
+              {selected && (
+                <div className="space-y-0.5 border-b border-border px-3 py-2 text-xs">
+                  <div className="break-all font-mono">{selected.hash}</div>
+                  <div className="text-muted-foreground">
+                    {selected.author} &lt;{selected.email}&gt;
+                  </div>
+                  <div className="text-muted-foreground">{new Date(selected.date).toLocaleString()}</div>
+                  <pre className="whitespace-pre-wrap break-words font-sans text-sm">{selected.message}</pre>
                 </div>
-                <div role="cell" className="truncate pr-2 text-muted-foreground">Uncommitted changes</div>
-                <div role="cell" />
-                <div role="cell" />
-                <div role="cell" className="font-mono text-muted-foreground">*</div>
+              )}
+              <div className="min-h-0 flex-1 overflow-auto">
+                {detailLoading && <div className="p-3 text-sm text-muted-foreground">Loading commit diff…</div>}
+                {detailError && <div role="alert" className="p-3 text-xs text-red-400">{detailError}</div>}
+                {!detailLoading && !detailError && detail && <CommitDiff files={detail} />}
               </div>
-            )}
-
-            {commits.map((c, i) => (
-              <CommitRow
-                key={c.hash}
-                commit={c}
-                row={rows[i]}
-                graphWidth={graphWidth}
-                columns={columns}
-                selected={c.hash === selectedHash}
-                onSelect={() => void selectCommit(c.hash)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setMenu({ hash: c.hash, position: { x: e.clientX, y: e.clientY } });
-                }}
-              />
-            ))}
-
-            {!loading && commits.length === 0 && (
-              <div className="px-3 py-6 text-center text-sm text-muted-foreground">No commits</div>
-            )}
-            {list.hasMore && (
-              <div className="p-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full"
-                  data-testid="git-history-load-more"
-                  disabled={loadingMore}
-                  onClick={() => void loadMore()}
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 overflow-auto">
+            {loading && commits.length === 0 ? (
+              <div className="px-3 py-6 text-center text-sm text-muted-foreground">Loading history…</div>
+            ) : (
+              <div role="table" aria-label="Commit history" style={{ minWidth: TABLE_MIN_WIDTH }}>
+                <div
+                  role="row"
+                  className="sticky top-0 z-10 grid items-center border-b border-border bg-background text-xs text-muted-foreground"
+                  style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
                 >
-                  {loadingMore ? "Loading…" : "Load more"}
-                </Button>
+                  <div role="columnheader" className="pl-2">Graph</div>
+                  <div role="columnheader">Description</div>
+                  <div role="columnheader">Author</div>
+                  <div role="columnheader">Date</div>
+                  <div role="columnheader">Commit</div>
+                </div>
+
+                {dirty && (
+                  <div
+                    role="row"
+                    data-testid="git-history-uncommitted"
+                    onClick={onShowChanges}
+                    className="grid cursor-pointer items-center text-xs italic hover:bg-muted/40"
+                    style={{ gridTemplateColumns: columns, height: ROW_HEIGHT }}
+                  >
+                    <div role="cell" className="h-full">
+                      <svg width={graphWidth} height={ROW_HEIGHT} aria-hidden="true">
+                        <line
+                          x1={GRAPH_LANE_WIDTH / 2}
+                          y1={ROW_HEIGHT / 2}
+                          x2={GRAPH_LANE_WIDTH / 2}
+                          y2={ROW_HEIGHT}
+                          strokeDasharray="2 2"
+                          strokeWidth={2}
+                          className="stroke-muted-foreground"
+                        />
+                        <circle
+                          cx={GRAPH_LANE_WIDTH / 2}
+                          cy={ROW_HEIGHT / 2}
+                          r={4}
+                          strokeWidth={2}
+                          strokeDasharray="2 2"
+                          className="fill-background stroke-muted-foreground"
+                        />
+                      </svg>
+                    </div>
+                    <div role="cell" className="truncate pr-2 text-muted-foreground">Uncommitted changes</div>
+                    <div role="cell" />
+                    <div role="cell" />
+                    <div role="cell" className="font-mono text-muted-foreground">*</div>
+                  </div>
+                )}
+
+                {commits.map((c, i) => (
+                  <CommitRow
+                    key={c.hash}
+                    commit={c}
+                    row={rows[i]}
+                    graphWidth={graphWidth}
+                    columns={columns}
+                    selected={c.hash === selectedHash}
+                    onSelect={() => void selectCommit(c.hash)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setMenu({ hash: c.hash, position: { x: e.clientX, y: e.clientY } });
+                    }}
+                  />
+                ))}
+
+                {!loading && commits.length === 0 && (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">No commits</div>
+                )}
+                {list.hasMore && (
+                  <div className="p-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      data-testid="git-history-load-more"
+                      disabled={loadingMore}
+                      onClick={() => void loadMore()}
+                    >
+                      {loadingMore ? "Loading…" : "Load more"}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
       </div>
-
-      {selectedHash && (
-        <div data-testid="git-history-detail" className="flex h-[40%] min-h-0 shrink-0 flex-col border-t border-border">
-          {selected && (
-            <div className="space-y-0.5 border-b border-border px-3 py-2 text-xs">
-              <div className="break-all font-mono">{selected.hash}</div>
-              <div className="text-muted-foreground">
-                {selected.author} &lt;{selected.email}&gt;
-              </div>
-              <div className="text-muted-foreground">{new Date(selected.date).toLocaleString()}</div>
-              <pre className="whitespace-pre-wrap break-words font-sans text-sm">{selected.message}</pre>
-            </div>
-          )}
-          <div className="min-h-0 flex-1 overflow-auto">
-            {detailLoading && <div className="p-3 text-sm text-muted-foreground">Loading commit diff…</div>}
-            {detailError && <div role="alert" className="p-3 text-xs text-red-400">{detailError}</div>}
-            {!detailLoading && !detailError && detail && <CommitDiff files={detail} />}
-          </div>
-        </div>
-      )}
 
       {menu && menuCommit && (
         <ContextMenu

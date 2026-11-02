@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/memory"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestBasePromptShape_PerPrimaryAgent asserts the marker order and presence
@@ -315,6 +317,58 @@ func TestDocPrompt_IsConditionalGuidance(t *testing.T) {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("doc prompt missing %q: %s", want, doc)
 		}
+	}
+}
+
+// browserRoutingStubTool stands in for the browser tool. Only its name matters
+// to the prompt builder.
+type browserRoutingStubTool struct{}
+
+func (browserRoutingStubTool) Name() string                            { return "browser" }
+func (browserRoutingStubTool) Description() string                     { return "" }
+func (browserRoutingStubTool) Definition() map[string]interface{}      { return nil }
+func (browserRoutingStubTool) Execute(json.RawMessage) (string, error) { return "", nil }
+func (browserRoutingStubTool) Parallel() bool                          { return false }
+
+// TestBrowserRoutingPromptGatedOnBrowserTool pins that the routing fragment is a
+// system message present only when the session has a browser tool, and that a
+// resumed history never gets a second copy.
+func TestBrowserRoutingPromptGatedOnBrowserTool(t *testing.T) {
+	resetPromptOverrides(t, nil)
+
+	without := &Agent{tools: map[string]tool.Tool{}}
+	if containsPromptMarker(without.BasePromptMessages(), promptBrowserRoutingMarker) {
+		t.Fatalf("expected no %s fragment without a browser tool", promptBrowserRoutingMarker)
+	}
+
+	with := &Agent{tools: map[string]tool.Tool{"browser": browserRoutingStubTool{}}}
+	msgs := with.BasePromptMessages()
+	frag := findMarker(msgs, promptBrowserRoutingMarker)
+	if frag == "" {
+		t.Fatalf("expected the %s fragment with a browser tool", promptBrowserRoutingMarker)
+	}
+	if !strings.Contains(frag, "use browser_run (multi-step) or browser (single read/action)") {
+		t.Fatalf("routing fragment does not name the browser tools: %q", frag)
+	}
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Content, promptBrowserRoutingMarker) && m.Role != "system" {
+			t.Fatalf("browser-routing fragment role = %q, want system", m.Role)
+		}
+	}
+
+	history := []Message{
+		{Role: "system", Content: promptBrowserRoutingMarker + "\nstored on an earlier turn"},
+		{Role: "user", Content: "hi"},
+	}
+	resumed := with.PrepareMessages(history, "")
+	count := 0
+	for _, m := range resumed {
+		if strings.HasPrefix(m.Content, promptBrowserRoutingMarker) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("browser-routing fragment count = %d after PrepareMessages, want 1", count)
 	}
 }
 

@@ -33,7 +33,7 @@ slower per task).
 
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
-`internal/agent/browser_run.go:204`). Each sub-step is a real call to
+`internal/agent/browser_run.go:252`). Each sub-step is a real call to
 `handleToolCallWithContext` (`internal/agent/agent.go:3973`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
@@ -43,7 +43,7 @@ loop and never appended to the transcript. Only `browser_run`'s own result is.
 
 Arguments: `goal` (required), `data` (named string values the loop may type), `tab`
 (as for `browser`), and `max_steps` (default 15, at most 40). The tool is registered only
-when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:305`).
+when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:353`).
 It is `PermissionAllow` by default (`internal/agent/permissions.go:1990`), because it
 performs nothing on its own.
 
@@ -89,7 +89,7 @@ Each step sends one batched request with these questions. The value question is 
 | `done` | noul | the goal is met on this page, given the recent actions |
 | `operation` | choice | the operations the page offers, plus `scroll_down`, `press_enter` and `stuck` |
 | `target_click`, `target_fill`, `target_check`, `target_uncheck` | choice | the controls offering that operation. Asked only for operations with at least one candidate |
-| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:629`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
+| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:851`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
 
 Answers in one request cannot see each other. A value asked beside its target was answered
 without knowing the field: live, `none` at probability 0.61 for a "Name" field. Asked in its
@@ -101,30 +101,110 @@ done. A rejected operation, target or value answer stops the run as `unsure`.
 The state carries `goal`, `date`, `page` (url, title, text, settled), `data_keys`,
 `recent_actions` (the last 8 steps), `elements` (the controls as offered, copied with
 their current `value` cleared by `browserRunRedactedControls`,
-`internal/agent/browser_run.go:641`), and `omitted_elements`. `page.settled` is false
+`internal/agent/browser_run.go:863`), and `omitted_elements`. `page.settled` is false
 when the settle bound ran out, so the judge can see that a listing may still be
-mid-render. Data values never enter the state. Only key names do.
+mid-render. Data values never enter the state. Only key names do. This is the text view's
+state. A page the text view cannot judge is sent as a screenshot instead (see
+[Screenshot view](#screenshot-view)).
 
 The state has a per-step budget of 30 KB marshalled (`browserRunStateBudgetBytes`,
-`internal/agent/browser_run.go:43`). Over budget, the page text is clipped to 2 KB
-(`browserRunTextBytes`, `internal/agent/browser_run.go:45`) and then, if the state is
+`internal/agent/browser_run.go:44`). Over budget, the page text is clipped to 2 KB
+(`browserRunTextBytes`, `internal/agent/browser_run.go:46`) and then, if the state is
 still over, elements are cut from the end, keeping the longest prefix that fits (found by a
 binary search), and the number cut is counted in `omitted_elements`. Whenever the view is partial the request carries `_projection`
-(`stateProjectionKey`, `internal/agent/state_budget.go:54`) as `applied` plus a `fields`
+(`stateProjectionKey`, `internal/agent/state_budget.go:61`) as `applied` plus a `fields`
 list that names exactly what was cut: `page.text` — the browser tool's own
 `text_truncated`, or a local clip that actually shortened the text, so a short page
 whose elements caused the overflow never claims its text was clipped — and/or
-`elements`. A state still over budget stops the run as `page_too_dense` and no request
+`elements`. A state still over budget falls to the screenshot view when the decision backend can take
+images, and otherwise stops the run as `page_too_dense`. No request
 is sent. The state then goes through the shared decision budget,
 `prepareDecisionState`, like every other judge.
+
+## Screenshot view
+
+The text view is the default. The screenshot view is used when the text view cannot
+see the whole page: the listing is partial (more than 160 controls, or a count the browser
+tool already omitted), or the text state does not fit the budget even after its page text
+is clipped. A text state that fits only after cutting elements stays in the text view, with
+`omitted_elements`, as before.
+
+The screenshot view needs a decision backend that takes images. Only `*TypesafeClient` does,
+through `DecideWithAssetsCtx` (the `imageDecider` interface, `internal/agent/decider.go:59`).
+Any other backend keeps the text view, and a state that does not fit stops the run as
+`page_too_dense`, with a detail that names the TypeSafe requirement. The view never goes to
+another backend.
+
+What a screenshot request carries:
+
+- **Numbered controls.** Only controls whose box overlaps the viewport are drawn, in listing
+  order, at most 160. Each is outlined, and its number is drawn at its top-left corner: `@e12`
+  is drawn as `12`. The questions name each control by role and number, and the answer is still
+  the control's ref.
+- **Masking.** Before any outline or number is drawn, each text-entry control in the viewport
+  is painted solid black: a textbox, searchbox, combobox or spinbutton, and any control that
+  holds a value. The masks come from the whole listing, so a text field past the draw cap is
+  still covered.
+- **One image.** The screenshot is scaled to fit 1280x800, keeping its aspect ratio, and sent
+  as one PNG asset. The state names it by a random placeholder. The request carries the header
+  `TypeSafe-Danger-Zone-Images: true`, which TypeSafe requires for images.
+- **The state.** Labels, values, page text and the page body are not in it. The URL and title
+  are, as in the text view. An example:
+
+```json
+{"goal": "add the item to the cart", "date": "2026-11-02", "view": "screenshot",
+ "page": {"url": "https://shop.example/cart", "title": "Cart", "settled": true,
+          "viewport": {"w": 1280, "h": 800}},
+ "screenshot": "screenshot-3f9c…", "elements": [{"ref": "@e1", "role": "textbox"}, {"ref": "@e2", "role": "button"}],
+ "data_keys": ["email"], "recent_actions": ["click @e2 button → page changed"],
+ "offscreen_elements": 109}
+```
+
+`offscreen_elements` counts the controls that are not drawn: those off the screen, and those
+past the cap. The state must fit 21 KB, the 30 KB text budget less `imageStateAllowanceBytes`
+(9 KB). The image is not counted in that budget: it costs input tokens, not state bytes. A state
+over 21 KB stops the run as `page_too_dense` before any screenshot is taken.
+
+A viewport with a side under 64 px stops the run as `error` before any screenshot is taken,
+because the decision model rejects such an image.
+
+The screenshot may be taken at device pixels, as CDP on a Retina display and the htrcli
+screenshot both do. The image is mapped to the viewport per axis, from its own size, so a 2x
+screenshot puts each mask and outline at the same CSS position as a 1x one. A test covers this.
+
+A moved scroll offset is progress on this view. The listing can stay the same while the boxes
+move, so three `scroll_down` steps that each move the offset do not stall the run. On the text
+view they still count toward the stall limit, as before.
+
+The operation, target and done questions carry the screenshot note: the image shows the page,
+each number is drawn at the control's top-left corner, text-entry fields are black, and the
+done question is judged on the screenshot only. The value question names its field by role and
+number, and never by label.
+
+**Cost.** A 640x400 image with two boxes cost 1,037 input tokens in the gated live test
+(`TestTypesafeLiveImageAsset`, `internal/agent/typesafe_assets_test.go`, on `jev-latest`). TypeSafe
+measured 1280x800 at 3,018 input tokens. Every decision request in this view carries the image,
+so a fill step's value request pays for it again. Each request logs
+`BROWSER_RUN view=screenshot step=N image=WxH drawn=N masked=N input_tokens=N`.
+
+**What the image shows.** The masks cover text-entry controls only. The screenshot is the whole
+visible page, so visible text outside a text-entry control reaches the judge as pixels: a
+confirmation that echoes an email, a price, a heading. A text field the browser tool did not list
+is not masked, because the loop never sees it.
+
+**Injection.** Pixels are not text-guarded. The content guard reads the browser tool's text
+result, never the image, so text painted into the page is untrusted and can steer the judge.
+Jev still picks only among drawn refs. An answer that names a ref not drawn stops the run as
+`error`, as in the text view. A steered answer that names a drawn control still runs as a
+sub-step, so the permission and content guards apply to it as to any click.
 
 ## Floors
 
 | gate | applies to | floor |
 | --- | --- | --- |
-| operation confidence | the `operation` choice | 0.55 (`browserRunMinConfidenceDefault`, `internal/agent/browser_run.go:33`) |
-| chosen option probability | `target_*` and `value_fill` | 0.60 (`browserRunMinChoiceProbability`, `internal/agent/browser_run.go:39`) |
-| done noul | `done` | 0.85 (`browserRunDoneAcceptFrom`, `internal/agent/browser_run.go:30`) |
+| operation confidence | the `operation` choice | 0.55 (`browserRunMinConfidenceDefault`, `internal/agent/browser_run.go:34`) |
+| chosen option probability | `target_*` and `value_fill` | 0.60 (`browserRunMinChoiceProbability`, `internal/agent/browser_run.go:40`) |
+| done noul | `done` | 0.85 (`browserRunDoneAcceptFrom`, `internal/agent/browser_run.go:31`) |
 
 The operation choice still gates on Jev's confidence. Target and value gate on the chosen
 option's probability, not its confidence. Jev's confidence is a distribution-shape statistic
@@ -142,7 +222,7 @@ pick can fail a confidence floor. The permission floor is never reused.
 | `max_steps` | the step limit was reached |
 | `denied` | a sub-step was denied, or refused (a read-only agent, or locked mode). The loop stops at once |
 | `needs_approval` | a mutating sub-step needed a human answer and this host has no blocking asker. The loop stops before acting and names the step |
-| `page_too_dense` | the state does not fit the budget even after trimming |
+| `page_too_dense` | the text state does not fit the budget even after trimming, and no screenshot view is available (the backend takes no images); or the screenshot state does not fit beside its image |
 | `error` | a judge call failed or returned nothing, a controls read failed after its retry, a tool call failed, or Jev chose a ref not on the page |
 
 A missing judge is not a status. `browser_run` returns the tool error
@@ -158,7 +238,7 @@ backend or to the main model.
   sub-step is denied.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
-  `browser_run` (`internal/agent/browser_run.go:436-437`, `withPermissionAsker` at
+  `browser_run` (`internal/agent/browser_run.go:489-490`, `withPermissionAsker` at
   `internal/agent/agent.go:6832`). The dialog then reads like
   `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:5823`),
   and the loop waits for the answer. With no asker at all, the step stops as
@@ -167,7 +247,7 @@ backend or to the main model.
   `browser_run`, and so do the unlisted `general` and `review` definitions. `explore` and
   `context` do not get it. A read-only agent's sub-steps still hit the browser tool's
   refusal for each mutating step.
-- **Content guard.** Each sub-step result is guarded (`browser_run.go:457`), and so is
+- **Content guard.** Each sub-step result is guarded (`browser_run.go:511`), and so is
   `browser_run`'s own result (the `browser_run` case of `contentGuardSourceFor`,
   `internal/agent/content_guard_typesafe.go:296`). Known gap: on the main agent, a
   content-guard ask on a sub-step result becomes `needs_approval`, not a blocking ask.
@@ -200,14 +280,19 @@ backend or to the main model.
 
 ## The controls action and the Settle rule
 
-`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:415`).
+`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:442`).
 It returns one JSON object after an untrusted-content header. The object's keys are
-`url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls` and
-`omitted`. `text` and `text_truncated` map the cdp layer's viewport text fields. The
-struct is `browserControlsOutput` (`internal/server/browser_tool.go:939`).
+`url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls`, `omitted`,
+`viewport_width`, `viewport_height` (the viewport in CSS pixels), `scroll_x` and `scroll_y`
+(the document's scroll offset in CSS pixels; on the htrcli surface, the snapshot's `scroll`). `text` and `text_truncated` map the cdp layer's viewport text fields. The
+struct is `browserControlsOutput` (`internal/server/browser_tool.go:1035`).
 
-Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set)
-and `operations`. The operations come from the role (`controlOperations`,
+Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set),
+`operations`, `box` and `in_viewport`. `box` is the control's rectangle in CSS pixels of the
+viewport, and `null` when the element has no rendered box. `in_viewport` is true when that
+rectangle overlaps the viewport. The boxes come from one `DOMSnapshot.captureSnapshot` for the
+whole document, so they add one CDP round trip per read, not one per control. Chrome's layout
+rectangles are in document coordinates, so the scroll offset is taken away from them. The operations come from the role (`controlOperations`,
 `internal/browse/cdp/pagedom_controls.go:59`):
 
 - `button`, `link`, `tab`, `menuitem` and similar: `click`.
@@ -227,10 +312,10 @@ it because a page can answer an action by changing only text (a validation error
 appearing, a cart total updating, a toast), so a text-only response is not mistaken for
 a stall. Refs are left out, so a re-render that leaves the page the same keeps the
 fingerprint. It is cut to 16 hex digits (`controlsFingerprint`,
-`internal/browse/cdp/pagedom_controls.go:329`).
+`internal/browse/cdp/pagedom_controls.go:446`).
 
 **Settle rule.** `Controls` settles the page first (`Target.Settle`,
-`internal/browse/cdp/pagedom_controls.go:125`). The wait is:
+`internal/browse/cdp/pagedom_controls.go:144`). The wait is:
 
 1. `document.readyState` is no longer `loading`.
 2. 200 ms pass with no DOM mutation (`settleQuietWindow`, `pagedom_read.go:36`).
@@ -247,11 +332,27 @@ quiet is the rule that is left.
 Permissions for `controls` follow the other reads. It is in the observe set
 (`internal/agent/permissions.go:5711`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:531`). Read-only
-agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:204`).
+agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:218`).
+
+## Routing the model to browser_run
+
+The model picks its browser path from tool descriptions and the skill catalog, before any skill body is read. Four levers steer it toward `browser_run` and away from `webfetch` and per-click shell CLIs:
+
+- **Tool description.** `browserRunDescription` (`internal/agent/browser_run.go:65`) says to prefer this tool over driving a browser from the shell with htrcli for multi-step page tasks.
+- **Skill description.** The `htrcli` frontmatter (`skills/htrcli/SKILL.md`) opens with the same rule. Discovery embeds the description clamped to 400 characters (`parseSkillMetadata`, `internal/skill/loader.go:594`), so the rule sits inside the kept part.
+- **webfetch hint.** `isJSShell` (`internal/tool/web.go:143`) decides when a page is a client-rendered shell: converted text under 200 bytes and the raw HTML contains `<script` or `<noscript`. Only then does the result end with the `[ocode]` line (`jsShellHint`, `internal/tool/web.go:133`).
+- **Prompt fragment.** When the session has a `browser` tool, `BasePromptMessages` (`internal/agent/prompt.go:295`) adds one static `[ocode:browser_routing]` system message (`browserRoutingPromptContent`, `internal/agent/prompt.go:41`). The browser tool is bound at construction, so the fragment is fixed for the session and the cached prefix stays byte-identical.
 
 ## Limits in v1
 
-- Only the first 160 controls are offered. There is no relevance pre-filter yet.
+- The text view offers only the first 160 controls. A page with more is judged on a
+  screenshot when the backend takes images, and otherwise the rest are counted as omitted.
+  There is no relevance pre-filter yet.
+- Scrolling does not change the fingerprint, because it covers the URL, the text and the
+  controls but not their position. On the text view, three `scroll_down` steps in a row that
+  change nothing else end the run as `stalled`. On the screenshot view a moved scroll offset
+  counts as progress (see Screenshot view). That needs the browser tool's controls output to
+  carry `scroll_x` and `scroll_y`.
 - Operations are `click`, `fill`, `check`, `uncheck`, `scroll_down` and `press_enter`.
   There is no `pick`, `select`, `upload`, `type` or key-chord operation. Use the `browser`
   tool directly for those.
@@ -262,10 +363,17 @@ agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:2
   for even when the limit then stops the run. A `done` answer on that decision still wins.
 - Stop cancels the run's context. An in-flight sub-step returns at once, as in
   `browser-agent-tools.md`.
+- On a remote host with an htrcli token, the loop runs over the client's htrcli
+  surface (see `browser-agent-tools.md`, the htrcli section). Its controls are the
+  same shape, and its refs are identity-checked. `pick`, `upload`, `scroll`, frames
+  and `type` without a target are unavailable there, and the loop's operations never
+  use them.
 
 ## Live verification
 
-`TestBrowserRunLiveChromeAndJev` (`internal/agent/browser_run_live_test.go:284`) runs the loop
+`TestTypesafeLiveImageAsset` (`internal/agent/typesafe_assets_test.go`) sends a synthetic image
+through the TypeSafe image asset path and asks which number is on the blue box. It is gated on
+`TYPESAFE_API_KEY`. `TestBrowserRunLiveChromeAndJev` (`internal/agent/browser_run_live_test.go:284`) runs the loop
 on real headless Chrome with the real Jev model. It is gated on `OCODE_CHROME_PATH` and
 `TYPESAFE_API_KEY`, and skips without them. On 2026-11-01 it completed a four-field newsletter
 form: status=done, steps=4, jev_calls=7, with decision probabilities from 0.80 to 1.00. That is
@@ -281,11 +389,17 @@ re-tuned on that corpus.
 
 ## Code map
 
-- `internal/agent/browser_run.go`: `browserRunTool` (204), `ExecuteCtx` (252),
-  `bindBrowserRun` (305), `execute` (329), `readControls` (397), `subStep` (421),
-  `act` (472), `decide` (500), `ask` (571), `decideValue` (589), `valueQuestion` (614),
-  `questions` (661), `state` (686), `format` (799), `parseBrowserRunPage` (823). Floors and
-  caps are at lines 30 to 48.
+- `internal/agent/browser_run.go`: `browserRunTool` (252), `ExecuteCtx` (300),
+  `bindBrowserRun` (353), `execute` (379), `readControls` (451), `subStep` (475),
+  `act` (526), `scrolledView` (581), `decide` (586), `view` (600), `screenshotView` (625),
+  `screenshot` (692), `choose` (722), `ask` (790), `decideValue` (811), `valueQuestion` (836),
+  `questions` (885), `state` (910), `format` (1024), `parseBrowserRunPage` (1048). Floors and
+  caps are at lines 30 to 46.
+- `internal/agent/browser_run_shot.go`: `browserRunShotControls` (76), `browserRunDrawShot` (97),
+  the masking and number tags, the 64 px viewport floor, and the screenshot placeholder.
+- `internal/agent/typesafe.go`: `DecideWithAssetsCtx` and the shared `decide` request path,
+  `TypesafeAsset`, and the images header. `internal/agent/state_budget.go`:
+  `imageStateAllowanceBytes` (38).
 - `internal/agent/agent.go`: `handleToolCallWithContext` (3973), the context asker
   (4215), `attributePermAsker` (6811), `withPermissionAsker` (6832).
 - `internal/agent/permissions.go`: `browser_run` allow default (1990), the observe set
@@ -294,10 +408,11 @@ re-tuned on that corpus.
   `BrowserRun` config key `browser_run.judge_model` (1041).
 - `internal/agent/content_guard_typesafe.go`: `browserGuardedOutputs` (266), the
   `browser_run` case (296).
-- `internal/browse/cdp/pagedom_controls.go`: `settleExpr` (24), `Settle` (125),
-  `Controls` (178), `controlsWalker.add` (287), `controlsFingerprint` (329).
+- `internal/browse/cdp/pagedom_controls.go`: `settleExpr` (24), `Settle` (144),
+  `Controls` (197), `controlsWhereExpr` (256), `controlLayout` (289), `placeControls` (322),
+  `controlsWalker.add` (403), `controlsFingerprint` (446).
 - `internal/browse/cdp/pagedom_read.go`: the settle and control caps (36 to 45).
-- `internal/server/browser_tool.go`: `browserActions` (57), `browserReadOnlyActions` (204),
+- `internal/server/browser_tool.go`: `browserActions` (57), `browserReadOnlyActions` (217),
   the `controls` case (415), `browserControlsOutput` (939), `controls` (953).
 
 Related: [browser-agent-tools](browser-agent-tools.md) (the `browser` tool, its actions and

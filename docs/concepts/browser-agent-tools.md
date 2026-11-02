@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Browser agent tool — agents see and drive the Chrome tabs of their session's machine
-description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
+description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome or, with an htrcli token, the client''s browser over htrcli, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
 tags:
   - browser
   - agent
@@ -20,7 +20,8 @@ tags:
 Agents of a web/desktop session get one tool, `browser`, and the step loop `browser_run` built on it (see the section below). It drives Chrome
 over CDP on the machine that runs the session. For a local project that is this
 machine. A remote project's session runs on its host (`ocode serve --remote`), so
-the tool drives the host's Chrome. The TUI's own chat agent does not get the tool; sessions on the TUI's `/rc` server do, because that server starts the embedded browser (`StartBrowse` in `internal/tui/model.go`). Nothing in the TUI's own agent is wired.
+the tool drives the host's Chrome, or the client's own browser when the host has an
+htrcli token (see Wiring and the htrcli section). The TUI's own chat agent does not get the tool; sessions on the TUI's `/rc` server do, because that server starts the embedded browser (`StartBrowse` in `internal/tui/model.go`). Nothing in the TUI's own agent is wired.
 
 ## Wiring
 
@@ -28,6 +29,16 @@ the tool drives the host's Chrome. The TUI's own chat agent does not get the too
   `Handler.browseSurfaces` to `browseAgentSurfaces`, an adapter over the browse
   server's `AgentTarget` and `OpenAgentTab`. It runs once at boot, before `Serve`,
   on every server, including a remote-mode host.
+- On a remote-mode host, `StartBrowse` calls `Server.wireRemoteHTRSurfaces` right
+  after `EnableBrowse`. When the host can read an htrcli token (from its
+  `~/.htrcli/config.json`, or `browser.htr_token` in its config), that call replaces
+  the Chrome surfaces with `htrAgentSurfaces` (`internal/server/browser_surfaces_htr.go`).
+  The adapter drives the client's browser through the client's htrcli daemon, which
+  the reverse SSH forward carries to the host's loopback on the same port. The
+  choice is made once at boot, so the tools array stays byte-stable. Reachability
+  is checked per call. An unreachable daemon is an error, never a fall back to
+  Chrome. The adapter never starts a daemon. Without a token the host keeps its own
+  Chrome, and the reason is logged once at startup.
 - `buildAgentSession` appends the tool through `Handler.browserToolFor` for
   non-Pulse sessions. It returns nil when no surface is wired, or when the project
   has a host. A server never builds a session for a project that has a host: a
@@ -157,7 +168,7 @@ ask is what gates that network access, as it does for bash.
 | `wait` | `target` or `text`, `gone`, `timeout`, `frame` | until the element or text appears (or, with `gone`, is absent) | allow on an agent-opened tab; ask on a user tab |
 | `console` | `max` | newest console and exception entries since the tab was attached | allow on an agent-opened tab; ask on a user tab |
 | `network` | `max` | newest request records since the tab was attached (no headers, cookies or bodies) | allow on an agent-opened tab; ask on a user tab |
-| `controls` | none | the page's interactive elements as one JSON object, each with its `@eN` ref and operations, read after the page settles (see the `browser_run` section) | allow on an agent-opened tab; ask on a user tab |
+| `controls` | none | the page's interactive elements as one JSON object, each with its `@eN` ref, operations, `box` and `in_viewport`, plus the viewport size and scroll offset, read after the page settles (see the `browser_run` section) | allow on an agent-opened tab; ask on a user tab |
 | `scroll` | `direction` | one viewport up or down (`window.scrollBy`) | allow (on any tab, by design: it only moves the viewport) |
 | `click` | `target` (and `frame`), or `x` and `y` | the element (scrolled into view; the click lands at its content-box centre, and is refused if another element covers that point), or a point of the last screenshot | ask |
 | `type` | `text`, optional `target` (and `frame`) | `Input.insertText` into the focused field, or focus the named field and insert there | ask |
@@ -290,7 +301,8 @@ failures keep their error. The same path cancels the computer tool.
 - `snapshot` and `find` mint `@eN` refs. A ref is a CDP `backendNodeId`, so it
   survives scrolling. A `target` takes an `@eN` ref or a selector (CSS, or the
   `label=`, `name=` and `text=` forms). A selector must match exactly one element.
-  Zero matches or several are an error. htrcli takes the first match instead.
+  Zero matches or several are an error. The htrcli surface keeps the same rule: it
+  counts the matches before it acts.
 - Each agent instance keeps one ref table per tab for its lifetime, created on
   first use. A subagent gets a fresh table from `ForAgent`. Refs are never shared
   between tabs or between agents.
@@ -411,6 +423,67 @@ definitions. `explore` and `context` do not. The design, the status set, the dec
 floors and the known content-guard gap are in
 [browser-run-jev-step-loop](browser-run-jev-step-loop.md).
 
+## Remote host: the client's browser over htrcli
+
+On a remote host the tool reaches the client's browser through the client's htrcli
+daemon (`htrAgentSurfaces`, `browserSurface` in `internal/server/browser_surfaces_htr.go`).
+The daemon routes each command to the extension in the tab's browser, so the
+client's own browser does the fetching. The egress protections of the Chrome path do
+not apply to those fetches. The tool's URL check still runs before any navigate or
+open.
+
+- **Tabs are the daemon's numeric ids.** A `tab:<id>` state key carries the daemon
+  id. The tool reads the tab's browser from the daemon and sends that browser with
+  every tab-routed command, so a Chrome tab and a Firefox tab with one id are not
+  confused, as far as the daemon's own ids allow. `action=tabs` lists the client's
+  tabs after the strip and the agent's own tabs, sorted by id, and marks the active
+  one. `action=open` opens a background tab in a browser the daemon picks.
+- **The agent never closes the user's tabs.** `action=close` on a client tab the
+  agent did not open is refused. Only tabs the agent opened close, and a close of
+  a tab the daemon no longer holds only drops the agent's record of it.
+- **Refs keep identity.** The daemon numbers refs per page, from `@e1` again after
+  each full navigation, so a bare number could name a different element after a
+  navigation. The tool records the tag and xpath of each element a ref names, and
+  every later use re-finds that ref. A ref whose element no longer matches fails as
+  `stale ref`, which `browser_run` matches. A ref is a structural identity: a page
+  reloaded with the same structure keeps its refs, and the check cannot tell that
+  apart from the same control.
+- **Snapshot and controls come from the daemon's snapshot**, with the same line
+  format and control operations as the Chrome path. A node without identity has no
+  ref, and the agent reaches it by a selector instead.
+- **Controls report geometry on both surfaces.** Each control's `box` is its
+  rectangle in viewport CSS pixels, `null` when the element is not laid out, and
+  `in_viewport` uses the same overlap rule on both paths. The viewport size is the
+  snapshot root's size and its `scroll` offset supply `scroll_x` and `scroll_y` on the
+  htrcli surface. A snapshot without either is an error, because the client extension
+  predates them and must be rebuilt, so a zero is never a stand-in for a missing value.
+- **Reads.** `text` is the body's text content, which includes script and style
+  text. The Chrome path returns visible text only. `controls.settled` is true when
+  the page's ready state is complete. A screenshot captures the named tab, and that
+  capture was checked on a background tab. Waits poll the page, because the client
+  extension in use ignores the gone flag. `console` and `network` read the daemon's
+  event buffer for the tab, oldest first, and report how many older entries the
+  daemon evicted. Each action re-arms the client's network capture when it is due
+  (see Limits), and a failed read is an error the model sees.
+- **Writes.** `fill` and `check` read the value back from the page. A `select`
+  reports what the element then reads, without failing on a text match.
+  `fill_form` reads back after all writes, and a checkbox reads back with `isChecked`,
+  as `check` does. A file list is refused.
+- **Every action is wired.** `pick` maps to the daemon's pick action, and the mode
+  reads as `select` or `combobox` from the element. `upload` reads the files on the
+  host, checks each path through the file tools' confinement first, and sends their
+  bytes base64 in one command, so no host path reaches the client. `frame` goes to
+  the daemon on every element action. The client takes a top-level iframe selector
+  only, so a nested frame is refused by the extension and the error is shown. A ref stays in the frame it was found in:
+  a ref used in another frame is refused as a mismatch. `scroll` moves the window by
+  the CDP path's 80% of the viewport. `type` without a `target` types into the
+  focused element.
+- **Coordinate clicks work on both browsers.** A coordinate target goes to the
+  client's extension, which resolves it on Chrome and on Firefox.
+- **Tab ids are per browser.** The daemon numbers each browser's tabs, so the same
+  number can exist in two browsers. The tool follows the daemon's own choice when
+  that happens, and it does not detect it.
+
 ## Limits
 
 - `navigate`, `back`, `forward`, `reload` and `open` do not wait for the load. The
@@ -438,13 +511,31 @@ floors and the known content-guard gap are in
   chords. Keys go through the same `keyEventParams` path as the panel, so the
   macOS unhandled-key freeze fix applies (see
   `docs/gotchas/chrome-headless-mac-key-redispatch-freeze.md`).
-- Hover, drag and key chords are not implemented, and neither are recording,
-  network mocking, or a Firefox or htrcli transport. See TODO.md.
+- Hover, drag and key chords are not implemented, and neither are recording or
+  network mocking. See TODO.md.
 - `scroll` moves the window, not inner scroll containers.
 - Headless targets run without a sink, and start no screencast at all: Chrome
   streams nothing until a panel attaches with a sink.
-- A remote host needs Chrome installed. Without it the action reports the attach
-  error. A target that an agent call attaches but whose first load then fails or is cancelled (Stop / turn deadline) is closed again rather than left registered; the failed-attach path calls `CloseAgentTab` and removes the strip entry.
+- htrcli network capture is armed per tab. Each action arms the client's capture
+  with the extension's longest window, 120 s, when the tab was never armed in this
+  process or the last arm is 100 s old or more. A re-arm inside the window extends
+  it. A re-arm after the window closed records the stretch with no capture. A
+  network read adds a note with the last arm time, the window length and any such
+  stretch, so requests in a gap are never shown as absent without a reason. Requests
+  made while no action runs for more than 120 s are not recorded. Firefox's
+  `webRequest` is always on and has no window. A failed arm fails that action, and
+  the next action on the tab tries again.
+- htrcli reads report their failures. A `console` or `network` read the daemon
+  cannot answer is an error that names the read, not an empty list. The daemon keeps
+  500 events per tab and kind, and its evicted count is reported.
+- htrcli network entries carry no failure flag. The extension records a request when
+  it completes, and a completed request with no response status reads as
+  `no response recorded`. The tool uses the same label for a CDP entry that finished
+  with no status. Pending requests are never recorded.
+- htrcli `fill_form` refuses a file list. `upload` takes the files; the file fields
+  of `fill_form` do not reuse it yet.
+- A remote host with no htrcli token needs Chrome installed. Without it the action
+  reports the attach error. A target that an agent call attaches but whose first load then fails or is cancelled (Stop / turn deadline) is closed again rather than left registered; the failed-attach path calls `CloseAgentTab` and removes the strip entry.
 
 ## Code map
 
@@ -455,6 +546,12 @@ floors and the known content-guard gap are in
 - `internal/browse/cdp/keys.go`: `namedKeys`, `NamedKeys`.
 - `internal/browse/server.go`: `AgentTarget`, `waitForLoad`, `OpenAgentTab`,
   `CloseAgentTab`, `headlessAttacher`.
+- `internal/server/browser_surfaces_htr.go`: `htrAgentSurfaces` (the client's htrcli
+  daemon), `htrSurface` (one client tab), `htrRefStore` (ref identity),
+  `wireRemoteHTRSurfaces` (the boot choice on a remote host). Its tests are
+  `internal/server/browser_surfaces_htr_test.go`, which drive a stub daemon.
+  `internal/browse/cdp/surface_exports.go`: the caps, control operations,
+  fingerprint and snapshot line format the htrcli surface shares with the CDP path.
 - `internal/server/browser_tool.go`: the tool (the action enum, `checkShape`, tab
   resolution, the screenshot cache, per-tab `RefTable`s, `checkUploadFiles`,
   `ForAgent`, `Refusal`, `closeTab`, `removeFromStrip`, `browserStripWithout`).

@@ -30,6 +30,13 @@ import (
 // than degrading auto-mode silently in production.
 const decisionStateBudgetBytes = 96_000
 
+// imageStateAllowanceBytes is what a request that carries an image takes from its
+// own state budget. The image is not measured by the byte budget: it costs input
+// tokens, not state bytes. A 1280x800 PNG costs about 3,000 tokens, which at about
+// 3 bytes per token is the 9,000 bytes reserved here, so an image-carrying caller
+// subtracts this from its budget and keeps the rest for the state.
+const imageStateAllowanceBytes = 9_000
+
 // statePreviewBytes is the per-field preview size projection aims for.
 //
 // Projection retries at progressively smaller previews (see prepareDecisionState)

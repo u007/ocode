@@ -148,6 +148,9 @@ type Server struct {
 	browseProxyLn   net.Listener
 	browseProxyPort int
 	browseProxyHS   *http.Server
+	// tabOrigins hands out the per-tab root-mounted origins (browse_tab_origin.go).
+	// Nil until StartBrowse wires it; the tab-origin endpoint answers 503 before.
+	tabOrigins *tabOrigins
 	// htrNotice is written at boot and then, from background goroutines owned by
 	// the shared HTR daemon, for the lifetime of the server. Guarded by
 	// htrNoticeMu — see SetHTRNotice.
@@ -275,6 +278,7 @@ func (s *Server) registerRoutes() {
 	// header (see healthProbeCmd's doc). Every other server requires the
 	// same auth as any other route.
 	s.mux.HandleFunc("GET /api/health", s.healthMiddleware(s.handleHealth))
+	s.mux.HandleFunc("POST /api/browse/tab-origin", s.authMiddleware(s.handleBrowseTabOrigin))
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
 	s.mux.HandleFunc("GET /api/chat/messages", s.authMiddleware(s.handleSessionMessages))
@@ -490,7 +494,7 @@ func (s *Server) registerRoutes() {
 	// methods and proxies to the remote server. ServeMux matches this more
 	// specific pattern ahead of the generic /api/ handlers by specificity,
 	// not registration order.
-	s.mux.HandleFunc("/api/remote/{host}/api/{rest...}", s.authMiddleware(s.handler.HandleRemoteProxy))
+	s.mux.HandleFunc("/api/remote/{host}/api/{rest...}", s.authMiddleware(s.handleRemoteAPI))
 	// Remote host lifecycle (local server, never proxied): status reports what
 	// the registry knows without connecting; connect brings the host up;
 	// restart kills and restarts the host's server. Registered next to the
@@ -1018,7 +1022,9 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	})
 	// The browser agent tool drives the Chrome of the machine running the
 	// session. On a remote-mode host that is the host's own Chrome: a remote
-	// project's session runs there, and its tabs are reached headless.
+	// project's session runs there, and its tabs are reached headless. StartBrowse
+	// replaces these with the client's browser (wireRemoteHTRSurfaces) when the
+	// host has an htrcli token to reach it with.
 	s.handler.browseSurfaces = browseAgentSurfaces{bs: bs}
 }
 
@@ -1264,6 +1270,14 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	// Register endpoints before serving so a startup wiring mistake surfaces
 	// synchronously instead of as a 404 at first panel open.
 	srv.EnableBrowse(bBase, bs)
+	srv.enableTabOrigins(browseProxyBindHost(spaOrigin), newTabPortStoreAt(filepath.Join(dataDir, "browse", "tab-ports.json")))
+	if srv.remoteMode {
+		var htrToken string
+		if opts != nil {
+			htrToken = browserConfigFromBrowseOptions(opts).HTRToken
+		}
+		srv.wireRemoteHTRSurfaces(htrToken)
+	}
 
 	// Second listener: the browse proxy. This serves the browse-proxy routes
 	// (/b/, /__ocode_capture.js, /api/remote/{host}/browse/...) on its OWN
@@ -1271,10 +1285,7 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	// It binds the same host as the main server so a direct LAN client can
 	// reach it; over Tailscale the phone reaches it via the separate HTTPS
 	// mount (tailscale serve --https=<proxyHTTPSPort>).
-	proxyHost := "127.0.0.1"
-	if u, err := url.Parse(spaOrigin); err == nil && u.Hostname() != "" {
-		proxyHost = u.Hostname()
-	}
+	proxyHost := browseProxyBindHost(spaOrigin)
 	proxyLn, err := net.Listen("tcp", net.JoinHostPort(proxyHost, "0"))
 	if err != nil {
 		return fmt.Errorf("browse proxy listen: %w", err)
@@ -1596,7 +1607,7 @@ func (s *Server) handleBrowseGrant(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	grant := s.browse.MintGrant(req.StateKey, requestOrigin(r))
+	grant := s.mintBrowseGrant(r, req.StateKey)
 	writeJSON(w, http.StatusOK, map[string]string{"grant": grant})
 }
 
@@ -1633,6 +1644,7 @@ func (s *Server) handleBrowseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.browse.Revoke(req.StateKey)
+	s.revokeTabOrigins(r, req.StateKey)
 	// A closed browse panel must lose its vault access: the surface id is the
 	// browse state key.
 	if s.handler != nil {
@@ -2358,6 +2370,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			log.Printf("server: shutdown browse cdp manager: %v", err)
 		}
 	}
+	s.dropLiveTabOrigins()
 	if s.procSup != nil {
 		if err := s.procSup.Shutdown(ctx); err != nil {
 			log.Printf("server: shutdown process supervisor: %v", err)

@@ -19,15 +19,26 @@ var captureJS []byte
 // The capture script is fetched by an absolute root-relative path, so a
 // non-root mount MUST prefix it or the browser fetches the WRONG origin's
 // capture bundle. See basepath.go.
-func injectCapture(html []byte, stateKey, spaOrigin string, basePath string) []byte {
+func injectCapture(html []byte, t target, spaOrigin string, basePath string) []byte {
 	// json.Marshal of a plain string cannot fail; err intentionally not logged.
-	sk, _ := json.Marshal(stateKey)
+	sk, _ := json.Marshal(t.StateKey)
 	so, _ := json.Marshal(spaOrigin)
 	var b strings.Builder
 	b.WriteString("<script>window.__OCODE_BROWSE__={stateKey:")
 	b.Write(sk)
 	b.WriteString(",spaOrigin:")
 	b.Write(so)
+	if t.RootMounted {
+		// Root mode: the script needs the binding to tell same-upstream URLs
+		// (routable by path) from foreign ones. Prefix mode omits these.
+		bScheme, bHost := t.binding()
+		sc, _ := json.Marshal(bScheme)
+		sh, _ := json.Marshal(bHost)
+		b.WriteString(",rootMode:true,scheme:")
+		b.Write(sc)
+		b.WriteString(",host:")
+		b.Write(sh)
+	}
 	b.WriteString("};</script>")
 	b.WriteString(`<script src="` + withBasePath(basePath, "/__ocode_capture.js") + `"></script>`)
 	snippet := []byte(b.String())

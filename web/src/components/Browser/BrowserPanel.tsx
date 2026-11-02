@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, getBrowseStreamViaMain, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS } from "../../api/client";
+import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, getBrowseStreamViaMain, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS, openBrowseTabOrigin } from "../../api/client";
 import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
 import { useBrowserMessages } from "./useBrowserMessages";
+import { browseOriginOf } from "./browseOrigin";
+import { REMOTE_STALL_AFTER_MS } from "../../hooks/useRemoteHostStatus";
 import { ChromeViewport } from "./ChromeViewport";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { openExternalURL } from "../../lib/externalLinks";
@@ -37,10 +39,18 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   const [everLoaded, setEverLoaded] = useState(false);
   const [htrNotice, setHtrNotice] = useState("");
   const loadGeneration = useRef(0);
+  // Origin of the document the iframe was last pointed at: the postMessage gate
+  // and the restore-scroll target. Set just before iframe.src is assigned.
+  const pageOriginRef = useRef<string | null>(null);
+  // A scheduled retry while a remote host is still connecting (503 Retry-After),
+  // and the navigation that started connecting, for the remote stall guard.
+  const connectRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connecting = useRef<{ url: string; since: number } | null>(null);
 
   useEffect(() => {
     // Drop the previous origin first: a base from another host must never load.
     setBase(null);
+    pageOriginRef.current = null;
     if (host === null) {
       actions.setError(stateKey, "This tab's project is not in the project list, so its host is unknown; the page was not loaded.");
       return;
@@ -62,7 +72,7 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
     };
   }, [actions, host, stateKey]);
 
-  useBrowserMessages(stateKey, base, {
+  useBrowserMessages(stateKey, base, { originRef: pageOriginRef, frameRef: iframeRef }, {
     pushConsole: actions.pushConsole,
     pushNetwork: actions.pushNetwork,
     // Local-mode page title (capture.js observer): tab strip only, applied
@@ -105,29 +115,68 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
     return s.mode ?? "chrome";
   })();
 
-  // Every top-level iframe load carries a fresh grant. Besides authenticating
-  // the browse origin, this is the one-use proof that a local/private
-  // document was initiated by the SPA rather than by an external page link.
+  // Every top-level iframe load goes through the tab's own root-mounted origin
+  // (openBrowseTabOrigin), so the page sees its upstream path as location.pathname.
+  // The server's answer carries a grant in the URL. A client that cannot use a
+  // root-mounted origin (the server answers 409) loads in prefix mode instead,
+  // with a fresh grant per load: the one-use proof that a local/private document
+  // was initiated by the SPA rather than by an external page link.
   const loadInto = useCallback(async (iframe: HTMLIFrameElement, url: string) => {
     if (!base || !url || host === null) return;
     const generation = ++loadGeneration.current;
+    if (connectRetryTimer.current !== null) {
+      clearTimeout(connectRetryTimer.current);
+      connectRetryTimer.current = null;
+    }
     try {
-      // A remote host's browse listener moves when `ocode serve --remote`
-      // restarts there, so its origin is re-read for every load (getBrowseBase
-      // caches only this machine's). A changed origin also re-keys the
-      // postMessage gate in useBrowserMessages through `base`.
+      const tab = await openBrowseTabOrigin(stateKey, url, host);
+      if (generation !== loadGeneration.current) return;
+      if (tab.kind === "connecting") {
+        // The remote host is still connecting. Retry once after the server's
+        // Retry-After; past the remote stall guard (the bound the host status
+        // uses) stop with a visible error the user can reload from.
+        const since = connecting.current && connecting.current.url === url ? connecting.current.since : Date.now();
+        connecting.current = { url, since };
+        if (Date.now() - since >= REMOTE_STALL_AFTER_MS) {
+          connecting.current = null;
+          actions.setError(stateKey, `Remote host ${host} is still connecting. Reload to try again.`);
+          return;
+        }
+        connectRetryTimer.current = setTimeout(() => {
+          connectRetryTimer.current = null;
+          if (iframeRef.current === iframe) void loadInto(iframe, url);
+        }, tab.retryAfterMs);
+        return;
+      }
+      connecting.current = null;
+      if (tab.kind === "tab") {
+        pageOriginRef.current = tab.origin;
+        iframe.src = tab.url;
+        return;
+      }
+      // Prefix mode. A remote host's browse listener moves when `ocode serve
+      // --remote` restarts there, so its origin is re-read for every load
+      // (getBrowseBase caches only this machine's). A changed origin also
+      // re-keys the `base` the chrome viewport and the mount read use.
       const origin = host ? await getBrowseBase(host) : base;
       if (generation !== loadGeneration.current) return;
       if (origin !== base) setBase(origin);
       const grant = await mintBrowseGrant(stateKey, host);
       if (generation !== loadGeneration.current) return;
+      pageOriginRef.current = browseOriginOf(origin);
       iframe.src = browseSrc(origin, grant, stateKey, url);
     } catch (e) {
       if (generation !== loadGeneration.current) return;
+      connecting.current = null;
       console.error("browse: load failed:", e);
       actions.setError(stateKey, e instanceof Error ? e.message : String(e));
     }
   }, [actions, base, host, stateKey]);
+
+  // A scheduled connect retry must not outlive the panel.
+  useEffect(() => () => {
+    if (connectRetryTimer.current !== null) clearTimeout(connectRetryTimer.current);
+  }, []);
 
   // Local-mode scroll restore: after each (re)load, send the persisted
   // offset for this URL into the page (capture.js applies it). Retried a few
@@ -154,15 +203,10 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
         clearInterval(timer);
         return;
       }
-      try {
-        const origin = new URL(base).origin;
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: "ocode:browse:restore-scroll", stateKey, y },
-          origin,
-        );
-      } catch {
-        clearInterval(timer);
-      }
+      // Target origin is the current page's (never the SPA's or another tab's).
+      const origin = pageOriginRef.current;
+      const frame = iframeRef.current ? iframeRef.current.contentWindow : null;
+      if (origin && frame) frame.postMessage({ type: "ocode:browse:restore-scroll", stateKey, y }, origin);
     }, 500);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -121,7 +121,31 @@ func (t WebFetchTool) Execute(args json.RawMessage) (string, error) {
 		return t.stripHTML(string(body)), nil
 	}
 
-	return truncateFetched(markdown), nil
+	result := truncateFetched(markdown)
+	if strings.Contains(contentType, "text/html") && isJSShell(markdown, body) {
+		result += jsShellHint
+	}
+	return result, nil
+}
+
+// jsShellHint tells the model that webfetch only saw the server HTML of a page
+// that a browser would render with JavaScript, and which tool to use instead.
+const jsShellHint = "\n\n[ocode] This page renders with JavaScript; webfetch only sees the server HTML. Use browser_run for a multi-step task or browser (snapshot/text) to read it."
+
+// jsShellTextLimit is the converted-text size, in bytes, under which an HTML
+// page counts as empty.
+const jsShellTextLimit = 200
+
+// isJSShell reports whether an HTML page is a client-rendered shell: its
+// converted text is under jsShellTextLimit and its raw body carries script
+// markup (<script or <noscript, case-insensitive). Both must hold, so a
+// content-rich page never gets the hint, however much script it loads.
+func isJSShell(markdown string, body []byte) bool {
+	if len(strings.TrimSpace(markdown)) >= jsShellTextLimit {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "<script") || strings.Contains(lower, "<noscript")
 }
 
 // maxFetchedBytes caps fetched content returned to the model. Cuts land on a

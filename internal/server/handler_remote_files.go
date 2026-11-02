@@ -425,7 +425,7 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	rw, err := h.remoteWorkFor(host, root)
+	rw, err := h.remoteWorkForFileRead(host, root)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -470,7 +470,7 @@ func (h *Handler) remoteFileRaw(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	rw, err := h.remoteWorkFor(host, root)
+	rw, err := h.remoteWorkForFileRead(host, root)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

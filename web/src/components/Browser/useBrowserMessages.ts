@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, type MutableRefObject, type RefObject } from "react";
 import type { NetworkEvent, StateKey } from "../../lib/browserStore";
+import { isTrustedBrowseMessage } from "./browseOrigin";
 
 interface Handlers {
   pushConsole: (key: StateKey, ev: { level: string; text: string; ts: number }) => void;
@@ -10,23 +11,27 @@ interface Handlers {
   onScroll?: (key: StateKey, y: number, url: string) => void;
 }
 
-// Accepts messages ONLY from the browse origin. Everything else — including the
-// SPA's own origin and any other frame — is dropped. "ocode:browse:nav" is
-// intentionally ignored: the address bar is driven by server nav events, so a
-// page-reported URL is never trusted for display.
-export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, h: Handlers) {
+/** Where a panel's messages may come from: the origin of the document it last
+ *  pointed the iframe at (the tab's own origin, or the prefix base), and the
+ *  iframe itself. Refs, so the listener reads the current page on every event. */
+export interface BrowseMessageSource {
+  originRef: MutableRefObject<string | null>;
+  frameRef: RefObject<HTMLIFrameElement | null>;
+}
+
+// Accepts messages ONLY from the current page: its origin AND the iframe's own
+// window (isTrustedBrowseMessage). Everything else — the SPA's own origin, other
+// tabs' origins, other frames — is dropped. "ocode:browse:nav" is intentionally
+// ignored: the address bar is driven by server nav events, so a page-reported URL
+// is never trusted for display.
+export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, source: BrowseMessageSource, h: Handlers) {
   const { pushConsole, pushNetwork, onTitle, onScroll } = h;
+  const { originRef, frameRef } = source;
   useEffect(() => {
     if (!browseBase) return;
-    let origin: string;
-    try {
-      origin = new URL(browseBase).origin;
-    } catch (e) {
-      console.error("browse: malformed browseBase", browseBase, e);
-      return;
-    }
     function onMessage(e: MessageEvent) {
-      if (e.origin !== origin) return; // hard origin gate
+      const frame = frameRef.current ? frameRef.current.contentWindow : null;
+      if (!isTrustedBrowseMessage(e, { origin: originRef.current, frame })) return; // hard origin + source gate
       const d = e.data;
       if (!d || typeof d !== "object") return;
       if (d.stateKey !== stateKey) return;
@@ -72,5 +77,5 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, pushConsole, pushNetwork, onTitle, onScroll]);
+  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, onTitle, onScroll]);
 }

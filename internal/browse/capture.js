@@ -22,6 +22,18 @@
   var spaOrigin = cfg.spaOrigin || "";
   if (!spaOrigin) return; // nothing to report to; do not touch the page.
 
+  // Root mode: the document is served from its own per-tab origin, mounted at
+  // the upstream root, so location.pathname IS the upstream path and there is
+  // no /b/ route. The server sets rootMode and the bound scheme/host only for
+  // that origin (tab_origin.go); prefix mode leaves them unset.
+  var rootMode = cfg.rootMode === true;
+  var upScheme = String(cfg.scheme || "");
+  var upHost = String(cfg.host || "");
+  // sameUpstream reports whether a URL's scheme and host are the bound upstream.
+  function sameUpstream(scheme, host) {
+    return scheme === upScheme && host.toLowerCase() === upHost.toLowerCase();
+  }
+
   function post(msg) {
     msg.stateKey = stateKey;
     try {
@@ -44,6 +56,7 @@
   // pathname carries it raw (e.g. "side:chat:abc"). Encoding it here would make
   // the already-routed check and the marker lookup miss, double-wrapping URLs.
   function mountBase() {
+    if (rootMode) return "";
     var marker = "/b/" + stateKey;
     var i = location.pathname.indexOf(marker);
     if (i === -1) {
@@ -56,6 +69,8 @@
 
   // --- /b/ base of the current document, e.g. "/b/tab:abc" ---
   function browseBase() {
+    // Root mode has no /b/ route: the origin root is the route.
+    if (rootMode) return "";
     // location.pathname === {prefix}/b/{stateKey}/{scheme}/{host}/{path...}
     return mountBase() + "/b/" + stateKey;
   }
@@ -65,10 +80,26 @@
   // browser would otherwise resolve them against the browse origin ROOT and
   // drop out of the stateless route.
   function routeBase() {
+    if (rootMode) return "";
     // {prefix}/b/{stateKey}/{scheme}/{host}
     var rest = location.pathname.slice(mountBase().length);
     var m = rest.match(/^(\/b\/[^/]+\/[^/]+\/[^/]+)/);
     return m ? mountBase() + m[1] : browseBase();
+  }
+
+  // Root mode: a root-relative URL already resolves on the bound upstream. A
+  // same-upstream absolute URL needs only its path. Any other upstream goes
+  // through the reserved /__ocode/b/{scheme}/{host} route on this origin, where
+  // the proxy applies the SSRF guard, the local-mode gate and the cookie jar. A
+  // URL already on this origin is the proxy itself and is returned as-is.
+  function rerouteRoot(raw, rootRel) {
+    if (rootRel) return raw;
+    var u;
+    try { u = new URL(raw); } catch (e) { return raw; }
+    if (u.origin === location.origin) return raw;
+    var scheme = u.protocol.replace(":", "");
+    if (sameUpstream(scheme, u.host)) return location.origin + u.pathname + u.search + u.hash;
+    return location.origin + "/__ocode/b/" + scheme + "/" + u.host + u.pathname + u.search + u.hash;
   }
 
   // Map an absolute or root-relative URL to /b/{stateKey}/{scheme}/{host}/{path...}.
@@ -83,6 +114,7 @@
     if (/^\/\//.test(raw)) raw = (location.protocol === "https:" ? "https:" : "http:") + raw; // protocol-relative
     var rootRel = /^\/(?!\/)/.test(raw);
     if (!rootRel && !/^https?:\/\//i.test(raw)) return raw; // bare relative — leave as-is.
+    if (rootMode) return rerouteRoot(raw, rootRel);
     var base = browseBase();
     if (raw.indexOf(location.origin + base + "/") === 0) return raw;
     if (rootRel) {
@@ -191,7 +223,18 @@
         try {
           var u = new URL(url);
           var scheme = u.protocol === "wss:" ? "https" : "http";
-          routed = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + browseBase() + "/" + scheme + "/" + u.host + u.pathname + u.search;
+          var wsProto = location.protocol === "https:" ? "wss://" : "ws://";
+          if (rootMode) {
+            // Root mode: a same-upstream socket is on this origin's root; any
+            // other upstream goes through the reserved route (rerouteRoot). A
+            // socket already on this origin stays as typed.
+            if (u.host !== location.host) {
+              var routeRoot = sameUpstream(scheme, u.host) ? "" : "/__ocode/b/" + scheme + "/" + u.host;
+              routed = wsProto + location.host + routeRoot + u.pathname + u.search;
+            }
+          } else {
+            routed = wsProto + location.host + browseBase() + "/" + scheme + "/" + u.host + u.pathname + u.search;
+          }
         } catch (e) { routed = url; }
       }
       return protocols === undefined ? new OrigWS(routed) : new OrigWS(routed, protocols);
@@ -260,6 +303,8 @@
   // the address bar. originalURL() reconstructs the site URL from the /b/
   // route so the SPA can drop titles that don't match the current surface.
   function originalURL() {
+    // Root mode: the document path already is the upstream path.
+    if (rootMode) return upScheme + "://" + upHost + location.pathname + location.search + location.hash;
     // location.pathname === {prefix}/b/{stateKey}/{scheme}/{host}/{path...}
     // The {prefix}/b/{stateKey} part is stripped so the scheme/host/path can
     // be read back out; under a prefixed mount the leading "/b/..." anchor

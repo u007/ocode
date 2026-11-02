@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -63,6 +64,39 @@ func (h *Handler) remoteProjectEntry(host, path string) (projects.Project, bool)
 //
 // Mutation callers must use remoteMutationWorkFor instead, which additionally
 // re-checks the canonical directory (see below).
+// remoteHostTarget validates that host names a saved remote project host and
+// returns the parsed target with its saved port filled in. Shared by
+// remoteWorkFor and remoteWorkForFileRead so the host-trust and port resolution
+// logic exists in one place.
+func (h *Handler) remoteHostTarget(host string) (remote.Target, error) {
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		return remote.Target{}, fmt.Errorf("invalid remote host: %w", err)
+	}
+	hostKnown := false
+	var savedPort int
+	if h.projects != nil {
+		for _, proj := range h.projects.List() {
+			if proj.Host == target.String() {
+				hostKnown = true
+				if savedPort == 0 && proj.RemotePort > 0 {
+					savedPort = proj.RemotePort
+				}
+			}
+		}
+	}
+	if !hostKnown {
+		return remote.Target{}, fmt.Errorf("host/project_path is not a remote project registered with this server")
+	}
+	if target.Port == 0 && savedPort > 0 {
+		target.Port = savedPort
+	}
+	if err := remote.ValidateTargetOS(target); err != nil {
+		return remote.Target{}, err
+	}
+	return target, nil
+}
+
 func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 	if host == "" {
 		return remoteWork{}, fmt.Errorf("host is required")
@@ -70,29 +104,46 @@ func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 	if path == "" {
 		return remoteWork{}, fmt.Errorf("path is required")
 	}
-	target, err := remote.ParseTarget(host)
+	target, err := h.remoteHostTarget(host)
 	if err != nil {
-		return remoteWork{}, fmt.Errorf("invalid remote host: %w", err)
-	}
-	// A saved entry may carry an explicit port; honor it when the query's
-	// host string did not include one.
-	if entry, ok := h.remoteProjectEntry(target.String(), path); ok {
-		if target.Port == 0 && entry.RemotePort > 0 {
-			target.Port = entry.RemotePort
-		}
-	} else if anchor, ok := h.remoteTreeRoot(target.String(), path); ok {
-		if entry, ok := h.remoteProjectEntry(target.String(), anchor); ok {
-			if target.Port == 0 && entry.RemotePort > 0 {
-				target.Port = entry.RemotePort
-			}
-		}
-	} else {
-		return remoteWork{}, fmt.Errorf("host/project_path is not a remote project registered with this server")
-	}
-	if err := remote.ValidateTargetOS(target); err != nil {
 		return remoteWork{}, err
 	}
+	// Admission: path must name a registered project or sit under one.
+	if _, ok := h.remoteProjectEntry(target.String(), path); !ok {
+		if _, ok := h.remoteTreeRoot(target.String(), path); !ok {
+			return remoteWork{}, fmt.Errorf("host/project_path is not a remote project registered with this server")
+		}
+	}
 	return remoteWork{Target: target, Path: path}, nil
+}
+
+func (h *Handler) remoteWorkForFileRead(host, root string) (remoteWork, error) {
+	if host == "" {
+		return remoteWork{}, fmt.Errorf("host is required")
+	}
+	if root == "" {
+		return remoteWork{}, fmt.Errorf("path is required")
+	}
+	if containsDotDot(root) {
+		return remoteWork{}, fmt.Errorf("path is outside the project root")
+	}
+	target, err := h.remoteHostTarget(host)
+	if err != nil {
+		return remoteWork{}, err
+	}
+	// Registered project or a path under one: keep existing behaviour.
+	if _, ok := h.remoteProjectEntry(target.String(), root); ok {
+		return remoteWork{Target: target, Path: root}, nil
+	}
+	if _, ok := h.remoteTreeRoot(target.String(), root); ok {
+		return remoteWork{Target: target, Path: root}, nil
+	}
+	// Out-of-project root: allow only scratch/temp locations so an arbitrary
+	// absolute path cannot be used to read the whole host.
+	if !isAllowedScratchRoot(root) {
+		return remoteWork{}, fmt.Errorf("path is outside the project root")
+	}
+	return remoteWork{Target: target, Path: root}, nil
 }
 
 // remoteMutationWorkFor is remoteWorkFor for an endpoint that WRITES on the
@@ -101,6 +152,28 @@ func (h *Handler) remoteWorkFor(host, path string) (remoteWork, error) {
 // sit inside that project: otherwise a symlinked subdirectory would become a
 // mutation anchor reaching into another tree — a write the read path's
 // documented lexical tolerance must not be able to escalate into.
+// isAllowedScratchRoot reports whether root is a scratch/temporary directory
+// on the remote host. Only such roots may be used as an out-of-project
+// containment root for remote file reads (e.g. the agent's /tmp/claude-*
+// scratchpad). Broader out-of-project access on a remote host goes through
+// that host's own grant endpoints, not the SSH transport.
+func isAllowedScratchRoot(root string) bool {
+	p := filepath.ToSlash(strings.TrimSpace(root))
+	safePrefixes := []string{"/tmp/", "/var/tmp/", "/var/folders/"}
+	for _, pref := range safePrefixes {
+		if p == strings.TrimRight(pref, "/") || strings.HasPrefix(p, pref) {
+			return true
+		}
+	}
+	if td := os.TempDir(); td != "" {
+		tds := filepath.ToSlash(td)
+		if p == tds || strings.HasPrefix(p, tds+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) remoteMutationWorkFor(ctx context.Context, host, path string) (remoteWork, error) {
 	rw, err := h.remoteWorkFor(host, path)
 	if err != nil {

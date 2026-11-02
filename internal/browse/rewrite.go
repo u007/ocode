@@ -59,6 +59,11 @@ func resolutionBase(t target, base string) *url.URL {
 // path /b/{stateKey}/{scheme}/{host}/{path}?{query}. Untouched schemes and
 // anchors pass through verbatim.
 //
+// A root-mounted target (tab_origin.go) emits a path on its own origin instead:
+// the binding's URLs are plain paths, and any other upstream goes through the
+// reserved /__ocode/b/{scheme}/{host}/{path} route. Both keep the proxy in the
+// path. An absolute upstream URL would make the browser load it directly.
+//
 // basePath is the mount prefix the origin is served under ("" = root-mounted).
 // The emitted path is root-relative, so a non-root mount MUST prefix it —
 // otherwise the browser resolves it against the proxy root and lands on the
@@ -80,9 +85,17 @@ func mapURL(raw string, t target, base string, basePath string) string {
 	if path == "" {
 		path = "/"
 	}
-	// DNS is case-insensitive; lowercase the host so route parsing round-trips
-	// consistently (the scheme is already lowercased by url.Parse).
-	out := withBasePath(basePath, fmt.Sprintf("/b/%s/%s/%s%s", t.StateKey, abs.Scheme, strings.ToLower(abs.Host), path))
+	var out string
+	if t.RootMounted {
+		// The origin serves its binding at its root, so a binding URL is just
+		// its path. Any other upstream takes the reserved route, which proxies it.
+		bScheme, bHost := t.binding()
+		out = rootPathFor(bScheme, bHost, abs.Scheme, abs.Host, path)
+	} else {
+		// DNS is case-insensitive; lowercase the host so route parsing round-trips
+		// consistently (the scheme is already lowercased by url.Parse).
+		out = withBasePath(basePath, fmt.Sprintf("/b/%s/%s/%s%s", t.StateKey, abs.Scheme, strings.ToLower(abs.Host), path))
+	}
 	if abs.RawQuery != "" {
 		out += "?" + abs.RawQuery
 	}

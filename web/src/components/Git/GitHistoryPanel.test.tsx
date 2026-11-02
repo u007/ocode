@@ -18,6 +18,7 @@ vi.mock("@/lib/clipboard", () => ({ copyTextToClipboard: mocks.copyTextToClipboa
 import GitHistoryPanel from "./GitHistoryPanel";
 
 const SCOPE_KEY = "ocode.ui.git-history-scope.v1";
+const SPLIT_KEY = "ocode.ui.git-history-split.v1";
 
 const status: GitStatus = {
   branch: "main",
@@ -358,5 +359,53 @@ describe("GitHistoryPanel", () => {
     mocks.gitLog.mockResolvedValue([]);
     renderPanel();
     await screen.findByText("No commits");
+  });
+
+  describe("split persistence", () => {
+    async function selectFirstCommit() {
+      await screen.findByText("subject h1aaaaaaaa");
+      fireEvent.click(rowFor("h1aaaaaaaa"));
+      await screen.findByTestId("git-history-detail");
+    }
+
+    it("defaults the detail pane to 40% of the split height", async () => {
+      mocks.gitShow.mockResolvedValue([{ path: "src/changed.ts", status: "modified", patch: "" }]);
+      renderPanel();
+      await selectFirstCommit();
+
+      const detail = screen.getByTestId("git-history-detail");
+      expect(detail).toHaveStyle({ height: "40%" });
+    });
+
+    it("restores a persisted split ratio from localStorage", async () => {
+      window.localStorage.setItem(SPLIT_KEY, "0.8");
+      mocks.gitShow.mockResolvedValue([{ path: "src/changed.ts", status: "modified", patch: "" }]);
+      renderPanel();
+      await selectFirstCommit();
+
+      const detail = screen.getByTestId("git-history-detail");
+      // ratio 0.8 -> detail takes 1 - 0.8 = 0.2 = 20%.
+      expect(detail).toHaveStyle({ height: "20%" });
+    });
+
+    it("clamps a persisted ratio below minRatio to the default", async () => {
+      window.localStorage.setItem(SPLIT_KEY, "0.05");
+      mocks.gitShow.mockResolvedValue([{ path: "src/changed.ts", status: "modified", patch: "" }]);
+      renderPanel();
+      await selectFirstCommit();
+
+      const detail = screen.getByTestId("git-history-detail");
+      expect(detail).toHaveStyle({ height: "40%" });
+    });
+
+    it("clamps a persisted ratio above maxRatio to the default", async () => {
+      window.localStorage.setItem(SPLIT_KEY, "0.95");
+      mocks.gitShow.mockResolvedValue([{ path: "src/changed.ts", status: "modified", patch: "" }]);
+      renderPanel();
+      await selectFirstCommit();
+
+      const detail = screen.getByTestId("git-history-detail");
+      expect(detail).toHaveStyle({ height: "40%" });
+    });
   });
 });

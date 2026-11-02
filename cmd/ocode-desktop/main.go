@@ -301,10 +301,15 @@ func main() {
 				if html, ok := pagePrintHTML(message, origin, dw.host, dw.clipNonce); ok {
 					openPrintWindow(html)
 				}
+				if req, ok := pageSaveFileRequest(message, origin, dw.host, dw.clipNonce); ok {
+					openSaveFile(window, req)
+				}
 			} else if strings.HasPrefix(message, msgClipboardWrite) {
 				log.Printf("ocode-desktop: refused clipboard write: window not ready")
 			} else if strings.HasPrefix(message, msgPrintDocument) {
 				log.Printf("ocode-desktop: refused print request: window not ready")
+			} else if strings.HasPrefix(message, msgSaveFile) {
+				log.Printf("ocode-desktop: refused save file: window not ready")
 			}
 		},
 		SingleInstance: &application.SingleInstanceOptions{

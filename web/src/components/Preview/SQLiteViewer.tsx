@@ -575,7 +575,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
 
   const exportCsv = () => {
     if (!table || !selected) return;
-    downloadCsv(csvFilename(selected), resultToCsv(table.result));
+    void downloadCsv(csvFilename(selected), resultToCsv(table.result));
     setNotice(`Exported ${table.result.row_count} row(s) to CSV.`);
   };
 

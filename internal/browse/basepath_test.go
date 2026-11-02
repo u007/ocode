@@ -76,7 +76,7 @@ func TestSessionCookieCoversTheWholeMount(t *testing.T) {
 // prefix or the browser fetches the WRONG origin's bundle.
 func TestInjectedCaptureScriptIsPrefixed(t *testing.T) {
 	in := []byte(`<!doctype html><html><head><title>x</title></head><body>hi</body></html>`)
-	out := string(injectCapture(in, "tab:abc", "http://127.0.0.1:5000", mountPrefix))
+	out := string(injectCapture(in, target{StateKey: "tab:abc"}, "http://127.0.0.1:5000", mountPrefix))
 
 	want := `src="` + mountPrefix + `/__ocode_capture.js"`
 	if !strings.Contains(out, want) {

@@ -112,6 +112,9 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 			req.URL.Path = t.Path
 			req.URL.RawQuery = t.RawQuery
 			req.Host = upstream.Host
+			if t.Foreign {
+				trimForeignReferer(req.Header, t)
+			}
 			// Site cookies come from the per-stateKey server-side jar; this
 			// also drops the browser's Cookie header (the browse session
 			// cookie must never go upstream). See cookiejar.go.
@@ -134,36 +137,38 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 			// viewport and the chrome target will navigate there. Not applicable
 			// in remote-workspace mode (Server.remoteMode) — there is no chrome
 			// to hand off to, so every redirect target stays in this pipeline.
-			if isDocumentRequest(r) && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-				loc := resp.Header.Get("Location")
-				if loc != "" {
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				if loc := resp.Header.Get("Location"); loc != "" {
 					if parsed, err := url.Parse(loc); err == nil {
 						base := &url.URL{Scheme: t.Scheme, Host: t.Host, Path: t.Path}
 						resolved := base.ResolveReference(parsed)
-						if !s.remoteMode && resolved.Host != "" && !hostIsLiteralPrivate(resolved.Host) {
-							// Hand off to chrome.
-							s.emitNav(NavEvent{StateKey: t.StateKey, URL: resolved.String(), Status: 0, Mode: "chrome"})
-							// Drain and close original body.
-							if resp.Body != nil {
-								_, _ = io.Copy(io.Discard, resp.Body)
-								_ = resp.Body.Close()
+						if t.RootMounted {
+							// A root-mounted origin leaves for any upstream but its
+							// binding. A document goes to that upstream's own tab
+							// origin through the SPA, so it is handed off, not
+							// followed. A subresource is rewritten onto the reserved
+							// route below, so the browser cannot fetch the raw
+							// absolute URL. Prefix mode leaves subresource redirects
+							// alone.
+							bScheme, bHost := t.binding()
+							foreign := resolved.Scheme != bScheme || !strings.EqualFold(resolved.Host, bHost)
+							if foreign && isDocumentRequest(r) {
+								s.handOffNav(resp, NavEvent{StateKey: t.StateKey, URL: resolved.String(), Status: 0, Mode: foreignNavMode(hostIsLiteralPrivate(resolved.Host))})
+								return nil
 							}
-							resp.Body = io.NopCloser(bytes.NewReader(nil))
-							resp.StatusCode = http.StatusNoContent
-							resp.Status = http.StatusText(http.StatusNoContent)
-							resp.Header.Del("Location")
-							resp.Header.Del("Content-Length")
-							resp.Header.Del("Content-Type")
-							resp.Header.Del("Content-Encoding")
-							resp.ContentLength = 0
-							return nil
+							resp.Header.Set("Location", mapURL(resolved.String(), t, "", basePath))
+						} else if isDocumentRequest(r) {
+							if !s.remoteMode && resolved.Host != "" && !hostIsLiteralPrivate(resolved.Host) {
+								s.handOffNav(resp, NavEvent{StateKey: t.StateKey, URL: resolved.String(), Status: 0, Mode: "chrome"})
+								return nil
+							}
+							// Stay in this pipeline: rewrite Location into the /b/ route so
+							// the iframe's redirect follow re-enters the proxy (and its SSRF
+							// guard/header stripping) instead of navigating the raw upstream
+							// URL directly. mapURL's /b/... output is an absolute-path
+							// reference, which Location accepts (RFC 9110 §10.2.2).
+							resp.Header.Set("Location", mapURL(resolved.String(), t, "", basePath))
 						}
-						// Stay in this pipeline: rewrite Location into the /b/ route so
-						// the iframe's redirect follow re-enters the proxy (and its SSRF
-						// guard/header stripping) instead of navigating the raw upstream
-						// URL directly. mapURL's /b/... output is an absolute-path
-						// reference, which Location accepts (RFC 9110 §10.2.2).
-						resp.Header.Set("Location", mapURL(resolved.String(), t, "", basePath))
 					}
 				}
 			}
@@ -196,7 +201,10 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 			if err != nil {
 				return err
 			}
-			if term != nil {
+			// A foreign target is never a document here (serveBoundTarget hands
+			// those off), so its HTML is subresource data and must not move the
+			// address bar.
+			if term != nil && !t.Foreign {
 				s.emitNav(*term)
 			}
 			return nil
@@ -245,6 +253,42 @@ func (s *Server) handleLocal(w http.ResponseWriter, r *http.Request, t target, b
 	proxy.ServeHTTP(w, r)
 }
 
+// trimForeignReferer sets the Referer a foreign upstream receives to the
+// binding's origin, which is what strict-origin-when-cross-origin sends for a
+// real cross-site request from the binding. The tab origin's URL and path never
+// reach a third party. A downgrade from https to http sends none, and a request
+// without a Referer gets none. Binding-upstream requests are not trimmed.
+func trimForeignReferer(h http.Header, t target) {
+	if h.Get("Referer") == "" {
+		return
+	}
+	if t.BindScheme == "https" && t.Scheme == "http" {
+		h.Del("Referer")
+		return
+	}
+	h.Set("Referer", t.BindScheme+"://"+t.BindHost+"/")
+}
+
+// handOffNav replaces a 3xx response with a 204 and emits ev, so the SPA performs
+// the navigation rather than the iframe following the redirect. The body and
+// the headers that described the redirect are dropped.
+func (s *Server) handOffNav(resp *http.Response, ev NavEvent) {
+	s.emitNav(ev)
+	// Drain and close original body.
+	if resp.Body != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(nil))
+	resp.StatusCode = http.StatusNoContent
+	resp.Status = http.StatusText(http.StatusNoContent)
+	resp.Header.Del("Location")
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Content-Type")
+	resp.Header.Del("Content-Encoding")
+	resp.ContentLength = 0
+}
+
 // rewriteAndInjectResponse reads the (possibly gzipped) HTML body, rewrites
 // its URLs into the stateless route (root-relative dev-server assets stay on
 // the route), injects the capture script, and rewrites the body +
@@ -284,7 +328,7 @@ func (s *Server) rewriteAndInjectResponse(resp *http.Response, t target, basePat
 		s.log.Printf("browse local: rewriteHTML for %s: %v — serving unrewritten", resp.Request.URL, rerr)
 		injected = raw // fail open to raw HTML rather than blank page
 	}
-	injected = injectCapture(injected, t.StateKey, s.spaOriginFor(t.StateKey), basePath)
+	injected = injectCapture(injected, t, s.spaOriginFor(t.StateKey), basePath)
 
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	// We always emit identity-encoded HTML after injection.

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render as renderView, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render as renderView, screen, waitFor } from "@testing-library/react";
 
 // Print & Download: both reuse an independent Blob snapshot of the PDF bytes
 // (pdf.js may detach the buffer handed to getDocument). Download mints an
-// object URL and clicks an anchor; print hosts the blob in a hidden iframe
-// and calls print() on its window, with popup-tab and download fallbacks.
+// object URL and clicks an anchor; print opens an in-app preview dialog
+// instead of triggering the native OS print dialog.
 
 const mocks = vi.hoisted(() => {
   const renderMock = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
@@ -51,21 +51,14 @@ function stubBlobUrls() {
     urls.push(u);
     return u;
   };
-  (URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = () => {};
-  const restore = () => {
-    const mutable = URL as unknown as { createObjectURL?: unknown; revokeObjectURL?: unknown };
-    delete mutable.createObjectURL;
-    delete mutable.revokeObjectURL;
-    if (nativeCreate) mutable.createObjectURL = nativeCreate;
-    if (nativeRevoke) mutable.revokeObjectURL = nativeRevoke;
+  (URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = (u: string) => {
+    blobs.delete(u);
+    if (nativeRevoke) nativeRevoke(u);
   };
-  return { urls, blobs, restore };
-}
-/** iframe.contentWindow.print is jsdom-unreachable (null window) — the code
- *  catches and opens a tab; capture window.open instead. */
-function stubWindowOpen(result: Window | null) {
-  const open = vi.spyOn(window, "open").mockReturnValue(result as Window);
-  return { open, restore: () => open.mockRestore() };
+  return { urls, blobs, restore: () => {
+    (URL as unknown as { createObjectURL: typeof nativeCreate }).createObjectURL = nativeCreate!;
+    (URL as unknown as { revokeObjectURL: typeof nativeRevoke }).revokeObjectURL = nativeRevoke!;
+  }};
 }
 
 beforeEach(() => {
@@ -95,54 +88,59 @@ describe("PdfViewer print & download", () => {
     restore();
   });
 
-  it("print opens the PDF in a fallback tab on environments without frame print", async () => {
+  it("print opens the PDF in an in-app preview dialog instead of a native print popup", async () => {
     const { urls, restore } = stubBlobUrls();
     const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
     await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
 
-    const appendSpy = vi.spyOn(document.body, "appendChild").mockImplementation((node: Node) => {
-      // Call through so React's real DOM insertions still happen.
-      return HTMLElement.prototype.appendChild.call(document.body, node);
-    });
-    // jsdom's real window.open logs "Not implemented" and returns undefined —
-    // which our code treats as popup-blocked and falls back to download.
-    // Stub it to a "allowed popup" return so exactly one URL gets minted.
-    const openSpy = vi.spyOn(window, "open").mockImplementation((() => ({})) as unknown as typeof window.open);
-
-    vi.useFakeTimers();
+    // The Print button now opens an in-app preview dialog instead of
+    // triggering the native OS print dialog. One blob URL is minted for the
+    // dialog's iframe, and no native print popup is opened.
     fireEvent.click(view.getByLabelText("Print"));
-    // jsdom never fires iframe onload for blob: URLs; the 1s WKWebView
-    // fallback timer is what removes the frame and opens a tab. Drive it.
-    act(() => {
-      vi.advanceTimersByTime(1100);
-    });
-    vi.useRealTimers();
-    expect(urls).toHaveLength(1);
-    // jsdom: onload never fires → the 1s watchdog removed the frame and
-    // opened a tab (popup allowed here). The frame is gone afterwards.
-    expect(document.querySelector("iframe")).toBeNull();
-    expect(openSpy).toHaveBeenCalledTimes(1);
 
-    appendSpy.mockRestore();
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    const dialog = screen.getByRole("dialog");
+    const iframe = dialog.querySelector("iframe");
+    expect(iframe).toBeInTheDocument();
+    expect(iframe?.src).toBe(urls[0]);
+    expect(urls).toHaveLength(1);
     restore();
   });
 
-  it("print falls back to a popup tab when the frame cannot print", async () => {
-    const { restore: restoreUrls } = stubBlobUrls();
+  it("print dialog shows the PDF blob in an iframe when the frame cannot print", async () => {
+    const { urls, restore: restoreUrls } = stubBlobUrls();
     const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
     await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
 
-    const { open, restore: restoreOpen } = stubWindowOpen({} as Window);
-    // contentWindow stays null (jsdom default) → print() throws → fallback.
-    vi.useFakeTimers();
+    // No native print() call is made anymore: clicking Print always opens the
+    // in-app dialog with the blob URL.
     fireEvent.click(view.getByLabelText("Print"));
-    act(() => {
-      vi.advanceTimersByTime(1100);
-    });
-    vi.useRealTimers();
-    expect(open).toHaveBeenCalledWith(expect.any(String), "_blank");
-    restoreOpen();
+
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    const dialog = screen.getByRole("dialog");
+    const iframe = dialog.querySelector("iframe");
+    expect(iframe).toBeInTheDocument();
+    expect(iframe?.src).toBe(urls[0]);
+    expect(urls).toHaveLength(1);
     restoreUrls();
+  });
+
+  it("closing the print dialog revokes the blob URL", async () => {
+    const { urls, restore } = stubBlobUrls();
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+
+    expect(revokeSpy).toHaveBeenCalledWith(urls[0]);
+    restore();
   });
 
   it("buttons are disabled until a document has loaded", () => {

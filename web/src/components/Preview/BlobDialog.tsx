@@ -108,7 +108,7 @@ export default function BlobDialog({
 
   const doDownload = () => {
     if (state.kind !== "ready") return;
-    downloadBytes(blobFilename(column, state.mediaType), state.data, state.mediaType);
+    void downloadBytes(blobFilename(column, state.mediaType), state.data, state.mediaType);
   };
 
   const doUpload = async (file: File) => {

@@ -87,30 +87,48 @@ func prepareRemoteCDPRequest(r *http.Request, host string) {
 	r.SetPathValue("rest", "browse/cdp/"+r.PathValue("stateKey"))
 }
 
-// handleRemoteBrowseProxy proxies browse-origin requests to the remote host's
-// tunneled browse origin. This makes the embedded browser accessible from
-// remote clients (mobile, web) that cannot reach the loopback tunnel directly.
-func (s *Server) handleRemoteBrowseProxy(w http.ResponseWriter, r *http.Request, host string) {
-	h := s.handler
+// connectedBrowseTunnel resolves the tunnel end of host's browse origin for a
+// request that sits outside authMiddleware: the browse proxy and the tab forwarders.
+// It never dials. The host must be a saved project. A host that is not connected is
+// 503 with Retry-After while its connect runs, and 409 otherwise. A host that reports
+// no browse origin is 502. It writes the error and returns false, so a caller never
+// falls back to this machine's browse origin.
+func (h *Handler) connectedBrowseTunnel(w http.ResponseWriter, host string) (string, bool) {
 	if h.remoteHosts == nil {
 		writeError(w, http.StatusServiceUnavailable, "remote connections not available")
-		return
+		return "", false
 	}
 	project, ok := h.firstSavedProjectForHost(host)
 	if !ok {
 		writeError(w, http.StatusForbidden, "unknown host")
-		return
+		return "", false
 	}
-	// This route sits outside authMiddleware, so it must never dial: the
-	// authenticated /api/browse/config call connects the host first.
 	ws, connected := h.remoteHosts.connectedWorkspace(host, project.RemotePort)
 	if !connected {
+		if h.remoteHosts.status(host, project.RemotePort).Connecting {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusServiceUnavailable, "remote connecting")
+			return "", false
+		}
 		writeError(w, http.StatusConflict, "remote host not connected")
-		return
+		return "", false
 	}
 	tunnelBase := ws.BrowseURL()
 	if tunnelBase == "" {
 		writeError(w, http.StatusBadGateway, "remote server has no browse origin")
+		return "", false
+	}
+	return tunnelBase, true
+}
+
+// handleRemoteBrowseProxy proxies browse-origin requests to the remote host's
+// tunneled browse origin. This makes the embedded browser accessible from
+// remote clients (mobile, web) that cannot reach the loopback tunnel directly.
+func (s *Server) handleRemoteBrowseProxy(w http.ResponseWriter, r *http.Request, host string) {
+	// This route sits outside authMiddleware, so it must never dial: the
+	// authenticated /api/browse/config call connects the host first.
+	tunnelBase, ok := s.handler.connectedBrowseTunnel(w, host)
+	if !ok {
 		return
 	}
 	target, err := url.Parse(tunnelBase)

@@ -14,7 +14,7 @@ tags:
   - jsdom
   - persistence
   - project-switch
-timestamp: 2026-09-20T00:38:52Z
+timestamp: 2026-11-02T07:26:21Z
 ---
 # PDF viewer zoom, Space navigation, and find
 
@@ -74,7 +74,7 @@ Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale
 
 - Both reuse an independent `blobRef` Blob snapshot of the PDF bytes taken at load — pdf.js may transfer (detach) the ArrayBuffer handed to `getDocument`, so always snapshot `new Blob([buf.slice(0)])` BEFORE calling `getDocument`; reset `blobRef.current = null` in the load effect's cleanup.
 - **Download**: object URL → temp anchor with `download` = path basename (appends `.pdf` if missing) → revoke after 10s (Safari navigates to `about:blank` if revoked synchronously).
-- **Print**: hidden 1px iframe with the blob URL; onload → `contentWindow.print()`. Fallback chain: `print()` throw → `window.open(url)` popup tab → popup blocked (`open` returns null) → `downloadPdf()`. 1s watchdog: if the frame is still connected (WKWebView sometimes never fires blob: iframe onload), remove it and open the tab; 60s timer reaps frame + URL.
+- **Print**: opens `PrintPreviewDialog` with the PDF blob URL in a sandboxed iframe (`sandbox=""`); Close dismisses without printing. The blob URL is revoked on dialog close. No native print dialog or popup tab.
 - Buttons in the toolbar next to Find: Print, Download (disabled until `total > 0`).
 
 ## View-state persistence (2026-09-20)
@@ -103,7 +103,7 @@ localStorage `ocode.ui.sidebarPreview.v1`, keyed `host::root`. Shape `{surface, 
 3. **CSS-escaped class names are invalid selectors**: `.bg-yellow-300/45` is NOT valid for `querySelectorAll` — match by `[aria-hidden="true"]` + `className.includes` instead.
 4. **`getByLabelText` must come from the render result object**, not `container`.
 5. **`vi.mock` of `pdfjs-dist` must implement `Util.transform` as a real matrix product** when the viewer builds text spans — `vi.fn()` returning undefined causes a `tx[4]` crash.
-6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). jsdom never fires blob: iframe onload → the 1s watchdog path is what runs; the watchdog timer is scheduled at CLICK time, so `vi.useFakeTimers()` must be installed BEFORE the click for `advanceTimersByTime` to drive it. `window.open` logs "Not implemented" and returns undefined (= popup-blocked fallback to download); stub `window.open` to control the path.
+6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). The print dialog is a Radix `Dialog`, so assert `screen.getByRole("dialog")` and the iframe's `src`; closing it must revoke the blob URL.
 
 ### Test hygiene
 

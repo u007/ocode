@@ -88,31 +88,50 @@ var controlContextRoles = map[string]bool{
 }
 
 // Control is one interactive element of the top document, as the browser_run
-// decision loop reads it. Ref is valid for every element action.
+// decision loop reads it. Ref is valid for every element action. Box is the
+// element's rectangle in CSS pixels of the viewport, nil when the element has no
+// rendered box. InViewport reports whether that rectangle overlaps the viewport.
 type Control struct {
-	Ref        string   `json:"ref"`
-	Role       string   `json:"role"`
-	Label      string   `json:"label"`
-	Value      string   `json:"value,omitempty"`
-	States     []string `json:"states"`
-	Context    string   `json:"context,omitempty"`
-	Operations []string `json:"operations"`
+	Ref        string      `json:"ref"`
+	Role       string      `json:"role"`
+	Label      string      `json:"label"`
+	Value      string      `json:"value,omitempty"`
+	States     []string    `json:"states"`
+	Context    string      `json:"context,omitempty"`
+	Operations []string    `json:"operations"`
+	Box        *ControlBox `json:"box"`
+	InViewport bool        `json:"in_viewport"`
+}
+
+// ControlBox is a rectangle in CSS pixels of the viewport.
+type ControlBox struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
 }
 
 // ControlsPage is the result of Controls. Controls holds at most
 // controlsMaxElements entries in document order; Omitted counts the rest.
 // ViewportText is the page's visible text, cut to viewportTextMaxChars UTF-16
-// units, and ViewportTruncated says whether it was cut. Settled reports whether
-// the page went quiet before the settle bound ran out.
+// units, and ViewportTruncated says whether it was cut. ViewportWidth and
+// ViewportHeight are the viewport's size in CSS pixels, the space every Box is
+// in. Settled reports whether the page went quiet before the settle bound ran out.
 type ControlsPage struct {
-	URL               string    `json:"url"`
-	Title             string    `json:"title"`
-	Fingerprint       string    `json:"fingerprint"`
-	ViewportText      string    `json:"viewport_text"`
-	ViewportTruncated bool      `json:"viewport_truncated"`
-	Settled           bool      `json:"settled"`
-	Controls          []Control `json:"controls"`
-	Omitted           int       `json:"omitted"`
+	URL               string `json:"url"`
+	Title             string `json:"title"`
+	Fingerprint       string `json:"fingerprint"`
+	ViewportText      string `json:"viewport_text"`
+	ViewportTruncated bool   `json:"viewport_truncated"`
+	ViewportWidth     int    `json:"viewport_width"`
+	ViewportHeight    int    `json:"viewport_height"`
+	// ScrollX and ScrollY are the document's scroll offset in CSS pixels. A scroll
+	// moves the boxes without changing the listing, so the offset is what shows it.
+	ScrollX  float64   `json:"scroll_x"`
+	ScrollY  float64   `json:"scroll_y"`
+	Settled  bool      `json:"settled"`
+	Controls []Control `json:"controls"`
+	Omitted  int       `json:"omitted"`
 }
 
 // Settle waits for the top document to go quiet after an action: readyState is
@@ -190,10 +209,20 @@ func (t *Target) Controls(ctx context.Context, refs *RefTable) (ControlsPage, er
 	w := &controlsWalker{byID: axIndex(nodes), refs: refs, controls: []Control{}}
 	w.walk(&nodes[0], false)
 
-	var url string
-	if err := t.topValue(ctx, "location.href", &url); err != nil {
-		return ControlsPage{}, fmt.Errorf("controls: reading the page URL: %w", err)
+	var where struct {
+		Href   string `json:"href"`
+		Width  int    `json:"vw"`
+		Height int    `json:"vh"`
 	}
+	if err := t.topValue(ctx, controlsWhereExpr, &where); err != nil {
+		return ControlsPage{}, fmt.Errorf("controls: reading the page URL and viewport: %w", err)
+	}
+	url := where.Href
+	layout, err := t.controlLayout(ctx)
+	if err != nil {
+		return ControlsPage{}, err
+	}
+	placeControls(w.controls, w.nodes, layout.rects, where.Width, where.Height)
 	var text struct {
 		Text  string `json:"text"`
 		Total int    `json:"total"`
@@ -211,10 +240,95 @@ func (t *Target) Controls(ctx context.Context, refs *RefTable) (ControlsPage, er
 		Fingerprint:       fingerprint,
 		ViewportText:      text.Text,
 		ViewportTruncated: text.Total > viewportTextMaxChars,
+		ViewportWidth:     where.Width,
+		ViewportHeight:    where.Height,
+		ScrollX:           layout.scrollX,
+		ScrollY:           layout.scrollY,
 		Settled:           settled,
 		Controls:          w.controls,
 		Omitted:           w.omitted,
 	}, nil
+}
+
+// controlsWhereExpr reads the URL and the viewport size in CSS pixels in one
+// evaluate. innerWidth and innerHeight include any scrollbar, the same space the
+// layout rects and the screenshot use.
+const controlsWhereExpr = `({href: location.href, vw: window.innerWidth, vh: window.innerHeight})`
+
+// domSnapshot is the part of a DOMSnapshot.captureSnapshot reply that the control
+// boxes need. Layout node i is the DOM node Nodes.BackendNodeID[NodeIndex[i]], and
+// Bounds[i] is that node's rectangle in CSS pixels of the document. The rect
+// Chrome reports as clientRects is not viewport-relative, so bounds is the one
+// read; the scroll offset then gives the viewport position.
+type domSnapshot struct {
+	Documents []struct {
+		Nodes struct {
+			BackendNodeID []int64 `json:"backendNodeId"`
+		} `json:"nodes"`
+		Layout struct {
+			NodeIndex []int       `json:"nodeIndex"`
+			Bounds    [][]float64 `json:"bounds"`
+		} `json:"layout"`
+		ScrollOffsetX float64 `json:"scrollOffsetX"`
+		ScrollOffsetY float64 `json:"scrollOffsetY"`
+	} `json:"documents"`
+}
+
+// controlLayout is the layout of the top document at one read: the rectangle of
+// every DOM node that has one, in CSS pixels of the viewport and keyed by backend
+// node id, and the document's scroll offset.
+type controlLayout struct {
+	rects   map[int64][]float64
+	scrollX float64
+	scrollY float64
+}
+
+// controlLayout reads the layout of the top document. One DOMSnapshot call covers
+// the whole document, so the boxes of every control cost one round trip, not one
+// per control, and the scroll offset comes from the same reply.
+func (t *Target) controlLayout(ctx context.Context) (controlLayout, error) {
+	var snap domSnapshot
+	if err := t.conn.Call(ctx, t.sessionID, "DOMSnapshot.captureSnapshot", map[string]any{
+		"computedStyles":  []string{},
+		"includeDOMRects": true,
+	}, &snap); err != nil {
+		return controlLayout{}, fmt.Errorf("controls: reading the element layout: %w", err)
+	}
+	if len(snap.Documents) == 0 {
+		return controlLayout{}, errors.New("controls: the element layout has no document")
+	}
+	doc := snap.Documents[0]
+	if len(doc.Layout.Bounds) != len(doc.Layout.NodeIndex) {
+		return controlLayout{}, fmt.Errorf("controls: the element layout has %d bounds for %d layout nodes", len(doc.Layout.Bounds), len(doc.Layout.NodeIndex))
+	}
+	rects := make(map[int64][]float64, len(doc.Layout.NodeIndex))
+	for i, idx := range doc.Layout.NodeIndex {
+		if idx < 0 || idx >= len(doc.Nodes.BackendNodeID) {
+			return controlLayout{}, fmt.Errorf("controls: layout node %d names node %d of %d", i, idx, len(doc.Nodes.BackendNodeID))
+		}
+		b := doc.Layout.Bounds[i]
+		if len(b) != 4 {
+			continue
+		}
+		rects[doc.Nodes.BackendNodeID[idx]] = []float64{b[0] - doc.ScrollOffsetX, b[1] - doc.ScrollOffsetY, b[2], b[3]}
+	}
+	return controlLayout{rects: rects, scrollX: doc.ScrollOffsetX, scrollY: doc.ScrollOffsetY}, nil
+}
+
+// placeControls sets each control's Box from the rect of the DOM node it was
+// minted from, and InViewport when that box overlaps the viewport. nodes[i] is the
+// backend node id of controls[i]. A control with no rect keeps a nil Box. A zero
+// viewport puts nothing in view.
+func placeControls(controls []Control, nodes []int64, rects map[int64][]float64, vw, vh int) {
+	for i := range controls {
+		rect, ok := rects[nodes[i]]
+		if !ok {
+			continue
+		}
+		box := ControlBox{X: rect[0], Y: rect[1], W: rect[2], H: rect[3]}
+		controls[i].Box = &box
+		controls[i].InViewport = ControlBoxInViewport(box, vw, vh)
+	}
 }
 
 // topValue evaluates expr in the top document and decodes its by-value result
@@ -238,7 +352,9 @@ type controlsWalker struct {
 	refs     *RefTable
 	contexts []string
 	controls []Control
-	omitted  int
+	// nodes[i] is the backend DOM node id controls[i] was minted from.
+	nodes   []int64
+	omitted int
 }
 
 // walk visits n and its subtree. suppressText has the same meaning as in
@@ -305,6 +421,7 @@ func (w *controlsWalker) add(n *axNode, role, name string, ops []string) {
 		c.Operations = append(c.Operations, ops...)
 	}
 	w.controls = append(w.controls, c)
+	w.nodes = append(w.nodes, n.BackendDOMNodeID)
 }
 
 // controlFingerprintKey is what a fingerprint covers for one control: what the

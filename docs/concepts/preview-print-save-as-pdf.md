@@ -1,19 +1,19 @@
 ---
 type: Concept
 title: Preview Print / Save as PDF
-description: "Print and Save as PDF for markdown, html, text and json previews: the content-built document, the sandboxed-iframe route in browsers, the per-window route in the desktop shell, and the bridge rules that keep an untrusted print window unprivileged."
+description: "Print for markdown, html, text and json previews: the toolbar button opens an in-app Radix Dialog preview of the content-built document in a sandboxed iframe, with no native print dialog; the legacy browser and desktop print routes and their bridge rules."
 resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/PrintPreviewButton.tsx; web/src/lib/wails.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-01T15:53:23Z
+timestamp: 2026-11-02T07:24:58Z
 status: active
 ---
-
 # Preview Print / Save as PDF
 
-A Print button prints the rendered preview of a file. The print dialog's own
-destination provides Save as PDF; there is no separate PDF export. PDF files
-are not covered here: `PdfViewer` has its own Print button, see
-[PDF viewer zoom, Space navigation, and find](pdf-viewer-zoom-find.md).
+A Print button opens an in-app preview dialog for the rendered preview of a
+file. The document is shown in a sandboxed iframe with only a Close button; no
+native OS print dialog is opened automatically, and there is no separate PDF
+export. PDF files are not covered here: `PdfViewer` has its own Print button,
+see [PDF viewer zoom, Space navigation, and find](pdf-viewer-zoom-find.md).
 
 ## Scope
 
@@ -69,72 +69,79 @@ they stay out of the entry chunk.
   `document.baseURI`. Other head `<style>` elements belong to runtime libraries
   (Monaco, toasts) and are left out.
 
-## Browser route
+## Print preview dialog
 
-`printDocument` creates a hidden iframe with
-`sandbox="allow-scripts allow-modals"` and `srcdoc` set to the document.
+`PrintPreviewButton` opens `PrintPreviewDialog`
+(`web/src/components/Preview/PrintPreviewDialog.tsx`), a Radix `Dialog` that
+renders the document in an iframe:
 
-- On `load`, the parent posts the string `"ocode:print"` to the frame.
-- The bootstrap script inside the frame listens for that message and calls
-  `window.print()`.
+- The button still calls `buildPrintDocument(kind, content, title)` to build the
+  standalone HTML (see [Content, not DOM](#content-not-dom)).
+- The HTML is passed to the dialog as `html` and rendered with
+  `<iframe srcDoc={html} sandbox="" title="Print preview" />`.
+- The dialog has a single **Close** button (`DialogClose`, marked
+  `data-dialog-default-action`). It never calls `window.print()` and never opens
+  a native print dialog; closing dismisses the preview without printing.
 
-A parent cannot call `print()` on a sandboxed frame, and `allow-modals` is what
-permits `print()` inside one. One sandboxed path serves every kind, because
-the html kind is untrusted; this is the same stance as `HtmlViewer`.
+`printDocument` and `printPreview` remain exported from `printPreview.tsx` and
+are still unit-tested, but the toolbar click path no longer calls them. The old
+hidden-iframe route — post `"ocode:print"` to a
+`sandbox="allow-scripts allow-modals"` frame whose bootstrap calls
+`window.print()`, with `PRINT_LOAD_TIMEOUT_MS` (15 s) and a
+`PRINT_FRAME_LIFETIME_MS` (60 s) reap — is retained only for those tests and is
+not reachable from the UI.
 
-**Load timeout.** `PRINT_LOAD_TIMEOUT_MS` (15 s) removes the frame and rejects
-`printDocument` if it has not loaded. `onload` clears that timer. The frame is
-removed `PRINT_FRAME_LIFETIME_MS` (60 s) after a successful post, so the dialog
-can stay open. `printDocument` also rejects when the loaded frame has no
-`contentWindow`. `PrintPreviewButton` shows the failed state for any rejection.
+`PdfViewer` reuses the same dialog with a `src` blob URL instead of `html`; see
+[PDF viewer zoom, Space navigation, and find](pdf-viewer-zoom-find.md).
 
-## Desktop route
+## Desktop route (unused from the toolbar)
 
-WKWebView ignores `window.print()`, and Wails does not implement the
-`_webView:printFrame:` UI-delegate hook. Wails' `WebviewWindow.Print()` runs an
-`NSPrintOperation` over the WHOLE webview, which would print the SPA itself.
-The document therefore gets its own window:
+The desktop app shows the same in-app `PrintPreviewDialog` as the browser. The
+toolbar click no longer reaches the native print path: `printDesktopDocument`
+(`web/src/lib/wails.ts`), `openPrintWindow` (`cmd/ocode-desktop/print.go`) and
+`window.Print()` (Wails' `NSPrintOperation`) remain in the codebase and are
+still covered by `print_test.go`, but `PrintPreviewButton` does not invoke them.
 
-1. `printDesktopDocument` (`web/src/lib/wails.ts`) sends
-   `ocode:print-document:<nonce>:<html>` over `_wails.invoke`. The nonce is the
-   per-launch `?clip=` value the shell appends to the window URL.
+The retained legacy path, for reference:
+
+1. `printDesktopDocument` sends `ocode:print-document:<nonce>:<html>` over
+   `_wails.invoke`. The nonce is the per-launch `?clip=` value the shell appends
+   to the window URL.
 2. The `RawMessageHandler` in `cmd/ocode-desktop/main.go` calls
-   `pagePrintHTML`, which applies `pageBridgePayload`. That is the same nonce
-   and app-host origin check the clipboard write uses. It is shared between
-   the two.
-3. `openPrintWindow` (`cmd/ocode-desktop/print.go`) generates a name
-   (`ocode-print-<n>`) and registers it in `printWindows` BEFORE
-   `NewWithOptions` creates the `WebviewWindow` with that name and `HTML: html`.
-   The registry is keyed by name, not id, because the id does not exist until
-   the window does. Wails runs each window message on its own goroutine, so the
-   ready message can arrive before `NewWithOptions` returns. Registering after
-   creation raced it.
-4. The bootstrap in the print window sends `ocode:print-window-ready` on
-   `load`. `handlePrintWindowMessage` calls `consumePrintWindowReady`, a
-   one-shot `CompareAndSwap`, so only the first ready message prints. It then
-   calls `window.Print()` in a goroutine started with `crashguard.Go`. `Print()`
-   is `InvokeSyncWithError` onto the main thread, and the raw handler may already
-   be running there, so an inline call could block the thread on itself. The
-   window stays registered after the ready message, so its later messages are
-   still dropped (see Security invariant).
+   `pagePrintHTML`, which applies `pageBridgePayload` — the same nonce and
+   app-host origin check as the clipboard write.
+3. `openPrintWindow` registers the name (`ocode-print-<n>`) in `printWindows`
+   BEFORE `NewWithOptions` creates the window, because Wails runs each window
+   message on its own goroutine and the ready message can arrive first.
+4. The print window's bootstrap sends `ocode:print-window-ready` on `load`;
+   `consumePrintWindowReady` (one-shot `CompareAndSwap`) calls `window.Print()`
+   via `crashguard.Go` (it is `InvokeSyncWithError` onto the main thread, which
+   the raw handler may already be on). The window stays registered until it
+   closes, so later messages are dropped (see Security invariant).
 
-The desktop route has no acknowledgement. `printDesktopDocument` throws when the
-message is over `MAX_PRINT_DOCUMENT_BYTES` (8 MiB, UTF-8 bytes of the whole
-message: prefix, nonce and document), and nothing is sent. Otherwise `true`
-means only that the message was posted. The shell sends no reply, so a bad
-nonce or a sender outside the ocode page is just logged on the Go side.
-`PrintPreviewButton` shows a failure state (warning icon, reason in the tooltip,
-reset after 2.5 s) when `printPreview` throws. A posted document that later fails
-in the shell does not show it.
+`printDesktopDocument` still throws over `MAX_PRINT_DOCUMENT_BYTES` (8 MiB,
+UTF-8 bytes of prefix + nonce + document) and the shell still sends no
+acknowledgement, so `true` only means the message was posted.
 
-The window stays open as a print preview. The native print sheet offers Save as
-PDF. The user closes the window, and the `events.Common.WindowClosing` listener
-removes its name from `printWindows`.
+True silent PDF output on desktop is deferred. It would need `NSPrintOperation`
+with `showsPrintPanel = false` (unverified) or a server-side render. See
+`TODO.md` ("print preview replaces native OS print dialog", 2026-11-02).
 
 ## Security invariant
 
-The print window is the only window that shows a user's untrusted document in
-the desktop shell, so its bridge access is strictly limited.
+The preview document is untrusted (the `html` kind is the user's file
+verbatim), so it is confined at the rendering boundary:
+
+- **The dialog iframe is fully sandboxed: `sandbox=""`.** With no
+  `allow-scripts`, `allow-same-origin` or `allow-modals`, a previewed `.html`
+  file cannot run scripts, cannot reach the app origin's DOM, storage or
+  `_wails` bridge, and cannot open a native print dialog. This is stricter than
+  the legacy `HtmlViewer` frame (which allows scripts).
+- **Only Close is wired.** The dialog calls neither `window.print()` nor the
+  desktop bridge, so there is no print-trigger message for a document to forge.
+
+The legacy desktop print window's bridge rules still apply to the retained,
+unused-from-toolbar path:
 
 - `RawMessageHandler`'s FIRST statement routes any message from a registered
   print window (`isPrintWindow`, matched by name) to `handlePrintWindowMessage`,
@@ -145,15 +152,20 @@ the desktop shell, so its bridge access is strictly limited.
 - Wails itself honours only that window's own `wails:drag`,
   `wails:resize:` and `wails:runtime:ready` messages. These are handled in
   `webview_window.go` of the Wails module (v3 beta.12, per `go.mod`).
-- The print window is therefore no more privileged than the sandboxed
-  HtmlViewer frame. Scripts still run, and the network is open in both.
 
 ## Known gaps
 
+- **Silent PDF output is deferred.** The dialog previews only; it does not
+  produce a PDF. A true silent-PDF path needs native work on desktop (see
+  [Desktop route](#desktop-route-unused-from-the-toolbar)) or a server-side
+  render. See `TODO.md`.
+- **`window.print()` cannot be suppressed.** A browser page cannot suppress the
+  native print dialog that `window.print()` opens, which is why the preview
+  dialog stops at review and never triggers printing.
 - **Not verified live.** Coverage is unit tests only: `printPreview.test.tsx`,
-  `PrintPreviewButton.test.tsx` and `print_test.go`. The browser route is not
-  yet checked in Chrome or WebKit, and the desktop route is not yet checked in
-  the running app.
+  `PrintPreviewButton.test.tsx`, `PdfViewer.print.test.tsx` and `print_test.go`.
+  The dialog is not yet checked in Chrome or WebKit, and the desktop shell is
+  not yet checked in the running app.
 - **No Go-side size cap.** `print.go` accepts any length of document. The only
   bound is the SPA's `MAX_PRINT_DOCUMENT_BYTES` check in `wails.ts`.
 - **`@import` string form not rewritten.** `absolutizeCssUrls` rewrites
