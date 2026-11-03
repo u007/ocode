@@ -229,9 +229,9 @@ type Decider interface {
 
 One resolver replaces the five hardcoded `newClientFn(...).(*TypesafeClient)`
 sites — `if client := newClientFn(a.config, model); client != nil {` at
-`internal/agent/agent.go:2607` (auto-continue),
+`internal/agent/agent.go:2610` (auto-continue),
 `client, ok := newClientFn(a.config, modelName).(*TypesafeClient)` at
-`internal/agent/agent.go:3835` (permission),
+`internal/agent/agent.go:3838` (permission),
 `newClientFn(a.config, discoveryJudgeModel).(*TypesafeClient)` at
 `internal/agent/discovery_typesafe.go:53`,
 `newClientFn(a.config, networkGuardJudgeModel).(*TypesafeClient)` at

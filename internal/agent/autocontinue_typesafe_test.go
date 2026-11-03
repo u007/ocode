@@ -378,16 +378,19 @@ func TestStepLimitHitDetail(t *testing.T) {
 	}
 }
 
+// A transcript at or under autoContinueTranscriptCap reaches the verdict whole:
+// the builder no longer caps it (selection does), so every message is sent.
+// Over the cap, selection narrows it first (autocontinue_select_typesafe_test.go).
 func TestAutoContinueTypesafeStateTailBounded(t *testing.T) {
 	a := &Agent{config: &config.Config{}}
-	msgs := make([]Message, 0, 20)
-	for i := 0; i < 20; i++ {
+	msgs := make([]Message, 0, autoContinueTranscriptCap)
+	for i := 0; i < autoContinueTranscriptCap; i++ {
 		msgs = append(msgs, Message{Role: "assistant", Content: "long content here"})
 	}
 	state := a.buildTypesafeAutoContinueState(msgs, nil, nil, tool.TodoSnapshot{})
 	tail := state["transcript_tail"].([]map[string]any)
-	if len(tail) != 6 {
-		t.Fatalf("tail = %d entries, want 6", len(tail))
+	if len(tail) != autoContinueTranscriptCap {
+		t.Fatalf("tail = %d entries, want %d", len(tail), autoContinueTranscriptCap)
 	}
 }
 

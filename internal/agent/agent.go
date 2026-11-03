@@ -442,6 +442,9 @@ type Agent struct {
 	// dirMDPending holds rendered blocks for ancestor docs discovered since the
 	// last Step drained them into the volatile tail (see injectDirMDTail).
 	dirMDPending []string
+	// selectScores caches Jev's auto-continue selection outcome per message so a
+	// turn end scores only messages it has not seen (autocontinue_select_typesafe.go).
+	selectScores typesafeScoreCache
 	mcpErrors    []string
 	config       *config.Config
 	mode         Mode

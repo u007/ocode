@@ -15,7 +15,7 @@ timestamp: 2026-10-04T12:33:27Z
 
 When a decision backend is connected, every `doc_search` call is filtered by a relevance judge that asks whether each returned knowledge document is in scope for the query. Out-of-scope docs are hidden before `get_top` body inlining, so the caller only sees and reads documents the judge considers relevant. The judge is **fail-open**: on any error it falls back to showing all results.
 
-The judge shares its lenient core and confidence floor with the [discovery relevance judge](concepts/discovery-typesafe-judge.md) through `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`).
+The judge shares its lenient core and confidence floor with the [discovery relevance judge](concepts/discovery-typesafe-judge.md) through `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:34`).
 
 ## Activation
 

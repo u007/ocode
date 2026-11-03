@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // The boundary tests below are the point of this file. An earlier draft sized
@@ -287,6 +288,7 @@ func TestSharedStateBudget_WorstCaseProductionPayloads(t *testing.T) {
 			"tool": "read", "file_content": strings.Repeat("line of prose\n", 500),
 		}},
 		{"goal-judge-html-tail", buildWorstCaseGoalState()},
+		{"auto-continue-verdict-20-markup", buildWorstCaseAutoContinueState()},
 	}
 	for _, tc := range cases {
 		before := marshalledSize(t, tc.state)
@@ -370,6 +372,20 @@ func TestSharedStateBudget_PermissionExecutedScriptsProjectedAndSignalled(t *tes
 	if after := marshalledSize(t, prepared); after > decisionStateBudgetBytes {
 		t.Errorf("prepared state is %d bytes, over the %d byte budget", after, decisionStateBudgetBytes)
 	}
+}
+
+// buildWorstCaseAutoContinueState mirrors the auto-continue verdict request at the
+// selection cap: autoContinueTranscriptCap messages at the 4000-rune cap, with
+// the markup-heavy content that json.Marshal escapes. It is built by the real
+// builder, so a change to the state shape is measured here too.
+func buildWorstCaseAutoContinueState() map[string]any {
+	markup := strings.Repeat(`<div class="row">&nbsp;<span>x</span></div>`, 200)[:4000]
+	msgs := make([]Message, 0, autoContinueTranscriptCap)
+	for i := 0; i < autoContinueTranscriptCap; i++ {
+		msgs = append(msgs, Message{Role: "assistant", Content: markup})
+	}
+	a := &Agent{config: &config.Config{}}
+	return a.buildTypesafeAutoContinueState(msgs, nil, nil, tool.TodoSnapshot{})
 }
 
 // buildWorstCaseGoalState mirrors the goal judge's request: a 4000-rune

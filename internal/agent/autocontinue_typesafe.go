@@ -290,6 +290,7 @@ func (a *Agent) advisorAvailable() bool {
 const typesafeAutoContinueInstructions = `You are triaging how an AI coding assistant's most recent reply ended and choosing the single next action for the harness. The assistant will not receive new human input unless you choose an action that ends the turn.
 Rules:
 - Judge the last assistant reply in the transcript; earlier turns are context.
+- When the state includes original_request (the user's genuine request for this chain), compare the last assistant reply with it. If parts of original_request are still undone, do not choose "end": pick the resume action that matches the undone part. Choose "end" only when the whole original_request is satisfied.
 - Pick a resume action only when there is concrete remaining work the reply itself acknowledges or leaves visible, or a concrete gap (failing tests, no verification, no plan) the action names. Each action's criteria say exactly when it applies.
 - Choose "end" when the reply reads as a natural completion: it answered the request, delivered the result, and ends cleanly — including short acknowledgements and status reports — or when it reports a blocking error that continuing would not help.
 - A reply that ends by asking the user something is NOT a cut-off mid-task reply. Classify the question: a plain yes/no go-ahead on a plan the reply has already described in full is a confirmation, and only "proceed", "skip" or "reject" may answer it. Any other question — an open choice between approaches, a missing or ambiguous requirement, a destructive or irreversible action — is a decision for the user: choose "await_user".
@@ -353,7 +354,37 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 	todoOpen := snap.HasOpenItems
 	todoItems := autoContinueTodoItems(snap)
 	offered := a.autoContinueOffered(prior, true, todoOpen)
-	state := a.buildTypesafeAutoContinueState(messages, stepErr, prior, snap)
+	model := deciderLabel(client)
+
+	// Selection step: a long chain is narrowed to the messages that bear on the
+	// original request (autocontinue_select_typesafe.go). Failure fails closed:
+	// no verdict is asked on a transcript that was not selected.
+	transcript := typesafeNonEmpty(messages)
+	selected, err := a.selectTypesafeTranscript(client, transcript)
+	if err != nil {
+		a.emitDebug("AGENT", fmt.Sprintf("autocontinue_typesafe selection failed: %v", err))
+		return AutoContinueDecision{Detail: fmt.Sprintf("%s selection failed: %v", model, err)}, err
+	}
+	// Every drop — a relevance veto, the batch ceiling, or the budget fit — is
+	// reported to the verdict as transcript_selection, so a judge that is looking
+	// at part of the chain is told so. With nothing dropped the state keeps its
+	// exact previous shape.
+	buildState := func(kept []Message) map[string]any {
+		state := a.buildTypesafeAutoContinueState(kept, stepErr, prior, snap)
+		if len(kept) < len(transcript) {
+			state["transcript_selection"] = map[string]any{
+				"chain_messages": len(transcript),
+				"sent":           len(kept),
+				"dropped":        len(transcript) - len(kept),
+			}
+		}
+		return state
+	}
+	tail, err := fitTypesafeTranscript(selected, buildState)
+	if err != nil {
+		return AutoContinueDecision{Detail: model + " triage failed: " + err.Error()}, err
+	}
+	state := buildState(tail)
 	reasonCriteria := make(map[string]string, len(typesafeAutoContinueReasons))
 	for _, r := range typesafeAutoContinueReasons {
 		reasonCriteria[r.Key] = r.Label
@@ -396,7 +427,6 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 		}
 	}
 
-	model := deciderLabel(client)
 	resp, err := client.Decide(state, questions)
 	if err != nil {
 		return AutoContinueDecision{Detail: model + " triage failed: " + err.Error()}, err
@@ -547,12 +577,16 @@ func quotedCommandCandidates(text string) []string {
 }
 
 // buildTypesafeAutoContinueState assembles the structured triage request: the
-// conversation tail (roles + bounded content), how the turn ended so Jev does
-// not have to infer it, the actions already fired in this chain, and whether
-// the todo plan has open items. stepErr is the Step error that ended the turn
-// (nil on a clean stop). The tail mirrors runAutoContinueJudge's budget — the
-// last 6 non-empty messages, each trimmed, so one huge tool result cannot blow
-// up the request.
+// conversation transcript (roles + bounded content), the original request of the
+// chain, how the turn ended so Jev does not have to infer it, the actions already
+// fired in this chain, and whether the todo plan has open items. stepErr is the
+// Step error that ended the turn (nil on a clean stop).
+//
+// messages is the SELECTED transcript (selectTypesafeTranscript, then
+// fitTypesafeTranscript), not the raw session. The original request is derived
+// from it, which is safe because selection always keeps that message (it is
+// pinned). A caller passing an unselected slice would get whatever genuine
+// request is left in it.
 //
 // In production stepErr is always nil and StepLimitHit is always false: both
 // dispatchers short-circuit the hard signals before calling (runTurn returns on
@@ -564,12 +598,15 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 		prior = []string{}
 	}
 	state := map[string]any{
-		"transcript_tail":     typesafeTranscriptTail(messages, 6),
+		"transcript_tail":     typesafeTranscriptEntries(messages),
 		"turn_ended":          a.typesafeTurnEnded(stepErr),
 		"chain_actions_fired": prior,
 		"todo_has_open_items": snap.HasOpenItems,
 		"todo_open_items":     autoContinueTodoItems(snap),
 		"advisor_available":   a.advisorAvailable(),
+	}
+	if origIdx := typesafeOriginalRequestIndex(messages); origIdx >= 0 {
+		state["original_request"] = typesafeCapContent(strings.TrimSpace(messages[origIdx].Content))
 	}
 	if a.config != nil {
 		state["auto_continue_model"] = a.config.Ocode.AutoContinueModel
@@ -579,24 +616,38 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 
 // typesafeTranscriptTail is the bounded conversation tail sent to a TypeSafe
 // judge: the last n messages with empty ones dropped and each trimmed to 4000
-// characters, so one huge tool result cannot blow up the request.
+// characters, so one huge tool result cannot blow up the request. The
+// auto-continue judge does not use it (it sends the selected transcript); the
+// goal judge does.
 func typesafeTranscriptTail(messages []Message, n int) []map[string]any {
 	tail := messages
 	if len(tail) > n {
 		tail = tail[len(tail)-n:]
 	}
-	entries := make([]map[string]any, 0, len(tail))
-	for _, m := range tail {
+	return typesafeTranscriptEntries(tail)
+}
+
+// typesafeTranscriptEntries renders messages as judge state entries: empty ones
+// dropped, each content trimmed and capped by typesafeCapContent.
+func typesafeTranscriptEntries(messages []Message) []map[string]any {
+	entries := make([]map[string]any, 0, len(messages))
+	for _, m := range messages {
 		content := strings.TrimSpace(m.Content)
 		if content == "" {
 			continue
 		}
-		if cut := truncateRunes(content, 4000); cut != content {
-			content = cut + "…(truncated)"
-		}
-		entries = append(entries, map[string]any{"role": m.Role, "content": content})
+		entries = append(entries, map[string]any{"role": m.Role, "content": typesafeCapContent(content)})
 	}
 	return entries
+}
+
+// typesafeCapContent cuts content to 4000 runes and marks the cut, so one huge
+// message cannot dominate a judge request.
+func typesafeCapContent(content string) string {
+	if cut := truncateRunes(content, 4000); cut != content {
+		return cut + "…(truncated)"
+	}
+	return content
 }
 
 // typesafeTurnEnded describes how a turn ended, so a TypeSafe judge does not have

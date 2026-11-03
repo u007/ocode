@@ -1,14 +1,16 @@
 # TODO
 
-## Open: print preview replaces native OS print dialog (2026-11-02)
+## Open: auto-continue verdict clips at the selection cap (2026-11-02)
 
-The toolbar Print button (markdown/text/html/json via `PrintPreviewButton`, and PDF via `PdfViewer`) now opens an in-app Radix `Dialog` preview instead of triggering the native OS print dialog. The document renders in a sandboxed iframe inside the popup; Close dismisses without printing.
+- **Known limit:** at `autoContinueTranscriptCap` (20) messages, each at the 4000-rune cap and markup-heavy (JSON escaping inflates it), the verdict state is ~168 KB, over the 96 KB `decisionStateBudgetBytes`. `prepareDecisionState` then projects it to ~45 KB, clipping every message to ~1 KB. The clip is signalled through `_projection`, so it is not silent. Pinned by the `auto-continue-verdict-20-markup` case in `TestSharedStateBudget_WorstCaseProductionPayloads`.
+- **Fix candidates:** a per-message cap that shrinks with the kept count, or a content-aware cap before projection. Not done: it changes the verdict's view of every chain.
+- **Cost:** the in-memory score cache (`autoContinueSelectCacheCap`, 2000 entries) means a turn end scores only messages it has not seen. The first call on a long transcript still scores every unpinned message in batches of 20, with no ceiling on total batches. Consider a batch ceiling, or running selection only when the chain's first verdict is not `end`.
+- **Slot config:** `slotAutoContinueSelect` (`auto_continue_select`) has no config key yet and always resolves to `typesafe/jev-latest`. Add `auto_continue_select_model` if it needs to be set per install.
 
-- **Browser:** `window.print()` always opens the browser's own print dialog and cannot be suppressed by a web page, so there is no programmatic "print silently" path. The in-app preview is the only print UI; silent PDF output is deferred.
-- **Desktop (WKWebView):** `window.Print()` (the `NSPrintOperation` path in `cmd/ocode-desktop/print.go`) is no longer called from the toolbar click. `printDesktopDocument`/`openPrintWindow` remain in the codebase and tested but are unused from `PrintPreviewButton`. True silent PDF on desktop would need `NSPrintOperation` with `showsPrintPanel=false` or a server-side render — unverified, deferred.
-- **PDF:** `PdfViewer`'s Print button opens `PrintPreviewDialog` with the PDF blob URL; the old hidden-iframe → `contentWindow.print()` → popup-tab fallback chain is removed. Blob URL is revoked on dialog close.
+## Open: desktop print unverified live (2026-11-02)
 
-- **Deferred:** true silent-PDF output (no native dialog at all) on desktop. Requires native `NSPrintOperation` work in `cmd/ocode-desktop/print.go` or a server-side `Page.printToPDF`. Add a TODO entry when revisited.
+- **Unverified live:** PDF print through the hidden iframe (`PdfViewer` `printPdf`) inside the WKWebView blob frame. Unit tests only.
+- **Unverified live:** macOS print panel. `ocode_printWindow` (`cmd/ocode-desktop/native_darwin.m`) opens the system print panel using the user's saved print settings on the largest visible WKWebView. Not yet checked in the running app.
 
 ## Open: reopen-and-answer of a dismissed question in TUI `/rc` bridge mode (2026-11-02)
 

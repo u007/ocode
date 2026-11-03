@@ -122,7 +122,7 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   right away (the session is streaming, compacting, or has a queue drain blocked) sets
   `goalResumePending`. `compactFinishedMsg` fires it once the session is idle (`goalResumeReady`,
   `model.go:303`, `:5792`). Any new turn clears the flag, because that turn's own judge decides the
-  goal (`askAgent`, `model.go:16096`).
+  goal (`askAgent`, `model.go:16097`).
 - **The resume message is user-role.** `GoalResumeMessage` (`goal.go:241`) produces a `[ocode:goal]`
   user message: the condition, the evaluator's last reason, and a continue instruction. It is never
   system-role, so the cached system prefix stays stable.
@@ -135,10 +135,10 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   rejected values are logged with the `GOAL` debug kind.
 - Written after every judged turn (`goalShouldResume`, `agent_session.go:1491`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
-  (`sessionSidebarMetadata`, `model.go:21330`).
+  (`sessionSidebarMetadata`, `model.go:21331`).
 - Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads
-  (`restoreSessionMetadata`, `model.go:21364`). The key is listed in `sessionOwnedMetadataKeys`
-  (`model.go:21302`), so the TUI's carry-forward copy never overwrites it.
+  (`restoreSessionMetadata`, `model.go:21365`). The key is listed in `sessionOwnedMetadataKeys`
+  (`model.go:21303`), so the TUI's carry-forward copy never overwrites it.
 
 ## Endpoints
 
@@ -164,7 +164,7 @@ and sends `kickoff_prompt` as the turn.
 ## Judge configuration
 
 - Config key `ocode.goal.judge_model`, default `typesafe/jev-latest` (`defaultJudgeModel`,
-  `internal/agent/decider.go:30`; slot read at `:94-95`).
+  `internal/agent/decider.go:35`; slot read at `:94-95`).
 - The goal judge has its own confidence floor, `goalMinConfidenceDefault`. It does not read
   `permissions.auto.min_confidence` or the auto-continue floor.
 - There is no fallback to another backend. An unset or keyless judge pauses the goal as

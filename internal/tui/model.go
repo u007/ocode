@@ -2752,6 +2752,7 @@ func newModel(opts ...RunOptions) model {
 	tool.ResetTodoState()
 	if a != nil {
 		a.ClearGoal()
+		a.ResetSelectScores()
 		// Keep OpenCode request affinity stable without tagging TUI debug logs.
 		a.SetOpenCodeSessionID(o.SessionID)
 		// Journal file-edit backups under this session and replay any
@@ -11751,6 +11752,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			tool.ResetTodoState()
 			if m.agent != nil {
 				m.agent.ClearGoal()
+				m.agent.ResetSelectScores()
 			}
 			m.goalGen++
 			m.goalResumePending = false
@@ -12223,6 +12225,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	tool.ResetTodoState()
 	if m.agent != nil {
 		m.agent.ClearGoal()
+		m.agent.ResetSelectScores()
 	}
 	m.goalResumePending = false
 	m.sessionTelemetry = sidebarTelemetry{}
@@ -12401,6 +12404,7 @@ func (m *model) handleResetIDCmd(args []string) {
 	m.sessionID = newID
 	if m.agent != nil {
 		m.agent.RekeyOpenCodeSession(oldID, newID)
+		m.agent.ResetSelectScores()
 	}
 	tool.RekeyTodoSession(tool.TodoProjectRootFor(m.workDir), oldID, newID)
 	m.broadcastTUIStatus()

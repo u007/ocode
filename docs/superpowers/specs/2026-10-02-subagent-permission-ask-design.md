@@ -53,15 +53,15 @@ child asks.
 Two more facts close the remaining gaps:
 
 - The sentinel path in `Agent.Step` is only taken when `a.OnPermissionAsk` is
-  nil (`internal/agent/agent.go:4135`).
+  nil (`internal/agent/agent.go:4138`).
 - `SetSubAgentPermAsker` has exactly one real install site in the whole tree,
-  `internal/tui/model.go:18911`. The server never installs one; `subagent.go:552`
+  `internal/tui/model.go:18912`. The server never installs one; `subagent.go:552`
   and `advisor_tool.go:358` merely propagate the parent's (nil) asker.
 
 ## Non-goals
 
 - **The TUI is unaffected.** It installs a working asker
-  (`tui/model.go:18911-18928`) and this change does not touch that path. The
+  (`tui/model.go:18912-18929`) and this change does not touch that path. The
   attribution wrapper (§Components #2) is a no-op when the name is already set.
 - **ACP and `runcli` are unaffected.** ACP installs its own asker; `runcli`'s
   is opt-in (`internal/runcli/run.go:267`). Either way both keep their current
@@ -82,7 +82,7 @@ Two more facts close the remaining gaps:
    live outside it.
 2. **The child blocks.** That is what delivers the answer to the goroutine that
    needs it, without inventing a re-`Step` protocol that must survive
-   `shutdownTransient` (`agent.go:6510`). It mirrors the TUI's asker line for
+   `shutdownTransient` (`agent.go:6513`). It mirrors the TUI's asker line for
    line.
 3. **`livePendingAsks` merges rather than replaces.** The registry is read
    unconditionally; the existing message-scan keeps its current `TryLock`
@@ -227,7 +227,7 @@ RC-bridged sessions.
 ## Known limits (deliberate)
 
 - **Parent cancellation does not reach an executing synchronous sub-agent.**
-  `Step` snapshots its own `a.StopCh()` (`agent.go:1562`), and `runSyncDispatch`
+  `Step` snapshots its own `a.StopCh()` (`agent.go:1565`), and `runSyncDispatch`
   consults the parent's channel only for queue admission (`subagent.go:899`,
   `:905`). So after an auto-deny the child keeps running its own loop until it
   finishes on its own. Today that window is "however long the child takes";

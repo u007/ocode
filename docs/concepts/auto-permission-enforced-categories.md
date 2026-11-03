@@ -41,7 +41,7 @@ The closed set is `typesafeConcerns` in `internal/agent/permission_typesafe.go` 
 
 ## Amendment (2026-10-28) — `secrets` relaxation reaches `verifyAutoGrant`
 
-As of the 2026-10-28 working-tree change (`agent.go:4860` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **three independent consumers** — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 904; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4849/4860), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
+As of the 2026-10-28 working-tree change (`agent.go:4863` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **three independent consumers** — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 904; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4849/4860), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
 
 1. **Judge rubric** — `state["relaxed_concerns"]` line 904; `relaxedConcernSet()`; the `secrets` note (`permission_typesafe.go`:83, verified verbatim: "Switching this off lets a credential file be read without the deterministic sensitive-path refusal, and relaxes exposing the value plus the interpreter verifier's sensitive-path gate. Writing, editing or deleting a credential file is still gated, as is repo metadata (.git/, .github/workflows/).").
 2. **Interpreter-effect verifier** — `permission_interpreter.go`:467: `if !relaxed["secrets"] && isSensitivePath(p) { ... }`.
@@ -275,9 +275,9 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 
 ## Amendment (2026-10-04): The permission judge resolves through `resolveDecider(slotPermission)`
 
-The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:256`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:126`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
+The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:256`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:134`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
 
-`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:241`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
+`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:249`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
 
 The fail-open contract, the confidence floors, and the opaque-floor override are unchanged. The **deterministic Go safety boundary did change** — see the amendment below.
 

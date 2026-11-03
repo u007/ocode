@@ -34,9 +34,9 @@ Sandbox's auto-allow does not skip the decision judge. In `handleToolCall` (`int
 
 ## Persistence (Decision 2 superseded)
 
-Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/model.go:15685`) clamped `sandbox` to `normal` on the persist path (Decision 2 in `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md`). This has been superseded: sandbox now persists like any other mode.
+Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/model.go:15686`) clamped `sandbox` to `normal` on the persist path (Decision 2 in `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md`). This has been superseded: sandbox now persists like any other mode.
 
-- `persistPermissions()` calls `config.SavePermissionModeSwitch(string(pm.Mode()))` (`model.go:15669`) — writes the mode verbatim, no clamp.
+- `persistPermissions()` calls `config.SavePermissionModeSwitch(string(pm.Mode()))` (`model.go:15670`) — writes the mode verbatim, no clamp.
 - `SavePermissionModeSwitch` (`internal/config/ocodeconfig.go:3671`) sets `cfg.Permissions.Mode = mode` with no sandbox-specific logic.
 - TUI: `/sandbox` bare toggles, `/sandbox on|off|status`, permission-mode click cycle.
 - Web: the chat sidebar's Permission pill and `/yolo` + `/sandbox` commands, scoped to the active chat session; the Settings→Permissions form owns only the persisted default.
@@ -113,7 +113,7 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 
 - Mode constants: `internal/agent/permissions.go:38-46`
 - `Decide` path: `internal/agent/permissions.go:~1430-1505`
-- `persistPermissions`: `internal/tui/model.go:15685`
+- `persistPermissions`: `internal/tui/model.go:15686`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1108`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`

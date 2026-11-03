@@ -35,7 +35,7 @@ The **inbound-content guardrail** (`internal/agent/content_guard_typesafe.go`, p
 
 ## Activation: no config flag
 
-There is **no `permissions.*` key and no config field**, and none was added. The guardrail exists exactly when the shared client factory yields a keyed TypeSafe client — `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` with a non-empty `APIKey` in `contentGuardClient` (`content_guard_typesafe.go:376`), model `typesafe/jev-latest` (`defaultJudgeModel`, `internal/agent/decider.go:36`). This is the same "provider connected" convention as the egress guard (`networkGuardJudgeClient`), the discovery judge and the doc-search judge — four judges, one convention.
+There is **no `permissions.*` key and no config field**, and none was added. The guardrail exists exactly when the shared client factory yields a keyed TypeSafe client — `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` with a non-empty `APIKey` in `contentGuardClient` (`content_guard_typesafe.go:376`), model `typesafe/jev-latest` (`defaultJudgeModel`, `internal/agent/decider.go:41`). This is the same "provider connected" convention as the egress guard (`networkGuardJudgeClient`), the discovery judge and the doc-search judge — four judges, one convention.
 
 Absent, not disabled: with no TypeSafe key, `scanContentGuard` returns `contentGuardResult{}` at `content_guard_typesafe.go:527` and the result passes untouched, and that steady state is deliberately **not logged per call** (`content_guard_typesafe.go:525`). Judge usage is billed via `RecordSideUsage(..., "typesafe/"+client.Model)` (`content_guard_typesafe.go:630`).
 
@@ -86,13 +86,13 @@ The guard runs at **all five `scanToolResult` call sites**, immediately after se
 
 | # | call site | what follows |
 |---|---|---|
-| 1 | `agent.go:2074` → `agent.go:2076` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
-| 2 | `agent.go:2141` → `agent.go:2143` | `shapeToolResult` |
-| 3 | `agent.go:2204` → `agent.go:2207` | `TruncateToolResult` directly (`agent.go:2207`) |
-| 4 | `agent.go:5767` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCall` at `agent.go:5759`) | returned to the approved-call path |
+| 1 | `agent.go:2077` → `agent.go:2079` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
+| 2 | `agent.go:2144` → `agent.go:2146` | `shapeToolResult` |
+| 3 | `agent.go:2207` → `agent.go:2210` | `TruncateToolResult` directly (`agent.go:2210`) |
+| 4 | `agent.go:5770` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCall` at `agent.go:5762`) | returned to the approved-call path |
 | 5 | DAG scheduler: `task_dag.go:637` (redact) → `task_dag.go:644` (guard) | `shapeToolResult` in `buildResults` (`task_dag.go:870`) |
 
-The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1630`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:5774`. `contentGuardStepCtx` (`content_guard_typesafe.go:351`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
+The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1633`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:5777`. `contentGuardStepCtx` (`content_guard_typesafe.go:351`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
 
 The DAG scheduler's guard ctx used to be built by `contentGuardStepCtxCtx`, which deliberately dropped the cancel on the stated grounds that "a live ctx there is not a leak" — it was: the cancel is what unparks the `crashguard.Go` goroutine `contentGuardStepCtx` starts on `stopCh`, so each batch parked one goroutine and kept one context alive for the rest of the session. `newDAGScheduler` now stores the cancel (`task_dag.go:425`) and `run` releases it via `defer` (`task_dag.go:473`); `contentGuardStepCtxCtx` is deleted. Pinned by `TestDAGSchedulerReleasesItsGuardContext` (`task_dag_test.go`).
 
@@ -225,7 +225,7 @@ The concern question's labels double as its choice descriptions (`contentGuardCo
 - `Concern` + `ConcernConfidence`, reported **separately and including `none`** — dropping the number on the clean case made the question look unanswered rather than answered-clean.
 - `Probabilities` — the verdict distribution, rendered `p: clean 0.09 / flagged 0.91`, because a bare `0.62` is opaque: it does not say *which way* the judge leaned or by how much.
 
-Wire: `permissions.go:148` (`UntrustedScores`) → `handler_permissions_resolve.go:72` (SSE/pending-ask payload) → TUI `model.go:15304` (`contentGuardScoreLines`) and web `chatStore.tsx:59` / `PermissionDialog.tsx:447` (`aria-label="Guardrail judge scores"`).
+Wire: `permissions.go:148` (`UntrustedScores`) → `handler_permissions_resolve.go:72` (SSE/pending-ask payload) → TUI `model.go:15305` (`contentGuardScoreLines`) and web `chatStore.tsx:59` / `PermissionDialog.tsx:447` (`aria-label="Guardrail judge scores"`).
 
 **Rationale:** the user decides whether to hand content to the model, so they need the underlying scores and must be able to *disagree* with the judge. A single confidence number asks for trust; per-chunk verdicts, concerns and distributions invite a judgement.
 
@@ -239,7 +239,7 @@ Carrying the content over the wire:
 
 - SSE / pending-asks payload: `PermissionEvent` gained the three `untrusted_*` fields plus scores and failure, `omitempty` so every ordinary permission frame is byte-identical to before (`handler_permissions_resolve.go:72`), projected in `newPermissionEvent`.
 - Web store: `chatStore.tsx:59` maps `untrusted_scores` (and `untrusted_content`); prop threading `App.tsx:2157`.
-- **TUI** renders the full result through the existing `permViewport`: `renderPermissionRequestBody`'s content branch (`model.go:15235`) prints a `🛡 Content guardrail — this tool's result was flagged:` header (`model.go:15240`), the summary, `Source: …`, a "Secrets are already masked in this view" line, then `req.UntrustedContent` (`model.go:15258`), then the per-chunk score lines (`model.go:15304`). The viewport is height-budgeted against `bottomChromeHeight` (`model.go:17377`) and capped by `permDialogMaxBodyLines` (`model.go:17402`), so an arbitrarily large result scrolls instead of pushing the buttons off screen.
+- **TUI** renders the full result through the existing `permViewport`: `renderPermissionRequestBody`'s content branch (`model.go:15236`) prints a `🛡 Content guardrail — this tool's result was flagged:` header (`model.go:15241`), the summary, `Source: …`, a "Secrets are already masked in this view" line, then `req.UntrustedContent` (`model.go:15259`), then the per-chunk score lines (`model.go:15305`). The viewport is height-budgeted against `bottomChromeHeight` (`model.go:17378`) and capped by `permDialogMaxBodyLines` (`model.go:17403`), so an arbitrarily large result scrolls instead of pushing the buttons off screen.
 - **Web** renders a scrollable `<pre data-testid="content-guard-result">` (`PermissionDialog.tsx:486`) with `max-h-96 overflow-y-auto` (`PermissionDialog.tsx:488`), showing one page of `CONTENT_PAGE_CHARS` (32 000, `PermissionDialog.tsx:38`) at a time; a **"Show next 32,000"** button (`PermissionDialog.tsx:504`) reveals the rest. Paging, not truncation: the ask still carries the full text, and the DOM never holds more than one page, because one text block's layout cost grows with its size (headless Chrome, one `<pre>`: ~86 ms at 50 KB, ~6 s at 500 KB, ~116 s at 2 MB). An uncapped block inside the dialog would make the decision unreachable (`PermissionDialog.tsx:482`). The grid track is `minmax(0,1fr)` (`PermissionDialog.tsx:387`) and the body `min-w-0` (`PermissionDialog.tsx:405`): without them an unbreakable run widens the auto track and pushes the buttons off-screen wherever the engine does not count `overflow-wrap:anywhere` in min-content sizing. The judge scores sit under `aria-label="Guardrail judge scores"` (`PermissionDialog.tsx:447`), a distinct **"Guardrail could not clear this result:"** block when `Failure` is set, plus the copy *"Delivering it lets the assistant read the text, including anything in it written as an instruction"* (`PermissionDialog.tsx:478`).
 
 ## Approval does NOT re-execute — the load-bearing host change
@@ -248,11 +248,11 @@ Every other approval **re-runs the tool**: the TUI through `executeApprovedTool`
 
 So approval returns the already-inspected text: `ResolveContentAsk(req, approved)` (`content_guard_typesafe.go:807`) returns `req.UntrustedContent` on approve and `contentGuardDeniedNotice` on deny, and `IsContentAsk(req)` is the branch predicate both hosts use:
 
-- **TUI:** `model.go:15532` (allow) and `model.go:15599` (deny) route to `contentAskResolved` (`model.go:15883`), which substitutes the resolved text keyed on `m.pendingToolCallID` — the same field `executeApprovedTool` uses, so a round holding several asks resolves each independently.
+- **TUI:** `model.go:15533` (allow) and `model.go:15600` (deny) route to `contentAskResolved` (`model.go:15884`), which substitutes the resolved text keyed on `m.pendingToolCallID` — the same field `executeApprovedTool` uses, so a round holding several asks resolves each independently.
 - **Server:** `handler_permissions_resolve.go:328` substitutes `working[askIdx].Content` inside the same `dispatchAskContinuation` that every other ask uses — same async shape, same `permission_resolved` broadcast, same re-Step plumbing.
 - **Sub-agent path:** when `OnPermissionAsk` is set (sub-agents, the ACP bridge, `run --auto`), `guardToolResult` (`content_guard_typesafe.go:838`) asks synchronously on the dispatch goroutine the caller already waits on and resolves through the same `ResolveContentAsk`, emitting `tier=contentguard_resolved`.
 
-Because there is nothing left to execute, approval wraps the resolved content in `TruncateToolResult` — the TUI in `contentAskResolved` (`model.go:15885`), the server in the `IsContentAsk` branch of the resolve continuation (`handler_permissions_resolve.go:327`-`handler_permissions_resolve.go:329`) — so approving a 192 KB result does not inject 192 KB. Both hosts used to skip this: each called `ResolveContentAsk` and handed `req.UntrustedContent` to the model verbatim, so a >192 KB MCP/webfetch result entered the context whole on one approval click. The old TUI comment *asserted* the truncation while no code performed it — the previous citation for this claim pointed at that comment, not at any code. The ask deliberately carries the FULL flagged text so the user can judge it; truncation happens AFTER the dialog, not before — safe because `ResolveContentAsk` has already replaced the sentinel, so truncate.go's "never cut an ask" rule does not apply. Pinned by `TestApprovedContentAskIsTruncatedLikeAnyToolResult` and `TestContentAskPayloadStaysCompleteForTheDialog` (`internal/server/handler_content_guard_reask_test.go`).
+Because there is nothing left to execute, approval wraps the resolved content in `TruncateToolResult` — the TUI in `contentAskResolved` (`model.go:15886`), the server in the `IsContentAsk` branch of the resolve continuation (`handler_permissions_resolve.go:327`-`handler_permissions_resolve.go:329`) — so approving a 192 KB result does not inject 192 KB. Both hosts used to skip this: each called `ResolveContentAsk` and handed `req.UntrustedContent` to the model verbatim, so a >192 KB MCP/webfetch result entered the context whole on one approval click. The old TUI comment *asserted* the truncation while no code performed it — the previous citation for this claim pointed at that comment, not at any code. The ask deliberately carries the FULL flagged text so the user can judge it; truncation happens AFTER the dialog, not before — safe because `ResolveContentAsk` has already replaced the sentinel, so truncate.go's "never cut an ask" rule does not apply. Pinned by `TestApprovedContentAskIsTruncatedLikeAnyToolResult` and `TestContentAskPayloadStaysCompleteForTheDialog` (`internal/server/handler_content_guard_reask_test.go`).
 
 ## Approved re-execution can raise a NEW content ask — the server must not Step on it
 
@@ -273,7 +273,7 @@ Neither host offers an always-allow choice:
 
 - `AlwaysRuleChoiceAvailable` returns `false` for `PermissionScopeContent` (`permissions.go:1896`) — *"there is no rule that would make the next remote result safe"*; persisting anything would silently convert a one-shot judgement into a blanket allow.
 - `AlwaysToolChoiceAvailable` returns `false` for the same reason (`permissions.go:1962`).
-- The TUI delegates both (`permAlwaysRuleAvailable`, `model.go:17326`; `permAlwaysToolAvailable`, `model.go:17334`), so the buttons are never rendered.
+- The TUI delegates both (`permAlwaysRuleAvailable`, `model.go:17327`; `permAlwaysToolAvailable`, `model.go:17335`), so the buttons are never rendered.
 - **The server re-checks independently** at `handler_permissions_resolve.go:272`-`handler_permissions_resolve.go:284`: a hand-crafted `always_rule` / `always_tool` resolve against a content ask gets HTTP **409** with *"it must be approved individually"*. UI-level hiding is not the security boundary.
 
 The scope's doc comment states the invariant outright (`permissions.go:84`-`permissions.go:89`).

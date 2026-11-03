@@ -13,7 +13,7 @@
 
 Web/desktop `/btw` does not behave like the TUI.
 
-**TUI** (`internal/tui/model.go:12711` `handleBtwCmd` → `internal/agent/ask.go:68`
+**TUI** (`internal/tui/model.go:12712` `handleBtwCmd` → `internal/agent/ask.go:68`
 `AskLoopAsync`): `/btw <msg>` runs an **independent side-query agent loop** — its own
 fresh LLM client, its own message list, the tool set minus dispatch/interactive tools,
 an 8-step cap, permission asks denied non-blockingly. It streams live tool activity and
@@ -39,7 +39,7 @@ behaviour, with a **docked, non-blocking panel** instead of the TUI's modal popu
 
 ### TUI semantics (parity target)
 
-The observable contract to match (`internal/tui/model.go:12711` + `internal/agent/ask.go:68`):
+The observable contract to match (`internal/tui/model.go:12712` + `internal/agent/ask.go:68`):
 
 - Runs an independent child agent with its **own fresh client**; it sees the **full
   current transcript plus the aside** (not just the aside).

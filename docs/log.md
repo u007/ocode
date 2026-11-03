@@ -4,6 +4,8 @@
 
 ## 2026-11-02
 
+* **Update**: Desktop print: macOS system print panel via `ocode_printWindow` (portrait, 36pt margins) replaces Wails landscape `windowPrint`; PDF popup-tab timer fires only if onload never ran ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md), [concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+* **Update**: Preview Print / Save as PDF: toolbar Print back to native system print, in-app print dialog removed, PDF viewer print chain ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
 * **Update**: browser_run screenshot view: set-of-marks screenshot for pages the text view cannot judge, text-entry controls masked before the image, TypeSafe image assets, scroll offset as progress, 64 px viewport floor ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
 * **Update**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
 * **Update**: Preview Print / Save as PDF ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
@@ -23,6 +25,8 @@
 * **Update**: Web/Desktop Server Project Scoping: embedded-browser paragraph notes the per-tab origin for local clients ([concepts/web-server-project-scoping.md](/concepts/web-server-project-scoping.md))
 * **Update**: Per-tab browse origin plan 04: remote binding in the request header, marker in the reply ([plans/2026-11-02-browse-per-tab-origin/04-remote.md](/plans/2026-11-02-browse-per-tab-origin/04-remote.md))
 * **Update**: Per-tab browse origin plan 05: shipped POST /api/browse/tab-origin contract and 409 handling ([plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md](/plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md))
+* **Update**: Auto-continue verdict now judges the messages that bear on the chain's original request: `original_request` in the state, a per-message noul selection step once a transcript passes 20 messages (`slotAutoContinueSelect`, own 0.5 floor, fail-closed on selection error), and a rubric line that refuses `end` while the request is still undone ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-continue selection is progressive: an in-memory per-message score cache on `Agent` (sha256 of role and trimmed content, scoped to the original request, fail-open unscored outcomes and failed calls not cached) so a turn end scores only new messages ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
 
 ## 2026-11-01
 

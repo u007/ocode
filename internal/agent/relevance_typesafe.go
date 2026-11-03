@@ -28,13 +28,20 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 	return relevanceJudgeMinConfidenceDefault
 }
 
-// judgeRelevanceQuestions sends one noul (yes-probability) question per
-// candidate in a single Decide call and returns (a) the set of candidate ids
-// whose answer meets the lenient relevance floor and (b) the raw noul score for
-// every candidate that got a real noul answer. The caller builds the state and
-// per-candidate instructions; this function owns the shared mechanics: the
-// Decide call, side-usage recording, the confidence floor, per-candidate
-// fail-open handling, and the debug lines.
+// judgeRelevanceQuestions is judgeNoulCandidates at the shared lenient relevance
+// floor (resolveRelevanceJudgeMinConfidence). The discovery, doc_search and
+// code_search judges all go through it.
+func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client Decider, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, map[string]float64, error) {
+	return a.judgeNoulCandidates(ctx, client, debugKind, logTag, candidateIDs, state, questions, a.resolveRelevanceJudgeMinConfidence())
+}
+
+// judgeNoulCandidates sends one noul (yes-probability) question per candidate in
+// a single Decide call and returns (a) the set of candidate ids whose answer
+// meets min and (b) the raw noul score for every candidate that got a real noul
+// answer. The caller builds the state and per-candidate instructions and chooses
+// the floor; this function owns the shared mechanics: the Decide call,
+// side-usage recording, the floor, per-candidate fail-open handling, and the
+// debug lines.
 //
 // The score map is a SECOND output rather than a change to the keep contract, so
 // the three judges keep identical veto semantics. It exists because a boolean
@@ -53,8 +60,10 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 // Fail-open contract (mirrors the pre-existing discovery judge): a
 // transport/decode error returns (nil, err) so the caller keeps every
 // candidate; a missing or non-noul answer keeps that candidate; only a real
-// below-floor noul vetoes. The judge can therefore only ever veto.
-func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client Decider, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, map[string]float64, error) {
+// below-floor noul vetoes. The judge can therefore only ever veto. A caller that
+// must fail CLOSED on a transport error (the auto-continue selection step) treats
+// the returned error as its own failure.
+func (a *Agent) judgeNoulCandidates(ctx context.Context, client Decider, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion, min float64) (map[string]bool, map[string]float64, error) {
 	if len(candidateIDs) == 0 {
 		return map[string]bool{}, map[string]float64{}, nil
 	}
@@ -64,7 +73,6 @@ func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client Decider, deb
 	}
 	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))
 
-	min := a.resolveRelevanceJudgeMinConfidence()
 	model := deciderLabel(client)
 	keep := make(map[string]bool, len(candidateIDs))
 	scores := make(map[string]float64, len(candidateIDs))

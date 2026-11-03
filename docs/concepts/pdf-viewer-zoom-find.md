@@ -14,7 +14,7 @@ tags:
   - jsdom
   - persistence
   - project-switch
-timestamp: 2026-11-02T07:26:21Z
+timestamp: 2026-11-02T12:22:31Z
 ---
 # PDF viewer zoom, Space navigation, and find
 
@@ -74,7 +74,8 @@ Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale
 
 - Both reuse an independent `blobRef` Blob snapshot of the PDF bytes taken at load — pdf.js may transfer (detach) the ArrayBuffer handed to `getDocument`, so always snapshot `new Blob([buf.slice(0)])` BEFORE calling `getDocument`; reset `blobRef.current = null` in the load effect's cleanup.
 - **Download**: `saveBlobAsFile(blob, basename)` (`web/src/lib/saveBlob.ts`; the basename appends `.pdf` if missing). In a browser that is an object URL on a temp anchor, revoked after 10s (Safari navigates to `about:blank` if revoked synchronously). In the desktop app the bytes go to the shell over the `ocode:save-file:` bridge message and the native save panel opens (`cmd/ocode-desktop/save_file.go`), because WKWebView drops blob `<a download>` clicks without any error. The desktop save is unverified live; see `TODO.md`.
-- **Print**: opens `PrintPreviewDialog` with the PDF blob URL in a sandboxed iframe (`sandbox=""`); Close dismisses without printing. The blob URL is revoked on dialog close. No native print dialog or popup tab.
+- **Print**: `printPdf` (`PdfViewer.tsx`) makes an object URL from the blob and loads it in a hidden 1px iframe. On `load` it waits 500 ms (`PDF_PRINT_SETTLE_MS`) for the PDF viewer to render, then calls `contentWindow.print()`, so the browser's PDF engine opens the print dialog. If `print()` throws, it opens the URL in a popup tab. A 30 s watchdog (`PDF_PRINT_LOAD_TIMEOUT_MS`, also wired to `onerror`) opens a popup tab only if the frame's `onload` never fired (the `loaded` flag), and falls back to `downloadPdf` if the popup is blocked. A successful print therefore opens no popup tab. The frame and URL are cleaned up on the iframe's `afterprint` event, with a 10 min safety timer (`PDF_PRINT_CLEANUP_MS`) if it never fires.
+  - Desktop PDF print inside the WKWebView blob frame is unverified live; see `TODO.md`.
 - Buttons in the toolbar next to Find: Print, Download (disabled until `total > 0`).
 
 ## View-state persistence (2026-09-20)
@@ -103,7 +104,7 @@ localStorage `ocode.ui.sidebarPreview.v1`, keyed `host::root`. Shape `{surface, 
 3. **CSS-escaped class names are invalid selectors**: `.bg-yellow-300/45` is NOT valid for `querySelectorAll` — match by `[aria-hidden="true"]` + `className.includes` instead.
 4. **`getByLabelText` must come from the render result object**, not `container`.
 5. **`vi.mock` of `pdfjs-dist` must implement `Util.transform` as a real matrix product** when the viewer builds text spans — `vi.fn()` returning undefined causes a `tx[4]` crash.
-6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). The print dialog is a Radix `Dialog`, so assert `screen.getByRole("dialog")` and the iframe's `src`; closing it must revoke the blob URL.
+6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). Print assertions check the hidden iframe's `src`. The object URL is revoked on `afterprint` or a 10 min timer, so use fake timers to observe the revoke.
 
 ### Test hygiene
 

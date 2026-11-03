@@ -24,7 +24,7 @@ An opaque payload (a heredoc, a base64 string, a downloaded script) offers no sa
 ## The two surfaces
 
 - **Web** (`PermissionDialog.tsx`): a new **"Explain this tool call"** button. When clicked it fires the digest endpoint; the result is shown inside the same dialog.
-- **TUI** (`internal/tui/model.go:17899`: `const permDigestActionLabel = "[e] explain"`): the `[e]` shortcut is a clickable chip on the hint row (`internal/tui/model.go:18155`), one line below the Approve/Deny/Always buttons. The digest renders inside `permissionBodyText` (`internal/tui/model.go:17978`) so the viewport, scroll indicator, and hit-test row layout stay consistent.
+- **TUI** (`internal/tui/model.go:17900`: `const permDigestActionLabel = "[e] explain"`): the `[e]` shortcut is a clickable chip on the hint row (`internal/tui/model.go:18156`), one line below the Approve/Deny/Always buttons. The digest renders inside `permissionBodyText` (`internal/tui/model.go:17979`) so the viewport, scroll indicator, and hit-test row layout stay consistent.
 
 Both surfaces disclose the same caveat next to the button: the session's **redaction hook** is applied only when enabled; ordinary arguments still reach a second provider. This is the documented posture for any side-call that processes argument content.
 
@@ -64,7 +64,7 @@ The server resolves the **authoritative** pending ask from the session transcrip
 
 ## Model resolution
 
-`toolDigestClient` (`internal/agent/tool_digest.go:203`) picks the small model when `SmallModelRuntimeEnabled()`; the fallback (`internal/agent/agent.go:3417`, `smallModelOrMainClient`) is a no-thinking copy of the main client. The fallback to the main model is deliberate (`docs/concepts/compaction-cancellation.md` notes the same resolution for compaction): a slow local small model is supported, but the feature must work even when none is configured, rather than silently disabling itself.
+`toolDigestClient` (`internal/agent/tool_digest.go:203`) picks the small model when `SmallModelRuntimeEnabled()`; the fallback (`internal/agent/agent.go:3420`, `smallModelOrMainClient`) is a no-thinking copy of the main client. The fallback to the main model is deliberate (`docs/concepts/compaction-cancellation.md` notes the same resolution for compaction): a slow local small model is supported, but the feature must work even when none is configured, rather than silently disabling itself.
 
 The call is non-blocking in the TUI (`tea.Cmd`, guarded by `permDigestSeq`, `internal/tui/model.go:723`); a queued (not promoted) ask does not clear the current digest.
 
@@ -92,9 +92,9 @@ The system prompt (`internal/agent/tool_digest.go:64`) states the parameters are
 
 - **No prompt-cache impact**: the side call carries no tools array and produces no transcript mutation.
 - **No cancellation in TUI**: the TUI digest is a `tea.Cmd`; there is no user action to cancel it mid-flight. The timeout (`25 s`) is the only abort mechanism.
-- **No digest for content-guardrail asks** (`internal/tui/model.go:17904`, `permDigestActionAvailable`): a guardrail ask is about a result that already ran, so there is nothing pending to explain.
+- **No digest for content-guardrail asks** (`internal/tui/model.go:17905`, `permDigestActionAvailable`): a guardrail ask is about a result that already ran, so there is nothing pending to explain.
 - **No digest cache**: each click hits the endpoint fresh; the result is not persisted across turns.
-- **TUI geometry**: the chip lives on the hint row (`internal/tui/model.go:17899`, `internal/tui/model.go:18155`), never rendered below the button row (`permissionBodyText` keeps the viewport consistent).
+- **TUI geometry**: the chip lives on the hint row (`internal/tui/model.go:17900`, `internal/tui/model.go:18156`), never rendered below the button row (`permissionBodyText` keeps the viewport consistent).
 
 ## Verification references
 

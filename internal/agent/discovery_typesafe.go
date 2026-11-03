@@ -12,9 +12,9 @@ import (
 // a large project-doc summary cannot blow up the request.
 const discoveryJudgeSummaryCap = 1000
 
-// discoveryJudgeTailN / discoveryJudgeTailCap mirror the auto-continue judge's
-// transcript budget: at most the last N messages, each capped, so one huge
-// tool result cannot dominate the request.
+// discoveryJudgeTailN / discoveryJudgeTailCap are this judge's own transcript
+// budget (independent of the auto-continue selection step): at most the last N
+// messages, each capped, so one huge tool result cannot dominate the request.
 const (
 	discoveryJudgeTailN   = 6
 	discoveryJudgeTailCap = 4000

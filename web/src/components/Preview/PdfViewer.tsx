@@ -6,7 +6,6 @@ import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsync
 import { saveBlobAsFile } from "@/lib/saveBlob";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import { usePdfFind } from "./usePdfFind";
-import { PrintPreviewDialog } from "./PrintPreviewDialog";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
 
 // WebKit has no ReadableStream async iteration, which pdf.js's getTextContent()
@@ -41,6 +40,12 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 1.25;
 /** Wheel zoom sensitivity: ratio = exp(-deltaY / WHEEL_ZOOM_DIVISOR). */
 const WHEEL_ZOOM_DIVISOR = 450;
+/** Print: a blob frame that has not loaded by this long has genuinely failed. */
+const PDF_PRINT_LOAD_TIMEOUT_MS = 30_000;
+/** Print: pause after onload so the browser's PDF viewer paints before print(). */
+const PDF_PRINT_SETTLE_MS = 500;
+/** Print: safety teardown if afterprint never fires; the dialog can stay open for minutes. */
+const PDF_PRINT_CLEANUP_MS = 600_000;
 
 type PageDim = { w: number; h: number };
 /** How to re-map the scroll position after a zoom layout change. */
@@ -189,12 +194,10 @@ export default function PdfViewer({
   const [renderTick, setRenderTick] = useState(0);
   /** Bumped when a new document lands; resets the find bar state. */
   const [docVersion, setDocVersion] = useState(0);
- const [spaceHeld, setSpaceHeld] = useState(false);
- const [dragging, setDragging] = useState(false);
-  const [printOpen, setPrintOpen] = useState(false);
-  const [printSrc, setPrintSrc] = useState<string | null>(null);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [dragging, setDragging] = useState(false);
 
- const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
+  const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const canvasRefs = useRef(new Map<number, HTMLCanvasElement>());
   const textRefs = useRef(new Map<number, HTMLDivElement>());
@@ -641,15 +644,73 @@ export default function PdfViewer({
 
   /** Print via a hidden iframe hosting the PDF blob: the browser's own PDF
    *  engine renders it and its print dialog opens. Fallback chain: iframe →
-  *  popup tab → forced download (popup blocked). */
+   *  popup tab → forced download (popup blocked). */
   const printPdf = useCallback(() => {
     const blob = blobRef.current;
     if (!blob) return;
     const url = URL.createObjectURL(blob);
-    setPrintSrc(url);
-    setPrintOpen(true);
-    return;
-  }, []);
+    const frame = document.createElement("iframe");
+    frame.style.position = "fixed";
+    frame.style.right = "0";
+    frame.style.bottom = "0";
+    frame.style.width = "1px";
+    frame.style.height = "1px";
+    frame.style.opacity = "0";
+    frame.style.border = "0";
+    frame.src = url;
+    frame.setAttribute("aria-hidden", "true");
+    frame.tabIndex = -1;
+    let loaded = false;
+    // Idempotent: removing the frame makes a second call a no-op.
+    const cleanup = () => {
+      frame.remove();
+      URL.revokeObjectURL(url);
+    };
+    // The frame cannot host the print dialog: no window to call print() on, or
+    // print() itself refused. Open the PDF in a tab; with popups blocked, save it
+    // instead. Every failure path goes through here so the click never no-ops.
+    const openTab = () => {
+      frame.remove();
+      const win = window.open(url, "_blank");
+      if (!win) downloadPdf(); // popups blocked → last resort: download
+      else window.setTimeout(() => URL.revokeObjectURL(url), PDF_PRINT_CLEANUP_MS);
+    };
+    // Genuinely failed load (onerror, or no onload within the watchdog window).
+    const fallback = () => {
+      if (loaded || !frame.isConnected) return;
+      openTab();
+    };
+    frame.onerror = fallback;
+    frame.onload = () => {
+      loaded = true;
+      window.clearTimeout(watchdog);
+      // The PDF viewer may not have painted when load fires; settle before printing.
+      window.setTimeout(() => {
+        const target = frame.contentWindow;
+        if (!target) {
+          // A blob: frame can load without an accessible window (WKWebView). Do not
+          // swallow the click — take the documented tab/download fallback.
+          openTab();
+          return;
+        }
+        try {
+          // afterprint fires on the frame's window when the dialog closes.
+          // Listen before print(), which can block until then.
+          target.addEventListener("afterprint", cleanup);
+          target.focus();
+          target.print();
+        } catch {
+          // Cross-origin/sandboxed frame refused print() — open a tab instead.
+          openTab();
+        }
+      }, PDF_PRINT_SETTLE_MS);
+      // Safety net in case afterprint never fires; the frame stays while the dialog is open.
+      window.setTimeout(cleanup, PDF_PRINT_CLEANUP_MS);
+    };
+    document.body.appendChild(frame);
+    // WKWebView can leave a blob: frame without onload; wait the full window before giving up.
+    const watchdog = window.setTimeout(fallback, PDF_PRINT_LOAD_TIMEOUT_MS);
+  }, [downloadPdf]);
 
   const rotate = useCallback(() => {
     const doc = docRef.current;
@@ -949,7 +1010,6 @@ export default function PdfViewer({
   const toggleOn = "rounded px-1.5 py-0.5 bg-muted text-foreground";
   const toggleOff = "rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted";
   return (
-    <>
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1 text-xs">
         <button type="button" disabled={!total || safe <= 1} onClick={() => gotoPage(safe - 1)} className={idleBtn} aria-label="Previous page">←</button>
@@ -965,7 +1025,7 @@ export default function PdfViewer({
         <button type="button" disabled={!total} onClick={fitPage} className={idleBtn} aria-label="Fit page" title="Fit whole page">Page</button>
         <button type="button" disabled={!total} onClick={rotate} className={idleBtn} aria-label="Rotate clockwise" title="Rotate 90° clockwise">⟳</button>
         <span className="flex-1" />
-        <button type="button" disabled={!total} onClick={printPdf} className={idleBtn} aria-label="Print" title="Open print preview">Print</button>
+        <button type="button" disabled={!total} onClick={printPdf} className={idleBtn} aria-label="Print" title="Print (browser print dialog)">Print</button>
         <button type="button" disabled={!total} onClick={downloadPdf} className={idleBtn} aria-label="Download" title={`Download ${pdfFileName}`}>Download</button>
         <button type="button" disabled={!total} onClick={find.show} className={idleBtn} aria-label="Find in document" title="Find (Ctrl/⌘ F)">Find</button>
       </div>
@@ -1128,18 +1188,5 @@ export default function PdfViewer({
       <style>{`.pdf-text-layer span{color:transparent;}.pdf-text-layer span::selection{background:rgba(59,130,246,.35);}`}</style>
       {sel && <SelectionToolbar sel={sel} path={path} label={`p.${safe}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
-    <PrintPreviewDialog
-      open={printOpen}
-      onOpenChange={(next) => {
-        if (!next && printSrc) {
-          URL.revokeObjectURL(printSrc);
-          setPrintSrc(null);
-        }
-        setPrintOpen(next);
-      }}
-      src={printSrc}
-      title={pdfFileName}
-    />
-    </>
   );
 }
