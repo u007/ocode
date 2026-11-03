@@ -380,6 +380,12 @@ the control is deferred (§19).
 - Selecting a Ghostty theme keeps today's behaviour; this source is opt-in.
 - `TerminalForm` gains the third option with a hint naming the active colour
   theme.
+- **Known side effect (from `docs/concepts/web-terminal-ghostty-web.md`):**
+  changing the terminal theme rebuilds the wasm terminal, which drops terminal
+  modes, the alternate screen, the selection and the link cache. Selecting a
+  VS Code theme under this source therefore resets those; it is ghostty-web
+  behaviour, not new in this feature, but the Settings copy should not imply a
+  seamless live recolour.
 
 ## 10. TUI registry integration
 
