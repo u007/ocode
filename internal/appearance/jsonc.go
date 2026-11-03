@@ -21,6 +21,11 @@ import (
 // stops with a warning rather than recursing without bound.
 const maxIncludeDepth = 5
 
+// maxThemeFileBytes caps every theme file read. A theme is a small JSON
+// document, so anything larger is a mistake or an attack and is refused before
+// it is pulled into memory.
+const maxThemeFileBytes = 8 << 20
+
 // jsoncComments matches either a quoted string (preserved) or a comment
 // (removed). Copied from internal/config so this package does not depend on
 // config; matching quoted strings first keeps "//" inside a value such as a URL
@@ -165,11 +170,14 @@ func stripTrailingCommas(data []byte) []byte {
 
 // LoadThemeTree loads the theme at path and merges its "include" chain
 // depth-first: the included layer is laid down first, then the including file
-// overrides it key by key.
+// overrides it key by key. Relative "include" and "tokenColors" references
+// resolve against the directory of the file that contains them, never against
+// root, so a theme inside themes/ can include "./dark_vs.json" beside it.
 //
-// root is the containment boundary. path and every file reached through
-// "include" or an external "tokenColors" reference must resolve inside root
-// both lexically and after EvalSymlinks; anything else is refused.
+// root is the containment boundary and must be non-empty. path and every file
+// reached through "include" or an external "tokenColors" reference must resolve
+// inside root both lexically and after EvalSymlinks; anything else is refused.
+// Every file read is capped at maxThemeFileBytes.
 //
 // depth seeds the include counter and callers pass 0. Partial failures — an
 // escaping include, a depth overflow, an unreadable or non-JSON tokenColors
@@ -206,7 +214,7 @@ func LoadThemeTree(path, root string, depth int) (*RawTheme, []string, error) {
 // overlays its own values. Problems in the included layer become warnings; only
 // this file's own read or decode failure is fatal.
 func loadThemeLayer(path, root string, depth int) (*RawTheme, []string, error) {
-	data, err := os.ReadFile(path)
+	data, err := readThemeFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read theme file: %w", err)
 	}
@@ -222,7 +230,10 @@ func loadThemeLayer(path, root string, depth int) (*RawTheme, []string, error) {
 			warnings = append(warnings, fmt.Sprintf(
 				"include %q skipped: include depth limit %d reached", inc, maxIncludeDepth))
 		} else {
-			candidate := includePath(root, inc)
+			// VS Code resolves an "include" against the including file's
+			// directory (its own "include": "./dark_vs.json" sits beside it),
+			// so joining against root alone silently misses the base layer.
+			candidate := includePath(filepath.Dir(path), inc)
 			if incPath, resolveErr := resolveContained(root, candidate); resolveErr != nil {
 				warnings = append(warnings, fmt.Sprintf("include %q rejected: %v", inc, resolveErr))
 			} else if parent, parentWarnings, loadErr := loadThemeLayer(incPath, root, depth+1); loadErr != nil {
@@ -242,14 +253,37 @@ func loadThemeLayer(path, root string, depth int) (*RawTheme, []string, error) {
 }
 
 // includePath resolves an "include" value to a path candidate. Relative values
-// are joined against root; absolute values are used as-is so containment can
-// refuse them explicitly.
-func includePath(root, inc string) string {
+// are joined against the including file's directory; absolute values are used
+// as-is so containment can refuse them explicitly.
+func includePath(baseDir, inc string) string {
 	candidate := filepath.FromSlash(inc)
 	if !filepath.IsAbs(candidate) {
-		return filepath.Join(root, candidate)
+		return filepath.Join(baseDir, candidate)
 	}
 	return filepath.Clean(candidate)
+}
+
+// readThemeFile reads a theme file or an external tokenColors reference,
+// refusing anything over maxThemeFileBytes. Every theme read goes through this
+// helper so the cap cannot be bypassed by one path. The size is checked before
+// the read and again on the bytes actually returned, in case the file grew
+// between the stat and the read.
+func readThemeFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxThemeFileBytes {
+		return nil, fmt.Errorf("file is %d bytes, over the %d-byte theme file limit", info.Size(), maxThemeFileBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxThemeFileBytes {
+		return nil, fmt.Errorf("file grew to %d bytes, over the %d-byte theme file limit", len(data), maxThemeFileBytes)
+	}
+	return data, nil
 }
 
 // loadTokenColorsFile loads an external "tokenColors" reference held in
@@ -274,7 +308,7 @@ func loadTokenColorsFile(layer *RawTheme, themePath, root string) string {
 	if err != nil {
 		return fmt.Sprintf("tokenColors %q rejected: %v", ref, err)
 	}
-	data, err := os.ReadFile(resolved)
+	data, err := readThemeFile(resolved)
 	if err != nil {
 		return fmt.Sprintf("tokenColors %q not loaded: %v", ref, err)
 	}
@@ -291,6 +325,7 @@ func loadTokenColorsFile(layer *RawTheme, themePath, root string) string {
 // the child actually has some.
 func mergeThemes(base, child *RawTheme) *RawTheme {
 	merged := &RawTheme{}
+	var baseTokens tokenColors
 	if base != nil {
 		merged.Name = base.Name
 		merged.Type = base.Type
@@ -301,9 +336,10 @@ func mergeThemes(base, child *RawTheme) *RawTheme {
 				merged.Colors[key] = value
 			}
 		}
-		merged.TokenColors = base.TokenColors
+		baseTokens = base.TokenColors
 	}
 	if child == nil {
+		merged.TokenColors = mergeTokenColors(tokenColors{}, baseTokens)
 		return merged
 	}
 	if child.Name != "" {
@@ -323,13 +359,39 @@ func mergeThemes(base, child *RawTheme) *RawTheme {
 			merged.Colors[key] = value
 		}
 	}
-	if len(child.TokenColors.Rules) > 0 {
-		merged.TokenColors.Rules = child.TokenColors.Rules
-	}
-	if child.TokenColors.File != "" {
-		merged.TokenColors.File = child.TokenColors.File
-	}
+	merged.TokenColors = mergeTokenColors(baseTokens, child.TokenColors)
 	return merged
+}
+
+// mergeTokenColors layers the child's tokenColors over the base's. The child's
+// rules win when it has any, and the file reference follows the same precedence,
+// but the two must come from the same layer: a reference is dropped when the
+// winning rules were supplied by a different layer, so the impossible
+// "{File != \"\", Rules from another source}" pairing cannot be produced.
+func mergeTokenColors(base, child tokenColors) tokenColors {
+	var out tokenColors
+	rulesFrom := ""
+	if len(base.Rules) > 0 {
+		rulesFrom = "base"
+		out.Rules = base.Rules
+	}
+	if len(child.Rules) > 0 {
+		rulesFrom = "child"
+		out.Rules = child.Rules
+	}
+	fileFrom := ""
+	if base.File != "" {
+		fileFrom = "base"
+		out.File = base.File
+	}
+	if child.File != "" {
+		fileFrom = "child"
+		out.File = child.File
+	}
+	if rulesFrom != "" && fileFrom != "" && fileFrom != rulesFrom {
+		out.File = ""
+	}
+	return out
 }
 
 // resolveContained resolves candidate and guarantees it stays inside root. A
@@ -340,6 +402,9 @@ func mergeThemes(base, child *RawTheme) *RawTheme {
 // is missing". Both the given and the resolved root are accepted as the
 // reference frame, because a caller may pass either form.
 func resolveContained(root, candidate string) (string, error) {
+	if err := requireContainmentRoot(root); err != nil {
+		return "", err
+	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve containment root %q: %w", root, err)
@@ -367,6 +432,9 @@ func resolveContained(root, candidate string) (string, error) {
 
 // canonicalRoot returns the absolute, symlink-free form of a containment root.
 func canonicalRoot(root string) (string, error) {
+	if err := requireContainmentRoot(root); err != nil {
+		return "", err
+	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return "", fmt.Errorf("resolve %q: %w", root, err)
@@ -376,6 +444,16 @@ func canonicalRoot(root string) (string, error) {
 		return "", fmt.Errorf("resolve %q: %w", abs, err)
 	}
 	return real, nil
+}
+
+// requireContainmentRoot rejects an empty root. filepath.Abs("") resolves to the
+// process working directory, which would make containment a no-op, so an empty
+// or whitespace-only root is an error rather than a silent widening.
+func requireContainmentRoot(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return fmt.Errorf("containment root is empty")
+	}
+	return nil
 }
 
 // within reports whether target is root or lives below it.
