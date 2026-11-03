@@ -1,0 +1,14 @@
+// Sample JSONC theme used by the decode tests. VS Code theme files allow
+// line comments, block comments and trailing commas.
+// The URL below contains "//" and must survive comment stripping.
+{
+  "name": "Comment Sample", // trailing comment
+  "type": "dark",
+  /* block comment
+     spanning two lines */
+  "colors": {
+    "editor.background": "#101010",
+    "editor.foreground": "#f0f0f0",
+    "textLink.foreground": "https://example.test/a//b",
+  },
+}

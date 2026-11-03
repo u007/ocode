@@ -1,0 +1,8 @@
+{
+  "name": "Child Layer",
+  "type": "dark",
+  "include": "./base.json",
+  "colors": {
+    "editor.background": "#111111"
+  }
+}
