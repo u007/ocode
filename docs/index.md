@@ -62,7 +62,6 @@ and the web DB panel (`DBPanel.tsx`).
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) - Discovery visibility in the web UI: live transient notices via SSE and runtime status endpoint, with map-race safety rule.
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) - TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
 - [Embedded Browser — Chrome Mode Streams Over the Main Origin for Non-Local Clients](concepts/browse-stream-via-main-origin.md) - Why the embedded browser tab hung on "Connecting to localhost:3510…" for a phone over Tailscale, and how non-local clients now get the server's Chrome screencast over the main origin (/api/browse/cdp/{stateKey}) instead of the separate browse-proxy listener.
-- [Embedded Browser — Per-Tab Root-Mounted Origin for Root-Basepath SPAs](concepts/browse-per-tab-origin.md) - Why client routers saw the /b/ proxy path and failed with "Expected to find a match below the root match", and how local and remote tabs now load on a root-mounted per-tab origin: one listener per stateKey, scheme and host with a stable persisted port, a per-tab cookie, a reserved route for foreign upstreams, and a root-mode request header for remote projects.
 - [Embedded Browser — Root-Relative Redirect for Dev-Server Module Graphs](concepts/browse-root-relative-redirect.md) - Why Vite/TanStack dev servers rendered blank (or a notice) in the embedded browser, and the Referer-keyed 307 at the browse-origin root and the desktop browse-proxy root that sends escaped module imports back onto the /b/ route. Covers both local and remote (SSH) projects, why it is a redirect and not a proxy, and the HMR WebSocket gap.
 - [Environment Prompt](concepts/environment-prompt.md) - The env block the LLM receives at session start via internal/agent/prompt.go, including the extra Project host line for remote (SSH/WSL) projects and why there is no git branch line.
 - [File Editor Grants — Editor-Only Out-of-Project Access](concepts/file-editor-grants.md) - The editor/preview opens files outside the active project through per-request, in-memory grants separated from the agent's file scope; records the LFI-shaped hole the scope split fixed.
@@ -341,6 +340,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [desktop-single-instance.md](architecture/desktop-single-instance.md)
 - [cloud-connectors-design.md](cloud-connectors-design.md)
 - [cloud-connectors-encryption.md](cloud-connectors-encryption.md)
+- [browse-per-tab-origin.md](concepts/browse-per-tab-origin.md)
 - [db-connector.md](concepts/db-connector.md)
 - [session-list-claude-code-sessions.md](concepts/session-list-claude-code-sessions.md)
 - [2026-10-08-cloud-connectors-phase1.md](plans/2026-10-08-cloud-connectors-phase1.md)
