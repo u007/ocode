@@ -3,7 +3,10 @@ package appearance
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
+
+	"github.com/u007/ocode/internal/theme"
 )
 
 // loadFixture decodes one of the testdata themes with the same JSONC decoder
@@ -245,8 +248,11 @@ func TestConvertThemeOmitsUnmappedUIVariables(t *testing.T) {
 	}
 	assertEq(t, got.UI["--background"], "#101010")
 	assertEq(t, got.UI["--foreground"], "#f0f0f0")
-	if _, ok := got.UI["--accent-foreground"]; ok {
-		t.Error("--accent-foreground has no source key in this theme and must be omitted")
+	// --accent-foreground is the one pair that is never omitted: with no
+	// partner key and no --accent it falls back to the page background.
+	assertEq(t, got.UI["--accent-foreground"], "#f0f0f0")
+	if ratio := contrastRatio(got.UI["--accent-foreground"], got.UI["--background"]); ratio < aaNormal {
+		t.Errorf("accent-foreground contrast = %.2f, want >= %.1f", ratio, aaNormal)
 	}
 	if _, ok := got.UI["--secondary"]; ok {
 		t.Error("--secondary has no source key in this theme and must be omitted")
@@ -403,4 +409,319 @@ func TestConvertThemeNoColorsUsesFirstRuleBackground(t *testing.T) {
 	}
 	assertEq(t, got.Kind, PolarityLight)
 	assertEq(t, got.UI["--background"], "#ffffff")
+}
+
+// assertStringMapEqual reports missing, extra and differing keys so a golden
+// failure names the row that drifted.
+func assertStringMapEqual(t *testing.T, label string, got, want map[string]string) {
+	t.Helper()
+	for key, wantValue := range want {
+		gotValue, ok := got[key]
+		if !ok {
+			t.Errorf("%s: missing key %q (want %q)", label, key, wantValue)
+			continue
+		}
+		if gotValue != wantValue {
+			t.Errorf("%s: %q = %q, want %q", label, key, gotValue, wantValue)
+		}
+	}
+	for key, gotValue := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("%s: unexpected key %q = %q", label, key, gotValue)
+		}
+	}
+}
+
+func assertMonacoRulesEqual(t *testing.T, got, want []MonacoRule) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("monaco rules length = %d, want %d\ngot: %+v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Errorf("monaco rule %d = %+v, want %+v", index, got[index], want[index])
+		}
+	}
+}
+
+// TestConvertThemeUIValuesAreSixDigitHex is the §8.2 contract: every web
+// variable is a lower-case #RRGGBB. The web converter drops anything else and
+// the stylesheet default survives, so an 8-digit author value must never reach
+// the UI map.
+func TestConvertThemeUIValuesAreSixDigitHex(t *testing.T) {
+	pattern := regexp.MustCompile(`^#[0-9a-f]{6}$`)
+	for _, name := range []string{"catppuccin-mocha.json", "gruvbox-light.json"} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ConvertTheme("vscode:test/"+name, name, loadFixture(t, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for variable, value := range got.UI {
+				if !pattern.MatchString(value) {
+					t.Errorf("%s = %q, want #RRGGBB", variable, value)
+				}
+			}
+		})
+	}
+}
+
+// TestConvertThemeCompositesAlphaOverBackground pins the compositing rule on
+// the values Catppuccin actually carries: a fully transparent value becomes the
+// background (never black) and a partly transparent value is blended, not
+// truncated.
+func TestConvertThemeCompositesAlphaOverBackground(t *testing.T) {
+	raw := &RawTheme{
+		Type: "dark",
+		Colors: map[string]string{
+			"editor.background":    "#1e1e2e",
+			"editor.foreground":    "#cdd6f4",
+			"list.hoverBackground": "#31324480",
+			"input.border":         "#00000000",
+			"panel.border":         "#0f08", // #RGBA shorthand
+		},
+	}
+	got, err := ConvertTheme("vscode:test/alpha", "Alpha", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEq(t, got.UI["--input"], "#1e1e2e")
+	assertEq(t, got.UI["--muted"], "#282839")
+	assertEq(t, got.UI["--accent"], "#282839")
+	assertEq(t, got.UI["--border"], "#0e9615")
+}
+
+// TestConvertThemePrefersAuthoredPartnerForegrounds proves the authored partner
+// key wins over synthesis. None of these values is what pickReadableFg would
+// choose, so a regression to "always synthesize" fails.
+func TestConvertThemePrefersAuthoredPartnerForegrounds(t *testing.T) {
+	raw := &RawTheme{
+		Type: "dark",
+		Colors: map[string]string{
+			"editor.background":              "#101010",
+			"editor.foreground":              "#f0f0f0",
+			"button.background":              "#202020",
+			"button.foreground":              "#123456",
+			"input.background":               "#303030",
+			"input.foreground":               "#654321",
+			"list.activeSelectionBackground": "#404040",
+			"list.activeSelectionForeground": "#abcdef",
+		},
+	}
+	got, err := ConvertTheme("vscode:test/partners", "Partners", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEq(t, got.UI["--primary-foreground"], "#123456")
+	assertEq(t, got.UI["--secondary-foreground"], "#654321")
+	assertEq(t, got.UI["--accent-foreground"], "#abcdef")
+}
+
+// TestConvertThemeAccentForegroundAlwaysPresent covers §8.2's "never omitted":
+// with no partner key the value is synthesized from --accent and stays readable
+// even when the theme's own text colour is unreadable there.
+func TestConvertThemeAccentForegroundAlwaysPresent(t *testing.T) {
+	raw := &RawTheme{
+		Type: "light",
+		Colors: map[string]string{
+			"editor.background":              "#ffffff",
+			"editor.foreground":              "#eeeeee",
+			"list.activeSelectionBackground": "#f0f0a0",
+		},
+	}
+	got, err := ConvertTheme("vscode:test/accent", "Accent", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreground, ok := got.UI["--accent-foreground"]
+	if !ok {
+		t.Fatal("--accent-foreground must never be omitted")
+	}
+	if ratio := contrastRatio(foreground, got.UI["--accent"]); ratio < aaNormal {
+		t.Errorf("accent-foreground contrast = %.2f, want >= %.1f", ratio, aaNormal)
+	}
+}
+
+// TestConvertCatppuccinMochaFullPalette pins the complete conversion of the
+// Catppuccin fixture. The expected values are derived from
+// testdata/catppuccin-mocha.json with spec §8.2 (ui), §8.3 (Monaco) and §8.5
+// (TUI) — not from the converter's output — so a wrong mapping cannot agree
+// with itself.
+func TestConvertCatppuccinMochaFullPalette(t *testing.T) {
+	got, err := ConvertTheme("vscode:test/mocha", "Catppuccin Mocha", loadFixture(t, "catppuccin-mocha.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantUI := map[string]string{
+		"--accent":                 "#313244",
+		"--accent-foreground":      "#cdd6f4",
+		"--background":             "#1e1e2e",
+		"--border":                 "#585b70",
+		"--card":                   "#181825",
+		"--card-foreground":        "#cdd6f4",
+		"--destructive":            "#f38ba8",
+		"--destructive-foreground": "#000000",
+		"--foreground":             "#cdd6f4",
+		// input.border is #00000000: composited, it is the background, not black.
+		"--input":                "#1e1e2e",
+		"--link":                 "#89b4fa",
+		"--muted":                "#282839", // #31324480 over #1e1e2e
+		"--muted-foreground":     "#cdd6f4",
+		"--popover":              "#1e1e2e",
+		"--popover-foreground":   "#cdd6f4",
+		"--primary":              "#cba6f7",
+		"--primary-foreground":   "#11111b", // authored button.foreground
+		"--ring":                 "#cba6f7",
+		"--secondary":            "#313244",
+		"--secondary-foreground": "#cdd6f4",
+	}
+	assertStringMapEqual(t, "ui", got.UI, wantUI)
+
+	wantColors := theme.ThemeColors{
+		User:       "#89b4fa",
+		Assistant:  "#f5c2e7",
+		Header:     "#94e2d5",
+		Border:     "#585b70",
+		Hint:       "#cdd6f4",
+		Text:       "#cdd6f4",
+		Background: "#1e1e2e",
+		StatusBg:   "#11111b",
+		StatusFg:   "#cdd6f4",
+		SelectedFg: "#cdd6f4",
+		SelectedBg: "#313244",
+		Success:    "#a6e3a1",
+		Error:      "#f38ba8",
+		Accent:     "#cba6f7",
+		Dim:        "#7f849c",
+		Thinking:   "#9399b2",
+	}
+	assertEq(t, got.Colors, wantColors)
+
+	wantMonaco := map[string]string{
+		"editor.background":                      "#1e1e2e",
+		"editor.foreground":                      "#cdd6f4",
+		"editorCursor.foreground":                "#f5e0dc",
+		"editor.lineHighlightBackground":         "#cdd6f412",
+		"editor.lineHighlightBorder":             "#00000000",
+		"editorLineNumber.foreground":            "#7f849c",
+		"editorLineNumber.activeForeground":      "#cba6f7",
+		"editor.selectionBackground":             "#9399b240",
+		"editor.selectionHighlightBackground":    "#9399b233",
+		"editorBracketMatch.background":          "#9399b21a",
+		"editorBracketMatch.border":              "#9399b2",
+		"editorGutter.background":                "#1e1e2e",
+		"editorWidget.background":                "#181825",
+		"editorHoverWidget.background":           "#181825",
+		"editorHoverWidget.border":               "#585b70",
+		"editorSuggestWidget.background":         "#181825",
+		"editorSuggestWidget.border":             "#585b70",
+		"editorSuggestWidget.selectedBackground": "#313244",
+		"input.background":                       "#313244",
+		"input.border":                           "#00000000",
+		"input.foreground":                       "#cdd6f4",
+		"list.activeSelectionBackground":         "#313244",
+		"list.hoverBackground":                   "#31324480",
+		"scrollbar.shadow":                       "#11111b",
+		"scrollbarSlider.background":             "#585b7080",
+		"scrollbarSlider.hoverBackground":        "#6c7086",
+		"scrollbarSlider.activeBackground":       "#31324466",
+		"minimap.background":                     "#18182580",
+		"editorGroupHeader.tabsBackground":       "#11111b",
+		"tab.activeBackground":                   "#1e1e2e",
+		"tab.activeForeground":                   "#cba6f7",
+		"tab.inactiveBackground":                 "#181825",
+		"tab.inactiveForeground":                 "#6c7086",
+	}
+	assertStringMapEqual(t, "monaco colors", got.Monaco.Colors, wantMonaco)
+
+	wantRules := []MonacoRule{
+		{Token: "comment", Foreground: "#9399b2", FontStyle: "italic"},
+		{Token: "constant", Foreground: "#fab387"},
+		{Token: "delimiter", Foreground: "#94e2d5", FontStyle: "italic"},
+		{Token: "function", Foreground: "#89b4fa", FontStyle: "italic"},
+		{Token: "keyword", Foreground: "#cba6f7"},
+		{Token: "number", Foreground: "#fab387"},
+		{Token: "operator", Foreground: "#94e2d5"},
+		{Token: "parameter", Foreground: "#eba0ac", FontStyle: "italic"},
+		{Token: "string", Foreground: "#a6e3a1"},
+		{Token: "type", Foreground: "#f9e2af", FontStyle: "italic"},
+		{Token: "variable", Foreground: "#89b4fa", FontStyle: "italic"},
+	}
+	assertMonacoRulesEqual(t, got.Monaco.Rules, wantRules)
+}
+
+// TestConvertGruvboxLightFullPalette pins the complete conversion of the
+// Gruvbox Light fixture, derived the same way as the Catppuccin golden.
+func TestConvertGruvboxLightFullPalette(t *testing.T) {
+	got, err := ConvertTheme("vscode:test/gruvbox-light", "Gruvbox Light", loadFixture(t, "gruvbox-light.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantUI := map[string]string{
+		"--accent":                 "#ebdbb2",
+		"--accent-foreground":      "#3c3836",
+		"--background":             "#fbf1c7",
+		"--border":                 "#d5c4a1",
+		"--card":                   "#f2e5bc",
+		"--card-foreground":        "#3c3836",
+		"--destructive":            "#9d0006",
+		"--destructive-foreground": "#ffffff",
+		"--foreground":             "#3c3836",
+		"--input":                  "#d5c4a1",
+		"--link":                   "#076678",
+		"--muted":                  "#ebdbb2",
+		"--muted-foreground":       "#7c6f64",
+		"--popover":                "#fbf1c7",
+		"--popover-foreground":     "#3c3836",
+		"--primary":                "#458588",
+		"--primary-foreground":     "#fbf1c7", // authored button.foreground
+		"--ring":                   "#b57614",
+		"--secondary":              "#f2e5bc",
+		"--secondary-foreground":   "#3c3836",
+	}
+	assertStringMapEqual(t, "ui", got.UI, wantUI)
+
+	wantColors := theme.ThemeColors{
+		User:       "#076678",
+		Assistant:  "#8f3f71",
+		Header:     "#427b58",
+		Border:     "#d5c4a1",
+		Hint:       "#7c6f64",
+		Text:       "#3c3836",
+		Background: "#fbf1c7",
+		StatusBg:   "#f2e5bc",
+		StatusFg:   "#3c3836",
+		SelectedFg: "#3c3836",
+		SelectedBg: "#ebdbb2",
+		Success:    "#79740e",
+		Error:      "#9d0006",
+		Accent:     "#b57614",
+		Dim:        "#a89984",
+		Thinking:   "#928374",
+	}
+	assertEq(t, got.Colors, wantColors)
+
+	wantMonaco := map[string]string{
+		"editor.background":                "#fbf1c7",
+		"editor.foreground":                "#3c3836",
+		"editorCursor.foreground":          "#3c3836",
+		"editorLineNumber.foreground":      "#a89984",
+		"input.background":                 "#f2e5bc",
+		"input.foreground":                 "#3c3836",
+		"list.activeSelectionBackground":   "#ebdbb2",
+		"list.hoverBackground":             "#ebdbb2",
+		"editorGroupHeader.tabsBackground": "#f2e5bc",
+	}
+	assertStringMapEqual(t, "monaco colors", got.Monaco.Colors, wantMonaco)
+
+	wantRules := []MonacoRule{
+		{Token: "comment", Foreground: "#928374", FontStyle: "italic"},
+		{Token: "delimiter", Foreground: "#928374", FontStyle: "italic"},
+		{Token: "function", Foreground: "#b57614"},
+		{Token: "keyword", Foreground: "#9d0006", FontStyle: "bold"},
+		{Token: "number", Foreground: "#8f3f71"},
+		{Token: "string", Foreground: "#79740e"},
+	}
+	assertMonacoRulesEqual(t, got.Monaco.Rules, wantRules)
 }

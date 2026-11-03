@@ -16,11 +16,17 @@ const (
 // palettes ocode renders with: the 16-field TUI palette, the web chrome CSS
 // variables, the Monaco editor theme and the terminal palette.
 //
-// Conversion never rewrites an author's colour. Only the synthesized
-// foregrounds (--primary-foreground, --destructive-foreground and
-// --secondary-foreground when the theme supplies no value) and a repaired
-// --link are computed; every other value is copied verbatim from the theme,
-// and a variable with no source key is omitted rather than substituted.
+// Conversion preserves the author's colours, with these deliberate exceptions.
+// Every value emitted to the web palette is composited over the theme
+// background and flattened to #RRGGBB, because the CSS variables cannot carry
+// alpha and the web converter ignores an 8-digit value. A foreground the theme
+// does not author (--primary-foreground, --destructive-foreground,
+// --secondary-foreground, and --accent-foreground when neither the partner key
+// nor an accent surface exists) is synthesized for readability; when the theme
+// does author the partner key (button.foreground, input.foreground,
+// list.activeSelectionForeground) that value wins. --link is repaired only when
+// it fails AA on both the page background and the muted surface. A variable
+// with no source key is omitted rather than substituted.
 type ConvertedTheme struct {
 	ID       string            `json:"id"`
 	Label    string            `json:"label"`
@@ -62,11 +68,11 @@ type TerminalPalette struct {
 // Palette always holds 16 entries in ANSI order (black, red, ..., bright
 // white); missing slots fall back to the default xterm table.
 type TerminalColors struct {
-	Foreground          string   `json:"foreground"`
-	Background          string   `json:"background"`
-	Cursor              string   `json:"cursor"`
-	CursorText          string   `json:"cursor_text"`
-	SelectionBackground string   `json:"selection_background"`
-	SelectionForeground string   `json:"selection_foreground"`
-	Palette             []string `json:"palette"`
+	Foreground          string   `json:"foreground,omitempty"`
+	Background          string   `json:"background,omitempty"`
+	Cursor              string   `json:"cursor,omitempty"`
+	CursorText          string   `json:"cursor_text,omitempty"`
+	SelectionBackground string   `json:"selection_background,omitempty"`
+	SelectionForeground string   `json:"selection_foreground,omitempty"`
+	Palette             []string `json:"palette,omitempty"`
 }

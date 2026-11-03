@@ -105,27 +105,30 @@ type uiMapping struct {
 	keys     []string
 }
 
-// uiMappings is spec §8.2 verbatim. --primary-foreground and
-// --destructive-foreground have no author source and are always synthesized.
+// uiMappings is spec §8.2 verbatim. A foreground paired with a surface is
+// authored-first: --primary-foreground, --secondary-foreground and
+// --accent-foreground each name their VS Code partner key here, and
+// synthesiseForeground fills only a gap the theme leaves.
 var uiMappings = []uiMapping{
-	{"--background", []string{"editor.background", "sideBar.background"}},
-	{"--foreground", []string{"editor.foreground", "sideBar.foreground"}},
-	{"--card", []string{"sideBar.background", "editor.background"}},
-	{"--card-foreground", []string{"sideBar.foreground", "editor.foreground"}},
-	{"--popover", []string{"menu.background", "editorWidget.background", "editor.background"}},
-	{"--popover-foreground", []string{"menu.foreground", "editorWidget.foreground", "editor.foreground"}},
-	{"--primary", []string{"button.background", "focusBorder", "textLink.foreground"}},
-	{"--secondary", []string{"input.background", "editorWidget.background"}},
-	{"--secondary-foreground", []string{"input.foreground", "editor.foreground"}},
-	{"--muted", []string{"list.hoverBackground", "editorWidget.background", "sideBar.background"}},
-	{"--muted-foreground", []string{"descriptionForeground", "editorLineNumber.foreground"}},
-	{"--accent", []string{"list.activeSelectionBackground", "list.hoverBackground"}},
-	{"--accent-foreground", []string{"list.activeSelectionForeground"}},
-	{"--destructive", []string{"errorForeground", "terminal.ansiRed"}},
-	{"--border", []string{"panel.border", "sideBar.border", "editorGroup.border", "contrastBorder"}},
-	{"--input", []string{"input.border", "panel.border"}},
-	{"--ring", []string{"focusBorder", "textLink.foreground"}},
-	{"--link", []string{"textLink.foreground"}},
+	{variable: "--background", keys: []string{"editor.background", "sideBar.background"}},
+	{variable: "--foreground", keys: []string{"editor.foreground", "sideBar.foreground"}},
+	{variable: "--card", keys: []string{"sideBar.background", "editor.background"}},
+	{variable: "--card-foreground", keys: []string{"sideBar.foreground", "editor.foreground"}},
+	{variable: "--popover", keys: []string{"menu.background", "editorWidget.background", "editor.background"}},
+	{variable: "--popover-foreground", keys: []string{"menu.foreground", "editorWidget.foreground", "editor.foreground"}},
+	{variable: "--primary", keys: []string{"button.background", "focusBorder", "textLink.foreground"}},
+	{variable: "--primary-foreground", keys: []string{"button.foreground"}},
+	{variable: "--secondary", keys: []string{"input.background", "editorWidget.background"}},
+	{variable: "--secondary-foreground", keys: []string{"input.foreground", "editor.foreground"}},
+	{variable: "--muted", keys: []string{"list.hoverBackground", "editorWidget.background", "sideBar.background"}},
+	{variable: "--muted-foreground", keys: []string{"descriptionForeground", "editorLineNumber.foreground"}},
+	{variable: "--accent", keys: []string{"list.activeSelectionBackground", "list.hoverBackground"}},
+	{variable: "--accent-foreground", keys: []string{"list.activeSelectionForeground"}},
+	{variable: "--destructive", keys: []string{"errorForeground", "terminal.ansiRed"}},
+	{variable: "--border", keys: []string{"panel.border", "sideBar.border", "editorGroup.border", "contrastBorder"}},
+	{variable: "--input", keys: []string{"input.border", "panel.border"}},
+	{variable: "--ring", keys: []string{"focusBorder", "textLink.foreground"}},
+	{variable: "--link", keys: []string{"textLink.foreground"}},
 }
 
 // tokenScopeMapping maps a TextMate scope prefix to a Monaco token.
@@ -138,28 +141,28 @@ type tokenScopeMapping struct {
 // matching prefix wins, so "constant.numeric" must be checked before
 // "constant" and "keyword.operator" before "keyword".
 var tokenScopeMappings = []tokenScopeMapping{
-	{"comment", "comment"},
-	{"string", "string"},
-	{"constant.numeric", "number"},
-	{"regexp", "regexp"},
-	{"keyword.operator", "operator"},
-	{"keyword", "keyword"},
-	{"storage", "keyword"},
-	{"entity.name.function", "function"},
-	{"support.function", "function"},
-	{"entity.name.type", "type"},
-	{"entity.name.class", "type"},
-	{"support.class", "type"},
-	{"support.type", "type"},
-	{"variable.parameter", "parameter"},
-	{"variable", "variable"},
-	{"support.variable", "variable"},
-	{"meta.object-literal.key", "property"},
-	{"entity.other.attribute-name", "attribute"},
-	{"entity.name.tag", "tag"},
-	{"constant", "constant"},
-	{"punctuation", "delimiter"},
-	{"invalid", "invalid"},
+	{prefix: "comment", token: "comment"},
+	{prefix: "string", token: "string"},
+	{prefix: "constant.numeric", token: "number"},
+	{prefix: "regexp", token: "regexp"},
+	{prefix: "keyword.operator", token: "operator"},
+	{prefix: "keyword", token: "keyword"},
+	{prefix: "storage", token: "keyword"},
+	{prefix: "entity.name.function", token: "function"},
+	{prefix: "support.function", token: "function"},
+	{prefix: "entity.name.type", token: "type"},
+	{prefix: "entity.name.class", token: "type"},
+	{prefix: "support.class", token: "type"},
+	{prefix: "support.type", token: "type"},
+	{prefix: "variable.parameter", token: "parameter"},
+	{prefix: "variable", token: "variable"},
+	{prefix: "support.variable", token: "variable"},
+	{prefix: "meta.object-literal.key", token: "property"},
+	{prefix: "entity.other.attribute-name", token: "attribute"},
+	{prefix: "entity.name.tag", token: "tag"},
+	{prefix: "constant", token: "constant"},
+	{prefix: "punctuation", token: "delimiter"},
+	{prefix: "invalid", token: "invalid"},
 }
 
 // ConvertTheme converts a parsed VS Code colour theme into ocode's four
@@ -317,28 +320,94 @@ func buildColours(raw *RawTheme) theme.ThemeColors {
 	return out
 }
 
-// buildUI maps spec §8.2's web variables and applies the two permitted
-// computed colours.
+// buildUI maps spec §8.2's web variables and applies the permitted computed
+// colours.
+//
+// Every value is composited over the resolved background before it is emitted.
+// The CSS variables carry no alpha (they are consumed as HSL triplets), and the
+// web converter accepts six hex digits only, so an authored #RRGGBBAA value
+// would be dropped and the stylesheet default would survive. Compositing keeps
+// the author's intent: a fully transparent value becomes the background itself,
+// never black.
 func buildUI(colors map[string]string, kind Polarity, palette theme.ThemeColors) map[string]string {
+	background := uiBackground(colors, kind)
 	ui := make(map[string]string, len(uiMappings)+3)
 	for _, mapping := range uiMappings {
-		if value, ok := firstPresent(colors, mapping.keys...); ok {
-			ui[mapping.variable] = value
+		value, ok := firstPresent(colors, mapping.keys...)
+		if !ok {
+			continue
 		}
+		composited, ok := compositeOver(value, background)
+		if !ok {
+			// A value the web converter could not read is omitted rather than
+			// emitted, matching the "no source key, no variable" rule.
+			continue
+		}
+		ui[mapping.variable] = composited
 	}
+	// The background is the surface everything else is flattened onto, so it is
+	// always emitted even when the author value was missing or unparseable.
+	ui["--background"] = background
 
-	// A VS Code theme never authors these surfaces' foregrounds, so they are
-	// always derived from the surface they sit on.
+	// Authored partner foregrounds win (uiMappings copied them above); only a
+	// gap the theme leaves is synthesized, from the surface it sits on.
 	synthesiseForeground(ui, "--primary", "--primary-foreground", palette.Text)
 	synthesiseForeground(ui, "--destructive", "--destructive-foreground", palette.Text)
-	// --secondary-foreground is authored when the theme supplies
-	// input.foreground/editor.foreground; otherwise derive it.
-	if _, ok := ui["--secondary-foreground"]; !ok {
-		synthesiseForeground(ui, "--secondary", "--secondary-foreground", palette.Text)
+	synthesiseForeground(ui, "--secondary", "--secondary-foreground", palette.Text)
+	// --accent-foreground must never be omitted: leaving it out falls back to a
+	// near-white stylesheet default that can be unreadable on a light accent.
+	// When the theme authors neither list.activeSelectionForeground nor an
+	// accent surface, compute the foreground from the page background.
+	if _, ok := ui["--accent-foreground"]; !ok {
+		surface := ui["--accent"]
+		if !validColour(surface) {
+			surface = background
+		}
+		ui["--accent-foreground"] = pickReadableFg(surface, []string{palette.Text})
 	}
 
 	repairLink(ui, kind)
 	return ui
+}
+
+// uiBackground resolves the background every ui value is composited over. It
+// follows the --background mapping's key order and reduces the value to its RGB
+// channels; when the theme supplies no parseable background it uses the
+// polarity neutral.
+func uiBackground(colors map[string]string, kind Polarity) string {
+	if value, ok := firstPresent(colors, "editor.background", "sideBar.background"); ok {
+		if rgb, _, ok := parseHexColourAlpha(value); ok {
+			return formatHexRGB(rgb)
+		}
+	}
+	if kind == PolarityLight {
+		return "#ffffff"
+	}
+	return "#000000"
+}
+
+// compositeOver flattens a theme colour onto background and returns #RRGGBB.
+// Alpha is composited, never truncated: #00000000 becomes the background and
+// #31324480 becomes a blend of the author colour and the background. A value
+// that does not parse is reported as not ok so the caller can omit it.
+func compositeOver(value, background string) (string, bool) {
+	rgb, alpha, ok := parseHexColourAlpha(value)
+	if !ok {
+		return "", false
+	}
+	if alpha == 255 {
+		return formatHexRGB(rgb), true
+	}
+	backdrop, ok := parseHexColour(background)
+	if !ok {
+		backdrop = [3]uint8{}
+	}
+	strength := int(alpha)
+	var out [3]uint8
+	for index := 0; index < 3; index++ {
+		out[index] = uint8((int(rgb[index])*strength + int(backdrop[index])*(255-strength) + 127) / 255)
+	}
+	return formatHexRGB(out), true
 }
 
 // synthesiseForeground writes foregroundVar as the most readable of the
@@ -434,15 +503,8 @@ func deriveWithoutColors(raw *RawTheme, kind Polarity) (map[string]string, theme
 	}
 
 	muted := text
-	for _, rule := range raw.TokenColors.Rules {
-		foreground := strings.TrimSpace(rule.Settings.Foreground)
-		if foreground == "" {
-			continue
-		}
-		if scopeHasComponent(rule.Scope, "comment") {
-			muted = foreground
-			break
-		}
+	if foreground, ok := firstCommentForeground(raw.TokenColors.Rules); ok {
+		muted = foreground
 	}
 
 	// A border has no source in a colors-less theme. Blend it toward the muted
@@ -615,13 +677,21 @@ func validColour(value string) bool {
 	return ok
 }
 
-// parseHexColour parses #RGB, #RGBA, #RRGGBB or #RRGGBBAA. Alpha is ignored:
-// only the RGB channels matter for contrast and mixing.
+// parseHexColour parses #RGB, #RGBA, #RRGGBB or #RRGGBBAA. Alpha is ignored
+// here: only the RGB channels matter for contrast and mixing.
 func parseHexColour(value string) ([3]uint8, bool) {
+	rgb, _, ok := parseHexColourAlpha(value)
+	return rgb, ok
+}
+
+// parseHexColourAlpha parses #RGB, #RGBA, #RRGGBB or #RRGGBBAA and returns the
+// RGB channels plus the alpha channel, which is 255 when the value carries
+// none.
+func parseHexColourAlpha(value string) ([3]uint8, uint8, bool) {
 	var rgb [3]uint8
 	value = strings.TrimSpace(value)
 	if !strings.HasPrefix(value, "#") {
-		return rgb, false
+		return rgb, 0, false
 	}
 	digits := value[1:]
 	switch len(digits) {
@@ -629,23 +699,52 @@ func parseHexColour(value string) ([3]uint8, bool) {
 		for index := 0; index < 3; index++ {
 			nibble, ok := parseHexNibble(digits[index])
 			if !ok {
-				return rgb, false
+				return rgb, 0, false
 			}
 			rgb[index] = nibble*16 + nibble
 		}
-		return rgb, true
+		alpha := uint8(255)
+		if len(digits) == 4 {
+			nibble, ok := parseHexNibble(digits[3])
+			if !ok {
+				return rgb, 0, false
+			}
+			alpha = nibble*16 + nibble
+		}
+		return rgb, alpha, true
 	case 6, 8:
 		for index := 0; index < 3; index++ {
 			b, ok := parseHexByte(digits[index*2 : index*2+2])
 			if !ok {
-				return rgb, false
+				return rgb, 0, false
 			}
 			rgb[index] = b
 		}
-		return rgb, true
+		alpha := uint8(255)
+		if len(digits) == 8 {
+			b, ok := parseHexByte(digits[6:8])
+			if !ok {
+				return rgb, 0, false
+			}
+			alpha = b
+		}
+		return rgb, alpha, true
 	default:
-		return rgb, false
+		return rgb, 0, false
 	}
+}
+
+// formatHexRGB renders RGB channels as a lower-case #RRGGBB, the only shape the
+// web converter accepts.
+func formatHexRGB(rgb [3]uint8) string {
+	const hexDigits = "0123456789abcdef"
+	var buf [7]byte
+	buf[0] = '#'
+	for index := 0; index < 3; index++ {
+		buf[1+index*2] = hexDigits[rgb[index]>>4]
+		buf[2+index*2] = hexDigits[rgb[index]&0x0f]
+	}
+	return string(buf[:])
 }
 
 func parseHexNibble(c byte) (uint8, bool) {
