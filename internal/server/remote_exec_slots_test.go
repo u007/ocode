@@ -94,6 +94,41 @@ func TestRunBoundedSlotWaitCountsTowardTimeout(t *testing.T) {
 	}
 }
 
+// The timeout error must name the bound that actually fired. A caller deadline
+// shorter than the runBounded timeout (HandleFileStat's 5s) must not be
+// reported as the 30s constant, and a plain timeout must name its own bound.
+func TestRunBoundedTimeoutNamesAppliedBound(t *testing.T) {
+	target := remote.Target{Kind: remote.KindSSH, Host: "bound-named.example"}
+	const prefix = "remote command timed out after "
+
+	t.Run("caller deadline shorter than timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		err := runBounded(ctx, target, exec.Command("sleep", "5"), 30*time.Second, remoteExecForeground)
+		if err == nil || !isRemoteTransportError(err) {
+			t.Fatalf("err = %v, want a transport timeout", err)
+		}
+		i := strings.Index(err.Error(), prefix)
+		if i < 0 {
+			t.Fatalf("err = %q, want %q", err.Error(), prefix)
+		}
+		got, perr := time.ParseDuration(err.Error()[i+len(prefix):])
+		if perr != nil {
+			t.Fatalf("err = %q, bound is not a duration: %v", err.Error(), perr)
+		}
+		if got > 100*time.Millisecond || got < 50*time.Millisecond {
+			t.Fatalf("err names %s, want the caller's ~100ms deadline, not the 30s timeout", got)
+		}
+	})
+
+	t.Run("timeout shorter than caller deadline", func(t *testing.T) {
+		err := runBounded(context.Background(), target, exec.Command("sleep", "5"), 100*time.Millisecond, remoteExecForeground)
+		if err == nil || !strings.Contains(err.Error(), prefix+"100ms") {
+			t.Fatalf("err = %v, want %q", err, prefix+"100ms")
+		}
+	})
+}
+
 // The pool must key on the WHOLE target identity, not the port-free
 // Target.String(). Two projects on the same host reached over different SSH
 // ports are different connections with different sshd MaxSessions budgets, so

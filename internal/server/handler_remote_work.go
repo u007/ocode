@@ -462,9 +462,16 @@ func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout tim
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// bound is the budget this call actually runs under: timeout, or the
+	// caller's remaining deadline when that is shorter. It names the bound in
+	// the timeout error, so a 5s caller deadline is not reported as 30s.
+	bound := timeout
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < bound {
+		bound = time.Until(dl).Round(time.Millisecond)
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	release, err := acquireRemoteExecSlot(ctx, t, timeout, kind)
+	release, err := acquireRemoteExecSlot(ctx, t, bound, kind)
 	if err != nil {
 		return err
 	}
@@ -485,7 +492,7 @@ func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout tim
 		if ctx.Err() == context.Canceled && ctx != context.Background() {
 			return &remoteTransportError{msg: "remote command cancelled"}
 		}
-		return &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s", timeout)}
+		return &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s", bound)}
 	}
 }
 
@@ -685,24 +692,6 @@ func shellQuotePathPOSIX(p string) string {
 	return remote.ShellQuotePath(p)
 }
 
-// remoteSafeSpec validates a caller-supplied path for a remote FILE operation
-// before it is embedded in a remote shell command. The file-op callers do not
-// shell-quote the path, so this strict check is their only guard: quotes,
-// semicolons, redirection, variable expansion, glob characters, and control
-// characters are rejected. Git endpoints use remoteGitSpec instead, because
-// they shell-quote their specs.
-func remoteSafeSpec(p string) (string, error) {
-	if err := remoteSpecCore(p); err != nil {
-		return "", err
-	}
-	for _, r := range p {
-		if strings.ContainsRune("'\";`$&|<>\\!*?[](){}#:", r) {
-			return "", fmt.Errorf("path contains unsupported characters: %q", p)
-		}
-	}
-	return p, nil
-}
-
 // remoteSpecCore holds the checks every remote path validator shares: the
 // path must be non-empty, repo-relative and free of control characters.
 // Absolute paths are refused because the frontend sends tree-anchored
@@ -723,11 +712,9 @@ func remoteSpecCore(p string) error {
 }
 
 // remoteGitSpec validates a repo-relative git pathspec for a remote command.
-// Unlike remoteSafeSpec it allows shell metacharacters, because every caller
-// shell-quotes the spec (remoteQuoteSpecs / remoteQuoteSpecPath). It still
-// refuses what quoting cannot neutralize: git glob syntax (* ? [ would match
-// other files), a leading ":" (pathspec magic such as ":!x"), and a Windows
-// drive prefix ("C:"). remoteSafeSpec stays the rule for file operations.
+// Unlike remoteSpecCore it also refuses what quoting cannot neutralize: git
+// glob syntax (* ? [ would match other files), a leading ":" (pathspec magic
+// such as ":!x"), and a Windows drive prefix ("C:").
 func remoteGitSpec(p string) (string, error) {
 	if err := remoteSpecCore(p); err != nil {
 		return "", err

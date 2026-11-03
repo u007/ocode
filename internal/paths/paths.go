@@ -256,7 +256,7 @@ func LogsDir() (string, error) {
 // ServersDir returns the directory holding one registry entry per live
 // `ocode serve` process. A starting server reads it to report sibling servers
 // running a different version: such a server keeps a remote host's workspace
-// alive and retires the newer remote server on every reconnect, which kills
+// alive, and its explicit restart retires the shared remote server, which kills
 // in-flight turns. Absent entries are self-cleaning (the owner removes its
 // file on exit and a scanner drops records whose pid is gone).
 func ServersDir() (string, error) {

@@ -12,9 +12,12 @@ import (
 
 // Remote variants of the FS mutation endpoints (handler_fs.go). Admission is
 // the same registered (host, path) rule; every operation becomes one
-// POSIX shell invocation on the remote host. Paths are root-joined and
-// shell-quoted; metacharacter-bearing names are rejected by remoteSafeSpec
-// (mirroring the local endpoints' resolveFSPath containment).
+// POSIX shell invocation on the remote host. Paths are root-joined, checked for
+// containment with remoteRelCheck, and shell-quoted at the command site with
+// remote.ShellQuotePath. Because the quoting — not the path text — is the
+// injection guard, ordinary non-ASCII/space/bracket names are allowed; only
+// control characters and absolute/escaping paths are refused (remoteSpecCore,
+// mirroring the local endpoints' resolveFSPath containment).
 
 // remoteFSRequest mirrors fsActionRequest plus the ?host= query value.
 func (h *Handler) remoteDecodeFSRequest(w http.ResponseWriter, r *http.Request, host string) (fsActionRequest, remoteWork, bool) {
@@ -53,8 +56,7 @@ func (h *Handler) remoteTargetOf(w http.ResponseWriter, rw remoteWork, p, mode s
 		writeError(w, http.StatusBadRequest, "path is outside the project root")
 		return "", "", false
 	}
-	spec, serr := remoteSafeSpec(rel)
-	if serr != nil {
+	if serr := remoteSpecCore(rel); serr != nil {
 		writeError(w, http.StatusBadRequest, serr.Error())
 		return "", "", false
 	}
@@ -76,7 +78,7 @@ func (h *Handler) remoteTargetOf(w http.ResponseWriter, rw remoteWork, p, mode s
 			return "", "", false
 		}
 	}
-	return abs, spec, true
+	return abs, rel, true
 }
 
 // remoteParentPath returns the remote parent directory of p (slash-based;
@@ -212,8 +214,8 @@ func (h *Handler) fsRenameRemote(w http.ResponseWriter, r *http.Request, host st
 			writeError(w, http.StatusBadRequest, "path and new_name are required")
 			return
 		}
-		name, nerr := remoteSafeSpec(req.NewName)
-		if nerr != nil || name != req.NewName || containsSlash(name) {
+		name := req.NewName
+		if nerr := remoteSpecCore(name); nerr != nil || containsSlash(name) {
 			writeError(w, http.StatusBadRequest, "new_name must be a plain name without path separators")
 			return
 		}

@@ -655,9 +655,9 @@ session's working directory. Details, endpoint params and remote-project routing
   failure blocks the turn (502 `remote-connect`) — never fall back to a local agent.
   `~` is expanded only by the server owning that `$HOME` (`projects.ExpandHome`). The SPA
   resolves the host per session (`resolveSessionHost`). An older remote server is
-  killed and replaced on connect (`EnsureRemoteServer`); a newer one is reused, because
-  the local client is the one that is behind (an older client retiring it would
-  ping-pong with a newer one on the same host).
+  kept on connect and flagged outdated (`EnsureRemoteServer`), upgraded only by an explicit restart (`POST /api/remote/{host}/restart`); a newer one is reused, because
+  the local client is the one that is behind (an older client's explicit restart would
+  retire it, and two clients on one host would then keep killing each other's server).
 - **The open-terminal tab list is server state** (`GET/PUT /api/terminal-tabs`,
   `internal/termtabs`): keys are opaque (never `filepath.Clean`); the PUT is a MERGE
   (emit an explicit empty entry for a project whose last tab closed); closing a tab is a

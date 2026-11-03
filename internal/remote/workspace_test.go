@@ -213,18 +213,16 @@ func TestConnectFatalOnSyncFailure(t *testing.T) {
 	}
 }
 
-// TestWorkspaceDiscoverOrStartServerRetiresOutdated proves the desktop host
-// registry path shares the update policy: an alive mismatched server is
-// killed (SIGTERM issued) rather than reused, and a fresh one is launched.
-func TestWorkspaceDiscoverOrStartServerRetiresOutdated(t *testing.T) {
+// TestWorkspaceDiscoverOrStartServerKeepsOutdated proves the desktop host
+// registry path shares the update policy: an alive mismatched server is reused
+// and flagged Outdated, and nothing is killed or launched. The upgrade waits
+// for an explicit restart.
+func TestWorkspaceDiscoverOrStartServerKeepsOutdated(t *testing.T) {
 	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.0.0-old"}
 	ft := newConnectFakeTransport(existing)
-	fresh := ServeState{PID: 77, Port: 4100, Token: "new", Version: version.Version}
-	freshData, _ := json.Marshal(fresh)
-	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd(version.Version, ""), freshStateJSON: string(freshData)}
 
 	rw := &RemoteWorkspace{
-		Transport:  k,
+		Transport:  ft,
 		RemotePath: "/home/user/proj",
 	}
 
@@ -232,12 +230,10 @@ func TestWorkspaceDiscoverOrStartServerRetiresOutdated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverOrStartServer: %v", err)
 	}
-	if state.Outdated || state.PID != 77 {
-		t.Fatalf("expected the fresh server, got %+v", state)
+	if !state.Outdated || state.PID != 42 {
+		t.Fatalf("expected the kept outdated server (pid 42, Outdated), got %+v", state)
 	}
-	if !k.killed || !k.launched {
-		t.Fatalf("killed=%v launched=%v, want both true", k.killed, k.launched)
-	}
+	assertOnlyProbeCalls(t, ft, 42, 4096)
 }
 
 // TestEnsureBinaryActivatesUploadedBinary is the regression test for the

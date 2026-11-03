@@ -352,17 +352,26 @@ func TestRemoteUnregisteredPairRejected(t *testing.T) {
 	}
 }
 
-func TestRemoteSafeSpec(t *testing.T) {
-	good := []string{"a.txt", "src/main.go", "deep/nested/file.ts"}
+func TestRemoteSpecCore(t *testing.T) {
+	good := []string{
+		"a.txt", "src/main.go", "deep/nested/file.ts",
+		// Ordinary filenames that the old strict remoteSafeSpec rejected. The
+		// command sites shell-quote them (remote.ShellQuotePath), so the
+		// metacharacters are literal and must NOT be refused.
+		"NMB_Cloud Risk Assessement Form (AIS).xlsx",
+		"Q1 [draft] {final}.xlsx",
+		"it's a $5 file.txt",
+		"cost&profit#1.txt",
+	}
 	for _, g := range good {
-		if _, err := remoteSafeSpec(g); err != nil {
-			t.Errorf("remoteSafeSpec(%q) = %v, want nil", g, err)
+		if err := remoteSpecCore(g); err != nil {
+			t.Errorf("remoteSpecCore(%q) = %v, want nil", g, err)
 		}
 	}
-	bad := []string{"a;rm -rf.txt", "$(whoami)", "a b `id`", "/abs/path", "back`tick", "semi;colon", "pipe|it"}
+	bad := []string{"", "/abs/path", "a\x01b", "del\x7fchar"}
 	for _, b := range bad {
-		if _, err := remoteSafeSpec(b); err == nil {
-			t.Errorf("remoteSafeSpec(%q) accepted, want error", b)
+		if err := remoteSpecCore(b); err == nil {
+			t.Errorf("remoteSpecCore(%q) accepted, want error", b)
 		}
 	}
 }

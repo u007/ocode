@@ -271,9 +271,103 @@ func TestRemoteDownloadFromTildeRootedProject(t *testing.T) {
 	}
 }
 
+// Ordinary filenames containing shell metacharacters (parentheses, brackets,
+// spaces, quotes, $, &, #) are legal on a remote project and the command sites
+// shell-quote them, so every file operation must accept them. They used to be
+// refused by the old remoteSafeSpec guard with
+// `path contains unsupported characters`, so a file like
+// "NMB_Cloud Risk Assessement Form (AIS).xlsx" could not be downloaded, copied,
+// renamed or deleted remotely even though saving it worked.
+func TestRemoteFileOpsAllowShellMetacharacterNames(t *testing.T) {
+	names := []string{
+		"NMB_Cloud Risk Assessement Form (AIS).xlsx",
+		"Q1 [draft] {final}.xlsx",
+		"it's a $5 file.txt",
+		"cost&profit#1.txt",
+	}
+	for _, name := range names {
+		t.Run("download/"+name, func(t *testing.T) {
+			h, proj := tildeRemoteProject(t)
+			if err := os.WriteFile(filepath.Join(proj, name), []byte("payload:"+name), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			target := remoteFSTarget(t, "/api/fs/download", url.Values{"path": {name}})
+			r := httptest.NewRequest(http.MethodGet, target, nil)
+			w := httptest.NewRecorder()
+			h.HandleFSDownload(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("download of %q failed: %d %s", name, w.Code, w.Body.String())
+			}
+			if got := w.Body.String(); got != "payload:"+name {
+				t.Fatalf("downloaded body = %q, want %q", got, "payload:"+name)
+			}
+		})
+
+		t.Run("delete/"+name, func(t *testing.T) {
+			h, proj := tildeRemoteProject(t)
+			discard := filepath.Join(proj, name)
+			if err := os.WriteFile(discard, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r, w := call(remoteFSTarget(t, "/api/fs/delete", nil),
+				map[string]any{"paths": []string{name}})
+			h.HandleFSDelete(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("delete of %q failed: %d %s", name, w.Code, w.Body.String())
+			}
+			if _, err := os.Stat(discard); !os.IsNotExist(err) {
+				t.Fatalf("file %q still present after delete: %v", name, err)
+			}
+		})
+	}
+}
+
+// Renaming TO a metacharacter-bearing name is the same class as downloading
+// one: the destination is built from the request's new_name and shell-quoted
+// before it reaches `mv`.
+func TestRemoteRenameToShellMetacharacterName(t *testing.T) {
+	h, proj := tildeRemoteProject(t)
+	if err := os.WriteFile(filepath.Join(proj, "old.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const want = "Form (AIS) [final].txt"
+	r, w := call(remoteFSTarget(t, "/api/fs/rename", nil),
+		map[string]any{"path": "old.txt", "new_name": want})
+	h.HandleFSRename(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename to %q failed: %d %s", want, w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, want)); err != nil {
+		t.Fatalf("renamed file missing: %v", err)
+	}
+}
+
+// The relaxed gate must not become an injection hole: a filename built from
+// balanced shell syntax is a literal word at the command site. If any endpoint
+// splices it unquoted, the shim's /bin/sh executes the substitutions and the
+// payloadName canary creates PWNED* files (see assertNoCanaryFiles).
+func TestRemoteDownloadCanaryNameStaysLiteral(t *testing.T) {
+	h, proj := tildeRemoteProject(t)
+	if err := os.WriteFile(filepath.Join(proj, payloadName), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := remoteFSTarget(t, "/api/fs/download", url.Values{"path": {payloadName}})
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	h.HandleFSDownload(w, r)
+	// Checked before the status: an injected command can also break the
+	// request, and that must not hide the injection.
+	assertNoCanaryFiles(t, proj)
+	if w.Code != http.StatusOK {
+		t.Fatalf("download of the canary name failed: %d %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "v1\n" {
+		t.Fatalf("downloaded body = %q, want %q", w.Body.String(), "v1\n")
+	}
+}
+
 // remoteStreamFile is the paste-upload writer: it claims the destination with
-// `set -C` in one remote script. The destination is "~"-rooted on a tilde
-// project, so the script must expand $HOME too.
+
 func TestRemoteStreamFileExpandsTildeRoot(t *testing.T) {
 	h, proj := tildeRemoteProject(t)
 	rw, err := h.remoteWorkFor("ci.local", "~/www/aimsweb")

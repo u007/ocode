@@ -33,9 +33,9 @@ const serveProbeTimeout = 250 * time.Millisecond
 const serveInstancePrefix = "serve-"
 
 // serveInstance is the on-disk record of one running server. Version is the
-// whole point: servers sharing a remote host retire each other's remote server
-// when their versions differ, so a starting server must be able to name the
-// stale sibling that keeps doing it.
+// whole point: servers of different versions sharing a remote host can retire
+// each other's remote server (an explicit restart does), so a starting server
+// must be able to name the sibling that could do it.
 type serveInstance struct {
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
@@ -137,11 +137,11 @@ func serveSiblingWarnings(instances []serveInstance, selfVersion string) []strin
 				inst.Version, inst.Addr, inst.PID, where),
 		)
 		if inst.Verified {
-			out = append(out, fmt.Sprintf("serve: versions differ (this server is v%s) — that one keeps retiring shared remote servers, so stop it: %s",
+			out = append(out, fmt.Sprintf("serve: versions differ (this server is v%s) — that one can retire shared remote servers on an explicit restart, so stop it: %s",
 				selfVersion, serveStopHint(runtime.GOOS, inst.PID)))
 			continue
 		}
-		out = append(out, fmt.Sprintf("serve: versions differ (this server is v%s) — that one keeps retiring shared remote servers. Its record predates identity locking, so the pid may be stale; stop that ocode process yourself.",
+		out = append(out, fmt.Sprintf("serve: versions differ (this server is v%s) — that one can retire shared remote servers on an explicit restart. Its record predates identity locking, so the pid may be stale; stop that ocode process yourself.",
 			selfVersion))
 	}
 	return out

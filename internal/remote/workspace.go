@@ -274,11 +274,7 @@ func (rw *RemoteWorkspace) ensureBinary() error {
 // discoverOrStartServer delegates to EnsureRemoteServer so the reuse-vs-fresh
 // decision has a single implementation shared with the CLI's ConnectWeb path.
 func (rw *RemoteWorkspace) discoverOrStartServer() (ServeState, error) {
-	state, _, retiredVersion, err := EnsureRemoteServer(rw.Transport, version.Version, rw.slot())
-	if retiredVersion != "" {
-		// Retiring the old server ended the terminals it was running on the host.
-		log.Printf("remote: %s: retired ocode serve v%s, replaced with v%s; its terminals ended", rw.Target.String(), retiredVersion, version.Version)
-	}
+	state, _, err := EnsureRemoteServer(rw.Transport, version.Version, rw.slot())
 	if err != nil {
 		return ServeState{}, err
 	}

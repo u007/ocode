@@ -255,15 +255,15 @@ func ConnectWeb(opts ConnectOptions) error {
 	}
 
 	progress.Start("server", "discovering or starting remote server")
-	state, reused, retiredVersion, err := EnsureRemoteServer(transport, version.Version, "")
+	state, reused, err := EnsureRemoteServer(transport, version.Version, "")
 	if err != nil {
 		progress.Fail(err, "check ~/.ocode/remote/serve.log on the remote")
 		return err
 	}
-	if reused {
+	if reused && state.Outdated {
+		progress.Done(fmt.Sprintf("reusing existing server v%s (older than local v%s; restart it to upgrade)", state.Version, version.Version))
+	} else if reused {
 		progress.Done("reusing existing server")
-	} else if retiredVersion != "" {
-		progress.Done(fmt.Sprintf("retired remote server v%s, started fresh v%s", retiredVersion, version.Version))
 	} else {
 		progress.Done("started fresh")
 	}
