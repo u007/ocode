@@ -4,12 +4,13 @@ import { useSyncExternalStore } from "react";
  * editorAppearance — the light/dark override for the file editor (Monaco) and
  * its rendered preview pane.
  *
- * WHY a separate preference: the app's global palette comes from the *terminal*
- * theme (`useTheme` → `applyThemeColors`), which is a single app-wide choice.
- * Someone authoring a README, or eyeballing a rendered HTML/Markdown document,
- * often wants to see it on the opposite polarity without re-theming the whole
- * chrome. This preference is that override — it never touches
- * `document.documentElement`; consumers scope the palette with a wrapper class.
+ * WHY a separate preference: the app's global palette comes from the active
+ * colour theme (`useTheme` → `lib/appearanceTheme`), which is a single
+ * app-wide choice. Someone authoring a README, or eyeballing a rendered
+ * HTML/Markdown document, often wants to see it on the opposite polarity
+ * without re-theming the whole chrome. This preference is that override — it
+ * never touches `document.documentElement`; consumers scope the palette with a
+ * wrapper class.
  *
  * Persistence: one GLOBAL localStorage key (`ocode.ui.editorAppearance.v1`) —
  * unlike "show hidden files" or per-file viewer state, the appearance is a

@@ -49,7 +49,8 @@ function relLuminance([r, g, b]: [number, number, number]): number {
 
 // Contrast ratio (1–21) between two hex colors. Invalid hex returns 21 so
 // callers treat unknown colors as "already fine" and leave them untouched
-// (applyThemeColors logs a warning for those separately).
+// (an invalid value is skipped with a warning when it is applied — see
+// `writeThemeVar` in `lib/appearanceTheme`).
 export function contrastRatio(a: string, b: string): number {
   const ca = hexToRgb(a);
   const cb = hexToRgb(b);
@@ -82,8 +83,8 @@ export const AA_NORMAL = 4.5;
 export function pickReadableFg(bg: string, candidates: string[]): string {
   for (const c of candidates) {
     // contrastRatio returns 21 for invalid hex — without this guard a
-    // malformed candidate would be "accepted" and then silently skipped by
-    // applyThemeColors, leaving the previous theme's value in place.
+    // malformed candidate would be "accepted" and then silently skipped when
+    // applied, leaving the previous theme's value in place.
     if (hexToRgb(c) !== null && contrastRatio(bg, c) >= AA_NORMAL) return c;
   }
   return contrastRatio(bg, "#ffffff") >= contrastRatio(bg, "#000000")
@@ -153,7 +154,7 @@ export function computeThemeVars(colors: ThemeColors): Record<string, string> {
   // palettes ship a proper link blue there); if none clears on both surfaces,
   // start from the best of them and blend toward the page polarity. Invalid
   // hex is filtered out: contrastRatio treats it as 21:1, which would let a
-  // malformed candidate win and then get skipped in applyThemeColors.
+  // malformed candidate win and then get skipped when applied.
   const linkCandidates = [colors.user, colors.header, colors.accent].filter(
     (c) => hexToRgb(c) !== null,
   );
@@ -199,17 +200,4 @@ export function computeThemeVars(colors: ThemeColors): Record<string, string> {
     "--ring": colors.user,
     "--link": link,
   };
-}
-
-export function applyThemeColors(colors: ThemeColors) {
-  const root = document.documentElement;
-  const vars = computeThemeVars(colors);
-  for (const [name, hex] of Object.entries(vars)) {
-    const triplet = hexToHslTriplet(hex);
-    if (triplet === null) {
-      console.warn(`Skipping theme variable ${name}: invalid hex color`, hex);
-      continue;
-    }
-    root.style.setProperty(name, triplet);
-  }
 }

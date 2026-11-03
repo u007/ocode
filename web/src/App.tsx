@@ -1302,10 +1302,12 @@ function HomeApp() {
         setFakeAgent: (name) => api.setFakeAgentConfig(name),
         getEditorConfig: () => api.getEditorConfig(),
         setEditorConfig: (editor, editorMode, ideMode) => api.setEditorConfig(editor, editorMode, ideMode),
-        getThemes: () => api.getThemes(),
-        getTheme: (name) => api.getTheme(name),
-        getTUISettings: () => api.getTUISettings(),
-        setTUISettings: (cfg) => api.setTUISettings(cfg),
+        // `/themes` gates on this method, so leaving it unwired reports
+        // "not available" in every real build while unit tests (which inject
+        // the api bag themselves) stay green. The list endpoint is the only
+        // theme read the command needs; "current" comes from the appearance
+        // store. `commands.productionContext.test.ts` pins that wiring.
+        getAppearanceThemes: () => api.getAppearanceThemes(),
         getExplorerModel: (host?) => api.getExplorerModel(host),
         setExplorerModel: (model, host?) => api.setExplorerModel(model, host),
         setExplorerModelEnabled: (enabled, host?) => api.setExplorerModelEnabled(enabled, host),

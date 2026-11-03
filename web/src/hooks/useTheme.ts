@@ -2,11 +2,13 @@
 // `lib/themeColors` so `lib/appearanceTheme` can share them without an import
 // cycle (this hook imports the appearance store, which imports them).
 //
-// Re-exported here because `commands.ts`, `ThemeForm.tsx` and the existing
-// test suite import them from this module.
+// Re-exported for the colour-helper tests. `applyThemeColors` was deliberately
+// dropped: the appearance store is the only writer of the theme variables now,
+// and it also records what it wrote so the next theme switch can remove the
+// names it no longer sets. A second unrecorded writer could leave stale
+// variables on the document root.
 export {
   AA_NORMAL,
-  applyThemeColors,
   computeThemeVars,
   contrastRatio,
   hexToHslTriplet,

@@ -3,10 +3,15 @@ import { COMMANDS, type CommandContext, dispatchCommand } from "./commands";
 
 // `/themes` now applies/persists through the appearance store; the store talks
 // to the server on its own, so this suite stubs the module and asserts the id
-// it was handed. The persistence-across-reload behaviour is covered by
-// commands.themes.test.tsx against the REAL store.
-const { setColorThemeId } = vi.hoisted(() => ({ setColorThemeId: vi.fn(async () => {}) }));
-vi.mock("../../lib/appearanceTheme", () => ({ setColorThemeId }));
+// it was handed. "Current" comes from the store too (`getColorThemeId`), so
+// that is stubbed rather than a settings endpoint. The persistence-across-
+// reload behaviour is covered by commands.themes.test.tsx against the REAL
+// store.
+const { getColorThemeId, setColorThemeId } = vi.hoisted(() => ({
+  getColorThemeId: vi.fn(() => ""),
+  setColorThemeId: vi.fn(async () => {}),
+}));
+vi.mock("../../lib/appearanceTheme", () => ({ getColorThemeId, setColorThemeId }));
 
 /**
  * TUI-parity slash-command suite.
@@ -250,6 +255,8 @@ describe("/editor and /editor-mode", () => {
 describe("/themes and /search", () => {
   beforeEach(() => {
     setColorThemeId.mockClear();
+    getColorThemeId.mockReset();
+    getColorThemeId.mockReturnValue("");
   });
 
   const THEMES = {
@@ -263,18 +270,11 @@ describe("/themes and /search", () => {
     truncated: false,
   };
 
-  it("lists the unified appearance list and marks the effective theme", async () => {
+  it("lists the unified appearance list and marks the applied theme", async () => {
+    getColorThemeId.mockReturnValue("vscode:acme.themes/dark");
     const result = await dispatchCommand(
       "/themes",
-      ctx({
-        getAppearanceThemes: vi.fn(async () => THEMES),
-        getAppearanceSettings: vi.fn(async () => ({
-          color_theme: "",
-          icon_theme: "",
-          extra_extension_dirs: [],
-          effective_color_theme: "vscode:acme.themes/dark",
-        })),
-      }),
+      ctx({ getAppearanceThemes: vi.fn(async () => THEMES) }),
     );
     const content = result.messages?.[0]?.content ?? "";
     expect(content).toContain("vscode:acme.themes/dark");
@@ -283,17 +283,10 @@ describe("/themes and /search", () => {
   });
 
   it("applies and persists a VS Code theme through the appearance store", async () => {
+    getColorThemeId.mockReturnValue("tokyonight");
     const result = await dispatchCommand(
       "/themes vscode:acme.themes/dark",
-      ctx({
-        getAppearanceThemes: vi.fn(async () => THEMES),
-        getAppearanceSettings: vi.fn(async () => ({
-          color_theme: "tokyonight",
-          icon_theme: "",
-          extra_extension_dirs: [],
-          effective_color_theme: "tokyonight",
-        })),
-      }),
+      ctx({ getAppearanceThemes: vi.fn(async () => THEMES) }),
     );
 
     expect(setColorThemeId).toHaveBeenCalledWith("vscode:acme.themes/dark");
@@ -301,17 +294,10 @@ describe("/themes and /search", () => {
   });
 
   it("still accepts a legacy builtin theme name", async () => {
+    getColorThemeId.mockReturnValue("tokyonight");
     const result = await dispatchCommand(
       "/themes tokyonight",
-      ctx({
-        getAppearanceThemes: vi.fn(async () => THEMES),
-        getAppearanceSettings: vi.fn(async () => ({
-          color_theme: "",
-          icon_theme: "",
-          extra_extension_dirs: [],
-          effective_color_theme: "tokyonight",
-        })),
-      }),
+      ctx({ getAppearanceThemes: vi.fn(async () => THEMES) }),
     );
 
     expect(setColorThemeId).toHaveBeenCalledWith("tokyonight");
@@ -321,15 +307,7 @@ describe("/themes and /search", () => {
   it("rejects an unknown theme without persisting", async () => {
     const result = await dispatchCommand(
       "/themes nope",
-      ctx({
-        getAppearanceThemes: vi.fn(async () => THEMES),
-        getAppearanceSettings: vi.fn(async () => ({
-          color_theme: "",
-          icon_theme: "",
-          extra_extension_dirs: [],
-          effective_color_theme: "tokyonight",
-        })),
-      }),
+      ctx({ getAppearanceThemes: vi.fn(async () => THEMES) }),
     );
     expect(setColorThemeId).not.toHaveBeenCalled();
     expect(result.messages?.[0]?.content).toContain("Unknown theme");

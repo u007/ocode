@@ -6,7 +6,8 @@
  * Color system (two tiers):
  *  1. THEME TOKENS (bg-background, bg-card, bg-muted, bg-accent, text-foreground,
  *     text-muted-foreground, border-border, bg-primary, ring-ring, …) are bound to the
- *     CSS variables set by useTheme()/applyThemeColors() from the server (terminal) theme.
+ *     CSS variables set by the appearance store (`lib/appearanceTheme`, surfaced through
+ *     useTheme()) from the active colour theme.
  *     All chrome — tabs, panels, sidebars, inputs, dialogs, hover/active states — MUST use
  *     these so the web UI follows the active theme. Do not hard-code zinc/slate/neutral/gray.
  *  2. STATUS / SEMANTIC COLORS (red/green/yellow/blue/amber/emerald, etc.) used for git &

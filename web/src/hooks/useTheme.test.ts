@@ -48,9 +48,9 @@ describe("computeThemeVars contrast", () => {
           `${name}: ${fgVar} (${vars[fgVar]}) on ${bgVar} (${vars[bgVar]}) = ${ratio.toFixed(2)}:1`,
         ).toBeGreaterThanOrEqual(AA);
       }
-      // Every derived value must be a valid hex — applyThemeColors silently
-      // skips invalid ones, which would leave stale values from the previous
-      // theme on screen.
+      // Every derived value must be a valid hex — an invalid one is skipped
+      // when applied, which would leave stale values from the previous theme
+      // on screen.
       for (const [varName, value] of Object.entries(vars)) {
         expect(value, `${name}: ${varName} must be #rrggbb`).toMatch(/^#[0-9a-f]{6}$/i);
       }

@@ -20,7 +20,7 @@ import {
   markLocalCompactionEnd,
 } from "../../lib/compactionState";
 import { reportActionError } from "../../lib/actionErrors";
-import { setColorThemeId } from "../../lib/appearanceTheme";
+import { getColorThemeId, setColorThemeId } from "../../lib/appearanceTheme";
 
 import {
   Plus,
@@ -472,15 +472,10 @@ export interface CommandContext {
     setFakeAgent?: (name: string) => Promise<{ fake_agent: string; active: string; options: string[] }>;
     getEditorConfig?: () => Promise<{ editor: string; editor_mode: string; ide_mode: string }>;
     setEditorConfig?: (editor: string, editorMode: string, ideMode: string) => Promise<{ editor: string; editor_mode: string; ide_mode: string }>;
-    getThemes?: () => Promise<import("../../api/types").ThemesListResponse>;
-    getTheme?: (name?: string) => Promise<import("../../api/types").ThemeResponse>;
-    /** Unified appearance theme list (/themes). Prefer this over the legacy
-     *  registry pair above: it includes converted VS Code themes. */
+    /** Unified appearance theme list (/themes). This is the only theme read
+     *  `/themes` needs: "current" comes from the appearance store, which is
+     *  already what painted the screen. */
     getAppearanceThemes?: () => Promise<import("../../api/types").AppearanceThemesResponse>;
-    /** Stored appearance selection (/themes reads "current" from it). */
-    getAppearanceSettings?: () => Promise<import("../../api/types").AppearanceSettings>;
-    getTUISettings?: () => Promise<import("../../api/client").TUISettings>;
-    setTUISettings?: (cfg: import("../../api/client").TUISettings) => Promise<import("../../api/client").TUISettings>;
     getExplorerModel?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
     setExplorerModel?: (model: string, host?: string) => Promise<{ model: string; enabled: boolean }>;
     setExplorerModelEnabled?: (enabled: boolean, host?: string) => Promise<{ model: string; enabled: boolean }>;
@@ -3627,8 +3622,14 @@ async function handleEditorMode(args: string, ctx: CommandContext): Promise<Comm
 // ─── /themes [id|name] — color theme ────────────────────────────────────────
 
 /**
- * `/themes` reads the SAME unified list and the SAME stored selection the
+ * `/themes` reads the SAME unified list and the SAME applied selection the
  * Settings picker uses, and applies/persists through the appearance store.
+ *
+ * "Current" comes from the store (`getColorThemeId`), never from a fresh
+ * `GET /api/appearance/settings`: the store is what actually painted the
+ * screen, and a second read could disagree with it (the TUI or another tab can
+ * change the selection at any time). Because the store also owns the write,
+ * the command and the picker cannot describe different palettes.
  *
  * The previous implementation read the legacy `/api/themes` registry, applied
  * the 16-colour mapping and wrote `tui.theme`. That made `/themes
@@ -3638,15 +3639,12 @@ async function handleEditorMode(args: string, ctx: CommandContext): Promise<Comm
  * is the source of truth now, so the web path must not write `tui.theme`.
  */
 async function handleThemes(args: string, ctx: CommandContext): Promise<CommandResult> {
-  if (!ctx.api.getAppearanceThemes || !ctx.api.getAppearanceSettings) {
+  if (!ctx.api.getAppearanceThemes) {
     return unsupported("/themes");
   }
   try {
-    const [list, settings] = await Promise.all([
-      ctx.api.getAppearanceThemes(),
-      ctx.api.getAppearanceSettings(),
-    ]);
-    const current = settings.effective_color_theme || settings.color_theme;
+    const list = await ctx.api.getAppearanceThemes();
+    const current = getColorThemeId();
     const name = args.trim().toLowerCase();
     if (!name) {
       return ok(
@@ -3659,6 +3657,12 @@ async function handleThemes(args: string, ctx: CommandContext): Promise<CommandR
                 `- ${t.id === current ? "**" : ""}\`${t.id}\`${t.id === current ? " (current)**" : ""} — ${t.label}`,
             )
             .join("\n"),
+          // The list is paginated and the client walks every page; a partial
+          // result means a page failed, which would otherwise look like "the
+          // theme is gone" when the user just cannot see it.
+          ...(list.truncated
+            ? ["", `_Showing ${list.themes.length} of ${list.total} themes — the list was truncated._`]
+            : []),
           "",
           "Switch with `/themes <id>` or Settings > Theme.",
         ].join("\n"),

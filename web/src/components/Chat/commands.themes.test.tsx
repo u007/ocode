@@ -117,14 +117,16 @@ const server = vi.hoisted(() => {
 
 vi.mock("../../api/client", () => ({ api: server }));
 
-function commandContext(): CommandContext {
+function commandContext(
+  themes: () => ReturnType<typeof server.getAppearanceThemes>,
+): CommandContext {
   return {
     commandName: "/themes",
     args: "",
-    api: {
-      getAppearanceThemes: server.getAppearanceThemes,
-      getAppearanceSettings: server.getAppearanceSettings,
-    },
+    // `handleThemes` needs ONE read: the list. "Current" comes from the
+    // appearance store, so a context that also injects a settings reader would
+    // hide the bug this file exists to catch.
+    api: { getAppearanceThemes: themes },
   } as unknown as CommandContext;
 }
 
@@ -144,7 +146,7 @@ describe("/themes <vscode:id> survives a reload", () => {
     expect(getColorThemeId()).toBe("tokyonight");
     expect(server.getAppearanceTheme).not.toHaveBeenCalled();
 
-    const result = await dispatchCommand(`/themes ${THEME_ID}`, commandContext());
+    const result = await dispatchCommand(`/themes ${THEME_ID}`, commandContext(server.getAppearanceThemes));
     expect(result.messages?.[0]?.content).toContain("Acme Dark");
     expect(server.setAppearanceSettings).toHaveBeenCalledWith(
       expect.objectContaining({ color_theme: THEME_ID }),
@@ -162,5 +164,56 @@ describe("/themes <vscode:id> survives a reload", () => {
     expect(document.documentElement.style.getPropertyValue("--background")).toBe(
       "240 21.1% 14.9%",
     );
+  });
+});
+
+describe("/themes output", () => {
+  beforeEach(() => {
+    __resetAppearanceThemeForTests();
+    document.documentElement.removeAttribute("style");
+    server.state.stored = "tokyonight";
+    vi.clearAllMocks();
+  });
+
+  it("marks the theme the store actually applied as current", async () => {
+    // The store is what painted the screen; the command must not read a second
+    // copy of the selection from the server and disagree with it.
+    await loadAppearanceTheme();
+    expect(getColorThemeId()).toBe("tokyonight");
+    server.getAppearanceSettings.mockClear();
+
+    const result = await dispatchCommand("/themes", commandContext(server.getAppearanceThemes));
+    expect(result.messages?.[0]?.content).toContain("`tokyonight` (current)");
+    expect(server.getAppearanceSettings).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a truncated list instead of silently hiding themes", async () => {
+    const result = await dispatchCommand(
+      "/themes",
+      commandContext(async () => ({
+        themes: [
+          {
+            id: "tokyonight",
+            label: "Tokyo Night",
+            source: "builtin" as const,
+            kind: "dark" as const,
+            has_icon_theme: false,
+          },
+        ],
+        total: 4200,
+        offset: 0,
+        limit: 1,
+        truncated: true,
+      })),
+    );
+
+    const content = result.messages?.[0]?.content ?? "";
+    expect(content).toContain("Showing 1 of 4200 themes");
+    expect(content).toContain("truncated");
+  });
+
+  it("omits the truncation note for a complete list", async () => {
+    const result = await dispatchCommand("/themes", commandContext(server.getAppearanceThemes));
+    expect(result.messages?.[0]?.content).not.toContain("truncated");
   });
 });
