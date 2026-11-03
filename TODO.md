@@ -6865,3 +6865,15 @@ Done in `internal/browse` (`tab_remote.go`, `basepath.go` RootModeHeader) and `i
 - **Tab origin: iframe foreign documents are not handed off.** A `Sec-Fetch-Dest=iframe` request from a root-mounted origin to a foreign upstream is answered by the server's handoff path, so the foreign page does not render in the embedded iframe. Only top-level document redirects (302 to a foreign upstream) hand off through the SPA nav event; verified in headless Chrome (address bar and per-tab iframe move to the new upstream). Fix needs a subresource/iframe route decision in `internal/browse/local.go`.
 - **Tab origin: JS-initiated cross-upstream navigation bypasses the proxy.** `location.href = "http://<other upstream>/..."` inside the page is fetched by the browser directly (capture.js does not hook location assignment); it was observed not to render in the iframe. Pre-existing in prefix mode too. Not changed here.
 - **Tab origin: reload burst after a foreign handoff.** A single 302 handoff to a second upstream produced ~30 upstream GETs within ~2 s, then stopped (count stayed at 30 for 10 s). Cause not established; no prefix-mode baseline was measured. Investigate with the nav event URL (server reports `upstream + Path` without the query, so `?q=` in the SPA URL is dropped and triggers one reload).
+
+## Open: VS Code themes and icons — deferred items (2026-11-03)
+
+Design spec: `.opencode/plans/2026-11-03-vscode-themes-and-icons-design.md`. These are deliberate non-goals of the first implementation, recorded here so they are not lost.
+
+- **`semanticTokenColors` → Monaco.** Monaco's `defineTheme` has no semantic-token rules; the design maps `tokenColors` only, so themes that rely on semantic highlighting will look approximate.
+- **Per-project (workspace) theme overrides.** One global `appearance.color_theme` / `appearance.icon_theme` only.
+- **Product icon themes** (`contributes.productIconThemes`) are ignored; the activity bar keeps lucide icons.
+- **Extension auto-update** and an update indicator are not built; a version can be re-installed explicitly.
+- **VS Code Marketplace as a second source.** Only Open VSX is used (verified `/-/search` and `/api/<ns>/<name>/<ver>/file/<file>.vsix`); `marketplace.visualstudio.com` is undocumented and bot-hostile.
+- **`.tmTheme` (plist) `tokenColors`.** Only a JSON file with the `[{scope,settings}]` shape is accepted; a plist path yields "no syntax rules" plus a warning.
+- **No theme-editing UI.** A converted theme cannot be tweaked in place; the user must pick another theme.
