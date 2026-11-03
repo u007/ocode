@@ -1,10 +1,10 @@
 ---
 type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-description: '''Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary.'''
+description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
 resource: ""
-tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer]
-timestamp: 2026-09-23T08:32:38Z
+tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find]
+timestamp: 2026-11-03T12:00:00Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
@@ -57,6 +57,37 @@ project switch (its `key={sideStateKey}` changes with `activeTabId`), so it
 persists shell state per project via `web/src/components/Preview/sidebarPreviewState.ts`,
 and per-file viewer state lives in `web/src/lib/previewViewState.ts`. See
 `gotchas/project-scope-is-mounting-not-visibility.md` for the full mechanism.
+
+## Find in the preview — per kind (2026-11-03)
+
+Find is a **viewer** feature, not a routing feature. `FileTabContent`'s
+toolbar holds Print (`FileTabContent.tsx:151`) and the light/dark toggle; it
+renders no find control at all. Each viewer owns its own header row with a
+visible **Find** button (`aria-label="Find in document"`), so availability
+follows the viewer that was routed to.
+
+| Preview kind | Find | Engine |
+|---|---|---|
+| `markdown` (`.md`, `.markdown`, `.mdx`) | yes | DOM text index (`useDomFind`) |
+| `docx` | yes | DOM text index (`useDomFind`) |
+| `html` | yes | serialized agent injected into the iframe `srcDoc` |
+| `pdf` | yes | pdf.js text items (`usePdfFind`) |
+| `pptx` / `excel` / `image` / media; `text` / `json` / `mermaid` (Monaco) | no | no bar is rendered |
+
+Two consequences of that placement:
+
+- **The Word body is written asynchronously.** `DocxViewer` bumps `docVersion`
+  (`DocxViewer.tsx:23`) only after `docx-preview`'s `renderAsync` resolves
+  (`:44`), and `useDomFind` keys its text index on that value (`:26`). Without
+  the bump the first find after a load indexes an empty body and reports 0
+  matches.
+- **Find state is per-mount.** It is deliberately absent from
+  `previewViewState.ts`, so a remount (app reload, sidebar change) reopens with
+  an empty bar.
+
+Ctrl/⌘F inside a preview is gated so it cannot race the chat's own find bar —
+that gate is described in [concepts/preview-find.md](../concepts/preview-find.md),
+along with the two engines, the highlight overlay and the tests.
 
 ## Open-classification model (2026-09-23)
 
@@ -395,6 +426,8 @@ bundle.
 
 ## Related
 
+- `docs/concepts/preview-find.md` — find engines, overlay colours, and the
+  Ctrl/⌘F ownership gate for the four document previews.
 - `docs/gotchas/browser-panel-transition-inconsistency.md` — another
   documentation-vs-landed-behavior mismatch in the web preview/browser surface.
 - `docs/gotchas/mdx-preview-not-evaluated.md` — MDX preview rule: rendered as

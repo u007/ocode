@@ -1,8 +1,8 @@
 ---
 type: Concept
 title: PDF viewer zoom, Space navigation, and find
-description: "PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas."
-resource: web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/lib/previewViewState.ts
+description: "PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find (rendered through the shared preview FindBar) with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas."
+resource: web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/lib/previewViewState.ts
 tags:
   - web
   - pdf
@@ -14,13 +14,13 @@ tags:
   - jsdom
   - persistence
   - project-switch
-timestamp: 2026-11-02T12:22:31Z
+timestamp: 2026-11-03T05:46:54Z
 ---
 # PDF viewer zoom, Space navigation, and find
 
 **Type:** Concept
-**Description:** PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
-**Resource:** web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/lib/previewViewState.ts; web/src/components/Preview/sidebarPreviewState.ts
+**Description:** PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find (rendered through the shared preview FindBar) with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
+**Resource:** web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/lib/previewViewState.ts; web/src/components/Preview/sidebarPreviewState.ts
 **Tags:**
   - web
   - pdf
@@ -61,14 +61,20 @@ Holding Space turns the plain wheel into **zoom-at-cursor** (same anchor math as
 | First/last page | — | Home / End | |
 | Prev/next page | — | ArrowLeft / ArrowRight (pre-existing) | |
 
+The **Find** toolbar button is the shared `"Find in document"` control
+(`PdfViewer.tsx:1024`), not a PDF-only widget.
+
 Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale: PAGE_SCALE, rotation: (pg.rotate + rot) % 360})` and re-renders the visible window (unrenders all pages first).
 
-## Find (`usePdfFind.ts`)
+## Find (`usePdfFind.ts`) — PDF engine behind the shared FindBar
 
+- **The bar is the shared `FindBar`, not a PDF-specific one.** `PdfViewer` renders the same component the Markdown, Word and HTML previews use (`PdfViewer.tsx:1027`) and imports `isEditableTarget` from `findDom.ts` (`PdfViewer.tsx:9`). Labels, key handling and the highlight palette are documented once in [preview-find.md](preview-find.md).
+- **`usePdfFind` is the PDF-ONLY engine** (`usePdfFind.ts:29`): pdf.js text items are not DOM text, so a PDF cannot use the DOM engine (`useDomFind`) that serves Markdown/Word.
 - **Index**: per-page text index built once per document from the SAME `getTextContent()` items joined with single spaces that the DOM text-layer spans use (viewer appends `" "` text nodes between item spans) — match character offsets map 1:1 onto DOM spans.
-- **Search**: regex over ALL pages (not just rendered). Toggles: Aa (case-sensitive), ab (whole-word `\b(?:escaped)\b`). Counter n/total; Enter/Shift+Enter, F3/Shift+F3 walk with wrap; Esc closes; Ctrl/⌘F opens the bar from anywhere (window keydown; editable targets keep browser-native find).
-- **Highlights**: DOM Range over live text-layer spans → `getClientRects()` → page-relative overlay divs over each page (yellow = all matches, orange = current), recomputed on renderTick bumps. Current match scrolls to ~⅓ viewport height; if its page isn't rendered, falls back to scrolling to the page via `onPageChange`.
-- **Hook guards**: `Range.getClientRects` wrapped in try/catch + optional call (jsdom lacks it); search runs use `runRef` generation so stale async runs can't commit; index cached per document object (identity check); `docVersion` bump on new document resets all find state.
+- **Search**: regex over ALL pages (not just rendered). Toggles: Aa (case-sensitive), ab (whole-word `\b(?:escaped)\b`). Counter n/total; Enter/Shift+Enter, F3/Shift+F3 walk with wrap; Esc closes. Ctrl/⌘F is claimed only by the **visible** viewer: the window keydown effect returns early unless the `active` prop is set (`PdfViewer.tsx:818`), so N mounted-but-hidden PDF panes cannot all flip `find.active` or race on F3. (The DOM viewers use `previewWantsFindShortcut` instead — see preview-find.md.)
+- **Highlights**: DOM Range over live text-layer spans → `getClientRects()` → page-relative overlay divs over each page (yellow = all matches, orange = current), recomputed on renderTick bumps. The colours are deliberately identical to `FindHighlights.tsx` so find looks the same on every surface. Current match scrolls to ~⅓ viewport height; if its page isn't rendered, falls back to scrolling to the page via `onPageChange`.
+- **Hook guards**: `Range.getClientRects` wrapped in try/catch + optional call (jsdom lacks it); search runs use `runRef` generation so stale async runs can't commit (`usePdfFind.ts:48`); index cached per document object (identity check); `docVersion` bump on new document resets all find state.
+- **State is per-mount, not persisted**: `previewViewState.ts` stores only `page`/`zoom`/`scrollTop`, so an active search survives a close/reopen within the mount but not a remount.
 
 ## Print & Download
 
@@ -100,7 +106,7 @@ localStorage `ocode.ui.sidebarPreview.v1`, keyed `host::root`. Shape `{surface, 
 ## ⚠️ jsdom gotchas (save debugging time)
 
 1. **No PointerEvent**: `fireEvent.pointerDown` yields no button/clientX — dispatch `MouseEvent` with `type: "pointerdown"` instead.
-2. **`Range.prototype.getClientRects` undefined** in jsdom: stub on the prototype, restore in `afterEach`.
+2. **`Range.prototype.getClientRects` undefined** in jsdom: stub on the prototype, restore in `afterEach`. This affects BOTH engines (`usePdfFind` and `useDomFind`).
 3. **CSS-escaped class names are invalid selectors**: `.bg-yellow-300/45` is NOT valid for `querySelectorAll` — match by `[aria-hidden="true"]` + `className.includes` instead.
 4. **`getByLabelText` must come from the render result object**, not `container`.
 5. **`vi.mock` of `pdfjs-dist` must implement `Util.transform` as a real matrix product** when the viewer builds text spans — `vi.fn()` returning undefined causes a `tx[4]` crash.
@@ -108,7 +114,7 @@ localStorage `ocode.ui.sidebarPreview.v1`, keyed `host::root`. Shape `{surface, 
 
 ### Test hygiene
 
-PDF viewer suites (`PdfViewer.persistence.test.tsx`, `PreviewHost.test.tsx`, `FileTabContent.test.tsx`, `previewViewState.test.ts`) call `localStorage.clear()` in `beforeEach` because several reuse `path="doc.pdf"` and would otherwise inherit the previous case's stored position.
+PDF viewer suites (`PdfViewer.persistence.test.tsx`, `PreviewHost.test.tsx`, `FileTabContent.test.tsx`, `previewViewState.test.ts`) call `localStorage.clear()` in `beforeEach` because several reuse `path="doc.pdf"` and would otherwise inherit the previous case's stored position. Find-specific coverage lives in `PdfViewer.find.test.tsx` (see preview-find.md).
 
 ## Validation
 

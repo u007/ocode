@@ -5,6 +5,8 @@ import { api } from "../../api/client";
 import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsyncIterator";
 import { saveBlobAsFile } from "@/lib/saveBlob";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+import { FindBar } from "./FindBar";
+import { isEditableTarget } from "./findDom";
 import { usePdfFind } from "./usePdfFind";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
 
@@ -73,13 +75,6 @@ function isCancelledRender(e: unknown): boolean {
   // pdf.js rejects an in-flight render with RenderingCancelledException when
   // the page is unrendered or the document is torn down. That is expected.
   return !!e && typeof e === "object" && (e as { name?: string }).name === "RenderingCancelledException";
-}
-
-function isEditableTarget(t: EventTarget | null): boolean {
-  const el = t as HTMLElement | null;
-  if (!el || !el.tagName) return false;
-  const tag = el.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
 /** Shared 2D context for text metrics (null where canvas is unavailable). */
@@ -1008,8 +1003,6 @@ export default function PdfViewer({
 
   const safe = total ? Math.min(Math.max(1, visiblePage), total) : 1;
   const idleBtn = "rounded px-1.5 py-0.5 hover:bg-muted disabled:opacity-40";
-  const toggleOn = "rounded px-1.5 py-0.5 bg-muted text-foreground";
-  const toggleOff = "rounded px-1.5 py-0.5 text-muted-foreground hover:bg-muted";
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1 text-xs">
@@ -1031,52 +1024,19 @@ export default function PdfViewer({
         <button type="button" disabled={!total} onClick={find.show} className={idleBtn} aria-label="Find in document" title="Find (Ctrl/⌘ F)">Find</button>
       </div>
       {find.active && (
-        <div role="search" className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1 text-xs">
-          <input
-            ref={findInputRef}
-            autoFocus
-            value={find.query}
-            onChange={(e) => find.setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                find.go(e.shiftKey ? -1 : 1);
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                find.hide();
-              }
-            }}
-            placeholder="Find in document"
-            aria-label="Find text"
-            className="h-6 w-44 rounded border border-border bg-transparent px-1.5 outline-none focus:ring-1 focus:ring-ring"
-          />
-          <span aria-live="polite" className="min-w-12 text-center text-muted-foreground">
-            {find.searching ? "…" : `${find.count ? find.current + 1 : 0}/${find.count}`}
-          </span>
-          <button type="button" disabled={!find.count} onClick={() => find.go(-1)} className={idleBtn} aria-label="Previous match" title="Previous match (Shift+F3)">↑</button>
-          <button type="button" disabled={!find.count} onClick={() => find.go(1)} className={idleBtn} aria-label="Next match" title="Next match (Enter, F3)">↓</button>
-          <button
-            type="button"
-            aria-label="Match case"
-            title="Match case"
-            aria-pressed={find.opts.caseSensitive}
-            className={find.opts.caseSensitive ? toggleOn : toggleOff}
-            onClick={() => find.setOpts((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}
-          >
-            Aa
-          </button>
-          <button
-            type="button"
-            aria-label="Whole word"
-            title="Whole word"
-            aria-pressed={find.opts.wholeWord}
-            className={find.opts.wholeWord ? toggleOn : toggleOff}
-            onClick={() => find.setOpts((o) => ({ ...o, wholeWord: !o.wholeWord }))}
-          >
-            ab
-          </button>
-          <button type="button" onClick={find.hide} className={idleBtn} aria-label="Close find" title="Close (Esc)">✕</button>
-        </div>
+        <FindBar
+          inputRef={findInputRef}
+          query={find.query}
+          onQueryChange={find.setQuery}
+          current={find.current}
+          count={find.count}
+          searching={find.searching}
+          opts={find.opts}
+          onToggleOption={(key) => find.setOpts((o) => ({ ...o, [key]: !o[key] }))}
+          onNext={() => find.go(1)}
+          onPrev={() => find.go(-1)}
+          onClose={find.hide}
+        />
       )}
       <div
         ref={attachScroll}

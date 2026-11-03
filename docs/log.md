@@ -5,6 +5,11 @@
 
 ## 2026-11-03
 
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Markdown preview: persisted paper-width reading column ([concepts/preview-width.md](/concepts/preview-width.md))
+* **Update**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+* **Update**: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming) ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
+* **Creation**: In-preview find (Markdown, Word, HTML, PDF) ([concepts/preview-find.md](/concepts/preview-find.md))
 * **Update**: Server-Side Auto-Continue Loop: withheld messages (relevance veto, 8-batch ceiling, budget fit) are reported to the verdict as `transcript_selection`; each selection batch is retried once; the reserved `auto_continue_select` slot is removed ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
 * **Update**: Auto-continue selection and print follow-ups: selection scores on the verdict `client` and cancels on Stop; the score cache scope includes `last_reply`; `ResetSelectScores` also runs at session load and `/reset-id`; PDF viewer print timers and `afterprint` cleanup, print errors logged, popup-blocked download revokes its object URL; macOS desktop print uses the user's saved print settings ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md), [concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md), [concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
 

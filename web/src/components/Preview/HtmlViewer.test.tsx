@@ -7,7 +7,9 @@ describe("HtmlViewer", () => {
     render(<HtmlViewer content="<h1>Hello</h1>" />);
     const iframe = screen.getByTitle("HTML preview");
     expect(iframe.tagName).toBe("IFRAME");
-    expect(iframe).toHaveAttribute("srcDoc", "<h1>Hello</h1>");
+    expect(iframe.getAttribute("srcDoc")).toContain("<h1>Hello</h1>");
+    // The find agent is appended to the srcDoc (see htmlFindAgent.ts).
+    expect(iframe.getAttribute("srcDoc")).toContain("__ocodeFind");
   });
 
   it("uses sandbox=allow-scripts (no allow-same-origin)", () => {
@@ -19,8 +21,10 @@ describe("HtmlViewer", () => {
 
   it("updates srcDoc when content changes", () => {
     const { rerender } = render(<HtmlViewer content="<p>one</p>" />);
-    expect(screen.getByTitle("HTML preview")).toHaveAttribute("srcDoc", "<p>one</p>");
+    expect(screen.getByTitle("HTML preview").getAttribute("srcDoc")).toContain("<p>one</p>");
     rerender(<HtmlViewer content="<p>two</p>" />);
-    expect(screen.getByTitle("HTML preview")).toHaveAttribute("srcDoc", "<p>two</p>");
+    const srcDoc = screen.getByTitle("HTML preview").getAttribute("srcDoc") ?? "";
+    expect(srcDoc).toContain("<p>two</p>");
+    expect(srcDoc).not.toContain("<p>one</p>");
   });
 });

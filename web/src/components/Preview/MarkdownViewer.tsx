@@ -6,6 +6,10 @@ import MermaidViewer from "./MermaidViewer";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import FileEditor from "../Files/FileEditor";
 import MarkdownLink from "../common/MarkdownLink";
+import { FindBar } from "./FindBar";
+import { FindHighlights } from "./FindHighlights";
+import { isEditableTarget, previewWantsFindShortcut } from "./findDom";
+import { useDomFind } from "./useDomFind";
 import { cn } from "../../lib/utils";
 import type { EditorAppearance } from "../../lib/editorAppearance";
 import {
@@ -65,6 +69,10 @@ export default function MarkdownViewer({
   const [isBinary, setIsBinary] = useState(false);
   const [forceEdit, setForceEdit] = useState(false);
   const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
+  // Rendered prose root: the searchable text lives here, while `ref` is the
+  // scroll container whose geometry the highlight layer uses.
+  const columnRef = useRef<HTMLDivElement | null>(null);
+  const find = useDomFind({ containerRef: ref, textRootRef: columnRef, version: md, enabled: !forceEdit && !isBinary });
   // Reading column. `auto` resolves per locale (Letter for US customary-paper
   // locales, A4 elsewhere); the resolved width is applied to an inner wrapper
   // so `.prose`/`max-w-none` on the scroller still cannot cap the measure, and
@@ -198,6 +206,28 @@ export default function MarkdownViewer({
     }
   }, [md, followTail, controlled]);
 
+  // Same window-level shortcuts as the PDF viewer: Ctrl/⌘F opens the bar when
+  // the reader is in this preview, F3/Shift+F3 walk matches, Esc closes. The
+  // preview only claims Ctrl+F while focused/hovered/selected so the chat's
+  // own find bar is not opened at the same time.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.altKey && e.key.toLowerCase() === "f" && !isEditableTarget(e.target)) {
+        if (!previewWantsFindShortcut(ref.current)) return;
+        e.preventDefault();
+        find.show();
+      } else if (e.key === "F3" && find.active) {
+        e.preventDefault();
+        find.go(e.shiftKey ? -1 : 1);
+      } else if (e.key === "Escape" && find.active && !isEditableTarget(e.target)) {
+        find.hide();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [find.active, find.show, find.go, find.hide, ref]);
+
   if (error) return <div className="p-4 text-xs text-red-400">Load failed: {error}</div>;
   if (isBinary && !forceEdit) return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
@@ -218,15 +248,39 @@ export default function MarkdownViewer({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center justify-end border-b border-border px-2 py-0.5 text-xs">
+        <button type="button" onClick={find.show} className="rounded px-1.5 py-0.5 hover:bg-muted" aria-label="Find in document" title="Find (Ctrl/⌘ F)">
+          Find
+        </button>
+      </div>
+      {find.active && (
+        <FindBar
+          query={find.query}
+          onQueryChange={find.setQuery}
+          current={find.current}
+          count={find.count}
+          opts={find.opts}
+          onToggleOption={find.toggleOption}
+          onNext={() => find.go(1)}
+          onPrev={() => find.go(-1)}
+          onClose={find.hide}
+        />
+      )}
       {diagram && (
         <div className="min-h-[220px] shrink-0 border-b border-border">
           <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} appearance={appearance} />
         </div>
       )}
-      <div ref={ref} onScroll={handleScroll} className={cn("prose prose-sm max-w-none min-h-0 flex-1 overflow-auto select-text", appearance !== "light" && "prose-invert")}>
-        <div className={previewColumnClass(columnWidth)} data-preview-column={columnWidth}>
+      <div
+        ref={ref}
+        onScroll={handleScroll}
+        tabIndex={0}
+        className={cn("relative prose prose-sm max-w-none min-h-0 flex-1 overflow-auto select-text outline-none", appearance !== "light" && "prose-invert")}
+      >
+        <div ref={columnRef} className={previewColumnClass(columnWidth)} data-preview-column={columnWidth}>
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
         </div>
+        <FindHighlights rects={find.rects} current={find.current} />
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
