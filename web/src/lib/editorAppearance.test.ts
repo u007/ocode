@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import {
+  DEFAULT_EDITOR_APPEARANCE,
   EDITOR_APPEARANCE_STORAGE_KEY,
   getEditorAppearance,
+  resolveEffectiveEditorAppearance,
   setEditorAppearance,
   toggleEditorAppearance,
   useEditorAppearance,
@@ -15,10 +17,9 @@ describe("editorAppearance store", () => {
     __resetEditorAppearanceForTests();
   });
 
-  it("defaults to dark when nothing is stored and no app polarity is readable", () => {
-    // jsdom does not load index.css, so getComputedStyle("--background") is
-    // empty and the default must fall back to dark.
-    expect(getEditorAppearance()).toBe("dark");
+  it("reads an absent stored value as auto", () => {
+    expect(getEditorAppearance()).toBe("auto");
+    expect(DEFAULT_EDITOR_APPEARANCE).toBe("auto");
   });
 
   it("reads a valid persisted value", () => {
@@ -27,15 +28,27 @@ describe("editorAppearance store", () => {
     expect(getEditorAppearance()).toBe("light");
   });
 
-  it("treats an invalid persisted value as unset instead of selecting it", () => {
-    window.localStorage.setItem(EDITOR_APPEARANCE_STORAGE_KEY, "blue");
+  it("keeps an explicitly stored preference", () => {
+    window.localStorage.setItem(EDITOR_APPEARANCE_STORAGE_KEY, "dark");
     __resetEditorAppearanceForTests();
     expect(getEditorAppearance()).toBe("dark");
   });
 
+  it("reads an explicitly stored auto as auto", () => {
+    window.localStorage.setItem(EDITOR_APPEARANCE_STORAGE_KEY, "auto");
+    __resetEditorAppearanceForTests();
+    expect(getEditorAppearance()).toBe("auto");
+  });
+
+  it("treats an unparsable persisted value as auto", () => {
+    window.localStorage.setItem(EDITOR_APPEARANCE_STORAGE_KEY, "blue");
+    __resetEditorAppearanceForTests();
+    expect(getEditorAppearance()).toBe("auto");
+  });
+
   it("setEditorAppearance persists and re-renders subscribers", () => {
     const { result, unmount } = renderHook(() => useEditorAppearance());
-    expect(result.current).toBe("dark");
+    expect(result.current).toBe("auto");
 
     act(() => {
       setEditorAppearance("light");
@@ -43,18 +56,32 @@ describe("editorAppearance store", () => {
 
     expect(result.current).toBe("light");
     expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("light");
+
+    // "Use theme colours" writes auto back.
+    act(() => {
+      setEditorAppearance("auto");
+    });
+    expect(result.current).toBe("auto");
+    expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("auto");
     unmount();
   });
 
   it("toggleEditorAppearance flips and persists", () => {
-    expect(toggleEditorAppearance()).toBe("light");
+    expect(toggleEditorAppearance("dark")).toBe("light");
     expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("light");
-    expect(toggleEditorAppearance()).toBe("dark");
+    expect(toggleEditorAppearance("light")).toBe("dark");
+    expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("dark");
+  });
+
+  it("toggles away from the effective polarity when storage says auto", () => {
+    // Auto on a LIGHT theme shows the light palette, so the first click must
+    // switch to dark — not assume the old dark default.
+    expect(toggleEditorAppearance("light")).toBe("dark");
     expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("dark");
   });
 
   it("applies a cross-tab storage event", () => {
-    expect(getEditorAppearance()).toBe("dark");
+    expect(getEditorAppearance()).toBe("auto");
     act(() => {
       window.dispatchEvent(
         new StorageEvent("storage", {
@@ -66,12 +93,33 @@ describe("editorAppearance store", () => {
     expect(getEditorAppearance()).toBe("light");
   });
 
+  it("reverts to auto when another tab removes the key", () => {
+    setEditorAppearance("dark");
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: EDITOR_APPEARANCE_STORAGE_KEY, newValue: null }),
+      );
+    });
+    expect(getEditorAppearance()).toBe("auto");
+  });
+
   it("ignores a storage event for a different key or an invalid value", () => {
     window.dispatchEvent(new StorageEvent("storage", { key: "other", newValue: "light" }));
-    expect(getEditorAppearance()).toBe("dark");
+    expect(getEditorAppearance()).toBe("auto");
     window.dispatchEvent(
       new StorageEvent("storage", { key: EDITOR_APPEARANCE_STORAGE_KEY, newValue: "nope" }),
     );
-    expect(getEditorAppearance()).toBe("dark");
+    expect(getEditorAppearance()).toBe("auto");
+  });
+});
+
+describe("resolveEffectiveEditorAppearance", () => {
+  it.each([
+    ["auto", "dark", "dark"],
+    ["auto", "light", "light"],
+    ["light", "dark", "light"],
+    ["dark", "light", "dark"],
+  ] as const)("resolves %s against a %s theme to %s", (value, polarity, expected) => {
+    expect(resolveEffectiveEditorAppearance(value, polarity)).toBe(expected);
   });
 });

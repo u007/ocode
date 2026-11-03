@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 
 // FileEditor pulls Monaco (unresolvable in vitest); PreviewSurface pulls every
 // heavy viewer. Both are captured as stubs so this test only covers the
@@ -14,8 +14,17 @@ vi.mock("../Preview/PreviewSurface", () => ({
     <div data-testid="preview" data-appearance={props.appearance ?? "unset"} />
   ),
 }));
+const getAppearanceSettings = vi.fn();
+const getAppearanceTheme = vi.fn();
+vi.mock("../../api/client", () => ({
+  api: {
+    getAppearanceSettings: (...args: unknown[]) => getAppearanceSettings(...args),
+    getAppearanceTheme: (...args: unknown[]) => getAppearanceTheme(...args),
+  },
+}));
 
 import FileTabContent from "./FileTabContent";
+import { __resetAppearanceThemeForTests } from "../../lib/appearanceTheme";
 import {
   EDITOR_APPEARANCE_STORAGE_KEY,
   __resetEditorAppearanceForTests,
@@ -25,6 +34,11 @@ describe("FileTabContent appearance toggle", () => {
   beforeEach(() => {
     window.localStorage.clear();
     __resetEditorAppearanceForTests();
+    __resetAppearanceThemeForTests();
+    getAppearanceSettings.mockReset();
+    getAppearanceTheme.mockReset();
+    // No theme loaded by default: "auto" resolves to the dark fallback.
+    getAppearanceSettings.mockRejectedValue(new Error("offline"));
   });
 
   it("shows the toggle in the split-view toolbar, hides it in the editor header, and toggles both panes", async () => {
@@ -55,5 +69,57 @@ describe("FileTabContent appearance toggle", () => {
       "true",
     );
     expect(screen.getByTestId("preview")).toHaveAttribute("data-appearance", "light");
+  });
+
+  it("follows a light VS Code theme's polarity when the preference is auto", async () => {
+    // §8.6 case 2 + the \"auto\" migration: the preview must receive the
+    // EFFECTIVE polarity, not the stored \"auto\" string.
+    getAppearanceSettings.mockResolvedValue({
+      color_theme: "vscode:acme.themes/light",
+      icon_theme: "",
+      extra_extension_dirs: [],
+      effective_color_theme: "vscode:acme.themes/light",
+    });
+    getAppearanceTheme.mockResolvedValue({
+      id: "vscode:acme.themes/light",
+      label: "Acme Light",
+      kind: "light",
+      colors: {
+        user: "#1e66f5",
+        assistant: "#4c4f69",
+        header: "#1e66f5",
+        border: "#ccd0da",
+        hint: "#9ca0b0",
+        text: "#4c4f69",
+        background: "#eff1f5",
+        status_bg: "#e6e9ef",
+        status_fg: "#4c4f69",
+        selected_fg: "#4c4f69",
+        selected_bg: "#ccd0da",
+        success: "#40a02b",
+        error: "#d20f39",
+        accent: "#7287fd",
+        dim: "#9ca0b0",
+        thinking: "#9ca0b0",
+      },
+      ui: {},
+      monaco: { base: "vs", colors: {}, rules: [] },
+      terminal: {},
+    });
+
+    render(<FileTabContent path="README.md" content="# Hi" />);
+    await screen.findByTestId("editor");
+
+    act(() => {
+      screen.getByRole("button", { name: "Preview" }).click();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("preview")).toHaveAttribute("data-appearance", "light"),
+    );
+    expect(screen.getByRole("button", { name: "Toggle light or dark theme" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

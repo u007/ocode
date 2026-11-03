@@ -15,10 +15,21 @@ import { useSyncExternalStore } from "react";
  * unlike "show hidden files" or per-file viewer state, the appearance is a
  * reading/workflow preference, not a property of a project or a document.
  *
- * Default when unset: the app's own polarity, read once from the computed
- * `--background` lightness. A user on a light terminal theme therefore gets a
- * light preview by default instead of a jarring dark pane; the moment they
- * toggle, an explicit value is stored and the default stops applying.
+ * Three stored values (spec §8.6):
+ *
+ * - `"auto"` (the default) — the editor follows the active colour theme: a
+ *   `vscode:` theme contributes its converted Monaco palette, a builtin one is
+ *   outranked only by `monaco.theme` (see `lib/monacoTheme.ts`), and the
+ *   preview pane takes the theme's polarity.
+ * - `"light"` / `"dark"` — an EXPLICIT override. It outranks the colour theme
+ *   (`ocode-light` / `ocode-dark`) and Settings tells the user it is on, with a
+ *   *Use theme colours* action that writes `"auto"` back.
+ *
+ * Migration: an ABSENT or unparsable stored value reads as `"auto"`, so an
+ * existing install stops being coerced to a polarity of the editor's own and
+ * instead gets the active theme's palette. An explicitly stored `light`/`dark`
+ * keeps its meaning. `resolveEffectiveEditorAppearance` turns the stored value
+ * into the light/dark polarity the preview chrome needs.
  *
  * Cross-tab sync uses the `storage` event (same-tab components all read this
  * one module store through `useEditorAppearance`, so no custom event is
@@ -27,22 +38,29 @@ import { useSyncExternalStore } from "react";
 
 export const EDITOR_APPEARANCE_STORAGE_KEY = "ocode.ui.editorAppearance.v1";
 
+/** The EFFECTIVE (light/dark) palette polarity. Preview viewers take this. */
 export type EditorAppearance = "light" | "dark";
+
+/** The persisted preference: an explicit override, or `"auto"` to follow the
+ *  active colour theme. */
+export type EditorAppearanceValue = "auto" | EditorAppearance;
+
+/** The stored default: an absent/unparsable preference means `"auto"`. */
+export const DEFAULT_EDITOR_APPEARANCE: EditorAppearanceValue = "auto";
 
 const listeners = new Set<() => void>();
 /** Cached resolved value. `null` means "not resolved yet". Caching keeps the
- *  `useSyncExternalStore` snapshot referentially stable and avoids re-reading
- *  computed style on every render. */
-let current: EditorAppearance | null = null;
+ *  `useSyncExternalStore` snapshot referentially stable. */
+let current: EditorAppearanceValue | null = null;
 
 /** Strictly validate a raw stored value: anything that is not exactly
- *  "light"/"dark" is treated as unset so a corrupt or foreign value can never
- *  select a non-existent palette. */
-function normalize(raw: string | null | undefined): EditorAppearance | null {
-  return raw === "light" || raw === "dark" ? raw : null;
+ *  "auto"/"light"/"dark" is treated as unset so a corrupt or foreign value can
+ *  never select a non-existent palette. */
+function normalize(raw: string | null | undefined): EditorAppearanceValue | null {
+  return raw === "auto" || raw === "light" || raw === "dark" ? raw : null;
 }
 
-function readStored(): EditorAppearance | null {
+function readStored(): EditorAppearanceValue | null {
   try {
     return normalize(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY));
   } catch (err) {
@@ -52,33 +70,34 @@ function readStored(): EditorAppearance | null {
   }
 }
 
-/**
- * The app's current polarity from the computed `--background` HSL triplet
- * ("H S% L%"). Falls back to "dark" when the value is absent (e.g. jsdom, or a
- * read before the theme is applied) — the app's own `:root` default is dark.
- */
-function defaultAppearance(): EditorAppearance {
-  try {
-    const bg = getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
-    const m = /(\d+(?:\.\d+)?)%\s*$/.exec(bg);
-    if (m) return Number.parseFloat(m[1]) > 50 ? "light" : "dark";
-  } catch (err) {
-    console.warn("[editorAppearance] failed to detect app polarity", err);
-  }
-  return "dark";
-}
-
 function emit(): void {
   for (const l of listeners) l();
 }
 
-/** Current appearance (resolved from storage, then the app polarity). */
-export function getEditorAppearance(): EditorAppearance {
-  if (current === null) current = readStored() ?? defaultAppearance();
+/** The stored preference (`"auto"` when never set or unparsable). */
+export function getEditorAppearance(): EditorAppearanceValue {
+  if (current === null) current = readStored() ?? DEFAULT_EDITOR_APPEARANCE;
   return current;
 }
 
-export function setEditorAppearance(next: EditorAppearance): void {
+/**
+ * Resolve the stored preference to the light/dark polarity everything visually
+ * scoped by it uses (`editorAppearanceClass`, the toggle label, Monaco).
+ *
+ * `"auto"` takes the ACTIVE COLOUR THEME's polarity, so a light VS Code theme
+ * yields a light preview/gutter without the user touching the toggle. Callers
+ * pass the theme's `kind` (or `"dark"` while no theme is loaded, matching the
+ * dark fallback of the Monaco resolver).
+ */
+export function resolveEffectiveEditorAppearance(
+  value: EditorAppearanceValue | null | undefined,
+  themePolarity: EditorAppearance,
+): EditorAppearance {
+  if (value === "light" || value === "dark") return value;
+  return themePolarity === "light" ? "light" : "dark";
+}
+
+export function setEditorAppearance(next: EditorAppearanceValue): void {
   if (getEditorAppearance() === next) return;
   current = next;
   try {
@@ -90,9 +109,16 @@ export function setEditorAppearance(next: EditorAppearance): void {
   emit();
 }
 
-/** Flip light ⇄ dark and persist. Returns the new value. */
-export function toggleEditorAppearance(): EditorAppearance {
-  const next: EditorAppearance = getEditorAppearance() === "light" ? "dark" : "light";
+/**
+ * Flip light ⇄ dark and persist. `currentEffective` is the value the caller is
+ * currently showing (it already resolved `"auto"` against the active theme), so
+ * the first click from `"auto"` flips AWAY from what the user sees rather than
+ * from an assumed polarity.
+ */
+export function toggleEditorAppearance(currentEffective?: EditorAppearance): EditorAppearance {
+  const base =
+    currentEffective ?? resolveEffectiveEditorAppearance(getEditorAppearance(), "dark");
+  const next: EditorAppearance = base === "light" ? "dark" : "light";
   setEditorAppearance(next);
   return next;
 }
@@ -104,8 +130,9 @@ function subscribe(onChange: () => void): () => void {
   };
 }
 
-/** React binding — one source of truth for every mounted editor/preview. */
-export function useEditorAppearance(): EditorAppearance {
+/** React binding — one source of truth for every mounted editor/preview.
+ *  Returns the STORED value; resolve with `resolveEffectiveEditorAppearance`. */
+export function useEditorAppearance(): EditorAppearanceValue {
   return useSyncExternalStore(subscribe, getEditorAppearance, getEditorAppearance);
 }
 
@@ -129,7 +156,8 @@ export function __resetEditorAppearanceForTests(): void {
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key !== EDITOR_APPEARANCE_STORAGE_KEY) return;
-    const v = normalize(e.newValue);
+    // A removed key reverts to the default; an unparsable value is ignored.
+    const v = e.newValue === null ? DEFAULT_EDITOR_APPEARANCE : normalize(e.newValue);
     if (v && v !== current) {
       current = v;
       emit();

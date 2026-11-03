@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ThemeForm from "./ThemeForm";
 import { __resetAppearanceThemeForTests } from "../../lib/appearanceTheme";
+import {
+  EDITOR_APPEARANCE_STORAGE_KEY,
+  __resetEditorAppearanceForTests,
+} from "../../lib/editorAppearance";
 import type {
   AppearanceSettings,
   AppearanceThemesResponse,
@@ -89,6 +93,8 @@ function convertedTheme(id: string): ConvertedTheme {
 describe("ThemeForm", () => {
   beforeEach(() => {
     __resetAppearanceThemeForTests();
+    __resetEditorAppearanceForTests();
+    window.localStorage.clear();
     document.documentElement.removeAttribute("style");
     vi.clearAllMocks();
     getAppearanceThemes.mockResolvedValue(THEME_LIST);
@@ -97,6 +103,8 @@ describe("ThemeForm", () => {
 
   afterEach(() => {
     __resetAppearanceThemeForTests();
+    __resetEditorAppearanceForTests();
+    window.localStorage.clear();
     document.documentElement.removeAttribute("style");
   });
 
@@ -154,5 +162,31 @@ describe("ThemeForm", () => {
     // The stored/applied selection did not move.
     expect(screen.getByText("tokyonight", { selector: "code" })).toBeInTheDocument();
     expect(document.documentElement.style.getPropertyValue("--background")).toBe("");
+  });
+
+  it("does not show the editor-override notice while the editor follows the theme", async () => {
+    render(<ThemeForm />);
+    await screen.findByText("Acme Dark");
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use theme colours" })).toBeNull();
+  });
+
+  it("warns that an explicit editor override outranks the theme, and clears it", async () => {
+    // Spec §8.6 case 1: an explicit light/dark editor preference wins over the
+    // theme's editor colours, so Settings must say so and offer a reset.
+    window.localStorage.setItem(EDITOR_APPEARANCE_STORAGE_KEY, "dark");
+    __resetEditorAppearanceForTests();
+
+    render(<ThemeForm />);
+    await screen.findByText("Acme Dark");
+
+    const notice = screen.getByRole("status");
+    expect(notice.textContent).toContain("Editor override is on");
+    expect(notice.textContent).toContain("not used");
+
+    fireEvent.click(screen.getByRole("button", { name: "Use theme colours" }));
+
+    expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("auto");
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });

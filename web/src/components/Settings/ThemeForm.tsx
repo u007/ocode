@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { api } from "../../api/client";
 import type { ThemeRef } from "../../api/types";
 import { loadAppearanceSettings, setColorThemeId } from "../../lib/appearanceTheme";
+import { setEditorAppearance, useEditorAppearance } from "../../lib/editorAppearance";
 
 const SOURCE_LABELS: Record<string, string> = {
   builtin: "Built-in",
@@ -66,6 +67,12 @@ export default function ThemeForm() {
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  // The file editor has its own light/dark preference. When it is EXPLICIT,
+  // it outranks the colour theme's editor palette (spec §8.6 case 1), which is
+  // invisible from here unless we say so — that silent disagreement is what
+  // this notice fixes.
+  const editorAppearance = useEditorAppearance();
+  const editorOverrideOn = editorAppearance !== "auto";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -151,6 +158,23 @@ export default function ThemeForm() {
       {error && (
         <div role="alert" className="text-xs text-red-400">
           {error}
+        </div>
+      )}
+      {editorOverrideOn && (
+        <div
+          role="status"
+          className="flex items-start justify-between gap-3 rounded border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+        >
+          <p>
+            Editor override is on — the theme’s editor colours are not used.
+          </p>
+          <button
+            type="button"
+            onClick={() => setEditorAppearance("auto")}
+            className="shrink-0 rounded border border-amber-600/50 px-2 py-1 text-[11px] font-medium transition-colors hover:bg-amber-500/20"
+          >
+            Use theme colours
+          </button>
         </div>
       )}
       {warnings.length > 0 && (

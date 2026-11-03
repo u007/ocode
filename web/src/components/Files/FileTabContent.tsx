@@ -8,7 +8,12 @@ import { isLegacyOfficePath, previewOnlyKindForPath, splitPreviewKindForPath } f
 import { useResizableSplit } from "../../hooks/useResizableSplit";
 import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 import { cn } from "../../lib/utils";
-import { toggleEditorAppearance, useEditorAppearance } from "../../lib/editorAppearance";
+import {
+  resolveEffectiveEditorAppearance,
+  toggleEditorAppearance,
+  useEditorAppearance,
+} from "../../lib/editorAppearance";
+import { useAppearanceTheme } from "../../lib/appearanceTheme";
 
 // Monaco (and its workers) is the single largest dependency in the app. It is
 // only ever needed once a text/code tab actually renders, so load it on demand
@@ -94,8 +99,15 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   const previewContent = useDebouncedValue(props.content, PREVIEW_DEBOUNCE_MS);
   // Shared light/dark override for the editor and its rendered preview (see
   // editorAppearance.ts). Global + persisted, so it follows the user across
-  // files and reloads.
-  const appearance = useEditorAppearance();
+  // files and reloads. The STORED value can be "auto" (follow the active
+  // colour theme), so resolve it against the theme's polarity — the preview
+  // class and the toggle label both need the effective light/dark.
+  const appearanceValue = useEditorAppearance();
+  const { theme: activeTheme } = useAppearanceTheme();
+  const appearance = resolveEffectiveEditorAppearance(
+    appearanceValue,
+    activeTheme?.kind ?? "dark",
+  );
 
   // Persist the paginated viewer's position for this file. Only one of the two
   // viewers is ever mounted for a given file, so pick the index that belongs to
@@ -159,7 +171,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
                 hidden in Preview mode; this toolbar is visible in all three. */}
             <button
               type="button"
-              onClick={() => toggleEditorAppearance()}
+              onClick={() => toggleEditorAppearance(appearance)}
               aria-pressed={appearance === "light"}
               aria-label="Toggle light or dark theme"
               title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}

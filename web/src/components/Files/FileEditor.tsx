@@ -5,7 +5,13 @@ import { Loader2, Settings2, HelpCircle, Save, Sun, Moon } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
-import { toggleEditorAppearance, useEditorAppearance } from "../../lib/editorAppearance";
+import {
+  resolveEffectiveEditorAppearance,
+  toggleEditorAppearance,
+  useEditorAppearance,
+} from "../../lib/editorAppearance";
+import { useAppearanceTheme } from "../../lib/appearanceTheme";
+import { applyMonacoTheme, resolveEditorTheme } from "../../lib/monacoTheme";
 import {
   Dialog,
   DialogContent,
@@ -180,15 +186,28 @@ function FileEditorImpl({
   // Light/dark override shared with the preview pane. Subscribed (not a prop)
   // so the editor theme follows one global preference from every host,
   // including the embedded editors in TextViewer / MarkdownViewer.
-  const appearance = useEditorAppearance();
-  // Which Monaco theme to paint. The quick toggle OWNS the polarity; the
-  // Settings theme picker still chooses among dark themes. A settings theme
-  // that is itself light (VS Light) would otherwise fight a "dark" toggle, so
-  // it is coerced to the custom dark theme instead.
-  const monacoTheme = useMemo(() => {
-    if (appearance === "light") return "ocode-light";
-    return persistedTheme === "vs" || persistedTheme === "ocode-light" ? "ocode-dark" : persistedTheme;
-  }, [appearance, persistedTheme]);
+  const appearanceValue = useEditorAppearance();
+  // The active colour theme (VS Code themes contribute their own Monaco
+  // palette). Subscribed so picking a theme in Settings repaints open editors.
+  const { theme: activeTheme } = useAppearanceTheme();
+  // Which Monaco theme to paint. The four-case precedence lives in ONE
+  // resolver (lib/monacoTheme.ts, spec §8.6) — this component no longer
+  // coerces a light saved theme back to `ocode-dark`.
+  const monacoTheme = useMemo(
+    () =>
+      resolveEditorTheme({
+        appearance: appearanceValue,
+        theme: activeTheme,
+        monacoTheme: persistedTheme,
+      }),
+    [appearanceValue, activeTheme, persistedTheme],
+  );
+  // Effective polarity for the toggle label, the wrapper's backdrop and the
+  // split preview: `auto` follows the active theme.
+  const appearance = resolveEffectiveEditorAppearance(
+    appearanceValue,
+    activeTheme?.kind ?? "dark",
+  );
   // onMount runs once; read the latest theme through a ref so the mount
   // callback's identity (and therefore the editor instance) never changes when
   // the theme does.
@@ -198,9 +217,10 @@ function FileEditorImpl({
   }, [monacoTheme]);
   // Re-apply after mount when the toggle (or the Settings theme) changes. The
   // @monaco-editor/react wrapper also re-applies its `theme` prop, but keeping
-  // this explicit covers a change that races the async mount.
+  // this explicit covers a change that races the async mount. A VS Code
+  // theme's `defineTheme` happens here too, once per id.
   useEffect(() => {
-    monacoRef.current?.editor.setTheme(monacoTheme);
+    if (monacoRef.current) applyMonacoTheme(monacoTheme, monacoRef.current);
   }, [monacoTheme]);
   // When the parent doesn't provide onOpenSettings (the current default), the
   // Settings button opens the Monaco settings/extensions panel in a dialog.
@@ -557,7 +577,7 @@ function FileEditorImpl({
       },
     });
 
-    monaco.editor.setTheme(monacoThemeRef.current);
+    applyMonacoTheme(monacoThemeRef.current, monaco);
     // Inject search highlight style once
     if (!document.getElementById("ocode-search-highlight-style")) {
       const style = document.createElement("style");
@@ -964,7 +984,7 @@ function FileEditorImpl({
               variant="ghost"
               size="icon"
               className="h-6 w-6 text-muted-foreground hover:text-foreground"
-              onClick={() => toggleEditorAppearance()}
+              onClick={() => toggleEditorAppearance(appearance)}
               aria-pressed={appearance === "light"}
               aria-label="Toggle light or dark theme"
               title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
@@ -1062,7 +1082,7 @@ function FileEditorImpl({
         </div>
       )}
       {(forceEdit || !isBinary) && (
-        <div className="flex-1 overflow-hidden" style={{ backgroundColor: monacoTheme === "ocode-light" ? LIGHT_EDITOR_BG : undefined }}>
+        <div className="flex-1 overflow-hidden" style={{ backgroundColor: monacoTheme.id === "ocode-light" ? LIGHT_EDITOR_BG : undefined }}>
           <Editor
             key={projectRoot ? `${projectRoot}::${path}` : path}
             path={projectRoot ? `${projectRoot}::${path}` : path}
@@ -1076,7 +1096,7 @@ function FileEditorImpl({
               </div>
             }
             options={editorOptions}
-            theme={monacoTheme}
+            theme={monacoTheme.id}
           />
         </div>
       )}
