@@ -3,8 +3,26 @@
 
 
 
+## 2026-11-04
+
+* **Update**: soft-keyboard Backspace: ghostty-web drops it on both keydown (keyCode 229) and beforeinput (`deleteContentBackward` maps to empty), so the earlier claim that Backspace works through beforeinput is removed; the uncommitted `softKeyboardBackspace` fix and its possible double-send are recorded as unverified on device; re-derived the TerminalPanel.tsx, terminalSoftKeyboard.ts and handler_terminal.go anchors ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+
 ## 2026-11-03
 
+* **Update**: Horizontal `fill` alignment renders left in the Excel preview, now an approved known gap (user approved 2026-11-03; Univer has no fill alignment). Supersedes the "not yet approved" wording in the earlier 2026-11-03 entry ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
+* **Update**: Excel preview theme fallback (Office default palette when a workbook has no theme part) recorded as user-approved 2026-11-03; horizontal `fill` alignment rendering left recorded as a known gap, not yet approved ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
+* **Update**: DB Environment Templates (.env / .env.local for connections and SQLite paths) ([concepts/db-environment-templates.md](/concepts/db-environment-templates.md))
+* **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
+* **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
+* **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
+* **Update**: DB Environment Templates (.env / .env.local for connections and SQLite paths) ([concepts/db-environment-templates.md](/concepts/db-environment-templates.md))
+* **Creation**: VS Code themes and file icon themes ([concepts/vscode-themes-and-icons.md](/concepts/vscode-themes-and-icons.md))
+* **Update**: Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract) ([gotchas/remote-git-shell-quoting.md](/gotchas/remote-git-shell-quoting.md))
+* **Update**: Git stash UI: list, per-file restore, delete ([concepts/git-stash-ui.md](/concepts/git-stash-ui.md))
+* **Update**: Git tab "git add failed: pathspec '…' did not match" — C-quoted names from non-`-z` listings ([gotchas/git-status-c-quoted-paths.md](/gotchas/git-status-c-quoted-paths.md))
+* **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))
+* **Update**: Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract) ([gotchas/remote-git-shell-quoting.md](/gotchas/remote-git-shell-quoting.md))
+* **Update**: Remote server version policy: an older live server is kept and flagged outdated, upgraded only by explicit restart ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
 * **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
 * **Update**: Markdown preview: persisted paper-width reading column ([concepts/preview-width.md](/concepts/preview-width.md))
 * **Update**: PDF viewer zoom, Space navigation, and find ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
@@ -19,6 +37,15 @@
 * **Update**: File editor grants: `GET /api/files/access` containment probe, grant prompt on the sidebar and session Preview tab, `grantedFrom` re-anchor, re-derived anchors ([concepts/file-editor-grants.md](/concepts/file-editor-grants.md))
 * **Update**: Preview-only routing: outside-root refusal now comes from the server access probe instead of a lexical check ([gotchas/files-tab-preview-only-routing.md](/gotchas/files-tab-preview-only-routing.md))
 * **Update**: Markdown preview: re-derived `PreviewHost.tsx` and `PreviewTabPage.tsx` width-menu anchors ([concepts/preview-width.md](/concepts/preview-width.md))
+* **Update**: Web Ctrl/Cmd+P FilePicker pins an exact typed path (file or folder) first, via `GET /api/files/stat` independent of the tree index ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: File search ordering: web Ctrl+P exact direct-path hit is pinned above the ranking ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
+* **Creation**: Resize hook drag direction depends on pane side ([gotchas/resize-hook-drag-sign-per-side.md](/gotchas/resize-hook-drag-sign-per-side.md))
+* **Update**: Remote server version policy: `EnsureRemoteServer` returns `(state, reused, err)`; `shouldReplaceRemote` is now `isOlderRemote` (flag only, never replaces or kills) ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
+* **Update**: Web Ctrl/Cmd+P direct hit: `GET /api/files/stat` returns the canonical tree-spelled `path`, a bounded remote stat (`remoteStatTimeout`), 502 on transport failure, and the picker keys the hit by query and project+host; stale anchors and the App.tsx/FileEditor.tsx line references corrected ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: File search ordering: re-derived FilePicker.tsx and handler_files.go anchors ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
+* **Update**: File tree walk budget: re-derived handler_files.go and FilePicker.tsx anchors, FileTree.tsx hint line ([concepts/file-tree-walk-budget.md](/concepts/file-tree-walk-budget.md))
+* **Creation**: Excel preview: read-only Univer sheet over ExcelJS (.xlsx) and SheetJS (csv/tsv/.xls) conversion, limits, and the .xlsm routing gap ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
+* **Update**: Multi-Use Preview design spec: the PreviewSurface line names Univer and ExcelJS/SheetJS instead of SheetJS for .xlsx ([superpowers/specs/2026-09-10-preview-multipurpose-design.md](/superpowers/specs/2026-09-10-preview-multipurpose-design.md))
 
 ## 2026-11-02
 

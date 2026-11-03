@@ -23,7 +23,7 @@ this file is the index plus the rules the pages only imply.
 | `internal/remote/connect.go`, `serve.go`, `workspace.go`, `provision.go` | Connect flow, server launch, binary upload/activate |
 | `internal/remote/sync.go` | `BuildSyncPayload` — credentials/config pushed to the host |
 | `internal/server/remote_hosts.go` | Connection registry: `remoteConnectionKey`, per-entry connect `sync.Cond` |
-| `internal/server/handler_remote_work.go` | `remoteGitCommand`, `remoteSafeSpec`, the exec slot pool |
+| `internal/server/handler_remote_work.go` | `remoteGitCommand`, `remoteGitSpec`/`remoteSpecCore`, the exec slot pool |
 | `internal/server/handler_remote_fs.go` | `/api/fs/*?host=` mutations (`remoteTargetOf`, `remoteAbsJoin` callers) |
 | `internal/server/handler_remote_proxy.go` | `HandleRemoteProxy` — the `/api/remote/{host}/…` entry |
 
@@ -180,12 +180,16 @@ Two complementary layers of the same function — don't merge them:
 | Lock/env | **`CLAUDE.md` §"Git subprocesses: `gitexec`"** | leading `GIT_OPTIONAL_LOCKS=0` in `remoteGitCommand`; mutations via `remoteGitMutation` |
 | Quoting | `docs/gotchas/remote-git-shell-quoting.md` | see below |
 
-- `remoteGitCommand` (`handler_remote_work.go:601`) builds a **shell string**,
+- `remoteGitCommand` (`handler_remote_work.go:674`) builds a **shell string**,
   so quoting is the caller's job.
 - Any free-form argument (commit message, stash message, ref, branch) **must** be
   wrapped in `remote.ShellQuote` by the caller.
-- A pathspec from `remoteSafeSpec` (`handler_remote_work.go:621`) **must not** be
-  pre-quoted — double-quoting breaks `^{commit}` rev resolution.
+- A git pathspec is validated by `remoteGitSpec` (`handler_remote_work.go:711`)
+  and **must not** be pre-quoted — double-quoting breaks `^{commit}` rev
+  resolution. Remote **file operations** are different: their command sites
+  shell-quote the path with `remote.ShellQuotePath`, so they validate with
+  `remoteSpecCore` (`handler_remote_work.go:692`) only, and ordinary names with
+  spaces, parentheses, brackets, quotes, `$`, `&` and `#` are allowed.
 - **Never** quote for the local `gitRunInDir` path: it's argv, no shell, so
   quoting embeds literal `"` characters.
 

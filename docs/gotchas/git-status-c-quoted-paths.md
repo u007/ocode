@@ -1,6 +1,6 @@
 ---
 type: Gotcha
-title: 'Git tab "git add failed: pathspec ''"…"'' did not match" — C-quoted names from non-`-z` listings'
+title: 'Git tab "git add failed: pathspec ''…'' did not match" — C-quoted names from non-`-z` listings'
 description: 'The web/desktop Git tab could not stage files whose names contain non-ASCII bytes (an em dash, an accented letter), locally or over SSH/WSL. Listings were read without -z, so git C-quoted the name and the quoted form was passed back to git add; remote command args were also joined unquoted, so a space split the name. Every listing that feeds a path back into git must use -z or decode, and every spec that becomes a command argument must be shell-quoted.'
 resource: internal/server/handler_git.go; internal/server/handler_remote_git.go; internal/server/handler_remote_git_actions.go; internal/server/handler_git_quoting_test.go; internal/server/handler_remote_git_quoting_test.go
 tags:
@@ -12,7 +12,7 @@ tags:
   - web
   - desktop
   - gotcha
-timestamp: 2026-10-09T14:30:00Z
+timestamp: 2026-11-03T12:59:54Z
 ---
 # Git tab stage failed on non-ASCII filenames — C-quoted names from non-`-z` listings
 
@@ -53,10 +53,10 @@ match`). That applied to any pathspec, not only non-ASCII ones.
    the first record in `-z` porcelain.
 3. **Skip the original-path record after a rename or copy.** In `-z` porcelain, an `R` or `C`
    in either column is followed by the original path as its own NUL record with no status
-   prefix. `untrackedPathsFromStatusZ` (`handler_git.go:794`) does this, so an original path
+   prefix. `untrackedPathsFromStatusZ` (`handler_git.go:907`) does this, so an original path
    such as `old?y.txt` is never read as an untracked entry.
 4. **Decode `diff --git` headers when git quoted them.** `diffHeaderPath`
-   (`handler_git.go:818`) passes the quoted `"b/…"` form through `gitignoreUnquotePath`
+   (`handler_git.go:931`) passes the quoted `"b/…"` form through `gitignoreUnquotePath`
    (`handler_git_ignore.go:256`). That decoder is byte-exact; `strconv.Unquote` would turn
    invalid UTF-8 into U+FFFD. The plain form still splits on `" b/"`. This also fixes remote
    diffs, which share `parseUnifiedDiff`.
@@ -69,8 +69,10 @@ match`). That applied to any pathspec, not only non-ASCII ones.
    injection guard.** Use `remoteQuoteSpecs` (`handler_remote_git.go:332`) for a list and
    `remoteQuoteSpecPath` for one. Git pathspecs are validated by `remoteGitSpec`
    (`handler_remote_work.go`), which allows shell metacharacters and refuses only what quoting
-   cannot neutralize. File operations keep the strict `remoteSafeSpec`. Keep the raw spec wherever
-   it is looked up in a path set (for example `remoteRestoreStashPaths`).
+   cannot neutralize. File operations validate with `remoteSpecCore` (`handler_remote_work.go:692`)
+   and shell-quote the absolute path at each command site with `remote.ShellQuotePath`, so
+   ordinary filenames containing spaces/parens/quotes/`$`/`&`/`#` are allowed. Keep the raw spec
+   wherever it is looked up in a path set (for example `remoteRestoreStashPaths`).
 7. **A remote `diff --no-index /dev/null` needs `|| true`.** `remoteRun` discards stdout on any
    nonzero exit, and `diff --no-index` exits 1 for every untracked file. Without the masking,
    every remote untracked patch came back empty.

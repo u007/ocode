@@ -11,7 +11,7 @@ tags:
   - web
   - remote
   - status
-timestamp: 2026-10-31T04:51:30Z
+timestamp: 2026-11-03T12:59:43Z
 ---
 # Git conflicts and halted-operation recovery
 
@@ -25,7 +25,7 @@ timestamp: 2026-10-31T04:51:30Z
 - `conflicts: [{ path, code, ours, theirs }]` — one entry per unmerged path, `code` being git's porcelain `XY` (`DD`, `AU`, `UD`, `UA`, `DU`, `AA`, `UU`), `ours`/`theirs` reporting whether stage 2 / stage 3 exists (a false side is a deletion on that side).
 - `operation?: { kind, label, step, total }` — present only while an operation is halted; `kind` is one of `merge`, `rebase`, `rebase-interactive`, `am`, `cherry-pick`, `revert`, `bisect`; `label` is human text (e.g. `Rebasing feature/login onto 1a2b3c4 (3/7)`), with `step`/`total` only where progress exists.
 
-A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:365-389`, mirrored in `handler_remote_git.go`). The UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — **now ships in `GitPanel.tsx`** (phase 06): the banner drives `api.gitOperation` and each conflict row drives `api.gitResolveConflict`. A row's **Blocks** toggle (§11) expands the file into per-block choices, and an **Editor** button (§12) opens the whole file in Monaco.
+A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:385-433`, mirrored in `handler_remote_git.go`). The UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — **now ships in `GitPanel.tsx`** (phase 06): the banner drives `api.gitOperation` and each conflict row drives `api.gitResolveConflict`. A row's **Blocks** toggle (§11) expands the file into per-block choices, and an **Editor** button (§12) opens the whole file in Monaco.
 
 ## 2. One parser, two transports
 
@@ -98,7 +98,7 @@ Two deliberate asymmetries: git refusing a *requested action* is 409 (a legitima
 
 The same two endpoints serve remote projects — they dispatch on `hostParam(r)` to `remoteGitResolveConflict` / `remoteGitOperation`, and the status shape comes from `remoteGitStatus`, which appends the conflicts and operation probes as **two extra sections of the single batched status script** (an extra section is an ssh round trip otherwise; `TestRemoteGitStatusUsesOneBatchedRoundTrip` pins one trip). Response types are identical, so the web cannot tell the transports apart. Known remote-only limits:
 
-1. **Paths with shell-special characters cannot be resolved remotely.** `remoteSafeSpec` rejects `'"` + backtick + `$&|<>\!*?[](){}#:` and control characters — the shell-injection guard shared by every remote git mutation — so a conflicted path containing any of them (including ordinary routes like `app/[slug]/page.tsx` or `(group)/layout.tsx`, not just a colon) answers a clear **400** instead of resolving. The validator is deliberately not relaxed; the real fix is passing the path via stdin/argv the way `remoteGitHunk` already carries its patch.
+1. **Git-ambiguous paths cannot be resolved remotely.** Conflicts validate with `remoteGitSpec` (`handler_remote_work.go:711`): it allows shell metacharacters (they are neutralized by `remote.ShellQuotePath` at the command site) but refuses what quoting cannot fix — a leading `:` (pathspec magic), a Windows drive prefix, and the glob characters `*`, `?`, `[`, where a glob would match other files. A path like `app/[slug]/page.tsx` therefore answers a clear **400** instead of resolving. Ordinary filenames with spaces, parentheses, quotes, `$`, `&` and `#` are fine (remote file operations have always allowed them via `remoteSpecCore`; git specs stay stricter by design). The validator is deliberately not relaxed; the real fix is passing the path via stdin/argv the way `remoteGitHunk` already carries its patch.
 2. **The remote operation response omits `output`** (only the workspace is returned), so hook output is not surfaced for remote continue/skip today.
 3. **The bound differs:** local 60s, remote the shared exec bound above.
 
@@ -134,7 +134,7 @@ Added 2026-10-12. It lifts the "no conflict-marker editor" non-goal of §9 for o
 - **Staging.** Each choice rewrites only that block's markers. When no markers remain, the file is staged through `gitMarkResolved`, which re-scans it and adds it. While any block is left, the file stays unmerged.
 - **Relabelling.** Chunk buttons and pane headers come from `conflictSideLabels` (`web/src/components/Git/conflictSideLabels.ts`), the same source as the whole-file buttons. During a rebase the buttons read "Keep upstream" / "Keep my commit" and the panes read "Upstream · HEAD" / "Your commit · …". The rebase inversion in §3 applies here as well.
 - **Web.** Each conflict row has a **Blocks** toggle (`GitPanel.tsx`), hidden for remote projects. The toggle expands `ConflictChunks.tsx`, which fetches lazily on expand. Each action runs through the panel's shared mutation contract, then bumps a refresh tick that re-reads the list. The buttons stay disabled until the list re-read after an action has arrived, because until then they would carry a fingerprint the file may no longer have. The expanded view closes on its own once the path leaves the conflicts list.
-- **Remote is not supported yet.** `GET` and `POST` answer **501** for any request carrying a `host` parameter, before any path is touched, so a same-named local file can never be edited on behalf of a remote project. The gap is tracked in `TODO.md`. Remote parity needs the file body transferred over SSH, which is the same problem as §7's shell-special-character limit.
+- **Remote is not supported yet.** `GET` and `POST` answer **501** for any request carrying a `host` parameter, before any path is touched, so a same-named local file can never be edited on behalf of a remote project. The gap is tracked in `TODO.md`. Remote parity needs the file body transferred over SSH, which is the same problem as §7's git-pathspec limit.
 - **Limits.** Files over `conflictMarkerScanLimit` (4 MiB) and non-regular files are refused with 400; use ours/theirs. The diff3 base is not shown, only dropped.
 
 ## 12. Full-document conflict editor (local projects only)

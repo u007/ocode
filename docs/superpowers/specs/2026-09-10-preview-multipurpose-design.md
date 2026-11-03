@@ -4,7 +4,7 @@ title: Multi-Use Preview — Design Spec (Draft, 2026-09-10)
 description: 'Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.'
 resource: ""
 tags: []
-timestamp: 2026-09-23T08:19:01Z
+timestamp: 2026-11-03T15:19:36Z
 ---
 # Multi-Use Preview — Design Spec (Draft, 2026-09-10)
 
@@ -57,7 +57,7 @@ File selected → GET /api/files/content (text/editable) OR
                GET /api/files/raw (binary, allowlisted, 32 MiB cap,
                                     project-root anchored, auth scoped)
                → PreviewSurface renders (Monaco / pdf.js / docx-preview /
-                 jszip slide parser / mermaid / SheetJS / image)
+                 jszip slide parser / mermaid / Univer sheet (ExcelJS for .xlsx, SheetJS for csv/tsv/.xls) / image)
 Edit save → PUT /api/files/content (atomic write)
 Agent trigger → preview_open tool → PREVIEW_OPEN: sentinel →
                 usePreviewActivation → open sidebar PreviewHost →

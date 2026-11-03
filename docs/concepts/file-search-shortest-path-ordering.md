@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: 'File search result ordering: shortest path first'
-description: 'How file-name search results are ordered: relevance first, then shortest path as tiebreak, with shared Go/TS helpers and explicit carve-outs for content search. Amended 2026-10-20: added what the index contains and why a filter can return fewer matches than expected (walk truncation + virtualizer tail clipping), cross-linked to file-tree-walk-budget.md.'
+description: 'How file-name search results are ordered: relevance first, then shortest path as tiebreak, with shared Go/TS helpers and explicit carve-outs for content search. Amended 2026-10-20: added what the index contains and why a filter can return fewer matches than expected (walk truncation + virtualizer tail clipping), cross-linked to file-tree-walk-budget.md. Amended 2026-11-03: web Ctrl+P pins an exact typed path (file or folder) above the ranking.'
 tags:
   - file search
   - ordering
@@ -11,7 +11,7 @@ tags:
   - file picker
   - truncation
   - index
-timestamp: 2026-10-19T23:52:25Z
+timestamp: 2026-11-03T15:19:36Z
 ---
 # File search result ordering: shortest path first
 
@@ -24,6 +24,8 @@ File-name search result lists are ordered by:
 3. **Lexicographic** — final deterministic tiebreak.
 
 An unfiltered/empty-query list is ordered shortest-path first (segments asc, then lexicographic).
+
+**Exception (web/desktop Ctrl+P only):** an exact existing path typed into the picker is pinned above this order, folder or file. It is a presence override, not a score, so the ranking below it is unchanged. See the "Web/Desktop Ctrl+P" surface below.
 
 ## Shared helpers (single source of truth — keep Go and TS in sync)
 
@@ -41,6 +43,8 @@ An unfiltered/empty-query list is ordered shortest-path first (segments asc, the
 ### Web/Desktop Ctrl+P
 `web/src/components/Files/FilePicker.tsx` — filtered results ranked with `scoreMatch` (relevance) then `compareByShortestPath`; empty query `[...files].sort(compareByShortestPath)`.
 
+An exact typed path that exists is pinned first (`directHit` → `filteredFiles`). It comes from `GET /api/files/stat` (`HandleFileStat`), not from the tree index, so it appears even while the index is loading or truncated. Full flow: [web-keyboard-shortcuts.md](web-keyboard-shortcuts.md) (⌘P section).
+
 ### Web/Desktop Files tab path filter
 `filterTreeNodes` (`web/src/components/Files/FileTree.tsx`) — keeps `scoreMatch` desc and adds a `pathSegmentCount` tiebreak. Siblings share a depth, so this is normally a no-op and preserves the dirs-first order.
 
@@ -53,29 +57,29 @@ Content-search results (TUI Ctrl+F `startContentSearchCmd`; web Content mode `co
 The web/desktop picker filters a **server-built index**, not the filesystem
 directly. `FilePicker` fetches `GET /api/files/tree?path=<project>&depth=0` once
 on open and flattens the returned tree into `tree.files` / `tree.folders`
-(`FilePicker.tsx:126`); `filteredFiles` then filters that in-memory list
-(`FilePicker.tsx:151`). So the "N matches" heading counts matches *against the
+(`FilePicker.tsx:142`, flattened at `:151`); `rankedFiles` then filters that in-memory list
+(`FilePicker.tsx:227-239`), and `filteredFiles` pins the direct hit (`:242-245`). So the "N matches" heading counts matches *against the
 index*, and the index can legitimately be smaller than the project on disk for
 two independent reasons:
 
 1. **The server walk is bounded and stops dead.** The walk is capped by
-   `maxTreeNodes = 20000` (`internal/server/handler_files.go:1389`) and symlinked
+   `maxTreeNodes = 20000` (`internal/server/handler_files.go:1730`) and symlinked
    subtrees by a collective `maxSymlinkTreeNodes = 2000`
-   (`handler_files.go:1409`). Once the cap is hit the walk stops, everything
+   (`handler_files.go:1750`). Once the cap is hit the walk stops, everything
    not-yet-visited is dropped, and the server sets `Truncated: true`. The picker
    then appends " — results may be incomplete (truncated)" to the heading
-   (`FilePicker.tsx:209`), and `filteredFiles` only ever sees the truncated
+   (`FilePicker.tsx:291`), and `filteredFiles` only ever sees the truncated
    subset. This is **not pagination** — there is no "next page" to scroll into;
    the missing files are simply absent from the index.
 
 2. **A row-height/virtualizer mismatch clips the rendered tail.** The virtualizer's
    `estimateSize` was `42` while the real row is `44` (`FILE_ROW_HEIGHT`,
-   `FilePicker.tsx:65`), and `virtualizer.measureElement` is *not* wired here, so
+   `FilePicker.tsx:90`), and `virtualizer.measureElement` is *not* wired here, so
    `getTotalSize()` was shorter than the real content: the last matches existed
    in the DOM but could never be scrolled into view. Fixed by making
    `estimateSize` equal the exact row height and giving the path span
    `min-w-0 truncate` so a long path can't wrap the row to 64px
-   (`FilePicker.tsx:244`).
+   (`FilePicker.tsx:326`).
 
 So a heading that says "18 matches" while scrolling reveals fewer is usually
 **reason 2** (the tail is clipped), and "18 matches" while the user believes 30

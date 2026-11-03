@@ -40,8 +40,12 @@ Soft-keyboard arrow keys now work (ghostty-web drops them: `keyCode === 229`, an
 
 - **No on-screen key bar.** A phone has no Esc, Tab or Ctrl, and `terminalSoftKeyboard.ts` can only synthesise the unmodified nav keys (a real one is a config/UI feature, not a bug fix). A compact bar (Esc, Tab, sticky Ctrl, ↑ ↓ ← →) above the terminal on coarse pointers would cover both — and would also be the ONLY path for keyboards that emit no keydown at all (next bullet). Keep it out of the terminal host so it does not fight `touch-none`/`preventDefault`, and route through `term.input(seq, true)` like the nav keys do.
 - **Caret movement with no key event is unreachable from the web layer.** A keyboard that moves the caret via `setSelection` (SwiftKey's space-bar cursor swipe) fires `selectionchange` on the hidden textarea and NO keydown; nothing can translate that into pty bytes without hijacking text selection. Treat as covered-only-by-the-key-bar.
-- **`beforeinput` arrow forms do not exist**, so there is nothing more to intercept there. Backspace/Enter already work through ghostty-web's `beforeinput` (`deleteContentBackward`, `insertLineBreak`) — do not add them to the nav-key map, a second sender double-submits.
+- **`beforeinput` arrow forms do not exist**, so there is nothing more to intercept there. Enter already works through ghostty-web's `beforeinput` (`insertLineBreak`) — do not add it to the nav-key map, a second sender double-submits. Backspace does NOT work through `beforeinput`: ghostty-web maps `deleteContentBackward` to `""` and sends nothing (`ghostty-web.js:1108`–`1109`, guard `if (g)` at `:1126`), and its keydown drops keyCode 229 (`:956`). See the Backspace bullets below.
 - **Not verified on a physical device.** The fix is derived from the library source plus DOM-level tests; confirm with `chrome://inspect` (keydown/beforeinput/selectionchange logger) on a real SwiftKey/Gboard phone. If no keydown arrives, the key bar is the whole fix, not a supplement.
+- **Soft-keyboard Backspace: fix uncommitted, double-send unverified.** `softKeyboardBackspace` (keydown, keyCode 229) and the capture-phase `beforeinput` for `deleteContentBackward` in `TerminalPanel.tsx` both send DEL. The fix assumes `preventDefault()` on the 229 keydown suppresses the `beforeinput` that follows on Android; if both fire, one Backspace deletes two characters. Check on SwiftKey and Gboard with an empty prompt and a non-empty one, using a keydown/beforeinput logger.
+- **Autocorrect doubles a word (hypothesis, not fixed).** `insertReplacementText` (autocorrect) is sent like `insertText` without erasing the word it replaces, so the original stays and the word can appear twice. Confirm with the on-device trace before changing the code.
+- **Stuck composition drops later text (hypothesis, not fixed).** A missed `compositionend` can leave ghostty-web's `isComposing` set, which makes it drop later input. Confirm with the on-device trace before changing the code.
+- **Get one on-device event trace first.** Record keydown, beforeinput, composition and selectionchange for a Backspace, an autocorrected word and a composed word on SwiftKey or Gboard. The double-send check and both hypotheses above need it.
 ## Open: the collapsed status bar sits under the floating SpeechToolbar on a phone (2026-10-31)
 
 The slim row now keeps the cowork/sidebar toggle beside the expand chevron, which fixes "no way to open the sidebar once collapsed" on desktop/web. On a phone that row is the default, and the floating `SpeechToolbar` (`fixed bottom-2 inset-x-2 z-40`, visible by default) still overlays the bottom strip and intercepts clicks for the whole bar — the pre-existing expand chevron included. A separate uncommitted change in the main checkout publishes the bar's measured height as `--speech-toolbar-height` and adds it to `.app-viewport`'s bottom padding; re-verify the toggle at 390×844 once that lands (it is what makes the row tappable).
@@ -4150,8 +4154,15 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   git endpoints, conflict resolve included: they validate with `remoteGitSpec`, which allows a
   colon inside a path and shell-quotes the spec at the command site
   (`remoteQuoteSpecPath`). Still refused: a leading `:` (pathspec magic), a drive prefix, and
-  glob characters. File operations keep `remoteSafeSpec`. See
-  `docs/gotchas/git-status-c-quoted-paths.md`.
+  glob characters. See `docs/gotchas/git-status-c-quoted-paths.md`.
+  File operations no longer keep `remoteSafeSpec` (deleted 2026-11-03): every remote file-op
+  command site already shell-quotes with `remote.ShellQuotePath`, so `remoteTargetOf` /
+  `fsRenameRemote` validate with `remoteSpecCore` only. That fixed
+  `Downloaded 0 files — NMB_Cloud Risk Assessement Form (AIS).xlsx: path contains unsupported
+  characters` (parentheses were rejected) for download/copy/move/delete/rename/new-file.
+  Pinned by `TestRemoteFileOpsAllowShellMetacharacterNames`,
+  `TestRemoteRenameToShellMetacharacterName`, `TestRemoteDownloadCanaryNameStaysLiteral`,
+  `TestRemoteSpecCore`.
 
 
 Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
@@ -6884,3 +6895,14 @@ Design spec: `.opencode/plans/2026-11-03-vscode-themes-and-icons-design.md`. The
 - **Partial-merge settings patch trap (MEDIUM).** `PUT /api/appearance/settings` REPLACES the whole block. Any caller that sends only `color_theme` silently clears `icon_theme` and `extra_extension_dirs`. `setColorThemeId` already re-reads and sends all three; a future caller must too, or the server needs a real PATCH.
 - **Go↔TS JSON contract fixture (MEDIUM).** `AppearanceSettings` / `ConvertedTheme` / `AppearanceThemesResponse` are hand-mirrored in `web/src/api/types.ts`. A field rename on either side compiles on both. Add one fixture (Go golden JSON) both suites assert against.
 - **Conversion-cache invalidation for included files (MEDIUM).** The conversion cache key is the theme id, revalidated against the contribution file's mtime/size only. Editing a file pulled in via `include` or an external `tokenColors` reference does not invalidate it; the next resolve serves the old palette until the contribution file itself changes.
+
+## Excel preview (`web/src/components/Preview/ExcelViewer.tsx`)
+Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` converter (`univerData.ts`).
+- **Not run in a real browser (HIGH).** The Univer mount is mocked in jsdom. Check the grid paints, edits are blocked, and dark mode follows the theme.
+- Univer is pinned `^1.1.0`; 1.3.1 was held back by pnpm's release-age policy. Upgrade once allowed.
+- Approved 2026-11-03: the default Office palette when a workbook has no theme part (matches Excel). Automatic border/text colour renders black (Excel's rule). Horizontal `fill` alignment (Excel's repeat-to-fill-width) renders left because Univer has no equivalent; approved 2026-11-03 as a known gap.
+- SSF silently accepts some malformed number formats (e.g. `0.0.0.0` renders the raw number); the converter throws only for formats SSF rejects.
+- The old selection Copy / Ask-LLM toolbar is gone (canvas has no DOM selection); column-resize drag is gone.
+- Split view remounts Univer on every debounced edit; may be slow on large CSVs.
+- Merges and theme are read from ExcelJS private fields (`ws._merges`, `wb._themes`); an ExcelJS upgrade will throw loudly rather than mis-render.
+- Remote `HandleFileStat` branch (5 s deadline, 502/500 split) has no test; no fake-remote harness covers it.

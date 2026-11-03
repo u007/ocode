@@ -11,7 +11,7 @@ tags:
   - server
   - web
   - budget
-timestamp: 2026-10-19T23:52:11Z
+timestamp: 2026-11-03T15:19:36Z
 ---
 # File tree walk: node budget, symlink budget, and truncation
 
@@ -29,13 +29,13 @@ The implementation lives in `internal/server/handler_files.go`. The key pieces:
 
 | Constant / type | Location | Meaning |
 | --- | --- | --- |
-| `maxTreeNodes = 20000` | `handler_files.go:1389` | Total node cap for one whole-tree walk. |
-| `maxSymlinkTreeNodes = 2000` | `handler_files.go:1409` | Collective cap on nodes contributed by symlinked subtrees. |
-| `fileTreeWalk` | `handler_files.go:1412` | Shared per-walk state (`visited`, `limit`, `symlinkVisited`, `truncated`, `ancestors`). |
-| `buildFileTree` | `handler_files.go:1442` | The recursive walk itself. |
+| `maxTreeNodes = 20000` | `handler_files.go:1730` | Total node cap for one whole-tree walk. |
+| `maxSymlinkTreeNodes = 2000` | `handler_files.go:1750` | Collective cap on nodes contributed by symlinked subtrees. |
+| `fileTreeWalk` | `handler_files.go:1753` | Shared per-walk state (`visited`, `limit`, `symlinkVisited`, `truncated`, `ancestors`). |
+| `buildFileTree` | `handler_files.go:1783` | The recursive walk itself. |
 
 The response's `Truncated` field is set from `walk.truncated`
-(`handler_files.go:144`) — previously it was computed as `count >= maxTreeNodes`,
+(`handler_files.go:148`, in `HandleFileTree`) — previously it was computed as `count >= maxTreeNodes`,
 which counted only the raw node total and could not express the symlink-budget
 and cycle cases below.
 
@@ -43,7 +43,7 @@ and cycle cases below.
 
 A single `depth=0` walk may visit at most `maxTreeNodes = 20000` nodes. The
 budget is consumed as the walk proceeds and the walk **stops dead** when it is
-exhausted (`handler_files.go:1527`). This is a liveness guard, not pagination:
+exhausted (`handler_files.go:1868`). This is a liveness guard, not pagination:
 there is no way to ask the endpoint for "the next 20000" — once truncated, the
 tree is simply incomplete and the frontend is told so via `Truncated`.
 
@@ -70,7 +70,7 @@ gdrive directory of 40731 files): the index held 19738 of 177489 files and
 missing from the picker.
 
 The fix gives symlinked subtrees a **collective** budget of
-`maxSymlinkTreeNodes = 2000` (`handler_files.go:1560`). A symlinked directory is
+`maxSymlinkTreeNodes = 2000` (`handler_files.go:1750`). A symlinked directory is
 still *followed* — the Files tab can expand one and the picker lists its
 contents — but *all* symlinked subtrees together may contribute at most 2000
 nodes, no matter how many links a project has. The bulk of the node budget is
@@ -85,7 +85,7 @@ not what a user can explicitly open.
 ## Files are visited before directories
 
 Within a directory, the walk visits **files first, then directories**, each
-name-sorted (`handler_files.go:1506`, the `visit` slice). Since the budget stops
+name-sorted (`handler_files.go:1856-1865`, the `visit` slice). Since the budget stops
 the walk dead, a directory visited first could swallow the remaining budget and
 starve the sibling files after it. Visiting a directory's files first guarantees
 every file in that directory is indexed before any subtree competes for the
@@ -93,7 +93,7 @@ budget — so a project root's own files (`README.md`, `package.json`, …) are
 always searchable even in a huge tree.
 
 The **response order is unchanged**: after the visit, children are re-sorted for
-display as directories-first then name-sorted (`handler_files.go:1608`). The
+display as directories-first then name-sorted (`handler_files.go:1952`). The
 frontend renders the tree in server order, so the visit order must not leak into
 the response.
 
@@ -106,17 +106,17 @@ subtree dozens of times under ever-deeper paths (`a/loop/loop/.../file.txt`).
 The `fileTreeWalk.ancestors` set holds the resolved real paths
 (`filepath.EvalSymlinks`) of the directories on the current path. When a symlink's
 resolved target is already an ancestor, the link is **LISTED but not descended
-into** (`handler_files.go:1570-1585`). Before the fix the walk recursed to depth
+into** (`handler_files.go:1915-1927`). Before the fix the walk recursed to depth
 25 and indexed one file 26 times; now it visits 5 nodes and the tree is 2 deep.
 
 ## Truncation is surfaced, not hidden
 
 The server has always sent `truncated`; the picker only did `console.warn`.
 `web/src/components/Files/FilePicker.tsx` now stores it in `treeTruncated`
-(`FilePicker.tsx:84`, set at `FilePicker.tsx:125`) and appends
+(`FilePicker.tsx:109`, set at `FilePicker.tsx:150`) and appends
 " — results may be incomplete (truncated)" to the `CommandGroup` heading
-(`FilePicker.tsx:209`) — the same wording as the Files-tab hint
-(`web/src/components/Files/FileTree.tsx` ~line 2131).
+(`FilePicker.tsx:291`) — the same wording as the Files-tab hint
+(`web/src/components/Files/FileTree.tsx` ~line 2632).
 
 ## The remote (SSH/WSL) path is unchanged
 

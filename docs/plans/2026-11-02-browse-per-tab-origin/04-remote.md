@@ -5,7 +5,12 @@
   a foreign upstream is forwarded on the same `/b/` path, so the path cannot tell the
   binding from a foreign upstream. The host replies with `X-Ocode-Browse-Root-Mode: 1`
   on every reply, and a reply without that marker is never relayed (502, restart the
-  host). An older remote ignores the header and is killed/replaced on connect.
+  host). An older remote ignores the header, so the relay / per-tab origin is
+  unavailable against it. `EnsureRemoteServer` keeps an older remote on connect
+  (flagged `Outdated`, never killed); it is upgraded only by an explicit restart
+  (`POST /api/remote/{host}/restart`, the RemoteVersionBanner confirm). Until
+  then, surface the feature as unavailable (outdated banner → restart), never as
+  a silent fallback to local browse.
 - Local per-tab listener for a remote project forwards to the host's browse
   listener over the workspace tunnel (`handler_remote_browse.go`), mounting the
   host's `/b/{stateKey}/{scheme}/{host}` prefix itself so the browser sees root.

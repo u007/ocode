@@ -10,7 +10,7 @@ tags:
   - sessions
   - sidebar
   - architecture
-timestamp: 2026-09-30T04:20:10Z
+timestamp: 2026-11-03T15:19:36Z
 resource: ""
 ---
 # Remote Persistent Sessions and Terminals
@@ -64,7 +64,7 @@ Terminal IDs persist in localStorage per project (`web/src/components/Terminal/t
 
 ### Remote server version policy
 
-`EnsureRemoteServer` (`internal/remote/serve.go`) kills an alive, healthy server that is older than the local version (`shouldReplaceRemote`) and starts a fresh one at the local version; a newer server is reused, so two clients of different versions on one host do not retire each other's server in turn. Versions that are not plain `X.Y.Z` (dev builds) replace on any difference. It then reaps every other-version `ocode serve` left on the host (`killOtherVersionServers`). Terminals on the old server are not drained. `ServeState.Outdated` (bool, `json:"-"`) is now only set transiently; a freshly started server is never Outdated.
+`EnsureRemoteServer(t, ver, slot)` (`internal/remote/serve.go`) returns `(state, reused, err)`. It keeps an alive, healthy server that is older than the local version (`isOlderRemote`, which only decides the flag and never replaces or kills) and reuses it with `ServeState.Outdated` set (`json:"-"`, never persisted). Nothing is killed, so its terminals stay up and no retired version is returned. Versions that are not plain `X.Y.Z` (dev builds) count as older on any difference. A newer server is reused as-is. The upgrade happens only on an explicit restart (`POST /api/remote/{host}/restart`, the banner's confirm), which kills the discovered PID first and aborts if that kill fails. A fresh start (no live server in the state file) still reaps every other-version `ocode serve` left on the host (`killOtherVersionServers`). A freshly started server is never Outdated.
 
 ### Lifecycle endpoints
 

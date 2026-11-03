@@ -2,24 +2,15 @@
 type: Concept
 title: DB Environment Templates (.env / .env.local for connections and SQLite paths)
 description: |-
-  A Postgres connection URL or a SQLite file path may contain ${NAME} or $NAME
-  references, resolved per project against the project root (.env, then
-  .env.local, then process env). Only a braced ${NAME} makes the value a template;
-  a bare $NAME never does, so a literal password such as "pa$HOME" or "p$ssword"
-  is sealed, not saved in the clear. The feature spans the dotenv
-  parser (`internal/envfile`), template expansion (`internal/dbconnect/expand`),
-  the saved-connection shape (`config.DBConnection`), the server unlock flow
-  (`dbEnvLookup` / `dbResolveTemplate`), SQLite path expansion (`dbExpandPath`),
-  and the web DB panel (`DBPanel.tsx`).
+  A Postgres connection URL or a SQLite file path may contain ${NAME} or $NAME references, resolved per project against the project root (.env, then .env.local, then process env). Only a braced ${NAME} makes the value a template; a bare $NAME never does, so a literal password such as "pa$HOME" or "p$ssword" is sealed, not saved in the clear. The dotenv parser accepts a key repeated with the same value and rejects a differing duplicate, and an unreadable .env is reported as a load error instead of a phantom missing variable. The feature spans the dotenv parser (`internal/envfile`), template expansion (`internal/dbconnect/expand`), the saved-connection shape (`config.DBConnection`), the server unlock flow (`dbEnvLookup` / `dbResolveTemplate`), SQLite path expansion (`dbExpandPath`), and the web DB panel (`DBPanel.tsx`).
 tags:
   - dbconnect
   - sqlite
   - env
   - dotenv
-timestamp: 2026-10-30T00:00:00Z
+timestamp: 2026-11-03T15:24:41Z
 resource: internal/envfile/envfile.go; internal/dbconnect/expand.go; internal/config/db_connections.go; internal/server/dbconnect_env.go; internal/server/handler_dbconnect.go; internal/server/handler_db.go; web/src/components/Layout/DBPanel.tsx
 ---
-
 # DB Environment Templates
 
 A connection URL (`postgres://...`) or a SQLite file path (`data/*.sqlite`) may
@@ -78,29 +69,44 @@ form (`${P}`) when a missing variable must be an error.
 
 ## Where values come from, and precedence (`internal/envfile/envfile.go`)
 
-`envfile` defines the dotenv parser (`envfile.go:41` `Parse`) and the loader
-(`envfile.go:182` `Load`). The constants (`envfile.go:24`):
+`envfile` defines the dotenv parser (`envfile.go:44` `Parse`) and the loader
+(`envfile.go:190` `Load`). The constants (`envfile.go:24`):
 
 - `FileName = ".env"`
 - `LocalFileName = ".env.local"`
 
-`Load(dir)` (`envfile.go:182`) reads `.env` first and `.env.local` second; a
+`Load(dir)` (`envfile.go:190`) reads `.env` first and `.env.local` second; a
 key in `.env.local` overrides the same key in `.env`. A missing file is **not**
-an error (`envfile.go:202` `loadFile`: `os.IsNotExist` yields an empty map). A file
-that exists but cannot be parsed **is** an error (`envfile.go:208`): the caller logs
-it and continues with the process environment only, so the connection fails with
-an explicit "not set" error naming the variable (`dbconnect_env.go:45`).
+an error (`envfile.go:210` `loadFile`: `os.IsNotExist` yields an empty map). A file
+that exists but cannot be parsed **is** an error (`envfile.go:218`): the caller
+logs it (without values), contributes no file values while the process environment
+is still consulted, and returns the load error alongside the lookup
+(`dbconnect_env.go:51`, `dbconnect_env.go:68`). The resolution callers
+(`dbResolveTemplate`, `dbExpandPath`) consult that error before reporting a missing
+variable, so the user sees `cannot read the project's env files: <wrapped error
+naming the path and line>` instead of a phantom
+`environment variable "X" is not set` for a value that is right there
+(`dbconnect_env.go:95`, `handler_db.go:202`).
 
 The dotenv format (`envfile.go:8`): `KEY=VALUE`, optional `export ` prefix
-(`envfile.go:79` `strings.CutPrefix`), `#` comments, blank lines skipped, single-quoted
-values (literal, no escape processing — `envfile.go:127`), double-quoted values with
-`\n`, `\t`, `\r`, `\\` unescaped (`envfile.go:145` `unescapeDouble`). The first
-`=` outside quotes splits key from value (`envfile.go:101` `indexUnquoted`). A quoted
-value may contain `=`. An unterminated quoted value (`DB_PASS="abc`) is a parse error that names the line and never echoes the value, so the line is not silently skipped. A duplicate key in one file is a parse error (`envfile.go:59`
-`fmt.Errorf("line %d: duplicate key %q", ...)`). There is no multi-line value, no
-interpolation inside a file (`envfile.md:10`), and no command substitution.
+(`envfile.go:87` `strings.CutPrefix`), `#` comments, blank lines skipped, single-quoted
+values (literal, no escape processing — `envfile.go:135`), double-quoted values with
+`\n`, `\t`, `\r`, `\\` unescaped (`envfile.go:153` `unescapeDouble`). The first
+`=` outside quotes splits key from value (`envfile.go:109` `indexUnquoted`). A quoted
+value may contain `=`. An unterminated quoted value (`DB_PASS="abc`) is a parse error that names the line and never echoes the value, so the line is not silently skipped.
 
-`Lookup(name, fileValues)` (`envfile.go:225`) gives the precedence:
+A key repeated in one file with the **same** value is accepted: the repeat says
+nothing new, and real `.env` files acquire such repeats by appending, so rejecting
+the whole file would void every other key. The value is kept (`envfile.go:61`). A
+key repeated with a **different** value is a parse error that names the line and
+the key — `line N: duplicate key "K" with a different value`
+(`envfile.go:63`) — because the file is then genuinely ambiguous, and nothing from
+it is trusted.
+
+There is no multi-line value, no interpolation inside a file (`envfile.go:9`), and
+no command substitution.
+
+`Lookup(name, fileValues)` (`envfile.go:233`) gives the precedence:
 
 1. Process environment (`os.LookupEnv`) — first.
 2. `.env.local` (merged over `.env` by `Load`).
@@ -108,54 +114,65 @@ interpolation inside a file (`envfile.md:10`), and no command substitution.
 
 So: **process env > `.env.local` > `.env`**. A value exported in the shell (or
 injected by CI) always wins over the file; `.env.local` still overrides the
-committed `.env`. A variable that is set but EMPTY counts as set (`envfile.go:222`
+committed `.env`. A variable that is set but EMPTY counts as set (`envfile.go:230`
 "A variable that is set but EMPTY counts as set"): an empty value is a deliberate
 value, not a missing one. That matters for a connection whose password is
 deliberately empty (`DB_PASS=`).
 
 ## Per-project resolution (`internal/server/dbconnect_env.go`)
 
-`dbEnvLookup(projectRoot)` (`dbconnect_env.go:27`) builds the lookup used to expand
-a template. It is lazy — the `.env` files are read on the **first variable lookup**
-(`dbconnect_env.go:29` `sync.Once`), not when the lookup is constructed, so a
-request with a literal URL (no `$`) never touches the filesystem (`dbconnect_env.go:27`
+`dbEnvLookup(projectRoot)` (`dbconnect_env.go:33`) builds the lookup used to expand
+a template, plus a second function that reports why the dotenv files could not be
+loaded. It is lazy — the `.env` files are read on the **first variable lookup**
+(`dbconnect_env.go:35` `sync.Once`), not when the lookup is constructed, so a
+request with a literal URL (no `$`) never touches the filesystem (`dbconnect_env.go:23`
 comment). A `projectRoot` of `""` means "no project": only the process environment is
 consulted (`dbconnect_env.go:19`). A malformed `.env` is logged (without values) and
-the lookup falls back to the process environment only (`dbconnect_env.go:40`); the
-connection then fails with an explicit "environment variable \"...\" is not set"
-error (`dbconnect_env.go:55`).
+contributes no file values while the process environment is still consulted
+(`dbconnect_env.go:51`); its load error is returned by the second function
+(`dbconnect_env.go:68`) so the caller can name the real cause. Without that check the
+lookup would report `environment variable "..." is not set` for every key, because a
+file that failed to load contributes nothing.
 
-`dbResolveTemplate` (`dbconnect_env.go:79`) resolves a connection's environment
+`dbResolveTemplate` (`dbconnect_env.go:84`) resolves a connection's environment
 template into a usable URL: it calls `dbconnect.ExpandEnv(template, dbEnvLookup(projectRoot))`,
 then validates the expanded result as a Postgres URL (`dbconnect.ParseURL`).
 Validating **after** expansion is required because a template (`"${DATABASE_URL}"`)
 is not a URL (`dbconnect_env.go:80`). The resolved URL is a credential: it is never
-logged (`dbconnect_env.go:86`), never returned to the client, and never written to disk
-(`dbconnect_env.go:77` comment). The error names the missing variable or the invalid
-URL shape (`ParseURL`'s error never contains the URL — `internal/dbconnect.ParseURL` doc —
-so the password cannot leak through the message).
+logged, returned to the client, or written to disk (`dbconnect_env.go:82`
+comment). The error names the missing variable or the invalid URL shape
+(`ParseURL`'s error never contains the URL — `internal/dbconnect.ParseURL` doc —
+so the password cannot leak through the message). A dotenv load failure is wrapped
+first (`dbconnect_env.go:95`), so that path names a path and line rather than a
+variable.
 
-`HandleDBConnectUnlock` (`handler_dbconnect.go:472`) applies this per project:
-`project_path` names the project (`handler_dbconnect.go:520`
-`h.dbUnlockProjectRoot(req.ProjectPath, req.SessionID)`); the allowlist check
-itself is `handler_dbconnect.go:184` (`h.fileContentRootFor(projectPath)` inside
-dbUnlockProjectRoot), validated against the server's allowed project roots exactly
-like a file read. An invalid path is refused with 400 rather than reading a local
-`.env` by accident. A remote project's path never reaches this check on this machine:
+`HandleDBConnectUnlock` (`handler_dbconnect.go:500`) applies this per project:
+`project_path` names the project (`handler_dbconnect.go:548`
+`h.dbUnlockProjectRoot(req.ProjectPath, req.SessionID)`). `dbUnlockProjectRoot`
+(`handler_dbconnect.go:185`) resolves the path through `dbProjectRootFor`
+(`handler_dbconnect.go:213`): it first tries the allowlist check
+(`handler_dbconnect.go:214` `h.fileContentRootFor(projectPath)`) and, if that
+misses, retries the HOME-expanded spelling (`handler_dbconnect.go:217`
+`projects.ExpandHome`) — a remote (SSH/WSL) project is saved under the verbatim
+`~` form and unlocked on its own host, whose registry holds the expanded path.
+The trust decision is unchanged: only a saved root can match, and expansion
+narrows the accepted set (see `docs/concepts/db-connector.md` § Unlock model).
+An invalid path is still refused with 400 rather than reading a local `.env` by
+accident. A remote project's path never reaches this check on this machine:
 its calls are routed to the host's server (`/api/remote/<host>/api/dbconnect/*`), which
 validates the path against its own roots. `session_id` remains as a compatibility
 fallback for callers that predate the project-scoped panel
-(`handler_dbconnect.go:191` `h.sessionProjectRoot(req.SessionID)`); it trusts the
+(`handler_dbconnect.go:194` `h.sessionProjectRoot(req.SessionID)`); it trusts the
 session registry's recorded root (server-side state, never client input) as the
 trust boundary.
 
 **A template needs a project.** With neither `project_path` nor a resolvable
 `session_id`, a template is reported as failed and is NEVER resolved from the
-server's own process environment (`handler_dbconnect.go:553`). That fallback was
+server's own process environment (`handler_dbconnect.go:581`). That fallback was
 removed because a remote project would otherwise connect — and allow writes — to a
 local database exported in the server's shell.
 
-Every saved connection is iterated once (`handler_dbconnect.go:546`): if
+Every saved connection is iterated once (`handler_dbconnect.go:574`): if
 `c.EnvTemplate != ""` it is resolved against that project; if `c.EncryptedURL != ""`
 it is opened with the master password. The password is **optional for the
 environment flow**: with no password, only the template connections are granted and
@@ -166,13 +183,16 @@ a wrong password is rejected with 401 ("master password does not open connection
 
 Failures are **per connection**: a template that does not resolve is recorded in
 the response's `failed` array and the others are still granted
-(`handler_dbconnect.go:563`). An obsolete `${ANALYTICS_URL}` therefore no longer
+(`handler_dbconnect.go:591`). An obsolete `${ANALYTICS_URL}` therefore no longer
 blocks unlocking a sealed connection with the correct password. An unlock that
-grants nothing is a 400 (`handler_dbconnect.go:596`). The grant holds the plaintext
-URLs in memory only (`handler.go:229` "dbGrants holds the plaintext URLs"), keyed by
+grants nothing is a 400 (`handler_dbconnect.go:623`); when there are
+per-connection failures the message is `connection <name>: <error>` for the first
+one (`handler_dbconnect.go:626`), so an unreadable `.env` surfaces there as
+`connection <name>: cannot read the project's env files: …`. The grant holds the plaintext
+URLs in memory only (`handler.go:255` "dbGrants holds the plaintext URLs"), keyed by
 surface id (`db-panel:<host>:<projectPath>:<per-mount id>` in `DBPanel.tsx:76`). The
-password-less flow MERGES into the surface grant (`handler_dbconnect.go:607`); a
-password unlock replaces it (`handler_dbconnect.go:609`), so loading an environment connection never
+password-less flow MERGES into the surface grant (`handler_dbconnect.go:635`); a
+password unlock replaces it (`handler_dbconnect.go:637`), so loading an environment connection never
 revokes a sealed connection the user already unlocked.
 
 The grant is bounded: a surface idle for 30 minutes (or beyond 64 remembered
@@ -181,21 +201,21 @@ length-bounded (256). A template that stops resolving now LOSES its grant and
 pool: the password-less unlock drops it from the surface before the "nothing
 unlocked" 400 (`handler_dbconnect.go:563` `staleNames`), so a later query cannot
 keep hitting the old database. `project_path` is resolved and validated only when
-at least one saved connection is a template (`handler_dbconnect.go:511`
+at least one saved connection is a template (`handler_dbconnect.go:539`
 `hasTemplate`), so a sealed-only unlock works even when the project directory has
 moved.
 
-`HandleDBConnectAdd` (`handler_dbconnect.go:336`) stores the connection. The URL
+`HandleDBConnectAdd` (`handler_dbconnect.go:364`) stores the connection. The URL
 field (`req.URL`) is examined with `dbconnect.IsTemplate(req.URL)`
-(`handler_dbconnect.go:354`): a template is saved as `EnvTemplate` in the clear
-(`handler_dbconnect.go:390`); a literal URL is sealed (`dbconnect.SealURL`) and
+(`handler_dbconnect.go:382`): a template is saved as `EnvTemplate` in the clear
+(`handler_dbconnect.go:418`); a literal URL is sealed (`dbconnect.SealURL`) and
 saved as `EncryptedURL`. The master password is **required only for a literal
-URL** (`handler_dbconnect.go:362`): a template has no secret to encrypt, so the
+URL** (`handler_dbconnect.go:390`): a template has no secret to encrypt, so the
 add request may omit it and the existing `dbCheckMasterPassword` check is skipped
 for the template. A literal URL with no password is a 400.
 
 A template that ALSO carries a literal password is refused
-(`handler_dbconnect.go:355`, `dbconnect.TemplateHasLiteralSecret`): a template is
+(`handler_dbconnect.go:383`, `dbconnect.TemplateHasLiteralSecret`): a template is
 stored in the clear, so `postgres://app:hunter2@host/db?sslmode=${SM}` would put
 `hunter2` in `ocodeconfig.json` unencrypted. The password (and any
 `password`/`sslpassword` query value) must consist of references only
@@ -205,15 +225,15 @@ kept as literal text by `ExpandEnv` and would be stored in the clear. The query
 scan runs to the end of the string with no `#` truncation, and runs even when
 there is no `://` (scheme-less templates).
 
-Exactly one of the two fields must be set (`internal/config/db_connections.go:57`
+Exactly one of the two fields must be set (`internal/config/db_connections.go:116`
 `AddDBConnection`): neither (`url` and `env_template` both empty) or both
 (ambiguous which wins at unlock) is an error. The saved connection never holds a
 plaintext URL.
 
-`HandleDBConnectList` (`handler_dbconnect.go:291`) returns `FromEnv: c.EnvTemplate != ""`
-(`handler_dbconnect.go:322`) — the "env" badge in the UI — and `Unlocked` from the
+`HandleDBConnectList` (`handler_dbconnect.go:319`) returns `FromEnv: c.EnvTemplate != ""`
+(`handler_dbconnect.go:350`) — the "env" badge in the UI — and `Unlocked` from the
 grant. The template itself (`EnvTemplate`) is **not** returned: it names variables,
-but the resolved URL is a credential and stays on the server (`handler_dbconnect.go:307`
+but the resolved URL is a credential and stays on the server (`handler_dbconnect.go:335`
 `FromEnv` doc comment).
 
 ## SQLite file paths (`internal/server/handler_db.go`)
@@ -225,7 +245,9 @@ first `dbExpandPath` (environment expansion), then `resolveProjectFilePath`
 (`handler_db.go:191`) calls `dbconnect.IsTemplate(path)`; if
 it is not a template the original path is returned; if it is, `dbconnect.ExpandEnv`
 resolves it (`handler_db.go:195`). An unresolved braced reference produces an error
-message naming the variable. A bare reference never makes a path a template, so
+message naming the variable; an unreadable `.env` produces
+`cannot read the project's env files: …` instead (`handler_db.go:202`). A bare
+reference never makes a path a template, so
 `$DB_FILE.db` is taken literally; write `${DB_FILE}.db` to expand it.
 The expanded value goes through the **same** containment and allowed-roots checks as
 a literal path: it is never trusted, only checked (`handler_db.go:89` "The expanded
@@ -247,17 +269,18 @@ containment + write-guard pipeline.
 
 ## Security properties
 
-- The resolved URL is never persisted (`dbconnect_env.go:77`), never returned
-  (`handler_dbconnect.go:322` `FromEnv` — only the boolean flag), never logged
-  (`dbconnect_env.go:86`; `ParseURL` never quotes the input), and never appears in
-  an error message (`expand.go:63` names the variable, not a value; `dbconnect_env.go:87`
+- The resolved URL is never persisted (`dbconnect_env.go:82`), never returned
+  (`handler_dbconnect.go:350` `FromEnv` — only the boolean flag), never logged
+  (`dbconnect_env.go:82`; `ParseURL` never quotes the input), and never appears in
+  an error message (`expand.go:63` names the variable, not a value; `dbconnect_env.go:101`
   validates the expanded URL with `ParseURL`, whose errors never include the URL).
-- A missing `.env` is not an error; a malformed `.env` is logged without values and
-the lookup falls back to the process environment (`dbconnect_env.go:40`), so the
-connection fails with a clear "variable X is not set" rather than silently resolving
-to a different URL.
+- A missing `.env` is not an error; a malformed `.env` is logged without values, the
+  lookup still consults the process environment (`dbconnect_env.go:51`), and the
+  load error is surfaced as `cannot read the project's env files: …` rather than a
+  phantom missing variable (`dbconnect_env.go:94`). It never silently resolves to a
+  different URL.
 - A sealed connection still requires the master password (`dbCheckMasterPassword`,
-  `handler_dbconnect.go:307`). A template does NOT: it stores no secret, so requiring
+  `handler_dbconnect.go:335`). A template does NOT: it stores no secret, so requiring
   a password would only re-gate a value the project's own `.env` already exposes.
   The password-less unlock can therefore grant templates only; sealed connections
   stay locked (or open only when the correct password is supplied). **The master
@@ -273,8 +296,9 @@ to a different URL.
   request cannot make the server read an arbitrary directory's `.env`. A remote
   project's calls go to its host (`/api/remote/<host>/api/dbconnect/*`), so the
   host's server validates the path against its own roots and reads the host's
-  `.env`. A template with NO project is refused outright — there is no
-  process-environment fallback.
+  `.env`. The host also accepts the `~` spelling its own registry expanded
+  (`dbProjectRootFor`); expansion only ever narrows the allowed set. A template
+  with NO project is refused outright — there is no process-environment fallback.
 - `ParseURL` (`internal/dbconnect/dbconnect.go:189`) refuses a raw `#`, parses the
   query the way pgx does (split on `&`, percent-decode the key, bad escape fails
   closed), and refuses `service`/`servicefile`/`passfile`/`sslkey`/`sslcert`/
@@ -283,7 +307,7 @@ to a different URL.
   these could otherwise redirect the connection through a service file or make pgx
   read a local file and send its contents as the password.
 - Precedence is process environment > `.env.local` > `.env`
-  (`envfile.Lookup:225-230`). A variable exported where the server runs therefore
+  (`envfile.Lookup:233-238`). A variable exported where the server runs therefore
   shadows the project file; the UI says so.
 - Containment is the last gate (`handler_db.go:119`): env expansion is never a way
 around the allowed-roots boundary (`handler_db.go:89` comment).
@@ -317,8 +341,9 @@ load-bearing one.
 ```
 
 A top-level key that an older binary does not recognise lands in its `Extra` map
-(the raw-JSON passthrough for unknown keys: `ocodeconfig.go:2299`) and is written
-back **verbatim**, so the template survives any binary's save. The same mechanism
+(the raw-JSON passthrough for unknown keys: `ocodeconfig.go:2598` on load,
+`ocodeconfig.go:3347` on save) and is written back **verbatim**, so the template
+survives any binary's save. The same mechanism
 already preserves `last_model` (see `lastModelKey`). The in-section `env_template`
 field (`DBConnection` struct, `db_connections.go:60`) does not survive by itself.
 
@@ -326,15 +351,15 @@ field (`DBConnection` struct, `db_connections.go:60`) does not survive by itself
 
 The separate map is **authoritative** (`db_connections.go:98` `reconcileDBEnvTemplates`):
 
-- **On load** (`ocodeconfig.go:2312` `reconcileDBEnvTemplates`): the map from
+- **On load** (`ocodeconfig.go:2611` `reconcileDBEnvTemplates`): the map from
   `Extra` (`dbEnvTemplates(cfg.Extra)`) is copied onto the `"db"` connections
   (`reconcileDBEnvTemplates`). A connection whose `env_template` was stripped by
   an older binary is restored here. Only a connection with no `url` takes a template: a map entry under the name of a literal connection is stale (its connection was deleted by an older binary) and is ignored. A malformed map is logged and left on disk, and a save never deletes it because it failed to parse.
-- **On save** (`ocodeconfig.go:2813` `dbEnvTemplatesCanonical`): the canonical
+- **On save** (`ocodeconfig.go:3209` `dbEnvTemplatesCanonical`): the canonical
   map is rebuilt from the connections (`dbConnectionTemplates`, `db_connections.go:178`)
-  and written AFTER the `Extra` loop (`ocodeconfig.go:2942`), so the canonical
-  value always wins over any stale `Extra` copy (`ocodeconfig.go:2811` comment).
-- When no template connection remains (`ocodeconfig.go:2956` `delete`): the key
+  and written AFTER the `Extra` loop (`ocodeconfig.go:3358`), so the canonical
+  value always wins over any stale `Extra` copy (`ocodeconfig.go:3207` comment).
+- When no template connection remains (`ocodeconfig.go:3372` `delete`): the key
   is removed entirely, so a stale map cannot resurrect a deleted connection.
 
 The two copies never drift: the separate key is derived from the connections at
@@ -364,9 +389,9 @@ last template connection is deleted (`test:214`).
 ### Regression: mutation-verified (`scripts/mutcheck_dbenv.py`)
 
 A mutation-testing script (`scripts/mutcheck_dbenv.py`) verifies the mechanism by
-temporarily removing the canonical map assignment (`ocodeconfig.go:2947`) and
+temporarily removing the canonical map assignment (`ocodeconfig.go:3209`) and
 confirming the regression tests fail; removing the `reconcileDBEnvTemplates` call
-(`ocodeconfig.go:2312`) also fails the repair tests. Both mutations are verified to
+(`ocodeconfig.go:2611`) also fails the repair tests. Both mutations are verified to
 compile (`mutcheck_dbenv.py:137-151`).
 
 

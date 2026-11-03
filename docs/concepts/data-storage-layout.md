@@ -54,8 +54,8 @@ Sub-directories:
   record whose pid is alive is reported as unverified and left on disk.
   Not authoritative state — nothing auto-kills another server. It exists so
   two local servers of different versions that both target the same remote host
-  stop retiring each other's remote `ocode serve` on reconnect, which kills
-  in-flight turns on that host; a starting server logs a warning naming the
+  can see each other: an explicit restart from either one kills the remote
+  `ocode serve`, and with it the in-flight turns of the other; a starting server logs a warning naming the
   stale sibling's version, address, pid and cwd. Only a lock-verified sibling
   gets a `stop it: kill <pid>` hint; an unverified one is reported without a
   stop command, because its pid may belong to an unrelated process.

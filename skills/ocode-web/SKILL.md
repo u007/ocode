@@ -579,14 +579,21 @@ Custom list popup navigation is intentionally local to the popup, using `useList
   before this feature). (b) Both probe payloads are **base64-encoded in the
   shell** — `MERGE_MSG` can contain tabs/newlines and a `-z` path can contain
   the `0x1e` section separator, so raw text would forge entries or shift every
-  later field. (c) `remoteSafeSpec` rejects `'";` + backtick + `$&|<>\!*?[](){}#:`
-  and control chars, so a remote conflict on a file like `app/[slug]/page.tsx`
-  or `(group)/layout.tsx` **cannot be resolved** even though it resolves fine
-  locally; this returns a clear 400 and leaves the file untouched. Do NOT
-  "fix" that by loosening the validator — it is the shell-injection guard
-  shared by every remote git mutation. The real fix is passing the path via
-  stdin/argv (as `remoteGitHunk` does for its patch). Tests:
-  `handler_remote_git_conflicts_test.go`.
+  later field. (c) Remote git specs go through `remoteGitSpec`, which refuses a
+  leading `:` (pathspec magic), a drive prefix, and the git glob characters
+  `* ? [`. So a remote conflict on a file like `app/[slug]/page.tsx` **cannot
+  be resolved** even though it resolves fine locally; that returns a clear 400
+  and leaves the file untouched. Ordinary shell metacharacters (quotes, `;`,
+  `$`, parentheses, brackets, `#`, space) ARE allowed, because every site
+  shell-quotes the spec (`remoteQuoteSpecPath`). Do NOT loosen `remoteGitSpec`
+  — its rejects are git-pathspec semantics that quoting cannot neutralize. The
+  real fix for the glob case is passing the path via stdin/argv (as
+  `remoteGitHunk` does for its patch). Remote **file operations** are a
+  different, looser gate: `remoteSpecCore` (non-empty, repo-relative, no control
+  chars) plus `remote.ShellQuotePath` at every command site, so an ordinary
+  filename such as `NMB_Cloud Risk Assessement Form (AIS).xlsx` downloads,
+  copies, renames and deletes normally. Tests:
+  `handler_remote_git_conflicts_test.go`, `handler_remote_fs_test.go`.
 
 36c. **The Git tab's conflicts UI (Phase 06).** `GitPanel.tsx` renders an
   operation banner directly under the header and a conflicts section below it,
@@ -713,7 +720,8 @@ Test harness rules: **`useChatDispatch` must return a STABLE reference** when re
     - **jsdom must model the DOM or the test is vacuous.** The regression tests build xterm's real nesting — panel root → `term.element` → a `<textarea>` carrying its own paste listener that calls the same `term.paste` mock — and dispatch a `paste` event with a stubbed `clipboardData`; that is the shape which produced the bug, and the stub `Terminal` needs an `element` field for the guard to be exercised at all. Regression: `web/src/components/Terminal/TerminalPanel.copyOnSelect.test.tsx` ("Cmd/Ctrl+V keydown blocks xterm (no \x16) and leaves the paste to the browser's paste event", "pastes a native paste event once and keeps xterm's own paste listener from seeing it", "drops a duplicate paste event for one physical paste", "still pastes the same text again 100ms later", "never drops a paste of different text inside the duplicate window", "leaves a paste aimed at another input inside the panel (the find bar) alone", "pastes the right-click menu Paste through term.paste, never a raw socket write"). The stub `Terminal` needs an `element` field and the helper must build xterm's real nesting (panel root → `element` → textarea) or the guard test is vacuous. Mutation-verified: dropping `stopPropagation` fails all five original cases, dropping the dedupe's text comparison fails the different-text case, dropping the subtree guard fails the find-bar case, reverting `handlePaste` to `sock.send` fails the context-menu case, and widening the window to 250ms fails the 100ms case. A real-xterm-in-jsdom test is NOT possible here — every suite in this directory stubs xterm because it needs canvas/layout jsdom lacks.
 
 
-57. **The composer's "recent inputs" strip reads the LOADED WINDOW, and the scroll signal crosses components through the store** — `RecentInputsStrip` renders the last two real typed prompts above the composer, but only while the transcript is scrolled off its tail. Three things that are easy to get wrong:
+57. **The composer's "recent inputs" strip reads the LOADED WINDOW, and the scroll signal crosses components through the store** — `RecentInputsStrip` renders the last two real typed prompts above the composer, but only while the transcript is scrolled off its tail. Four things that are easy to get wrong:
+    - **The strip must not look like the queued-message list.** Both render one muted line of message text in the same composer stack (`ChatInput` renders the queue below the attach pills), and bare `›` rows were read as pending messages. The strip now carries a `Sent — not queued` label and every row starts with a lucide `Send` glyph, while queue rows stay numbered, clickable buttons under an `N queued — …` hint. Keep the label and the non-interactive contract together — a clickable row here would re-create the same confusion in reverse. `RecentInputsStrip.test.tsx` pins the hint, the per-row glyph and the absence of buttons/inputs/links.
     - **`ChatPanel` and `ChatInput` are SIBLINGS under `App.tsx`**, so the transcript's scroll state cannot reach the composer by prop. It goes through `SessionSlice.transcriptScrolledUp`, written from the ONE place in `handleScroll`'s rAF that already computes `!atBottom` (beside `setShowJumpToBottom`). Do **not** add a second scroll-distance computation, and do not touch `atBottomRef` — gotcha 51's tail-follow machinery is untouched by this feature on purpose. The published value is the raw measured one, NOT the intent-gated ref: the intent gate exists so a clamped pin of our own cannot silently kill the autoscroll follow, whereas this signal wants to report the viewport honestly. The field must stay per-session, or one tab's scroll lights up every other composer (they are all kept mounted, hidden via CSS).
     - **`role: "user"` does not mean the user typed it.** Injected user-role messages are persisted and dominate real transcripts — over 400 recent session files: 113 `[advisor plan checkpoint]`, 82 `[advisor completion checkpoint]`, 7 `[ocode:event]`. `lib/recentInputs.ts` composes `isCountableUserMessage` and adds a marker denylist. **The two predicates must NOT be "unified"**: `isCountableUserMessage` answers "does this count towards the alt+up/down denominator", which must agree with the TUI, and it deliberately still counts injections. `[ocode:` is a prefix rule, so a new injected tail needs no edit — a new non-`[ocode:` marker does.
     - **The strip reads the client's loaded window, so it can legitimately show nothing.** A long agent turn is hundreds of assistant/tool rows; the session this shipped in has 351 messages of which only 2 are user messages, both at the start, so its tail window yields `[]` and the strip stays hidden. Scrolling up pages older messages in, which usually recovers it. Do not "fix" this by walking the whole transcript client-side — the window is capped (`MAX_SLICE_MESSAGES`) and a server-side "last N user inputs" endpoint is the real answer. Regression: `RecentInputsStrip.seam.test.tsx` (the real-store -> real-hook -> real-composer seam every other strip suite mocks out), `ChatInput.recentInputs.test.tsx`, `lib/recentInputs.test.ts`, plus the publish half in `ChatPanel.test.tsx`.

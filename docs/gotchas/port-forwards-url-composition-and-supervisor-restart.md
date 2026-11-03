@@ -259,7 +259,7 @@ Detection alone only clears the lie; something has to re-open the forward. One
 ### Deliberately out of scope
 
 - **The service *behind* a forward.** `waitForTunnelReady` only dials
-  `127.0.0.1:localPort` (`internal/remote/connect.go:402`), and ssh's local listener accepts
+  `127.0.0.1:localPort` (`internal/remote/connect.go:404`), and ssh's local listener accepts
   whether or not the remote end is reachable — so "live" means "our ssh child is running",
   **not** "the remote app answers". A dead backend behind a healthy forward is invisible to
   this monitor.
@@ -278,8 +278,8 @@ verified against the working tree on 2026-09-30.
   auto-start trigger: the first list for a project ran `autoStartPortMaps`
   (`internal/server/handler_portmaps.go:279`) inline behind `entry.autoStartOnce`
   (`internal/server/handler_portmaps.go:71`). Every `fm.Start` runs the bounded readiness
-  probe `waitForTunnelReady` (`internal/remote/connect.go:394` — `tunnelReadyAttempts` 25 ×
-  `tunnelReadyInterval` 200ms, `internal/remote/connect.go:385-388`, ~5s), so a forward
+  probe `waitForTunnelReady` (`internal/remote/connect.go:396` — `tunnelReadyAttempts` 25 ×
+  `tunnelReadyInterval` 200ms, `internal/remote/connect.go:387-390`, ~5s), so a forward
   whose tunnel could not come up held the list response for ~5s.
 - `startRemoteServer` (`internal/desktop/boot.go`) ran the same loop before `net.Listen`,
   so a single dead forward delayed the desktop window appearing by ~5s. (That

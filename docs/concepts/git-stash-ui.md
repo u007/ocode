@@ -2,8 +2,8 @@
 type: Concept
 title: 'Git stash UI: list, per-file restore, delete'
 description: The Git tab's stash surface, per-file/multi-file stash, multi-select, and the server endpoints behind them.
-tags: []
-timestamp: 2026-09-21T08:22:29Z
+tags: [git, stash, ui, git-panel, filetree]
+timestamp: 2026-11-03T13:00:06Z
 ---
 # Git stash UI: list, per-file restore, delete, stash-from-context-menu
 
@@ -71,7 +71,7 @@ A stash is a merge-shaped commit: tree = working tree, parents = [HEAD-at-stash-
 
 ## Security / shape
 
-Stash indices are integers formatted server-side into `stash@{N}`; a caller never supplies a rev string. Remote (SSH/WSL) commands quote the rev and run paths through the existing `remoteSafeSpec` / `remote.ShellQuote` guards.
+Stash indices are integers formatted server-side into `stash@{N}`; a caller never supplies a rev string. Remote (SSH/WSL) commands quote the rev and run paths through `remoteGitSpec` (quote-safe validation) plus `remote.ShellQuote` / `remoteQuoteSpecs` at the command site.
 
 `prepareGitAction` / `remotePrepareGitAction` were split into a body decoder (`decodeGitAction`) + an already-decoded validator (`prepareGitActionFor` / `remotePrepareGitActionFor`) so the stash handler can read the extra `include_untracked` field while sharing path validation with stage/unstage/discard/commit.
 

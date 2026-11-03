@@ -166,13 +166,14 @@ Rules:
   project binding). New session-scoped calls must pass that host — plus an
   `X-Ocode-Project` header when they carry a path — or they hit the wrong
   machine. Local calls pass no host and keep byte-identical URLs.
-- **An older remote server is retired on connect.** `EnsureRemoteServer`
-  kills an alive, healthy server whose version is older than the local build (a newer
-  one is reused; dev or non-`X.Y.Z` versions replace on any difference), starts
-  a fresh one, then reaps every other-version `ocode serve` on the host
-  (`killOtherVersionServers`) — leftovers held memory and starved sshd. Running
-  turns and terminals on the old server are not drained. Explicit restart remains
-  `POST /api/remote/{host}/restart`.
+- **An older remote server is kept on connect, flagged outdated.** `EnsureRemoteServer`
+  reuses an alive, healthy server whose version is older than the local build (dev or
+  non-`X.Y.Z` versions count as older on any difference) and sets `Outdated`; a newer one
+  is reused as-is. Nothing kills it implicitly, because a kill ends its running turns and
+  terminals. The upgrade happens only on an explicit restart, `POST /api/remote/{host}/restart`
+  (the banner confirm), which kills the discovered PID first and aborts if that kill fails.
+  A fresh start (no live server in the state file) still reaps other-version `ocode serve`
+  on the host (`killOtherVersionServers`).
 - **Terminal reattach keys are host-qualified** (`projectTerminalsKey(path,
   host)` = `<host>::<path>` for remote, bare path for local), so a local and a
   remote project at the same path cannot share terminal tabs.
