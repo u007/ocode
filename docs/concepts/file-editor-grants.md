@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-10-31T16:44:05Z
+timestamp: 2026-11-03T15:00:00Z
 ---
 
 # File Editor Grants — Editor-Only Out-of-Project Access
@@ -53,7 +53,7 @@ question.
 
 ## Endpoints
 
-`server.go:404-406`, all behind `authMiddleware`:
+Registered in `Server.registerRoutes()` (`server.go:410-412`), all behind `authMiddleware`:
 
 - `POST /api/files/grant` — body `{"path": "..."}` → `{"root","path","granted","roots"}`.
   `path` is the requested file spelled under the canonical `root` (symlinks resolved;
@@ -68,6 +68,24 @@ directory** (so sibling files in that directory are reachable). Handlers:
 `HandleGrantFilePath` (`:164`), `canonicalGrantFile` (`:197`, the `path` the grant
 response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:236`).
 
+### Access probe (`GET /api/files/access`)
+
+`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:404`;
+`Server.handleFileAccess` calls `Handler.HandleFileAccess`, `handler_files.go:1307`)
+answers one question: would the editor serve this path? It is **containment
+only**. A local path runs the same resolver as the raw endpoint
+(`resolveEditorFilePath`, `handler_files.go:967`), so it honors the same grants. A
+remote path (`host=`) runs `remoteRawContainment` (`handler_remote_files.go:464`),
+the helper `remoteFileRaw` also uses. The response is `200 {"ok":true}`, or `400`
+with the resolver's message. The probe never stats, reads or type-checks the file.
+
+It exists because preview-only kinds (image, pdf, office, media) skip the content
+fetch, so the tab must ask the server before it appears. `HEAD` on
+`/api/files/raw` is not used: refusals are 400 bodies, and `HEAD` has no body. The
+client is `api.checkFileAccess` (`web/src/api/client.ts`), wrapped by
+`isOutsideProjectRoot` (`web/src/components/Preview/outsideRootAccess.ts`), which
+returns true only for an outside-root refusal.
+
 ## One resolver, two scopes
 
 `resolveProjectFilePath` (`handler_files.go:956`) delegates to
@@ -81,7 +99,7 @@ response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:23
 - **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:967`), used
   by `HandleFileContent` (`:1125`), `HandleFileRaw` (`:1240`),
   `HandleSaveFileContent` (via `writeScopeRoot`, `:1070`) and
-  `HandleMediaToken` (`:1333`). `resolveOpenPath` shares the rules
+  `HandleMediaToken` (`:1367`). `resolveOpenPath` shares the rules
   (`handler_open.go:95`, `:115`).
 
 `grantedRootFor` (`:1025`) is the only way a request may name a directory outside
@@ -146,6 +164,55 @@ stronger action than browsing it.
 
 Remote (SSH/WSL) grants route through `remoteApiBase(host)`, so they land in the
 **remote** server's own grant list.
+
+## Outside-root paths reach the grant prompt from every surface (2026-11-03)
+
+Every surface that opens a file asks the server before it shows the file. Only an
+outside-root refusal becomes a grant offer; any other failure keeps the surface's
+own error. Preview-only kinds (`PREVIEW_ONLY_KINDS`: pdf, docx, pptx, excel, image,
+audio, video) and legacy `.doc`/`.ppt` skip the `/api/files/content` fetch, which is
+the only containment check a text file gets before its tab exists. So each surface
+probes the access route first:
+
+- **Files tab.** `useEditorTabs` `handleOpenFile`'s preview-only branch calls
+  `api.checkFileAccess`. On any failure it releases the open claim, logs, and
+  returns `false`. `App.tsx`'s `openFileAndShow` then calls
+  `requestOpenOutsideProject(path)`, but only for an absolute path opened with
+  `fallbackQuickOpen` (chat file links). Other callers get no offer. The branch
+  returns `false` for every probe failure, not only containment refusals, so an
+  absolute path that failed for another reason also reaches the grant dialog. Test: `web/src/hooks/useEditorTabs.outsideProject.test.ts`.
+- **Sidebar `PreviewHost` and the session Preview sub-tab (`PreviewTabPage.tsx`).**
+  Both probe the selected doc of any kind with `isOutsideProjectRoot`. On an
+  outside-root refusal they show `OutsideRootGrantPrompt`
+  (`web/src/components/Preview/OutsideRootGrantPrompt.tsx`) instead of the viewer.
+- **Clicking the prompt's button is the confirmation.** It calls
+  `api.grantFilePath`, then the pane re-anchors the doc to the granted root
+  (`anchorForGrant`, `web/src/lib/outOfProjectFiles.ts`). Nothing is granted
+  automatically.
+- **Relative outside paths.** The prompt names the file's absolute path.
+  `resolveAgainstRoot` resolves the request against the anchor root first, and the
+  grant is made with that absolute path.
+- **`grantedFrom`.** A granted sidebar doc records the root it was granted from.
+  `docBelongsHere` accepts a doc whose `grantedFrom` matches the pane's root, so a
+  granted doc survives a remount with the granted root.
+- **Restore is silent.** A restored sidebar doc whose probe is outside-root is
+  cleared with no prompt on page load. Restored editor tabs that fail the access
+  check are dropped quietly by the restore effect in `useEditorTabs.ts`.
+
+Known gaps (5a and 5b are tracked in `TODO.md`):
+
+- If the sidebar panel unmounts while its probe is in flight, the activation is
+  still consumed once. An inside-project result is saved to the session's sidebar
+  state and restored on the next mount. An outside-root result is dropped, because
+  the grant prompt needs a mounted panel; the file must be opened again.
+- The remote branch of `HandleFileAccess` has no direct test. It shares
+  `remoteRawContainment` with `remoteFileRaw`.
+- Grants are in-memory, so after a server restart a granted tab or sidebar doc is
+  dropped on reload and must be re-granted.
+
+The lexical-check gaps from the earlier round (symlinked spellings such as
+`/var` vs `/private/var`, and no check when `projectRoot` is undefined) are closed
+by the server probe.
 
 ## Home-directory `~` links
 

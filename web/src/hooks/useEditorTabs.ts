@@ -10,7 +10,7 @@ import {
 } from "../components/Files/editorTabsPersistence";
 import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
 import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "../lib/remoteHostGate";
-import { relativeToRoot } from "../lib/outOfProjectFiles";
+import { anchorForGrant } from "../lib/outOfProjectFiles";
 import { noteDraftPersistFailure, noteDraftPersistPending, noteDraftPersistSuccess, reconcileDraftGuard } from "../lib/editorDraftGuard";
 
 export interface EditorTab {
@@ -149,6 +149,17 @@ export function useEditorTabs(): UseEditorTabsResult {
     // /api/files/raw, and a large binary would otherwise be transferred — and
     // JSON-decoded into a JS string — a second time for nothing.
     if (isPreviewOnlyPath(path)) {
+      // Preview-only kinds skip the content fetch, so nothing else checks
+      // containment before the tab is created. Ask the server (it resolves
+      // symlinks and grants) and refuse here so the caller can offer the
+      // out-of-project grant.
+      try {
+        await api.checkFileAccess(path, projectRoot, host);
+      } catch (err) {
+        openFileIdsRef.current.delete(id);
+        console.error("Failed to open file:", err);
+        return false;
+      }
       setEditorTabs((prev) =>
         prev.some((t) => t.id === id)
           ? prev
@@ -282,11 +293,11 @@ export function useEditorTabs(): UseEditorTabsResult {
       // those, never from the path the user typed. `relativeToRoot` enforces
       // the separator boundary — a bare slice(root.length) would turn
       // root=/a/b + path=/a/bc/d into "c/d".
-      const rel = relativeToRoot(grant.path, grant.root);
-      if (rel === null) {
+      const anchor = anchorForGrant(grant);
+      if (anchor === null) {
         throw new Error(`Cannot open ${clean}: it is not inside the granted folder ${grant.root}.`);
       }
-      return handleOpenFile(rel, grant.root, host);
+      return handleOpenFile(anchor.path, anchor.projectRoot, host);
     },
     [handleOpenFile],
   );

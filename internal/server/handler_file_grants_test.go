@@ -479,3 +479,59 @@ func TestFileGrant_HomeTildePathExpandsThenContained(t *testing.T) {
 		t.Fatalf("after grant: status = %d body = %s, want the file content", rec.Code, rec.Body.String())
 	}
 }
+
+// The tab-open probe (GET /api/files/access) answers containment only. It must
+// admit what the raw read admits and refuse what it refuses, without reading
+// the file. Preview-only kinds (images, pdf, office, media) rely on it.
+func TestFileAccess_InProjectRelativePathIsOK(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.WriteFile(filepath.Join(tmpDir, "shot.png"), []byte("png"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleFileAccess(rec, httptest.NewRequest("GET", "/api/files/access?path=shot.png&project_root="+url.QueryEscape(tmpDir), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileAccess_OutsidePathRefusedThenGranted(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	outside := t.TempDir()
+	target := filepath.Join(outside, "deck.pptx")
+	if err := os.WriteFile(target, []byte("pptx"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleFileAccess(rec, httptest.NewRequest("GET", "/api/files/access?path="+url.QueryEscape(target)+"&project_root="+url.QueryEscape(tmpDir), nil))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "outside the project root") {
+		t.Fatalf("before grant: status = %d body=%s, want 400 outside the project root", rec.Code, rec.Body.String())
+	}
+
+	// The web passes the granted root back as project_root (see grant.root).
+	root := grantPath(t, h, target)
+	rec = httptest.NewRecorder()
+	h.HandleFileAccess(rec, httptest.NewRequest("GET", "/api/files/access?path="+url.QueryEscape(target)+"&project_root="+url.QueryEscape(root), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after grant: status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileAccess_SymlinkedProjectRootIsOK(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.WriteFile(filepath.Join(tmpDir, "shot.png"), []byte("png"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(tmpDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleFileAccess(rec, httptest.NewRequest("GET", "/api/files/access?path=shot.png&project_root="+url.QueryEscape(link), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 via symlinked project root", rec.Code, rec.Body.String())
+	}
+}

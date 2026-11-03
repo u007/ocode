@@ -1,11 +1,14 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
 import { PreviewWidthMenu } from "./PreviewWidthMenu";
 import { previewKindForPath, type PreviewKind, type PreviewOpenRequest } from "../../lib/previewKind";
+import { resolveAgainstRoot } from "../../lib/outOfProjectFiles";
 import { api } from "../../api/client";
 import { PrintPreviewButton } from "./PrintPreviewButton";
+import { OutsideRootGrantPrompt, type GrantAnchor } from "./OutsideRootGrantPrompt";
+import { isOutsideProjectRoot } from "./outsideRootAccess";
 
 interface SelectedFile {
   path: string;
@@ -60,17 +63,49 @@ function PreviewTabPage({
 }) {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [selected, setSelected] = useState<SelectedFile | null>(null);
+  // A file the server refused as outside the project, waiting for the user to
+  // grant its folder. Shown in place of the viewer until granted or superseded.
+  const [pendingGrant, setPendingGrant] = useState<SelectedFile | null>(null);
+  // Each selection takes a new token; an access check resolving under an older
+  // token is stale and dropped.
+  const selectTokenRef = useRef(0);
   // Bumped by the refresh button. Keying the surface on it remounts the viewer,
   // which refetches the file from disk (viewers have no other reload path here:
   // this host passes no live-refresh revision).
   const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // Select a file, asking the server first. An outside-root path waits on the
+  // grant prompt instead of a viewer that would fail with the refusal. A relative
+  // path is granted by its ABSOLUTE form, resolved against the file's root.
+  const select = (next: SelectedFile) => {
+    const token = ++selectTokenRef.current;
+    void isOutsideProjectRoot(next.path, next.projectRoot, next.projectHost).then((outside) => {
+      if (token !== selectTokenRef.current) return;
+      const grantPath = outside ? resolveAgainstRoot(next.projectRoot ?? "", next.path) : null;
+      if (grantPath !== null) {
+        setPendingGrant({ ...next, path: grantPath });
+        return;
+      }
+      setPendingGrant(null);
+      setSelected(next);
+    });
+  };
+
+  // The user confirmed the grant: show the file under the granted root. The
+  // token bump keeps an in-flight selection from overriding the grant.
+  const grantPending = (anchor: GrantAnchor) => {
+    if (!pendingGrant) return;
+    selectTokenRef.current += 1;
+    setSelected({ ...pendingGrant, path: anchor.path, projectRoot: anchor.projectRoot });
+    setPendingGrant(null);
+  };
 
   // Apply a mobile preview activation. Keyed on the monotonic nonce (not the
   // request identity) so re-requesting the same file still re-selects it; the
   // request itself is read at apply time.
   useEffect(() => {
     if (!nonce || !request) return;
-    setSelected({
+    select({
       path: request.path,
       kind: isPreviewKind(request.kind) ? request.kind : previewKindForPath(request.path) ?? "text",
       projectRoot: request.projectRoot ?? projectRoot,
@@ -124,7 +159,7 @@ function PreviewTabPage({
           open={filePickerOpen}
           onClose={() => setFilePickerOpen(false)}
           onOpenFile={(path, root) => {
-            setSelected({ path, kind: previewKindForPath(path) || "text", projectRoot: root ?? projectRoot, projectHost });
+            select({ path, kind: previewKindForPath(path) || "text", projectRoot: root ?? projectRoot, projectHost });
             setFilePickerOpen(false);
           }}
           projectPath={projectRoot}
@@ -132,7 +167,9 @@ function PreviewTabPage({
         />
       </aside>
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-        {!selected ? (
+        {pendingGrant ? (
+          <OutsideRootGrantPrompt path={pendingGrant.path} host={pendingGrant.projectHost} onGrant={grantPending} />
+        ) : !selected ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Select a file to preview or edit.
           </div>

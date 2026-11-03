@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { BrowserPanel } from "../Browser/BrowserPanel";
 import type { StateKey } from "../../lib/browserStore";
 import { previewKindForPath, resolvePreviewDoc, type PreviewOpenRequest } from "../../lib/previewKind";
+import { resolveAgainstRoot } from "../../lib/outOfProjectFiles";
 import { api } from "../../api/client";
 import PreviewSurface from "./PreviewSurface";
+import { OutsideRootGrantPrompt, type GrantAnchor } from "./OutsideRootGrantPrompt";
+import { isOutsideProjectRoot } from "./outsideRootAccess";
 import { PreviewWidthMenu } from "./PreviewWidthMenu";
 import { PrintPreviewButton } from "./PrintPreviewButton";
 import LegacyOfficePane from "./LegacyOfficePane";
@@ -23,7 +26,14 @@ interface Doc {
   kind: Exclude<ReturnType<typeof previewKindForPath>, null>;
   projectRoot?: string;
   projectHost?: string;
+  /** Set when the user granted this file's folder: the project root the request
+   *  was anchored to before the grant (projectRoot is then the granted root). */
+  grantedFrom?: string;
 }
+
+/** A request the server refused as outside the project, waiting for the user
+ *  to grant its folder. `page` is applied once the grant re-anchors the file. */
+type PendingGrant = Doc & { page: number };
 
 /**
  * Sidebar PreviewHost: the side panel's two-tab shell.
@@ -75,11 +85,35 @@ export default function PreviewHost({
   const initial = initialRef.current;
 
   const [surface, setSurface] = useState<Surface>(initial?.surface === "preview" ? "preview" : "browser");
+  const restoringDoc = initial?.surface === "preview" && !!initial.path && !!initial.kind;
   const [doc, setDoc] = useState<Doc | null>(() =>
     initial?.surface === "preview" && initial.path && initial.kind
-      ? { path: initial.path, kind: initial.kind, projectRoot: initial.projectRoot, projectHost: initial.projectHost }
+      ? {
+          path: initial.path,
+          kind: initial.kind,
+          projectRoot: initial.projectRoot,
+          projectHost: initial.projectHost,
+          grantedFrom: initial.grantedFrom,
+        }
       : null,
   );
+  // A restored doc is not rendered until its mount-time access check passes: its
+  // root may be a grant that did not survive a server restart.
+  const [docVerified, setDocVerified] = useState(!restoringDoc);
+  const [pendingGrant, setPendingGrant] = useState<PendingGrant | null>(null);
+  // Every request, grant and restore check takes a new token; an access check
+  // that resolves under an older token is stale and dropped.
+  const probeTokenRef = useRef(0);
+  // Set once the panel unmounts: a probe still in flight then resolves with no
+  // mounted panel to update (see the request effect). The reset in the effect
+  // body keeps StrictMode's mount → cleanup → mount cycle correct.
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
   const [page, setPage] = useState(() => Math.max(1, initial?.page ?? 1));
   const [osOpenState, setOsOpenState] = useState<string | null>(null);
   const lastNonceRef = useRef(0);
@@ -114,8 +148,10 @@ export default function PreviewHost({
     // of this panel cannot replay it over the state restored for another
     // project. App opens the panel off the same nonce.
     onConsumeActivation?.();
+    const token = ++probeTokenRef.current;
     const resolved = resolvePreviewDoc(request.path);
     if (!resolved.kind) {
+      setPendingGrant(null);
       setDoc(null);
       setUnsupported({ path: resolved.unsupported, projectRoot: request.projectRoot ?? projectRoot });
       setSurface("preview");
@@ -124,23 +160,86 @@ export default function PreviewHost({
     setUnsupported(null);
     const anchor = request.projectRoot ?? projectRoot;
     const anchorHost = request.projectHost ?? projectHost;
-    setDoc({ path: request.path, kind: resolved.kind, projectRoot: anchor, projectHost: anchorHost });
-    setPage(Math.max(1, request.page));
-    setSurface("preview");
+    const next: Doc = { path: request.path, kind: resolved.kind, projectRoot: anchor, projectHost: anchorHost };
+    const nextPage = Math.max(1, request.page);
+    // Ask the server before showing the file. An outside-root file gets the
+    // grant prompt; the viewer would only fail with the raw refusal. The grant
+    // names the file's ABSOLUTE path, resolved against the anchor root.
+    void isOutsideProjectRoot(request.path, anchor, anchorHost).then((outside) => {
+      if (token !== probeTokenRef.current) return;
+      if (unmountedRef.current) {
+        // The panel is gone, so an outside-root grant prompt cannot be shown:
+        // that request is dropped and the file must be opened again. An in-root
+        // file is saved under this session surface so the next mount restores it.
+        // Same belongs-here test as the persist effect below.
+        const belongsHere =
+          (next.projectHost ?? "") === (projectHost ?? "") &&
+          (!next.projectRoot ||
+            next.projectRoot === projectRoot ||
+            (next.grantedFrom !== undefined && next.grantedFrom === projectRoot));
+        if (!outside && belongsHere) {
+          saveSidebarPreviewState(stateKey, {
+            surface: "preview",
+            path: next.path,
+            kind: next.kind,
+            projectRoot: next.projectRoot,
+            projectHost: next.projectHost,
+            grantedFrom: next.grantedFrom,
+            page: nextPage,
+            unsupportedPath: undefined,
+          });
+        }
+        return;
+      }
+      setSurface("preview");
+      const grantPath = outside ? resolveAgainstRoot(anchor ?? "", request.path) : null;
+      if (grantPath !== null) {
+        setPendingGrant({ ...next, path: grantPath, page: nextPage });
+        return;
+      }
+      setPendingGrant(null);
+      setDoc(next);
+      setDocVerified(true);
+      setPage(nextPage);
+    });
     // onConsumeActivation is a stable App callback; not a trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request, nonce, projectRoot, projectHost]);
+
+  // Access check for a restored doc, once on mount. A request applied on this
+  // mount already superseded it (lastNonceRef is set only by the request effect).
+  // Outside the project now means the grant it was anchored to is gone: clear
+  // it silently. Never prompt on page load; only an explicit request does that.
+  useEffect(() => {
+    if (!restoringDoc || lastNonceRef.current !== 0 || !initial?.path) return;
+    const token = probeTokenRef.current;
+    void isOutsideProjectRoot(
+      initial.path,
+      initial.projectRoot ?? projectRoot,
+      initial.projectHost ?? projectHost,
+    ).then((outside) => {
+      if (token !== probeTokenRef.current) return;
+      if (outside) setDoc(null);
+      setDocVerified(true);
+    });
+    // Mount-only: the restored state is read once, like the initial-read above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Persist the shell state for this SESSION SURFACE so the next mount (session
   // or project switch back) restores it. Runs on mount too, which just rewrites
   // the restored value — idempotent. A doc whose anchor differs from this pane's
   // project (a request that carried its own root/host) must NOT be stored under
   // this session's key, or switching here would later restore a foreign file.
+  // A granted doc is anchored to its granted root, so it belongs here only when
+  // it was granted from this pane's root (grantedFrom), never for any other root.
   useEffect(() => {
     const docBelongsHere =
       !!doc &&
       (doc.projectHost ?? "") === (projectHost ?? "") &&
-      (!doc.projectRoot || doc.projectRoot === projectRoot);
+      (!doc.projectRoot ||
+        doc.projectRoot === projectRoot ||
+        (doc.grantedFrom !== undefined && doc.grantedFrom === projectRoot));
     // Same containment check for the legacy fallback: a request that carried
     // another project's root must not be restored from this project's slot.
     const unsupportedBelongsHere =
@@ -156,6 +255,7 @@ export default function PreviewHost({
       kind: docBelongsHere ? doc.kind : undefined,
       projectRoot: docBelongsHere ? doc.projectRoot : undefined,
       projectHost: docBelongsHere ? doc.projectHost : undefined,
+      grantedFrom: docBelongsHere ? doc.grantedFrom : undefined,
       page: docBelongsHere ? page : undefined,
       unsupportedPath: unsupportedBelongsHere ? unsupported.path : undefined,
     });
@@ -216,6 +316,24 @@ export default function PreviewHost({
     };
   }, [sessionId]);
 
+  // The user confirmed the grant: re-anchor the pending file to the granted root
+  // and show it. The token bump keeps an in-flight access check from overriding
+  // the explicit grant.
+  const grantPending = (anchor: GrantAnchor) => {
+    if (!pendingGrant) return;
+    probeTokenRef.current += 1;
+    setDoc({
+      path: anchor.path,
+      kind: pendingGrant.kind,
+      projectRoot: anchor.projectRoot,
+      projectHost: pendingGrant.projectHost,
+      grantedFrom: pendingGrant.projectRoot,
+    });
+    setDocVerified(true);
+    setPage(pendingGrant.page);
+    setPendingGrant(null);
+  };
+
   const openWithOS = async (target?: string) => {
     const targetPath = target ?? doc?.path;
     // Legacy fallback keeps its own project root (multi-project windows);
@@ -269,6 +387,10 @@ export default function PreviewHost({
               absent projectHost is this machine, not an unresolved project. */}
           <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" host={projectHost ?? ""} />
         </div>
+      ) : pendingGrant ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <OutsideRootGrantPrompt path={pendingGrant.path} host={pendingGrant.projectHost} onGrant={grantPending} />
+        </div>
       ) : unsupported ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <LegacyOfficePane
@@ -277,6 +399,8 @@ export default function PreviewHost({
             projectHost={doc?.projectHost ?? projectHost}
           />
         </div>
+      ) : doc && !docVerified ? (
+        <div className="flex min-h-0 flex-1 flex-col" aria-busy="true" />
       ) : doc ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1 text-xs">

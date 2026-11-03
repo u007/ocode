@@ -401,6 +401,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/search/stream", s.authMiddleware(s.handleFileSearchStream))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
+	s.mux.HandleFunc("GET /api/files/access", s.authMiddleware(s.handleFileAccess))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	// Editor grants: directories OUTSIDE any project root the user explicitly
@@ -2054,6 +2055,10 @@ func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileRaw(w, r)
+}
+
+func (s *Server) handleFileAccess(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileAccess(w, r)
 }
 
 func (s *Server) handleMediaToken(w http.ResponseWriter, r *http.Request) {

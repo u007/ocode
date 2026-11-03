@@ -26,6 +26,9 @@ export interface SidebarPreviewState {
   kind?: PreviewKind;
   projectRoot?: string;
   projectHost?: string;
+  /** Project root the file was requested under, when the file was then granted
+   *  access from its own folder (projectRoot is that granted root). */
+  grantedFrom?: string;
   /** 1-based page (PDF) / slide index (PPTX) at last use. */
   page?: number;
   /** Legacy .doc/.ppt fallback path (no in-browser renderer). */
@@ -62,6 +65,7 @@ function loadStore(): Store {
       if (typeof rec.kind === "string") entry.kind = rec.kind as PreviewKind;
       if (typeof rec.projectRoot === "string") entry.projectRoot = rec.projectRoot;
       if (typeof rec.projectHost === "string") entry.projectHost = rec.projectHost;
+      if (typeof rec.grantedFrom === "string") entry.grantedFrom = rec.grantedFrom;
       if (typeof rec.page === "number" && Number.isFinite(rec.page) && rec.page > 0) entry.page = rec.page;
       if (typeof rec.unsupportedPath === "string") entry.unsupportedPath = rec.unsupportedPath;
       out[k] = entry;

@@ -165,6 +165,15 @@ The agent tool (`docs/concepts/browser-agent-tools.md`) drives this machine's br
 - **`OpenAgentTab` leaves its blank tab registered when the navigation fails.** `AgentTarget` now closes the tab through `CloseAgentTab`; `OpenAgentTab` (`internal/browse/server.go`) still returns the key with the error. Fix: close the key on that error. The tool caller in `internal/server/browser_tool.go` is owned elsewhere.
 - **Frame clicks assume one level of same-origin iframe with no CSS transform.** `cdp.Target.frameOrigin` takes the iframe's content-box origin as the frame viewport origin. That is exact for a top-level `<iframe>` with no transform; a transformed or nested iframe would hit-test at the wrong point and refuse the click rather than mis-click.
 
+## DONE: sidebar and session previews offer the out-of-project grant (2026-11-03)
+
+- **`PreviewHost` (sidebar) and the session `Preview` sub-tab route outside-root paths to the grant prompt.** Both probe `GET /api/files/access` through `isOutsideProjectRoot` and show `OutsideRootGrantPrompt` on a refusal. Design: `docs/concepts/file-editor-grants.md`.
+
+## Open: outside-root grant prompt follow-ups (2026-11-03)
+
+- [x] **A sidebar access probe is lost when the panel unmounts.** Fixed: the activation stays consumed at once (one-shot, so a remount cannot replay it onto another session); if the panel unmounts mid-probe and the file is inside the project, the result is saved to that session's sidebar state and restored on the next mount. Still open: an outside-root result after unmount is dropped, because the grant prompt needs a mounted panel. (`docs/concepts/file-editor-grants.md`, "Known gaps")
+- **The remote branch of `HandleFileAccess` has no direct test.** The `?host=` path (`internal/server/handler_files.go`) shares `remoteRawContainment` (`internal/server/handler_remote_files.go`) with `remoteFileRaw`, but nothing tests it directly.
+
 ## Open: Files-tab drag-in and download follow-ups (2026-10-30)
 
 Drag OS files onto the tree to upload, and right-click Download for files, both shipped (`docs/concepts/files-tab-clipboard.md`, "Drag-in upload and right-click Download"). Deliberately deferred:

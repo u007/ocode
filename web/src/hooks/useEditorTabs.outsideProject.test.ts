@@ -3,16 +3,39 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { useEditorTabs } from "./useEditorTabs";
 
-vi.mock("../api/client", () => ({
-  api: {
-    saveFileContent: vi.fn(),
-    grantFilePath: vi.fn(),
-  },
-  apiPath: (p: string) => p,
-  authHeaders: () => ({}),
-}));
+// checkFileAccess is the real client method, so its request goes through the
+// global fetch mock below and the tests can answer /api/files/access directly.
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      saveFileContent: vi.fn(),
+      grantFilePath: vi.fn(),
+    },
+    apiPath: (p: string) => p,
+    authHeaders: () => ({}),
+  };
+});
 
 const grantFilePath = api.grantFilePath as unknown as ReturnType<typeof vi.fn>;
+
+// stubFetch answers /api/files/access with the given verdict and every other
+// URL with file content.
+function stubFetch(access: { ok: true } | { ok: false; error: string }) {
+  const fetchMock = vi.fn(async (url: string) => {
+    if (url.includes("/api/files/access")) {
+      if (access.ok) {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return { ok: false, status: 400, statusText: "Bad Request", json: async () => ({ error: access.error }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ content: "hello" }) };
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -149,5 +172,66 @@ describe("useEditorTabs — out-of-project files", () => {
 
     expect(ok).toBe(false);
     expect(result.current.editorTabs).toHaveLength(0);
+  });
+});
+
+describe("useEditorTabs — preview-only files outside the project", () => {
+  it("refuses an absolute preview-only path outside the project root so the grant dialog can open", async () => {
+    const fetchMock = stubFetch({ ok: false, error: "path is outside the project root" });
+    const { result } = renderHook(() => useEditorTabs());
+    let first = true;
+    let second = true;
+    await act(async () => {
+      first = await result.current.handleOpenFile("/Users/x/Downloads/pic.png", "/Users/x/proj");
+      second = await result.current.handleOpenFile("/Users/x/Downloads/pic.png", "/Users/x/proj");
+    });
+
+    expect(first).toBe(false);
+    // A released claim reports false again; a leaked claim would report true
+    // ("already open") and hide the grant dialog.
+    expect(second).toBe(false);
+    expect(result.current.editorTabs).toHaveLength(0);
+    // The probe was asked, and the image itself was never fetched.
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/api/files/access") && u.includes("pic.png"))).toBe(true);
+    expect(urls.some((u) => u.includes("/api/files/raw"))).toBe(false);
+  });
+
+  it("refuses an absolute preview-only path with no project root when the server says it is outside", async () => {
+    stubFetch({ ok: false, error: "path is outside the project root" });
+    const { result } = renderHook(() => useEditorTabs());
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.handleOpenFile("/Users/x/Downloads/pic.png");
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.editorTabs).toHaveLength(0);
+  });
+
+  it("opens an absolute preview-only path inside the project root", async () => {
+    stubFetch({ ok: true });
+    const { result } = renderHook(() => useEditorTabs());
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleOpenFile("/Users/x/proj/img/pic.png", "/Users/x/proj");
+    });
+
+    expect(ok).toBe(true);
+    expect(result.current.editorTabs).toHaveLength(1);
+    expect(result.current.editorTabs[0].path).toBe("/Users/x/proj/img/pic.png");
+  });
+
+  it("opens a relative preview-only path under a granted root", async () => {
+    stubFetch({ ok: true });
+    const { result } = renderHook(() => useEditorTabs());
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.handleOpenFile("pic.png", "/Users/x/Downloads");
+    });
+
+    expect(ok).toBe(true);
+    expect(result.current.editorTabs).toHaveLength(1);
+    expect(result.current.editorTabs[0].path).toBe("pic.png");
   });
 });

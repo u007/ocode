@@ -4,7 +4,7 @@ title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing
 description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
 resource: ""
 tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find]
-timestamp: 2026-11-03T12:00:00Z
+timestamp: 2026-11-03T15:00:00Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
@@ -298,6 +298,23 @@ external-change re-check, repopulated the tab's `content` from
 `/api/files/content`, and re-introduced the duplicate fetch the skip exists to
 avoid. The skip and the three watcher guards are one invariant expressed in
 four places: a preview-only path is never fetched for content, only opened.
+
+## Outside-root preview-only paths must reach the grant dialog (2026-11-03)
+
+`handleOpenFile`'s preview-only branch probes the server with `api.checkFileAccess`
+(`GET /api/files/access`) before it creates a tab. On any probe failure it releases
+the open claim and returns `false`, so `openFileAndShow` can offer the
+out-of-project grant instead of creating a tab (chat file links only; see
+[concepts/file-editor-grants.md](../concepts/file-editor-grants.md)). The reason is the same invariant as the fetch skip: a
+preview-only path is never fetched, so the `/api/files/content` containment check
+never runs, and the access probe is the only check that does. Without it,
+`ImageViewer` showed "Image failed: path is outside the project root" on a tab that
+should never have opened. The probe is containment only and never reads the file, so
+the fetch skip stays intact. Do not drop the probe when touching the skip. The
+sidebar `PreviewHost` and the session Preview sub-tab use the same probe through
+`isOutsideProjectRoot` (`web/src/components/Preview/outsideRootAccess.ts`). The grant
+flow and the known gaps are in
+[concepts/file-editor-grants.md](../concepts/file-editor-grants.md).
 
 ## Legacy `.doc` / `.ppt` OS-open fallback
 

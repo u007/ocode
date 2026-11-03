@@ -3600,6 +3600,20 @@ export const api = {
     return res.arrayBuffer();
   },
 
+  // Containment probe for preview-only tabs: resolves when the server would
+  // serve path to the editor (same rules as fetchFileRaw), without reading it.
+  // Rejects with the server's message, e.g. "path is outside the project root".
+  checkFileAccess: async (path: string, projectRoot?: string, host?: string): Promise<void> => {
+    const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}${host ? `&host=${encodeURIComponent(host)}` : ""}`;
+    const res = await fetch(apiPath(`/api/files/access?${q}`), {
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+  },
+
   // ── SQLite browser (read-only in this phase). host routes to a registered
   // remote project's server through the /api/remote/{host} proxy (the remote
   // server reads its own filesystem); projectRoot scopes path containment.

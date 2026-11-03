@@ -6,6 +6,9 @@ import { describe, it, expect, vi } from "vitest";
 import PreviewTabPage from "./PreviewTabPage";
 import type { PreviewOpenRequest } from "../../lib/previewKind";
 
+vi.mock("../../api/client", () => ({
+  api: { checkFileAccess: vi.fn().mockResolvedValue(undefined) },
+}));
 vi.mock("../Files/FilePicker", () => ({ default: () => null }));
 vi.mock("./PreviewSurface", () => ({
   default: ({

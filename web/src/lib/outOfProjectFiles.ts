@@ -83,6 +83,44 @@ export function relativeToRoot(path: string, root: string): string | null {
   return rest.length === 0 ? "." : rest.join("/");
 }
 
+/**
+ * The anchor a granted file opens under: the granted root, and the file's path
+ * relative to it. Null when the server's canonical path is not inside the
+ * granted root (or either side is not absolute); the caller decides what that
+ * means. Both the editor and the sidebar preview anchor through this, so a
+ * grant is never re-derived from the path the user typed.
+ */
+export function anchorForGrant(grant: { root: string; path: string }): { projectRoot: string; path: string } | null {
+  const path = relativeToRoot(grant.path, grant.root);
+  if (path === null) return null;
+  return { projectRoot: grant.root, path };
+}
+
+/**
+ * Resolves a request path against the root it was requested under, giving the
+ * ABSOLUTE path a grant can name. A relative path is only grantable once it is
+ * anchored: the grant endpoint would otherwise resolve it against the server's
+ * own cwd and could grant the wrong folder.
+ *
+ * Absolute and "~" paths come back unchanged. Null when there is no usable
+ * root (empty, unexpanded "~", or not absolute), when the path is empty, or
+ * when it is drive-relative ("C:foo"): the caller then offers no grant.
+ */
+export function resolveAgainstRoot(root: string, path: string): string | null {
+  if (looksLikeAbsolutePath(path)) return path;
+  if (!path.trim() || !root || root.trim().startsWith("~")) return null;
+  const windows = isWindowsStylePath(root);
+  const base = splitPath(root, windows);
+  if (!base.absolute) return null;
+  const rel = splitPath(path, windows);
+  if (rel.absolute) return path;
+  if (rel.anchor !== "") return null;
+  const segments = normalizeSegments([...base.segments, ...rel.segments].join("/"), true);
+  // A UNC anchor ("//") already ends in its separator; a drive or POSIX root does not.
+  if (base.anchor === "//") return `//${segments.join("/")}`;
+  return `${base.anchor}/${segments.join("/")}`;
+}
+
 /** A Windows-style root: a drive letter ("C:\..." or "C:/...") or a UNC share
  *  ("\\server\share"). Only these fold case; a POSIX root stays case-sensitive. */
 function isWindowsStylePath(p: string): boolean {

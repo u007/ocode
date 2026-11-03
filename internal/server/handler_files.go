@@ -1300,6 +1300,40 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// HandleFileAccess answers whether the editor may open path, without reading
+// it. Preview-only kinds (image, pdf, office, media) skip the content fetch,
+// so the tab asks here before it appears. It runs the same containment as
+// HandleFileRaw and never stats, reads or type-checks the file.
+func (h *Handler) HandleFileAccess(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Remote project (?host=): containment on the remote host, no bytes read.
+	if host := hostParam(r); host != "" {
+		root := r.URL.Query().Get("project_root")
+		rw, err := h.remoteWorkForFileRead(host, root)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if _, errMsg := remoteRawContainment(rw, path, root); errMsg != "" {
+			writeError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+
+	if _, errMsg := h.resolveEditorFilePath(r.URL.Query().Get("project_root"), path); errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // serveMediaFile streams one local audio/video file with HTTP range support
 // (http.ServeContent) instead of buffering it. The Content-Type from the
 // allowlist is set first — ServeContent respects an already-set header — and

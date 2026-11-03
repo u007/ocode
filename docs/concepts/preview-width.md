@@ -10,7 +10,7 @@ tags:
   - paper width
   - localStorage
   - typography
-timestamp: 2026-11-03T05:47:12Z
+timestamp: 2026-11-03T15:00:00Z
 ---
 # Markdown preview: persisted paper-width reading column
 
@@ -103,8 +103,8 @@ the only way to tell F4 apart from A4, and it was not built.
    focuses the reader and the find shortcut gate recognises it.
 
 2. **Control appears only for markdown.** `PreviewWidthMenu` is rendered only
-   when `doc.kind === "markdown"` (`PreviewHost.tsx:289`) and
-   `selected?.kind === "markdown"` (`PreviewTabPage.tsx:121`). Every other kind
+   when `doc.kind === "markdown"` (`PreviewHost.tsx:379`) and
+   `selected?.kind === "markdown"` (`PreviewTabPage.tsx:156`). Every other kind
    either ignores it (PDF/deck/image) or is code, which stays full width.
 
 3. **One global preference, cross-window.** Storage key

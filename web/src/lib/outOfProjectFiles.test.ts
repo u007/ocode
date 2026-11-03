@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   isOutsideRootError,
+  anchorForGrant,
   looksLikeAbsolutePath,
   normalizeUserPath,
   relativeToRoot,
+  resolveAgainstRoot,
 } from "./outOfProjectFiles";
 
 describe("outOfProjectFiles", () => {
@@ -154,5 +156,57 @@ describe("relativeToRoot", () => {
   it("returns null for empty inputs", () => {
     expect(relativeToRoot("", "/a")).toBeNull();
     expect(relativeToRoot("/a/b", "")).toBeNull();
+  });
+});
+
+describe("anchorForGrant", () => {
+  it("anchors a granted file to its granted root and relative path", () => {
+    expect(anchorForGrant({ root: "/Users/x/Downloads", path: "/Users/x/Downloads/a/notes.md" })).toEqual({
+      projectRoot: "/Users/x/Downloads",
+      path: "a/notes.md",
+    });
+  });
+
+  it("returns null when the file is not inside the granted root", () => {
+    expect(anchorForGrant({ root: "/a/b", path: "/a/bc/d" })).toBeNull();
+  });
+
+  it("returns null for a relative path (the caller decides)", () => {
+    expect(anchorForGrant({ root: "/a/b", path: "c/d" })).toBeNull();
+  });
+});
+
+describe("resolveAgainstRoot", () => {
+  it("resolves a parent-relative path against the root, lexically", () => {
+    expect(resolveAgainstRoot("/Users/x/proj", "../x/a.png")).toBe("/Users/x/x/a.png");
+  });
+
+  it("resolves a plain relative path under the root", () => {
+    expect(resolveAgainstRoot("/Users/x/proj", "sub/a.png")).toBe("/Users/x/proj/sub/a.png");
+  });
+
+  it("returns an absolute path unchanged", () => {
+    expect(resolveAgainstRoot("/Users/x/proj", "/elsewhere/a.png")).toBe("/elsewhere/a.png");
+  });
+
+  it("returns a home-relative path unchanged", () => {
+    expect(resolveAgainstRoot("/Users/x/proj", "~/a.png")).toBe("~/a.png");
+  });
+
+  it("returns null when there is no root to anchor to", () => {
+    expect(resolveAgainstRoot("", "a.png")).toBeNull();
+  });
+
+  it("returns null when the root is not absolute or is an unexpanded home path", () => {
+    expect(resolveAgainstRoot("proj", "a.png")).toBeNull();
+    expect(resolveAgainstRoot("~/proj", "a.png")).toBeNull();
+  });
+
+  it("clamps a parent walk at the filesystem root, as the OS does", () => {
+    expect(resolveAgainstRoot("/a", "../../b.png")).toBe("/b.png");
+  });
+
+  it("resolves a relative path under a Windows drive root", () => {
+    expect(resolveAgainstRoot("C:\\Users\\x\\proj", "..\\Downloads\\pic.png")).toBe("C:/Users/x/Downloads/pic.png");
   });
 });

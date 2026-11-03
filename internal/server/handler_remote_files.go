@@ -457,6 +457,20 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// remoteRawContainment anchors a remote preview path the way remoteFileRaw and
+// the access probe both need: with a project_root the path must stay inside
+// the remote project root (errMsg otherwise); without one it is only joined
+// onto the work path. It returns the absolute remote path, or errMsg.
+func remoteRawContainment(rw remoteWork, path, root string) (string, string) {
+	abs := remoteAbsJoin(rw.Path, path)
+	if root != "" {
+		if _, cerr := remoteRelCheck(rw.Path, abs); cerr != nil {
+			return "", "path is outside the project root"
+		}
+	}
+	return abs, ""
+}
+
 // remoteFileRaw is HandleFileRaw's GET over the transport: the same
 // extension allowlist and per-type size cap as the local path (previewRawCap:
 // 32 MiB documents/images, 128 MiB audio/video), enforced remotely (stat +
@@ -475,15 +489,10 @@ func (h *Handler) remoteFileRaw(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if root != "" {
-		abs := remoteAbsJoin(rw.Path, path)
-		if _, cerr := remoteRelCheck(rw.Path, abs); cerr != nil {
-			writeError(w, http.StatusBadRequest, "path is outside the project root")
-			return
-		}
-		path = abs
-	} else {
-		path = remoteAbsJoin(rw.Path, path)
+	path, errMsg := remoteRawContainment(rw, path, root)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
 	}
 
 	ct, ok := previewRawTypes[strings.ToLower(filepath.Ext(path))]

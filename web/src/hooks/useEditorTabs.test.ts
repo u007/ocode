@@ -6,7 +6,7 @@ import { useEditorTabs } from "./useEditorTabs";
 import { __resetDraftGuardForTests, draftPersistenceBlocked } from "../lib/editorDraftGuard";
 
 vi.mock("../api/client", () => ({
-  api: { saveFileContent: vi.fn() },
+  api: { saveFileContent: vi.fn(), checkFileAccess: vi.fn() },
   apiPath: (p: string) => p,
   authHeaders: () => ({}),
 }));
