@@ -509,6 +509,23 @@ type ChatVerbosityConfig struct {
 	Overrides ChatVerbosityOverrides `json:"overrides"`
 }
 
+// AppearanceConfig is the appearance selection shared by the web/desktop SPA and
+// the TUI: the active colour theme, the active file icon theme, and any extra
+// directories to scan for installed VS Code extensions.
+//
+// ColorTheme and IconTheme are either empty (use the built-in default), a
+// VS Code theme id of the form `vscode:<publisher>.<extension>/<variant>`, or —
+// for a historical colour theme — a built-in theme name. Existence is NOT
+// validated here: this package must stay usable without a filesystem scan, and
+// spec §13 requires an unresolvable colour theme to degrade to tui.theme then
+// tokyonight with a warning rather than to fail the load. The server validates
+// existence before persisting a settings write.
+type AppearanceConfig struct {
+	ColorTheme         string   `json:"color_theme"`
+	IconTheme          string   `json:"icon_theme"`
+	ExtraExtensionDirs []string `json:"extra_extension_dirs"`
+}
+
 // UnmarshalJSON rejects an unknown override category instead of silently
 // dropping it. Omitted categories stay empty so withDefaults can apply
 // "preset"; an explicit null is rejected as an invalid value.
@@ -1001,6 +1018,10 @@ type OcodeConfig struct {
 	TTS           TTSConfig
 	STT           STTConfig
 	ChatVerbosity ChatVerbosityConfig
+	// Appearance is the colour/icon theme selection and the extra extension
+	// roots the discovery scan adds. Persisted under ocodeconfig.json's
+	// "appearance" key.
+	Appearance AppearanceConfig
 	// Git is repository behaviour shared by the TUI and web/desktop Git tabs.
 	Git GitConfig
 	// QuickActions is the composer strip. It is seeded in memory by
@@ -1563,6 +1584,15 @@ type gitConfigFile struct {
 	PullStrategy *string `json:"pull_strategy,omitempty"`
 }
 
+// appearanceConfigFile is the on-disk mirror of AppearanceConfig. Every field is
+// omitempty and the block as a whole is written only when a field is set, so an
+// untouched install gains no "appearance" key.
+type appearanceConfigFile struct {
+	ColorTheme         string   `json:"color_theme,omitempty"`
+	IconTheme          string   `json:"icon_theme,omitempty"`
+	ExtraExtensionDirs []string `json:"extra_extension_dirs,omitempty"`
+}
+
 type ocodeConfigFile struct {
 	Compact                    compactConfigFile           `json:"compact"`
 	Advisor                    advisorConfigFile           `json:"advisor"`
@@ -1573,6 +1603,7 @@ type ocodeConfigFile struct {
 	TTS                        TTSConfig                   `json:"tts,omitempty"`
 	STT                        STTConfig                   `json:"stt,omitempty"`
 	ChatVerbosity              *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
+	Appearance                 *appearanceConfigFile       `json:"appearance,omitempty"`
 	QuickActions               *QuickActionsConfig         `json:"quick_actions,omitempty"`
 	ExternalPlugins            map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels                map[string]LocalModelConfig `json:"local_models,omitempty"`
@@ -2091,6 +2122,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			return fmt.Errorf("chat_verbosity: %w", err)
 		}
 		delete(raw, "chat_verbosity")
+	}
+
+	if _, ok := raw["appearance"]; ok {
+		cfg.Appearance = appearanceFromFile(file.Appearance)
+		delete(raw, "appearance")
 	}
 
 	if _, ok := raw["quick_actions"]; ok {
@@ -2625,6 +2661,61 @@ func applyGitConfig(dst *GitConfig, src *gitConfigFile) error {
 	return nil
 }
 
+// appearanceFromFile converts the on-disk block into the in-memory one. An
+// absent block or an absent field reads as the zero value (no theme selected,
+// no extra roots), which is what an untouched install should get.
+//
+// Nothing here is validated: a theme id is resolved against the discovered
+// extension set by the server, and spec §13 requires an unknown value to degrade
+// to a warning and a fallback rather than to fail the load.
+func appearanceFromFile(src *appearanceConfigFile) AppearanceConfig {
+	if src == nil {
+		return AppearanceConfig{}
+	}
+	return NormalizeAppearanceConfig(AppearanceConfig{
+		ColorTheme:         src.ColorTheme,
+		IconTheme:          src.IconTheme,
+		ExtraExtensionDirs: src.ExtraExtensionDirs,
+	})
+}
+
+// NormalizeAppearanceConfig trims the theme ids, drops empty and duplicate
+// extra roots, and keeps the declared order. It is idempotent, so a caller can
+// apply it before validating a settings request.
+func NormalizeAppearanceConfig(cfg AppearanceConfig) AppearanceConfig {
+	cfg.ColorTheme = strings.TrimSpace(cfg.ColorTheme)
+	cfg.IconTheme = strings.TrimSpace(cfg.IconTheme)
+	if len(cfg.ExtraExtensionDirs) == 0 {
+		cfg.ExtraExtensionDirs = nil
+		return cfg
+	}
+	seen := make(map[string]struct{}, len(cfg.ExtraExtensionDirs))
+	dirs := make([]string, 0, len(cfg.ExtraExtensionDirs))
+	for _, dir := range cfg.ExtraExtensionDirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	if len(dirs) == 0 {
+		dirs = nil
+	}
+	cfg.ExtraExtensionDirs = dirs
+	return cfg
+}
+
+// IsZero reports whether the block carries no selection at all. The writer uses
+// it to leave "appearance" off disk for an untouched install, so a later change
+// to a default can still reach an existing config.
+func (c AppearanceConfig) IsZero() bool {
+	return c.ColorTheme == "" && c.IconTheme == "" && len(c.ExtraExtensionDirs) == 0
+}
+
 func applyChatVerbosityConfig(dst *ChatVerbosityConfig, src *chatVerbosityConfigFile) error {
 	if src == nil {
 		return nil
@@ -3080,6 +3171,11 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"chat_verbosity": chatVerbosity,
 		"quick_actions":  NormalizeQuickActions(cfg.QuickActions),
 	}
+	// Only written when the user has selected something, so an untouched install
+	// gains no key and a later change to the fallback can still apply.
+	if appearance := NormalizeAppearanceConfig(cfg.Appearance); !appearance.IsZero() {
+		payload["appearance"] = appearance
+	}
 	// Only written once the user departs from the rebase default, so an
 	// untouched install gains no new key and a switch back to rebase removes it.
 	if gitCfg := cfg.Git.withDefaults(); gitCfg.PullStrategy != GitPullStrategyRebase {
@@ -3252,7 +3348,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "terminal_appearance_source" || k == "terminal_cell_width_percent" || k == "terminal_cell_height_percent" || k == "terminal_theme" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" || k == "prompts" || k == "git" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "terminal_appearance_source" || k == "terminal_cell_width_percent" || k == "terminal_cell_height_percent" || k == "terminal_theme" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "appearance" || k == "quick_actions" || k == "prompts" || k == "git" {
 			continue
 		}
 		payload[k] = v
@@ -4818,6 +4914,21 @@ func SaveOcodeChatVerbosity(cfg ChatVerbosityConfig) error {
 	}
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.ChatVerbosity = cfg
+		return nil
+	})
+}
+
+// SaveOcodeAppearanceConfig persists the appearance selection (colour theme,
+// icon theme, extra extension roots).
+//
+// Existence validation is deliberately NOT done here: resolving a `vscode:` id
+// needs a filesystem scan and the disposition of the server, which owns the
+// appearance service. The caller validates before saving, so an invalid
+// selection can never reach this function from the HTTP surface.
+func SaveOcodeAppearanceConfig(cfg AppearanceConfig) error {
+	cfg = NormalizeAppearanceConfig(cfg)
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Appearance = cfg
 		return nil
 	})
 }

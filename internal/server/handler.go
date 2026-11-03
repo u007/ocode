@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/appearance"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/browsertabs"
 	"github.com/u007/ocode/internal/computer"
@@ -232,6 +233,11 @@ type Handler struct {
 	// by EnableBrowse, before Serve. Nil means no browser tool is registered.
 	browseSurfaces browserSurfaces
 	monaco         *monaco.Store
+	// appearance discovers VS Code colour themes in installed editor extensions
+	// and converts them on demand (handler_appearance.go). It is local to this
+	// machine by design: the endpoints take no ?host= and are never proxied.
+	// Nil only if a caller replaced it; the handlers then answer 503.
+	appearance *appearance.Service
 	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
 	// nil when the data dir could not be resolved (its handlers then 500).
 	// vaultGrants records which client surfaces have unlocked it; guarded by
@@ -697,6 +703,19 @@ func NewHandler() *Handler {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
 	}
 
+	// The appearance scan is rooted at the real user home: installed editor
+	// extensions are a property of the machine, not of any project. Extra roots
+	// come from config so a user can add a portable install.
+	appearanceHome, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("handler: resolve home for appearance discovery: %v (editor themes unavailable)", err)
+	}
+	var appearanceExtra []string
+	if cfg != nil {
+		appearanceExtra = cfg.Ocode.Appearance.ExtraExtensionDirs
+	}
+	appearanceService := appearance.NewService(appearanceHome, appearanceExtra)
+
 	h := &Handler{
 		agents:              make(map[string]*agentSession),
 		cfg:                 cfg,
@@ -709,6 +728,7 @@ func NewHandler() *Handler {
 		termTabsStore:       termTabsStore,
 		browserTabsStore:    browserTabsStore,
 		monaco:              monacoStore,
+		appearance:          appearanceService,
 		vaultGrants:         make(map[string]bool),
 		headlessSubs:        make(map[chan SSEEvent]struct{}),
 		toolOutput:          newToolOutputCoalescer(),
