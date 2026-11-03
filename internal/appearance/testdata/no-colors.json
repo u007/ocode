@@ -1,0 +1,21 @@
+{
+  "name": "Token Rules Only",
+  "tokenColors": [
+    {
+      "scope": ["source", "text"],
+      "settings": { "foreground": "#d4d4d4" }
+    },
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#6a9955", "fontStyle": "italic" }
+    },
+    {
+      "scope": ["string"],
+      "settings": { "foreground": "#ce9178" }
+    },
+    {
+      "scope": ["keyword"],
+      "settings": { "foreground": "#569cd6", "fontStyle": "bold" }
+    }
+  ]
+}

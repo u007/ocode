@@ -1,0 +1,74 @@
+{
+  "name": "Gruvbox Light",
+  "type": "light",
+  "colors": {
+    "editor.background": "#fbf1c7",
+    "editor.foreground": "#3c3836",
+    "sideBar.background": "#f2e5bc",
+    "sideBar.foreground": "#3c3836",
+    "menu.background": "#fbf1c7",
+    "menu.foreground": "#3c3836",
+    "focusBorder": "#b57614",
+    "button.background": "#458588",
+    "button.foreground": "#fbf1c7",
+    "textLink.foreground": "#076678",
+    "errorForeground": "#9d0006",
+    "descriptionForeground": "#7c6f64",
+    "panel.border": "#d5c4a1",
+    "editorGroupHeader.tabsBackground": "#f2e5bc",
+    "input.background": "#f2e5bc",
+    "input.foreground": "#3c3836",
+    "list.hoverBackground": "#ebdbb2",
+    "list.activeSelectionBackground": "#ebdbb2",
+    "list.activeSelectionForeground": "#3c3836",
+    "editorLineNumber.foreground": "#a89984",
+    "editorCursor.foreground": "#3c3836",
+    "terminal.foreground": "#3c3836",
+    "terminal.background": "#fbf1c7",
+    "terminal.ansiBlack": "#3c3836",
+    "terminal.ansiRed": "#9d0006",
+    "terminal.ansiGreen": "#79740e",
+    "terminal.ansiYellow": "#b57614",
+    "terminal.ansiBlue": "#076678",
+    "terminal.ansiMagenta": "#8f3f71",
+    "terminal.ansiCyan": "#427b58",
+    "terminal.ansiWhite": "#7c6f64",
+    "terminal.ansiBrightBlack": "#928374",
+    "terminal.ansiBrightRed": "#cc241d",
+    "terminal.ansiBrightGreen": "#98971a",
+    "terminal.ansiBrightYellow": "#d79921",
+    "terminal.ansiBrightBlue": "#458588",
+    "terminal.ansiBrightMagenta": "#b16286",
+    "terminal.ansiBrightCyan": "#689d6a",
+    "terminal.ansiBrightWhite": "#3c3836",
+    "statusBar.background": "#f2e5bc",
+    "statusBar.foreground": "#3c3836",
+    "gitDecoration.addedResourceForeground": "#79740e"
+  },
+  "tokenColors": [
+    {
+      "scope": ["text", "source"],
+      "settings": { "foreground": "#3c3836" }
+    },
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#928374", "fontStyle": "italic" }
+    },
+    {
+      "scope": ["string"],
+      "settings": { "foreground": "#79740e" }
+    },
+    {
+      "scope": ["constant.numeric"],
+      "settings": { "foreground": "#8f3f71" }
+    },
+    {
+      "scope": ["keyword"],
+      "settings": { "foreground": "#9d0006", "fontStyle": "bold" }
+    },
+    {
+      "scope": ["entity.name.function"],
+      "settings": { "foreground": "#b57614" }
+    }
+  ]
+}
