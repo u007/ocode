@@ -23,6 +23,7 @@ func TestHandleFileRawServesPreviewable(t *testing.T) {
 	}{
 		{"pdf", "report.pdf", []byte("%PDF-1.4 fake"), "application/pdf"},
 		{"xlsx", "book.xlsx", []byte("PK\x03\x04 fake"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+		{"xlsm", "macros.xlsm", []byte("PK\x03\x04 fake"), "application/vnd.ms-excel.sheet.macroEnabled.12"},
 		{"xls", "legacy.xls", []byte("\xd0\xcf\x11\xe0 fake"), "application/vnd.ms-excel"},
 		{"csv", "data.csv", []byte("a,b\n1,2\n"), "text/csv; charset=utf-8"},
 		{"mdx", "page.mdx", []byte("# Hi\n\n<Chart />\n"), "text/markdown; charset=utf-8"},
@@ -193,6 +194,7 @@ func TestPreviewRawCoversOfficeSet(t *testing.T) {
 		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
 		".xls":  "application/vnd.ms-excel",
 		".csv":  "text/csv; charset=utf-8",
 	}

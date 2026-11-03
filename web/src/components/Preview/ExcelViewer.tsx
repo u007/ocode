@@ -1,20 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { api } from "../../api/client";
-import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import { isDelimitedTextPath } from "../../lib/previewKind";
+import { useResolvedEditorTheme } from "../../hooks/useResolvedEditorTheme";
+import { errorMessage } from "./xlsxStyle";
+import {
+  assertWithinFileLimit,
+  MAX_COLS,
+  MAX_ROWS,
+  SHEETJS_READ_ROWS,
+  workbookFromExcelJs,
+  workbookFromSheetJs,
+  type ConvertedWorkbook,
+} from "./univerData";
+import type { UniverSheetHandle } from "./univerMount";
 
-// Caps so a huge spreadsheet can't freeze the tab: we render the leading
-// window and say so, instead of dumping 100k rows into the DOM. Full
-// fidelity is one click away via "Open in app".
-const MAX_ROWS = 1000;
-const MAX_COLS = 100;
+const OOXML_WORKBOOK = /\.(xlsx|xlsm)$/i;
 
 /**
- * Spreadsheet viewer (SheetJS `xlsx` — stable/maintained, Apache-2.0).
- * Read-only by design (same as Word/PowerPoint/PDF): sheet tabs across
- * the top, the active sheet as a plain HTML table with selectable text
- * for Copy / Ask-LLM.
+ * Spreadsheet viewer. Read-only by design (same as Word/PowerPoint/PDF): sheet
+ * tabs across the top, the active sheet as a Univer grid (read-only, no
+ * toolbar or formula bar). Dark or light follows the editor appearance.
+ *
+ * `.xlsx`/`.xlsm` go through ExcelJS for formatting. CSV/TSV and legacy `.xls`
+ * go through SheetJS as display text. Both are converted to Univer data by
+ * `univerData.ts`; the Univer runtime is loaded lazily by `univerMount.ts`.
  *
  * When `content` is provided (controlled mode from FileTabContent split view),
  * CSV/TSV is parsed from the live editor string instead of fetching from disk.
@@ -31,47 +41,50 @@ export default function ExcelViewer({
   /** Live editor content for split-view controlled mode (CSV/TSV only). */
   content?: string;
 }) {
-  const [sheets, setSheets] = useState<string[]>([]);
+  const [book, setBook] = useState<ConvertedWorkbook | null>(null);
   const [active, setActive] = useState(0);
-  const [rows, setRows] = useState<string[][]>([]);
-  const [rowCapped, setRowCapped] = useState(false);
-  const [colCapped, setColCapped] = useState(false);
+  const [host, setHost] = useState<UniverSheetHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const bookRef = useRef<XLSX.WorkBook | null>(null);
-  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => `sheet ${sheets[active] ?? ""}`);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const { effectiveAppearance } = useResolvedEditorTheme();
+  const dark = effectiveAppearance === "dark";
+  // Read by the mount effect, so a mount never starts in the wrong polarity.
+  const darkRef = useRef(dark);
+  useEffect(() => {
+    darkRef.current = dark;
+  }, [dark]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setSheets([]);
-    setRows([]);
+    setBook(null);
     setActive(0);
 
-    const parseWorkbook = (wb: XLSX.WorkBook) => {
+    const show = (next: ConvertedWorkbook) => {
       if (cancelled) return;
-      bookRef.current = wb;
-      setSheets(wb.SheetNames);
-      loadSheet(wb, 0);
+      setBook(next);
       setLoading(false);
     };
 
-    const handleError = (e: unknown) => {
+    const fail = (e: unknown, attempted: string) => {
+      console.error(`ExcelViewer: ${attempted} failed for ${path}:`, e);
       if (!cancelled) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(errorMessage(e));
         setLoading(false);
       }
     };
 
-    // Controlled mode: parse CSV/TSV from live editor content
+    // Controlled mode: parse CSV/TSV from live editor content. Synchronous, so
+    // typing in the split-view editor does not flash the loading state.
     if (content !== undefined) {
       try {
-        // TSV is just CSV with tab delimiters — SheetJS handles both via type:"string"
-        const wb = XLSX.read(content, { type: "string", sheetRows: MAX_ROWS });
-        parseWorkbook(wb);
+        assertWithinFileLimit(new TextEncoder().encode(content).byteLength);
+        // TSV is just CSV with tab delimiters — SheetJS handles both via type:"string".
+        show(workbookFromSheetJs(XLSX.read(content, { type: "string", sheetRows: SHEETJS_READ_ROWS }), true));
       } catch (e) {
-        handleError(e);
+        fail(e, "parsing live CSV/TSV content");
       }
       return () => {
         cancelled = true;
@@ -79,103 +92,113 @@ export default function ExcelViewer({
     }
 
     // Uncontrolled mode: fetch from disk
-    api
-      .fetchFileRaw(path, projectRoot, projectHost)
-      .then((buf) => {
+    const load = async (): Promise<void> => {
+      const buf = await api.fetchFileRaw(path, projectRoot, projectHost);
+      if (cancelled) return;
+      // Refused before any parser runs: ExcelJS and SheetJS hold the whole file.
+      assertWithinFileLimit(buf.byteLength);
+      // Delimited text has no binary magic, so it must be decoded as UTF-8
+      // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
+      // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
+      if (isDelimitedTextPath(path)) {
+        show(workbookFromSheetJs(XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: SHEETJS_READ_ROWS }), true));
+        return;
+      }
+      if (OOXML_WORKBOOK.test(path)) {
+        // Dynamic so ExcelJS stays out of the main bundle.
+        const { Workbook: ExcelWorkbook } = await import("exceljs");
+        const wb = new ExcelWorkbook();
+        await wb.xlsx.load(buf);
         if (cancelled) return;
-        // sheetRows caps parsing itself (not just rendering) so a 100k-row
-        // workbook can't freeze the tab during SheetJS parsing either.
-        // Delimited text has no binary magic, so it must be decoded as UTF-8
-        // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
-        // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
-        const wb = isDelimitedTextPath(path)
-          ? XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: MAX_ROWS })
-          : XLSX.read(buf, { type: "array", sheetRows: MAX_ROWS });
-        parseWorkbook(wb);
-      })
-      .catch(handleError);
+        show(workbookFromExcelJs(wb));
+        return;
+      }
+      show(workbookFromSheetJs(XLSX.read(buf, { type: "array", sheetRows: SHEETJS_READ_ROWS }), false));
+    };
+    load().catch((e: unknown) => fail(e, `loading ${path}`));
     return () => {
       cancelled = true;
     };
   }, [path, projectRoot, projectHost, content]);
 
-  const loadSheet = (wb: XLSX.WorkBook, idx: number) => {
-    const name = wb.SheetNames[idx];
-    const ws = wb.Sheets[name];
-    if (!ws || !ws["!ref"]) {
-      setRows([]);
-      setRowCapped(false);
-      setColCapped(false);
-      setActive(idx);
-      return;
-    }
-    // Totals come from the sheet's own range (not just the first row), so
-    // wide later rows can't get silently clipped without a notice.
-    const range = XLSX.utils.decode_range(ws["!ref"]);
-    const totalR = range.e.r - range.s.r + 1;
-    const totalC = range.e.c - range.s.c + 1;
-    // sheetRows already capped parsing at MAX_ROWS: hitting the boundary
-    // means "at least this many" — word the notice accordingly.
-    setRowCapped(totalR >= MAX_ROWS);
-    setColCapped(totalC > MAX_COLS);
-    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, raw: false, defval: "" });
-    setRows(aoa.slice(0, MAX_ROWS).map((r) => (Array.isArray(r) ? r : []).slice(0, MAX_COLS).map(String)));
-    setActive(idx);
-    clear();
-  };
+  // Mounts Univer once per converted workbook. The holder lets the cleanup
+  // dispose a handle that resolved after the effect was cancelled.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (book === null || container === null) return;
+    let cancelled = false;
+    const mounted: { handle: UniverSheetHandle | null } = { handle: null };
+    import("./univerMount")
+      .then(({ mountUniverSheet }) => mountUniverSheet(container, book.data, darkRef.current))
+      .then((handle) => {
+        if (cancelled) {
+          handle.dispose();
+          return;
+        }
+        mounted.handle = handle;
+        setHost(handle);
+      })
+      .catch((e: unknown) => {
+        console.error(`ExcelViewer: mounting the spreadsheet grid failed for ${path}:`, e);
+        if (!cancelled) setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+      setHost(null);
+      if (mounted.handle !== null) mounted.handle.dispose();
+    };
+  }, [book, path]);
 
-  const switchSheet = (idx: number) => {
-    const wb = bookRef.current;
-    if (wb) loadSheet(wb, idx);
-  };
+  useEffect(() => {
+    if (host === null) return;
+    host.setDarkMode(dark);
+  }, [host, dark]);
+
+  useEffect(() => {
+    if (host === null || book === null) return;
+    const sheetId = book.data.sheetOrder[active];
+    try {
+      host.activateSheet(sheetId);
+    } catch (e) {
+      console.error(`ExcelViewer: activating sheet ${sheetId} of ${path} failed:`, e);
+      setError(errorMessage(e));
+    }
+  }, [host, book, active, path]);
 
   if (loading) return <div className="p-4 text-xs text-muted-foreground">Loading spreadsheet…</div>;
   if (error) return <div className="p-4 text-xs text-red-400">Spreadsheet failed: {error}</div>;
-  if (sheets.length === 0) return <div className="p-4 text-xs text-muted-foreground">No sheets found.</div>;
+  if (book === null || book.sheets.length === 0) return <div className="p-4 text-xs text-muted-foreground">No sheets found.</div>;
+
+  const sheet = book.sheets[active];
+  const truncated = [
+    sheet.rowCapped ? `first ${MAX_ROWS} rows` : null,
+    sheet.colCapped ? `first ${MAX_COLS} columns` : null,
+  ].filter((part): part is string => part !== null);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2 py-1 text-xs" role="tablist" aria-label="Sheets">
-        {sheets.map((name, i) => (
+        {book.sheets.map((s, i) => (
           <button
-            key={name}
+            key={s.id}
             type="button"
             role="tab"
             aria-selected={i === active}
-            onClick={() => switchSheet(i)}
+            onClick={() => setActive(i)}
             className={`shrink-0 rounded px-2 py-0.5 ${i === active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-            title={`Sheet ${name}`}
+            title={`Sheet ${s.name}`}
           >
-            {name}
+            {s.name}
           </button>
         ))}
-        {(rowCapped || colCapped) && (
-          <span className="ml-auto shrink-0 text-muted-foreground">
-            {rowCapped ? `First ${rows.length} rows` : `${rows.length} rows`}
-            {colCapped ? ` × first ${MAX_COLS} cols` : ""} — large sheet capped
-          </span>
+        {truncated.length > 0 && (
+          <span className="ml-auto shrink-0 text-muted-foreground">Showing {truncated.join(" and ")} — large sheet truncated</span>
         )}
       </div>
-      <div ref={ref} className="min-h-0 flex-1 overflow-auto p-2">
-        {rows.length === 0 ? (
-          <div className="p-4 text-xs text-muted-foreground">(empty sheet)</div>
-        ) : (
-          <table className="w-full border-collapse text-xs select-text">
-            <tbody>
-              {rows.map((row, ri) => (
-                <tr key={ri} className={ri === 0 ? "bg-muted/60 font-medium" : undefined}>
-                  {row.map((cell, ci) => (
-                    <td key={ci} className="whitespace-nowrap border border-border px-2 py-0.5">
-                      {cell}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+      <div className="relative min-h-0 flex-1">
+        <div ref={containerRef} className="absolute inset-0" />
+        {sheet.isEmpty && <div className="absolute inset-0 bg-background p-4 text-xs text-muted-foreground">(empty sheet)</div>}
       </div>
-      {sel && <SelectionToolbar sel={sel} path={path} label={`sheet ${sheets[active] ?? ""}`} projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>
   );
 }

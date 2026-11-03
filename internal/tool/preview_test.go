@@ -17,7 +17,7 @@ func previewArgs(t *testing.T, path string, page int) json.RawMessage {
 
 func TestPreviewOpenToolAcceptsPreviewable(t *testing.T) {
 	tool := &PreviewOpenTool{}
-	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "notes.markdown", "docs/page.mdx", "main.go", "budget.xlsx", "legacy.xls", "data.csv", "song.mp3", "clip.mp4"} {
+	for _, p := range []string{"docs/deck.pptx", "spec.docx", "report.pdf", "flow.mmd", "notes.md", "notes.markdown", "docs/page.mdx", "main.go", "budget.xlsx", "budget.xlsm", "legacy.xls", "data.csv", "song.mp3", "clip.mp4"} {
 		got, err := tool.Execute(previewArgs(t, p, 0))
 		if err != nil {
 			t.Errorf("path %q: unexpected error %v", p, err)
@@ -113,7 +113,7 @@ func TestPreviewOpenToolName(t *testing.T) {
 func TestPreviewOpenCoversOfficeSet(t *testing.T) {
 	office := map[string]string{
 		".pdf": "pdf", ".docx": "docx", ".pptx": "pptx",
-		".xlsx": "excel", ".xls": "excel", ".csv": "excel",
+		".xlsx": "excel", ".xlsm": "excel", ".xls": "excel", ".csv": "excel",
 	}
 	for ext, want := range office {
 		got, ok := previewOpenKinds[ext]

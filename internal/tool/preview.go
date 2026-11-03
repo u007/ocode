@@ -23,6 +23,7 @@ var previewOpenKinds = map[string]string{
 	".docx": "docx",
 	".pptx": "pptx",
 	".xlsx": "excel",
+	".xlsm": "excel",
 	".xls":  "excel",
 	".csv":  "excel",
 	".png":  "image",
@@ -105,7 +106,7 @@ var previewNonTextExts = map[string]bool{
 	".jp2": true, ".j2k": true,
 	// Legacy/binary Office and document containers.
 	".doc": true, ".ppt": true, ".docm": true, ".dot": true, ".dotm": true,
-	".dotx": true, ".xlsm": true, ".xlt": true, ".xltx": true, ".xltm": true,
+	".dotx": true, ".xlt": true, ".xltx": true, ".xltm": true,
 	".pptm": true, ".pot": true, ".potx": true, ".potm": true, ".pps": true,
 	".ppsx": true, ".ppsm": true, ".vsd": true, ".vsdx": true, ".one": true,
 	".msg": true, ".pub": true,

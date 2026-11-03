@@ -42,6 +42,7 @@ const kindByExt: Record<string, PreviewKind> = {
   ".docx": "docx",
   ".pptx": "pptx",
   ".xlsx": "excel",
+  ".xlsm": "excel",
   ".xls": "excel",
   ".csv": "excel",
   ".tsv": "excel",
@@ -122,9 +123,9 @@ const NON_PREVIEWABLE_EXTS: ReadonlySet<string> = new Set([
   ".tiff", ".tif", ".bmp", ".heic", ".heif", ".avif", ".ico", ".cur",
   ".psd", ".psb", ".xcf", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng",
   ".orf", ".rw2", ".svgz", ".jp2", ".j2k",
-  // Legacy/binary Office and document containers (modern .docx/.pptx/.xlsx
-  // and .xls/.csv preview; .doc/.ppt go to the OS-open fallback).
-  ".doc", ".ppt", ".docm", ".dot", ".dotm", ".dotx", ".xlsm", ".xlt",
+  // Legacy/binary Office and document containers (modern .docx/.pptx/.xlsx/
+  // .xlsm and .xls/.csv preview; .doc/.ppt go to the OS-open fallback).
+  ".doc", ".ppt", ".docm", ".dot", ".dotm", ".dotx", ".xlt",
   ".xltx", ".xltm", ".pptm", ".pot", ".potx", ".potm", ".pps", ".ppsx",
   ".ppsm", ".vsd", ".vsdx", ".one", ".msg", ".pub",
   // Other opaque binary containers.

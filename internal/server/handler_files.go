@@ -1230,6 +1230,7 @@ var previewRawTypes = map[string]string{
 	".docx":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".pptx":     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	".xlsx":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".xlsm":     "application/vnd.ms-excel.sheet.macroEnabled.12",
 	".xls":      "application/vnd.ms-excel",
 	".csv":      "text/csv; charset=utf-8",
 	".png":      "image/png",

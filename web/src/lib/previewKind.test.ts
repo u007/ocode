@@ -25,6 +25,7 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("main.go")).toBe("text");
     expect(previewKindForPath("photo.PNG")).toBe("image");
     expect(previewKindForPath("budget.xlsx")).toBe("excel");
+    expect(previewKindForPath("macros.xlsm")).toBe("excel");
     expect(previewKindForPath("legacy.xls")).toBe("excel");
     expect(previewKindForPath("data.csv")).toBe("excel");
     expect(previewKindForPath("song.mp3")).toBe("audio");
@@ -81,6 +82,7 @@ describe("previewOnlyKindForPath", () => {
     expect(previewOnlyKindForPath("spec.docx")).toBe("docx");
     expect(previewOnlyKindForPath("deck.pptx")).toBe("pptx");
     expect(previewOnlyKindForPath("budget.xlsx")).toBe("excel");
+    expect(previewOnlyKindForPath("macros.xlsm")).toBe("excel");
     expect(previewOnlyKindForPath("photo.PNG")).toBe("image");
     expect(previewOnlyKindForPath("song.mp3")).toBe("audio");
     expect(previewOnlyKindForPath("voice.m4a")).toBe("audio");
@@ -245,6 +247,7 @@ describe("resolvePreviewDoc", () => {
   it("resolves known kinds directly", () => {
     expect(resolvePreviewDoc("report.pdf")).toEqual({ kind: "pdf", unsupported: null });
     expect(resolvePreviewDoc("budget.xlsx")).toEqual({ kind: "excel", unsupported: null });
+    expect(resolvePreviewDoc("macros.xlsm")).toEqual({ kind: "excel", unsupported: null });
   });
 
   it("falls unknown-but-textual requests through to the text editor", () => {
