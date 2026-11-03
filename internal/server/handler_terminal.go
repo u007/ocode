@@ -70,27 +70,6 @@ var resizePrefix = []byte(`{"type":"resize"`)
 
 const terminalMaxMessageSize = 32 * 1024
 
-// terminalUpgradeRespHeader echoes back the ocode.bearer. subprotocol the
-// client offered, if any, so the browser's `new WebSocket(url, [protocol])`
-// call completes — per the WebSocket spec, the client fails the connection
-// if the server doesn't select one of the offered subprotocols. The token
-// itself was already validated (or ignored outside remote mode) by
-// checkAuth in authMiddleware before this handler ever runs; this just
-// completes the handshake for the case that requires it.
-func terminalUpgradeRespHeader(r *http.Request) http.Header {
-	proto := r.Header.Get("Sec-WebSocket-Protocol")
-	if proto == "" {
-		return nil
-	}
-	tok := remoteWSToken(proto)
-	if tok == "" {
-		return nil
-	}
-	respHeader := http.Header{}
-	respHeader.Set("Sec-WebSocket-Protocol", remoteWSProtocolPrefix+tok)
-	return respHeader
-}
-
 type terminalResizeMsg struct {
 	Type string `json:"type"`
 	Cols uint16 `json:"cols"`

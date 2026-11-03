@@ -673,7 +673,7 @@ export default function PdfViewer({
       frame.remove();
       const win = window.open(url, "_blank");
       if (!win) downloadPdf(); // popups blocked → last resort: download
-      else window.setTimeout(() => URL.revokeObjectURL(url), PDF_PRINT_CLEANUP_MS);
+      window.setTimeout(() => URL.revokeObjectURL(url), PDF_PRINT_CLEANUP_MS);
     };
     // Genuinely failed load (onerror, or no onload within the watchdog window).
     const fallback = () => {
@@ -699,8 +699,9 @@ export default function PdfViewer({
           target.addEventListener("afterprint", cleanup);
           target.focus();
           target.print();
-        } catch {
+        } catch (err) {
           // Cross-origin/sandboxed frame refused print() — open a tab instead.
+          console.error("pdf print: frame print() refused, opening the PDF in a tab", { file: pdfFileName }, err);
           openTab();
         }
       }, PDF_PRINT_SETTLE_MS);
@@ -710,7 +711,7 @@ export default function PdfViewer({
     document.body.appendChild(frame);
     // WKWebView can leave a blob: frame without onload; wait the full window before giving up.
     const watchdog = window.setTimeout(fallback, PDF_PRINT_LOAD_TIMEOUT_MS);
-  }, [downloadPdf]);
+  }, [downloadPdf, pdfFileName]);
 
   const rotate = useCallback(() => {
     const doc = docRef.current;

@@ -35,7 +35,7 @@ The **inbound-content guardrail** (`internal/agent/content_guard_typesafe.go`, p
 
 ## Activation: no config flag
 
-There is **no `permissions.*` key and no config field**, and none was added. The guardrail exists exactly when the shared client factory yields a keyed TypeSafe client — `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` with a non-empty `APIKey` in `contentGuardClient` (`content_guard_typesafe.go:376`), model `typesafe/jev-latest` (`defaultJudgeModel`, `internal/agent/decider.go:41`). This is the same "provider connected" convention as the egress guard (`networkGuardJudgeClient`), the discovery judge and the doc-search judge — four judges, one convention.
+There is **no `permissions.*` key and no config field**, and none was added. The guardrail exists exactly when the shared client factory yields a keyed TypeSafe client — `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` with a non-empty `APIKey` in `contentGuardClient` (`content_guard_typesafe.go:376`), model `typesafe/jev-latest` (`defaultJudgeModel`, `internal/agent/decider.go:36`). This is the same "provider connected" convention as the egress guard (`networkGuardJudgeClient`), the discovery judge and the doc-search judge — four judges, one convention.
 
 Absent, not disabled: with no TypeSafe key, `scanContentGuard` returns `contentGuardResult{}` at `content_guard_typesafe.go:527` and the result passes untouched, and that steady state is deliberately **not logged per call** (`content_guard_typesafe.go:525`). Judge usage is billed via `RecordSideUsage(..., "typesafe/"+client.Model)` (`content_guard_typesafe.go:630`).
 
@@ -86,9 +86,9 @@ The guard runs at **all five `scanToolResult` call sites**, immediately after se
 
 | # | call site | what follows |
 |---|---|---|
-| 1 | `agent.go:2077` → `agent.go:2079` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
-| 2 | `agent.go:2144` → `agent.go:2146` | `shapeToolResult` |
-| 3 | `agent.go:2207` → `agent.go:2210` | `TruncateToolResult` directly (`agent.go:2210`) |
+| 1 | `agent.go:2143` → `agent.go:2145` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
+| 2 | `agent.go:2210` → `agent.go:2212` | `shapeToolResult` |
+| 3 | `agent.go:2273` → `agent.go:2276` | `TruncateToolResult` directly (`agent.go:2276`) |
 | 4 | `agent.go:5770` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCall` at `agent.go:5762`) | returned to the approved-call path |
 | 5 | DAG scheduler: `task_dag.go:637` (redact) → `task_dag.go:644` (guard) | `shapeToolResult` in `buildResults` (`task_dag.go:870`) |
 

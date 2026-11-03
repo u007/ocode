@@ -85,7 +85,9 @@ int ocode_printWindow(void *nativeWindow) {
 		NSPrintOperation *op = [webView printOperationWithPrintInfo:info];
 		op.showsPrintPanel = YES;
 		op.showsProgressPanel = YES;
-		// printOperationWithPrintInfo: needs a frame or it raises.
+		// WKWebView requires this or printOperationWithPrintInfo: raises, and the
+		// rect's values are ignored (scrolled-off content is still printed). This is
+		// the same workaround Wails' own windowPrint carries; do not "clean it up".
 		op.view.frame = webView.bounds;
 		[op runOperationModalForWindow:window delegate:nil didRunSelector:nil contextInfo:nil];
 		[info release];

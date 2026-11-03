@@ -150,6 +150,7 @@ describe("PdfViewer print & download", () => {
     await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
 
     const { open, restore: restoreOpen } = stubWindowOpen({} as Window);
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.useFakeTimers();
     const frame = startPrint(view);
     // The frame loads, then its print() throws → popup tab after the settle delay.
@@ -168,8 +169,44 @@ describe("PdfViewer print & download", () => {
     });
     vi.useRealTimers();
     expect(open).toHaveBeenCalledWith(expect.any(String), "_blank");
+    // The refusal is logged with what was attempted and the error, not swallowed.
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining("print"),
+      { file: "doc.pdf" },
+      expect.objectContaining({ message: "print refused" }),
+    );
+    logError.mockRestore();
     restoreOpen();
     restoreUrls();
+  });
+
+  it("print with popups blocked downloads the PDF and revokes its object URL", async () => {
+    const { urls, restore } = stubBlobUrls();
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    const { open, restore: restoreOpen } = stubWindowOpen(null);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    vi.useFakeTimers();
+    const frame = startPrint(view);
+    // A load failure takes the tab fallback; the blocked popup falls back to download.
+    act(() => {
+      fireEvent.error(frame);
+    });
+    expect(open).toHaveBeenCalledWith(urls[0], "_blank");
+    expect(click).toHaveBeenCalledTimes(1);
+    // The print URL is not revoked yet: the cleanup timer owns it, as on the tab path.
+    expect(revoke).not.toHaveBeenCalledWith(urls[0]);
+    act(() => {
+      vi.advanceTimersByTime(600_000);
+    });
+    vi.useRealTimers();
+    expect(revoke).toHaveBeenCalledWith(urls[0]);
+    click.mockRestore();
+    revoke.mockRestore();
+    restoreOpen();
+    restore();
   });
 
   it("print falls back to a tab when the loaded frame has no window", async () => {

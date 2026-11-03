@@ -2,6 +2,12 @@
 
 
 
+
+## 2026-11-03
+
+* **Update**: Server-Side Auto-Continue Loop: withheld messages (relevance veto, 8-batch ceiling, budget fit) are reported to the verdict as `transcript_selection`; each selection batch is retried once; the reserved `auto_continue_select` slot is removed ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-continue selection and print follow-ups: selection scores on the verdict `client` and cancels on Stop; the score cache scope includes `last_reply`; `ResetSelectScores` also runs at session load and `/reset-id`; PDF viewer print timers and `afterprint` cleanup, print errors logged, popup-blocked download revokes its object URL; macOS desktop print uses the user's saved print settings ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md), [concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md), [concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+
 ## 2026-11-02
 
 * **Update**: Desktop print: macOS system print panel via `ocode_printWindow` (portrait, 36pt margins) replaces Wails landscape `windowPrint`; PDF popup-tab timer fires only if onload never ran ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md), [concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
@@ -25,8 +31,7 @@
 * **Update**: Web/Desktop Server Project Scoping: embedded-browser paragraph notes the per-tab origin for local clients ([concepts/web-server-project-scoping.md](/concepts/web-server-project-scoping.md))
 * **Update**: Per-tab browse origin plan 04: remote binding in the request header, marker in the reply ([plans/2026-11-02-browse-per-tab-origin/04-remote.md](/plans/2026-11-02-browse-per-tab-origin/04-remote.md))
 * **Update**: Per-tab browse origin plan 05: shipped POST /api/browse/tab-origin contract and 409 handling ([plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md](/plans/2026-11-02-browse-per-tab-origin/05-spa-and-persistence.md))
-* **Update**: Auto-continue verdict now judges the messages that bear on the chain's original request: `original_request` in the state, a per-message noul selection step once a transcript passes 20 messages (`slotAutoContinueSelect`, own 0.5 floor, fail-closed on selection error), and a rubric line that refuses `end` while the request is still undone ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
-* **Update**: Auto-continue selection is progressive: an in-memory per-message score cache on `Agent` (sha256 of role and trimmed content, scoped to the original request, fail-open unscored outcomes and failed calls not cached) so a turn end scores only new messages ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-continue selection scores with the verdict's own decider (no selection slot; ten `judgeSlot`s), caps batches at 8 with one retry per batch, reports every withheld message to the verdict as `transcript_selection`, and keeps its score cache scoped to `original_request + last_reply` so a new reply rescores ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
 
 ## 2026-11-01
 

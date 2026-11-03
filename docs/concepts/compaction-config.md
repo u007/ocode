@@ -43,7 +43,7 @@ Two independent timeouts and a retry budget, all in the `compact` section of `oc
 Storage and runtime are deliberately two-stage:
 
 - **Persist (`applyCompactConfig`, `internal/config/ocodeconfig.go:2116`)** — copies an explicitly-present value verbatim, **including `0`**. An explicit `0` round-trips as `0`; it is never silently rewritten on disk.
-- **Resolve (`resolveCompactRuntime`, `internal/agent/agent.go:2403`)** — the only place that normalizes: `summary_first_token_timeout_seconds <= 0` → **300** (`agent.go:2452-2454`), `summary_timeout_seconds <= 0` → **600** (`agent.go:2448-2450`).
+- **Resolve (`resolveCompactRuntime`, `internal/agent/agent.go:2469`)** — the only place that normalizes: `summary_first_token_timeout_seconds <= 0` → **300** (`agent.go:2452-2454`), `summary_timeout_seconds <= 0` → **600** (`agent.go:2448-2450`).
 
 So the semantics of an explicit `0` **for the two timeouts** are *"use the runtime default"* (300 / 600), **not** "disable this timeout". Config cannot turn either timeout off; the `idle <= 0` plain-context branch inside `inactivityContextWithParent` is defense-in-depth unreachable through normal config resolution. Absent key → default 300; no migration.
 

@@ -164,7 +164,7 @@ and sends `kickoff_prompt` as the turn.
 ## Judge configuration
 
 - Config key `ocode.goal.judge_model`, default `typesafe/jev-latest` (`defaultJudgeModel`,
-  `internal/agent/decider.go:35`; slot read at `:94-95`).
+  `internal/agent/decider.go:36`; slot read at `:112-113`).
 - The goal judge has its own confidence floor, `goalMinConfidenceDefault`. It does not read
   `permissions.auto.min_confidence` or the auto-continue floor.
 - There is no fallback to another backend. An unset or keyless judge pauses the goal as

@@ -130,7 +130,7 @@ is clipped. A text state that fits only after cutting elements stays in the text
 `omitted_elements`, as before.
 
 The screenshot view needs a decision backend that takes images. Only `*TypesafeClient` does,
-through `DecideWithAssetsCtx` (the `imageDecider` interface, `internal/agent/decider.go:64`).
+through `DecideWithAssetsCtx` (the `imageDecider` interface, `internal/agent/decider.go:59`).
 Any other backend keeps the text view, and a state that does not fit stops the run as
 `page_too_dense`, with a detail that names the TypeSafe requirement. The view never goes to
 another backend.

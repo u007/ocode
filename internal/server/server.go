@@ -839,6 +839,30 @@ func remoteWSToken(header string) string {
 	return ""
 }
 
+// terminalUpgradeRespHeader echoes back the ocode.bearer. subprotocol the
+// client offered, if any, so the browser's `new WebSocket(url, [protocol])`
+// call completes — per the WebSocket spec, the client fails the connection
+// if the server doesn't select one of the offered subprotocols. The token
+// itself was already validated (or ignored outside remote mode) by
+// checkAuth in authMiddleware before this handler ever runs; this just
+// completes the handshake for the case that requires it.
+//
+// Lives here, not in handler_terminal.go, because handleBrowseCDP calls it on
+// every platform and that file is excluded from Windows builds.
+func terminalUpgradeRespHeader(r *http.Request) http.Header {
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+	if proto == "" {
+		return nil
+	}
+	tok := remoteWSToken(proto)
+	if tok == "" {
+		return nil
+	}
+	respHeader := http.Header{}
+	respHeader.Set("Sec-WebSocket-Protocol", remoteWSProtocolPrefix+tok)
+	return respHeader
+}
+
 func (s *Server) checkAuth(r *http.Request) bool {
 	// Bearer token header (used by frontend fetch calls)
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
