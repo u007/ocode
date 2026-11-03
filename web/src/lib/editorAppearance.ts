@@ -17,10 +17,12 @@ import { useSyncExternalStore } from "react";
  *
  * Three stored values (spec §8.6):
  *
- * - `"auto"` (the default) — the editor follows the active colour theme: a
- *   `vscode:` theme contributes its converted Monaco palette, a builtin one is
- *   outranked only by `monaco.theme` (see `lib/monacoTheme.ts`), and the
- *   preview pane takes the theme's polarity.
+ * - `"auto"` (the default) — the editor follows the active colour theme's
+ *   converted MONACO palette (a `vscode:` theme supplies one; a builtin theme
+ *   is outranked only by `monaco.theme`, see `lib/monacoTheme.ts`). The preview
+ *   pane takes the polarity of that RESOLVED editor palette, not the colour
+ *   theme's declared polarity, so a light `monaco.theme` under a dark colour
+ *   theme still renders a light preview.
  * - `"light"` / `"dark"` — an EXPLICIT override. It outranks the colour theme
  *   (`ocode-light` / `ocode-dark`) and Settings tells the user it is on, with a
  *   *Use theme colours* action that writes `"auto"` back.

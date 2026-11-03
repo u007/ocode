@@ -1,5 +1,7 @@
-// Package appearance parses and converts VS Code colour themes and file icon
-// themes into the palettes ocode renders with.
+// Package appearance parses and converts VS Code colour themes into the
+// palettes ocode renders with. It also DISCOVERS file icon themes (their
+// manifest contributions are recorded for the picker), but does not convert
+// them: icon rendering is not implemented here.
 //
 // Parsing is deliberately tolerant: theme files are JSONC (comments and
 // trailing commas), "include" chains merge a base theme underneath the

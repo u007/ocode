@@ -429,3 +429,32 @@ func TestExtensionRootsRejectsBareTilde(t *testing.T) {
 		t.Fatalf("expandHomeDir(\"~/extensions\") = %q", got)
 	}
 }
+
+// readCappedFile enforces its cap while reading, so a file that grows between
+// a stat and the read cannot slip past the limit (and the read never allocates
+// more than limit+1 bytes).
+func TestReadCappedFileEnforcesLimitAtReadTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	writeTestFile(t, path, strings.Repeat("a", 32))
+
+	if data, err := readCappedFile(path, 32); err != nil {
+		t.Fatalf("readCappedFile at the limit: %v", err)
+	} else if len(data) != 32 {
+		t.Fatalf("len = %d, want 32", len(data))
+	}
+
+	if _, err := readCappedFile(path, 31); err == nil {
+		t.Fatal("readCappedFile over the limit = nil error")
+	} else if !strings.Contains(err.Error(), "over the 31 byte limit") {
+		t.Fatalf("error = %v, want the byte-limit message", err)
+	}
+}
+
+// A directory must be refused rather than read as an empty file.
+func TestReadCappedFileRejectsDirectory(t *testing.T) {
+	if _, err := readCappedFile(t.TempDir(), 1024); err == nil {
+		t.Fatal("readCappedFile(dir) = nil error")
+	} else if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("error = %v, want a not-a-regular-file error", err)
+	}
+}

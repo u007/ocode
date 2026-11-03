@@ -20,7 +20,7 @@ import {
   markLocalCompactionEnd,
 } from "../../lib/compactionState";
 import { reportActionError } from "../../lib/actionErrors";
-import { applyThemeColors } from "../../hooks/useTheme";
+import { setColorThemeId } from "../../lib/appearanceTheme";
 
 import {
   Plus,
@@ -474,6 +474,11 @@ export interface CommandContext {
     setEditorConfig?: (editor: string, editorMode: string, ideMode: string) => Promise<{ editor: string; editor_mode: string; ide_mode: string }>;
     getThemes?: () => Promise<import("../../api/types").ThemesListResponse>;
     getTheme?: (name?: string) => Promise<import("../../api/types").ThemeResponse>;
+    /** Unified appearance theme list (/themes). Prefer this over the legacy
+     *  registry pair above: it includes converted VS Code themes. */
+    getAppearanceThemes?: () => Promise<import("../../api/types").AppearanceThemesResponse>;
+    /** Stored appearance selection (/themes reads "current" from it). */
+    getAppearanceSettings?: () => Promise<import("../../api/types").AppearanceSettings>;
     getTUISettings?: () => Promise<import("../../api/client").TUISettings>;
     setTUISettings?: (cfg: import("../../api/client").TUISettings) => Promise<import("../../api/client").TUISettings>;
     getExplorerModel?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
@@ -3619,39 +3624,59 @@ async function handleEditorMode(args: string, ctx: CommandContext): Promise<Comm
   }
 }
 
-// ─── /themes [name] — color theme ───────────────────────────────────────────
+// ─── /themes [id|name] — color theme ────────────────────────────────────────
 
+/**
+ * `/themes` reads the SAME unified list and the SAME stored selection the
+ * Settings picker uses, and applies/persists through the appearance store.
+ *
+ * The previous implementation read the legacy `/api/themes` registry, applied
+ * the 16-colour mapping and wrote `tui.theme`. That made `/themes
+ * vscode:acme/dark` claim success but reload as the TUI theme, because the web
+ * side persisted an id the TUI cannot resolve into `tui.theme`, and it painted
+ * a different palette than the picker for the same theme. `appearance.color_theme`
+ * is the source of truth now, so the web path must not write `tui.theme`.
+ */
 async function handleThemes(args: string, ctx: CommandContext): Promise<CommandResult> {
-  if (!ctx.api.getThemes || !ctx.api.getTheme) return unsupported("/themes");
+  if (!ctx.api.getAppearanceThemes || !ctx.api.getAppearanceSettings) {
+    return unsupported("/themes");
+  }
   try {
-    const list = await ctx.api.getThemes();
+    const [list, settings] = await Promise.all([
+      ctx.api.getAppearanceThemes(),
+      ctx.api.getAppearanceSettings(),
+    ]);
+    const current = settings.effective_color_theme || settings.color_theme;
     const name = args.trim().toLowerCase();
     if (!name) {
       return ok(
         [
           "## Themes",
           "",
-          list.themes.map((t) => `- ${t.name === list.current ? "**" : ""}\`${t.name}\`${t.name === list.current ? " (current)**" : ""} — ${t.label}`).join("\n"),
+          list.themes
+            .map(
+              (t) =>
+                `- ${t.id === current ? "**" : ""}\`${t.id}\`${t.id === current ? " (current)**" : ""} — ${t.label}`,
+            )
+            .join("\n"),
           "",
-          "Switch with `/themes <name>` or Settings > Theme.",
+          "Switch with `/themes <id>` or Settings > Theme.",
         ].join("\n"),
       );
     }
-    const match = list.themes.find((t) => t.name.toLowerCase() === name);
+    const match = list.themes.find(
+      (t) => t.id.toLowerCase() === name || t.label.toLowerCase() === name,
+    );
     if (!match) {
-      return ok(`Unknown theme \`${name}\`. Available: ${list.themes.map((t) => `\`${t.name}\``).join(", ")}.`);
+      return ok(
+        `Unknown theme \`${name}\`. Available: ${list.themes.map((t) => `\`${t.id}\``).join(", ")}.`,
+      );
     }
-    // Fetch the palette, apply it live, and persist the name so the pick
-    // survives a reload (the server's GET /api/theme reads the same config).
-    const resp = await ctx.api.getTheme(match.name);
-    applyThemeColors(resp.colors);
-    // Best-effort persist: a config endpoint that is missing (older server)
-    // must not throw away the already-applied live theme change.
-    if (ctx.api.getTUISettings && ctx.api.setTUISettings) {
-      const cur = await ctx.api.getTUISettings();
-      await ctx.api.setTUISettings({ ...cur, theme: match.name });
-    }
-    return ok(`**Theme:** ${match.label} (\`${match.name}\`).`);
+    // Persist and apply through the appearance store: a `vscode:` id survives a
+    // reload because the server's effective selection is read back on startup,
+    // while a builtin name still routes through the legacy /api/theme palette.
+    await setColorThemeId(match.id);
+    return ok(`**Theme:** ${match.label} (\`${match.id}\`).`);
   } catch (err) {
     return fail("/themes", err);
   }

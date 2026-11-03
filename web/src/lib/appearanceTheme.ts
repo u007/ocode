@@ -8,7 +8,7 @@ import type {
 } from "@/api/types";
 import {
   AA_NORMAL,
-  applyThemeColors,
+  computeThemeVars,
   contrastRatio,
   hexToHslTriplet,
   pickReadableFg,
@@ -63,6 +63,20 @@ let appliedUI = new Set<string>();
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The server omits `extra_extension_dirs` when it is empty (a fresh install).
+ * Normalise it once here so the store never hands a consumer a null it might
+ * `.map()` over.
+ */
+function normalizeAppearanceSettings(response: AppearanceSettings): AppearanceSettings {
+  return {
+    ...response,
+    extra_extension_dirs: Array.isArray(response.extra_extension_dirs)
+      ? response.extra_extension_dirs
+      : [],
+  };
 }
 
 function publish(next: AppearanceThemeState): AppearanceThemeState {
@@ -135,8 +149,8 @@ export async function loadAppearanceSettings(): Promise<AppearanceSettings> {
   settingsInFlight = api
     .getAppearanceSettings()
     .then((response) => {
-      settings = response;
-      return response;
+      settings = normalizeAppearanceSettings(response);
+      return settings;
     })
     .catch((error: unknown) => {
       console.warn("[appearance] settings request failed; retaining the last known selection", {
@@ -190,6 +204,53 @@ const SYNTHESIZED_FOREGROUND_PAIRS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
+ * Write one theme variable and record it in `appliedUI`, so switching to a
+ * theme that omits the same name can remove it again. A value that cannot be
+ * parsed is cleared instead of leaving a previous theme's colour in place.
+ */
+function writeThemeVar(name: string, hex: string): void {
+  const root = document.documentElement;
+  const triplet = hexToHslTriplet(hex);
+  if (triplet === null) {
+    console.warn(`Skipping theme variable ${name}: invalid hex color`, hex);
+    if (appliedUI.delete(name)) root.style.removeProperty(name);
+    return;
+  }
+  root.style.setProperty(name, triplet);
+  appliedUI.add(name);
+}
+
+/**
+ * Apply one full variable map as HSL triplets (the form Tailwind consumes) and
+ * remove every variable this module applied for a previous theme that the new
+ * map omits. BOTH application branches (rich `ui` and the legacy 16-colour
+ * mapping) go through here, so `appliedUI` is a complete record of what is
+ * inline and a legacy -> rich switch cannot leave legacy-only names painted
+ * over the stylesheet default.
+ */
+function applyVars(vars: Record<string, string>): void {
+  const root = document.documentElement;
+  for (const name of Array.from(appliedUI)) {
+    if (!(name in vars)) {
+      root.style.removeProperty(name);
+      appliedUI.delete(name);
+    }
+  }
+  for (const [name, hex] of Object.entries(vars)) writeThemeVar(name, hex);
+}
+
+/** Apply one resolved theme: rich `ui` palette when present, legacy otherwise. */
+function applyTheme(theme: ConvertedTheme): void {
+  if (hasUI(theme)) {
+    applyAppearanceUI(theme);
+    return;
+  }
+  // The legacy mapping derives all its variables from the 16-colour palette;
+  // routing it through applyVars is what records them for a later removal.
+  applyVars(computeThemeVars(theme.colors));
+}
+
+/**
  * Repair a synthesized foreground that fails WCAG AA on its surface. Only the
  * four foreground slots above are ever touched: every theme-authored surface,
  * border, link and body colour is written verbatim.
@@ -211,50 +272,23 @@ function repairSynthesizedForegrounds(ui: Record<string, string>, text?: string)
       (value): value is string => typeof value === "string" && value !== "",
     );
     const triplet = hexToHslTriplet(pickReadableFg(surface, candidates));
-    if (triplet !== null) root.style.setProperty(foregroundVar, triplet);
+    if (triplet !== null) {
+      root.style.setProperty(foregroundVar, triplet);
+      appliedUI.add(foregroundVar);
+    }
   }
 }
 
 /**
- * Write the converted theme's `ui` map to the document root as HSL triplets
- * (the form Tailwind consumes). A variable the map omits is left alone, so the
- * stylesheet default in `index.css` applies; a variable this module applied for
- * a previous theme and the new theme omits is removed for the same reason.
+ * Write the converted theme's `ui` map to the document root. A variable the map
+ * omits is left at the stylesheet default in `index.css`; a variable this module
+ * applied for a previous theme and the new theme omits is removed for the same
+ * reason.
  */
 export function applyAppearanceUI(theme: ConvertedTheme): void {
   const ui = theme.ui ?? {};
-  const root = document.documentElement;
-
-  for (const name of Array.from(appliedUI)) {
-    if (!(name in ui)) {
-      root.style.removeProperty(name);
-      appliedUI.delete(name);
-    }
-  }
-
-  for (const [name, hex] of Object.entries(ui)) {
-    const triplet = hexToHslTriplet(hex);
-    if (triplet === null) {
-      console.warn(`Skipping theme variable ${name}: invalid hex color`, hex);
-      continue;
-    }
-    root.style.setProperty(name, triplet);
-    appliedUI.add(name);
-  }
-
+  applyVars(ui);
   if (hasUI(theme)) repairSynthesizedForegrounds(ui, theme.colors?.text);
-}
-
-/** Apply one resolved theme: rich `ui` palette when present, legacy otherwise. */
-function applyTheme(theme: ConvertedTheme): void {
-  if (hasUI(theme)) {
-    applyAppearanceUI(theme);
-    return;
-  }
-  // The legacy 16-colour mapping writes every variable it knows, so clearing
-  // the rich-palette leftovers first is only about variables it does not own.
-  clearAppliedUI();
-  applyThemeColors(theme.colors);
 }
 
 /**
@@ -304,9 +338,9 @@ export async function setColorThemeId(id: string): Promise<void> {
   const response = await api.setAppearanceSettings({
     color_theme: id,
     icon_theme: current.icon_theme,
-    extra_extension_dirs: current.extra_extension_dirs,
+    extra_extension_dirs: current.extra_extension_dirs ?? [],
   });
-  settings = response;
+  settings = normalizeAppearanceSettings(response);
   const target = response.effective_color_theme || id;
   publish({
     ...state,

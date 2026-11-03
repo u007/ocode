@@ -509,9 +509,9 @@ type ChatVerbosityConfig struct {
 	Overrides ChatVerbosityOverrides `json:"overrides"`
 }
 
-// AppearanceConfig is the appearance selection shared by the web/desktop SPA and
-// the TUI: the active colour theme, the active file icon theme, and any extra
-// directories to scan for installed VS Code extensions.
+// AppearanceConfig is the appearance selection read by the web/desktop SPA.
+// It is not consumed by the TUI yet: the TUI still themes itself from
+// `tui.theme`, and nothing in ocode's TUI reads this block.
 //
 // ColorTheme and IconTheme are either empty (use the built-in default), a
 // VS Code theme id of the form `vscode:<publisher>.<extension>/<variant>`, or —

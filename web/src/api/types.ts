@@ -1229,6 +1229,9 @@ export interface AppearanceThemesResponse {
   total: number;
   offset: number;
   limit: number;
+  /** True when this page stops before `total`, so a client must request a
+   *  later offset to see every theme. */
+  truncated?: boolean;
   warnings?: string[];
 }
 
@@ -1289,7 +1292,8 @@ export interface ConvertedTheme {
 export interface AppearanceSettings {
   color_theme: string;
   icon_theme: string;
-  extra_extension_dirs: string[];
+  /** Omitted by the server on a fresh install; treat as `[]`. */
+  extra_extension_dirs?: string[];
   effective_color_theme: string;
   warnings?: string[];
 }

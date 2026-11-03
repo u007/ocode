@@ -200,6 +200,9 @@ func TestHandleAppearanceThemesPaginates(t *testing.T) {
 	if resp.Limit != 1 || resp.Offset != registry+1 {
 		t.Errorf("Limit/Offset = %d/%d, want 1/%d", resp.Limit, resp.Offset, registry+1)
 	}
+	if !resp.Truncated {
+		t.Errorf("Truncated = false for a %d-item page of %d", len(resp.Themes), resp.Total)
+	}
 	if len(resp.Themes) != 1 || resp.Themes[0].Label != "Bravo" {
 		t.Fatalf("page = %+v, want the single Bravo entry", resp.Themes)
 	}
@@ -213,6 +216,24 @@ func TestHandleAppearanceThemesPaginates(t *testing.T) {
 	}
 	if len(resp.Themes) != registry+3 {
 		t.Fatalf("themes = %d, want %d (registry + 3)", len(resp.Themes), registry+3)
+	}
+	if resp.Truncated {
+		t.Errorf("Truncated = true for a full page of %d", resp.Total)
+	}
+}
+
+// A fresh install has no extra extension roots. The response used to emit
+// `"extra_extension_dirs":null`, which a client that maps the field would crash
+// on; the key must be absent instead.
+func TestHandleAppearanceSettingsOmitsEmptyExtraRoots(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	rec := httptest.NewRecorder()
+	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"extra_extension_dirs"`) {
+		t.Fatalf("body = %s, want no extra_extension_dirs key when there are no roots", rec.Body.String())
 	}
 }
 

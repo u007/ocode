@@ -114,6 +114,31 @@ describe("appearance theme store", () => {
     expect(rootVar("--accent")).toBe("");
   });
 
+  it("clears legacy variables a later rich theme omits", async () => {
+    // Apply the legacy 16-colour palette first: it writes its whole mapping
+    // inline. Only a recorded application path can remove it again.
+    getAppearanceSettings.mockResolvedValue(
+      settings({ color_theme: "tokyonight", effective_color_theme: "tokyonight" }),
+    );
+    getTheme.mockResolvedValue({ name: "tokyonight", colors: COLORS } as ThemeResponse);
+    await loadAppearanceTheme();
+    expect(rootVar("--accent")).not.toBe("");
+    expect(rootVar("--primary")).not.toBe("");
+    expect(rootVar("--border")).not.toBe("");
+
+    // A rich theme that supplies only one key must reveal the stylesheet
+    // default for everything the legacy palette had painted.
+    getAppearanceTheme.mockResolvedValue(
+      convertedTheme({ ui: { "--background": "#1e1e2e" } }),
+    );
+    await loadAppearanceTheme("vscode:acme.themes/dark");
+
+    expect(rootVar("--background")).toBe("240 21.1% 14.9%");
+    expect(rootVar("--accent")).toBe("");
+    expect(rootVar("--primary")).toBe("");
+    expect(rootVar("--border")).toBe("");
+  });
+
   it("drops a variable the previous theme applied but the new one omits", async () => {
     getAppearanceTheme
       .mockResolvedValueOnce(

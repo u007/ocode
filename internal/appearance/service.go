@@ -200,9 +200,11 @@ func (s *Service) Themes(ctx context.Context) ([]ThemeRef, []string, error) {
 // The id is validated before any filesystem access, then matched against the
 // memoised discovery snapshot: an id is only ever resolved through a
 // contribution Discovery already verified, so no caller-supplied path reaches
-// the disk. Conversions are cached by absolute path plus modification time and
-// size, so touching a theme file invalidates it (spec §6). A conversion failure
-// is returned as-is; only a missing contribution is ErrThemeNotFound.
+// the disk. Conversions are cached under the theme ID and revalidated against
+// the contribution file's modification time and size, so touching that file
+// invalidates it (spec §6). Files pulled in through `include` or an external
+// `tokenColors` reference are NOT part of that key. A conversion failure is
+// returned as-is; only a missing contribution is ErrThemeNotFound.
 func (s *Service) Resolve(ctx context.Context, id string) (ConvertedTheme, error) {
 	extension, slug, ok := splitThemeID(id)
 	if !ok {

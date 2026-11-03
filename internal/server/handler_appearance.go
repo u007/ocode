@@ -38,11 +38,14 @@ type AppearanceThemeItem struct {
 // AppearanceThemesResponse is the response for GET /api/appearance/themes.
 // Total is the size of the full list, so a client can page it.
 type AppearanceThemesResponse struct {
-	Themes   []AppearanceThemeItem `json:"themes"`
-	Total    int                   `json:"total"`
-	Offset   int                   `json:"offset"`
-	Limit    int                   `json:"limit"`
-	Warnings []string              `json:"warnings,omitempty"`
+	Themes []AppearanceThemeItem `json:"themes"`
+	Total  int                   `json:"total"`
+	Offset int                   `json:"offset"`
+	Limit  int                   `json:"limit"`
+	// Truncated reports that this page does not reach the end of Total, so a
+	// client must request a later Offset to see every installed theme.
+	Truncated bool     `json:"truncated"`
+	Warnings  []string `json:"warnings,omitempty"`
 }
 
 // AppearanceSettingsResponse is the response for GET/PUT
@@ -55,9 +58,11 @@ type AppearanceThemesResponse struct {
 // consumer must route it by its prefix. Warnings explain a fallback; spec §13
 // requires the failure to degrade rather than to block startup.
 type AppearanceSettingsResponse struct {
-	ColorTheme          string   `json:"color_theme"`
-	IconTheme           string   `json:"icon_theme"`
-	ExtraExtensionDirs  []string `json:"extra_extension_dirs"`
+	ColorTheme string `json:"color_theme"`
+	IconTheme  string `json:"icon_theme"`
+	// omitempty keeps a fresh install (no extra roots) from emitting a JSON
+	// null, which a client that maps the field would crash on.
+	ExtraExtensionDirs  []string `json:"extra_extension_dirs,omitempty"`
 	EffectiveColorTheme string   `json:"effective_color_theme"`
 	Warnings            []string `json:"warnings,omitempty"`
 }
@@ -134,11 +139,12 @@ func (h *Handler) HandleAppearanceThemes(w http.ResponseWriter, r *http.Request)
 	page := make([]AppearanceThemeItem, 0, end-offset)
 	page = append(page, items[offset:end]...)
 	writeJSON(w, http.StatusOK, AppearanceThemesResponse{
-		Themes:   page,
-		Total:    total,
-		Offset:   offset,
-		Limit:    limit,
-		Warnings: warnings,
+		Themes:    page,
+		Total:     total,
+		Offset:    offset,
+		Limit:     limit,
+		Truncated: end < total,
+		Warnings:  warnings,
 	})
 }
 

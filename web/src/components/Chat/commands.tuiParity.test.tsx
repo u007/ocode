@@ -1,5 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { COMMANDS, type CommandContext, dispatchCommand } from "./commands";
+
+// `/themes` now applies/persists through the appearance store; the store talks
+// to the server on its own, so this suite stubs the module and asserts the id
+// it was handed. The persistence-across-reload behaviour is covered by
+// commands.themes.test.tsx against the REAL store.
+const { setColorThemeId } = vi.hoisted(() => ({ setColorThemeId: vi.fn(async () => {}) }));
+vi.mock("../../lib/appearanceTheme", () => ({ setColorThemeId }));
 
 /**
  * TUI-parity slash-command suite.
@@ -241,73 +248,93 @@ describe("/editor and /editor-mode", () => {
 });
 
 describe("/themes and /search", () => {
-  it("lists themes and marks the current one", async () => {
+  beforeEach(() => {
+    setColorThemeId.mockClear();
+  });
+
+  const THEMES = {
+    themes: [
+      { id: "tokyonight", label: "Tokyo Night", source: "builtin", kind: "dark", has_icon_theme: false },
+      { id: "vscode:acme.themes/dark", label: "Acme Dark", source: "vscode", kind: "dark", has_icon_theme: false },
+    ],
+    total: 2,
+    offset: 0,
+    limit: 2,
+    truncated: false,
+  };
+
+  it("lists the unified appearance list and marks the effective theme", async () => {
     const result = await dispatchCommand(
       "/themes",
       ctx({
-        getThemes: vi.fn(async () => ({
-          current: "tokyonight",
-          themes: [
-            { name: "tokyonight", label: "Tokyo Night" },
-            { name: "github-dark", label: "GitHub Dark" },
-          ],
+        getAppearanceThemes: vi.fn(async () => THEMES),
+        getAppearanceSettings: vi.fn(async () => ({
+          color_theme: "",
+          icon_theme: "",
+          extra_extension_dirs: [],
+          effective_color_theme: "vscode:acme.themes/dark",
         })),
-        getTheme: vi.fn(),
-        getTUISettings: vi.fn(),
-        setTUISettings: vi.fn(),
       }),
     );
     const content = result.messages?.[0]?.content ?? "";
-    expect(content).toContain("tokyonight");
-    expect(content).toContain("GitHub Dark");
+    expect(content).toContain("vscode:acme.themes/dark");
+    expect(content).toContain("Acme Dark");
     expect(content).toContain("(current)");
   });
 
-  it("applies and persists a named theme", async () => {
-    const setTUISettings = vi.fn(async (cfg: unknown) => cfg);
+  it("applies and persists a VS Code theme through the appearance store", async () => {
     const result = await dispatchCommand(
-      "/themes github-dark",
+      "/themes vscode:acme.themes/dark",
       ctx({
-        getThemes: vi.fn(async () => ({
-          current: "tokyonight",
-          themes: [{ name: "github-dark", label: "GitHub Dark" }],
+        getAppearanceThemes: vi.fn(async () => THEMES),
+        getAppearanceSettings: vi.fn(async () => ({
+          color_theme: "tokyonight",
+          icon_theme: "",
+          extra_extension_dirs: [],
+          effective_color_theme: "tokyonight",
         })),
-        getTheme: vi.fn(async () => ({
-          name: "github-dark",
-          colors: {
-            user: "#111111", assistant: "#222222", header: "#333333", border: "#444444",
-            hint: "#555555", text: "#eeeeee", background: "#000000", status_bg: "#111111",
-            status_fg: "#ffffff", selected_fg: "#ffffff", selected_bg: "#222222",
-            success: "#22c55e", error: "#ef4444", accent: "#3b82f6", dim: "#666666",
-            thinking: "#888888",
-          },
-        })),
-        getTUISettings: vi.fn(async () => ({
-          theme: "tokyonight", mouse: null, scroll_speed: 0, keybinds: {}, leader_timeout: 0, branchless: false,
-        })),
-        setTUISettings,
       }),
     );
-    expect(setTUISettings).toHaveBeenCalledWith(
-      expect.objectContaining({ theme: "github-dark" }),
+
+    expect(setColorThemeId).toHaveBeenCalledWith("vscode:acme.themes/dark");
+    expect(result.messages?.[0]?.content).toContain("Acme Dark");
+  });
+
+  it("still accepts a legacy builtin theme name", async () => {
+    const result = await dispatchCommand(
+      "/themes tokyonight",
+      ctx({
+        getAppearanceThemes: vi.fn(async () => THEMES),
+        getAppearanceSettings: vi.fn(async () => ({
+          color_theme: "",
+          icon_theme: "",
+          extra_extension_dirs: [],
+          effective_color_theme: "tokyonight",
+        })),
+      }),
     );
-    expect(result.messages?.[0]?.content).toContain("GitHub Dark");
+
+    expect(setColorThemeId).toHaveBeenCalledWith("tokyonight");
+    expect(result.messages?.[0]?.content).toContain("Tokyo Night");
   });
 
   it("rejects an unknown theme without persisting", async () => {
-    const setTUISettings = vi.fn();
     const result = await dispatchCommand(
       "/themes nope",
       ctx({
-        getThemes: vi.fn(async () => ({ current: "tokyonight", themes: [{ name: "tokyonight", label: "Tokyo Night" }] })),
-        getTheme: vi.fn(),
-        getTUISettings: vi.fn(),
-        setTUISettings,
+        getAppearanceThemes: vi.fn(async () => THEMES),
+        getAppearanceSettings: vi.fn(async () => ({
+          color_theme: "",
+          icon_theme: "",
+          extra_extension_dirs: [],
+          effective_color_theme: "tokyonight",
+        })),
       }),
     );
-    expect(setTUISettings).not.toHaveBeenCalled();
+    expect(setColorThemeId).not.toHaveBeenCalled();
     expect(result.messages?.[0]?.content).toContain("Unknown theme");
   });
+
 
   it("/search and /find open the in-chat find bar with the query", async () => {
     const seen: string[] = [];

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -418,19 +419,30 @@ func readThemeHead(path string) (themeHead, error) {
 }
 
 // readCappedFile reads at most limit bytes from path and reports a file larger
-// than the cap as an error instead of silently truncating it.
+// than the cap as an error instead of silently truncating it. The cap is
+// enforced while reading (io.LimitReader), not from a stat size a file can
+// outgrow between the check and the read.
 func readCappedFile(path string, limit int64) ([]byte, error) {
-	info, err := os.Stat(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%q is not a regular file", path)
 	}
-	if info.Size() > limit {
-		return nil, fmt.Errorf("%q is %d bytes, over the %d byte limit", path, info.Size(), limit)
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
 	}
-	return os.ReadFile(path)
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%q is at least %d bytes, over the %d byte limit", path, len(data), limit)
+	}
+	return data, nil
 }
 
 // contributionPolarity classifies a theme contribution from the theme's own

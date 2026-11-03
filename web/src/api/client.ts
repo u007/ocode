@@ -2760,10 +2760,31 @@ export const api = {
     ),
   getThemes: () => fetchJSON<ThemesListResponse>("/api/themes"),
   // Appearance is local-only (spec §12): these never take a `host`. The list
-  // is paginated server-side; request the maximum page so the picker shows
-  // every installed theme.
-  getAppearanceThemes: () =>
-    fetchJSON<AppearanceThemesResponse>("/api/appearance/themes?limit=1000"),
+  // is paginated server-side; walk every page so the picker cannot silently
+  // hide the themes past the server's hard cap.
+  getAppearanceThemes: async () => {
+    const pageSize = 1000;
+    const first = await fetchJSON<AppearanceThemesResponse>(
+      `/api/appearance/themes?limit=${pageSize}&offset=0`,
+    );
+    const total = Number.isFinite(first.total) ? first.total : 0;
+    const themes = Array.isArray(first.themes) ? [...first.themes] : [];
+    while (themes.length < total) {
+      const page = await fetchJSON<AppearanceThemesResponse>(
+        `/api/appearance/themes?limit=${pageSize}&offset=${themes.length}`,
+      );
+      if (!Array.isArray(page.themes) || page.themes.length === 0) break;
+      themes.push(...page.themes);
+    }
+    return {
+      ...first,
+      themes,
+      offset: 0,
+      limit: total,
+      total,
+      truncated: themes.length < total,
+    };
+  },
   getAppearanceTheme: (id: string) =>
     fetchJSON<ConvertedTheme>(appearanceThemePath(id)),
   getAppearanceSettings: () =>

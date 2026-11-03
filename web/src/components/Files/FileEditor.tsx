@@ -348,9 +348,10 @@ function FileEditorImpl({
           lineNumbers: s.line_numbers ? "on" : "off",
         });
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         // Keep the last known theme (the store starts at the default); a
         // transient settings failure must not discard the user's palette.
+        console.warn("[FileEditor] failed to load persisted Monaco settings", err);
       });
   }, []);
 
