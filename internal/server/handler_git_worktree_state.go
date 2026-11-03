@@ -277,6 +277,14 @@ func worktreeOwners(worktreePath, sessionsBase string, liveByRoot map[string][]s
 // outlive its budget) and folds stderr into the error. gitexec.Env() keeps
 // ocode from taking optional index locks while the user's own git runs.
 func gitRunInDirTimeout(ctx context.Context, dir string, args ...string) (string, error) {
+	out, err := gitRunInDirTimeoutRaw(ctx, dir, args...)
+	return strings.TrimSpace(out), err
+}
+
+// gitRunInDirTimeoutRaw is gitRunInDirTimeout without trimming. Line-oriented
+// porcelain needs it: an unstaged change is the line " M path", and a leading
+// space is its status code, not padding.
+func gitRunInDirTimeoutRaw(ctx context.Context, dir string, args ...string) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, worktreeGitTimeout)
 	defer cancel()
 
@@ -292,5 +300,5 @@ func gitRunInDirTimeout(ctx context.Context, dir string, args ...string) (string
 	if callCtx.Err() != nil {
 		return "", fmt.Errorf("git %s: %w (after %s)", strings.Join(args, " "), callCtx.Err(), worktreeGitTimeout)
 	}
-	return strings.TrimSpace(string(out)), gitexec.WithOutput(cmdErr, stderr.String(), strings.TrimSpace(string(out)))
+	return string(out), gitexec.WithOutput(cmdErr, stderr.String(), strings.TrimSpace(string(out)))
 }

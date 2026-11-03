@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -17,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/u007/ocode/internal/gitexec"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/remote"
 )
 
 type FileNode struct {
@@ -131,15 +133,20 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		node.Children = []FileNode{}
 	}
 	// Annotate with git status badges (M/?/A/D/R) when this is a repo.
-	if m := gitStatusMapForDir(anchor); len(m) > 0 {
+	if m := gitStatusMapForDir(r.Context(), anchor); len(m) > 0 {
 		annotateFileTreeGitStatus(&node, anchor, m)
 	}
 	// Use git itself so worktrees and non-standard layouts are recognised,
 	// not just a literal ".git" directory entry.
-	isGitRepo := false
-	if out, err := exec.Command("git", "-C", anchor, "rev-parse", "--is-inside-work-tree").Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
-		isGitRepo = true
+	// rev-parse never takes an optional lock, so the bounded helper's
+	// gitexec.Env() is inert here; the deadline is what matters.
+	out, err := gitRunInDirTimeout(r.Context(), anchor, "rev-parse", "--is-inside-work-tree")
+	isGitRepo := err == nil && out == "true"
+	if errors.Is(err, context.DeadlineExceeded) {
+		slog.Warn("file tree: git repo probe timed out", "dir", anchor, "bound", worktreeGitTimeout, "err", err)
 	}
+	// intentionally not logged: rev-parse exits non-zero outside a work tree,
+	// which is the normal non-repo answer, and a client disconnect is benign.
 	writeJSON(w, http.StatusOK, FileTreeResponse{
 		Children:  node.Children,
 		Truncated: walk.truncated,
@@ -162,22 +169,33 @@ type FileTreeResponse struct {
 // gitStatusMapForDir runs `git status --short` in dir and returns a map
 // of relative path -> badge (M/?/A/D/R), mirroring the TUI's
 // parseGitStatusShort. Returns nil for non-repos or on error. Uses git
-// plumbing so worktrees (where .git is a file) are handled.
-func gitStatusMapForDir(dir string) map[string]string {
-	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+// plumbing so worktrees (where .git is a file) are handled. Both git calls
+// run under the worktreeGitTimeout deadline and ctx (the request), with
+// gitexec.Env() so the badge probe never takes .git/index.lock.
+func gitStatusMapForDir(ctx context.Context, dir string) map[string]string {
+	const revParse = "rev-parse --is-inside-work-tree"
+	inside, err := gitRunInDirTimeout(ctx, dir, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		// A non-zero exit is git's normal answer outside a work tree, so it is
+		// not logged. Anything else (deadline, missing git, client gone) is.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			logGitStatusProbeError(dir, revParse, err)
+		}
 		return nil
 	}
-	// GIT_OPTIONAL_LOCKS=0: this badge probe serves the file tree on every
-	// request, and a plain `git status` would refresh the index (taking
-	// .git/index.lock) as a side effect — contending with the user's own git.
-	cmd := exec.Command("git", "-c", "core.quotepath=false", "-C", dir, "status", "--short")
-	cmd.Env = gitexec.Env()
-	out, err := cmd.Output()
+	if inside != "true" {
+		return nil
+	}
+	// Raw, not trimmed: the first status line can start with the space of an
+	// unstaged change (" M a.txt"), which the parser below depends on.
+	out, err := gitRunInDirTimeoutRaw(ctx, dir, "-c", "core.quotepath=false", "status", "--short")
 	if err != nil {
+		logGitStatusProbeError(dir, "status --short", err)
 		return nil
 	}
 	m := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if len(line) < 4 {
 			continue
 		}
@@ -202,6 +220,17 @@ func gitStatusMapForDir(dir string) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// logGitStatusProbeError records a file-tree git probe that failed for a reason
+// other than "not a repository". A client that went away is debug-only; a
+// deadline, a missing git binary or a failing status is a real fault.
+func logGitStatusProbeError(dir, attempted string, err error) {
+	if errors.Is(err, context.Canceled) {
+		slog.Debug("file tree: git probe cancelled by client", "dir", dir, "git", attempted, "err", err)
+		return
+	}
+	slog.Warn("file tree: git probe failed", "dir", dir, "git", attempted, "bound", worktreeGitTimeout, "err", err)
 }
 
 func annotateFileTreeGitStatus(node *FileNode, anchor string, m map[string]string) {
@@ -1332,6 +1361,113 @@ func (h *Handler) HandleFileAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// remoteStatTimeout bounds one remote stat. The picker stats on every typing
+// pause, so a hung host must not hold an exec slot and an HTTP connection for
+// the full remoteExecTimeout. A stat that exceeds it is a transport failure
+// (502) like any other unreachable-host read.
+const remoteStatTimeout = 5 * time.Second
+
+// fileStatResponse is the HandleFileStat body. Path is set whenever Exists is
+// true: the repo-relative spelling of the entry, byte-identical to the
+// FileNode.Path that /api/files/tree returns for it, so the picker can dedupe a
+// direct hit against tree rows and open the same path the tree would.
+type fileStatResponse struct {
+	Exists bool   `json:"exists"`
+	IsDir  bool   `json:"is_dir"`
+	Path   string `json:"path,omitempty"`
+}
+
+// HandleFileStat reports whether path exists and whether it is a directory,
+// under the same editor containment as HandleFileAccess. The ctrl/cmd+p picker
+// calls it with the typed text so a direct path hit is listed first without
+// waiting for the (slow, capped) full tree walk. A missing or out-of-scope
+// path is a normal "exists: false" answer, not an error.
+func (h *Handler) HandleFileStat(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	root := r.URL.Query().Get("project_root")
+	if host := hostParam(r); host != "" {
+		rw, err := h.remoteWorkForFileRead(host, root)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if containsDotDot(path) {
+			writeJSON(w, http.StatusOK, fileStatResponse{})
+			return
+		}
+		abs, cerr := remoteRawContainment(rw, path, root)
+		if cerr != "" {
+			writeJSON(w, http.StatusOK, fileStatResponse{})
+			return
+		}
+		rel, err := remoteRelCheck(rw.Path, abs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "remote stat: "+err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), remoteStatTimeout)
+		defer cancel()
+		q := remote.ShellQuotePath(abs)
+		out, rerr := remoteRun(ctx, rw, "if [ -d "+q+" ]; then echo DIR; elif [ -e "+q+" ]; then echo FILE; else echo NONE; fi")
+		if rerr != nil {
+			if r.Context().Err() != nil {
+				// The picker aborts each superseded keystroke, which cancels this
+				// request. Not a host fault, so it is only logged at debug.
+				slog.Debug("file stat: remote stat cancelled by client", "host", host, "path", abs, "err", rerr)
+			} else {
+				slog.Warn("file stat: remote stat failed", "host", host, "path", abs, "bound", remoteStatTimeout, "err", rerr)
+			}
+			status := http.StatusInternalServerError
+			if isRemoteTransportError(rerr) {
+				status = http.StatusBadGateway
+			}
+			writeError(w, status, "remote stat failed: "+rerr.Error())
+			return
+		}
+		kind := strings.TrimSpace(out)
+		if kind != "DIR" && kind != "FILE" {
+			writeJSON(w, http.StatusOK, fileStatResponse{})
+			return
+		}
+		writeJSON(w, http.StatusOK, fileStatResponse{Exists: true, IsDir: kind == "DIR", Path: pathpkg.Clean(rel)})
+		return
+	}
+	resolved, errMsg := h.resolveEditorFilePath(root, path)
+	if errMsg != "" {
+		writeJSON(w, http.StatusOK, fileStatResponse{})
+		return
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		writeJSON(w, http.StatusOK, fileStatResponse{})
+		return
+	}
+	// Spell the path exactly as /api/files/tree does: filepath.Rel from the
+	// same base the tree walks. The base is the project root, or the server's
+	// workDir when the request names none (the resolver anchors there too).
+	base := root
+	if base == "" {
+		base = h.workDir
+	}
+	rel, err := filepath.Rel(base, resolved)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stat path relative to project root: "+err.Error())
+		return
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// The containment check accepts a symlink-resolved match, so an absolute
+		// spelling through an alias (/var vs /private/var) can resolve outside
+		// the lexical root. It has no in-root spelling, so it is not reported.
+		writeJSON(w, http.StatusOK, fileStatResponse{})
+		return
+	}
+	writeJSON(w, http.StatusOK, fileStatResponse{Exists: true, IsDir: info.IsDir(), Path: rel})
 }
 
 // serveMediaFile streams one local audio/video file with HTTP range support

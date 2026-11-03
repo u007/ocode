@@ -409,6 +409,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
 	s.mux.HandleFunc("GET /api/files/access", s.authMiddleware(s.handleFileAccess))
+	s.mux.HandleFunc("GET /api/files/stat", s.authMiddleware(s.handler.HandleFileStat))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	// Editor grants: directories OUTSIDE any project root the user explicitly
@@ -2287,8 +2288,8 @@ func (s *Server) writeRemoteStateFile(ln net.Listener, browsePort int) error {
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
 	// Record this process so a later `ocode serve` can name a sibling running a
-	// DIFFERENT version: such a server keeps a remote host's workspace alive and
-	// retires the newer remote server on every reconnect, which kills in-flight
+	// DIFFERENT version: such a server keeps a remote host's workspace alive, and
+	// its explicit restart retires the shared remote server, which kills in-flight
 	// turns there. Registration lives here, not in Run, so the desktop shell and
 	// the TUI's embedded server are visible too — they never call Run. The
 	// record is advisory-locked for this process's lifetime, so a scanner can
@@ -2551,8 +2552,8 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	}
 
 	// Report sibling servers of a DIFFERENT version before binding: a stale
-	// server keeps its remote workspaces alive and retires the shared remote
-	// server on every reconnect, which kills in-flight turns there. Reporting
+	// server keeps its remote workspaces alive, and its explicit restart retires
+	// the shared remote server, which kills in-flight turns there. Reporting
 	// only — stopping another process is destructive (it can own terminals and
 	// running turns), so that stays an explicit user action.
 	warnServeSiblings()

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -54,6 +56,26 @@ func TestGitStatusForDirBoundedWhenGitHangs(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("gitStatusForDir did not return within 5s — a hung git still wedges the caller")
+	}
+}
+
+// gitStatusMapForDir feeds the file-tree badges. Its first status line is an
+// unstaged change (" M a.txt"), whose leading space is the status code; trimming
+// the whole output before parsing would shift that line and key the badge under
+// the wrong path. Both the modified and the untracked path must come back keyed.
+func TestGitStatusMapForDirKeysModifiedAndUntrackedPaths(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	writeFile(t, filepath.Join(dir, "a.txt"), "a\n")
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", "init")
+	writeFile(t, filepath.Join(dir, "a.txt"), "changed\n")
+	writeFile(t, filepath.Join(dir, "z.txt"), "new\n")
+
+	got := gitStatusMapForDir(context.Background(), dir)
+	want := map[string]string{"a.txt": "M", "z.txt": "?"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gitStatusMapForDir = %v, want %v", got, want)
 	}
 }
 

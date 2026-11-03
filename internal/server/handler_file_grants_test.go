@@ -535,3 +535,98 @@ func TestFileAccess_SymlinkedProjectRootIsOK(t *testing.T) {
 		t.Fatalf("status = %d body=%s, want 200 via symlinked project root", rec.Code, rec.Body.String())
 	}
 }
+
+func fileStat(t *testing.T, h *Handler, path, root string) fileStatResponse {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.HandleFileStat(rec, httptest.NewRequest("GET", "/api/files/stat?path="+url.QueryEscape(path)+"&project_root="+url.QueryEscape(root), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var got fileStatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	return got
+}
+
+// The ctrl/cmd+p picker stats the typed text so a direct path hit is listed
+// first without waiting for the tree walk.
+func TestFileStat_ReportsFileDirAndMissing(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "a", "b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "a", "f.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileStat(t, h, "a/b", tmpDir); !got.Exists || !got.IsDir {
+		t.Fatalf("dir: got %+v, want exists+is_dir", got)
+	}
+	if got := fileStat(t, h, "a/f.txt", tmpDir); !got.Exists || got.IsDir {
+		t.Fatalf("file: got %+v, want exists, not dir", got)
+	}
+	if got := fileStat(t, h, "a/missing", tmpDir); got.Exists {
+		t.Fatalf("missing: got %+v, want exists=false", got)
+	}
+}
+
+// The picker dedupes a direct hit against tree rows and opens the path the
+// tree would, so an existing entry reports the tree's spelling whatever the
+// typed one was (./ segments, doubled or trailing slashes, absolute paths).
+func TestFileStat_ReportsTreeSpelledPath(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "a", "b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "a", "f.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		typed string
+		want  string
+		isDir bool
+	}{
+		{"./a/f.txt", "a/f.txt", false},
+		{"a//f.txt", "a/f.txt", false},
+		{filepath.Join(tmpDir, "a", "f.txt"), "a/f.txt", false},
+		{"a/b/", "a/b", true},
+	}
+	for _, c := range cases {
+		got := fileStat(t, h, c.typed, tmpDir)
+		if !got.Exists || got.IsDir != c.isDir || got.Path != c.want {
+			t.Fatalf("typed %q: got %+v, want exists path=%q is_dir=%v", c.typed, got, c.want, c.isDir)
+		}
+	}
+}
+
+// An absolute spelling through a symlink alias passes containment but has no
+// spelling relative to the lexical project root; it is reported as not found
+// rather than with an escaping path the picker cannot open.
+func TestFileStat_SymlinkAliasWithoutInRootSpellingIsNotFound(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "a"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "a", "f.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(tmpDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileStat(t, h, filepath.Join(real, "a", "f.txt"), link); got.Exists {
+		t.Fatalf("alias spelling: got %+v, want exists=false", got)
+	}
+}
+
+func TestFileStat_OutsideRootIsNotFound(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	if got := fileStat(t, h, "../etc", tmpDir); got.Exists {
+		t.Fatalf("outside root: got %+v, want exists=false", got)
+	}
+}

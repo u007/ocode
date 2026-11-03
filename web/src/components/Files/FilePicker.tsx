@@ -50,6 +50,31 @@ interface FlatTree {
   folders: string[];
 }
 
+// Response of GET /api/files/stat. `path` is the server's canonical,
+// tree-spelled path whenever `exists` is true.
+interface FileStatResponse {
+  exists?: boolean;
+  is_dir?: boolean;
+  path?: string;
+}
+
+interface DirectHit {
+  path: string;
+  isDir: boolean;
+}
+
+// The hit a stat answered, keyed by the query and project it was asked for.
+interface DirectHitState {
+  query: string;
+  scope: string;
+  hit: DirectHit;
+}
+
+// A stat answer is only valid for the project and host it was asked under.
+function directHitScope(projectPath?: string, projectHost?: string): string {
+  return JSON.stringify([projectPath, projectHost]);
+}
+
 // Height of one result row, in pixels.
 //
 // The row is a cmdk item with `py-3` (12px top + 12px bottom) around a
@@ -136,6 +161,53 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
     else setQuery(initialQuery ?? "");
   }, [open, initialQuery]);
 
+  // Direct path hit: the typed text, when it is a single token naming a path
+  // that exists. Stat'd on its own request so it does not wait for the slow,
+  // capped tree walk above.
+  const typedPath = query.trim().replace(/\/+$/, "");
+  const [directHitState, setDirectHitState] = useState<DirectHitState | null>(null);
+  // Used only while the dialog is open, and only for the exact query, project
+  // and host it was stat'd for. Typing on hides it at once, so the row of a
+  // previous query is never drawn, and nothing is reset mid-typing.
+  const directHit =
+    open && directHitState && directHitState.query === typedPath && directHitState.scope === directHitScope(projectPath, projectHost)
+      ? directHitState.hit
+      : null;
+  useEffect(() => {
+    if (!open) {
+      setDirectHitState(null);
+      return;
+    }
+    if (!projectPath || !typedPath || /\s/.test(typedPath)) return;
+    const scope = directHitScope(projectPath, projectHost);
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      const qs = `path=${encodeURIComponent(typedPath)}&project_root=${encodeURIComponent(projectPath)}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`;
+      fetch(apiPath(`/api/files/stat?${qs}`), { headers: authHeaders(), signal: controller.signal })
+        .then(async (res) => {
+          if (!res.ok) {
+            console.error(`Failed to stat typed path "${typedPath}" in ${projectPath}: HTTP ${res.status}`);
+            return;
+          }
+          const data = (await res.json()) as FileStatResponse;
+          if (controller.signal.aborted || !data.exists) return;
+          if (!data.path) {
+            console.error(`Stat of typed path "${typedPath}" in ${projectPath} returned exists without a path`);
+            return;
+          }
+          setDirectHitState({ query: typedPath, scope, hit: { path: data.path, isDir: !!data.is_dir } });
+        })
+        .catch((err) => {
+          // An aborted request is a superseded keystroke, which is expected.
+          if ((err as Error).name !== "AbortError") console.error(`Failed to stat typed path "${typedPath}":`, err);
+        });
+    }, 120);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, typedPath, projectPath, projectHost]);
+
   const keywords = useMemo(() => parseKeywords(query), [query]);
   // Folder rows only exist when the caller can act on them. A path is either a
   // file or a folder, never both, so membership alone tells the rows apart.
@@ -147,8 +219,12 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
     () => (listFolders ? [...tree.files, ...tree.folders] : tree.files),
     [tree, listFolders],
   );
-  const folderPaths = useMemo(() => new Set(listFolders ? tree.folders : []), [tree, listFolders]);
-  const filteredFiles = useMemo(() => {
+  const folderPaths = useMemo(() => {
+    const set = new Set(listFolders ? tree.folders : []);
+    if (listFolders && directHit?.isDir) set.add(directHit.path);
+    return set;
+  }, [tree, listFolders, directHit]);
+  const rankedFiles = useMemo(() => {
     // Unfiltered: shortest path first so root-level files surface above deep ones.
     if (keywords.length === 0) return [...entries].sort(compareByShortestPath);
     // Filtered: relevance first, then shortest path as the tiebreaker.
@@ -161,6 +237,12 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
         return compareByShortestPath(a, b);
       });
   }, [entries, keywords]);
+  // An exact path hit is listed first, folder or file, even when the tree
+  // index is still loading, truncated, or lacks it.
+  const filteredFiles = useMemo(() => {
+    if (!directHit || (directHit.isDir && !listFolders)) return rankedFiles;
+    return [directHit.path, ...rankedFiles.filter((p) => p !== directHit.path)];
+  }, [rankedFiles, directHit, listFolders]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
