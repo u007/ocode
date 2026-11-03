@@ -10,6 +10,13 @@ interface Options {
   minWidth?: number;
   maxWidth?: number;
   collapsible?: boolean;
+  /**
+   * Which side of the handle the pane sits on. `left` (default): the pane is
+   * before the handle, so dragging right grows it. `right`: the pane is after
+   * the handle (e.g. the chat-side browser panel), so dragging left grows it.
+   * Geometry the hook cannot infer from the DOM, hence explicit.
+   */
+  side?: "left" | "right";
 }
 
 /**
@@ -24,7 +31,9 @@ export function useResizableSidebar(options: Options = {}) {
     minWidth = MIN_WIDTH,
     maxWidth = MAX_WIDTH,
     collapsible = false,
+    side = "left",
   } = options;
+  const dragSign = side === "right" ? -1 : 1;
 
   const collapsedKey = `${storageKey}.collapsed`;
 
@@ -76,7 +85,7 @@ export function useResizableSidebar(options: Options = {}) {
       const onMove = (ev: PointerEvent) => {
         if (!dragRef.current) return;
         const delta = ev.clientX - dragRef.current.startX;
-        const newWidth = clamp(dragRef.current.startWidth + delta);
+        const newWidth = clamp(dragRef.current.startWidth + dragSign * delta);
         setWidth(newWidth);
       };
 
@@ -91,7 +100,7 @@ export function useResizableSidebar(options: Options = {}) {
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
     },
-    [width, clamp],
+    [width, clamp, dragSign],
   );
 
   // Persist on width change

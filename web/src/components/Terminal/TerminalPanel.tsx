@@ -39,7 +39,7 @@ import { actionForEvent, buildKeybindTable, type KeybindAction } from "./ghostty
 import { attachMouseReporting, sendWheelReport } from "./terminalMouse";
 import { attachImeHygiene } from "./terminalImeHygiene";
 import { createTerminalInputGuard, isTerminalGeneratedReply } from "./terminalInputGuard";
-import { softKeyboardNavigationSequence } from "./terminalSoftKeyboard";
+import { softKeyboardBackspace, softKeyboardNavigationSequence } from "./terminalSoftKeyboard";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { noteRemoteHostReachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
@@ -1074,7 +1074,8 @@ export default function TerminalPanel({
   // inside it), so `stopPropagation` keeps it from also seeing the event.
   // The sequence is fed back through `term.input(..., true)`: the same typed
   // input path as a hardware key, so the attach guard in `term.onData`
-  // applies. Declining (null) is the default for every other key.
+  // applies. Declining (null) is the default for every other key. Backspace
+  // is dropped the same way (its keydown is also ignored on the 229 marker).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -1084,7 +1085,8 @@ export default function TerminalPanel({
       // Only keys aimed at the TERMINAL: the panel root also holds the find
       // bar's input, and typing there must never reach the shell.
       if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
-      const seq = softKeyboardNavigationSequence(e, term.getMode(1, false));
+      let seq = softKeyboardNavigationSequence(e, term.getMode(1, false));
+      if (!seq) seq = softKeyboardBackspace(e);
       if (!seq) return;
       e.preventDefault();
       e.stopPropagation();
@@ -1093,6 +1095,29 @@ export default function TerminalPanel({
     };
     el.addEventListener("keydown", onSoftKeyDown, true);
     return () => el.removeEventListener("keydown", onSoftKeyDown, true);
+  }, [inputGuard]);
+
+  // ── Soft-keyboard Backspace, text-path leg ────────────────────────
+  // A soft keyboard can deliver Backspace as `beforeinput` deleteContentBackward
+  // instead of a keydown. ghostty-web's own beforeinput listener also maps that
+  // to DEL, but it runs at the textarea, after this capture-phase listener on
+  // the panel root, which stops propagation and sends DEL through the same
+  // typed-input path as the keydown leg above. Composition deletes are left to
+  // the IME (isComposing), and every other inputType is untouched.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onBeforeInput = (e: InputEvent) => {
+      if (e.inputType !== "deleteContentBackward" || e.isComposing) return;
+      const term = termRef.current;
+      if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      inputGuard.noteInput();
+      term.input("\x7f", true);
+    };
+    el.addEventListener("beforeinput", onBeforeInput, true);
+    return () => el.removeEventListener("beforeinput", onBeforeInput, true);
   }, [inputGuard]);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a

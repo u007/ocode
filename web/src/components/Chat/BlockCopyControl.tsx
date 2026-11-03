@@ -77,7 +77,11 @@ export function BlockCopyControl({
       data-testid="block-copy"
       data-speech-exclude=""
       className={cn(
-        "inline-flex items-center overflow-hidden rounded border border-border/40 text-muted-foreground",
+        // `relative` anchors the absolutely positioned sr-only status span to this
+        // control. Unpositioned, it resolves to the virtualized row and escapes
+        // any `overflow-y-auto` ancestor (an expanded agent card's transcript),
+        // inflating the chat scrollHeight with blank space below the list.
+        "relative inline-flex items-center overflow-hidden rounded border border-border/40 text-muted-foreground",
         className,
       )}
     >

@@ -12,9 +12,12 @@
  * `beforeinput`, not `keydown` — which is why typing looked fine while arrows
  * were dead.
  *
+ * The same drop applies to Backspace: its keydown is ignored on the 229 marker,
+ * so `softKeyboardBackspace` covers it.
+ *
  * The panel owns those leftovers in a capture-phase listener and feeds the
  * sequence back through `term.input(..., true)` (the typed-input path), so the
- * pty sees exactly what a hardware arrow would send.
+ * pty sees exactly what a hardware key would send.
  */
 
 interface NavKeySequence {
@@ -26,8 +29,9 @@ interface NavKeySequence {
 
 /**
  * Keys that produce no text (so `beforeinput` never sees them) and are safe to
- * synthesise. Enter/Tab/Backspace are deliberately absent: phone keyboards
- * deliver those through the text path, and claiming them here would double-send.
+ * synthesise. Enter/Tab are deliberately absent: phone keyboards deliver those
+ * through the text path, and claiming them here would double-send. Backspace is
+ * handled by `softKeyboardBackspace` below.
  */
 const SEQUENCES: Record<string, NavKeySequence> = {
   ArrowUp: { dec: "\x1b[A", app: "\x1bOA" },
@@ -70,6 +74,15 @@ export interface SoftKeyboardEventShape {
 }
 
 /**
+ * True when ghostty-web must NOT own the event: it is IME-marked, or carries no
+ * usable physical `code`. A hardware key with a real `code` stays with
+ * ghostty-web's encoder, so intercepting it would double-send.
+ */
+function looksLikeSoftKeyboard(ev: SoftKeyboardEventShape): boolean {
+  return ev.keyCode === IME_KEYCODE || !ev.code || ev.code === "Unidentified";
+}
+
+/**
  * Returns the bytes to send for a soft-keyboard navigation key, or null when
  * the event should be left to ghostty-web (or to the browser).
  *
@@ -95,9 +108,25 @@ export function softKeyboardNavigationSequence(
   // and the event is not IME-marked — INCLUDING codes this table does not name
   // (keypad arrows, F-keys, Kitty encodings). Intercepting those would bypass
   // its encoder and could double-send, so only soft-keyboard-shaped events
-  // are ours: the Android IME marker, or no usable `code` at all.
-  const looksLikeSoftKeyboard = ev.keyCode === IME_KEYCODE || !ev.code || ev.code === "Unidentified";
-  if (!looksLikeSoftKeyboard) return null;
+  // are ours (see `looksLikeSoftKeyboard`).
+  if (!looksLikeSoftKeyboard(ev)) return null;
 
   return applicationCursor ? sequence.app : sequence.dec;
+}
+
+/**
+ * Returns DEL (`\x7f`) for a soft-keyboard Backspace, or null when the event
+ * should be left to ghostty-web (a hardware Backspace) or to the browser.
+ *
+ * Same drop as the nav keys: ghostty-web ignores a Backspace keydown on the
+ * 229 marker, so nothing reaches the pty. A hardware Backspace (real `code`,
+ * no marker) is ghostty-web's to send — returning DEL here would double it.
+ */
+export function softKeyboardBackspace(ev: SoftKeyboardEventShape): string | null {
+  // Modified Backspace (Ctrl/Alt/Meta/Shift) is a different byte sequence
+  // (word delete) that ghostty-web's encoder owns; phone keyboards send none.
+  if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return null;
+  if (ev.key !== "Backspace" && ev.keyCode !== 8) return null;
+  if (!looksLikeSoftKeyboard(ev)) return null;
+  return "\x7f";
 }

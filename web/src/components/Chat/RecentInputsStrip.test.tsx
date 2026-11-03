@@ -23,6 +23,26 @@ describe("RecentInputsStrip", () => {
     expect(screen.getByLabelText(/recent inputs/i)).toBeInTheDocument();
   });
 
+  it("labels itself as sent so it is not read as the queued list", () => {
+    render(<RecentInputsStrip inputs={["an ask"]} />);
+    expect(screen.getByText(/sent — not queued/i)).toBeInTheDocument();
+    // The list is *described by* that hint, so assistive tech gets it too.
+    expect(screen.getByLabelText(/recent inputs/i)).toHaveAccessibleDescription(
+      /sent — not queued/i,
+    );
+  });
+
+  it("marks every line with a send glyph instead of a queue number", () => {
+    render(<RecentInputsStrip inputs={["earlier ask", "latest ask"]} />);
+    const rows = Array.from(screen.getByTestId("recent-inputs").querySelectorAll("li"));
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.querySelector("svg")).not.toBeNull();
+      // Queue rows begin "1.", "2."; these never do.
+      expect(row.textContent ?? "").not.toMatch(/^\s*\d+\./);
+    }
+  });
+
   it("renders nothing when there are no inputs, so it reserves no chrome", () => {
     const { container } = render(<RecentInputsStrip inputs={[]} />);
     expect(container.firstChild).toBeNull();

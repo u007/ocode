@@ -290,3 +290,58 @@ describe("soft-keyboard navigation keys in the terminal", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 });
+
+function fireBeforeInput(target: HTMLElement, inputType: string, isComposing = false): { event: InputEvent } {
+  const event = new InputEvent("beforeinput", { bubbles: true, cancelable: true, isComposing });
+  // jsdom may not expose inputType on InputEvent, so pin the fields explicitly.
+  Object.defineProperty(event, "inputType", { get: () => inputType });
+  Object.defineProperty(event, "isComposing", { get: () => isComposing });
+  target.dispatchEvent(event);
+  return { event };
+}
+
+describe("soft-keyboard Backspace in the terminal", () => {
+  it("sends DEL once for a soft-keyboard Backspace keydown (keyCode 229)", async () => {
+    const { term, socket } = await mountPanel();
+    socket.send.mockClear();
+    const { event } = fireKeyDown(term.textarea!, { key: "Backspace", code: "", keyCode: 229 });
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(socket.send).toHaveBeenCalledWith("\x7f");
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("sends DEL once for a deleteContentBackward beforeinput", async () => {
+    const { term, socket } = await mountPanel();
+    socket.send.mockClear();
+    const { event } = fireBeforeInput(term.textarea!, "deleteContentBackward");
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(socket.send).toHaveBeenCalledWith("\x7f");
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("leaves other beforeinput types alone", async () => {
+    const { term, socket } = await mountPanel();
+    socket.send.mockClear();
+    const { event } = fireBeforeInput(term.textarea!, "insertText");
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("sends nothing for a deleteContentBackward during an IME composition", async () => {
+    const { term, socket } = await mountPanel();
+    socket.send.mockClear();
+    // The IME is still editing its own composed text; the browser owns that delete.
+    const { event } = fireBeforeInput(term.textarea!, "deleteContentBackward", true);
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("leaves a hardware Backspace keydown to ghostty-web (real code, keyCode 8)", async () => {
+    const { term, socket } = await mountPanel();
+    socket.send.mockClear();
+    // ghostty-web encodes this one itself; intercepting it here would double-send.
+    const { event } = fireKeyDown(term.textarea!, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+});

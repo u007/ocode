@@ -14,10 +14,23 @@
  * competing affordance for the same job. The full text is on the `title`
  * tooltip, and the line is truncated to one row so the band cannot grow.
  *
+ * ── Why the "Sent — not queued" label ──────────────────────────────────────
+ * `ChatInput` renders the queued-message list in this same stack (below the
+ * attach pills), and a queued row is also one line of muted message text. Two
+ * bare lines here were therefore read as pending messages. The strip now names
+ * itself and every row starts with a send glyph, which the queue rows never do
+ * (they are numbered, clickable buttons under an "N queued — …" hint). Do not
+ * drop the label: without it these lines carry no positive statement that they
+ * were already sent. Keep the strip non-interactive — the label must never
+ * imply "click to send".
+ *
  * Purely presentational: the parent (ChatInput) decides WHICH inputs and
  * WHETHER to show, using `recentUserInputs` (lib/recentInputs.ts) and the
  * per-session `transcriptScrolledUp` signal from ChatPanel's scroll handler.
  */
+
+import { Send } from "lucide-react";
+import { useId } from "react";
 
 interface Props {
   /** Oldest → newest, already filtered to real typed input. */
@@ -30,29 +43,43 @@ function oneLine(text: string): string {
 }
 
 export default function RecentInputsStrip({ inputs }: Props) {
+  // All chat tabs stay mounted, so a fixed id would be duplicated in the DOM.
+  const hintId = useId();
   const lines = inputs.map(oneLine).filter((text) => text.length > 0);
   if (lines.length === 0) return null;
 
   return (
-    <ul
-      data-testid="recent-inputs"
-      aria-label="Recent inputs"
-      className="mb-1 space-y-0.5"
-    >
-      {lines.map((text, i) => (
-        <li
-          key={`${i}:${text.slice(0, 24)}`}
-          title={text}
-          className="flex gap-1.5 text-xs text-muted-foreground/70"
-        >
-          <span aria-hidden="true" className="shrink-0 select-none">
-            ›
-          </span>
-          {/* truncate (not line-clamp) keeps the band exactly one row per input
-              no matter how long the prompt was. */}
-          <span className="truncate">{text}</span>
-        </li>
-      ))}
-    </ul>
+    <div data-testid="recent-inputs" className="mb-1">
+      <div
+        id={hintId}
+        className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60"
+      >
+        Sent — not queued
+      </div>
+      <ul
+        aria-label="Recent inputs"
+        aria-describedby={hintId}
+        className="space-y-0.5"
+      >
+        {lines.map((text, i) => (
+          <li
+            key={`${i}:${text.slice(0, 24)}`}
+            title={text}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground/70"
+          >
+            {/* A send glyph, never a number or a chevron: the queued list below
+                is numbered and clickable, and this line is already in the
+                transcript. */}
+            <Send
+              className="h-3 w-3 shrink-0 text-muted-foreground/50"
+              aria-hidden="true"
+            />
+            {/* truncate (not line-clamp) keeps the band exactly one row per input
+                no matter how long the prompt was. */}
+            <span className="truncate">{text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

@@ -20,6 +20,11 @@ describe("BlockCopyControl", () => {
     expect(copyTextToClipboard).toHaveBeenLastCalledWith("rendered");
   });
 
+  it("is a positioned box so its sr-only status cannot escape a scroll ancestor", () => {
+    render(<BlockCopyControl rawText="# raw" getRenderedText={() => "rendered"} />);
+    expect(screen.getByTestId("block-copy").className).toContain("relative");
+  });
+
   it("falls back to the raw text when the rendered extractor is empty", async () => {
     render(<BlockCopyControl rawText="# raw" getRenderedText={() => ""} />);
     await act(async () => {

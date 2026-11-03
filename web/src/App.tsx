@@ -484,6 +484,7 @@ function HomeApp() {
     minWidth: 320,
     maxWidth: 1400,
     collapsible: true,
+    side: "right",
   });
   // Restore per-project view state on project switch. Falls back to defaults
   // for new/unknown projects.
@@ -2234,12 +2235,13 @@ function HomeApp() {
                     onDoubleClick={browserPane.resetToDefault}
                     onKeyDown={(e) => {
                       const step = e.shiftKey ? 50 : 10;
+                      // Right-docked pane: moving the handle left grows it.
                       if (e.key === "ArrowLeft") {
                         e.preventDefault();
-                        browserPane.setWidth(browserPane.width - step);
+                        browserPane.setWidth(browserPane.width + step);
                       } else if (e.key === "ArrowRight") {
                         e.preventDefault();
-                        browserPane.setWidth(browserPane.width + step);
+                        browserPane.setWidth(browserPane.width - step);
                       } else if (e.key === "Home") {
                         e.preventDefault();
                         browserPane.resetToDefault();
