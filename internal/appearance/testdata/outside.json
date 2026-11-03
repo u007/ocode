@@ -1,0 +1,8 @@
+{
+  "name": "Outside Layer",
+  "type": "dark",
+  "colors": {
+    "editor.foreground": "#999999",
+    "sideBar.background": "#999998"
+  }
+}

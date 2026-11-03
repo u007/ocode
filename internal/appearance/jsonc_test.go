@@ -1,6 +1,7 @@
 package appearance
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,62 @@ func TestLoadThemeTreeRejectsEscapingInclude(t *testing.T) {
 	}
 	if got := theme.Colors["editor.background"]; got != "#222222" {
 		t.Fatalf("editor.background = %q, want the file's own #222222", got)
+	}
+}
+
+// The including file sits one directory below root, so "include" has to resolve
+// against its own directory for the reference to reach testdata/outside.json at
+// all. Under a root-relative join the same value would name a file in the
+// package directory that does not exist, so the assertion on the rejected path
+// is what distinguishes a file-relative join from a root-relative one; the
+// flat escape.json fixture is rejected either way.
+func TestLoadThemeTreeRejectsIncludeEscapingFromSubdirectory(t *testing.T) {
+	const root = "testdata/include"
+	theme, warn, err := LoadThemeTree(filepath.Join(root, "themes", "child.json"), root, 0)
+	if err != nil {
+		t.Fatalf("an escaping include must not be fatal: %v", err)
+	}
+	if len(warn) != 1 {
+		t.Fatalf("got %d warnings (%v), want exactly 1", len(warn), warn)
+	}
+	lower := strings.ToLower(warn[0])
+	if !strings.Contains(lower, "rejected") || !strings.Contains(lower, "containment") {
+		t.Fatalf("warning %q does not report a rejected include escaping containment", warn[0])
+	}
+	// The rejection names the file the include actually reached, which is the
+	// one outside root. A root-relative join would name a different, missing
+	// path here.
+	if outside := filepath.Join("testdata", "outside.json"); !strings.Contains(warn[0], outside) {
+		t.Fatalf("warning %q does not name the escaping target %q", warn[0], outside)
+	}
+	if theme == nil {
+		t.Fatal("theme is nil, want the child colours that were read")
+	}
+	// Nothing from the rejected include may appear.
+	if got, ok := theme.Colors["editor.foreground"]; ok {
+		t.Fatalf("inherited editor.foreground = %q from an escaping include", got)
+	}
+	if got, ok := theme.Colors["sideBar.background"]; ok {
+		t.Fatalf("inherited sideBar.background = %q from an escaping include", got)
+	}
+	if got := theme.Colors["editor.background"]; got != "#333333" {
+		t.Fatalf("editor.background = %q, want the file's own #333333", got)
+	}
+}
+
+// The empty-root guard is defence in depth: LoadThemeTree canonicalises the root
+// before calling resolveContained, so this path is otherwise only reachable
+// through canonicalRoot.
+func TestResolveContainedRejectsEmptyRoot(t *testing.T) {
+	resolved, err := resolveContained("", "x")
+	if err == nil {
+		t.Fatalf("resolveContained accepted an empty containment root and returned %q", resolved)
+	}
+	if resolved != "" {
+		t.Fatalf("resolveContained returned %q alongside its error", resolved)
+	}
+	if !strings.Contains(err.Error(), "containment root is empty") {
+		t.Fatalf("error = %q, want it to name the empty containment root", err)
 	}
 }
 
@@ -346,6 +403,56 @@ func TestLoadThemeTreeCapsThemeFileSize(t *testing.T) {
 		}
 		if len(theme.TokenColors.Rules) != 0 {
 			t.Fatalf("rules = %#v, want none from an oversize reference", theme.TokenColors.Rules)
+		}
+	})
+
+	// The limit bounds the read, not just the verdict: only
+	// maxThemeFileBytes+1 bytes are pulled from the file no matter how large it
+	// claims to be. The sparse file is cheap to create and reports 64 MiB while
+	// the read stops at the limit.
+	t.Run("read stops at the limit", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "theme.json")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatalf("create sparse theme: %v", err)
+		}
+		if err := f.Truncate(64 << 20); err != nil {
+			f.Close()
+			t.Fatalf("truncate sparse theme: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close sparse theme: %v", err)
+		}
+		theme, _, err := LoadThemeTree(path, dir, 0)
+		if err == nil {
+			t.Fatal("an oversize entry file must be fatal")
+		}
+		if theme != nil {
+			t.Fatalf("theme = %#v, want nil on a fatal read", theme)
+		}
+		want := fmt.Sprintf("at least %d bytes", maxThemeFileBytes+1)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not report reading only up to the limit (%q)", err, want)
+		}
+	})
+
+	// A directory is reported as such instead of being opened and read.
+	t.Run("non-regular file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "theme.json")
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatalf("mkdir theme path: %v", err)
+		}
+		theme, _, err := LoadThemeTree(path, dir, 0)
+		if err == nil {
+			t.Fatal("a non-regular entry must be fatal")
+		}
+		if theme != nil {
+			t.Fatalf("theme = %#v, want nil on a fatal read", theme)
+		}
+		if !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("error %q does not say the path is not a regular file", err)
 		}
 	})
 }

@@ -1,0 +1,8 @@
+{
+  "name": "Nested Escape Attempt",
+  "type": "dark",
+  "include": "../../outside.json",
+  "colors": {
+    "editor.background": "#333333"
+  }
+}

@@ -11,6 +11,7 @@ package appearance
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,9 +22,12 @@ import (
 // stops with a warning rather than recursing without bound.
 const maxIncludeDepth = 5
 
-// maxThemeFileBytes caps every theme file read. A theme is a small JSON
-// document, so anything larger is a mistake or an attack and is refused before
-// it is pulled into memory.
+// maxThemeFileBytes bounds how much of any theme file is read. A theme is a
+// small JSON document, so anything larger is a mistake or an attack. Every read
+// goes through io.LimitReader, so at most maxThemeFileBytes+1 bytes are ever
+// allocated; a file that turns out to be over the limit is refused once that
+// bound is reached. The limit is not a pre-flight check on a stat size, which a
+// file can outgrow or lie about.
 const maxThemeFileBytes = 8 << 20
 
 // jsoncComments matches either a quoted string (preserved) or a comment
@@ -263,25 +267,37 @@ func includePath(baseDir, inc string) string {
 	return filepath.Clean(candidate)
 }
 
-// readThemeFile reads a theme file or an external tokenColors reference,
-// refusing anything over maxThemeFileBytes. Every theme read goes through this
-// helper so the cap cannot be bypassed by one path. The size is checked before
-// the read and again on the bytes actually returned, in case the file grew
-// between the stat and the read.
+// readThemeFile reads a theme file or an external tokenColors reference. Only a
+// regular file is read, and at most maxThemeFileBytes are returned: the bound is
+// applied to the bytes actually read through io.LimitReader, never to a stat
+// size, so a file that grows between the stat and the read, or one that reports
+// a size it does not have, cannot allocate more than the limit.
+//
+// This helper is the only reader of theme files in the package, so every read
+// path shares that bound. It is a size bound, not an access control: keeping the
+// read inside root is resolveContained's job, and it runs before this is called.
+//
+// Residual: the regular-file check stats the path, so a path swapped for a FIFO
+// between that stat and the open can still block in open(2).
 func readThemeFile(path string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > maxThemeFileBytes {
-		return nil, fmt.Errorf("file is %d bytes, over the %d-byte theme file limit", info.Size(), maxThemeFileBytes)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file is not a regular file (mode %s)", info.Mode().Type())
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxThemeFileBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > maxThemeFileBytes {
-		return nil, fmt.Errorf("file grew to %d bytes, over the %d-byte theme file limit", len(data), maxThemeFileBytes)
+		return nil, fmt.Errorf("file is at least %d bytes, over the %d-byte theme file limit", len(data), maxThemeFileBytes)
 	}
 	return data, nil
 }
@@ -396,11 +412,16 @@ func mergeTokenColors(base, child tokenColors) tokenColors {
 
 // resolveContained resolves candidate and guarantees it stays inside root. A
 // candidate that exists is judged on its symlink-resolved form, so a symlink
-// planted inside root cannot redirect the read outside it. A candidate that
-// does not exist has nothing to redirect, so it is judged lexically instead —
-// that keeps "this include leaves the root" distinguishable from "this include
-// is missing". Both the given and the resolved root are accepted as the
-// reference frame, because a caller may pass either form.
+// planted inside root cannot redirect the read outside it.
+//
+// When EvalSymlinks fails the candidate is never returned. A missing leaf can
+// still sit under a symlinked intermediate directory, so its lexical spelling
+// says nothing about where a read would land; the lexical comparison below only
+// chooses between two errors — "escapes the root" and "cannot be resolved" — and
+// never authorizes a read.
+//
+// Both the given and the resolved root are accepted as the reference frame,
+// because a caller may pass either form.
 func resolveContained(root, candidate string) (string, error) {
 	if err := requireContainmentRoot(root); err != nil {
 		return "", err
