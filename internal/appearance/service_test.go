@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -230,6 +231,75 @@ func TestServiceSetExtraRootsRescans(t *testing.T) {
 	}
 }
 
+// A colour-only settings save must not drop the discovery snapshot or the
+// conversion cache. SetExtraRoots with the roots that are already configured is
+// a no-op, so a save that only changes the theme does not rescan every installed
+// editor or invalidate a conversion that is still valid.
+func TestServiceSetExtraRootsUnchangedKeepsSnapshotAndCache(t *testing.T) {
+	root := t.TempDir()
+	fixtureExtension(t, root, "acme", "themes", "First")
+
+	original := discoverFn
+	var scans int32
+	discoverFn = func(ctx context.Context, roots []string) ([]Manifest, []string, error) {
+		atomic.AddInt32(&scans, 1)
+		return original(ctx, roots)
+	}
+	t.Cleanup(func() { discoverFn = original })
+	conversions := countConversions(t)
+
+	svc := NewService(t.TempDir(), []string{root})
+	refs, _, err := svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("refs = %+v, want 1", refs)
+	}
+	if _, err := svc.Resolve(context.Background(), refs[0].ID); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	baseScans := atomic.LoadInt32(&scans)
+	baseConversions := atomic.LoadInt32(conversions)
+	if baseScans != 1 || baseConversions != 1 {
+		t.Fatalf("baseline scans=%d conversions=%d, want 1 and 1", baseScans, baseConversions)
+	}
+
+	// An equal but distinct slice must be recognised as no change.
+	svc.SetExtraRoots([]string{root})
+	if got := svc.ExtraRoots(); !reflect.DeepEqual(got, []string{root}) {
+		t.Fatalf("ExtraRoots = %#v, want [%q]", got, root)
+	}
+	// The snapshot and the conversion cache must still be live: reading both
+	// back must neither rescan nor reconvert.
+	refs, _, err = svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes after unchanged SetExtraRoots: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("refs after unchanged SetExtraRoots = %+v, want 1", refs)
+	}
+	if _, err := svc.Resolve(context.Background(), refs[0].ID); err != nil {
+		t.Fatalf("Resolve after unchanged SetExtraRoots: %v", err)
+	}
+	if got := atomic.LoadInt32(&scans); got != baseScans {
+		t.Fatalf("scans after unchanged SetExtraRoots = %d, want %d: an unrelated save must not rescan", got, baseScans)
+	}
+	if got := atomic.LoadInt32(conversions); got != baseConversions {
+		t.Fatalf("conversions after unchanged SetExtraRoots = %d, want %d: the cache must survive", got, baseConversions)
+	}
+
+	// A real change still refreshes immediately, so the new root is scanned.
+	second := t.TempDir()
+	svc.SetExtraRoots([]string{root, second})
+	if _, _, err := svc.Themes(context.Background()); err != nil {
+		t.Fatalf("Themes after change: %v", err)
+	}
+	if got := atomic.LoadInt32(&scans); got != baseScans+1 {
+		t.Fatalf("scans after a changed root set = %d, want %d", got, baseScans+1)
+	}
+}
+
 func TestServiceThemesSortedByLabelWithKindAndIconFlag(t *testing.T) {
 	root := t.TempDir()
 	fixtureExtension(t, root, "zeta", "themes", "Zulu")
@@ -446,5 +516,24 @@ func TestServiceWarnsOnStoredRelativeExtraRoot(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "relative/extensions") || !strings.Contains(warnings[0], "working directory") {
 		t.Fatalf("warning = %q, want it to name the root and the working-directory rule", warnings[0])
+	}
+}
+
+// A bare "~" stored on disk must warn and be skipped, exactly like a relative
+// path: expanding it would make the user's whole home an extension root.
+func TestServiceWarnsOnStoredBareTilde(t *testing.T) {
+	svc := NewService(t.TempDir(), []string{"~"})
+	refs, warnings, err := svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("refs = %+v, want none: a bare ~ must never be scanned", refs)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one naming the stored bare ~", warnings)
+	}
+	if !strings.Contains(warnings[0], `"~"`) {
+		t.Fatalf("warning = %q, want it to name the bare ~ entry", warnings[0])
 	}
 }

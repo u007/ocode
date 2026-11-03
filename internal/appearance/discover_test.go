@@ -401,8 +401,31 @@ func TestExtensionRootsSkipsRelativeExtras(t *testing.T) {
 
 func TestInvalidExtraRoots(t *testing.T) {
 	got := InvalidExtraRoots([]string{"", "  ", "/abs/path", "~/home", "~", "relative", "../x", "~other/x"})
-	want := []string{"relative", "../x", "~other/x"}
+	want := []string{"~", "relative", "../x", "~other/x"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("InvalidExtraRoots = %v, want %v", got, want)
+	}
+}
+
+// A bare "~" must not become an extension root: expanding it would walk the
+// user's whole home directory (and every installed editor's tree under it).
+func TestExtensionRootsRejectsBareTilde(t *testing.T) {
+	home := "/home/james"
+	roots := ExtensionRoots(home, []string{"~"})
+	for _, root := range roots {
+		if root == home {
+			t.Fatalf("roots = %v: a bare ~ was expanded to the home directory", roots)
+		}
+	}
+	// Only the five well-known editor roots remain.
+	if len(roots) != 5 {
+		t.Fatalf("roots = %v, want only the five editor roots", roots)
+	}
+	if got := expandHomeDir("~", home); got != "~" {
+		t.Fatalf("expandHomeDir(\"~\") = %q, want it left unexpanded", got)
+	}
+	// "~/" still expands.
+	if got := expandHomeDir("~/extensions", home); got != filepath.Join(home, "extensions") {
+		t.Fatalf("expandHomeDir(\"~/extensions\") = %q", got)
 	}
 }

@@ -801,6 +801,40 @@ func TestMCPAuthRestPathMatching(t *testing.T) {
 	}
 }
 
+// isAppearanceRestPath must refuse every spelling of the local-only surface, not
+// just the literal first segment: the proxied upstream path is rebuilt as
+// "/api/" + rest and the remote server cleans dot-segments, so a path can reach
+// /api/appearance without starting with "appearance".
+func TestAppearanceRestPathMatching(t *testing.T) {
+	cases := []struct {
+		rest string
+		want bool
+	}{
+		{"appearance", true},
+		{"appearance/themes", true},
+		{"appearance/settings", true},
+		{"/appearance/themes", true},
+		{"./appearance", true},
+		{"../appearance/themes", true},
+		{"foo/../../api/appearance/themes", true},
+		{"api/appearance", true},
+		{"Appearance/themes", true},
+		{"APPEARANCE", true},
+		{"appearanceX", false},
+		{"themes", false},
+		{"chat", false},
+		{"sessions", false},
+		{"", false},
+		{".", false},
+		{"..", false},
+	}
+	for _, c := range cases {
+		if got := isAppearanceRestPath(c.rest); got != c.want {
+			t.Errorf("isAppearanceRestPath(%q) = %v, want %v", c.rest, got, c.want)
+		}
+	}
+}
+
 // An SSH remote must refuse the proxied MCP OAuth routes BEFORE connecting:
 // the ssh -L tunnel makes the remote's own loopback gate pass, which would
 // launch a browser on the wrong machine and hang the client for its full poll

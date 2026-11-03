@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/appearance"
 	"github.com/u007/ocode/internal/config"
@@ -133,12 +135,37 @@ func TestHandleAppearanceThemesListsDiscoveredThemes(t *testing.T) {
 		t.Fatalf("VS Code entry at %d, want it after the %d registry entries", idx, len(theme.AvailableThemes()))
 	}
 	for i, entry := range resp.Themes[:len(theme.AvailableThemes())] {
-		if entry.Source != theme.SourceBuiltin && entry.Source != theme.SourceOpencode {
-			t.Fatalf("registry entry %d (%+v) has source %q, want builtin/opencode", i, entry, entry.Source)
+		if want := theme.Source(entry.ID); entry.Source != want {
+			t.Fatalf("registry entry %d (%+v) has source %q, want %q", i, entry, entry.Source, want)
 		}
 		if entry.Extension != "" {
 			t.Fatalf("registry entry %d carries extension %q", i, entry.Extension)
 		}
+	}
+	// The registry is a MIX of origins, so pin one id from each: a list that
+	// classified every entry as the same source would still satisfy a bare
+	// "builtin or opencode" check.
+	var wantBuiltin, wantOpencode string
+	for _, name := range theme.AvailableThemes() {
+		switch theme.Source(name) {
+		case theme.SourceBuiltin:
+			if wantBuiltin == "" {
+				wantBuiltin = name
+			}
+		case theme.SourceOpencode:
+			if wantOpencode == "" {
+				wantOpencode = name
+			}
+		}
+	}
+	if wantBuiltin == "" || wantOpencode == "" {
+		t.Fatalf("theme registry is not mixed: builtin=%q opencode=%q", wantBuiltin, wantOpencode)
+	}
+	if item, _ := findAppearanceTheme(t, resp.Themes, wantBuiltin); item.Source != theme.SourceBuiltin {
+		t.Fatalf("registry entry %q has source %q, want %q", wantBuiltin, item.Source, theme.SourceBuiltin)
+	}
+	if item, _ := findAppearanceTheme(t, resp.Themes, wantOpencode); item.Source != theme.SourceOpencode {
+		t.Fatalf("registry entry %q has source %q, want %q", wantOpencode, item.Source, theme.SourceOpencode)
 	}
 }
 
@@ -479,6 +506,8 @@ func TestSetAppearanceSettingsRejectsRelativeExtraRoot(t *testing.T) {
 		`{"extra_extension_dirs":["relative/extensions"]}`,
 		`{"extra_extension_dirs":["../sibling"]}`,
 		`{"extra_extension_dirs":["~otheruser/extensions"]}`,
+		// A bare "~" must not become the home directory as an extensions root.
+		`{"extra_extension_dirs":["~"]}`,
 	} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings", strings.NewReader(body)))
@@ -500,6 +529,115 @@ func TestSetAppearanceSettingsRejectsRelativeExtraRoot(t *testing.T) {
 		strings.NewReader(`{"extra_extension_dirs":["~/extensions","/opt/extensions"]}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("valid roots PUT = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// appearanceInterleaveSlowRootExtensions is how many extension directories the
+// rejected write in TestSetAppearanceSettingsConcurrentWritesKeepServiceAndDiskInSync
+// asks the validator to scan. It only has to outlast one accepted save; this many
+// tiny manifests gives an order-of-magnitude margin on any machine while keeping
+// the setup cheap.
+const appearanceInterleaveSlowRootExtensions = 400
+
+// Two interleaved PUTs must never leave the live discovery service scanning
+// roots different from what is on disk.
+//
+// The rejected write used to apply its candidate roots to the LIVE service
+// before validating, then restore "its" idea of the previous roots when
+// validation failed — so a slow rejection could undo the roots an accepted write
+// had just installed. The rejected request here scans a large root, which holds
+// it inside Resolve long enough for the accepted write to save. With the fix,
+// validation runs against a throwaway service and only the accepted write
+// touches the live one.
+func TestSetAppearanceSettingsConcurrentWritesKeepServiceAndDiskInSync(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	handler := srv.serveHandler()
+	svc := srv.handler.appearance
+
+	validRoot := t.TempDir()
+	installServerAppearanceExtension(t, validRoot, "acme.themes-1.0.0", "acme", "themes", "Acme Dark", "#101010")
+
+	slowRoot := t.TempDir()
+	for i := 0; i < appearanceInterleaveSlowRootExtensions; i++ {
+		writeServerTestFile(t, filepath.Join(slowRoot, fmt.Sprintf("ext%04d", i), "package.json"),
+			`{"name":"e","publisher":"p","contributes":{}}`)
+	}
+
+	rejected := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings",
+			strings.NewReader(`{"color_theme":"vscode:nope/none","extra_extension_dirs":["`+slowRoot+`"]}`)))
+		rejected <- rec.Code
+	}()
+	// Let the rejected write get past its (now throwaway) root selection and
+	// into the scan, so the accepted save lands while the rejection is in flight.
+	time.Sleep(10 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings",
+		strings.NewReader(`{"color_theme":"vscode:acme.themes/acme-dark","extra_extension_dirs":["`+validRoot+`"]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accepted PUT = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if code := <-rejected; code != http.StatusBadRequest {
+		t.Fatalf("rejected PUT = %d, want 400", code)
+	}
+
+	stored, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if want := []string{validRoot}; !reflect.DeepEqual(stored.Appearance.ExtraExtensionDirs, want) {
+		t.Fatalf("disk roots = %#v, want %#v", stored.Appearance.ExtraExtensionDirs, want)
+	}
+	if got := svc.ExtraRoots(); !reflect.DeepEqual(got, stored.Appearance.ExtraExtensionDirs) {
+		t.Fatalf("service roots = %#v, disk roots = %#v: a rejected write must never change the live service",
+			got, stored.Appearance.ExtraExtensionDirs)
+	}
+}
+
+// Concurrent accepted PUTs must converge: whichever save lands last must also be
+// the root set the live service scans. The save, the read-back and the apply run
+// under one lock, so the pair can never disagree.
+func TestSetAppearanceSettingsConcurrentAcceptedWritesConverge(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	handler := srv.serveHandler()
+	svc := srv.handler.appearance
+
+	const writers = 8
+	roots := make([]string, writers)
+	for i := range roots {
+		roots[i] = t.TempDir()
+	}
+
+	var wg sync.WaitGroup
+	codes := make(chan int, writers)
+	for _, root := range roots {
+		wg.Add(1)
+		go func(root string) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings",
+				strings.NewReader(`{"extra_extension_dirs":["`+root+`"]}`)))
+			codes <- rec.Code
+		}(root)
+	}
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("concurrent PUT = %d, want 200", code)
+		}
+	}
+
+	stored, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if got := svc.ExtraRoots(); !reflect.DeepEqual(got, stored.Appearance.ExtraExtensionDirs) {
+		t.Fatalf("service roots = %#v, disk roots = %#v: the last save must also be the applied roots",
+			got, stored.Appearance.ExtraExtensionDirs)
 	}
 }
 

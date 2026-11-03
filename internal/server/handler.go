@@ -238,6 +238,12 @@ type Handler struct {
 	// machine by design: the endpoints take no ?host= and are never proxied.
 	// Nil only if a caller replaced it; the handlers then answer 503.
 	appearance *appearance.Service
+	// appearanceWriteMu serialises the appearance settings write path: the
+	// config save, the read-back that reports the stored block, and the push of
+	// those roots into the live service. The config file has its own lock, but
+	// that only covers the write; without this, two PUTs can interleave between
+	// save and apply so the service ends up scanning roots that are not on disk.
+	appearanceWriteMu sync.Mutex
 	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
 	// nil when the data dir could not be resolved (its handlers then 500).
 	// vaultGrants records which client surfaces have unlocked it; guarded by

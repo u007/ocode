@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -280,13 +279,16 @@ func effectiveFallbackTheme(h *Handler) string {
 // Icon theme existence is not checked yet: Task 4 owns the icon theme model, so
 // only the id shape is enforced. Extra roots are normalized (trimmed, deduped)
 // and need not exist — a root that is absent is simply skipped by discovery —
-// but must be absolute or "~"-prefixed, so a stored value never resolves against
-// the process working directory.
+// but must be absolute or "~/"-prefixed (a bare "~" would make the whole home an
+// extension root), so a stored value never resolves against the process working
+// directory.
 //
-// The new extra roots are applied to the service BEFORE the selection is
-// validated: a request may add a root and select a theme that lives in it in the
-// same write, and validating against the previous roots would reject a valid
-// selection. Nothing is persisted until validation passes.
+// The new extra roots are validated THROUGH a throwaway service built from the
+// roots this request asks for (so a request may add a root and select a theme
+// that lives in it in the same write), but the live service is touched only
+// after the save succeeds. Mutating the live service before validation made
+// concurrent writes race: a rejected write would restore "its" idea of the
+// previous roots over a write that had already succeeded.
 func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Request) {
 	var req appearanceSettingsRequest
 	if err := readBodyJSON(r, &req); err != nil {
@@ -306,25 +308,9 @@ func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Req
 	}
 
 	svc := h.appearanceService()
-	previousRoots := h.appearanceConfig().ExtraExtensionDirs
-	rootsApplied := false
-	if svc != nil && !slices.Equal(previousRoots, next.ExtraExtensionDirs) {
-		// Scan the roots this request is about to persist, so a theme in a newly
-		// added root resolves. If validation fails, the roots are restored below:
-		// a rejected write must not leave the service scanning something that
-		// was never saved.
-		svc.SetExtraRoots(next.ExtraExtensionDirs)
-		rootsApplied = true
-	}
-	restoreRoots := func() {
-		if rootsApplied {
-			svc.SetExtraRoots(previousRoots)
-		}
-	}
 
 	if next.ColorTheme != "" && strings.HasPrefix(next.ColorTheme, "vscode:") {
 		if !appearance.ValidThemeID(next.ColorTheme) {
-			restoreRoots()
 			writeError(w, http.StatusBadRequest, "invalid color_theme id")
 			return
 		}
@@ -332,27 +318,51 @@ func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusServiceUnavailable, "appearance service unavailable")
 			return
 		}
-		if _, err := svc.Resolve(r.Context(), next.ColorTheme); err != nil {
-			restoreRoots()
+		// Validate against a service that will be discarded, so a failure
+		// cannot have mutated the live one. It shares the live home, so a
+		// candidate `~/...` root resolves against the same tree.
+		validator := appearance.NewService(svc.Home(), next.ExtraExtensionDirs)
+		if _, err := validator.Resolve(r.Context(), next.ColorTheme); err != nil {
 			writeError(w, http.StatusBadRequest, "unknown color_theme: "+err.Error())
 			return
 		}
 	}
 	if next.IconTheme != "" && strings.HasPrefix(next.IconTheme, "vscode:") && !appearance.ValidThemeID(next.IconTheme) {
-		restoreRoots()
 		writeError(w, http.StatusBadRequest, "invalid icon_theme id")
 		return
 	}
 
-	if err := config.SaveOcodeAppearanceConfig(next); err != nil {
-		restoreRoots()
+	stored, err := h.persistAppearanceSettings(next, svc)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save appearance settings: "+err.Error())
 		return
+	}
+	h.bus.Publish("appearance_changed", "", "", map[string]any{
+		"settings": h.appearanceSettingsResponse(r, stored, svc),
+	})
+	writeJSON(w, http.StatusOK, h.appearanceSettingsResponse(r, stored, svc))
+}
+
+// persistAppearanceSettings writes cfg and makes it live: it re-reads the stored
+// block, updates the handler's cached config, and pushes the stored roots into
+// the discovery service.
+//
+// All three steps run under appearanceWriteMu. The config file's own lock covers
+// only the write, so without this the PUT whose read-back/apply happens last can
+// be the one whose save did NOT land last, leaving the service scanning roots
+// that are not on disk. Re-reading inside the lock (rather than reusing cfg)
+// keeps the response honest when another process rewrote the file.
+func (h *Handler) persistAppearanceSettings(cfg config.AppearanceConfig, svc *appearance.Service) (config.AppearanceConfig, error) {
+	h.appearanceWriteMu.Lock()
+	defer h.appearanceWriteMu.Unlock()
+
+	if err := config.SaveOcodeAppearanceConfig(cfg); err != nil {
+		return config.AppearanceConfig{}, err
 	}
 	// Re-read from disk so the response is the stored block, not this function's
 	// idea of it: a concurrent writer (or a normalization difference) must be
 	// visible to the client that is about to render the result.
-	stored := next
+	stored := cfg
 	if loaded, err := config.LoadOcodeConfigCopy(); err != nil {
 		// The write already succeeded; failing the response now would tell the
 		// client nothing was saved when it was. Report the stored-equals-request
@@ -370,11 +380,10 @@ func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Req
 
 	if svc != nil {
 		// A new extra root must be scannable immediately, not after the memo
-		// expires, and the selection may point into that new root.
+		// expires, and the selection may point into that new root. A colour-only
+		// save leaves the roots equal, which SetExtraRoots recognises: it keeps
+		// the snapshot and the conversion cache instead of rescanning.
 		svc.SetExtraRoots(stored.ExtraExtensionDirs)
 	}
-	h.bus.Publish("appearance_changed", "", "", map[string]any{
-		"settings": h.appearanceSettingsResponse(r, stored, svc),
-	})
-	writeJSON(w, http.StatusOK, h.appearanceSettingsResponse(r, stored, svc))
+	return stored, nil
 }

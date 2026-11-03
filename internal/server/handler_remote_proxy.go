@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -409,9 +410,26 @@ func (h *Handler) firstSavedProjectForHost(host string) (projects.Project, bool)
 // Appearance describes the machine running the SPA — its installed extensions
 // and its theme files — so it must never be forwarded to another host, whether
 // that host is saved or not.
+//
+// The path is canonicalised before matching. The proxied upstream path is
+// rebuilt as "/api/" + rest and the REMOTE server cleans dot-segments, so
+// "../appearance/themes" or "foo/../../api/appearance" would reach the
+// local-only surface even though neither starts with "appearance". Matching is
+// case-insensitive because the deny must not depend on the remote router's case
+// rules. Over-matching here only forbids a catch-all proxy route that mirrors a
+// local-only name; under-matching would serve another machine's extensions and
+// palettes as this machine's.
 func isAppearanceRestPath(rest string) bool {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	return len(parts) >= 1 && parts[0] == "appearance"
+	parts := strings.Split(strings.Trim(path.Clean("/"+rest), "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return false
+	}
+	if strings.EqualFold(parts[0], "appearance") {
+		return true
+	}
+	// A path that climbs out of /api and back in is normalised by the remote
+	// server, e.g. "foo/../../api/appearance" → "/api/appearance".
+	return len(parts) >= 2 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "appearance")
 }
 
 // isMCPAuthRestPath reports whether a proxied sub-path ("api/" is already

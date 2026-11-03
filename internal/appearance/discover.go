@@ -60,13 +60,16 @@ type Manifest struct {
 // caller's extra roots first (so a user can point at a portable install or a
 // checkout), then the well-known editor locations under home.
 //
-// A leading "~/" or "~" in an extra root is expanded against home, and an empty
-// entry is dropped. An extra root that is neither absolute nor "~"-prefixed is
-// dropped too: a bare relative path would scan whatever the process working
-// directory happened to be, which is exactly the kind of ambient state this
-// package must not depend on. Such an entry is reported by InvalidExtraRoots so
-// the caller can warn (discovery) or reject it (settings write). An empty home
-// contributes no editor roots for the same reason.
+// A leading "~/" in an extra root is expanded against home, and an empty entry
+// is dropped. A bare "~" is refused like any other non-absolute root: expanding
+// it would make the user's whole home directory an extension root, so every
+// unrelated directory (and every installed editor's tree) would be walked.
+// An extra root that is neither absolute nor "~/"-prefixed is dropped too: a
+// bare relative path would scan whatever the process working directory happened
+// to be, which is exactly the kind of ambient state this package must not depend
+// on. Such an entry is reported by InvalidExtraRoots so the caller can warn
+// (discovery) or reject it (settings write). An empty home contributes no editor
+// roots for the same reason.
 func ExtensionRoots(home string, extra []string) []string {
 	roots := make([]string, 0, len(extra)+5)
 	seen := make(map[string]struct{}, len(extra)+5)
@@ -102,15 +105,14 @@ func ExtensionRoots(home string, extra []string) []string {
 	return roots
 }
 
-// expandHomeDir expands a leading "~" against home. A bare "~" or "~/x" is
-// expanded; "~other/x" is left alone (we have no passwd lookup and guessing
-// another user's home would read the wrong tree).
+// expandHomeDir expands a leading "~/" against home. A bare "~" is deliberately
+// NOT expanded: it is refused by validExtraRoot, and expanding it here would
+// turn the entire home directory into an extension root. "~other/x" is left
+// alone too (we have no passwd lookup and guessing another user's home would
+// read the wrong tree).
 func expandHomeDir(path, home string) string {
 	if home == "" || path == "" || path[0] != '~' {
 		return path
-	}
-	if path == "~" {
-		return home
 	}
 	if len(path) > 1 && (path[1] == '/' || path[1] == filepath.Separator) {
 		return filepath.Join(home, path[2:])
@@ -119,22 +121,20 @@ func expandHomeDir(path, home string) string {
 }
 
 // validExtraRoot reports whether dir is an acceptable extra extension root: an
-// absolute path, or one with the leading "~" that expandHomeDir knows how to
-// expand. A plain relative path is refused because scanning it would read
-// whatever directory the process started in — a settings value must never
-// resolve against the process CWD.
+// absolute path, or one with a leading "~/" that expandHomeDir knows how to
+// expand. A bare "~" is refused because it would mean the user's whole home, and
+// a plain relative path is refused because scanning it would read whatever
+// directory the process started in — a settings value must never resolve against
+// the process CWD.
 func validExtraRoot(dir string) bool {
 	if filepath.IsAbs(dir) {
-		return true
-	}
-	if dir == "~" {
 		return true
 	}
 	return len(dir) > 1 && dir[0] == '~' && (dir[1] == '/' || dir[1] == filepath.Separator)
 }
 
 // InvalidExtraRoots returns the non-empty entries of extra that are neither
-// absolute nor "~"-prefixed, in declaration order. ExtensionRoots drops such an
+// absolute nor "~/"-prefixed, in declaration order. ExtensionRoots drops such an
 // entry; the caller decides whether that is a settings-write error (HTTP PUT) or
 // a discovery warning (a value already on disk must never block a load).
 func InvalidExtraRoots(extra []string) []string {
@@ -160,7 +160,7 @@ func invalidExtraRootWarnings(extra []string) []string {
 	warnings := make([]string, 0, len(invalid))
 	for _, dir := range invalid {
 		warnings = append(warnings, fmt.Sprintf(
-			"ignoring extra extension directory %q: a relative path resolves against the process working directory; use an absolute path or a ~/ path", dir))
+			"ignoring extra extension directory %q: use an absolute path or a ~/ path (a relative path would resolve against the process working directory)", dir))
 	}
 	return warnings
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -120,13 +121,38 @@ func NewService(home string, extra []string) *Service {
 }
 
 // SetExtraRoots replaces the configured extra extension roots and refreshes the
-// snapshot. It is called after a settings write, because a new root must be
-// visible immediately rather than after the five-minute memo expires.
+// snapshot when they actually changed. It is called after a settings write,
+// because a new root must be visible immediately rather than after the
+// five-minute memo expires.
+//
+// A save that only changes the colour theme must not drop the snapshot or the
+// conversion cache: rescanning every installed editor for an unrelated field
+// would make a trivial settings change cost a full filesystem walk, and bumping
+// the generation would discard a conversion that is still valid.
 func (s *Service) SetExtraRoots(extra []string) {
+	next := append([]string(nil), extra...)
 	s.mu.Lock()
-	s.extra = append([]string(nil), extra...)
+	changed := !slices.Equal(s.extra, next)
+	s.extra = next
 	s.mu.Unlock()
-	s.Refresh()
+	if changed {
+		s.Refresh()
+	}
+}
+
+// Home returns the home directory the service resolves well-known editor
+// extension locations against. It is immutable after NewService, so a caller can
+// build a throwaway service with the same home (the settings handler validates a
+// candidate root set without mutating this one).
+func (s *Service) Home() string {
+	return s.home
+}
+
+// ExtraRoots returns a copy of the configured extra extension roots, in order.
+func (s *Service) ExtraRoots() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.extra...)
 }
 
 // Refresh drops the discovery snapshot and every cached conversion, forcing the
