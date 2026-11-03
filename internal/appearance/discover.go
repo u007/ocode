@@ -3,7 +3,9 @@ package appearance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,10 +61,12 @@ type Manifest struct {
 // checkout), then the well-known editor locations under home.
 //
 // A leading "~/" or "~" in an extra root is expanded against home, and an empty
-// entry is dropped. An empty home contributes no editor roots: a relative
-// ".vscode/extensions" would silently scan whatever the process working
+// entry is dropped. An extra root that is neither absolute nor "~"-prefixed is
+// dropped too: a bare relative path would scan whatever the process working
 // directory happened to be, which is exactly the kind of ambient state this
-// package must not depend on.
+// package must not depend on. Such an entry is reported by InvalidExtraRoots so
+// the caller can warn (discovery) or reject it (settings write). An empty home
+// contributes no editor roots for the same reason.
 func ExtensionRoots(home string, extra []string) []string {
 	roots := make([]string, 0, len(extra)+5)
 	seen := make(map[string]struct{}, len(extra)+5)
@@ -78,6 +82,10 @@ func ExtensionRoots(home string, extra []string) []string {
 		roots = append(roots, p)
 	}
 	for _, p := range extra {
+		p = strings.TrimSpace(p)
+		if p == "" || !validExtraRoot(p) {
+			continue
+		}
 		add(expandHomeDir(p, home))
 	}
 	if home != "" {
@@ -108,6 +116,53 @@ func expandHomeDir(path, home string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// validExtraRoot reports whether dir is an acceptable extra extension root: an
+// absolute path, or one with the leading "~" that expandHomeDir knows how to
+// expand. A plain relative path is refused because scanning it would read
+// whatever directory the process started in — a settings value must never
+// resolve against the process CWD.
+func validExtraRoot(dir string) bool {
+	if filepath.IsAbs(dir) {
+		return true
+	}
+	if dir == "~" {
+		return true
+	}
+	return len(dir) > 1 && dir[0] == '~' && (dir[1] == '/' || dir[1] == filepath.Separator)
+}
+
+// InvalidExtraRoots returns the non-empty entries of extra that are neither
+// absolute nor "~"-prefixed, in declaration order. ExtensionRoots drops such an
+// entry; the caller decides whether that is a settings-write error (HTTP PUT) or
+// a discovery warning (a value already on disk must never block a load).
+func InvalidExtraRoots(extra []string) []string {
+	var invalid []string
+	for _, dir := range extra {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || validExtraRoot(dir) {
+			continue
+		}
+		invalid = append(invalid, dir)
+	}
+	return invalid
+}
+
+// invalidExtraRootWarnings explains every refused extra root. It runs on the
+// stored config, so it must warn rather than fail: spec §13 requires a bad
+// stored value to degrade, never to block discovery.
+func invalidExtraRootWarnings(extra []string) []string {
+	invalid := InvalidExtraRoots(extra)
+	if len(invalid) == 0 {
+		return nil
+	}
+	warnings := make([]string, 0, len(invalid))
+	for _, dir := range invalid {
+		warnings = append(warnings, fmt.Sprintf(
+			"ignoring extra extension directory %q: a relative path resolves against the process working directory; use an absolute path or a ~/ path", dir))
+	}
+	return warnings
 }
 
 // extensionManifest is the slice of an extension's package.json this package
@@ -183,8 +238,15 @@ func Discover(ctx context.Context, roots []string) ([]Manifest, []string, error)
 			if statErr != nil || !info.IsDir() {
 				continue
 			}
-			manifest, warns := readExtension(ctx, dir)
+			manifest, warns, readErr := readExtension(ctx, dir)
 			warnings = append(warnings, warns...)
+			if readErr != nil {
+				// A cancelled context must reach the caller no matter where it
+				// fired. Swallowing it here would let the LAST extension's
+				// partial manifest stand as a complete result, which the service
+				// would then memoise for five minutes.
+				return manifests, warnings, readErr
+			}
 			if manifest == nil {
 				continue
 			}
@@ -195,34 +257,47 @@ func Discover(ctx context.Context, roots []string) ([]Manifest, []string, error)
 			manifests = append(manifests, *manifest)
 		}
 	}
+	// Re-check after the walk: a cancellation during the last entry has no
+	// following iteration to notice it.
+	if err := ctx.Err(); err != nil {
+		return manifests, warnings, err
+	}
 	return manifests, warnings, nil
 }
 
 // readExtension reads one extension directory. A nil manifest means the
 // directory is not an extension that contributes themes; warnings describe
-// contributions that had to be skipped.
-func readExtension(ctx context.Context, dir string) (*Manifest, []string) {
-	path := filepath.Join(dir, "package.json")
-	data, err := readCappedFile(path, maxManifestBytes)
+// contributions that had to be skipped. A non-nil error is a cancelled context:
+// the manifest may still be returned alongside it, but the caller must not treat
+// the result as complete.
+func readExtension(ctx context.Context, dir string) (*Manifest, []string, error) {
+	// The manifest read is contained the same way a contribution path is: a
+	// symlinked package.json must not let an extension point the scan at a file
+	// outside its own directory.
+	path, err := resolveContained(dir, filepath.Join(dir, "package.json"))
 	if err != nil {
 		// A directory with no package.json is not an extension (VS Code's
 		// extensions folder also holds `.obsolete`, and a half-removed install
 		// leaves a bare directory). That is normal and silent. A manifest that
-		// is present but unreadable IS worth reporting.
-		if os.IsNotExist(err) {
-			return nil, nil
+		// is present but escapes the extension directory IS worth reporting.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil
 		}
-		return nil, []string{fmt.Sprintf("cannot read extension manifest %q: %v", path, err)}
+		return nil, []string{fmt.Sprintf("cannot read extension manifest in %q: %v", dir, err)}, nil
+	}
+	data, err := readCappedFile(path, maxManifestBytes)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("cannot read extension manifest %q: %v", path, err)}, nil
 	}
 	var pkg extensionManifest
 	if err := json.Unmarshal(data, &pkg); err != nil {
-		return nil, []string{fmt.Sprintf("cannot parse extension manifest %q: %v", path, err)}
+		return nil, []string{fmt.Sprintf("cannot parse extension manifest %q: %v", path, err)}, nil
 	}
 	if pkg.Name == "" || pkg.Publisher == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(pkg.Contributes.Themes) == 0 && len(pkg.Contributes.IconThemes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	manifest := &Manifest{
@@ -237,7 +312,7 @@ func readExtension(ctx context.Context, dir string) (*Manifest, []string) {
 	usedSlugs := make(map[string]int, len(pkg.Contributes.Themes))
 	for i, contributed := range pkg.Contributes.Themes {
 		if err := ctx.Err(); err != nil {
-			return manifest, warnings
+			return manifest, warnings, err
 		}
 		rel := strings.TrimSpace(contributed.Path)
 		label := strings.TrimSpace(contributed.Label)
@@ -280,7 +355,7 @@ func readExtension(ctx context.Context, dir string) (*Manifest, []string) {
 	usedIconSlugs := make(map[string]int, len(pkg.Contributes.IconThemes))
 	for i, contributed := range pkg.Contributes.IconThemes {
 		if err := ctx.Err(); err != nil {
-			return manifest, warnings
+			return manifest, warnings, err
 		}
 		rel := strings.TrimSpace(contributed.Path)
 		label := strings.TrimSpace(contributed.Label)
@@ -323,7 +398,7 @@ func readExtension(ctx context.Context, dir string) (*Manifest, []string) {
 		})
 	}
 
-	return manifest, warnings
+	return manifest, warnings, nil
 }
 
 // readThemeHead decodes the top-level fields Discovery needs from a theme file.

@@ -34,6 +34,20 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Appearance is a property of the machine running this SPA (spec §12): the
+	// discovered theme list, the converted palettes and the settings all come
+	// from the LOCAL filesystem. Proxying /api/appearance/* to a saved remote
+	// host would answer with THAT host's extensions and palettes, so the route is
+	// refused before admission and before any connect is started. The catch-all
+	// /api/remote/{host}/api/{rest...} route is the only way such a request could
+	// reach a remote server, and no host — saved or not — may use it here.
+	if isAppearanceRestPath(rest) {
+		log.Printf("remote proxy: denied %s /api/%s — appearance is local-only", r.Method, rest)
+		writeError(w, http.StatusForbidden,
+			"appearance is local-only: /api/appearance/* is a property of this machine and is never proxied to a remote host")
+		return
+	}
+
 	// Resolve the project path for admission. Read in order:
 	// 1. ?project= / ?path= query params (explicit, so they win)
 	// 2. X-Ocode-Project header (set by the SPA on path-bearing calls)
@@ -388,6 +402,16 @@ func (h *Handler) firstSavedProjectForHost(host string) (projects.Project, bool)
 		}
 	}
 	return projects.Project{}, false
+}
+
+// isAppearanceRestPath reports whether a proxied sub-path ("api/" is already
+// stripped) targets the local-only appearance surface: /api/appearance/...
+// Appearance describes the machine running the SPA — its installed extensions
+// and its theme files — so it must never be forwarded to another host, whether
+// that host is saved or not.
+func isAppearanceRestPath(rest string) bool {
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	return len(parts) >= 1 && parts[0] == "appearance"
 }
 
 // isMCPAuthRestPath reports whether a proxied sub-path ("api/" is already

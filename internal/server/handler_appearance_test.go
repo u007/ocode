@@ -3,16 +3,20 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/u007/ocode/internal/appearance"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/theme"
 )
 
@@ -101,24 +105,53 @@ func TestHandleAppearanceThemesListsDiscoveredThemes(t *testing.T) {
 	installServerAppearanceExtension(t, root, "acme.themes-1.0.0", "acme", "themes", "Acme Dark", "#101010")
 
 	rec := httptest.NewRecorder()
-	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes", nil))
+	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes?limit=1000", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/appearance/themes = %d body=%s", rec.Code, rec.Body.String())
 	}
 	resp := decodeAppearanceThemes(t, rec)
-	if resp.Total != 1 || len(resp.Themes) != 1 {
-		t.Fatalf("themes = %+v, want one", resp)
+	// The list is unified: every registry theme plus the discovered one.
+	if want := len(theme.AvailableThemes()) + 1; resp.Total != want || len(resp.Themes) != want {
+		t.Fatalf("Total = %d (len %d), want %d (registry + 1)", resp.Total, len(resp.Themes), want)
 	}
-	item := resp.Themes[0]
-	if item.ID != "vscode:acme.themes/acme-dark" {
-		t.Errorf("ID = %q", item.ID)
+	if len(resp.Warnings) != 0 {
+		t.Fatalf("Warnings = %v, want none for a clean scan", resp.Warnings)
 	}
+
+	item, idx := findAppearanceTheme(t, resp.Themes, "vscode:acme.themes/acme-dark")
 	if item.Label != "Acme Dark" || item.Source != "vscode" || item.Kind != appearance.PolarityDark {
 		t.Errorf("item = %+v", item)
 	}
 	if item.Extension != "acme.themes" {
 		t.Errorf("Extension = %q", item.Extension)
 	}
+	if item.HasIconTheme {
+		t.Errorf("HasIconTheme = true for an extension with no icon theme")
+	}
+	// Registry entries come first; the discovered block after them.
+	if idx < len(theme.AvailableThemes()) {
+		t.Fatalf("VS Code entry at %d, want it after the %d registry entries", idx, len(theme.AvailableThemes()))
+	}
+	for i, entry := range resp.Themes[:len(theme.AvailableThemes())] {
+		if entry.Source != theme.SourceBuiltin && entry.Source != theme.SourceOpencode {
+			t.Fatalf("registry entry %d (%+v) has source %q, want builtin/opencode", i, entry, entry.Source)
+		}
+		if entry.Extension != "" {
+			t.Fatalf("registry entry %d carries extension %q", i, entry.Extension)
+		}
+	}
+}
+
+// findAppearanceTheme returns the entry with id and its position in items.
+func findAppearanceTheme(t *testing.T, items []AppearanceThemeItem, id string) (AppearanceThemeItem, int) {
+	t.Helper()
+	for i, item := range items {
+		if item.ID == id {
+			return item, i
+		}
+	}
+	t.Fatalf("theme %q missing from %d entries", id, len(items))
+	return AppearanceThemeItem{}, -1
 }
 
 func TestHandleAppearanceThemesPaginates(t *testing.T) {
@@ -127,17 +160,18 @@ func TestHandleAppearanceThemesPaginates(t *testing.T) {
 	installServerAppearanceExtension(t, root, "acme.two-1.0.0", "acme", "two", "Bravo", "#101010")
 	installServerAppearanceExtension(t, root, "acme.three-1.0.0", "acme", "three", "Charlie", "#101010")
 
+	registry := len(theme.AvailableThemes())
 	rec := httptest.NewRecorder()
-	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes?limit=1&offset=1", nil))
+	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/appearance/themes?limit=1&offset=%d", registry+1), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	resp := decodeAppearanceThemes(t, rec)
-	if resp.Total != 3 {
-		t.Errorf("Total = %d, want 3", resp.Total)
+	if want := registry + 3; resp.Total != want {
+		t.Errorf("Total = %d, want %d (registry + 3 discovered)", resp.Total, want)
 	}
-	if resp.Limit != 1 || resp.Offset != 1 {
-		t.Errorf("Limit/Offset = %d/%d, want 1/1", resp.Limit, resp.Offset)
+	if resp.Limit != 1 || resp.Offset != registry+1 {
+		t.Errorf("Limit/Offset = %d/%d, want 1/%d", resp.Limit, resp.Offset, registry+1)
 	}
 	if len(resp.Themes) != 1 || resp.Themes[0].Label != "Bravo" {
 		t.Fatalf("page = %+v, want the single Bravo entry", resp.Themes)
@@ -150,8 +184,68 @@ func TestHandleAppearanceThemesPaginates(t *testing.T) {
 	if resp.Limit != appearanceThemesDefaultLimit || resp.Offset != 0 {
 		t.Fatalf("fallback Limit/Offset = %d/%d", resp.Limit, resp.Offset)
 	}
-	if len(resp.Themes) != 3 {
-		t.Fatalf("themes = %d, want 3", len(resp.Themes))
+	if len(resp.Themes) != registry+3 {
+		t.Fatalf("themes = %d, want %d (registry + 3)", len(resp.Themes), registry+3)
+	}
+}
+
+// The unified list reports has_icon_theme for an extension that ships an icon
+// theme alongside its colour themes. The existing tests only ever pinned the
+// false case, so a broken flag (always false) would have gone unnoticed.
+func TestHandleAppearanceThemesReportsIconThemeFlag(t *testing.T) {
+	srv, root := newAppearanceRouter(t)
+	extDir := installServerAppearanceExtension(t, root, "acme.both-1.0.0", "acme", "both", "Both Dark", "#101010")
+	writeServerTestFile(t, filepath.Join(extDir, "package.json"), `{
+  "name": "both",
+  "publisher": "acme",
+  "contributes": {
+    "themes": [{"label": "Both Dark", "uiTheme": "vs-dark", "path": "themes/main.json"}],
+    "iconThemes": [{"id": "both-icons", "label": "Both Icons", "path": "icons.json"}]
+  }
+}`)
+	writeServerTestFile(t, filepath.Join(extDir, "icons.json"), `{"iconDefinitions":{}}`)
+
+	rec := httptest.NewRecorder()
+	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes?limit=1000", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeAppearanceThemes(t, rec)
+	item, _ := findAppearanceTheme(t, resp.Themes, "vscode:acme.both/both-dark")
+	if !item.HasIconTheme {
+		t.Fatalf("HasIconTheme = false for %+v, want true (the extension ships an icon theme)", item)
+	}
+}
+
+// Discovery warnings must reach the client: the settings page is where a user
+// learns that an installed extension was skipped, and a warning the endpoint
+// drops is a silent empty picker.
+func TestHandleAppearanceThemesReturnsDiscoveryWarnings(t *testing.T) {
+	srv, root := newAppearanceRouter(t)
+	extDir := installServerAppearanceExtension(t, root, "acme.themes-1.0.0", "acme", "themes", "Acme Dark", "#101010")
+	// A second contribution whose file does not exist is skipped with a warning.
+	writeServerTestFile(t, filepath.Join(extDir, "package.json"), `{
+  "name": "themes",
+  "publisher": "acme",
+  "contributes": {
+    "themes": [
+      {"label": "Acme Dark", "uiTheme": "vs-dark", "path": "themes/main.json"},
+      {"label": "Gone", "uiTheme": "vs-dark", "path": "themes/gone.json"}
+    ]
+  }
+}`)
+
+	rec := httptest.NewRecorder()
+	srv.serveHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes?limit=1000", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeAppearanceThemes(t, rec)
+	if len(resp.Warnings) == 0 {
+		t.Fatal("Warnings is empty, want the skipped contribution reported")
+	}
+	if !strings.Contains(strings.Join(resp.Warnings, "; "), "gone.json") {
+		t.Fatalf("Warnings = %v, want one naming gone.json", resp.Warnings)
 	}
 }
 
@@ -327,6 +421,101 @@ func TestSetAppearanceSettingsRejectsUnknownTheme(t *testing.T) {
 	}
 }
 
+// A write that ADDS an extra root and selects a theme living in it must succeed.
+// Validation used to run against the service's previous roots, so the selection
+// 400ed even though both halves of the request were valid together.
+func TestSetAppearanceSettingsValidatesAgainstNewRoots(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	newRoot := t.TempDir()
+	installServerAppearanceExtension(t, newRoot, "acme.themes-1.0.0", "acme", "themes", "Acme Dark", "#101010")
+	handler := srv.serveHandler()
+
+	body := `{"color_theme":"vscode:acme.themes/acme-dark","extra_extension_dirs":["` + newRoot + `"]}`
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d body=%s, want 200 (the new root must be scannable before validation)", rec.Code, rec.Body.String())
+	}
+	got := decodeAppearanceSettings(t, rec)
+	if got.EffectiveColorTheme != "vscode:acme.themes/acme-dark" {
+		t.Fatalf("EffectiveColorTheme = %q, want the stored id", got.EffectiveColorTheme)
+	}
+
+	stored, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if stored.Appearance.ColorTheme != "vscode:acme.themes/acme-dark" {
+		t.Fatalf("persisted ColorTheme = %q", stored.Appearance.ColorTheme)
+	}
+	if !reflect.DeepEqual(stored.Appearance.ExtraExtensionDirs, []string{newRoot}) {
+		t.Fatalf("persisted roots = %#v", stored.Appearance.ExtraExtensionDirs)
+	}
+
+	// A selection that is invalid against BOTH root sets still fails, and the
+	// rejected write must leave the service scanning the stored roots.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings",
+		strings.NewReader(`{"color_theme":"vscode:nope/none","extra_extension_dirs":["`+t.TempDir()+`"]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid selection status = %d, want 400", rec.Code)
+	}
+	stored, err = config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if !reflect.DeepEqual(stored.Appearance.ExtraExtensionDirs, []string{newRoot}) {
+		t.Fatalf("rejected PUT persisted roots %#v, want the previous %q", stored.Appearance.ExtraExtensionDirs, newRoot)
+	}
+}
+
+// A relative extra root would resolve against the process working directory, so
+// the write is rejected rather than persisted and scanned.
+func TestSetAppearanceSettingsRejectsRelativeExtraRoot(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	handler := srv.serveHandler()
+
+	for _, body := range []string{
+		`{"extra_extension_dirs":["relative/extensions"]}`,
+		`{"extra_extension_dirs":["../sibling"]}`,
+		`{"extra_extension_dirs":["~otheruser/extensions"]}`,
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("PUT %s = %d body=%s, want 400", body, rec.Code, rec.Body.String())
+		}
+	}
+	stored, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy: %v", err)
+	}
+	if !stored.Appearance.IsZero() {
+		t.Fatalf("rejected PUT persisted %+v", stored.Appearance)
+	}
+
+	// "~/" and an absolute path are still accepted.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings",
+		strings.NewReader(`{"extra_extension_dirs":["~/extensions","/opt/extensions"]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid roots PUT = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// The legacy endpoint must reject a malformed vscode: id with 400, not surface
+// the service's "invalid theme id" as a 500. /api/appearance/theme/{id} already
+// enforced the grammar; /api/theme?name= only checked the prefix.
+func TestGetThemeRejectsMalformedVSCodeID(t *testing.T) {
+	srv, _ := newAppearanceRouter(t)
+	rec := httptest.NewRecorder()
+	srv.serveHandler().ServeHTTP(rec,
+		httptest.NewRequest(http.MethodGet, "/api/theme?name=vscode:../../etc/passwd", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetAppearanceSettingsFallsBackToTUIThemeThenTokyoNight(t *testing.T) {
 	srv, _ := newAppearanceRouter(t)
 	handler := srv.serveHandler()
@@ -382,7 +571,8 @@ func TestGetAppearanceSettingsWithoutSelectionUsesTUITheme(t *testing.T) {
 // would fall through to the SPA handler and answer 200 with HTML, which is why
 // this drives the real serve handler instead of calling methods directly.
 func TestAppearanceRoutesAreRegisteredAndAuthenticated(t *testing.T) {
-	srv, _ := newAppearanceRouter(t)
+	srv, root := newAppearanceRouter(t)
+	installServerAppearanceExtension(t, root, "acme.themes-1.0.0", "acme", "themes", "Acme Dark", "#101010")
 	handler := srv.serveHandler()
 
 	for _, tc := range []struct {
@@ -390,6 +580,7 @@ func TestAppearanceRoutesAreRegisteredAndAuthenticated(t *testing.T) {
 		path   string
 	}{
 		{http.MethodGet, "/api/appearance/themes"},
+		{http.MethodGet, "/api/appearance/theme/vscode:acme.themes/acme-dark"},
 		{http.MethodGet, "/api/appearance/settings"},
 	} {
 		rec := httptest.NewRecorder()
@@ -409,6 +600,11 @@ func TestAppearanceRoutesAreRegisteredAndAuthenticated(t *testing.T) {
 	authHTTP.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/themes", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated GET = %d, want 401", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	authHTTP.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/appearance/theme/vscode:acme.themes/acme-dark", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated theme GET = %d, want 401", rec.Code)
 	}
 	rec = httptest.NewRecorder()
 	authHTTP.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/appearance/settings", strings.NewReader(`{}`)))
@@ -438,7 +634,9 @@ func TestAppearanceRoutesAreLocalOnly(t *testing.T) {
 
 	// The remote proxy catch-all exists, but the host is not a saved project, so
 	// the request never touches an appearance handler (and never returns its
-	// JSON).
+	// JSON). This only covers the unknown-host path: a SAVED host is the case
+	// that used to be proxied, and TestRemoteProxyRefusesAppearanceForSavedHost
+	// is the assertion that matters.
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/remote/nosuchhost/api/appearance/themes", nil))
 	if rec.Code == http.StatusOK {
@@ -446,6 +644,36 @@ func TestAppearanceRoutesAreLocalOnly(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "vscode:acme.themes/acme-dark") {
 		t.Fatalf("remote-prefixed request saw the local theme list: %s", rec.Body.String())
+	}
+}
+
+// A SAVED remote host must be refused before any connect: the route exists for
+// saved projects, so the unknown-host case above passes without exercising the
+// rule at all. Appearance is local-only (spec §12) even when the host is real.
+func TestRemoteProxyRefusesAppearanceForSavedHost(t *testing.T) {
+	installFakeSSH(t)
+	projectDir := t.TempDir()
+	h := newTestHandlerWithRemote(t, "ci.local", projectDir)
+	var connectCalled atomic.Bool
+	h.remoteHosts = newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
+		connectCalled.Store(true)
+		return nil, fmt.Errorf("connect must not start for a local-only route")
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet,
+		"/api/remote/ci.local/api/appearance/themes?token=local&project="+url.QueryEscape(projectDir), nil)
+	setPathValues(r, map[string]string{"host": "ci.local", "rest": "appearance/themes"})
+	h.HandleRemoteProxy(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s, want 403", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "local-only") {
+		t.Fatalf("body = %s, want the local-only rule named", w.Body.String())
+	}
+	if connectCalled.Load() {
+		t.Fatal("a connect was started for /api/appearance/*")
 	}
 }
 

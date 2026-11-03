@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -22,8 +23,10 @@ const (
 )
 
 // AppearanceThemeItem is one entry in the unified theme list. Source is "vscode"
-// for a discovered extension theme; builtin themes are served by /api/themes
-// with their registry names and appear here only when a caller merges both.
+// for a discovered extension theme, "builtin" for a palette compiled into
+// ocode, and "opencode" for one derived from the opencode desktop theme set.
+// Only a VS Code entry carries Extension and HasIconTheme; a registry entry has
+// no extension.
 type AppearanceThemeItem struct {
 	ID           string              `json:"id"`
 	Label        string              `json:"label"`
@@ -88,7 +91,9 @@ func (h *Handler) appearanceConfig() config.AppearanceConfig {
 	return h.cfg.Ocode.Appearance
 }
 
-// HandleAppearanceThemes lists discovered VS Code colour themes.
+// HandleAppearanceThemes lists every selectable colour theme: the palettes in
+// the theme registry (builtin and opencode, spec §12's unified list) followed by
+// the themes discovered in installed VS Code extensions.
 //
 // Discovery is local-only on purpose (spec §12): the list is a property of this
 // machine's installed editors, so this handler takes no `?host=` and is never
@@ -99,24 +104,16 @@ func (h *Handler) HandleAppearanceThemes(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "appearance service unavailable")
 		return
 	}
+	// Registry entries come first; the discovered block is already sorted by
+	// label by the service, so appending preserves the documented order.
+	items := registryThemeItems()
 	refs, warnings, err := svc.Themes(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "discover themes: "+err.Error())
 		return
 	}
-
-	limit, offset := appearancePage(r)
-	total := len(refs)
-	if offset > total {
-		offset = total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	page := make([]AppearanceThemeItem, 0, end-offset)
-	for _, ref := range refs[offset:end] {
-		page = append(page, AppearanceThemeItem{
+	for _, ref := range refs {
+		items = append(items, AppearanceThemeItem{
 			ID:           ref.ID,
 			Label:        ref.Label,
 			Source:       ref.Source,
@@ -125,6 +122,18 @@ func (h *Handler) HandleAppearanceThemes(w http.ResponseWriter, r *http.Request)
 			HasIconTheme: ref.HasIconTheme,
 		})
 	}
+
+	limit, offset := appearancePage(r)
+	total := len(items)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := make([]AppearanceThemeItem, 0, end-offset)
+	page = append(page, items[offset:end]...)
 	writeJSON(w, http.StatusOK, AppearanceThemesResponse{
 		Themes:   page,
 		Total:    total,
@@ -132,6 +141,25 @@ func (h *Handler) HandleAppearanceThemes(w http.ResponseWriter, r *http.Request)
 		Limit:    limit,
 		Warnings: warnings,
 	})
+}
+
+// registryThemeItems lists the theme registry's palettes in the unified-list
+// shape. Source distinguishes a palette compiled into ocode ("builtin") from one
+// converted from the opencode desktop theme set ("opencode"); Kind comes from
+// the background's luminance because the registry carries no polarity field.
+func registryThemeItems() []AppearanceThemeItem {
+	names := theme.AvailableThemes()
+	items := make([]AppearanceThemeItem, 0, len(names))
+	for _, name := range names {
+		def, _ := theme.GetTheme(name)
+		items = append(items, AppearanceThemeItem{
+			ID:     name,
+			Label:  theme.DisplayName(name),
+			Source: theme.Source(name),
+			Kind:   appearance.PolarityFromType("", def.Colors.Background),
+		})
+	}
+	return items
 }
 
 // appearancePage parses limit/offset, applying the default page size and the
@@ -251,7 +279,14 @@ func effectiveFallbackTheme(h *Handler) string {
 // §13). An empty colour theme is a legitimate "use the built-in theme" choice.
 // Icon theme existence is not checked yet: Task 4 owns the icon theme model, so
 // only the id shape is enforced. Extra roots are normalized (trimmed, deduped)
-// and need not exist — a root that is absent is simply skipped by discovery.
+// and need not exist — a root that is absent is simply skipped by discovery —
+// but must be absolute or "~"-prefixed, so a stored value never resolves against
+// the process working directory.
+//
+// The new extra roots are applied to the service BEFORE the selection is
+// validated: a request may add a root and select a theme that lives in it in the
+// same write, and validating against the previous roots would reject a valid
+// selection. Nothing is persisted until validation passes.
 func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Request) {
 	var req appearanceSettingsRequest
 	if err := readBodyJSON(r, &req); err != nil {
@@ -264,9 +299,32 @@ func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Req
 		ExtraExtensionDirs: req.ExtraExtensionDirs,
 	})
 
+	if invalid := appearance.InvalidExtraRoots(next.ExtraExtensionDirs); len(invalid) > 0 {
+		writeError(w, http.StatusBadRequest,
+			"extra_extension_dirs must be absolute paths or start with ~/: "+strings.Join(invalid, ", "))
+		return
+	}
+
 	svc := h.appearanceService()
+	previousRoots := h.appearanceConfig().ExtraExtensionDirs
+	rootsApplied := false
+	if svc != nil && !slices.Equal(previousRoots, next.ExtraExtensionDirs) {
+		// Scan the roots this request is about to persist, so a theme in a newly
+		// added root resolves. If validation fails, the roots are restored below:
+		// a rejected write must not leave the service scanning something that
+		// was never saved.
+		svc.SetExtraRoots(next.ExtraExtensionDirs)
+		rootsApplied = true
+	}
+	restoreRoots := func() {
+		if rootsApplied {
+			svc.SetExtraRoots(previousRoots)
+		}
+	}
+
 	if next.ColorTheme != "" && strings.HasPrefix(next.ColorTheme, "vscode:") {
 		if !appearance.ValidThemeID(next.ColorTheme) {
+			restoreRoots()
 			writeError(w, http.StatusBadRequest, "invalid color_theme id")
 			return
 		}
@@ -275,16 +333,19 @@ func (h *Handler) HandleSetAppearanceSettings(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if _, err := svc.Resolve(r.Context(), next.ColorTheme); err != nil {
+			restoreRoots()
 			writeError(w, http.StatusBadRequest, "unknown color_theme: "+err.Error())
 			return
 		}
 	}
 	if next.IconTheme != "" && strings.HasPrefix(next.IconTheme, "vscode:") && !appearance.ValidThemeID(next.IconTheme) {
+		restoreRoots()
 		writeError(w, http.StatusBadRequest, "invalid icon_theme id")
 		return
 	}
 
 	if err := config.SaveOcodeAppearanceConfig(next); err != nil {
+		restoreRoots()
 		writeError(w, http.StatusInternalServerError, "failed to save appearance settings: "+err.Error())
 		return
 	}

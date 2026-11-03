@@ -50,6 +50,13 @@ func currentThemeName(h *Handler) string {
 // service and returns the same 16-field palette /api/appearance/theme/{id}
 // reports, so the two endpoints cannot disagree (spec §12).
 func (h *Handler) handleVSCodeTheme(w http.ResponseWriter, r *http.Request, id string) {
+	// Shape first: a malformed id is a client error (400), not a failed
+	// resolution (500). The service enforces the same grammar, but its rejection
+	// surfaces as a generic resolve failure, which is why the check lives here.
+	if !appearance.ValidThemeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid theme id")
+		return
+	}
 	svc := h.appearanceService()
 	if svc == nil {
 		writeError(w, http.StatusServiceUnavailable, "appearance service unavailable")

@@ -67,6 +67,11 @@ var nowFn = time.Now
 // variable so tests can count conversions without a fake filesystem.
 var convertThemeFn = ConvertTheme
 
+// discoverFn is the walk the service performs on a cache miss. It is a variable
+// so a test can interleave a Refresh (or a settings change) with a scan: the
+// generation guard in snapshot is what makes such a scan non-authoritative.
+var discoverFn = Discover
+
 // cacheEntry is one converted theme, valid only while the source file keeps the
 // same modification time and size.
 type cacheEntry struct {
@@ -92,6 +97,11 @@ type Service struct {
 	scanned   bool
 	scannedAt time.Time
 	cache     map[string]cacheEntry
+	// gen is bumped by every Refresh. A scan captures it before walking and only
+	// installs its result when the generation is unchanged: a walk that started
+	// before a settings change describes roots (and a memo state) that no longer
+	// apply, so its result must not win over the refresh that replaced them.
+	gen uint64
 
 	// scanMu serialises discovery. It is deliberately a separate lock from mu so
 	// a long walk does not block Resolve for a theme already in the cache.
@@ -124,6 +134,7 @@ func (s *Service) SetExtraRoots(extra []string) {
 // settings change.
 func (s *Service) Refresh() {
 	s.mu.Lock()
+	s.gen++
 	s.manifests = nil
 	s.warnings = nil
 	s.scanned = false
@@ -238,22 +249,45 @@ func (s *Service) snapshot(ctx context.Context) ([]Manifest, []string, error) {
 		return manifests, warnings, nil
 	}
 
-	s.mu.Lock()
-	roots := ExtensionRoots(s.home, s.extra)
-	s.mu.Unlock()
+	// A Refresh (or a SetExtraRoots, which calls it) between capturing the roots
+	// and installing the result invalidates the walk: its roots, and the memo
+	// state it is about to install, belong to a generation that no longer
+	// applies. Retry with the current generation so the caller still gets a
+	// fresh list; the bound keeps a pathological Refresh loop from spinning here
+	// forever (the last walk's result is then returned uncached).
+	var lastManifests []Manifest
+	var lastWarnings []string
+	for attempt := 0; attempt < 3; attempt++ {
+		s.mu.Lock()
+		extra := append([]string(nil), s.extra...)
+		roots := ExtensionRoots(s.home, s.extra)
+		gen := s.gen
+		s.mu.Unlock()
 
-	manifests, warnings, err := Discover(ctx, roots)
-	if err != nil {
-		return nil, warnings, err
+		// A relative extra root is refused by ExtensionRoots; warn about the
+		// stored value instead of failing, because an unloadable config must
+		// degrade (spec §13).
+		warnings := invalidExtraRootWarnings(extra)
+		manifests, scanWarnings, err := discoverFn(ctx, roots)
+		warnings = append(warnings, scanWarnings...)
+		if err != nil {
+			return nil, warnings, err
+		}
+
+		s.mu.Lock()
+		if s.gen != gen {
+			s.mu.Unlock()
+			lastManifests, lastWarnings = manifests, warnings
+			continue
+		}
+		s.manifests = manifests
+		s.warnings = warnings
+		s.scanned = true
+		s.scannedAt = nowFn()
+		s.mu.Unlock()
+		return manifests, warnings, nil
 	}
-
-	s.mu.Lock()
-	s.manifests = manifests
-	s.warnings = warnings
-	s.scanned = true
-	s.scannedAt = nowFn()
-	s.mu.Unlock()
-	return manifests, warnings, nil
+	return lastManifests, lastWarnings, nil
 }
 
 // cachedSnapshot reports the memoised result when it is still inside the TTL.

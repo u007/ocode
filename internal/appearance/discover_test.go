@@ -2,6 +2,7 @@ package appearance
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,6 +161,34 @@ func TestDiscoverRejectsContributionEscapingExtension(t *testing.T) {
 	}
 }
 
+// A symlinked package.json must not let an extension point the scan at a
+// manifest outside its own directory: the manifest read is contained exactly
+// like a contribution path.
+func TestDiscoverRejectsManifestSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "package.json")
+	writeTestFile(t, outside, themeManifest("dark.json"))
+	extDir := filepath.Join(root, "acme.evil-1.0.0")
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(extDir, "package.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeTestFile(t, filepath.Join(extDir, "dark.json"), darkTheme)
+
+	manifests, warnings, err := Discover(context.Background(), []string{root})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(manifests) != 0 {
+		t.Fatalf("manifests = %+v, want none: a symlinked manifest escaping the extension must be refused", manifests)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "manifest") {
+		t.Fatalf("warnings = %v, want one naming the manifest", warnings)
+	}
+}
+
 // Two themes with the same name in one extension must not collide in the id
 // space; Light/Dark punctuation and case are folded into the slug.
 func TestDiscoverDedupesVariantSlugs(t *testing.T) {
@@ -301,5 +330,79 @@ func TestExtensionRootsEmptyHomeYieldsOnlyExtras(t *testing.T) {
 	roots := ExtensionRoots("", []string{"/opt/extra"})
 	if len(roots) != 1 || roots[0] != "/opt/extra" {
 		t.Fatalf("roots = %v, want only /opt/extra", roots)
+	}
+}
+
+// errAfterCalls is a context whose Err reports cancellation only after n
+// successful reads. It lets a test cancel a scan at an exact point in the walk
+// (Discover consults Err per root, per entry and per contribution) instead of
+// racing a timer or adding a production hook.
+type errAfterCalls struct {
+	context.Context
+	remaining int
+}
+
+func (c *errAfterCalls) Err() error {
+	if c.remaining <= 0 {
+		return context.Canceled
+	}
+	c.remaining--
+	return nil
+}
+
+// A cancellation during the LAST extension has no following iteration to notice
+// it. Without propagation out of readExtension (and the final re-check) the walk
+// returns a truncated list with a nil error, which the service then memoises for
+// five minutes.
+func TestDiscoverPropagatesCancellationDuringLastExtension(t *testing.T) {
+	root := t.TempDir()
+	extDir := filepath.Join(root, "acme.themes-1.0.0")
+	writeTestFile(t, filepath.Join(extDir, "package.json"), `{
+  "name": "themes",
+  "publisher": "acme",
+  "contributes": {
+    "themes": [
+      {"label": "First", "uiTheme": "vs-dark", "path": "first.json"},
+      {"label": "Second", "uiTheme": "vs-dark", "path": "second.json"}
+    ]
+  }
+}`)
+	writeTestFile(t, filepath.Join(extDir, "first.json"), `{"name":"First","type":"dark"}`)
+	writeTestFile(t, filepath.Join(extDir, "second.json"), `{"name":"Second","type":"dark"}`)
+
+	// Err is consulted for the root, then the extension entry, then each
+	// contribution: the cancel lands on the extension's SECOND contribution.
+	ctx := &errAfterCalls{Context: context.Background(), remaining: 3}
+	manifests, _, err := Discover(ctx, []string{root})
+	if err == nil {
+		t.Fatalf("Discover = %+v with a nil error; a cancelled scan must never look complete", manifests)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// A relative extra root is neither absolute nor "~"-prefixed, so it must be
+// dropped rather than resolved against the process working directory.
+func TestExtensionRootsSkipsRelativeExtras(t *testing.T) {
+	roots := ExtensionRoots("/home/james", []string{"relative/extensions", "../sibling", "/opt/extra", "~other/x", "~/portable"})
+	for _, root := range roots {
+		if !filepath.IsAbs(root) {
+			t.Fatalf("roots = %v, want every entry absolute", roots)
+		}
+	}
+	if len(roots) != 2+5 {
+		t.Fatalf("roots = %v, want /opt/extra and the expanded ~/portable plus 5 editor roots", roots)
+	}
+	if roots[0] != "/opt/extra" || roots[1] != filepath.Join("/home/james", "portable") {
+		t.Fatalf("roots = %v, want the valid extras first", roots)
+	}
+}
+
+func TestInvalidExtraRoots(t *testing.T) {
+	got := InvalidExtraRoots([]string{"", "  ", "/abs/path", "~/home", "~", "relative", "../x", "~other/x"})
+	want := []string{"relative", "../x", "~other/x"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("InvalidExtraRoots = %v, want %v", got, want)
 	}
 }

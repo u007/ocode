@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,5 +343,108 @@ func TestValidThemeID(t *testing.T) {
 		if ValidThemeID(id) {
 			t.Errorf("ValidThemeID(%q) = true, want false", id)
 		}
+	}
+}
+
+// A cancellation in the middle of a walk must not be memoised: readExtension
+// leaves a partial manifest behind, and caching it would show a truncated theme
+// list for the whole five-minute window.
+func TestServiceCancelledMidScanIsNotCached(t *testing.T) {
+	root := t.TempDir()
+	extDir := filepath.Join(root, "acme.themes-1.0.0")
+	writeTestFile(t, filepath.Join(extDir, "package.json"), `{
+  "name": "themes",
+  "publisher": "acme",
+  "contributes": {
+    "themes": [
+      {"label": "First", "uiTheme": "vs-dark", "path": "first.json"},
+      {"label": "Second", "uiTheme": "vs-dark", "path": "second.json"}
+    ]
+  }
+}`)
+	writeTestFile(t, filepath.Join(extDir, "first.json"), `{"name":"First","type":"dark"}`)
+	writeTestFile(t, filepath.Join(extDir, "second.json"), `{"name":"Second","type":"dark"}`)
+
+	svc := NewService("", []string{root})
+	// Same consultation order as Discover: root, entry, first contribution, then
+	// cancelled on the extension's SECOND contribution (see errAfterCalls). home
+	// is empty so this is the ONLY root: a following editor root would hit its
+	// own context check and mask the last-extension case being tested.
+	ctx := &errAfterCalls{Context: context.Background(), remaining: 3}
+	if _, _, err := svc.Themes(ctx); err == nil {
+		t.Fatal("Themes on a mid-scan cancellation = nil error, want cancellation")
+	}
+
+	refs, _, err := svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes after cancellation: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs = %+v, want both themes: a cancelled scan must not be cached", refs)
+	}
+}
+
+// A Refresh that lands while a scan is walking invalidates it. Without a
+// generation guard the older walk's list is installed after the refresh and the
+// new extension stays invisible until the memo expires.
+func TestServiceScanStartedBeforeRefreshDoesNotWin(t *testing.T) {
+	root := t.TempDir()
+	fixtureExtension(t, root, "acme", "themes", "First")
+	svc := NewService(t.TempDir(), []string{root})
+
+	original := discoverFn
+	var once sync.Once
+	discoverFn = func(ctx context.Context, roots []string) ([]Manifest, []string, error) {
+		manifests, warnings, err := original(ctx, roots)
+		once.Do(func() {
+			// A settings change (or an install) lands while this scan is in
+			// flight: a new extension appears and Refresh drops the memo.
+			fixtureExtension(t, root, "acme", "second", "Second")
+			svc.Refresh()
+		})
+		return manifests, warnings, err
+	}
+	t.Cleanup(func() { discoverFn = original })
+
+	refs, _, err := svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs = %+v, want 2: the scan that started before Refresh must be discarded", refs)
+	}
+	// The caller must not have left the stale result in the memo either.
+	refs, _, err = svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes (cached): %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs after the retry = %+v, want 2 (the pre-Refresh list must not be cached)", refs)
+	}
+}
+
+// A relative extra root stored on disk must warn and be skipped, never block and
+// never be scanned: scanning it would read whatever directory the process
+// started in.
+func TestServiceWarnsOnStoredRelativeExtraRoot(t *testing.T) {
+	cwd := t.TempDir()
+	// Populate the directory a relative root would resolve to, so a regression
+	// that still scans it is observable.
+	fixtureExtension(t, filepath.Join(cwd, "relative", "extensions"), "acme", "themes", "Should Not Appear")
+	t.Chdir(cwd)
+
+	svc := NewService("", []string{"relative/extensions"})
+	refs, warnings, err := svc.Themes(context.Background())
+	if err != nil {
+		t.Fatalf("Themes: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("refs = %+v, want none: a relative root must never be scanned", refs)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one naming the stored relative root", warnings)
+	}
+	if !strings.Contains(warnings[0], "relative/extensions") || !strings.Contains(warnings[0], "working directory") {
+		t.Fatalf("warning = %q, want it to name the root and the working-directory rule", warnings[0])
 	}
 }
