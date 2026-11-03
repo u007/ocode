@@ -369,6 +369,12 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 	if !hasNonLoopbackEgressTarget(targets) {
 		return networkGuardResult{}
 	}
+	// A disabled catalog prompt turns this guardrail off. The call keeps the
+	// behaviour it had before the guardrail existed; the permission layer still
+	// decides what actually runs.
+	if config.PromptDisabled("network_guard") {
+		return networkGuardResult{}
+	}
 	client := a.networkGuardJudgeClient()
 	if client == nil {
 		// Absent, not disabled: the call keeps the behaviour it had before this

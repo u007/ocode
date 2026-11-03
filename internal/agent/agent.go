@@ -3081,6 +3081,11 @@ func (a *Agent) autoContinueJudgeClientTyped() (LLMClient, bool) {
 // call) with Detail describing the failure. prior lists the action keys
 // already fired in this chain (once-per-chain filtering).
 func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64, prior []string) bool {
+	// A disabled catalog prompt turns the capability off before any work is
+	// dispatched. false tells the caller nothing was scheduled.
+	if config.PromptDisabled("auto_continue_judge") {
+		return false
+	}
 	client, isDecision := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return false

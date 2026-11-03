@@ -520,6 +520,11 @@ func (a *Agent) scanContentGuard(ctx context.Context, toolName, toolArgs, conten
 	if src == nil || content == "" {
 		return contentGuardResult{}
 	}
+	// A disabled catalog prompt turns this guardrail off. The permission layer
+	// beneath it still decides what reaches the model.
+	if config.PromptDisabled("content_guard") {
+		return contentGuardResult{}
+	}
 	client := a.contentGuardClient()
 	if client == nil {
 		// Absent, not disabled. Not logged per call: "no judge" is the steady

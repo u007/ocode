@@ -681,6 +681,11 @@ func (a *Agent) typesafeTurnEnded(stepErr error) string {
 // deterministically before the judge is consulted — so the parameter is a
 // safety net, not a signal the current hosts send.
 func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error, prior []string) (AutoContinueDecision, error) {
+	// A disabled catalog prompt turns the capability off: no triage call is
+	// made, so Resume stays false and the turn ends for the human to answer.
+	if config.PromptDisabled("auto_continue_judge") {
+		return AutoContinueDecision{Detail: "auto-continue judge prompt is disabled"}, nil
+	}
 	client, isTypesafe := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return AutoContinueDecision{}, nil

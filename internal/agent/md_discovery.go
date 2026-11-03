@@ -493,6 +493,12 @@ func (a *Agent) mdDocs() []discovery.Doc {
 // model (same client-resolution as title generation). Returns "" on any failure
 // — the caller leaves the file uncached so a later pass retries.
 func (a *Agent) summarizeMarkdown(rel string, content []byte) string {
+	// A disabled catalog prompt turns markdown summarisation off. "" is the
+	// documented no-summary result, and the caller's negative cache keeps the
+	// next scan from retrying immediately.
+	if config.PromptDisabled("md_summary") {
+		return ""
+	}
 	client := a.mdState.client
 	if client == nil {
 		return ""

@@ -365,6 +365,11 @@ func (a *Agent) decideGoal(gs *GoalState, messages []Message) GoalJudgeResult {
 	if gs.NoToolTurns >= goalStallTurns {
 		return goalPause(gs, "stalled", fmt.Sprintf("no tool use in the last %d turns", gs.NoToolTurns), nil)
 	}
+	// A disabled catalog prompt turns the capability off: the goal pauses as
+	// unavailable instead of the judge receiving an empty rubric.
+	if config.PromptDisabled("goal_judge") {
+		return goalPause(gs, "unavailable", "goal judge prompt is disabled", nil)
+	}
 
 	d := a.resolveDecider(slotGoal)
 	if d == nil {

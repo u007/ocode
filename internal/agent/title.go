@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 )
 
@@ -55,6 +56,11 @@ func resolveTitleSystem() string {
 }
 
 func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
+	// A disabled catalog prompt turns the capability off; the session keeps its
+	// default title instead of sending an empty system prompt.
+	if config.PromptDisabled("title") {
+		return ""
+	}
 	system := resolveTitleSystem()
 	prompt := buildTitlePrompt(userMsg, assistantMsg)
 	return a.generateTitleWithClients(a.titleClients(), system, prompt)

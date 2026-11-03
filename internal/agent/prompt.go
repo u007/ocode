@@ -277,17 +277,23 @@ func (a *Agent) BasePromptMessages() []Message {
 	// the agent may do, the recap says how it closes a turn that did work. Both
 	// are static, so the ordering is stable for the cached prefix.
 	if a.RecapPromptEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + config.ApplyPromptOverride("recap", recapPromptContent)})
+		if text, ok := config.ResolvePrompt("recap", recapPromptContent); ok {
+			msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + text})
+		}
 	}
 	// Plan-then-execute contract sits directly after recap. Static, so the
 	// ordering is stable for the cached prefix.
 	if a.PlanPromptEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptPlanMarker + "\n" + config.ApplyPromptOverride("plan", planExecutePromptContent)})
+		if text, ok := config.ResolvePrompt("plan", planExecutePromptContent); ok {
+			msgs = append(msgs, Message{Role: "system", Content: promptPlanMarker + "\n" + text})
+		}
 	}
 	// Communication-style standard sits directly after plan. Static, so the
 	// ordering is stable for the cached prefix.
 	if a.CommunicationStyleEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptCommunicationStyleMarker + "\n" + config.ApplyPromptOverride("communication_style", communicationStylePromptContent)})
+		if text, ok := config.ResolvePrompt("communication_style", communicationStylePromptContent); ok {
+			msgs = append(msgs, Message{Role: "system", Content: promptCommunicationStyleMarker + "\n" + text})
+		}
 	}
 	// Browser routing follows the communication style. The browser tool is bound
 	// at construction and never removed, so this fragment is fixed for the session.
@@ -331,12 +337,16 @@ func (a *Agent) BasePromptMessages() []Message {
 		}
 	}
 	if a.DocPromptEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + config.ApplyPromptOverride("doc_prompt", docPromptContent)})
+		if text, ok := config.ResolvePrompt("doc_prompt", docPromptContent); ok {
+			msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + text})
+		}
 	}
 	// Suggested responses: the same static-fragment contract as the doc prompt
 	// above — a const in the cached prefix, gated on a construction-time flag.
 	if a.SuggestedResponsesEnabled() {
-		msgs = append(msgs, Message{Role: "system", Content: promptSuggestionsMarker + "\n" + config.ApplyPromptOverride("suggested_responses", suggestedResponsesPromptContent)})
+		if text, ok := config.ResolvePrompt("suggested_responses", suggestedResponsesPromptContent); ok {
+			msgs = append(msgs, Message{Role: "system", Content: promptSuggestionsMarker + "\n" + text})
+		}
 	}
 	// Notes protocol fragment. Gate strictly on bus presence:
 	// a child not in a group has no bus, and the prompt must

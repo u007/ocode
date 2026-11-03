@@ -134,6 +134,11 @@ func (a *Agent) SummarizeToolCallCtx(ctx context.Context, in ToolCallDigestInput
 	if tool == "" {
 		return ToolDigest{}, errors.New("tool is required")
 	}
+	// A disabled catalog prompt turns the capability off. This call is an
+	// explicit user action, so report why nothing was produced.
+	if config.PromptDisabled("tool_digest") {
+		return ToolDigest{}, errors.New("the tool digest prompt is disabled in Settings")
+	}
 	client := a.toolDigestClient()
 	if client == nil {
 		return ToolDigest{}, errors.New("no model is available to explain this call")

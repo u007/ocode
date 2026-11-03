@@ -613,7 +613,7 @@ func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 // override, the same way a dispatched sub-agent does.
 func TestSwitchAgentToSubagentAppliesPromptOverride(t *testing.T) {
 	config.SetPromptOverrides(map[string]config.PromptOverride{
-		"subagent_explore": {Enabled: true, Text: "Prefer rg over grep."},
+		"subagent_explore": {Text: "Prefer rg over grep."},
 	})
 	t.Cleanup(func() { config.SetPromptOverrides(nil) })
 

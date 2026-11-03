@@ -725,8 +725,10 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int, previousSummary, f
 
 func renderSummaryPrompt(previousSummary, joined string, dropped int, focus string) string {
 	var b strings.Builder
-	b.WriteString(config.ApplyPromptOverride("compaction", compactionSystemPrompt))
-	b.WriteString("\n\n")
+	if text, ok := config.ResolvePrompt("compaction", compactionSystemPrompt); ok {
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
 	b.WriteString(summaryTemplate)
 	b.WriteString("\n\n")
 	if f := strings.TrimSpace(focus); f != "" {
@@ -1311,8 +1313,10 @@ func (a *Agent) runInlineSummary(ctx context.Context, messages []Message, rt com
 	}
 
 	var instruction strings.Builder
-	instruction.WriteString(config.ApplyPromptOverride("compaction", compactionSystemPrompt))
-	instruction.WriteString("\n\n")
+	if text, ok := config.ResolvePrompt("compaction", compactionSystemPrompt); ok {
+		instruction.WriteString(text)
+		instruction.WriteString("\n\n")
+	}
 	instruction.WriteString(summaryTemplate)
 	instruction.WriteString("\n\n")
 	if f := strings.TrimSpace(focus); f != "" {

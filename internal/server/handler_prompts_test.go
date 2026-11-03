@@ -61,8 +61,8 @@ func TestListPromptOverridesReturnsCatalogSorted(t *testing.T) {
 		if row.Kind == "" {
 			t.Errorf("prompt %q has empty kind", row.Key)
 		}
-		if row.Enabled || row.Text != "" {
-			t.Errorf("prompt %q should start with no override, got enabled=%v text=%q", row.Key, row.Enabled, row.Text)
+		if !row.Enabled || row.Text != "" {
+			t.Errorf("prompt %q should start enabled with no add-on text, got enabled=%v text=%q", row.Key, row.Enabled, row.Text)
 		}
 	}
 }
@@ -125,25 +125,54 @@ func TestSetPromptOverrideInvalidBodyIs400(t *testing.T) {
 	}
 }
 
-func TestSetPromptOverrideDisabledAndBlankClearsIt(t *testing.T) {
+func TestSetPromptOverrideEnabledBlankClearsIt(t *testing.T) {
 	h := promptsTestHandler(t)
 
 	if w := putPromptOverride(t, h, "title", `{"enabled":true,"text":"Be brief."}`); w.Code != http.StatusOK {
 		t.Fatalf("seed put status = %d, body=%s", w.Code, w.Body.String())
 	}
 
-	w := putPromptOverride(t, h, "title", `{"enabled":false,"text":""}`)
+	w := putPromptOverride(t, h, "title", `{"enabled":true,"text":""}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear put status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
 	if _, ok := config.PromptOverrideFor("title"); ok {
-		t.Errorf("cleared override still present in the live store")
+		t.Errorf("reset-to-default override still present in the live store")
 	}
 	for _, row := range listPromptRows(t, h) {
-		if row.Key == "title" && (row.Enabled || row.Text != "") {
-			t.Errorf("list row for title after clear = %+v, want disabled and empty", row)
+		if row.Key == "title" && (!row.Enabled || row.Text != "") {
+			t.Errorf("list row for title after reset = %+v, want enabled and empty", row)
 		}
 	}
+}
+
+func TestSetPromptOverrideDisabledKeepsThePromptOff(t *testing.T) {
+	h := promptsTestHandler(t)
+
+	w := putPromptOverride(t, h, "goal_judge", `{"enabled":false,"text":"kept for later"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	stored, ok := config.PromptOverrideFor("goal_judge")
+	if !ok {
+		t.Fatal("disabled override was not stored")
+	}
+	if !stored.Disabled || stored.Text != "kept for later" {
+		t.Errorf("stored override = %+v, want disabled with the add-on text kept", stored)
+	}
+	if text, send := config.ResolvePrompt("goal_judge", "BUILTIN"); send || text != "" {
+		t.Errorf("ResolvePrompt with the prompt disabled = %q, %v; want it omitted", text, send)
+	}
+	for _, row := range listPromptRows(t, h) {
+		if row.Key != "goal_judge" {
+			continue
+		}
+		if row.Enabled || row.Text != "kept for later" {
+			t.Errorf("list row for goal_judge = %+v, want disabled with retained text", row)
+		}
+		return
+	}
+	t.Fatalf("goal_judge missing from list")
 }
 
 func TestSetPromptOverrideOversizeTextIs400(t *testing.T) {

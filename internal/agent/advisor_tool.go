@@ -297,10 +297,11 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 		// Fallback: no tools available (e.g. main agent not set). Use a plain
 		// single-turn chat so the advisor still returns something useful.
 		emitDebug("ADVISOR", "no exploration tools available; falling back to plain chat")
-		messages := []Message{
-			{Role: "system", Content: config.ApplyPromptOverride("advisor", advisorSystemPrompt)},
-			{Role: "user", Content: params.Prompt},
+		messages := []Message{}
+		if text, ok := config.ResolvePrompt("advisor", advisorSystemPrompt); ok {
+			messages = append(messages, Message{Role: "system", Content: text})
 		}
+		messages = append(messages, Message{Role: "user", Content: params.Prompt})
 		var (
 			resp *Message
 			err  error
@@ -344,8 +345,12 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// exploration set. We set spec directly (not via SetSpec) so the resolved
 	// advisor client is preserved — SetSpec would try to swap clients based on
 	// spec.Model, which we intentionally leave empty.
+	advisorSystem := ""
+	if text, ok := config.ResolvePrompt("advisor", advisorSystemPrompt); ok {
+		advisorSystem = text
+	}
 	advisorAgent.spec = &AgentSpec{
-		SystemPrompt: config.ApplyPromptOverride("advisor", advisorSystemPrompt),
+		SystemPrompt: advisorSystem,
 		Tools:        advisorAllowedTools,
 		MaxSteps:     60,
 	}
@@ -548,11 +553,15 @@ func executeClaudeCodeAdvisor(parent context.Context, modelName, prompt, workDir
 	args := []string{
 		"-p",
 		"--model", modelName,
-		"--append-system-prompt", config.ApplyPromptOverride("advisor_claude_code", claudeCodeAdvisorPrompt),
+	}
+	if text, ok := config.ResolvePrompt("advisor_claude_code", claudeCodeAdvisorPrompt); ok {
+		args = append(args, "--append-system-prompt", text)
+	}
+	args = append(args,
 		"--allowedTools", "Read,Glob,Grep,LS,WebFetch,WebSearch",
 		"--",
 		prompt,
-	}
+	)
 
 	// Use a 5-minute timeout to prevent hanging subprocesses from permanently
 	// locking the advisorRecursionGuard and leaking a goroutine.

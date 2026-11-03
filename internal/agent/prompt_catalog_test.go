@@ -75,7 +75,7 @@ func TestPromptCatalogEffectiveAppendsEnabledOverride(t *testing.T) {
 	const extra = "Extra user guidance."
 	m := make(map[string]config.PromptOverride)
 	for _, e := range PromptCatalog() {
-		m[e.Key] = config.PromptOverride{Enabled: true, Text: extra}
+		m[e.Key] = config.PromptOverride{Text: extra}
 	}
 	resetPromptOverrides(t, m)
 	for _, e := range PromptCatalog() {
@@ -102,7 +102,7 @@ func TestGenerateTitleSendsOverriddenSystemPrompt(t *testing.T) {
 	}
 
 	resetPromptOverrides(t, map[string]config.PromptOverride{
-		"title": {Enabled: true, Text: "Prefer British spelling."},
+		"title": {Text: "Prefer British spelling."},
 	})
 	sent = ""
 	a = &Agent{client: client}
@@ -119,7 +119,7 @@ func TestGenerateTitleSendsOverriddenSystemPrompt(t *testing.T) {
 // override, so dispatch and main-agent switching cannot disagree.
 func TestSubAgentPromptWithOverrideFollowsStore(t *testing.T) {
 	resetPromptOverrides(t, map[string]config.PromptOverride{
-		"subagent_explore": {Enabled: true, Text: "Prefer rg."},
+		"subagent_explore": {Text: "Prefer rg."},
 	})
 	if got, want := SubAgentPromptWithOverride("explore", exploreSubAgentPrompt), exploreSubAgentPrompt+"\n\nPrefer rg."; got != want {
 		t.Errorf("explore with override = %q, want built-in plus override", got)
@@ -135,7 +135,7 @@ func TestSubAgentPromptWithOverrideFollowsStore(t *testing.T) {
 
 func TestOverrideBuiltinPromptOnlyTouchesBuiltinText(t *testing.T) {
 	resetPromptOverrides(t, map[string]config.PromptOverride{
-		"subagent_explore": {Enabled: true, Text: "Use rg first."},
+		"subagent_explore": {Text: "Use rg first."},
 	})
 	if got := overrideBuiltinPrompt("subagent_explore", exploreSubAgentPrompt); got != exploreSubAgentPrompt+"\n\nUse rg first." {
 		t.Errorf("built-in explore prompt not overridden")
@@ -153,7 +153,7 @@ func TestOverrideBuiltinPromptOnlyTouchesBuiltinText(t *testing.T) {
 // override, placed right after the built-in instruction.
 func TestRenderSummaryPromptHonoursCompactionOverride(t *testing.T) {
 	resetPromptOverrides(t, map[string]config.PromptOverride{
-		"compaction": {Enabled: true, Text: "Keep file paths verbatim."},
+		"compaction": {Text: "Keep file paths verbatim."},
 	})
 	got := renderSummaryPrompt("", "user: hi", 0, "")
 	want := compactionSystemPrompt + "\n\nKeep file paths verbatim.\n\n" + summaryTemplate

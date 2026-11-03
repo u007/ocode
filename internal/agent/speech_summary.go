@@ -352,6 +352,11 @@ func (a *Agent) SummarizeForSpeech(text string) string {
 		a.emitDebug("SPEECH", fmt.Sprintf("speaking %d chars verbatim; no summary needed", len([]rune(text))))
 		return ""
 	}
+	// A disabled catalog prompt turns the capability off: the caller speaks the
+	// original text, exactly as it does when no summariser client exists.
+	if config.PromptDisabled("speech_summary") {
+		return ""
+	}
 	client := a.speechSummaryClient()
 	if client == nil {
 		return ""

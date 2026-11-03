@@ -53,6 +53,52 @@ describe("PromptsForm", () => {
     expect(screen.queryByText(/Show built-in prompt/)).toBeNull();
   });
 
+  it("collapses the editor while a prompt is disabled and expands it when enabled", async () => {
+    render(<PromptsForm />);
+    await screen.findByText("Compaction summariser");
+
+    expect(
+      card("compaction").queryByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeNull();
+    expect(card("compaction").getByText(/Enable this prompt to edit its custom instructions/)).toBeTruthy();
+
+    fireEvent.click(card("compaction").getByLabelText("Enable this prompt"));
+    expect(
+      card("compaction").getByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeTruthy();
+
+    fireEvent.click(card("compaction").getByLabelText("Enable this prompt"));
+    expect(
+      card("compaction").queryByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeNull();
+  });
+
+  it("shows the editor already expanded for an enabled prompt and keeps saved text", async () => {
+    render(<PromptsForm />);
+    await screen.findByText("Session titles");
+
+    const editor = card("title").getByPlaceholderText(
+      "Appended to the built-in prompt when enabled.",
+    ) as HTMLTextAreaElement;
+    expect(editor.value).toBe("Keep titles under five words.");
+    expect(
+      card("title").queryByText(/Enable this prompt to edit its custom instructions/),
+    ).toBeNull();
+  });
+
+  it("calls out text that is saved but not applied on a disabled prompt", async () => {
+    mockGetPrompts.mockResolvedValue({
+      prompts: [{ ...compaction, enabled: false, text: "Old instructions." }],
+    });
+    render(<PromptsForm />);
+    await screen.findByText("Compaction summariser");
+
+    expect(
+      card("compaction").queryByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeNull();
+    expect(card("compaction").getByText(/The saved text is kept but not applied/)).toBeTruthy();
+  });
+
   it("enables Save only after the checkbox or text changes, then saves the draft", async () => {
     mockSetPrompt.mockResolvedValue({ ...compaction, enabled: true, text: "Use bullets." });
     render(<PromptsForm />);
@@ -60,7 +106,7 @@ describe("PromptsForm", () => {
 
     expect(saveButton("compaction").disabled).toBe(true);
 
-    fireEvent.click(card("compaction").getByLabelText("Enable custom instructions"));
+    fireEvent.click(card("compaction").getByLabelText("Enable this prompt"));
     fireEvent.change(card("compaction").getByPlaceholderText("Appended to the built-in prompt when enabled."), {
       target: { value: "Use bullets." },
     });
@@ -73,14 +119,34 @@ describe("PromptsForm", () => {
     await waitFor(() => expect(saveButton("compaction").disabled).toBe(true));
   });
 
-  it("Reset saves enabled=false with empty text", async () => {
-    mockSetPrompt.mockResolvedValue({ ...title, enabled: false, text: "" });
+  it("switches a prompt off, hiding its editor while keeping the saved text", async () => {
+    mockSetPrompt.mockResolvedValue({ ...title, enabled: false, text: "Keep titles under five words." });
+    render(<PromptsForm />);
+    await screen.findByText("Session titles");
+
+    fireEvent.click(card("title").getByLabelText("Enable this prompt"));
+    expect(
+      card("title").queryByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeNull();
+    expect(card("title").getByText(/The saved text is kept but not applied/)).toBeTruthy();
+
+    fireEvent.click(saveButton("title"));
+    await waitFor(() =>
+      expect(mockSetPrompt).toHaveBeenCalledWith("title", {
+        enabled: false,
+        text: "Keep titles under five words.",
+      }),
+    );
+  });
+
+  it("Reset re-enables the prompt and clears the custom text", async () => {
+    mockSetPrompt.mockResolvedValue({ ...title, enabled: true, text: "" });
     render(<PromptsForm />);
     await screen.findByText("Session titles");
 
     expect(resetButton("title").disabled).toBe(false);
     fireEvent.click(resetButton("title"));
-    await waitFor(() => expect(mockSetPrompt).toHaveBeenCalledWith("title", { enabled: false, text: "" }));
+    await waitFor(() => expect(mockSetPrompt).toHaveBeenCalledWith("title", { enabled: true, text: "" }));
     await waitFor(() => expect(resetButton("title").disabled).toBe(true));
   });
 

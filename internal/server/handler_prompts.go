@@ -21,7 +21,7 @@ type promptOverrideRow struct {
 }
 
 // newPromptOverrideRow reads the live override store. A key with no stored
-// override yields the zero PromptOverride, which is disabled with empty text.
+// override is an enabled prompt with no add-on text, which is the default.
 func newPromptOverrideRow(e agent.PromptCatalogEntry) promptOverrideRow {
 	o, _ := config.PromptOverrideFor(e.Key)
 	return promptOverrideRow{
@@ -29,7 +29,7 @@ func newPromptOverrideRow(e agent.PromptCatalogEntry) promptOverrideRow {
 		Label:       e.Label,
 		Description: e.Description,
 		Kind:        e.Kind,
-		Enabled:     o.Enabled,
+		Enabled:     !o.Disabled,
 		Text:        o.Text,
 	}
 }
@@ -66,7 +66,7 @@ func (h *Handler) HandleSetPromptOverride(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("prompt override text exceeds the %d byte limit", config.MaxPromptOverrideBytes))
 		return
 	}
-	if err := config.SavePromptOverride(key, config.PromptOverride{Enabled: req.Enabled, Text: req.Text}); err != nil {
+	if err := config.SavePromptOverride(key, config.PromptOverride{Disabled: !req.Enabled, Text: req.Text}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save prompt override: "+err.Error())
 		return
 	}

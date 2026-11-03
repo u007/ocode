@@ -53,8 +53,9 @@ export default function PromptsForm() {
     <div className="p-6 max-w-2xl space-y-4">
       <h2 className="text-sm font-semibold text-foreground">System Prompts</h2>
       <p className="text-[11px] text-muted-foreground/80">
-        When enabled and not empty, the text is appended to the built-in prompt.
-        Disabled or empty uses the built-in prompt unchanged.
+        Each built-in prompt runs unless you switch it off, and switching one off
+        turns off what it drives. Custom instructions are appended to the prompt
+        while it is enabled. The editor stays collapsed while a prompt is off.
       </p>
       {error && (
         <div role="alert" className="text-xs text-red-400">
@@ -98,7 +99,7 @@ function PromptCard({
 
   const busy = pending !== null;
   const dirty = enabled !== entry.enabled || text !== entry.text;
-  const alreadyReset = !entry.enabled && entry.text === "";
+  const alreadyReset = entry.enabled && entry.text === "";
   const textareaId = `prompt-override-${entry.key}`;
 
   return (
@@ -120,20 +121,29 @@ function PromptCard({
           disabled={busy}
           className="h-4 w-4 rounded border-border text-primary accent-primary focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
-        Enable custom instructions
+        Enable this prompt
       </label>
-      <label htmlFor={textareaId} className="sr-only">
-        Custom instructions for {entry.label}
-      </label>
-      <textarea
-        id={textareaId}
-        rows={4}
-        value={text}
-        disabled={busy}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Appended to the built-in prompt when enabled."
-        className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-      />
+      {enabled ? (
+        <>
+          <label htmlFor={textareaId} className="sr-only">
+            Custom instructions for {entry.label}
+          </label>
+          <textarea
+            id={textareaId}
+            rows={4}
+            value={text}
+            disabled={busy}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Appended to the built-in prompt when enabled."
+            className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          />
+        </>
+      ) : (
+        <p className="text-[11px] text-muted-foreground/70">
+          Enable this prompt to edit its custom instructions.
+          {text.trim() !== "" && " The saved text is kept but not applied."}
+        </p>
+      )}
       <div className="flex items-center gap-2">
         <Button
           size="sm"
@@ -148,7 +158,7 @@ function PromptCard({
           variant="outline"
           className="h-8 text-xs"
           disabled={busy || alreadyReset}
-          onClick={() => void write({ enabled: false, text: "" }, "reset")}
+          onClick={() => void write({ enabled: true, text: "" }, "reset")}
         >
           {pending === "reset" ? "Resetting…" : "Reset"}
         </Button>

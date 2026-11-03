@@ -72,7 +72,7 @@ func TestCommunicationStylePromptCarriesTheStandard(t *testing.T) {
 // the Prompts settings page is appended to the fragment.
 func TestCommunicationStylePromptAppliesOverride(t *testing.T) {
 	resetPromptOverrides(t, map[string]config.PromptOverride{
-		"communication_style": {Enabled: true, Text: "Prefer British spelling."},
+		"communication_style": {Text: "Prefer British spelling."},
 	})
 	ag := &Agent{}
 	ag.SetCommunicationStyleEnabled(true)

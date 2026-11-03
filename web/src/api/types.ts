@@ -1706,8 +1706,10 @@ export interface PulseSystemPrompt {
 export type PromptKind = "Sub-agent" | "Judge" | "Helper task" | "Main agent prompt";
 
 /** One configurable built-in system prompt. The built-in text itself is not
- *  sent. When `enabled` is on and `text` is non-empty, `text` is APPENDED after
- *  the built-in prompt; otherwise the built-in prompt applies unchanged. */
+ *  sent. `enabled` is the prompt itself: true is the default, and false means
+ *  the prompt is not sent at all and the capability it drives is switched off.
+ *  `text` is an add-on appended after the built-in prompt while it is enabled;
+ *  it is kept but not applied while the prompt is off. */
 export interface PromptOverrideEntry {
   key: string;
   label: string;
