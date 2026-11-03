@@ -3,6 +3,7 @@ package appearance
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -511,6 +512,141 @@ func TestConvertThemeUIValuesAreSixDigitHex(t *testing.T) {
 		}
 		check(t, got)
 		assertEq(t, got.UI["--foreground"], "#aaaaaa") // #d4d4d4cc over #000000
+	})
+}
+
+// TestConvertThemeTUIPalettesAreSixDigitHex is the §8.5 counterpart to the web
+// palette contract: every non-empty Colors field and every colour in the
+// emitted terminal block is a lower-case #RRGGBB. lipgloss and ghostty-web
+// render nothing for an 8-digit value, and real themes author alpha freely —
+// panel.border "#ffffff12" is what Border inherits.
+func TestConvertThemeTUIPalettesAreSixDigitHex(t *testing.T) {
+	pattern := regexp.MustCompile(`^#[0-9a-f]{6}$`)
+	check := func(t *testing.T, got ConvertedTheme) {
+		t.Helper()
+		for name, value := range themeColoursByName(got.Colors) {
+			if value == "" {
+				continue
+			}
+			if !pattern.MatchString(value) {
+				t.Errorf("colors.%s = %q, want #RRGGBB", name, value)
+			}
+		}
+		if got.Terminal.Dark == nil && got.Terminal.Light == nil {
+			t.Fatal("conversion emitted no terminal block")
+		}
+		for label, block := range map[string]*TerminalColors{
+			"terminal.dark":  got.Terminal.Dark,
+			"terminal.light": got.Terminal.Light,
+		} {
+			if block == nil {
+				continue
+			}
+			for field, value := range map[string]string{
+				"foreground":           block.Foreground,
+				"background":           block.Background,
+				"cursor":               block.Cursor,
+				"cursor_text":          block.CursorText,
+				"selection_background": block.SelectionBackground,
+				"selection_foreground": block.SelectionForeground,
+			} {
+				if value == "" {
+					continue
+				}
+				if !pattern.MatchString(value) {
+					t.Errorf("%s.%s = %q, want #RRGGBB", label, field, value)
+				}
+			}
+			if len(block.Palette) != len(terminalANSIKeys) {
+				t.Fatalf("%s palette has %d entries, want %d", label, len(block.Palette), len(terminalANSIKeys))
+			}
+			for index, value := range block.Palette {
+				if !pattern.MatchString(value) {
+					t.Errorf("%s.palette[%d] = %q, want #RRGGBB", label, index, value)
+				}
+			}
+		}
+	}
+
+	// catppuccin-mocha and gruvbox-light cover buildColours; no-colors covers
+	// deriveWithoutColors, whose Colors come from raw token rules.
+	for _, name := range []string{"catppuccin-mocha.json", "gruvbox-light.json", "no-colors.json"} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ConvertTheme("vscode:test/"+name, name, loadFixture(t, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, got)
+		})
+	}
+}
+
+// themeColoursByName exposes every ThemeColors field by its Go name. Reflection
+// keeps the palette contract complete: a field added to the shared struct is
+// covered without editing this helper, so it cannot silently escape the pass.
+func themeColoursByName(colors theme.ThemeColors) map[string]string {
+	value := reflect.ValueOf(colors)
+	typ := value.Type()
+	out := make(map[string]string, value.NumField())
+	for index := 0; index < value.NumField(); index++ {
+		out[typ.Field(index).Name] = value.Field(index).String()
+	}
+	return out
+}
+
+// TestConvertThemeCompositesAlphaInTUIPalettes proves the TUI and terminal
+// passes composite instead of dropping: an alpha panel.border becomes Border,
+// and an alpha terminal.ansiRed is flattened over the block background — or the
+// theme background when the block authors none. The values are the reported
+// real-world ones ("#ffffff12" is common in shipped themes), and the
+// unparseable slot pins the 16-entry contract against a garbage value.
+func TestConvertThemeCompositesAlphaInTUIPalettes(t *testing.T) {
+	t.Run("block background", func(t *testing.T) {
+		raw := &RawTheme{
+			Type: "dark",
+			Colors: map[string]string{
+				"editor.background":   "#101010",
+				"editor.foreground":   "#f0f0f0",
+				"panel.border":        "#ffffff12",
+				"terminal.background": "#000000",
+				"terminal.foreground": "#ffffff80",
+				"terminal.ansiRed":    "#ff000080",
+				"terminal.ansiGreen":  "not-a-colour",
+			},
+		}
+		got, err := ConvertTheme("vscode:test/alpha-tui", "Alpha TUI", raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEq(t, got.Colors.Border, "#212121") // #ffffff12 over #101010
+		assertEq(t, got.UI["--border"], "#212121")
+		if got.Terminal.Dark == nil {
+			t.Fatal("Terminal.Dark is nil for a dark theme")
+		}
+		assertEq(t, got.Terminal.Dark.Foreground, "#808080") // #ffffff80 over #000000
+		assertEq(t, got.Terminal.Dark.Palette[1], "#800000") // #ff000080 over #000000
+		assertEq(t, got.Terminal.Dark.Palette[2], defaultANSI[2])
+	})
+
+	t.Run("theme background fallback", func(t *testing.T) {
+		raw := &RawTheme{
+			Type: "dark",
+			Colors: map[string]string{
+				"editor.background": "#101010",
+				"editor.foreground": "#f0f0f0",
+				"terminal.ansiRed":  "#ff000080",
+			},
+		}
+		got, err := ConvertTheme("vscode:test/alpha-terminal-fallback", "Alpha Terminal Fallback", raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Terminal.Dark == nil {
+			t.Fatal("Terminal.Dark is nil for a dark theme")
+		}
+		// No terminal.background, so the block composites over the theme
+		// background rather than an implied black.
+		assertEq(t, got.Terminal.Dark.Palette[1], "#880808") // #ff000080 over #101010
 	})
 }
 

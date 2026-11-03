@@ -190,6 +190,16 @@ func ConvertTheme(id, label string, raw *RawTheme) (ConvertedTheme, error) {
 		ui = buildUI(raw.Colors, kind, colors)
 	}
 
+	// The TUI palette and the terminal palette are flattened here rather than
+	// inside their builders so both producers of Colors (buildColours and
+	// deriveWithoutColors) share one choke point, exactly as normaliseUI does
+	// for the web palette. The terminal block falls back to the theme
+	// background, so Colors must be normalised first: its Background is the
+	// backdrop a background-less terminal block is composited over.
+	colors = normaliseColours(colors)
+	terminal := buildTerminal(raw.Colors, kind)
+	normaliseTerminal(&terminal, colors.Background)
+
 	return ConvertedTheme{
 		ID:       id,
 		Label:    label,
@@ -197,9 +207,125 @@ func ConvertTheme(id, label string, raw *RawTheme) (ConvertedTheme, error) {
 		Colors:   colors,
 		UI:       ui,
 		Monaco:   buildMonaco(raw, kind),
-		Terminal: buildTerminal(raw.Colors, kind),
+		Terminal: terminal,
 		Warnings: warnings,
 	}, nil
+}
+
+// normaliseColours is the TUI palette's #RRGGBB choke point. Every field is
+// composited over the theme Background and any value that is not a colour at
+// all is cleared, mirroring normaliseUI: lipgloss cannot render an 8-digit
+// value, and real themes author alpha freely (panel.border "#ffffff12" is
+// common and is what Border inherits).
+//
+// Idempotent like normaliseUI: an opaque #RRGGBB composites to itself.
+func normaliseColours(colors theme.ThemeColors) theme.ThemeColors {
+	backdrop := normaliseBackdrop(colors.Background)
+	for _, field := range []*string{
+		&colors.User,
+		&colors.Assistant,
+		&colors.Header,
+		&colors.Border,
+		&colors.Hint,
+		&colors.Text,
+		&colors.Background,
+		&colors.StatusBg,
+		&colors.StatusFg,
+		&colors.SelectedFg,
+		&colors.SelectedBg,
+		&colors.Success,
+		&colors.Error,
+		&colors.Accent,
+		&colors.Dim,
+		&colors.Thinking,
+	} {
+		*field = normaliseColourValue(*field, backdrop)
+	}
+	return colors
+}
+
+// normaliseTerminal flattens every colour in whichever terminal block the
+// conversion emitted. Each block is composited over its own Background, falling
+// back to the other block's background and then the theme Background, because
+// ghostty-web renders an 8-digit value as nothing.
+//
+// A palette slot that does not parse as a colour is replaced by the xterm
+// default at the same index: unlike a map value it cannot simply be deleted,
+// since TerminalColors documents Palette as always holding 16 entries.
+func normaliseTerminal(palette *TerminalPalette, themeBackground string) {
+	if palette == nil {
+		return
+	}
+	for _, pair := range []struct {
+		block *TerminalColors
+		other *TerminalColors
+	}{
+		{palette.Dark, palette.Light},
+		{palette.Light, palette.Dark},
+	} {
+		block := pair.block
+		if block == nil {
+			continue
+		}
+		backdrop := terminalBackdrop(block, pair.other, themeBackground)
+		block.Foreground = normaliseColourValue(block.Foreground, backdrop)
+		block.Background = normaliseColourValue(block.Background, backdrop)
+		block.Cursor = normaliseColourValue(block.Cursor, backdrop)
+		block.CursorText = normaliseColourValue(block.CursorText, backdrop)
+		block.SelectionBackground = normaliseColourValue(block.SelectionBackground, backdrop)
+		block.SelectionForeground = normaliseColourValue(block.SelectionForeground, backdrop)
+		for index := range block.Palette {
+			if composited, ok := compositeOver(block.Palette[index], backdrop); ok {
+				block.Palette[index] = composited
+				continue
+			}
+			if index < len(defaultANSI) {
+				block.Palette[index] = defaultANSI[index]
+			}
+		}
+	}
+}
+
+// terminalBackdrop resolves the surface a terminal block's colours are
+// composited over: the block's own background, then the other block's, then the
+// theme background. A candidate that does not parse is skipped so a malformed
+// background never becomes an implied black.
+func terminalBackdrop(block, other *TerminalColors, themeBackground string) string {
+	candidates := []string{block.Background}
+	if other != nil {
+		candidates = append(candidates, other.Background)
+	}
+	candidates = append(candidates, themeBackground)
+	for _, candidate := range candidates {
+		if _, _, ok := parseHexColourAlpha(candidate); ok {
+			return normaliseBackdrop(candidate)
+		}
+	}
+	return normaliseBackdrop(themeBackground)
+}
+
+// normaliseBackdrop reduces a colour to its #RRGGBB channels, which is what
+// every value is composited over. An unparseable value is returned unchanged so
+// compositeOver applies its black fallback, matching the pre-existing behaviour.
+func normaliseBackdrop(value string) string {
+	if rgb, _, ok := parseHexColourAlpha(value); ok {
+		return formatHexRGB(rgb)
+	}
+	return value
+}
+
+// normaliseColourValue flattens one colour onto backdrop. An empty value stays
+// empty (an unset field is not an error) and an unparseable one is cleared, the
+// struct analogue of normaliseUI deleting an unreadable variable.
+func normaliseColourValue(value, backdrop string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	composited, ok := compositeOver(value, backdrop)
+	if !ok {
+		return ""
+	}
+	return composited
 }
 
 // PolarityFromType classifies a theme from its declared type, falling back to
@@ -279,6 +405,10 @@ func ResolveTokenScopes(rules []TokenRule) []MonacoRule {
 // buildColours maps spec §8.5's TUI fields. Every value is the first present
 // source key; a field with no source stays empty, except SelectedFg and
 // Thinking which have explicit fallbacks.
+//
+// Values are copied verbatim here; ConvertTheme flattens the finished palette
+// to #RRGGBB once (normaliseColours), so an author #RRGGBBAA value — and the
+// alpha it inherits into Border via panel.border — never reaches lipgloss.
 func buildColours(raw *RawTheme) theme.ThemeColors {
 	colors := raw.Colors
 	out := theme.ThemeColors{}
@@ -418,10 +548,7 @@ func buildUI(colors map[string]string, kind Polarity, palette theme.ThemeColors)
 // The pass is idempotent: #RRGGBB carries alpha 255 and composites to itself, so
 // running it over already-normalised output changes nothing.
 func normaliseUI(ui map[string]string, background string) {
-	backdrop := background
-	if rgb, _, ok := parseHexColourAlpha(background); ok {
-		backdrop = formatHexRGB(rgb)
-	}
+	backdrop := normaliseBackdrop(background)
 	for variable, value := range ui {
 		composited, ok := compositeOver(value, backdrop)
 		if !ok {
@@ -582,6 +709,8 @@ func deriveWithoutColors(raw *RawTheme, kind Polarity) (map[string]string, theme
 	// The token rules are raw author values, so they may be #RGB/#RRGGBBAA just
 	// like a colors block; the same choke point flattens them to #RRGGBB.
 	normaliseUI(ui, background)
+	// The returned TUI palette keeps those raw values; ConvertTheme's
+	// normaliseColours pass flattens it, so this producer needs no second pass.
 	colors := theme.ThemeColors{
 		Text:       text,
 		Background: background,
@@ -615,6 +744,10 @@ func buildMonaco(raw *RawTheme, kind Polarity) MonacoTheme {
 
 // buildTerminal assembles only the block matching kind. Every palette slot is
 // filled: a missing VS Code key takes the xterm default at the same index.
+//
+// Values are copied verbatim here; ConvertTheme flattens the block to #RRGGBB
+// once (normaliseTerminal), compositing over the block's background and
+// replacing an unparseable palette slot with the xterm default.
 func buildTerminal(colors map[string]string, kind Polarity) TerminalPalette {
 	foreground, _ := firstPresent(colors, "terminal.foreground", "editor.foreground")
 	background, _ := firstPresent(colors, "terminal.background", "editor.background")

@@ -22,6 +22,12 @@ const (
 // alpha and the web converter ignores an 8-digit value. That flattening is one
 // shared pass (normaliseUI) applied to every producer of the palette: the
 // mapping loop, the synthesized foregrounds and the colors-less derivation.
+// The TUI palette (Colors) and the emitted terminal block are flattened the
+// same way at the end of ConvertTheme — normaliseColours over the theme
+// background and normaliseTerminal over each block's own background — because
+// lipgloss and ghostty-web also render #RRGGBB only. A field or palette slot
+// that cannot be parsed as a colour is cleared (Colors) or replaced by the
+// xterm default (Palette), never passed through.
 // A foreground the theme does not author (--primary-foreground,
 // --destructive-foreground, --secondary-foreground, and --accent-foreground when
 // neither the partner key nor an accent surface exists) is synthesized for
