@@ -111,6 +111,20 @@ func TestParseRejectsDuplicateKey(t *testing.T) {
 	}
 }
 
+// A repeated IDENTICAL assignment is not ambiguous, and appending one is how
+// real .env files acquire duplicates. Rejecting the whole file over it voids
+// every other key, which surfaces as a phantom "environment variable X is not
+// set" for a value that is right there.
+func TestParseAcceptsAnIdenticalDuplicateKey(t *testing.T) {
+	got, err := Parse(strings.NewReader("A=1\nB=2\nA=1\n"))
+	if err != nil {
+		t.Fatalf("Parse() with an identical duplicate: %v", err)
+	}
+	if len(got) != 2 || got["A"] != "1" || got["B"] != "2" {
+		t.Errorf("Parse() = %v, want A=1 B=2", got)
+	}
+}
+
 func TestParseQuotedValueMayContainEquals(t *testing.T) {
 	got, err := Parse(strings.NewReader(`URL="postgres://u:p@h/db?x=1"` + "\n"))
 	if err != nil {

@@ -24,7 +24,13 @@ import (
 // up, and then cached for the lifetime of the returned lookup. Building the
 // lookup must stay cheap: a request whose value contains no variable
 // reference must not touch the filesystem.
-func dbEnvLookup(projectRoot string) func(string) (string, bool) {
+//
+// The second return reports why the dotenv files could not be read, once a
+// lookup has run. A load failure contributes no file values, so EVERY key then
+// looks unset — the caller MUST consult envErr before reporting "environment
+// variable X is not set", or one malformed line elsewhere in the file sends the
+// user hunting for a variable that is right there.
+func dbEnvLookup(projectRoot string) (func(string) (string, bool), func() error) {
 	var (
 		once      sync.Once
 		fileVals  map[string]string
@@ -39,10 +45,9 @@ func dbEnvLookup(projectRoot string) func(string) (string, bool) {
 			values, err := envfile.Load(projectRoot)
 			if err != nil {
 				// A malformed .env must not silently resolve to a different
-				// database than the user expects. Log it (without the values)
-				// and continue with the process environment only; the
-				// connection then fails with an explicit "not set" error
-				// naming the variable.
+				// database than the user expects. Log it (without the values),
+				// contribute no file values, and let the caller name the real
+				// cause instead of a phantom missing variable.
 				log.Printf("dbconnect: read env files in %s: %v", projectRoot, err)
 				loadError = err
 				fileVals = map[string]string{}
@@ -51,18 +56,18 @@ func dbEnvLookup(projectRoot string) func(string) (string, bool) {
 			fileVals = values
 		})
 	}
-	return func(name string) (string, bool) {
+	lookup := func(name string) (string, bool) {
 		load()
 		if loadError != nil {
-			// A file that could not be read contributes nothing. The caller
-			// reports the missing variable, which names the variable the
-			// user needs to set.
-			if v, ok := envfile.Lookup(name, nil); ok {
-				return v, true
-			}
-			return "", false
+			// A file that could not be read contributes nothing; the process
+			// environment is still consulted.
+			return envfile.Lookup(name, nil)
 		}
 		return envfile.Lookup(name, fileVals)
+	}
+	return lookup, func() error {
+		load()
+		return loadError
 	}
 }
 
@@ -77,10 +82,20 @@ func dbEnvLookup(projectRoot string) func(string) (string, bool) {
 // The resolved URL is a secret. It is returned to the caller for in-memory
 // use only and is never logged, returned to the client, or written to disk.
 func dbResolveTemplate(template, projectRoot string) (string, error) {
-	expanded, err := dbconnect.ExpandEnv(template, dbEnvLookup(projectRoot))
+	lookup, envErr := dbEnvLookup(projectRoot)
+	expanded, err := dbconnect.ExpandEnv(template, lookup)
 	if err != nil {
-		// The error names the missing variable but never its value, so it is
-		// safe to log and to show the user.
+		// A dotenv file that cannot be read (a duplicate key, an unterminated
+		// quote, a permissions problem) voids EVERY value in it, so a template
+		// then fails as if its variable were never set. Name the real cause:
+		// "DATABASE_URL is not set" sends the user looking in the one place the
+		// value already is. The load error names a path, line and key, never a
+		// value, so it is safe to show and to log.
+		if loadErr := envErr(); loadErr != nil {
+			return "", fmt.Errorf("cannot read the project's env files: %w", loadErr)
+		}
+		// Otherwise the error names the missing variable, never its value, so
+		// it is safe to log and to show the user.
 		return "", err
 	}
 	if _, err := dbconnect.ParseURL(expanded); err != nil {

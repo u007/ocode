@@ -13,6 +13,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/dbconnect"
+	"github.com/u007/ocode/internal/projects"
 )
 
 // Postgres DB connector HTTP surface (/api/dbconnect/*).
@@ -168,7 +169,9 @@ func (h *Handler) dbTouchLocked(surface string, now time.Time) []*sql.DB {
 // An explicit project_path is the authority, and it must name an allowed project
 // root — the same check the file reader uses, so a remote project's path
 // (which belongs to another machine) is refused instead of reading a local .env
-// that happens to share its name.
+// that happens to share its name. The "~" spelling IS accepted here: on a remote
+// (SSH/WSL) project the unlock is proxied to the host's own server, which is the
+// machine that owns that home directory (dbProjectRootFor).
 //
 // The legacy session_id fallback trusts the session registry's recorded root,
 // as docs/concepts/db-connector.md specifies. That is not the same thing as
@@ -181,7 +184,7 @@ func (h *Handler) dbTouchLocked(surface string, now time.Time) []*sql.DB {
 // environment: that would connect a remote project to a local database.
 func (h *Handler) dbUnlockProjectRoot(projectPath, sessionID string) (string, error) {
 	if projectPath != "" {
-		root, ok := h.fileContentRootFor(projectPath)
+		root, ok := h.dbProjectRootFor(projectPath)
 		if !ok {
 			return "", errors.New("project_path is not an allowed project root")
 		}
@@ -191,6 +194,31 @@ func (h *Handler) dbUnlockProjectRoot(projectPath, sessionID string) (string, er
 		return h.sessionProjectRoot(sessionID), nil
 	}
 	return "", nil
+}
+
+// dbProjectRootFor validates a client-supplied project path against this
+// server's allowed roots, accepting the host's "~" spelling.
+//
+// A remote (SSH/WSL) project is saved by the desktop under the verbatim "~"
+// form, and its unlock is proxied to the host's server (/api/remote/{host}/...),
+// which is the machine that owns that home directory. The host's own registry
+// holds the HOME-EXPANDED path (projects.Add expands there), so an exact-match
+// check rejects every tilde-keyed remote project before a single .env is read.
+//
+// The fallback is the same trust decision the git, upload and session-list
+// endpoints already make (resolveRegisteredProjectRoot): only a saved root can
+// match, and expansion narrows rather than widens the accepted set. A "~user"
+// form and every non-tilde path pass through projects.ExpandHome unchanged, so
+// they can never match a root this server was not already told to serve.
+func (h *Handler) dbProjectRootFor(projectPath string) (string, bool) {
+	if root, ok := h.fileContentRootFor(projectPath); ok {
+		return root, true
+	}
+	expanded, err := projects.ExpandHome(projectPath)
+	if err != nil || expanded == projectPath {
+		return "", false
+	}
+	return h.fileContentRootFor(expanded)
 }
 
 // dbDropSurface forgets every grant held by one surface and closes its pools.

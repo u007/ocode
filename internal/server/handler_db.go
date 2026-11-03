@@ -192,8 +192,15 @@ func (h *Handler) dbExpandPath(path, projectRoot string) (string, string) {
 	if !dbconnect.IsTemplate(path) {
 		return path, ""
 	}
-	expanded, err := dbconnect.ExpandEnv(path, dbEnvLookup(projectRoot))
+	lookup, envErr := dbEnvLookup(projectRoot)
+	expanded, err := dbconnect.ExpandEnv(path, lookup)
 	if err != nil {
+		// As in dbResolveTemplate: an unreadable dotenv file makes every
+		// variable look unset, so report the load failure rather than a
+		// phantom missing variable.
+		if loadErr := envErr(); loadErr != nil {
+			return "", fmt.Sprintf("cannot read the project's env files: %v", loadErr)
+		}
 		// The error names the missing variable, never a value.
 		return "", err.Error()
 	}

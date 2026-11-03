@@ -472,6 +472,79 @@ func TestDBConnectUnlockViaSessionIDTemplateNeedsNoMasterPassword(t *testing.T) 
 	}
 }
 
+// The reported failure: a .env whose DATABASE_URL is present still resolved as
+// "environment variable DATABASE_URL is not set", because ONE unchanged key was
+// repeated further down the file and the parser rejected the whole file. A
+// repeated identical assignment is not ambiguous, so it must not void the file.
+func TestDBConnectUnlockToleratesAnIdenticalDuplicateInTheEnvFile(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env",
+		"OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n"+
+			"UNRELATED=http://127.0.0.1:8770\n"+
+			"UNRELATED=http://127.0.0.1:8770\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock with an identical duplicate in .env = %d, want 200 (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	url, ok := h.dbGrantURL("s1", "env")
+	if !ok {
+		t.Fatal("template connection was not granted")
+	}
+	if url != "postgres://app:pw@127.0.0.1:1/app" {
+		t.Fatalf("granted url = %q", url)
+	}
+}
+
+func TestDBConnectUnlockReportsAnUnreadableEnvFileInsteadOfAMissingVariable(t *testing.T) {
+	// A dotenv file that fails to parse contributes NO values — one duplicated
+	// key anywhere in it voids every line. Reporting that as "environment
+	// variable X is not set" is what sent a user hunting for a variable their
+	// .env already had (the real cause was a duplicate YOLO_BASE_URL far below
+	// it). The failure must name the file, the line and the offending key.
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	dbEnvFile(t, project, ".env",
+		"OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n"+
+			"UNRELATED=http://127.0.0.1:1\n"+
+			"UNRELATED=http://127.0.0.1:2\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", project)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unlock with an unreadable .env = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "cannot read the project's env files") {
+		t.Fatalf("failure does not name the unreadable file: %s", body)
+	}
+	if !strings.Contains(body, "duplicate key") || !strings.Contains(body, "UNRELATED") {
+		t.Fatalf("failure does not name the duplicated key: %s", body)
+	}
+	if strings.Contains(body, `environment variable "OCODE_TEST_DB_URL" is not set`) {
+		t.Fatalf("failure still claims a phantom missing variable: %s", body)
+	}
+	if strings.Contains(body, "postgres://") {
+		t.Fatalf("failure leaked a value: %s", body)
+	}
+	if _, ok := h.dbGrantURL("s1", "env"); ok {
+		t.Error("an unreadable .env left a grant behind")
+	}
+}
+
 func TestDBConnectUnlockWithoutPasswordLeavesSealedConnectionsLocked(t *testing.T) {
 	// A password-less unlock is the environment flow only: it grants every
 	// template and never opens a sealed connection.
@@ -555,6 +628,73 @@ func TestDBConnectUnlockRefusesProjectOutsideAllowedRoots(t *testing.T) {
 	}
 	if _, ok := h.dbGrantURL("s1", "env"); ok {
 		t.Error("a refused project left a grant behind")
+	}
+}
+
+func TestDBConnectUnlockAcceptsTheHostsTildeProjectRoot(t *testing.T) {
+	// A remote (SSH/WSL) project is saved by the desktop under the verbatim "~"
+	// spelling, and the unlock is proxied to the host's server — the machine
+	// that owns that $HOME. The host's own registry holds the HOME-EXPANDED
+	// path (projects.Add expands there), so the allow-list check has to expand
+	// the same way. Without it every tilde-keyed remote project fails with
+	// "project_path is not an allowed project root" before a single .env is
+	// read, which is the reported database-IDE failure.
+	home := t.TempDir()
+	setHomeTree(t, home)
+	project := filepath.Join(home, "www", "app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbUnlockProject(t, h, "s1", "", "~/www/app")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlock with the host's tilde project root = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if got := dbUnlockedNames(t, rec); len(got) != 1 || got[0] != "env" {
+		t.Fatalf("unlocked = %v, want [env]", got)
+	}
+}
+
+// A "~" spelling must open only a project this server already allows. The
+// expansion narrows the comparison to the same allow-list; it must not turn any
+// home-relative path into a project.
+func TestDBConnectUnlockTildeProjectRootStillRequiresASavedProject(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	project := filepath.Join(home, "www", "app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	dbEnvFile(t, project, ".env", "OCODE_TEST_DB_URL=postgres://app:pw@127.0.0.1:1/app\n")
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "env", "url": "${OCODE_TEST_DB_URL}"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Same home, a different project directory that was never saved.
+	if err := os.MkdirAll(filepath.Join(home, "www", "other"), 0o755); err != nil {
+		t.Fatalf("mkdir other: %v", err)
+	}
+	for _, path := range []string{"~/www/other", "~bob/www/app"} {
+		rec := dbUnlockProject(t, h, "s1", "", path)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("unlock with %q = %d, want 400 (body=%s)", path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "not an allowed project root") {
+			t.Fatalf("refusal for %q names the wrong layer: %s", path, rec.Body.String())
+		}
+		if _, ok := h.dbGrantURL("s1", "env"); ok {
+			t.Fatalf("a refused tilde path %q left a grant behind", path)
+		}
 	}
 }
 

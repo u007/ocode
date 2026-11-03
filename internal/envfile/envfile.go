@@ -30,7 +30,10 @@ const (
 //
 // A line that is blank, a comment, or has no "=" is skipped. A line whose quoted
 // value is unterminated is an error, as is a key that appears twice in the same
-// file (the file is ambiguous, so nothing from it is trusted). A value may be
+// file with two DIFFERENT values (the file is ambiguous, so nothing from it is
+// trusted). A key repeated with the SAME value is accepted: the file is not
+// ambiguous, and real .env files acquire such repeats by appending — rejecting
+// the whole file over one would void every other key. A value may be
 // wrapped in matching single or double quotes, which are stripped; inside
 // double quotes, "\n", "\t", "\r" and "\\" are unescaped. A quoted value may
 // contain "="; the first "=" outside a quoted value separates key from value.
@@ -55,8 +58,13 @@ func Parse(r io.Reader) (map[string]string, error) {
 		if !ok {
 			continue
 		}
-		if _, dup := out[key]; dup {
-			return nil, fmt.Errorf("line %d: duplicate key %q", lineNo, key)
+		if prev, dup := out[key]; dup {
+			if prev != value {
+				return nil, fmt.Errorf("line %d: duplicate key %q with a different value", lineNo, key)
+			}
+			// The same assignment twice says nothing new, so it is not the
+			// ambiguity a differing duplicate is. Keep the value.
+			continue
 		}
 		out[key] = value
 	}
