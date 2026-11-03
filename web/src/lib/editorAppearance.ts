@@ -84,10 +84,12 @@ export function getEditorAppearance(): EditorAppearanceValue {
  * Resolve the stored preference to the light/dark polarity everything visually
  * scoped by it uses (`editorAppearanceClass`, the toggle label, Monaco).
  *
- * `"auto"` takes the ACTIVE COLOUR THEME's polarity, so a light VS Code theme
- * yields a light preview/gutter without the user touching the toggle. Callers
- * pass the theme's `kind` (or `"dark"` while no theme is loaded, matching the
- * dark fallback of the Monaco resolver).
+ * `"auto"` takes the polarity of the editor's RESOLVED palette, so a light
+ * `monaco.theme` — or a light VS Code theme — yields a light preview/gutter
+ * without the user touching the toggle. The editor surfaces get both inputs
+ * from `useResolvedEditorTheme()`, which is the only production caller: it
+ * passes the polarity of `resolveEditorTheme`'s result, so the toggle and the
+ * editor can never disagree about which palette is on screen.
  */
 export function resolveEffectiveEditorAppearance(
   value: EditorAppearanceValue | null | undefined,
@@ -111,14 +113,14 @@ export function setEditorAppearance(next: EditorAppearanceValue): void {
 
 /**
  * Flip light ⇄ dark and persist. `currentEffective` is the value the caller is
- * currently showing (it already resolved `"auto"` against the active theme), so
- * the first click from `"auto"` flips AWAY from what the user sees rather than
- * from an assumed polarity.
+ * currently showing (it already resolved `"auto"` against the active theme, or
+ * — for the editor surfaces — against the RESOLVED Monaco theme, which can be
+ * light under a dark colour theme). It is REQUIRED: a bare call would otherwise
+ * have to assume `"auto"` means dark, and a first click from that assumption
+ * flips to a palette the user is already looking at.
  */
-export function toggleEditorAppearance(currentEffective?: EditorAppearance): EditorAppearance {
-  const base =
-    currentEffective ?? resolveEffectiveEditorAppearance(getEditorAppearance(), "dark");
-  const next: EditorAppearance = base === "light" ? "dark" : "light";
+export function toggleEditorAppearance(currentEffective: EditorAppearance): EditorAppearance {
+  const next: EditorAppearance = currentEffective === "light" ? "dark" : "light";
   setEditorAppearance(next);
   return next;
 }

@@ -3,7 +3,9 @@ import type { ConvertedTheme } from "../api/types";
 import {
   VSCODE_MONACO_THEME_PREFIX,
   applyMonacoTheme,
+  monacoThemeChoiceBlocker,
   resolveEditorTheme,
+  resolvedThemePolarity,
   __resetMonacoThemeForTests,
 } from "./monacoTheme";
 
@@ -118,11 +120,33 @@ describe("resolveEditorTheme — §8.6 precedence", () => {
     ).toEqual({ id: "ocode-light", define: null });
   });
 
-  it("case 4: no loaded theme falls back to ocode-dark", () => {
+  it("case 3: a defined monaco.theme is honoured with NO loaded theme", () => {
+    // The appearance fetch is pending, offline or 401'd. Before this rule a
+    // defined `monaco.theme` was dropped in that state, silently discarding the
+    // user's editor palette; it was honoured unconditionally before §8.6.
     expect(resolveEditorTheme({ appearance: "auto", theme: null, monacoTheme: "vs" })).toEqual({
+      id: "vs",
+      define: null,
+    });
+    expect(
+      resolveEditorTheme({ appearance: "auto", theme: null, monacoTheme: "ocode-dark" }),
+    ).toEqual({ id: "ocode-dark", define: null });
+  });
+
+  it("case 2: a VS Code theme outranks a defined monaco.theme", () => {
+    expect(
+      resolveEditorTheme({ appearance: "auto", theme: VSCODE_LIGHT, monacoTheme: "vs-dark" }).id,
+    ).toBe(`${VSCODE_MONACO_THEME_PREFIX}acme.themes/light`);
+  });
+
+  it("case 5: no loaded theme and no defined monaco.theme falls back to ocode-dark", () => {
+    expect(resolveEditorTheme({ appearance: "auto", theme: null, monacoTheme: "" })).toEqual({
       id: "ocode-dark",
       define: null,
     });
+    expect(
+      resolveEditorTheme({ appearance: "auto", theme: null, monacoTheme: "not-a-theme" }),
+    ).toEqual({ id: "ocode-dark", define: null });
   });
 
   it("does not coerce a light monaco.theme when the override is auto", () => {
@@ -210,5 +234,86 @@ describe("applyMonacoTheme", () => {
       monaco,
     );
     expect(defineTheme.mock.calls[0][1]).toMatchObject({ base: "vs-dark", inherit: true });
+  });
+
+  it("normalizes a LIGHT theme's missing or foreign base to vs", () => {
+    // The dark half above would still pass if the kind check were deleted and
+    // every fallback hardcoded "vs-dark" — a light theme would then define a
+    // dark base over light colours.
+    for (const base of ["", "monokai"]) {
+      __resetMonacoThemeForTests();
+      defineTheme.mockClear();
+      const light = converted({
+        id: `vscode:acme.themes/light-${base || "missing"}`,
+        kind: "light",
+        monaco: { base, colors: {}, rules: [] },
+      });
+      applyMonacoTheme(
+        resolveEditorTheme({ appearance: "auto", theme: light, monacoTheme: "" }),
+        monaco,
+      );
+      expect(defineTheme.mock.calls[0][1]).toMatchObject({ base: "vs", inherit: true });
+    }
+  });
+});
+
+describe("resolvedThemePolarity", () => {
+  it.each([
+    ["ocode-light", "light"],
+    ["vs", "light"],
+    ["hc-light", "light"],
+    ["ocode-dark", "dark"],
+    ["vs-dark", "dark"],
+    ["hc-black", "dark"],
+  ])("reports %s as %s", (id, expected) => {
+    expect(resolvedThemePolarity({ id, define: null })).toBe(expected);
+  });
+
+  it("follows a converted theme's normalized base", () => {
+    expect(
+      resolvedThemePolarity(
+        resolveEditorTheme({ appearance: "auto", theme: VSCODE_LIGHT, monacoTheme: "" }),
+      ),
+    ).toBe("light");
+    expect(
+      resolvedThemePolarity(
+        resolveEditorTheme({ appearance: "auto", theme: VSCODE_DARK, monacoTheme: "" }),
+      ),
+    ).toBe("dark");
+  });
+
+  it("reports a light monaco.theme under a dark colour theme as light", () => {
+    // The toggle must describe the EDITOR, not the colour theme: `vs` paints a
+    // light editor even though the theme is dark.
+    expect(
+      resolvedThemePolarity(
+        resolveEditorTheme({ appearance: "auto", theme: BUILTIN, monacoTheme: "vs" }),
+      ),
+    ).toBe("light");
+    expect(
+      resolvedThemePolarity(
+        resolveEditorTheme({ appearance: "light", theme: BUILTIN, monacoTheme: "vs-dark" }),
+      ),
+    ).toBe("light");
+  });
+});
+
+describe("monacoThemeChoiceBlocker", () => {
+  it("is null when monaco.theme actually decides the palette", () => {
+    expect(monacoThemeChoiceBlocker({ appearance: "auto", theme: BUILTIN })).toBeNull();
+    expect(monacoThemeChoiceBlocker({ appearance: "auto", theme: null })).toBeNull();
+  });
+
+  it("reports the editor override and the VS Code theme, override first", () => {
+    expect(monacoThemeChoiceBlocker({ appearance: "light", theme: BUILTIN })).toBe(
+      "editor-appearance",
+    );
+    expect(monacoThemeChoiceBlocker({ appearance: "dark", theme: null })).toBe("editor-appearance");
+    expect(monacoThemeChoiceBlocker({ appearance: "auto", theme: VSCODE_DARK })).toBe(
+      "vscode-theme",
+    );
+    expect(monacoThemeChoiceBlocker({ appearance: "dark", theme: VSCODE_LIGHT })).toBe(
+      "editor-appearance",
+    );
   });
 });

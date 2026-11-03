@@ -12,16 +12,10 @@ vi.mock("@monaco-editor/react", () => ({
 vi.mock("../../lib/monaco-setup", () => ({}));
 const getAppearanceSettings = vi.fn();
 const getAppearanceTheme = vi.fn();
+const getMonacoSettings = vi.fn();
 vi.mock("../../api/client", () => ({
   api: {
-    getMonacoSettings: vi.fn().mockResolvedValue({
-      theme: "ocode-dark",
-      font_size: 13,
-      tab_size: 2,
-      word_wrap: false,
-      minimap: false,
-      line_numbers: true,
-    }),
+    getMonacoSettings: (...args: unknown[]) => getMonacoSettings(...args),
     getAppearanceSettings: (...args: unknown[]) => getAppearanceSettings(...args),
     getAppearanceTheme: (...args: unknown[]) => getAppearanceTheme(...args),
     // A builtin/opencode theme resolves through the legacy 16-colour endpoint.
@@ -55,6 +49,7 @@ import {
   EDITOR_APPEARANCE_STORAGE_KEY,
   __resetEditorAppearanceForTests,
 } from "../../lib/editorAppearance";
+import { __resetResolvedEditorThemeForTests } from "../../hooks/useResolvedEditorTheme";
 import type { ConvertedTheme } from "../../api/types";
 
 function convertedTheme(overrides: Partial<ConvertedTheme> = {}): ConvertedTheme {
@@ -99,8 +94,18 @@ describe("FileEditor appearance toggle", () => {
     window.localStorage.clear();
     __resetEditorAppearanceForTests();
     __resetAppearanceThemeForTests();
+    __resetResolvedEditorThemeForTests();
     getAppearanceSettings.mockReset();
     getAppearanceTheme.mockReset();
+    getMonacoSettings.mockReset();
+    getMonacoSettings.mockResolvedValue({
+      theme: "ocode-dark",
+      font_size: 13,
+      tab_size: 2,
+      word_wrap: false,
+      minimap: false,
+      line_numbers: true,
+    });
     getAppearanceSettings.mockResolvedValue(SETTINGS);
     getAppearanceTheme.mockResolvedValue(convertedTheme());
   });
@@ -170,6 +175,57 @@ describe("FileEditor appearance toggle", () => {
 
     expect(screen.getByTestId("monaco-stub")).toHaveAttribute("data-theme", "ocode-light");
     await waitFor(() => expect(getAppearanceTheme).toHaveBeenCalled());
+  });
+
+  it("labels the toggle from the RESOLVED editor, not the colour theme", async () => {
+    // A light `monaco.theme` under a dark colour theme paints a light editor.
+    // Deriving the toggle from the theme's kind used to read "Switch to light
+    // theme" here, and its first click changed nothing visible.
+    getMonacoSettings.mockResolvedValue({
+      theme: "vs",
+      font_size: 13,
+      tab_size: 2,
+      word_wrap: false,
+      minimap: false,
+      line_numbers: true,
+    });
+
+    render(<FileEditor path="src/a.ts" content="x" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("monaco-stub")).toHaveAttribute("data-theme", "vs"),
+    );
+    const btn = screen.getByRole("button", { name: "Toggle light or dark theme" });
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+    expect(btn).toHaveAttribute("title", "Switch to dark theme");
+    expect(screen.getByTestId("monaco-stub").parentElement).toHaveStyle({
+      backgroundColor: "rgb(255, 255, 255)",
+    });
+
+    // The first click leaves the light palette — an explicit dark override.
+    fireEvent.click(btn);
+    expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("dark");
+    expect(screen.getByTestId("monaco-stub")).toHaveAttribute("data-theme", "ocode-dark");
+  });
+
+  it("keeps a defined monaco.theme when the appearance fetch fails", async () => {
+    // Offline / 401: the colour theme never loads, so the previous precedence
+    // dropped the user's editor palette and forced ocode-dark.
+    getAppearanceSettings.mockRejectedValue(new Error("offline"));
+    getMonacoSettings.mockResolvedValue({
+      theme: "vs",
+      font_size: 13,
+      tab_size: 2,
+      word_wrap: false,
+      minimap: false,
+      line_numbers: true,
+    });
+
+    render(<FileEditor path="src/a.ts" content="x" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("monaco-stub")).toHaveAttribute("data-theme", "vs"),
+    );
   });
 
   it("hides the toggle when the split host owns it", () => {

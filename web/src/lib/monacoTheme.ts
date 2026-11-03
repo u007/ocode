@@ -1,5 +1,5 @@
 import type { ConvertedTheme, MonacoTheme, MonacoTokenRule } from "../api/types";
-import type { EditorAppearanceValue } from "./editorAppearance";
+import type { EditorAppearance, EditorAppearanceValue } from "./editorAppearance";
 
 /**
  * One resolver for the editor palette (design spec §8.6, binding).
@@ -15,12 +15,18 @@ import type { EditorAppearanceValue } from "./editorAppearance";
  *    Settings shows "Editor override is on" plus a *Use theme colours* action.
  * 2. The active colour theme is a VS Code theme (`vscode:<id>`) → its converted
  *    Monaco palette, defined here as `ocode-vscode:<id>`.
- * 3. A builtin/opencode theme → `monaco.theme` when it names a defined Monaco
- *    theme, else the theme's polarity default (`ocode-dark` / `ocode-light`).
- * 4. Fallback (no theme loaded) → `ocode-dark`.
+ * 3. `monaco.theme` names a defined Monaco theme → that theme. This holds with
+ *    OR without a loaded colour theme: before this feature the setting was
+ *    honoured unconditionally, so a slow/failed appearance fetch (offline, 401)
+ *    must not silently drop the user's editor palette.
+ * 4. A loaded builtin/opencode theme without a usable `monaco.theme` → the
+ *    theme's polarity default (`ocode-dark` / `ocode-light`).
+ * 5. Nothing loaded and no defined `monaco.theme` → `ocode-dark`.
  *
- * Keep this table in sync with §8.6 — the Settings notice and the precedence
- * tests both read from it.
+ * Case 4/5 are ordered as they are so the outcome matches §8.6's table, with
+ * the one deliberate widening in case 3 described above. Keep this table in
+ * sync with §8.6 — the Settings compliance notice and the precedence tests
+ * both read from it.
  */
 
 /** Prefix of the Monaco theme defined from a converted VS Code theme. */
@@ -117,15 +123,58 @@ export function resolveEditorTheme({
     };
   }
 
-  // 3. Builtin/opencode theme — `monaco.theme` still owns the choice, exactly
-  //    as it did before this feature, as long as it names a defined theme.
-  if (theme && monacoTheme && DEFINED_MONACO_THEMES.has(monacoTheme)) {
+  // 3. `monaco.theme` still owns the choice exactly as it did before this
+  //    feature, as long as it names a defined theme. Deliberately NOT gated on
+  //    a loaded theme: while the appearance fetch is pending (or failed —
+  //    offline, 401) a loaded-theme-only rule dropped the user's choice.
+  if (monacoTheme && DEFINED_MONACO_THEMES.has(monacoTheme)) {
     return { id: monacoTheme, define: null };
   }
+
+  // 4. A loaded builtin/opencode theme contributes its polarity default.
   if (theme) return { id: polarityDefault(theme), define: null };
 
-  // 4. Nothing loaded — the app's own default.
+  // 5. Nothing loaded — the app's own default.
   return { id: "ocode-dark", define: null };
+}
+
+/** Monaco theme ids that paint on a light surface. `hc-light` is not a
+ *  selectable `monaco.theme`, but it is a valid `base` so a converted theme
+ *  can carry it. */
+const LIGHT_MONACO_THEMES = new Set(["ocode-light", "vs", "hc-light"]);
+
+/**
+ * The polarity the RESOLVED editor theme actually paints with.
+ *
+ * This — not the stored preference, and not the colour theme's `kind` — is what
+ * the light/dark toggle, the editor wrapper backdrop and the rendered preview
+ * must follow: a light `monaco.theme` under a dark colour theme renders a light
+ * editor, and a toggle labelled "Switch to light theme" there would be lying
+ * (its first click would visibly do nothing).
+ */
+export function resolvedThemePolarity(resolved: ResolvedEditorTheme): EditorAppearance {
+  if (resolved.define) {
+    return resolved.define.base === "vs" || resolved.define.base === "hc-light" ? "light" : "dark";
+  }
+  return LIGHT_MONACO_THEMES.has(resolved.id) ? "light" : "dark";
+}
+
+/** Why the `monaco.theme` picker has no effect right now. */
+export type MonacoThemeChoiceBlocker = "editor-appearance" | "vscode-theme";
+
+/**
+ * Whether a `monaco.theme` choice would currently be IGNORED, and by which
+ * higher-precedence control. `MonacoSettingsPanel` disables the picker and says
+ * so instead of painting a stored value as if it were in effect (cases 1 and 2
+ * of `resolveEditorTheme`, which outrank case 3).
+ */
+export function monacoThemeChoiceBlocker({
+  appearance,
+  theme,
+}: Pick<ResolveEditorThemeInput, "appearance" | "theme">): MonacoThemeChoiceBlocker | null {
+  if (appearance === "light" || appearance === "dark") return "editor-appearance";
+  if (theme && isVSCodeTheme(theme)) return "vscode-theme";
+  return null;
 }
 
 /** Theme ids `applyMonacoTheme` has defined on the current Monaco instance. */

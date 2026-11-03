@@ -104,12 +104,17 @@ describe("editorAppearance store", () => {
   });
 
   it("ignores a storage event for a different key or an invalid value", () => {
+    // Seed a NON-default value: with the store at "auto" an ignored invalid
+    // value and an applied one are indistinguishable, so this used to pass
+    // vacuously.
+    setEditorAppearance("dark");
+    expect(getEditorAppearance()).toBe("dark");
     window.dispatchEvent(new StorageEvent("storage", { key: "other", newValue: "light" }));
-    expect(getEditorAppearance()).toBe("auto");
+    expect(getEditorAppearance()).toBe("dark");
     window.dispatchEvent(
       new StorageEvent("storage", { key: EDITOR_APPEARANCE_STORAGE_KEY, newValue: "nope" }),
     );
-    expect(getEditorAppearance()).toBe("auto");
+    expect(getEditorAppearance()).toBe("dark");
   });
 });
 

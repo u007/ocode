@@ -6,14 +6,10 @@ import LegacyOfficePane from "../Preview/LegacyOfficePane";
 import { PrintPreviewButton } from "../Preview/PrintPreviewButton";
 import { isLegacyOfficePath, previewOnlyKindForPath, splitPreviewKindForPath } from "../../lib/previewKind";
 import { useResizableSplit } from "../../hooks/useResizableSplit";
+import { useResolvedEditorTheme } from "../../hooks/useResolvedEditorTheme";
 import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 import { cn } from "../../lib/utils";
-import {
-  resolveEffectiveEditorAppearance,
-  toggleEditorAppearance,
-  useEditorAppearance,
-} from "../../lib/editorAppearance";
-import { useAppearanceTheme } from "../../lib/appearanceTheme";
+import { toggleEditorAppearance } from "../../lib/editorAppearance";
 
 // Monaco (and its workers) is the single largest dependency in the app. It is
 // only ever needed once a text/code tab actually renders, so load it on demand
@@ -99,15 +95,12 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   const previewContent = useDebouncedValue(props.content, PREVIEW_DEBOUNCE_MS);
   // Shared light/dark override for the editor and its rendered preview (see
   // editorAppearance.ts). Global + persisted, so it follows the user across
-  // files and reloads. The STORED value can be "auto" (follow the active
-  // colour theme), so resolve it against the theme's polarity — the preview
-  // class and the toggle label both need the effective light/dark.
-  const appearanceValue = useEditorAppearance();
-  const { theme: activeTheme } = useAppearanceTheme();
-  const appearance = resolveEffectiveEditorAppearance(
-    appearanceValue,
-    activeTheme?.kind ?? "dark",
-  );
+  // files and reloads. Polarity comes from the SAME hook FileEditor paints
+  // with — derived from the RESOLVED Monaco theme, not from the stored
+  // preference or the colour theme's `kind` — so a light `monaco.theme` under a
+  // dark colour theme labels the toggle correctly (and its first click visibly
+  // changes the palette).
+  const { effectiveAppearance } = useResolvedEditorTheme();
 
   // Persist the paginated viewer's position for this file. Only one of the two
   // viewers is ever mounted for a given file, so pick the index that belongs to
@@ -171,14 +164,14 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
                 hidden in Preview mode; this toolbar is visible in all three. */}
             <button
               type="button"
-              onClick={() => toggleEditorAppearance(appearance)}
-              aria-pressed={appearance === "light"}
+              onClick={() => toggleEditorAppearance(effectiveAppearance)}
+              aria-pressed={effectiveAppearance === "light"}
               aria-label="Toggle light or dark theme"
-              title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
+              title={effectiveAppearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
               className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
-              {appearance === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
-              <span className="hidden sm:inline">{appearance === "light" ? "Dark" : "Light"}</span>
+              {effectiveAppearance === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+              <span className="hidden sm:inline">{effectiveAppearance === "light" ? "Dark" : "Light"}</span>
             </button>
           </div>
         </div>
@@ -224,7 +217,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
                 projectHost={props.projectHost}
                 content={previewContent}
                 onOpenFile={handleOpenFile}
-                appearance={appearance}
+                appearance={effectiveAppearance}
               />
             </div>
           )}

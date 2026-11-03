@@ -4,6 +4,12 @@ import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { Separator } from "../ui/separator";
 import { Loader2, Palette, Puzzle, Save } from "lucide-react";
+import { useEditorAppearance } from "../../lib/editorAppearance";
+import { useAppearanceTheme } from "../../lib/appearanceTheme";
+import {
+  monacoThemeChoiceBlocker,
+  type MonacoThemeChoiceBlocker,
+} from "../../lib/monacoTheme";
 
 interface MonacoSettings {
   theme: string;
@@ -28,6 +34,13 @@ const THEMES = [
   { id: "hc-black", label: "High Contrast" },
 ];
 
+/** Why the stored `monaco.theme` cannot take effect right now. */
+function blockedHint(blocker: MonacoThemeChoiceBlocker): string {
+  return blocker === "editor-appearance"
+    ? "The editor light/dark override is on — this choice applies once you pick \"Use theme colours\"."
+    : "The active VS Code theme supplies the editor colours — this choice has no effect while it is selected.";
+}
+
 export default function MonacoSettingsPanel() {
   const [settings, setSettings] = useState<MonacoSettings | null>(null);
   const [extensions, setExtensions] = useState<MonacoExtension[]>([]);
@@ -35,6 +48,15 @@ export default function MonacoSettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [tab, setTab] = useState<"settings" | "extensions">("settings");
+  // Precedence cases 1 and 2 (lib/monacoTheme.ts) outrank `monaco.theme`, so a
+  // picker that keeps painting the stored value as active would be lying about
+  // what the editor shows. Disable it and say why instead.
+  const appearanceValue = useEditorAppearance();
+  const { theme: activeTheme } = useAppearanceTheme();
+  const themeChoiceBlocker = monacoThemeChoiceBlocker({
+    appearance: appearanceValue,
+    theme: activeTheme,
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -125,6 +147,7 @@ export default function MonacoSettingsPanel() {
                     variant={settings.theme === t.id ? "default" : "outline"}
                     size="sm"
                     className="justify-start h-9 text-xs"
+                    disabled={themeChoiceBlocker !== null}
                     onClick={() => {
                       setSettings({ ...settings, theme: t.id });
                       setDirty(true);
@@ -134,6 +157,11 @@ export default function MonacoSettingsPanel() {
                   </Button>
                 ))}
               </div>
+              {themeChoiceBlocker !== null && (
+                <p className="mt-2 text-xs text-muted-foreground" role="status">
+                  {blockedHint(themeChoiceBlocker)}
+                </p>
+              )}
             </div>
 
             <Separator />

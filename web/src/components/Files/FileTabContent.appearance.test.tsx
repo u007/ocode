@@ -29,12 +29,17 @@ import {
   EDITOR_APPEARANCE_STORAGE_KEY,
   __resetEditorAppearanceForTests,
 } from "../../lib/editorAppearance";
+import {
+  setPersistedMonacoTheme,
+  __resetResolvedEditorThemeForTests,
+} from "../../hooks/useResolvedEditorTheme";
 
 describe("FileTabContent appearance toggle", () => {
   beforeEach(() => {
     window.localStorage.clear();
     __resetEditorAppearanceForTests();
     __resetAppearanceThemeForTests();
+    __resetResolvedEditorThemeForTests();
     getAppearanceSettings.mockReset();
     getAppearanceTheme.mockReset();
     // No theme loaded by default: "auto" resolves to the dark fallback.
@@ -121,5 +126,32 @@ describe("FileTabContent appearance toggle", () => {
       "aria-pressed",
       "true",
     );
+  });
+
+  it("labels the toolbar toggle from the resolved editor theme, not the colour theme", async () => {
+    // A light `monaco.theme` (stored in Settings) under the default dark colour
+    // theme paints a light editor, so the toolbar toggle must read "light" —
+    // and its first click must change the palette.
+    setPersistedMonacoTheme("vs");
+    render(<FileTabContent path="README.md" content="# Hi" />);
+    await screen.findByTestId("editor");
+
+    const toggle = screen.getByRole("button", { name: "Toggle light or dark theme" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).toHaveAttribute("title", "Switch to dark theme");
+
+    act(() => {
+      screen.getByRole("button", { name: "Preview" }).click();
+    });
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-appearance", "light");
+
+    act(() => {
+      toggle.click();
+    });
+    expect(window.localStorage.getItem(EDITOR_APPEARANCE_STORAGE_KEY)).toBe("dark");
+    expect(
+      screen.getByRole("button", { name: "Toggle light or dark theme" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-appearance", "dark");
   });
 });
