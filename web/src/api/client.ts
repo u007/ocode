@@ -28,6 +28,10 @@ import type {
   LSPStatus,
   MCPStatus,
   ThemesListResponse,
+  AppearanceThemesResponse,
+  AppearanceSettings,
+  AppearanceSettingsPatch,
+  ConvertedTheme,
   FileStatus,
   Project,
   ProjectGroup,
@@ -1185,6 +1189,20 @@ export interface SessionGoal {
   turns: number;
   last_reason: string;
   status_text: string;
+}
+
+/**
+ * `/api/appearance/theme/{id...}` takes the whole id as one wildcard, so a
+ * theme id's slashes belong to the path. Encode each segment, but keep the
+ * `vscode:` scheme readable so server logs and errors show the id the theme
+ * list returned.
+ */
+function appearanceThemePath(id: string): string {
+  const encoded = id
+    .split("/")
+    .map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ":"))
+    .join("/");
+  return `/api/appearance/theme/${encoded}`;
 }
 
 export const api = {
@@ -2741,6 +2759,22 @@ export const api = {
       name ? `/api/theme?name=${encodeURIComponent(name)}` : "/api/theme",
     ),
   getThemes: () => fetchJSON<ThemesListResponse>("/api/themes"),
+  // Appearance is local-only (spec §12): these never take a `host`. The list
+  // is paginated server-side; request the maximum page so the picker shows
+  // every installed theme.
+  getAppearanceThemes: () =>
+    fetchJSON<AppearanceThemesResponse>("/api/appearance/themes?limit=1000"),
+  getAppearanceTheme: (id: string) =>
+    fetchJSON<ConvertedTheme>(appearanceThemePath(id)),
+  getAppearanceSettings: () =>
+    fetchJSON<AppearanceSettings>("/api/appearance/settings"),
+  // The server REPLACES the stored block, so callers that mean to change one
+  // field must include the current values of the others.
+  setAppearanceSettings: (patch: AppearanceSettingsPatch) =>
+    fetchJSON<AppearanceSettings>("/api/appearance/settings", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
   getSyncStatus: () => fetchJSON<SyncStatusResponse>("/api/sync/status"),
   syncLoginStart: () =>
     fetchJSON<SyncLoginStartResponse>("/api/sync/login/start", {

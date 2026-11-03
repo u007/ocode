@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { computeThemeVars, contrastRatio } from "./useTheme";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { computeThemeVars, contrastRatio, useTheme } from "./useTheme";
+import { __resetAppearanceThemeForTests } from "@/lib/appearanceTheme";
 import { builtinPalettes } from "./themePalettes.fixture";
+
+const getAppearanceTheme = vi.fn();
+const getAppearanceSettings = vi.fn();
+const getTheme = vi.fn();
+
+vi.mock("@/api/client", () => ({
+  api: {
+    getAppearanceTheme: (...args: unknown[]) => getAppearanceTheme(...args),
+    getAppearanceSettings: (...args: unknown[]) => getAppearanceSettings(...args),
+    getTheme: (...args: unknown[]) => getTheme(...args),
+    setAppearanceSettings: vi.fn(),
+  },
+}));
 
 // WCAG AA for normal-size text — the floor every foreground/surface pair in
 // the web UI must clear after mapping a terminal palette onto CSS variables.
@@ -120,5 +135,61 @@ describe("computeThemeVars tolerates malformed palettes", () => {
     expect(vars["--link"]).toMatch(/^#[0-9a-f]{6}$/i);
     expect(contrastRatio(vars["--muted"], vars["--link"])).toBeGreaterThanOrEqual(AA);
     expect(contrastRatio(vars["--background"], vars["--link"])).toBeGreaterThanOrEqual(AA);
+  });
+});
+
+describe("useTheme appearance store wiring", () => {
+  const colors = builtinPalettes.tokyonight;
+
+  beforeEach(() => {
+    __resetAppearanceThemeForTests();
+    document.documentElement.removeAttribute("style");
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    __resetAppearanceThemeForTests();
+    document.documentElement.removeAttribute("style");
+  });
+
+  it("returns serverColors from the store and applies the converted ui palette", async () => {
+    getAppearanceSettings.mockResolvedValue({
+      color_theme: "vscode:acme.themes/dark",
+      icon_theme: "",
+      extra_extension_dirs: [],
+      effective_color_theme: "vscode:acme.themes/dark",
+    });
+    getAppearanceTheme.mockResolvedValue({
+      id: "vscode:acme.themes/dark",
+      label: "Acme Dark",
+      kind: "dark",
+      colors,
+      ui: { "--background": "#1e1e2e" },
+      monaco: { base: "vs-dark", colors: {}, rules: [] },
+      terminal: {},
+    });
+
+    const { result } = renderHook(() => useTheme());
+
+    await waitFor(() => expect(result.current.serverColors).toEqual(colors));
+    // The returned shape is unchanged.
+    expect(Object.keys(result.current)).toEqual(["serverColors"]);
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe(
+      "240 21.1% 14.9%",
+    );
+  });
+
+  it("returns null and leaves the stylesheet defaults when the store load fails", async () => {
+    getAppearanceSettings.mockRejectedValue(new Error("offline"));
+
+    const { result } = renderHook(() => useTheme());
+
+    await waitFor(() => expect(getAppearanceSettings).toHaveBeenCalled());
+    await act(async () => {
+      // Drain the rejected load; the hook publishes the error, not a throw.
+      await Promise.resolve();
+    });
+    expect(result.current.serverColors).toBeNull();
+    expect(document.documentElement.style.getPropertyValue("--background")).toBe("");
   });
 });

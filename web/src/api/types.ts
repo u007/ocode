@@ -1204,6 +1204,107 @@ export interface ThemesListResponse {
   themes: { name: string; label: string }[];
 }
 
+// ── Appearance: converted VS Code themes (GET /api/appearance/*) ──
+//
+// `source` distinguishes a palette compiled into ocode ("builtin"), one
+// derived from the opencode desktop theme set ("opencode"), and one discovered
+// in a VS Code-family extension ("vscode"). Only a VS Code entry carries
+// `extension` / `has_icon_theme`.
+export type AppearanceThemeSource = "builtin" | "opencode" | "vscode";
+export type AppearanceThemeKind = "dark" | "light";
+
+/** One row of the unified theme list (`GET /api/appearance/themes`). */
+export interface ThemeRef {
+  id: string;
+  label: string;
+  source: AppearanceThemeSource | string;
+  kind: AppearanceThemeKind;
+  extension?: string;
+  has_icon_theme: boolean;
+}
+
+export interface AppearanceThemesResponse {
+  themes: ThemeRef[];
+  /** Size of the full list, not this page. */
+  total: number;
+  offset: number;
+  limit: number;
+  warnings?: string[];
+}
+
+/** Monaco token rule; `fontStyle` is a space-separated subset of
+ *  "italic bold underline strikethrough". */
+export interface MonacoTokenRule {
+  token: string;
+  foreground?: string;
+  fontStyle?: string;
+}
+
+/** The subset of a VS Code theme Monaco can express. */
+export interface MonacoTheme {
+  base: "vs" | "vs-dark" | string;
+  colors: Record<string, string>;
+  rules: MonacoTokenRule[];
+}
+
+export interface TerminalPaletteColors {
+  foreground?: string;
+  background?: string;
+  cursor?: string;
+  cursor_text?: string;
+  selection_background?: string;
+  selection_foreground?: string;
+  /** 16 entries in ANSI order (black, red, …, bright white). */
+  palette?: string[];
+}
+
+/** Only the block matching the theme's polarity is present. */
+export interface TerminalPalette {
+  dark?: TerminalPaletteColors;
+  light?: TerminalPaletteColors;
+}
+
+/**
+ * A theme converted into all four palettes ocode renders with. Every `ui`
+ * value is a flat 6-digit `#RRGGBB` (alpha is composited over the theme's
+ * background) and every key is a CSS custom property. A palette with no `ui`
+ * map falls back to the legacy 16-colour `colors` mapping.
+ */
+export interface ConvertedTheme {
+  id: string;
+  label: string;
+  kind: AppearanceThemeKind;
+  colors: ThemeColors;
+  ui: Record<string, string>;
+  monaco: MonacoTheme;
+  terminal: TerminalPalette;
+  warnings?: string[];
+}
+
+/**
+ * `GET`/`PUT /api/appearance/settings`. `color_theme` is the stored id ("" is a
+ * legitimate "use the fallback"); `effective_color_theme` is what a renderer
+ * actually applies and may differ when the stored id no longer resolves.
+ */
+export interface AppearanceSettings {
+  color_theme: string;
+  icon_theme: string;
+  extra_extension_dirs: string[];
+  effective_color_theme: string;
+  warnings?: string[];
+}
+
+/**
+ * Body of `PUT /api/appearance/settings`. The server REPLACES the whole block,
+ * so a write that only intends to change one field must still send every field
+ * it wants to keep (`setColorThemeId` reads the current settings first).
+ */
+export interface AppearanceSettingsPatch {
+  color_theme?: string;
+  icon_theme?: string;
+  extra_extension_dirs?: string[];
+}
+
 export interface Project {
   path: string;
   name: string;
