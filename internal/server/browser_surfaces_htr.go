@@ -1018,22 +1018,28 @@ func (s htrSurface) Snapshot(ctx context.Context, frame string, refs *cdp.RefTab
 	return text, minted, nil
 }
 
+// htrOutdatedClientError is the refusal for a snapshot that lacks a field Controls
+// needs. The client extension predates that field, so every read fails the same way.
+func htrOutdatedClientError(tab int, field string) error {
+	return fmt.Errorf("controls of client tab %d: the snapshot carries no %s; the htrcli extension is out of date, update and reload it, and use snapshot, find, text or screenshot meanwhile: %w", tab, field, cdp.ErrClientExtensionOutdated)
+}
+
 // Controls reads the top document's controls: the snapshot's nodes that carry a
 // verified ref and a control role, with the same operations and fingerprint as the
 // CDP path. Each control carries its box and whether it is in the viewport, and the
 // viewport's size and the scroll offset are reported, so the model can place a control
 // on a screenshot. A snapshot without its viewport or scroll offset is an error: the
-// client extension predates them and must be rebuilt.
+// client extension predates them and must be updated.
 func (s htrSurface) Controls(ctx context.Context, refs *cdp.RefTable) (cdp.ControlsPage, error) {
 	m, err := s.mintTree(ctx, "", refs)
 	if err != nil {
 		return cdp.ControlsPage{}, err
 	}
 	if m.viewport == nil {
-		return cdp.ControlsPage{}, fmt.Errorf("controls of client tab %d: the snapshot carries no viewport; the client extension predates viewport geometry, rebuild it", s.tab)
+		return cdp.ControlsPage{}, htrOutdatedClientError(s.tab, "viewport")
 	}
 	if m.scroll == nil {
-		return cdp.ControlsPage{}, fmt.Errorf("controls of client tab %d: the snapshot carries no scroll offset; the client extension predates scroll offsets, rebuild it", s.tab)
+		return cdp.ControlsPage{}, htrOutdatedClientError(s.tab, "scroll offset")
 	}
 	vw, vh := int(m.viewport.W), int(m.viewport.H)
 	page, err := s.page(ctx)

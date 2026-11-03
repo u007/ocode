@@ -17,6 +17,11 @@ import (
 // each action. Controls is a structured sibling of Snapshot: the same
 // accessibility read and refusal, but JSON-shaped controls instead of text.
 
+// ErrClientExtensionOutdated reports that the browser client's snapshot lacks a
+// field Controls needs, so the client extension predates it and must be updated.
+// A retry reads the same snapshot and fails the same way.
+var ErrClientExtensionOutdated = errors.New("browser client extension is outdated")
+
 // settleExpr resolves {settled} once readyState has left "loading" and quiet
 // milliseconds have passed with no DOM mutation, or resolves settled=false once
 // budget milliseconds have passed. Every path disconnects the observer, clears

@@ -33,7 +33,7 @@ slower per task).
 
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
-`internal/agent/browser_run.go:252`). Each sub-step is a real call to
+`internal/agent/browser_run.go:255`). Each sub-step is a real call to
 `handleToolCallWithContext` (`internal/agent/agent.go:3976`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
@@ -43,7 +43,7 @@ loop and never appended to the transcript. Only `browser_run`'s own result is.
 
 Arguments: `goal` (required), `data` (named string values the loop may type), `tab`
 (as for `browser`), and `max_steps` (default 15, at most 40). The tool is registered only
-when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:353`).
+when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:356`).
 It is `PermissionAllow` by default (`internal/agent/permissions.go:1990`), because it
 performs nothing on its own.
 
@@ -89,7 +89,7 @@ Each step sends one batched request with these questions. The value question is 
 | `done` | noul | the goal is met on this page, given the recent actions |
 | `operation` | choice | the operations the page offers, plus `scroll_down`, `press_enter` and `stuck` |
 | `target_click`, `target_fill`, `target_check`, `target_uncheck` | choice | the controls offering that operation. Asked only for operations with at least one candidate |
-| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:851`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
+| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:861`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
 
 Answers in one request cannot see each other. A value asked beside its target was answered
 without knowing the field: live, `none` at probability 0.61 for a "Name" field. Asked in its
@@ -101,15 +101,15 @@ done. A rejected operation, target or value answer stops the run as `unsure`.
 The state carries `goal`, `date`, `page` (url, title, text, settled), `data_keys`,
 `recent_actions` (the last 8 steps), `elements` (the controls as offered, copied with
 their current `value` cleared by `browserRunRedactedControls`,
-`internal/agent/browser_run.go:863`), and `omitted_elements`. `page.settled` is false
+`internal/agent/browser_run.go:873`), and `omitted_elements`. `page.settled` is false
 when the settle bound ran out, so the judge can see that a listing may still be
 mid-render. Data values never enter the state. Only key names do. This is the text view's
 state. A page the text view cannot judge is sent as a screenshot instead (see
 [Screenshot view](#screenshot-view)).
 
 The state has a per-step budget of 30 KB marshalled (`browserRunStateBudgetBytes`,
-`internal/agent/browser_run.go:44`). Over budget, the page text is clipped to 2 KB
-(`browserRunTextBytes`, `internal/agent/browser_run.go:46`) and then, if the state is
+`internal/agent/browser_run.go:45`). Over budget, the page text is clipped to 2 KB
+(`browserRunTextBytes`, `internal/agent/browser_run.go:47`) and then, if the state is
 still over, elements are cut from the end, keeping the longest prefix that fits (found by a
 binary search), and the number cut is counted in `omitted_elements`. Whenever the view is partial the request carries `_projection`
 (`stateProjectionKey`, `internal/agent/state_budget.go:61`) as `applied` plus a `fields`
@@ -202,9 +202,9 @@ sub-step, so the permission and content guards apply to it as to any click.
 
 | gate | applies to | floor |
 | --- | --- | --- |
-| operation confidence | the `operation` choice | 0.55 (`browserRunMinConfidenceDefault`, `internal/agent/browser_run.go:34`) |
-| chosen option probability | `target_*` and `value_fill` | 0.60 (`browserRunMinChoiceProbability`, `internal/agent/browser_run.go:40`) |
-| done noul | `done` | 0.85 (`browserRunDoneAcceptFrom`, `internal/agent/browser_run.go:31`) |
+| operation confidence | the `operation` choice | 0.55 (`browserRunMinConfidenceDefault`, `internal/agent/browser_run.go:35`) |
+| chosen option probability | `target_*` and `value_fill` | 0.60 (`browserRunMinChoiceProbability`, `internal/agent/browser_run.go:41`) |
+| done noul | `done` | 0.85 (`browserRunDoneAcceptFrom`, `internal/agent/browser_run.go:32`) |
 
 The operation choice still gates on Jev's confidence. Target and value gate on the chosen
 option's probability, not its confidence. Jev's confidence is a distribution-shape statistic
@@ -238,7 +238,7 @@ backend or to the main model.
   sub-step is denied.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
-  `browser_run` (`internal/agent/browser_run.go:489-490`, `withPermissionAsker` at
+  `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
   `internal/agent/agent.go:6835`). The dialog then reads like
   `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:5823`),
   and the loop waits for the answer. With no asker at all, the step stops as
@@ -247,7 +247,7 @@ backend or to the main model.
   `browser_run`, and so do the unlisted `general` and `review` definitions. `explore` and
   `context` do not get it. A read-only agent's sub-steps still hit the browser tool's
   refusal for each mutating step.
-- **Content guard.** Each sub-step result is guarded (`browser_run.go:511`), and so is
+- **Content guard.** Each sub-step result is guarded (`browser_run.go:521`), and so is
   `browser_run`'s own result (the `browser_run` case of `contentGuardSourceFor`,
   `internal/agent/content_guard_typesafe.go:296`). Known gap: on the main agent, a
   content-guard ask on a sub-step result becomes `needs_approval`, not a blocking ask.
@@ -338,7 +338,7 @@ agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:2
 
 The model picks its browser path from tool descriptions and the skill catalog, before any skill body is read. Four levers steer it toward `browser_run` and away from `webfetch` and per-click shell CLIs:
 
-- **Tool description.** `browserRunDescription` (`internal/agent/browser_run.go:65`) says to prefer this tool over driving a browser from the shell with htrcli for multi-step page tasks.
+- **Tool description.** `browserRunDescription` (`internal/agent/browser_run.go:66`) says to prefer this tool over driving a browser from the shell for multi-step page tasks. The out-of-date-extension guidance is not in the description: it rides the `controls` error text (`htrOutdatedClientError`, `internal/server/browser_surfaces_htr.go`), which wraps `cdp.ErrClientExtensionOutdated`.
 - **Skill description.** The `htrcli` frontmatter (`skills/htrcli/SKILL.md`) opens with the same rule. Discovery embeds the description clamped to 400 characters (`parseSkillMetadata`, `internal/skill/loader.go:594`), so the rule sits inside the kept part.
 - **webfetch hint.** `isJSShell` (`internal/tool/web.go:143`) decides when a page is a client-rendered shell: converted text under 200 bytes and the raw HTML contains `<script` or `<noscript`. Only then does the result end with the `[ocode]` line (`jsShellHint`, `internal/tool/web.go:133`).
 - **Prompt fragment.** When the session has a `browser` tool, `BasePromptMessages` (`internal/agent/prompt.go:295`) adds one static `[ocode:browser_routing]` system message (`browserRoutingPromptContent`, `internal/agent/prompt.go:41`). The browser tool is bound at construction, so the fragment is fixed for the session and the cached prefix stays byte-identical.
@@ -357,6 +357,7 @@ The model picks its browser path from tool descriptions and the skill catalog, b
   There is no `pick`, `select`, `upload`, `type` or key-chord operation. Use the `browser`
   tool directly for those.
 - `controls` reads the top document only. Frames are not targeted.
+- An htrcli extension older than the host returns a snapshot with no viewport or scroll offset, so `controls` fails with an error naming the extension, and `browser_run` ends `error` after one controls read: `readControls` does not retry an error wrapping `cdp.ErrClientExtensionOutdated`, because it fails identically every time. The fix is for the user to update and reload the extension; meanwhile the browser tool's snapshot, find, text and screenshot still work.
 - Typed text comes only from caller-supplied `data`. The model writes no field text.
 - No citations, no cross-tab operations, and no dialog handling.
 - The step limit is checked after each decision. So the last decision of a run is paid

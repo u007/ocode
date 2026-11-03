@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -36,6 +37,8 @@ type brFakeBrowser struct {
 	staleRef   string // a click on this ref fails as a stale ref, as the browser tool reports it
 	userTab    bool
 	onControls func(n int) // runs before the nth controls read is answered (1-based)
+	// controlsErr, when set, is the error every controls read fails with.
+	controlsErr error
 	// shot is the PNG the last screenshot call holds, which ExecuteImage returns.
 	shot []byte
 
@@ -124,6 +127,9 @@ func (b *brFakeBrowser) Execute(args json.RawMessage) (string, error) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.controlsErr != nil {
+		return "", b.controlsErr
+	}
 	if len(b.pages) == 0 {
 		return "", errors.New("fake browser: no controls page scripted")
 	}
@@ -709,6 +715,27 @@ func TestBrowserRunStaleRefCostsAStepAndDecidesAgain(t *testing.T) {
 	clicks := br.callsFor("click")
 	if len(clicks) != 2 || clicks[0]["target"] != "@e2" || clicks[1]["target"] != "@e3" {
 		t.Fatalf("click calls = %v, want @e2 once then @e3", clicks)
+	}
+}
+
+// TestBrowserRunOutdatedClientExtensionReadsControlsOnce checks that a controls read
+// failing with ErrClientExtensionOutdated is not retried: the run reports status=error
+// after that one read, and the decision model is never asked.
+func TestBrowserRunOutdatedClientExtensionReadsControlsOnce(t *testing.T) {
+	br := newBrFakeBrowser(t, brShopPage("a"))
+	br.controlsErr = fmt.Errorf("browser: controls of tab t1: %w", cdp.ErrClientExtensionOutdated)
+	jev := &brFakeJev{t: t}
+	ag := newBrowserRunAgent(t, br, jev)
+	brYolo(ag)
+
+	out := runBrowserRun(t, ag, `{"goal":"`+brGoal+`"}`)
+
+	brAssertContains(t, out, "browser_run: status=error steps=0 jev_calls=0")
+	if n := len(br.callsFor("controls")); n != 1 {
+		t.Fatalf("controls reads = %d, want 1: an outdated client extension must not be retried", n)
+	}
+	if n := jev.requestCount(); n != 0 {
+		t.Fatalf("decision calls = %d, want 0", n)
 	}
 }
 

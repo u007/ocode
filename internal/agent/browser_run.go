@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -241,6 +242,8 @@ type browserRunDecision struct {
 type browserRunEnd struct {
 	status browserRunStatus
 	detail string
+	// cause is the browser call's error, kept so a caller can errors.Is it.
+	cause error
 }
 
 func browserRunStop(status browserRunStatus, detail string) *browserRunEnd {
@@ -463,6 +466,11 @@ func (r *browserRunRun) readControls() (browserRunPage, *browserRunEnd) {
 			end.detail = "reading the page controls would need approval. Ask the user to change the permission mode."
 			return browserRunPage{}, end
 		}
+		// An outdated client extension fails identically on every read, so it is
+		// reported after this one read.
+		if errors.Is(end.cause, cdp.ErrClientExtensionOutdated) {
+			return browserRunPage{}, end
+		}
 		if end.status != browserRunError || attempt >= browserRunReadAttempts {
 			return browserRunPage{}, end
 		}
@@ -502,7 +510,9 @@ func (r *browserRunRun) subStep(args map[string]any) (string, *browserRunEnd) {
 				return "", browserRunStop(browserRunDenied, refusal)
 			}
 		}
-		return "", browserRunStop(browserRunError, err.Error())
+		end := browserRunStop(browserRunError, err.Error())
+		end.cause = err
+		return "", end
 	}
 	// The content guard runs only at the Step dispatch sites, not on this path, so
 	// the sub-step's own result is vetted here. It reads only results the guard

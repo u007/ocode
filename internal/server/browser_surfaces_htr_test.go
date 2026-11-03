@@ -1232,8 +1232,8 @@ func TestHTRSurface_ControlsMapBoxesAndTheViewport(t *testing.T) {
 	}
 
 	noViewport := htrSurface{h: newHTRTestSurfaces(t, newStub(false)), tab: 7, browser: "firefox"}
-	if _, err := noViewport.Controls(context.Background(), &cdp.RefTable{}); err == nil || !strings.Contains(err.Error(), "carries no viewport") {
-		t.Fatalf("Controls without a snapshot viewport = %v; want a refusal", err)
+	if _, err := noViewport.Controls(context.Background(), &cdp.RefTable{}); !errors.Is(err, cdp.ErrClientExtensionOutdated) || !strings.Contains(err.Error(), "carries no viewport") || !strings.Contains(err.Error(), "out of date") {
+		t.Fatalf("Controls without a snapshot viewport = %v; want a refusal wrapping ErrClientExtensionOutdated", err)
 	}
 	// A snapshot with a viewport but no scroll offset is refused, not read as zero.
 	noScroll := newStub(true)
@@ -1246,8 +1246,8 @@ func TestHTRSurface_ControlsMapBoxesAndTheViewport(t *testing.T) {
 		return newStub(true).answer(cmd)
 	}
 	noScrollSurf := htrSurface{h: newHTRTestSurfaces(t, noScroll), tab: 7, browser: "firefox"}
-	if _, err := noScrollSurf.Controls(context.Background(), &cdp.RefTable{}); err == nil || !strings.Contains(err.Error(), "carries no scroll offset") {
-		t.Fatalf("Controls without a snapshot scroll = %v; want a refusal, not zero", err)
+	if _, err := noScrollSurf.Controls(context.Background(), &cdp.RefTable{}); !errors.Is(err, cdp.ErrClientExtensionOutdated) || !strings.Contains(err.Error(), "carries no scroll offset") || !strings.Contains(err.Error(), "out of date") {
+		t.Fatalf("Controls without a snapshot scroll = %v; want a refusal wrapping ErrClientExtensionOutdated, not zero", err)
 	}
 }
 

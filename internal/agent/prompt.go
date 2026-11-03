@@ -38,7 +38,7 @@ const (
 
 // browserRoutingPromptContent steers the model off webfetch and the shell for
 // JavaScript-heavy sites. It is emitted only when the session has a browser tool.
-const browserRoutingPromptContent = "For sites that need JavaScript, a login or clicks, use browser_run (multi-step) or browser (single read/action); webfetch is for static pages only."
+const browserRoutingPromptContent = "For sites that need JavaScript, a login or clicks, use browser_run (multi-step) or browser (single read/action); webfetch is for static pages only. Do not script page extraction in the shell."
 
 // docPromptContent is the documentation-first development prompt injected
 // when DocPromptEnabled is true. It requires inspection and alignment checks

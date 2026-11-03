@@ -11,6 +11,7 @@ allowed-tools: Bash(htrcli:*), Bash(go run ./cmd/htrcli:*), Bash(make htrcli-*)
 - If the agent has a `browser_run` tool (an ocode web or desktop session), prefer `browser_run` for multi-step page tasks, and the `browser` tool for single reads or actions.
 - Use htrcli from the shell only when those tools are absent (for example the TUI), or for things they cannot do: recording, network mocking, contexts, raw `command`.
 - On a remote (SSH) project the `browser` and `browser_run` tools already drive the client's local browser through this same daemon (reverse-forwarded to the host's port 3845), including dense pages via `browser_run`'s screenshot view. Shelling out to htrcli from the host costs one chat-model round trip per command; `browser_run` costs one for the whole task.
+- If `browser` or `browser_run` report that controls or the client extension is out of date (the snapshot has no viewport or scroll offset), do not retry `browser_run` or the controls: use the browser tool's snapshot, find, text or screenshot, and tell the user to update the htrcli extension. Shelling out to htrcli over the default extension transport hits the same limit, but `--cdp` or a headless browser (`htrcli browser start --headless`) does not use the extension and remains an option when the task needs it.
 
 Go CLI for controlling browser tabs via the HTR NControl remote control API.
 Supports **two transports** — extension (default) and direct CDP:
