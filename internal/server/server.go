@@ -391,6 +391,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/reset-remote", s.authMiddleware(s.handler.HandleGitResetRemote))
 	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
 	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
+	// Appearance: VS Code colour/icon themes discovered in the local editor
+	// installs. LOCAL ONLY — no ?host= and no remote-proxy entry, because
+	// appearance is a property of the machine running this SPA (spec §12).
+	s.mux.HandleFunc("GET /api/appearance/themes", s.authMiddleware(s.handler.HandleAppearanceThemes))
+	s.mux.HandleFunc("GET /api/appearance/theme/{id...}", s.authMiddleware(s.handler.HandleAppearanceTheme))
+	s.mux.HandleFunc("GET /api/appearance/settings", s.authMiddleware(s.handler.HandleGetAppearanceSettings))
+	s.mux.HandleFunc("PUT /api/appearance/settings", s.authMiddleware(s.handler.HandleSetAppearanceSettings))
 	// CLI-utility detection/install (the web/desktop `/tools` command). Install
 	// is async: POST starts a job and the client polls its status.
 	s.mux.HandleFunc("GET /api/cli-tools", s.authMiddleware(s.handler.HandleListCliTools))
