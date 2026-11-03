@@ -19,14 +19,18 @@ const (
 // Conversion preserves the author's colours, with these deliberate exceptions.
 // Every value emitted to the web palette is composited over the theme
 // background and flattened to #RRGGBB, because the CSS variables cannot carry
-// alpha and the web converter ignores an 8-digit value. A foreground the theme
-// does not author (--primary-foreground, --destructive-foreground,
-// --secondary-foreground, and --accent-foreground when neither the partner key
-// nor an accent surface exists) is synthesized for readability; when the theme
-// does author the partner key (button.foreground, input.foreground,
-// list.activeSelectionForeground) that value wins. --link is repaired only when
-// it fails AA on both the page background and the muted surface. A variable
-// with no source key is omitted rather than substituted.
+// alpha and the web converter ignores an 8-digit value. That flattening is one
+// shared pass (normaliseUI) applied to every producer of the palette: the
+// mapping loop, the synthesized foregrounds and the colors-less derivation.
+// A foreground the theme does not author (--primary-foreground,
+// --destructive-foreground, --secondary-foreground, and --accent-foreground when
+// neither the partner key nor an accent surface exists) is synthesized for
+// readability; when the theme does author the partner key (button.foreground,
+// input.foreground, list.activeSelectionForeground) that value wins, unless the
+// authored value is fully transparent — it then counts as absent and is
+// synthesized. --link is repaired only when it fails AA on both the page
+// background and the muted surface. A variable with no source key is omitted
+// rather than substituted.
 type ConvertedTheme struct {
 	ID       string            `json:"id"`
 	Label    string            `json:"label"`

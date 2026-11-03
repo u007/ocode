@@ -320,6 +320,37 @@ func buildColours(raw *RawTheme) theme.ThemeColors {
 	return out
 }
 
+// partnerForegroundVars are the ui foregrounds whose authored partner key wins
+// over synthesis. They are the three variables synthesiseForeground fills.
+var partnerForegroundVars = map[string]struct{}{
+	"--primary-foreground":   {},
+	"--secondary-foreground": {},
+	"--accent-foreground":    {},
+}
+
+// partnerForegroundContributes reports whether an authored partner foreground
+// actually carries a colour of its own once flattened onto the page background.
+//
+// A fully transparent value contributes nothing, so it is treated as absent and
+// synthesiseForeground computes a readable one instead of the theme painting
+// background-coloured text on a coloured surface. An OPAQUE value equal to the
+// page background is still authoritative: Gruvbox Light authors
+// button.foreground #fbf1c7 — the page background — for text on its blue
+// button, and dropping it would replace a deliberate choice with a synthesized
+// one.
+func partnerForegroundContributes(value, background string) bool {
+	_, alpha, ok := parseHexColourAlpha(value)
+	if !ok || alpha == 0 {
+		return false
+	}
+	if alpha == 255 {
+		return true
+	}
+	composited, ok := compositeOver(value, background)
+	// A semi-transparent value whose RGB is the background adds nothing either.
+	return ok && composited != background
+}
+
 // buildUI maps spec §8.2's web variables and applies the permitted computed
 // colours.
 //
@@ -335,6 +366,11 @@ func buildUI(colors map[string]string, kind Polarity, palette theme.ThemeColors)
 	for _, mapping := range uiMappings {
 		value, ok := firstPresent(colors, mapping.keys...)
 		if !ok {
+			continue
+		}
+		if _, partner := partnerForegroundVars[mapping.variable]; partner && !partnerForegroundContributes(value, background) {
+			// The partner key exists but contributes no colour; leave the gap for
+			// synthesiseForeground below.
 			continue
 		}
 		composited, ok := compositeOver(value, background)
@@ -367,7 +403,33 @@ func buildUI(colors map[string]string, kind Polarity, palette theme.ThemeColors)
 	}
 
 	repairLink(ui, kind)
+	normaliseUI(ui, background)
 	return ui
+}
+
+// normaliseUI is the single choke point enforcing the web palette's #RRGGBB
+// contract. ui has three writers — the uiMappings loop, synthesiseForeground /
+// pickReadableFg, and deriveWithoutColors — and only the first composites its
+// values, so an authored #RRGGBBAA colour or an alpha-carrying token foreground
+// copied verbatim by pickReadableFg could otherwise reach the stylesheet, where
+// the converter drops it. Each value is composited over background and any value
+// that is not a colour at all is deleted.
+//
+// The pass is idempotent: #RRGGBB carries alpha 255 and composites to itself, so
+// running it over already-normalised output changes nothing.
+func normaliseUI(ui map[string]string, background string) {
+	backdrop := background
+	if rgb, _, ok := parseHexColourAlpha(background); ok {
+		backdrop = formatHexRGB(rgb)
+	}
+	for variable, value := range ui {
+		composited, ok := compositeOver(value, backdrop)
+		if !ok {
+			delete(ui, variable)
+			continue
+		}
+		ui[variable] = composited
+	}
 }
 
 // uiBackground resolves the background every ui value is composited over. It
@@ -517,6 +579,9 @@ func deriveWithoutColors(raw *RawTheme, kind Polarity) (map[string]string, theme
 		"--border":           border,
 		"--muted-foreground": muted,
 	}
+	// The token rules are raw author values, so they may be #RGB/#RRGGBBAA just
+	// like a colors block; the same choke point flattens them to #RRGGBB.
+	normaliseUI(ui, background)
 	colors := theme.ThemeColors{
 		Text:       text,
 		Background: background,

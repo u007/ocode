@@ -447,21 +447,129 @@ func assertMonacoRulesEqual(t *testing.T, got, want []MonacoRule) {
 // TestConvertThemeUIValuesAreSixDigitHex is the §8.2 contract: every web
 // variable is a lower-case #RRGGBB. The web converter drops anything else and
 // the stylesheet default survives, so an 8-digit author value must never reach
-// the UI map.
+// the UI map. It covers all three writers into that map: the mapping loop (the
+// fixtures), the synthesized foregrounds (the alpha editor.foreground case) and
+// deriveWithoutColors (the colors-less fixtures and the alpha tokenColors case).
 func TestConvertThemeUIValuesAreSixDigitHex(t *testing.T) {
 	pattern := regexp.MustCompile(`^#[0-9a-f]{6}$`)
-	for _, name := range []string{"catppuccin-mocha.json", "gruvbox-light.json"} {
+	check := func(t *testing.T, got ConvertedTheme) {
+		t.Helper()
+		if len(got.UI) == 0 {
+			t.Fatal("conversion emitted no web variables")
+		}
+		for variable, value := range got.UI {
+			if !pattern.MatchString(value) {
+				t.Errorf("%s = %q, want #RRGGBB", variable, value)
+			}
+		}
+	}
+
+	for _, name := range []string{"catppuccin-mocha.json", "gruvbox-light.json", "no-colors.json"} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ConvertTheme("vscode:test/"+name, name, loadFixture(t, name))
 			if err != nil {
 				t.Fatal(err)
 			}
-			for variable, value := range got.UI {
-				if !pattern.MatchString(value) {
-					t.Errorf("%s = %q, want #RRGGBB", variable, value)
-				}
-			}
+			check(t, got)
 		})
+	}
+
+	// An alpha-carrying editor.foreground reaches the palette twice: the mapping
+	// loop composites it, but pickReadableFg hands the same value back verbatim
+	// as a synthesized foreground candidate. Against the pre-normalisation code
+	// --primary-foreground was "#f0f0f0cc".
+	t.Run("alpha editor foreground", func(t *testing.T) {
+		raw := &RawTheme{
+			Type: "dark",
+			Colors: map[string]string{
+				"editor.background": "#101010",
+				"editor.foreground": "#f0f0f0cc",
+				"button.background": "#181818",
+			},
+		}
+		got, err := ConvertTheme("vscode:test/alpha-fg", "Alpha Foreground", raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, got)
+		assertEq(t, got.UI["--primary-foreground"], "#c3c3c3") // #f0f0f0cc over #101010
+	})
+
+	// A tokenColors-only theme carries raw token rule values straight into the
+	// derived palette, so an alpha foreground must be flattened there too.
+	t.Run("alpha tokenColors foreground", func(t *testing.T) {
+		raw := &RawTheme{
+			Type: "dark",
+			TokenColors: tokenColors{Rules: []TokenRule{
+				{Scope: scopeList{"source"}, Settings: TokenSettings{Foreground: "#d4d4d4cc"}},
+				{Scope: scopeList{"comment"}, Settings: TokenSettings{Foreground: "#6a9955cc"}},
+			}},
+		}
+		got, err := ConvertTheme("vscode:test/alpha-tokens", "Alpha Tokens", raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, got)
+		assertEq(t, got.UI["--foreground"], "#aaaaaa") // #d4d4d4cc over #000000
+	})
+}
+
+// TestNormaliseUIIdempotentAndDropping pins the choke point itself: a value that
+// is not a colour is deleted, and a second pass over already-flattened output
+// changes nothing (which is what keeps the goldens stable).
+func TestNormaliseUIIdempotentAndDropping(t *testing.T) {
+	ui := map[string]string{
+		"--background": "#1e1e2e",
+		"--muted":      "#31324480",
+		"--broken":     "not-a-colour",
+	}
+	normaliseUI(ui, "#1e1e2e")
+	once := make(map[string]string, len(ui))
+	for variable, value := range ui {
+		once[variable] = value
+	}
+	if _, ok := ui["--broken"]; ok {
+		t.Error("an unparseable value must be dropped, not emitted")
+	}
+	assertEq(t, ui["--muted"], "#282839")
+	normaliseUI(ui, "#1e1e2e")
+	assertStringMapEqual(t, "second pass", ui, once)
+}
+
+// TestConvertThemeTransparentPartnerForegroundIsSynthesized pins that a partner
+// key with alpha 0 counts as absent: otherwise it would flatten to the page
+// background and paint background-coloured text on a coloured surface.
+func TestConvertThemeTransparentPartnerForegroundIsSynthesized(t *testing.T) {
+	raw := &RawTheme{
+		Type: "dark",
+		Colors: map[string]string{
+			"editor.background":              "#101010",
+			"editor.foreground":              "#f0f0f0",
+			"button.background":              "#2a2a2a",
+			"button.foreground":              "#00000000",
+			"input.background":               "#303030",
+			"input.foreground":               "#00000000",
+			"list.activeSelectionBackground": "#404040",
+			"list.activeSelectionForeground": "#00000000",
+		},
+	}
+	got, err := ConvertTheme("vscode:test/transparent-partners", "Transparent Partners", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := [][2]string{
+		{"--primary-foreground", "--primary"},
+		{"--secondary-foreground", "--secondary"},
+		{"--accent-foreground", "--accent"},
+	}
+	for _, pair := range pairs {
+		foreground := got.UI[pair[0]]
+		if foreground == got.UI["--background"] {
+			t.Errorf("%s flattened to the page background; a transparent partner must be treated as absent", pair[0])
+		}
+		if ratio := contrastRatio(foreground, got.UI[pair[1]]); ratio < aaNormal {
+			t.Errorf("%s contrast on %s = %.2f, want >= %.1f", pair[0], pair[1], ratio, aaNormal)
+		}
 	}
 }
 
@@ -606,11 +714,13 @@ func TestConvertCatppuccinMochaFullPalette(t *testing.T) {
 		"editorLineNumber.foreground":            "#7f849c",
 		"editorLineNumber.activeForeground":      "#cba6f7",
 		"editor.selectionBackground":             "#9399b240",
+		"editor.inactiveSelectionBackground":     "#7f849c40",
 		"editor.selectionHighlightBackground":    "#9399b233",
 		"editorBracketMatch.background":          "#9399b21a",
 		"editorBracketMatch.border":              "#9399b2",
 		"editorGutter.background":                "#1e1e2e",
 		"editorWidget.background":                "#181825",
+		"editorWidget.border":                    "#585b70",
 		"editorHoverWidget.background":           "#181825",
 		"editorHoverWidget.border":               "#585b70",
 		"editorSuggestWidget.background":         "#181825",
