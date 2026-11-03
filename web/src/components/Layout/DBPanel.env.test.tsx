@@ -109,7 +109,7 @@ describe("DBPanel environment-backed connections", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
     await waitFor(() => {
-      expect(mockAdd).toHaveBeenCalledWith("env", "${DATABASE_URL}", "");
+      expect(mockAdd).toHaveBeenCalledWith("env", "${DATABASE_URL}", "", undefined);
     });
   });
 

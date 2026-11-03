@@ -13,7 +13,9 @@ import {
   api,
   type DBConnectConnection,
   type DBConnectQueryResult,
+  type DBConnectTarget,
   type DBConnectUnlockFailure,
+  type DBUnlockScope,
 } from "../../api/client";
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import { cn } from "../../lib/utils";
@@ -22,15 +24,11 @@ import { ResultGrid } from "../Preview/SQLiteResultGrid";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import DBTableBrowser from "./DBTableBrowser";
+import DBTableBrowser, { dbCallErrorText } from "./DBTableBrowser";
 import { toResultSet } from "./dbConnectCells";
 
 // Matches the server's default page size for the tables endpoint.
 const TABLE_PAGE_SIZE = 100;
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 // Table list width bounds, and the room side by side needs beyond the list: the
 // resize handle, then the narrowest data pane the toolbar and grid stay usable in.
@@ -67,6 +65,11 @@ function newDbPanelSurfaceID(): string {
 }
 
 export default function DBPanel({ projectPath, projectHost }: { projectPath?: string; projectHost?: string }) {
+  // A remote project's calls carry its path as X-Ocode-Project. Without it the host
+  // would act on its own default project, so refuse to render rather than misroute.
+  if (projectHost && !projectPath) {
+    throw new Error(`db panel: remote project on ${projectHost} has no project path`);
+  }
   const surfaceID = useRef<string>("");
   if (!surfaceID.current) surfaceID.current = newDbPanelSurfaceID();
   // Stable for this panel's lifetime. The project is kept in the id for
@@ -75,6 +78,23 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     () => `db-panel:${projectHost ?? ""}:${projectPath ?? ""}:${surfaceID.current}`,
     [projectHost, projectPath],
   );
+  // Routes every dbconnect call. A remote project's calls go to its host's server,
+  // which holds that project's .env, saved connections, grants and pools.
+  const target = useMemo<DBConnectTarget | undefined>(
+    () => (projectHost ? { host: projectHost, projectPath } : undefined),
+    [projectHost, projectPath],
+  );
+  // The unlock's project scope: a remote project's path travels with its host.
+  const unlockScope = useMemo<DBUnlockScope>(() => {
+    if (projectHost && projectPath) return [projectPath, { host: projectHost, projectPath }];
+    return projectPath ? [projectPath] : [];
+  }, [projectHost, projectPath]);
+  // The unlock-on-close cleanup reads the target through this ref, so it is keyed on
+  // the surface alone: a target change must never lock the grant mid-session.
+  const targetRef = useRef(target);
+  useEffect(() => {
+    targetRef.current = target;
+  }, [target]);
 
   // Table-list pane width: drag-to-resize + collapse, persisted per panel kind.
   const tablePane = useResizableSidebar({
@@ -141,7 +161,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   const addIsTemplate = isEnvTemplate(addUrl.trim());
 
   const refresh = useCallback(async () => {
-    const res = await api.dbConnectList(surface);
+    const res = await api.dbConnectList(surface, target);
     // Normalise at the fetch boundary: the api client already turns a null
     // list into [], but a partial mock (or an older server) must not crash the
     // panel with an undefined list.
@@ -151,23 +171,23 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       if (prev && list.some((c) => c.name === prev)) return prev;
       return list[0]?.name ?? null;
     });
-  }, [surface]);
+  }, [surface, target]);
 
   // offset 0 starts a fresh list; a later offset appends the next page.
   const loadTables = useCallback(
     async (connection: string, offset: number) => {
-      const page = await api.dbConnectTables(surface, connection, TABLE_PAGE_SIZE, offset);
+      const page = await api.dbConnectTables(surface, connection, TABLE_PAGE_SIZE, offset, target);
       setTables((prev) => (offset === 0 ? page.tables : [...prev, ...page.tables]));
       setTablesHasMore(page.hasMore);
     },
-    [surface],
+    [surface, target],
   );
 
   // Retryable load. A failure keeps `connections` null, so the loading branch
   // must render this error (and a Retry) instead of an endless spinner.
   const reload = useCallback(() => {
     setPanelError(null);
-    refresh().catch((err: unknown) => setPanelError(errorText(err)));
+    refresh().catch((err: unknown) => setPanelError(dbCallErrorText(err, target)));
   }, [refresh]);
 
   useEffect(() => {
@@ -178,8 +198,9 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   // the grant also dies with the server process.
   useEffect(() => {
     return () => {
-      api.dbConnectLock(surface).catch((err: unknown) => {
-        console.warn("db panel: lock on close failed", errorText(err));
+      const lockTarget = targetRef.current;
+      api.dbConnectLock(surface, lockTarget).catch((err: unknown) => {
+        console.warn("db panel: lock on close failed", dbCallErrorText(err, lockTarget));
       });
     };
   }, [surface]);
@@ -202,7 +223,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
 
   useEffect(() => {
     if (!selected || !unlocked) return;
-    loadTables(selected, 0).catch((err: unknown) => setPanelError(errorText(err)));
+    loadTables(selected, 0).catch((err: unknown) => setPanelError(dbCallErrorText(err, target)));
   }, [selected, unlocked, loadTables]);
 
   // A statement runs read-only first. The server answers 409 when it is a write;
@@ -213,7 +234,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     setQueryError(null);
     setNotice(null);
     try {
-      const res = await api.dbConnectQuery(surface, selected, text, confirmed);
+      const res = await api.dbConnectQuery(surface, selected, text, confirmed, target);
       setPendingWrite(null);
       setResult(res);
       if (res.rowsAffected !== null) {
@@ -231,7 +252,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
         setPendingWrite(text);
       } else {
         setPendingWrite(null);
-        setQueryError(errorText(err));
+        setQueryError(dbCallErrorText(err, target));
       }
     } finally {
       setBusy(null);
@@ -251,7 +272,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     try {
       await fn();
     } catch (err: unknown) {
-      setPanelError(errorText(err));
+      setPanelError(dbCallErrorText(err, target));
     } finally {
       setBusy(null);
     }
@@ -261,13 +282,11 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   const unlockWith = async (password: string) => {
     // The project path lets the server resolve an environment-backed
     // connection against THIS project's .env / .env.local. The password is
-    // empty for that flow; only sealed connections need it.
-    //
-    // A remote project's files (including .env) live on the other machine and
-    // this endpoint is not host-threaded, so its path must never be sent: the
-    // server would either refuse it or, worse, match a same-named local dir.
+    // empty for that flow; only sealed connections need it. For a remote project
+    // the same path goes to the host's server, which validates it against its own
+    // allowed roots and reads the host's .env.
     try {
-      const res = await api.dbConnectUnlock(surface, password, projectHost ? undefined : projectPath);
+      const res = await api.dbConnectUnlock(surface, password, ...unlockScope);
       setUnlockFailures(res.failed);
       // Apply the server's answer locally as well, so a failed refresh below
       // cannot leave the panel claiming the opposite of what the server did:
@@ -290,7 +309,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       // must not keep claiming a connection is locked when the server has
       // it (or vice versa). Keep the original unlock error if this fails.
       await refresh().catch((err: unknown) => {
-        console.warn("db panel: refresh after unlock failed", errorText(err));
+        console.warn("db panel: refresh after unlock failed", dbCallErrorText(err, target));
       });
     }
     // No explicit loadTables: the [selected, unlocked] effect above reloads
@@ -311,7 +330,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       // A template URL is saved in the clear and needs no password; a literal
       // URL is sealed under it. The server enforces the same rule.
       const literal = !addIsTemplate;
-      await api.dbConnectAdd(name, addUrl.trim(), password);
+      await api.dbConnectAdd(name, addUrl.trim(), password, target);
       setAddUrl("");
       setAddPassword("");
       setAddConfirm("");
@@ -329,9 +348,9 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
         try {
           await unlockWith(password);
         } catch (err: unknown) {
-          console.warn("db panel: auto-unlock after add failed", name, errorText(err));
+          console.warn("db panel: auto-unlock after add failed", name, dbCallErrorText(err, target));
           setPanelError(
-            `Connection ${name} was saved, but unlocking it failed: ${errorText(err)}. Unlock it manually with the master password.`,
+            `Connection ${name} was saved, but unlocking it failed: ${dbCallErrorText(err, target)}. Unlock it manually with the master password.`,
           );
         }
       }
@@ -339,7 +358,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
 
   const lockConnections = () =>
     withBusy("lock", async () => {
-      await api.dbConnectLock(surface);
+      await api.dbConnectLock(surface, target);
       setTables([]);
       setTablesHasMore(false);
       setResult(null);
@@ -350,7 +369,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
 
   const removeConnection = (name: string) =>
     withBusy("remove", async () => {
-      await api.dbConnectRemove(name);
+      await api.dbConnectRemove(name, target);
       setConfirmRemove(null);
       setUnlockFailures((prev) => prev.filter((f) => f.name !== name));
       await refresh();
@@ -454,7 +473,6 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             password={addPassword}
             confirmPassword={addConfirm}
             firstSetup={true}
-            isRemote={!!projectHost}
             onName={setAddName}
             onUrl={setAddUrl}
             onPassword={setAddPassword}
@@ -509,38 +527,28 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 <Database className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} reads its URL from the
                 project&apos;s <code className="font-mono">.env</code>
               </div>
-              {projectHost ? (
-                <p className="text-[11px] text-muted-foreground">
-                  Not available for a remote project: its <code className="font-mono">.env</code> lives on{" "}
-                  <span className="font-mono">{projectHost}</span>, and this connection is resolved by the server
-                  on this machine.
-                </p>
-              ) : (
-                <>
-                  <form
-                    className="flex items-end gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void unlockConnection();
-                    }}
-                  >
-                    <Button type="submit" size="sm" disabled={busy !== null} aria-busy={busy === "unlock"}>
-                      {busy === "unlock" ? (
-                        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Unlock className="mr-1 h-3.5 w-3.5" />
-                      )}
-                      Load from .env
-                    </Button>
-                  </form>
-                  <p className="text-[11px] text-muted-foreground">
-                    No password needed — nothing is stored or encrypted. The URL is read from{" "}
-                    <code className="font-mono">.env</code> / <code className="font-mono">.env.local</code> in the
-                    project root when you load it. A variable exported in the server&apos;s environment takes
-                    precedence.
-                  </p>
-                </>
-              )}
+              <form
+                className="flex items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void unlockConnection();
+                }}
+              >
+                <Button type="submit" size="sm" disabled={busy !== null} aria-busy={busy === "unlock"}>
+                  {busy === "unlock" ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Unlock className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Load from .env
+                </Button>
+              </form>
+              <p className="text-[11px] text-muted-foreground">
+                No password needed — nothing is stored or encrypted. The URL is read from{" "}
+                <code className="font-mono">.env</code> / <code className="font-mono">.env.local</code> in the
+                project root when you load it. A variable exported in the server&apos;s environment takes
+                precedence.
+              </p>
             </>
           ) : (
             <>
@@ -594,7 +602,6 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 password={addPassword}
                 confirmPassword={addConfirm}
                 firstSetup={false}
-                isRemote={!!projectHost}
                 onName={setAddName}
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
@@ -703,7 +710,13 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 </div>
               )}
               {activeTable && view === "data" ? (
-                <DBTableBrowser key={activeTable} surface={surface} connection={current.name} table={activeTable} />
+                <DBTableBrowser
+                  key={activeTable}
+                  surface={surface}
+                  connection={current.name}
+                  table={activeTable}
+                  target={target}
+                />
               ) : (
               <>
               <textarea
@@ -778,7 +791,6 @@ function AddFields({
   password,
   confirmPassword,
   firstSetup,
-  isRemote,
   onName,
   onUrl,
   onPassword,
@@ -790,9 +802,6 @@ function AddFields({
   confirmPassword: string;
   /** No connection is saved yet, so this password becomes the master password. */
   firstSetup: boolean;
-  /** A remote project's .env lives on the host, and the dbconnect routes are not
-   *  host-threaded, so an env template saved here can never be loaded. */
-  isRemote: boolean;
   onName: (v: string) => void;
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
@@ -833,13 +842,6 @@ function AddFields({
           wins). No password is needed for that, and the password must itself be a{" "}
           <code className="font-mono">{"${VAR}"}</code> reference — a literal password is refused
           because a template is stored unencrypted.
-          {isRemote && (
-            <>
-              {" "}
-              <strong>Not usable for this remote project</strong>: its .env lives on the host, and
-              this connection is resolved on this machine. Use a literal URL instead.
-            </>
-          )}
         </p>
       </div>
       <div className="space-y-1">

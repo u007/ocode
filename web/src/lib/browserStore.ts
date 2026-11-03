@@ -157,6 +157,10 @@ interface BrowserState {
  *  entries are dropped past the cap, so consumers render the tail. */
 export const CONSOLE_CAP = 1000;
 export const NETWORK_CAP = 1000;
+/** Cap on one surface's history list. navigate() and a page's pushState both
+ *  append, so a page that pushes on every route would otherwise grow it without
+ *  bound. The oldest entries are dropped past the cap. */
+export const HISTORY_CAP = 200;
 
 export const browserStore = new Store<BrowserState>({ byKey: {} });
 
@@ -195,6 +199,64 @@ function mutate(key: string, fn: (t: BrowserTabState) => BrowserTabState) {
 
 function cap<T>(arr: T[], limit: number): T[] {
   return arr.length > limit ? arr.slice(arr.length - limit) : arr;
+}
+
+/** How a same-document page hint changed the history: "push" = pushState (adds
+ *  an entry), "replace" = replaceState (overwrites the current entry),
+ *  "traverse" = popstate/hashchange (the page moved to an entry it already has). */
+export type PageURLKind = "push" | "replace" | "traverse";
+
+/** Appends `url` after the current entry (dropping forward entries), keeps at
+ *  most HISTORY_CAP entries, and returns the list with the new index. */
+function pushHistory(history: string[], idx: number, url: string): { history: string[]; idx: number } {
+  const kept = cap([...history.slice(0, idx + 1), url], HISTORY_CAP);
+  return { history: kept, idx: kept.length - 1 };
+}
+
+/** Index of the entry for `url` nearest to `from` (the earlier one on a tie), or -1. */
+function nearestIndex(history: string[], from: number, url: string): number {
+  for (let d = 0; d < history.length; d++) {
+    if (history[from - d] === url) return from - d;
+    if (history[from + d] === url) return from + d;
+  }
+  return -1;
+}
+
+interface PageURLStep {
+  tab: BrowserTabState;
+  applied: { url: string; idx: number };
+}
+
+function pageURLStep(t: BrowserTabState, url: string, history: string[], idx: number): PageURLStep {
+  return {
+    tab: { ...t, url, history, historyIndex: idx, scrollY: t.scrollByUrl[url] ?? 0 },
+    applied: { url, idx },
+  };
+}
+
+/** The tab after a same-document page hint, or null when the hint is rejected or
+ *  changes nothing. Pure: syncPageURL commits the returned tab. */
+function applyPageURL(t: BrowserTabState, reported: string, kind: PageURLKind): PageURLStep | null {
+  let next: string;
+  try {
+    next = normalizeBrowseURL(reported);
+    if (new URL(next).origin !== new URL(t.url).origin) return null;
+  } catch {
+    // intentionally not logged: a hint that does not parse or has no origin is page noise, same as a cross-origin one
+    return null;
+  }
+  if (next === t.url) return null;
+  if (kind === "push") {
+    const pushed = pushHistory(t.history, t.historyIndex, next);
+    return pageURLStep(t, next, pushed.history, pushed.idx);
+  }
+  // popstate/hashchange: when the URL is an entry already recorded, select that
+  // entry. Only a URL with no entry overwrites the current one.
+  const known = kind === "traverse" ? nearestIndex(t.history, t.historyIndex, next) : -1;
+  if (known >= 0) return pageURLStep(t, next, t.history, known);
+  const history = t.history.slice();
+  history[t.historyIndex] = next;
+  return pageURLStep(t, next, history, t.historyIndex);
 }
 
 function dropTabState(key: StateKey): void {
@@ -260,10 +322,25 @@ export const browserActions = {
   navigate(key: StateKey, url: string) {
     url = normalizeBrowseURL(url);
     mutate(key, (t) => {
-      const trimmed = t.history.slice(0, t.historyIndex + 1);
-      trimmed.push(url);
-      return { ...t, url, history: trimmed, historyIndex: trimmed.length - 1, loading: true, error: null, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+      const pushed = pushHistory(t.history, t.historyIndex, url);
+      return { ...t, url, history: pushed.history, historyIndex: pushed.idx, loading: true, error: null, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
     });
+  },
+
+  /** Same-document navigation reported by the page (pushState/replaceState/
+   *  popstate/hashchange). Display-untrusted: accepted only for the same
+   *  origin as the surface's current URL, so a page can only choose which
+   *  path of its own site the address bar shows. "push" appends a history entry,
+   *  "replace" overwrites the current one, "traverse" selects the nearest
+   *  existing entry for the URL (overwriting only when there is none). Never
+   *  starts a load. Returns the applied {url, idx}, or null when nothing changed. */
+  syncPageURL(key: StateKey, reported: string, kind: PageURLKind = "replace"): { url: string; idx: number } | null {
+    const cur = browserStore.state.byKey[key];
+    if (!cur) return null;
+    const step = applyPageURL(cur, reported, kind);
+    if (!step) return null;
+    mutate(key, () => step.tab);
+    return step.applied;
   },
 
   back(key: StateKey) {

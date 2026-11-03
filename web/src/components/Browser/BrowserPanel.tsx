@@ -10,6 +10,21 @@ import { ChromeViewport } from "./ChromeViewport";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { openExternalURL } from "../../lib/externalLinks";
 
+/** What the iframe was last pointed at (see loadedRef). */
+interface LoadRecord {
+  key: StateKey;
+  frame: HTMLIFrameElement;
+  base: string;
+  origin: string;
+  idx: number;
+}
+
+/** A load that failed must not stay recorded as the iframe's page, or the load
+ *  effect would skip the retry for the same index. */
+function forgetFailedLoad(ref: { current: LoadRecord | null }, frame: HTMLIFrameElement) {
+  if (ref.current?.frame === frame) ref.current = null;
+}
+
 // Frontend parity of Go's isLoopbackHost — handles [::1]:port via URL.hostname
 function isLoopbackHost(hostname: string): boolean {
   const lower = hostname.toLowerCase().replace(/\.$/, "").trim();
@@ -42,10 +57,30 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   // Origin of the document the iframe was last pointed at: the postMessage gate
   // and the restore-scroll target. Set just before iframe.src is assigned.
   const pageOriginRef = useRef<string | null>(null);
+  // What the iframe was last pointed at. The iframe follows its own links,
+  // redirects and SPA routes, so a store url change with the same
+  // historyIndex, surface, iframe element, base and upstream origin is the page
+  // reporting where it already is: re-assigning iframe.src would reload it.
+  // User navigation bumps historyIndex; a foreign hand-off changes the origin.
+  // Recorded before the load's awaits (a re-run during them must not double-load)
+  // and cleared when that load fails. A page nav hint that lands during those awaits
+  // supersedes the load (onNav) and overwrites the record with the URL it reported.
+  const loadedRef = useRef<LoadRecord | null>(null);
   // A scheduled retry while a remote host is still connecting (503 Retry-After),
   // and the navigation that started connecting, for the remote stall guard.
   const connectRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connecting = useRef<{ url: string; since: number } | null>(null);
+
+  // Ends the load in flight. Its awaits compare the generation after each step and
+  // stop without committing src, pageOriginRef or the record once it moved on; a
+  // scheduled connect retry for it is cancelled.
+  const supersedeLoad = useCallback(() => {
+    loadGeneration.current += 1;
+    if (connectRetryTimer.current !== null) {
+      clearTimeout(connectRetryTimer.current);
+      connectRetryTimer.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     // Drop the previous origin first: a base from another host must never load.
@@ -79,6 +114,20 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
     // with the stale-URL guard in setPageTitle.
     onTitle: (key, title, url) => actions.setPageTitle(key, title, url || undefined),
     onScroll: (key, y, url) => actions.setScrollY(key, y, url || undefined),
+    onNav: (key, url, kind) => {
+      const applied = actions.syncPageURL(key, url, kind);
+      if (!applied) return;
+      // A load still awaiting its grant would assign the iframe the URL it was started
+      // for, which the store no longer holds. Supersede it before it can commit.
+      supersedeLoad();
+      // The hint came from this iframe's own page (useBrowserMessages gates on its
+      // window), so the iframe already shows applied.url. Record that, whatever was
+      // recorded before, so the load effect does not reissue src for the new index.
+      const frame = iframeRef.current;
+      if (frame && base) {
+        loadedRef.current = { key, frame, base, origin: new URL(applied.url).origin, idx: applied.idx };
+      }
+    },
   });
 
   const showIframe = !!s && s.panelOpen && !s.collapsed;
@@ -123,11 +172,8 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   // was initiated by the SPA rather than by an external page link.
   const loadInto = useCallback(async (iframe: HTMLIFrameElement, url: string) => {
     if (!base || !url || host === null) return;
-    const generation = ++loadGeneration.current;
-    if (connectRetryTimer.current !== null) {
-      clearTimeout(connectRetryTimer.current);
-      connectRetryTimer.current = null;
-    }
+    supersedeLoad();
+    const generation = loadGeneration.current;
     try {
       const tab = await openBrowseTabOrigin(stateKey, url, host);
       if (generation !== loadGeneration.current) return;
@@ -139,6 +185,7 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
         connecting.current = { url, since };
         if (Date.now() - since >= REMOTE_STALL_AFTER_MS) {
           connecting.current = null;
+          forgetFailedLoad(loadedRef, iframe);
           actions.setError(stateKey, `Remote host ${host} is still connecting. Reload to try again.`);
           return;
         }
@@ -160,7 +207,12 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
       // re-keys the `base` the chrome viewport and the mount read use.
       const origin = host ? await getBrowseBase(host) : base;
       if (generation !== loadGeneration.current) return;
-      if (origin !== base) setBase(origin);
+      if (origin !== base) {
+        setBase(origin);
+        // This load points the iframe at the new base: record it so the re-render
+        // the base change causes does not load the same page a second time.
+        if (loadedRef.current?.frame === iframe) loadedRef.current.base = origin;
+      }
       const grant = await mintBrowseGrant(stateKey, host);
       if (generation !== loadGeneration.current) return;
       pageOriginRef.current = browseOriginOf(origin);
@@ -168,10 +220,11 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
     } catch (e) {
       if (generation !== loadGeneration.current) return;
       connecting.current = null;
+      forgetFailedLoad(loadedRef, iframe);
       console.error("browse: load failed:", e);
       actions.setError(stateKey, e instanceof Error ? e.message : String(e));
     }
-  }, [actions, base, host, stateKey]);
+  }, [actions, base, host, stateKey, supersedeLoad]);
 
   // A scheduled connect retry must not outlive the panel.
   useEffect(() => () => {
@@ -215,11 +268,21 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   useEffect(() => {
     if (!s) return;
     const iframe = iframeRef.current;
-    if (showIframe && iframe && base) void loadInto(iframe, s.url);
+    if (!showIframe || !iframe || !base) return;
+    let origin = "";
+    try {
+      origin = new URL(normalizeBrowseURL(s.url)).origin;
+    } catch {
+      // intentionally not logged: unparseable url just means no dedupe; loadInto surfaces the error
+    }
+    const prev = loadedRef.current;
+    if (origin && prev && prev.key === stateKey && prev.frame === iframe && prev.idx === s.historyIndex && prev.origin === origin && prev.base === base) return;
+    loadedRef.current = { key: stateKey, frame: iframe, base, origin, idx: s.historyIndex };
+    void loadInto(iframe, s.url);
     // Re-run on url change (navigate/back/forward/reload set a new s.url or
     // bump a nonce) and on surface flips: an iframe remounted after a
     // chrome→local switch needs its src (re)issued, or it mounts blank.
-  }, [showIframe, base, s?.url, s?.historyIndex, effectiveMode, loadInto]);
+  }, [showIframe, base, s?.url, s?.historyIndex, effectiveMode, loadInto, stateKey]);
 
   // A hidden Chrome viewport can retain focus in its IME textarea. Blur it as
   // soon as another project/tab or a non-browser surface becomes active so

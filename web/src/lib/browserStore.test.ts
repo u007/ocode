@@ -3,6 +3,7 @@ import {
   browserStore,
   browserActions,
   CONSOLE_CAP,
+  HISTORY_CAP,
   normalizeBrowseURL,
   isPrivateHost,
 } from "./browserStore";
@@ -234,5 +235,111 @@ describe("scroll offsets", () => {
     expect(s.pageTitle).toBe("B Site");
     expect(s.scrollY).toBe(55);
     expect(s.loading).toBe(false);
+  });
+});
+
+describe("syncPageURL", () => {
+  it("applies a same-origin page hint without adding history, rejects cross-origin", () => {
+    const key = "tab:sync1" as const;
+    browserActions.open(key);
+    browserActions.navigate(key, "https://example.com/a");
+    const got = browserActions.syncPageURL(key, "https://example.com/b?x=1");
+    expect(got).toEqual({ url: "https://example.com/b?x=1", idx: 0 });
+    const t = browserStore.get().byKey[key];
+    expect(t.url).toBe("https://example.com/b?x=1");
+    expect(t.history).toHaveLength(1);
+    expect(browserActions.syncPageURL(key, "https://evil.com/")).toBeNull();
+    expect(browserStore.get().byKey[key].url).toBe("https://example.com/b?x=1");
+  });
+});
+
+describe("syncPageURL push", () => {
+  it("appends a history entry for pushState and keeps back working", () => {
+    const key = "tab:sync2" as const;
+    browserActions.open(key);
+    browserActions.navigate(key, "https://example.com/a");
+    expect(browserActions.syncPageURL(key, "https://example.com/b", "push")).toEqual({ url: "https://example.com/b", idx: 1 });
+    const t = browserStore.get().byKey[key];
+    expect(t.history.slice(-2)).toEqual(["https://example.com/a", "https://example.com/b"]);
+    browserActions.back(key);
+    expect(browserStore.get().byKey[key].url).toBe("https://example.com/a");
+  });
+});
+
+describe("syncPageURL traverse (popstate/hashchange)", () => {
+  it("selects the entry the page moved to instead of overwriting the one it left", () => {
+    const key = "tab:trav1" as const;
+    browserActions.open(key);
+    for (const p of ["a", "b", "c"]) browserActions.navigate(key, `https://example.com/${p}`);
+    // history.back() from C: popstate reports B. Must not become [A,B,B].
+    expect(browserActions.syncPageURL(key, "https://example.com/b", "traverse")).toEqual({ url: "https://example.com/b", idx: 1 });
+    const t = browserStore.get().byKey[key];
+    expect(t.history).toEqual(["https://example.com/a", "https://example.com/b", "https://example.com/c"]);
+    expect(t.historyIndex).toBe(1);
+    expect(t.url).toBe("https://example.com/b");
+  });
+
+  it("picks the nearest matching entry when the URL repeats in the list", () => {
+    const key = "tab:trav2" as const;
+    browserActions.open(key);
+    for (const p of ["a", "b", "c", "b", "d"]) browserActions.navigate(key, `https://example.com/${p}`);
+    expect(browserActions.syncPageURL(key, "https://example.com/b", "traverse")).toEqual({ url: "https://example.com/b", idx: 3 });
+    expect(browserStore.get().byKey[key].history).toHaveLength(5);
+  });
+
+  it("an unknown URL with no entry to select overwrites the current entry", () => {
+    const key = "tab:trav3" as const;
+    browserActions.open(key);
+    browserActions.navigate(key, "https://example.com/a");
+    browserActions.navigate(key, "https://example.com/b");
+    expect(browserActions.syncPageURL(key, "https://example.com/c", "traverse")).toEqual({ url: "https://example.com/c", idx: 1 });
+    expect(browserStore.get().byKey[key].history).toEqual(["https://example.com/a", "https://example.com/c"]);
+  });
+
+  it("replace still overwrites the current entry and keeps earlier ones", () => {
+    const key = "tab:trav4" as const;
+    browserActions.open(key);
+    for (const p of ["a", "b", "c"]) browserActions.navigate(key, `https://example.com/${p}`);
+    expect(browserActions.syncPageURL(key, "https://example.com/d", "replace")).toEqual({ url: "https://example.com/d", idx: 2 });
+    expect(browserStore.get().byKey[key].history).toEqual(["https://example.com/a", "https://example.com/b", "https://example.com/d"]);
+  });
+
+  it("a hint for the URL already current changes nothing", () => {
+    const key = "tab:trav5" as const;
+    browserActions.open(key);
+    browserActions.navigate(key, "https://example.com/a");
+    const before = browserStore.get().byKey[key];
+    expect(browserActions.syncPageURL(key, "https://example.com/a", "traverse")).toBeNull();
+    expect(browserStore.get().byKey[key]).toBe(before);
+  });
+});
+
+describe("history cap", () => {
+  it("navigate drops the oldest entries past HISTORY_CAP and keeps the index at the end", () => {
+    const key = "tab:cap1" as const;
+    browserActions.open(key);
+    const total = HISTORY_CAP + 5;
+    for (let i = 0; i < total; i++) browserActions.navigate(key, `https://example.com/p${i}`);
+    const t = browserStore.get().byKey[key];
+    expect(t.history).toHaveLength(HISTORY_CAP);
+    expect(t.history[0]).toBe("https://example.com/p5");
+    expect(t.history[HISTORY_CAP - 1]).toBe(`https://example.com/p${total - 1}`);
+    expect(t.historyIndex).toBe(HISTORY_CAP - 1);
+    expect(t.url).toBe(`https://example.com/p${total - 1}`);
+  });
+
+  it("page pushState past the cap is capped the same way", () => {
+    const key = "tab:cap2" as const;
+    browserActions.open(key);
+    browserActions.navigate(key, "https://example.com/p0");
+    for (let i = 1; i <= HISTORY_CAP + 4; i++) {
+      expect(browserActions.syncPageURL(key, `https://example.com/p${i}`, "push")).toEqual({
+        url: `https://example.com/p${i}`,
+        idx: Math.min(i, HISTORY_CAP - 1),
+      });
+    }
+    const t = browserStore.get().byKey[key];
+    expect(t.history).toHaveLength(HISTORY_CAP);
+    expect(t.historyIndex).toBe(HISTORY_CAP - 1);
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect, type MutableRefObject, type RefObject } from "react";
-import type { NetworkEvent, StateKey } from "../../lib/browserStore";
+import type { NetworkEvent, PageURLKind, StateKey } from "../../lib/browserStore";
 import { isTrustedBrowseMessage } from "./browseOrigin";
 
 interface Handlers {
@@ -9,6 +9,15 @@ interface Handlers {
   onTitle?: (key: StateKey, title: string, url: string) => void;
   /** Local-mode scroll offset report (capture.js throttled scroll). */
   onScroll?: (key: StateKey, y: number, url: string) => void;
+  /** Same-document navigation hint (capture.js pushState/replaceState/popstate/
+   *  hashchange). Display-untrusted; the receiver must apply its own same-origin check. */
+  onNav?: (key: StateKey, url: string, kind: PageURLKind) => void;
+}
+
+/** The hint kind capture.js sent. Anything unrecognised is a replace, the
+ *  least disruptive entry change. */
+function navKind(kind: unknown): PageURLKind {
+  return kind === "push" || kind === "traverse" ? kind : "replace";
 }
 
 /** Where a panel's messages may come from: the origin of the document it last
@@ -21,11 +30,10 @@ export interface BrowseMessageSource {
 
 // Accepts messages ONLY from the current page: its origin AND the iframe's own
 // window (isTrustedBrowseMessage). Everything else — the SPA's own origin, other
-// tabs' origins, other frames — is dropped. "ocode:browse:nav" is intentionally
-// ignored: the address bar is driven by server nav events, so a page-reported URL
-// is never trusted for display.
+// tabs' origins, other frames — is dropped. "ocode:browse:nav" is a same-document
+// hint only: the receiver accepts it solely for the tab's current origin.
 export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, source: BrowseMessageSource, h: Handlers) {
-  const { pushConsole, pushNetwork, onTitle, onScroll } = h;
+  const { pushConsole, pushNetwork, onTitle, onScroll, onNav } = h;
   const { originRef, frameRef } = source;
   useEffect(() => {
     if (!browseBase) return;
@@ -70,12 +78,14 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
             onScroll?.(stateKey, d.y, typeof d.url === "string" ? d.url : "");
           }
           break;
-        // "ocode:browse:nav" intentionally not handled: display-untrusted.
+        case "ocode:browse:nav":
+          if (typeof d.url === "string" && d.url) onNav?.(stateKey, d.url, navKind(d.kind));
+          break;
         default:
           break;
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, onTitle, onScroll]);
+  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, onTitle, onScroll, onNav]);
 }

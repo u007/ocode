@@ -1217,6 +1217,26 @@ func isRetryableThinkingModeRequestError(err error) bool {
 	return strings.Contains(lower, "passed back") || strings.Contains(lower, "thinking mode")
 }
 
+// isRetryablePromptRenderingError reports whether err is a typed provider
+// status error where the opencode-go gateway failed to render the request into
+// a prompt for the upstream model:
+//
+//	{"error":{"type":"invalid_request_error","message":"Upstream request failed:
+//	 [prompt_rendering_failed] The request could not be rendered into a prompt
+//	 for this model."}}
+//
+// A 400 is otherwise non-retryable, but this one comes from the upstream
+// template step and is intermittent for an identical request, so it is a
+// deliberately narrow exemption keyed on the `prompt_rendering_failed` code
+// (same budget/delay as isRetryableThinkingModeRequestError).
+func isRetryablePromptRenderingError(err error) bool {
+	var se *providerStatusError
+	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(se.Body), "prompt_rendering_failed")
+}
+
 // isRetryableLLMError is the single retryability policy shared by the main
 // ChatWithContext retry loop and the auto-permission judge's outer retry loop.
 // Keeping it in one place stops the two loops from drifting. Callers still
@@ -1225,7 +1245,8 @@ func isRetryableLLMError(err error) bool {
 	return isRateLimitError(err) ||
 		isServerUnavailableError(err) ||
 		isRetryableLLMClientError(err) ||
-		isRetryableThinkingModeRequestError(err)
+		isRetryableThinkingModeRequestError(err) ||
+		isRetryablePromptRenderingError(err)
 }
 
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived

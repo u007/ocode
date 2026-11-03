@@ -8,10 +8,12 @@
 import { ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  ApiError,
   api,
   type DBCell,
   type DBCellInput,
   type DBConnectBrowsePage,
+  type DBConnectTarget,
   type DBTableSchema,
 } from "../../api/client";
 import { ConfirmDialog, RowEditorDialog } from "../Preview/SQLiteDialogs";
@@ -22,7 +24,14 @@ import { pgInputToCell, toCell } from "./dbConnectCells";
 
 const PAGE_SIZE = 100;
 
-function errorText(err: unknown): string {
+/** Text for a failed dbconnect call. A call routed to a remote host that answers
+ *  404 or 405 names the host and the status, so a host whose server lacks the route
+ *  reads as that rather than as a bare "Not Found". Every other error, including the
+ *  server's own 400/409 messages, is shown verbatim. */
+export function dbCallErrorText(err: unknown, target: DBConnectTarget | undefined): string {
+  if (target?.host && err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+    return `Remote host ${target.host} answered HTTP ${err.status} for the database connector: ${err.message}`;
+  }
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -30,10 +39,12 @@ export default function DBTableBrowser({
   surface,
   connection,
   table,
+  target,
 }: {
   surface: string;
   connection: string;
   table: string;
+  target?: DBConnectTarget;
 }) {
   const [page, setPage] = useState<DBConnectBrowsePage | null>(null);
   const [offset, setOffset] = useState(0);
@@ -58,20 +69,26 @@ export default function DBTableBrowser({
     setLoading(true);
     setLoadError(null);
     api
-      .dbConnectRows(surface, connection, table, {
-        sort,
-        dir: desc ? "desc" : "asc",
-        filter,
-        limit: PAGE_SIZE,
-        offset,
-      })
+      .dbConnectRows(
+        surface,
+        connection,
+        table,
+        {
+          sort,
+          dir: desc ? "desc" : "asc",
+          filter,
+          limit: PAGE_SIZE,
+          offset,
+        },
+        target,
+      )
       .then((res) => {
         if (!cancelled) setPage(res);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setPage(null);
-          setLoadError(errorText(err));
+          setLoadError(dbCallErrorText(err, target));
         }
       })
       .finally(() => {
@@ -80,7 +97,7 @@ export default function DBTableBrowser({
     return () => {
       cancelled = true;
     };
-  }, [surface, connection, table, sort, desc, filter, offset, version]);
+  }, [surface, connection, table, target, sort, desc, filter, offset, version]);
 
   const keyless = page !== null && page.primaryKey.length === 0;
 
@@ -141,16 +158,16 @@ export default function DBTableBrowser({
     setRowError(null);
     try {
       if (rowEdit.index == null) {
-        await api.dbConnectRow(surface, connection, "insert", table, {}, values);
+        await api.dbConnectRow(surface, connection, "insert", table, {}, values, target);
         setNotice("Inserted 1 row.");
       } else {
-        await api.dbConnectRow(surface, connection, "update", table, keyOf(page, rowEdit.index), values);
+        await api.dbConnectRow(surface, connection, "update", table, keyOf(page, rowEdit.index), values, target);
         setNotice("Updated 1 row.");
       }
       setRowEdit(null);
       setVersion((v) => v + 1);
     } catch (err: unknown) {
-      setRowError(errorText(err));
+      setRowError(dbCallErrorText(err, target));
     } finally {
       setRowBusy(false);
     }
@@ -161,12 +178,12 @@ export default function DBTableBrowser({
     setRowBusy(true);
     setActionError(null);
     try {
-      await api.dbConnectRow(surface, connection, "delete", table, keyOf(page, deleteIndex), {});
+      await api.dbConnectRow(surface, connection, "delete", table, keyOf(page, deleteIndex), {}, target);
       setNotice("Deleted 1 row.");
       setDeleteIndex(null);
       setVersion((v) => v + 1);
     } catch (err: unknown) {
-      setActionError(errorText(err));
+      setActionError(dbCallErrorText(err, target));
       setDeleteIndex(null);
     } finally {
       setRowBusy(false);

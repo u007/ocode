@@ -663,6 +663,7 @@ export async function fetchJSON<T>(
  * be routed to a remote project's server like every other verb — without it, a
  * project-scoped delete would silently hit the LOCAL server for a remote
  * project, which is the exact class of bug the host threading exists to prevent.
+ * A non-2xx answer throws the same ApiError as fetchJSON, so the status survives.
  */
 async function fetchEmpty(
   path: string,
@@ -680,7 +681,7 @@ async function fetchEmpty(
   if (!res.ok) {
     reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    throw new ApiError(err.message || err.error || res.statusText, res.status, err);
   }
 }
 
@@ -1003,6 +1004,25 @@ export interface DBConnectBrowseOptions {
   limit: number;
   offset: number;
 }
+
+/** Where a dbconnect call runs. Omit it for a local project. For a remote project
+ *  `host` and `projectPath` route the call through that host's server. */
+export interface DBConnectTarget {
+  host?: string;
+  projectPath?: string;
+}
+
+/** A remote project's host and its path. The path travels with the host: the
+ *  host validates it against its own allowed roots. */
+export interface DBRemoteTarget {
+  host: string;
+  projectPath: string;
+}
+
+/** The project an unlock resolves environment templates for. No project: `[]`.
+ *  A local project: its path alone. A remote project: its path AND its host, as
+ *  one unit, so the path can never reach the wrong server. */
+export type DBUnlockScope = [] | [projectPath: string] | [projectPath: string, target: DBRemoteTarget];
 
 export interface DBTableResponse {
   schema: DBTableSchema;
@@ -4579,12 +4599,17 @@ export const api = {
     }),
 
   // ── Postgres connector ──
-  // Saved connections are global (ocodeconfig.json), not directory-bound, so
-  // these are NOT host-threaded. Unlock is per client surface, like the vault.
+  // Local projects hit this server. A remote project is routed to the host's
+  // server (/api/remote/<host>/...), whose saved connections, unlock grants and
+  // pools they are: the host resolves its own .env, so a DATABASE_URL of
+  // localhost is the host's database. Unlock is per client surface, like the vault.
   // Null lists are normalised here, once, at the fetch boundary.
-  dbConnectList: (surface: string) =>
+  dbConnectList: (surface: string, target?: DBConnectTarget) =>
     fetchJSON<{ connections: DBConnectConnectionWire[] | null }>(
       `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
+      undefined,
+      target?.host,
+      target?.projectPath,
     ).then((r) => ({
       connections: (r.connections ?? []).map((c) => ({
         name: c.name,
@@ -4598,43 +4623,83 @@ export const api = {
     })),
   /** `password` is required only for a literal (sealed) URL. An environment
    *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
-  dbConnectAdd: (name: string, url: string, password: string) =>
-    fetchJSON<{ name: string }>("/api/dbconnect/connections", {
-      method: "POST",
-      body: JSON.stringify({ name, url, password }),
-    }),
-  dbConnectRemove: (name: string) =>
-    fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    }),
-  /** `projectPath` names the project whose .env / .env.local files provide the
-   *  URL for an environment-backed connection. An empty password unlocks only
-   *  those connections; sealed connections still need the master password. A
-   *  template that fails is reported in `failed`; the others are still granted. */
-  dbConnectUnlock: (surface: string, password: string, projectPath?: string) =>
-    fetchJSON<{ unlocked: string[] | null; failed: DBConnectUnlockFailure[] | null }>(
+  dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget) =>
+    fetchJSON<{ name: string }>(
+      "/api/dbconnect/connections",
+      {
+        method: "POST",
+        body: JSON.stringify({ name, url, password }),
+      },
+      target?.host,
+      target?.projectPath,
+    ),
+  dbConnectRemove: (name: string, target?: DBConnectTarget) =>
+    fetchEmpty(
+      `/api/dbconnect/connections/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+      target?.host,
+      target?.projectPath,
+    ),
+  /** `scope` names the project whose .env / .env.local files provide the URL for
+   *  an environment-backed connection: `[projectPath]` for a local project, or
+   *  `[projectPath, { host, projectPath }]` for a remote one (see DBUnlockScope;
+   *  a remote path without its host, or a host without its path, is a type error
+   *  and a runtime throw). An empty password unlocks only those connections;
+   *  sealed connections still need the master password. A template that fails is
+   *  reported in `failed`; the others are still granted. */
+  dbConnectUnlock: (surface: string, password: string, ...scope: DBUnlockScope) => {
+    const [projectPath, target] = scope;
+    // Untyped callers (JS, casts) can still pass a half-specified remote scope.
+    if (target && !target.host)
+      throw new Error(`dbConnectUnlock: remote project path ${target.projectPath} was given without its host`);
+    if (target && !projectPath)
+      throw new Error(`dbConnectUnlock: remote host ${target.host} was given without its project path`);
+    return fetchJSON<{ unlocked: string[] | null; failed: DBConnectUnlockFailure[] | null }>(
       "/api/dbconnect/unlock",
       {
         method: "POST",
         body: JSON.stringify({ surface, password, project_path: projectPath }),
       },
+      target?.host,
+      target?.projectPath,
     ).then(
       (r): DBConnectUnlockResult => ({
         unlocked: r.unlocked ?? [],
         failed: r.failed ?? [],
       }),
+    );
+  },
+  dbConnectLock: (surface: string, target?: DBConnectTarget) =>
+    fetchEmpty(
+      "/api/dbconnect/lock",
+      {
+        method: "POST",
+        body: JSON.stringify({ surface }),
+      },
+      target?.host,
+      target?.projectPath,
     ),
-  dbConnectLock: (surface: string) =>
-    fetchEmpty("/api/dbconnect/lock", {
-      method: "POST",
-      body: JSON.stringify({ surface }),
-    }),
-  dbConnectTables: (surface: string, connection: string, limit: number, offset: number) =>
+  dbConnectTables: (
+    surface: string,
+    connection: string,
+    limit: number,
+    offset: number,
+    target?: DBConnectTarget,
+  ) =>
     fetchJSON<{ tables: string[] | null; has_more: boolean }>(
       `/api/dbconnect/tables?surface=${encodeURIComponent(surface)}&connection=${encodeURIComponent(connection)}&limit=${limit}&offset=${offset}`,
+      undefined,
+      target?.host,
+      target?.projectPath,
     ).then((r): DBConnectTablePage => ({ tables: r.tables ?? [], hasMore: r.has_more })),
   /** One page of a table. Sort and filter are validated by the server; the filter is a read-only predicate. */
-  dbConnectRows: (surface: string, connection: string, table: string, opts: DBConnectBrowseOptions) => {
+  dbConnectRows: (
+    surface: string,
+    connection: string,
+    table: string,
+    opts: DBConnectBrowseOptions,
+    target?: DBConnectTarget,
+  ) => {
     const q = new URLSearchParams({
       surface,
       connection,
@@ -4650,7 +4715,7 @@ export const api = {
       rows: unknown[][] | null;
       has_more: boolean;
       primary_key: string[] | null;
-    }>(`/api/dbconnect/rows?${q.toString()}`).then(
+    }>(`/api/dbconnect/rows?${q.toString()}`, undefined, target?.host, target?.projectPath).then(
       (r): DBConnectBrowsePage => ({
         columns: r.columns ?? [],
         rows: r.rows ?? [],
@@ -4667,22 +4732,39 @@ export const api = {
     table: string,
     key: Record<string, unknown>,
     values: Record<string, unknown>,
+    target?: DBConnectTarget,
   ) =>
-    fetchJSON<{ rows_affected: number }>("/api/dbconnect/row", {
-      method: "POST",
-      body: JSON.stringify({ surface, connection, op, table, key, values }),
-    }).then((r) => ({ rowsAffected: r.rows_affected })),
+    fetchJSON<{ rows_affected: number }>(
+      "/api/dbconnect/row",
+      {
+        method: "POST",
+        body: JSON.stringify({ surface, connection, op, table, key, values }),
+      },
+      target?.host,
+      target?.projectPath,
+    ).then((r) => ({ rowsAffected: r.rows_affected })),
   /** `confirmed` must be true only after the user has approved a write (a 409 asked for it). */
-  dbConnectQuery: (surface: string, connection: string, sql: string, confirmed: boolean) =>
+  dbConnectQuery: (
+    surface: string,
+    connection: string,
+    sql: string,
+    confirmed: boolean,
+    target?: DBConnectTarget,
+  ) =>
     fetchJSON<{
       columns: string[] | null;
       rows: unknown[][] | null;
       truncated: boolean;
       rows_affected?: number;
-    }>("/api/dbconnect/query", {
-      method: "POST",
-      body: JSON.stringify({ surface, connection, sql, confirm: confirmed }),
-    }).then(
+    }>(
+      "/api/dbconnect/query",
+      {
+        method: "POST",
+        body: JSON.stringify({ surface, connection, sql, confirm: confirmed }),
+      },
+      target?.host,
+      target?.projectPath,
+    ).then(
       (r): DBConnectQueryResult => ({
         columns: r.columns ?? [],
         rows: r.rows ?? [],

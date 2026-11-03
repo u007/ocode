@@ -178,7 +178,25 @@ an error on the tab, and prefix mode is not tried.
   `useBrowserMessages` accepts a message from the iframe only when its origin equals the
   origin of the page the panel last loaded (`pageOriginRef`: the tab origin, or the prefix
   base in prefix mode) and its source is the iframe's window. The page's own
-  `ocode:browse:nav` report is ignored. The address bar follows server nav events only.
+  `ocode:browse:nav` report (pushState/replaceState/popstate/hashchange, carrying the
+  original site URL) is a same-document hint: `browserActions.syncPageURL` applies it only
+  when its origin equals the tab's current URL origin, appends a history entry for `pushState` (`kind: "push"`), replaces the current one for
+  `replaceState` (`kind: "replace"`), and for `popstate`/`hashchange` (`kind: "traverse"`) selects the nearest existing entry for that URL, replacing the current one only when no entry matches. `capture.js` does not re-send a URL equal to the last one it posted, and the history list is capped at `HISTORY_CAP` (200) entries.
+  Document loads and foreign hand-offs still follow server nav events.
+  `BrowserPanel`'s load effect re-assigns `iframe.src` only when the `historyIndex`, surface,
+  iframe element or upstream origin changed since the last assignment; a same-origin `s.url`
+  change at the same index (page hint, link click, in-proxy redirect) is the iframe already
+  being there, and reloading it would be a double load.
+- A load awaits its grant (`openBrowseTabOrigin`, `mintBrowseGrant`) before it assigns
+  `iframe.src`. `loadInto` takes a generation from `loadGeneration` at its start (through
+  `supersedeLoad`) and checks it after each await, so a stale load stops without committing
+  its `src`, `pageOriginRef` or base. The load effect records the target before those awaits
+  (so a re-run does not double-load), and a failed load clears that record only if it is
+  still current. A page nav hint that is applied while a load is pending calls
+  `supersedeLoad` (`BrowserPanel`'s `onNav`), cancels a scheduled connect retry and overwrites
+  the record with the URL the page reported. The iframe still shows that page, so the
+  record stays true. The pending navigation is dropped in favour of the page's own
+  same-origin hint, and the address bar shows the hint's URL.
 
 ## Invariants
 
@@ -213,6 +231,11 @@ an error on the tab, and prefix mode is not tried.
 These are the open items recorded in the `TODO.md` blocks "Browse per-tab origin"
 and re-checked against the code. Items the code has since overtaken are left out.
 
+- **Old-document hint after commit.** Found by reading `BrowserPanel`, not reproduced. A
+  page hint that the outgoing document sends after `iframe.src` is assigned, but before the
+  new document replaces it, is still applied, because the origin gate passes for a same-origin
+  navigation. The store and the iframe can then disagree until the next load. A supersede
+  covers only the window before the commit.
 - **Foreign iframe does not render.** A foreign document in an iframe on a tab origin
   gets a 204 and a nav event, so the embed stays empty. This is deliberate: a foreign
   page on the tab origin would share an origin with the binding's page. The rule for

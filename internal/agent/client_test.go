@@ -1857,6 +1857,33 @@ func TestIsRetryableThinkingModeRequestError(t *testing.T) {
 	}
 }
 
+func TestIsRetryablePromptRenderingError(t *testing.T) {
+	body := `{"error":{"param":null,"type":"invalid_request_error","message":"Upstream request failed: [prompt_rendering_failed] The request could not be rendered into a prompt for this model."}}`
+	e := &providerStatusError{Provider: "opencode-go", Code: http.StatusBadRequest, Body: body}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"opencode-go prompt_rendering_failed 400 retries", e, true},
+		{"wrapped by attempt count retries", fmt.Errorf("llm request failed after 1 attempt(s): %w", e), true},
+		{"unrelated 400 does not retry", &providerStatusError{Provider: "p", Code: http.StatusBadRequest, Body: `{"error":{"message":"unsupported parameter"}}`}, false},
+		{"non-400 does not use this exemption", &providerStatusError{Provider: "p", Code: http.StatusUnauthorized, Body: body}, false},
+		{"untyped text does not retry", errors.New("prompt_rendering_failed"), false},
+		{"nil does not retry", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryablePromptRenderingError(tc.err); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if !isRetryableLLMError(e) {
+		t.Fatal("isRetryableLLMError must include the prompt-rendering exemption")
+	}
+}
+
 func TestProviderStatusErrorClassification(t *testing.T) {
 	cases := []struct {
 		code              int

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "./client";
+import { ApiError, api } from "./client";
 
 // Contract tests for the Postgres connector client. The component tests mock
 // `api`, so they can only prove the panel agrees with the client — not that the
@@ -111,5 +111,84 @@ describe("dbConnectAdd wire shape", () => {
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(body).toEqual({ name: "env", url: "${DATABASE_URL}", password: "" });
+  });
+});
+
+describe("dbConnectUnlock project scope", () => {
+  // The runtime guard is for untyped callers, so the test reaches it through a loose view.
+  const unlockUntyped = api.dbConnectUnlock as unknown as (
+    surface: string,
+    password: string,
+    ...scope: unknown[]
+  ) => Promise<unknown>;
+
+  it("sends a local project's path to this server with no host header", async () => {
+    const fetchMock = stubFetch({ unlocked: [], failed: [] });
+
+    await api.dbConnectUnlock("s1", "", "/proj");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/dbconnect/unlock");
+    expect(String(url)).not.toContain("/api/remote/");
+    expect(new Headers(init?.headers).has("X-Ocode-Project")).toBe(false);
+  });
+
+  it("routes a remote scope to its host, sending the path as header and body", async () => {
+    const fetchMock = stubFetch({ unlocked: [], failed: [] });
+
+    await api.dbConnectUnlock("s1", "", "/srv/app", { host: "me@box", projectPath: "/srv/app" });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/remote/me%40box/api/dbconnect/unlock");
+    expect(new Headers(init?.headers).get("X-Ocode-Project")).toBe("/srv/app");
+    expect(JSON.parse(String(init?.body)).project_path).toBe("/srv/app");
+  });
+
+  it("throws, without calling the server, for a remote path given without its host", () => {
+    const fetchMock = stubFetch({ unlocked: [], failed: [] });
+
+    expect(() => unlockUntyped("s1", "", "/srv/app", { projectPath: "/srv/app" })).toThrow(
+      "without its host",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws, without calling the server, for a remote host given without its path", () => {
+    const fetchMock = stubFetch({ unlocked: [], failed: [] });
+
+    expect(() => unlockUntyped("s1", "", undefined, { host: "me@box", projectPath: "/srv/app" })).toThrow(
+      "without its project path",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects both half-specified remote scopes at compile time", () => {
+    // Compile-time contract only: the closure is never invoked.
+    const neverCalled = () => {
+      // @ts-expect-error a remote host needs its project path
+      api.dbConnectUnlock("s1", "", undefined, { host: "me@box", projectPath: "/srv/app" });
+      // @ts-expect-error a remote project path needs its host
+      api.dbConnectUnlock("s1", "", "/srv/app", { projectPath: "/srv/app" });
+    };
+    expect(neverCalled).toBeTypeOf("function");
+  });
+});
+
+describe("lock and remove keep the HTTP status", () => {
+  it("dbConnectRemove throws an ApiError carrying the status and the server's message", async () => {
+    stubFetch({ error: "no such connection" }, 404);
+
+    const err: unknown = await api.dbConnectRemove("prod").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 404, message: "no such connection" });
+  });
+
+  it("dbConnectLock on a remote host keeps the 405 the host answered", async () => {
+    stubFetch({ error: "method not allowed" }, 405);
+
+    await expect(
+      api.dbConnectLock("s1", { host: "me@box", projectPath: "/srv/app" }),
+    ).rejects.toMatchObject({ status: 405, message: "method not allowed" });
   });
 });

@@ -280,7 +280,7 @@ function NavSection({
         return (
           <div key={g.id} className="mb-2">
             {newCategory && (
-              <div className="px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+              <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground mb-1">
                 {g.category}
               </div>
             )}

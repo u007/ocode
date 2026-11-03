@@ -27,6 +27,7 @@ const actions = {
   clearConsole: vi.fn(), clearNetwork: vi.fn(),
   setCollapsed: vi.fn(), close: vi.fn(),
   setError: vi.fn(), setUserMode: vi.fn(),
+  syncPageURL: vi.fn((_key: string, _url: string, _kind: string): { url: string; idx: number } | null => null),
 };
 vi.mock("../../lib/browserStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserStore")>();
@@ -87,6 +88,8 @@ describe("BrowserPanel", () => {
     (state as unknown as Record<string, unknown>).mode = "chrome";
     (state as unknown as Record<string, unknown>).userMode = null;
     (state as unknown as Record<string, unknown>).collapsed = false;
+    state.history = ["https://example.com/"];
+    state.historyIndex = 0;
   });
 
   it("chrome mode mounts ChromeViewport and no iframe", async () => {
@@ -470,5 +473,100 @@ describe("BrowserPanel", () => {
     await waitFor(() => expect(iframe.getAttribute("src")).toContain("__grant=GRANT123"));
     // One read on mount, one more inside the load itself.
     expect(mockGetBrowseBase.mock.calls.filter(([h]) => h === "user@box").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("retries a failed load when the effect runs again for the same index", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    state.url = "http://localhost:3000/a";
+    mockOpenTabOrigin
+      .mockImplementationOnce(async () => { throw new Error("tab origin down"); })
+      .mockImplementationOnce(async () => ({ kind: "tab", origin: "http://localhost:41001", url: "http://localhost:41001/b?__grant=G" }));
+    const tree = () => <BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />;
+    const { rerender } = render(tree());
+    await waitFor(() => expect(actions.setError).toHaveBeenCalledWith("tab:abc", "tab origin down"));
+    // Same index and origin, new path: the effect runs again and must retry, not skip.
+    state.url = "http://localhost:3000/b";
+    rerender(tree());
+    await waitFor(() => expect(mockOpenTabOrigin).toHaveBeenCalledTimes(2));
+    expect(mockOpenTabOrigin).toHaveBeenLastCalledWith("tab:abc", "http://localhost:3000/b", "");
+  });
+
+  it("re-loads the page at the same index when the browse base changes", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    state.url = "http://localhost:3000/app";
+    mockGetBrowseBase.mockImplementation(async (h: string) => (h === "user@box" ? "http://localhost:40263" : "http://127.0.0.1:54321"));
+    mockOpenTabOrigin.mockImplementation(async () => ({ kind: "tab", origin: "http://localhost:41001", url: "http://localhost:41001/app?__grant=G" }));
+    const tree = (host: string) => <BrowserPanel stateKey={"tab:abc" as any} mode="full" host={host} />;
+    const { rerender, container } = render(tree(""));
+    await waitFor(() => expect(container.querySelector("iframe")?.getAttribute("src")).toContain("__grant=G"));
+    expect(mockOpenTabOrigin).toHaveBeenCalledTimes(1);
+    // Same tab, same index, same page origin: only the host (and so the base) changed.
+    rerender(tree("user@box"));
+    await waitFor(() => expect(mockOpenTabOrigin).toHaveBeenCalledTimes(2));
+    expect(mockOpenTabOrigin).toHaveBeenLastCalledWith("tab:abc", "http://localhost:3000/app", "user@box");
+  });
+
+  it("a page nav hint is applied and the iframe it came from is not reloaded", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    state.url = "http://localhost:3000/app";
+    mockOpenTabOrigin.mockImplementation(async () => ({ kind: "tab", origin: "http://localhost:41001", url: "http://localhost:41001/app?__grant=G" }));
+    actions.syncPageURL.mockReturnValueOnce({ url: "http://localhost:3000/app/next", idx: 1 });
+    const tree = () => <BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />;
+    const { container, rerender } = render(tree());
+    await waitFor(() => expect(container.querySelector("iframe")?.getAttribute("src")).toContain("__grant=G"));
+    const iframe = container.querySelector("iframe")!;
+    const post = (data: Record<string, unknown>) => act(() => {
+      window.dispatchEvent(new MessageEvent("message", { origin: "http://localhost:41001", source: iframe.contentWindow, data: { stateKey: "tab:abc", ...data } }));
+    });
+    post({ type: "ocode:browse:nav", url: "http://localhost:3000/app/next", kind: "push", ts: 1 });
+    expect(actions.syncPageURL).toHaveBeenCalledWith("tab:abc", "http://localhost:3000/app/next", "push");
+    // A popstate hint reaches the store as a traverse; an unknown kind is a replace.
+    post({ type: "ocode:browse:nav", url: "http://localhost:3000/app", kind: "traverse", ts: 2 });
+    expect(actions.syncPageURL).toHaveBeenLastCalledWith("tab:abc", "http://localhost:3000/app", "traverse");
+    post({ type: "ocode:browse:nav", url: "http://localhost:3000/app", kind: "bogus", ts: 3 });
+    expect(actions.syncPageURL).toHaveBeenLastCalledWith("tab:abc", "http://localhost:3000/app", "replace");
+    // The store now reflects the page's own URL at the new index: no reload.
+    state.url = "http://localhost:3000/app/next";
+    state.history = ["http://localhost:3000/app", "http://localhost:3000/app/next"];
+    state.historyIndex = 1;
+    rerender(tree());
+    expect(mockOpenTabOrigin).toHaveBeenCalledTimes(1);
+  });
+
+  it("a nav hint that lands while a load awaits its grant supersedes that load", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    state.url = "http://localhost:3000/a";
+    mockOpenTabOrigin.mockImplementationOnce(async () => ({ kind: "tab", origin: "http://localhost:41001", url: "http://localhost:41001/a?__grant=GA" }));
+    // The load for /b stays pending until the test releases it.
+    let releaseB: (tab: unknown) => void = () => {};
+    mockOpenTabOrigin.mockImplementationOnce(() => new Promise((resolve) => { releaseB = resolve; }));
+    actions.syncPageURL.mockReturnValueOnce({ url: "http://localhost:3000/c", idx: 2 });
+    const tree = () => <BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />;
+    const { container, rerender } = render(tree());
+    await waitFor(() => expect(container.querySelector("iframe")?.getAttribute("src")).toContain("__grant=GA"));
+    const iframe = container.querySelector("iframe")!;
+    // The user navigates to /b. The iframe still shows /a.
+    state.url = "http://localhost:3000/b";
+    state.history = ["http://localhost:3000/a", "http://localhost:3000/b"];
+    state.historyIndex = 1;
+    rerender(tree());
+    await waitFor(() => expect(mockOpenTabOrigin).toHaveBeenCalledTimes(2));
+    // The page the iframe still shows reports a same-origin pushState to /c.
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { origin: "http://localhost:41001", source: iframe.contentWindow, data: { stateKey: "tab:abc", type: "ocode:browse:nav", url: "http://localhost:3000/c", kind: "push", ts: 1 } }));
+    });
+    expect(actions.syncPageURL).toHaveBeenCalledWith("tab:abc", "http://localhost:3000/c", "push");
+    // The store now holds /c at index 2, and the record matches it: no reissue.
+    state.url = "http://localhost:3000/c";
+    state.history = ["http://localhost:3000/a", "http://localhost:3000/b", "http://localhost:3000/c"];
+    state.historyIndex = 2;
+    rerender(tree());
+    expect(mockOpenTabOrigin).toHaveBeenCalledTimes(2);
+    // The superseded /b load now resolves. It must not assign its grant to the iframe.
+    await act(async () => {
+      releaseB({ kind: "tab", origin: "http://localhost:41001", url: "http://localhost:41001/b?__grant=GB" });
+    });
+    expect(iframe.getAttribute("src")).toContain("__grant=GA");
+    expect(iframe.getAttribute("src")).not.toContain("GB");
   });
 });

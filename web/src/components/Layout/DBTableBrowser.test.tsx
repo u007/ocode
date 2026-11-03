@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import DBTableBrowser from "./DBTableBrowser";
+import DBTableBrowser, { dbCallErrorText } from "./DBTableBrowser";
 import { ApiError, api } from "../../api/client";
 
 vi.mock("../../api/client", () => {
@@ -47,8 +47,11 @@ const KEYLESS = {
   primaryKey: [],
 };
 
+// A remote project's calls are routed to its host, so the target is forwarded on every call.
+const TARGET = { host: "me@host", projectPath: "~/proj" };
+
 function renderBrowser(table = "orders") {
-  return render(<DBTableBrowser surface={SURFACE} connection="prod" table={table} />);
+  return render(<DBTableBrowser surface={SURFACE} connection="prod" table={table} target={TARGET} />);
 }
 
 beforeEach(() => {
@@ -71,7 +74,7 @@ describe("DBTableBrowser", () => {
       filter: "",
       limit: 100,
       offset: 0,
-    });
+    }, TARGET);
   });
 
   it("sorts by a header click, then flips direction on the same column", async () => {
@@ -79,12 +82,12 @@ describe("DBTableBrowser", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Sort by amount" }));
     await waitFor(() =>
       expect(mockRows).toHaveBeenLastCalledWith(SURFACE, "prod", "orders",
-        expect.objectContaining({ sort: "amount", dir: "asc", offset: 0 })),
+        expect.objectContaining({ sort: "amount", dir: "asc", offset: 0 }), TARGET),
     );
     fireEvent.click(screen.getByRole("button", { name: "Sort by amount" }));
     await waitFor(() =>
       expect(mockRows).toHaveBeenLastCalledWith(SURFACE, "prod", "orders",
-        expect.objectContaining({ sort: "amount", dir: "desc" })),
+        expect.objectContaining({ sort: "amount", dir: "desc" }), TARGET),
     );
   });
 
@@ -95,7 +98,7 @@ describe("DBTableBrowser", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() =>
       expect(mockRows).toHaveBeenLastCalledWith(SURFACE, "prod", "orders",
-        expect.objectContaining({ filter: "amount > 10", offset: 0 })),
+        expect.objectContaining({ filter: "amount > 10", offset: 0 }), TARGET),
     );
   });
 
@@ -105,7 +108,7 @@ describe("DBTableBrowser", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Next page" }));
     await waitFor(() =>
       expect(mockRows).toHaveBeenLastCalledWith(SURFACE, "prod", "orders",
-        expect.objectContaining({ offset: 100 })),
+        expect.objectContaining({ offset: 100 }), TARGET),
     );
   });
 
@@ -119,7 +122,7 @@ describe("DBTableBrowser", () => {
     await waitFor(() =>
       expect(mockRow).toHaveBeenCalledWith(SURFACE, "prod", "update", "orders",
         { id: "9007199254740993" },
-        { id: "9007199254740993", amount: "99.99" }),
+        { id: "9007199254740993", amount: "99.99" }, TARGET),
     );
   });
 
@@ -131,7 +134,7 @@ describe("DBTableBrowser", () => {
 
     await waitFor(() =>
       expect(mockRow).toHaveBeenCalledWith(SURFACE, "prod", "delete", "orders",
-        { id: "9007199254740994" }, {}),
+        { id: "9007199254740994" }, {}, TARGET),
     );
   });
 
@@ -143,7 +146,7 @@ describe("DBTableBrowser", () => {
     fireEvent.click(screen.getByTestId("sqlite-row-save"));
 
     await waitFor(() =>
-      expect(mockRow).toHaveBeenCalledWith(SURFACE, "prod", "insert", "orders", {}, expect.objectContaining({ amount: "1.00" })),
+      expect(mockRow).toHaveBeenCalledWith(SURFACE, "prod", "insert", "orders", {}, expect.objectContaining({ amount: "1.00" }), TARGET),
     );
   });
 
@@ -170,7 +173,7 @@ describe("DBTableBrowser", () => {
     expect(await screen.findByTestId("dbconnect-rows")).toBeTruthy();
     expect(screen.queryByText("the filter must be a read-only expression")).toBeNull();
     expect(mockRows).toHaveBeenLastCalledWith(SURFACE, "prod", "orders",
-      expect.objectContaining({ filter: "amount > 10", offset: 0 }));
+      expect.objectContaining({ filter: "amount > 10", offset: 0 }), TARGET);
   });
 
   it("makes a table without a primary key read-only", async () => {
@@ -179,5 +182,19 @@ describe("DBTableBrowser", () => {
     expect(await screen.findByText(/no primary key, so its rows are read-only/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Edit row 1" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete row 1" })).toBeNull();
+  });
+});
+
+describe("dbCallErrorText", () => {
+  it("names the host and the status for a remote 404 or 405", () => {
+    const text404 = dbCallErrorText(new ApiError("not found", 404), TARGET);
+    expect(text404).toBe("Remote host me@host answered HTTP 404 for the database connector: not found");
+    const text405 = dbCallErrorText(new ApiError("method not allowed", 405), TARGET);
+    expect(text405).toContain("answered HTTP 405");
+  });
+
+  it("shows a remote 409 or a local 404 verbatim", () => {
+    expect(dbCallErrorText(new ApiError("connection is busy", 409), TARGET)).toBe("connection is busy");
+    expect(dbCallErrorText(new ApiError("not found", 404), undefined)).toBe("not found");
   });
 });

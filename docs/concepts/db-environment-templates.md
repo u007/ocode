@@ -140,9 +140,10 @@ so the password cannot leak through the message).
 `h.dbUnlockProjectRoot(req.ProjectPath, req.SessionID)`); the allowlist check
 itself is `handler_dbconnect.go:184` (`h.fileContentRootFor(projectPath)` inside
 dbUnlockProjectRoot), validated against the server's allowed project roots exactly
-like a file read. An invalid path — including a remote
-project's path, which belongs to another machine — is refused with 400 rather than
-reading a local `.env` by accident. `session_id` remains as a compatibility
+like a file read. An invalid path is refused with 400 rather than reading a local
+`.env` by accident. A remote project's path never reaches this check on this machine:
+its calls are routed to the host's server (`/api/remote/<host>/api/dbconnect/*`), which
+validates the path against its own roots. `session_id` remains as a compatibility
 fallback for callers that predate the project-scoped panel
 (`handler_dbconnect.go:191` `h.sessionProjectRoot(req.SessionID)`); it trusts the
 session registry's recorded root (server-side state, never client input) as the
@@ -169,7 +170,7 @@ the response's `failed` array and the others are still granted
 blocks unlocking a sealed connection with the correct password. An unlock that
 grants nothing is a 400 (`handler_dbconnect.go:596`). The grant holds the plaintext
 URLs in memory only (`handler.go:229` "dbGrants holds the plaintext URLs"), keyed by
-surface id (`db-panel:<host>:<projectPath>:<per-mount id>` in `DBPanel.tsx:75`). The
+surface id (`db-panel:<host>:<projectPath>:<per-mount id>` in `DBPanel.tsx:76`). The
 password-less flow MERGES into the surface grant (`handler_dbconnect.go:607`); a
 password unlock replaces it (`handler_dbconnect.go:609`), so loading an environment connection never
 revokes a sealed connection the user already unlocked.
@@ -269,10 +270,11 @@ to a different URL.
   whose userinfo password or `password`/`sslpassword` query value is not composed
   entirely of references.
 - `project_path` is validated against the server's allowed project roots, so a
-  request cannot make the server read an arbitrary directory's `.env`; a remote
-  project's path is refused because its `.env` lives on the other machine. A
-  template with NO project is refused outright — there is no process-environment
-  fallback.
+  request cannot make the server read an arbitrary directory's `.env`. A remote
+  project's calls go to its host (`/api/remote/<host>/api/dbconnect/*`), so the
+  host's server validates the path against its own roots and reads the host's
+  `.env`. A template with NO project is refused outright — there is no
+  process-environment fallback.
 - `ParseURL` (`internal/dbconnect/dbconnect.go:189`) refuses a raw `#`, parses the
   query the way pgx does (split on `&`, percent-decode the key, bad escape fails
   closed), and refuses `service`/`servicefile`/`passfile`/`sslkey`/`sslcert`/
@@ -373,9 +375,9 @@ compile (`mutcheck_dbenv.py:137-151`).
 The DB connector is a **project-level top tab** (beside Assets in `TopTabs.tsx`),
 not a session sub-tab: its environment-backed connections resolve against the
 active project, so it must not be tied to one chat session. `DBPanel`
-(`DBPanel.tsx:64` `newDbPanelSurfaceID`) uses
+(`DBPanel.tsx:65` `newDbPanelSurfaceID`) uses
 `surface = db-panel:<host>:<projectPath>:<document tag>-<counter>`
-(`DBPanel.tsx:75`). The id is now unique per browser document AND per mount: the
+(`DBPanel.tsx:76`). The id is now unique per browser document AND per mount: the
 document tag is a per-document random (8 hex chars) and the counter is per mount.
 A plain module counter was NOT enough — module scope is per document, so every
 browser window restarted at 1 and two windows on one project collided on `p1`,
@@ -384,26 +386,30 @@ was a real bug found in review. `App.tsx` also keys the panel by `host:path` and
 mounts it only for projects whose DB tab was actually visited.
 
 An environment-backed connection (`fromEnv`) gets a **"Load from .env"** action
-with no password field (`DBPanel.tsx:522`): the unlock call sends the empty
-password plus `project_path` (`DBPanel.tsx:270`), and the server grants only the
+with no password field (`DBPanel.tsx:529`): the unlock call sends the empty
+password plus `project_path` (`DBPanel.tsx:275`), and the server grants only the
 template connections. The button carries `aria-busy` while loading. A remote
-project (non-empty host) does NOT get the action; it shows "Not available for a
-remote project" (`DBPanel.tsx:503`), because this endpoint is not host-threaded and
-its `.env` lives on the other machine. A sealed connection keeps the
-master-password form. The add form mirrors the rule: `isEnvTemplate(url)`
-(`DBPanel.tsx:47`, the server's exact `${[A-Za-z_][A-Za-z0-9_]*}` rule) disables the
-password field and lets Save proceed without it (`DBPanel.tsx:378`). The connection
-picker shows the `from_env` flag (`DBPanel.tsx:400`) and a tooltip explaining it.
-A partial unlock lists the failed connections in a warning (`DBPanel.tsx:420`). A
-failed connection-list load shows the error and a Retry instead of an endless
-spinner (`DBPanel.tsx:351` error branch / `DBPanel.tsx:359` Retry button).
+project gets the same action. Its calls go through `/api/remote/<host>/api/dbconnect/*`
+with `X-Ocode-Project` set (`DBConnectTarget` in `web/src/api/client.ts`), so the host's
+own server resolves the template against the host's `.env`, and owns the saved
+connections, unlock grants and pools. A `${DATABASE_URL}` of `localhost` therefore
+means the host's database. The host must run a version with the dbconnect routes. A
+sealed connection keeps the master-password form. The add form mirrors the rule:
+`isEnvTemplate(url)` (`DBPanel.tsx:48`, the server's exact
+`${[A-Za-z_][A-Za-z0-9_]*}` rule) disables the password field and lets Save proceed
+without it (`DBPanel.tsx:393`). The connection picker shows the `from_env` flag
+(`DBPanel.tsx:416`) and a tooltip explaining it. A partial unlock lists the failed
+connections in a warning (`DBPanel.tsx:431`). A failed connection-list load shows the
+error and a Retry instead of an endless spinner (`DBPanel.tsx:364` error branch /
+Retry at `DBPanel.tsx:376`).
 
 The panel is no longer mounted when there is no active project: it renders "Select
-a project to use the database connector." instead. The add form now says an env URL
-is not usable for a remote project.
+a project to use the database connector." instead. The add form saves an env URL for
+a remote project too; it is resolved on the host when the connection is loaded.
 
-Tests: `DBPanel.test.tsx` (27 cases, including the password-less environment flow,
-partial failures, retry and the remote guard — and it now also asserts that the
+Tests: `DBPanel.test.tsx` (28 cases, including the password-less environment flow,
+including on a remote project, where the unlock and table reads must go to the host;
+partial failures; retry; and it also asserts that the
 GRANTED connection actually loads its tables), `web/src/api/client.dbConnect.test.ts`
 (wire mapping: `from_env` -> `fromEnv`, `project_path`, null normalisation) and
 `web/src/App.dbTab.test.tsx` (no mount before the tab is opened, mount path,

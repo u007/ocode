@@ -289,13 +289,22 @@
   // The authoritative address bar is driven by server nav events (Part 07).
   // This is only a low-latency hint the SPA MAY use; the SPA must not treat it
   // as authoritative because page JS controls it and could spoof the URL.
-  function navHint() {
-    post({ type: "ocode:browse:nav", url: location.href, ts: Date.now() });
+  // kind "push" = history.pushState (adds a Back entry); "traverse" = popstate
+  // or hashchange (the page moved to an entry it already has); "replace" =
+  // replaceState. A URL equal to the last one posted is not re-sent: routers
+  // call pushState/replaceState for the same route again and again.
+  var lastNavURL = "";
+  function navHint(kind) {
+    var u = originalURL();
+    if (!u || u === lastNavURL) return;
+    lastNavURL = u;
+    post({ type: "ocode:browse:nav", url: u, kind: kind, ts: Date.now() });
   }
   var ps = history.pushState, rs = history.replaceState;
-  history.pushState = function () { var r = ps.apply(this, arguments); navHint(); return r; };
-  history.replaceState = function () { var r = rs.apply(this, arguments); navHint(); return r; };
-  window.addEventListener("popstate", navHint);
+  history.pushState = function () { var r = ps.apply(this, arguments); navHint("push"); return r; };
+  history.replaceState = function () { var r = rs.apply(this, arguments); navHint("replace"); return r; };
+  window.addEventListener("popstate", function () { navHint("traverse"); });
+  window.addEventListener("hashchange", function () { navHint("traverse"); });
 
   // --- page title (DISPLAY ONLY) ---
   // The tab strip shows the site's own <title>, including JS-driven changes.
