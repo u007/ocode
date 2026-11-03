@@ -333,6 +333,42 @@ The TUI uses the mapped values verbatim (no repair); ANSI-based fields are
 chosen because TUI messages are rendered in those slots by convention, matching
 how the builtin `tokyonight` palette is authored.
 
+### 8.6 Editor theme precedence (three controls — resolved here)
+
+Three controls already decide the editor palette, and adding `appearance.color_theme`
+would make four behaviours unless the precedence is written down:
+
+| Control | Where | Current effect |
+| --- | --- | --- |
+| `monaco.theme` | `internal/monaco/monaco.go:25` (`Theme`), `GET\|PUT /api/monaco/settings`, read at `FileEditor.tsx:340` | persisted Monaco theme id; default `ocode-dark` |
+| `editorAppearance` | `web/src/lib/editorAppearance.ts` | explicit light/dark quick toggle; `FileEditor.tsx:190` coerces a light saved theme back to `ocode-dark` when the toggle says dark |
+| `appearance.color_theme` | new | proposed single source for chrome/terminal/TUI |
+
+That coercion is the defect this design must remove: pick Catppuccin Latte while the
+toggle says dark and the editor silently shows `ocode-dark`, with nothing in the UI
+saying why.
+
+**Editor palette resolution order (first match wins):**
+
+1. `editorAppearance` is **explicitly** `light` or `dark` → `ocode-light` / `ocode-dark`.
+   The Settings page then states *"Editor override is on — the theme's editor colours
+   are not used"* and offers **Use theme colours** to clear the override.
+2. Active `appearance.color_theme` is a VS Code theme → its converted Monaco theme.
+3. Active theme is builtin/opencode → `monaco.theme` when it names a defined Monaco
+   theme, else the polarity default (`ocode-dark` / `ocode-light`) — today's behaviour.
+4. Fallback → `ocode-dark`.
+
+`editorAppearance` gains a third stored value `"auto"`. An absent or unparsable stored
+value reads as `"auto"`, so existing users stop being coerced and instead get the active
+theme's own editor palette. An explicitly stored `light`/`dark` keeps today's meaning.
+
+Chrome, terminal and TUI have **no override**: they always follow
+`appearance.color_theme`.
+
+`monaco.theme` is not removed and not migrated. It is simply outranked while a VS Code
+theme is active, so an install that never selects one sees no change at all. Retiring
+the control is deferred (§19).
+
 ## 9. Terminal appearance source `vscode`
 
 - `internal/config`: `TerminalAppearanceSourceVSCode = "vscode"`;
@@ -489,7 +525,10 @@ both must resolve `vscode:` ids:
   the current `computeThemeVars(colors)` path runs unchanged.
 - `lib/monacoTheme.ts` — `applyMonacoTheme(payload, appearance)`, called by
   `FileEditor` before `setTheme`. Builtin themes keep `ocode-dark`/`ocode-light`;
-  VS Code themes define `ocode-vscode` once per id and select it.
+  VS Code themes define `ocode-vscode` once per id and select it. The four-case
+  precedence in §8.6 lives in one exported resolver
+  (`resolveEditorTheme({appearance, colorTheme, monacoTheme})`) so `FileEditor`
+  stops coercing on its own (`FileEditor.tsx:190`).
 - `useIconTheme()` — loads the icon model for the configured id, memoises
   lookup maps, and returns `resolveIcon(name, isDir, expanded, depth)`.
 - Settings: the existing group id `theme` (internal navigation key, not a URL)
@@ -533,7 +572,10 @@ Web:
 - `iconTheme.test.ts` — resolution order, dotted suffixes, folder expansion,
   root folders, fallbacks.
 - `FileIcon.test.tsx` / `FileTree` / `FilePicker` render tests.
-- `monacoTheme.test.ts` — rules built from scopes, later-wins, base polarity.
+- `monacoTheme.test.ts` — rules built from scopes, later-wins, base polarity, and
+  the full §8.6 precedence table (explicit override, VS Code theme, builtin +
+  `monaco.theme`, fallback), including the `editorAppearance` `"auto"` migration
+  (absent/unparsable stored value reads as auto, explicit `light`/`dark` unchanged).
 - `AppearanceForm.test.tsx` — list, install/remove via mocked API, error states.
 - `useTheme.test.ts` — extended for the rich payload, existing cases kept.
 
@@ -595,6 +637,7 @@ packages, `cd web && bun check .`, `vite build`, and the touched web suites.
 | Large icon JSON (450 KB) + many assets | Referenced-definition pruning, on-demand immutable asset caching |
 | Registry race / hot path cost | `atomic.Pointer` copy-on-write snapshot |
 | Theme looks wrong after repair | Repair limited to synthesized foregrounds; author colours pass through |
+| Three editor theme knobs silently disagree | §8.6 fixes one precedence order, adds `editorAppearance: "auto"`, and shows an explicit "override is on" notice with a reset action |
 | Confusing UX with 3 terminal sources | Explicit option + hint naming the active colour theme |
 | `include` escaping the extension dir | Depth cap + containment after `EvalSymlinks` |
 
@@ -604,6 +647,8 @@ packages, `cd web && bun check .`, `vite build`, and the touched web suites.
 - Open VSX, not the VS Code Marketplace.
 - Separate entry per light/dark variant, no polarity toggle.
 - Author palette verbatim; repair only synthesized foreground pairs.
+- Editor palette precedence: explicit `editorAppearance` override > active VS Code
+  theme > `monaco.theme` > polarity default (§8.6). No silent coercion.
 - Local-only endpoints; never proxied to remote hosts.
 - Spec stored outside the OKF bundle; concept page added by the context agent
   after shipping.
@@ -620,3 +665,5 @@ Each item is a deliberate limitation of this design, not an oversight:
 5. VS Code Marketplace as a second source (currently Open VSX only).
 6. `.tmTheme` (plist) `tokenColors` support; today only JSON is accepted.
 7. A theme-editing UI for adjusting a converted theme in place.
+8. Retiring the `monaco.theme` control (`PUT /api/monaco/settings`). It stays,
+   outranked by a VS Code theme, so existing installs are unaffected.

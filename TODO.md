@@ -6877,3 +6877,5 @@ Design spec: `.opencode/plans/2026-11-03-vscode-themes-and-icons-design.md`. The
 - **VS Code Marketplace as a second source.** Only Open VSX is used (verified `/-/search` and `/api/<ns>/<name>/<ver>/file/<file>.vsix`); `marketplace.visualstudio.com` is undocumented and bot-hostile.
 - **`.tmTheme` (plist) `tokenColors`.** Only a JSON file with the `[{scope,settings}]` shape is accepted; a plist path yields "no syntax rules" plus a warning.
 - **No theme-editing UI.** A converted theme cannot be tweaked in place; the user must pick another theme.
+- **`monaco.theme` is outranked, not retired.** `PUT /api/monaco/settings` still stores an editor theme id, but a VS Code colour theme (or an explicit `editorAppearance` light/dark override) wins per spec §8.6. Removing the control needs a migration for installs that set it.
+- **`editorAppearance` gains `"auto"`.** Absent/unparsable stored values read as auto so the editor follows the active theme's own palette. Existing explicit `light`/`dark` keep their meaning.
