@@ -239,6 +239,23 @@ when it fails AA against both `--background` and `--muted` (the existing
 `ensureContrast` rule). No global palette repair: a user who picked a low-contrast
 theme gets that theme, minus illegible synthesized pairs.
 
+**Foreground pairs — authored first.** When the theme names the partner key, use
+it instead of synthesizing: `button.foreground` → `--primary-foreground`,
+`input.foreground` → `--secondary-foreground`,
+`list.activeSelectionForeground` → `--accent-foreground`. Only an absent partner
+falls back to `pickReadableFg`.
+
+**Alpha is composited, never emitted.** VS Code themes routinely carry 8-digit
+`#RRGGBBAA` values (`input.border: "#00000000"`, `list.hoverBackground:
+"#31324480"`). The CSS variables are HSL triplets consumed as
+`hsl(var(--x) / <alpha-value>)`, which cannot carry alpha, and the web converter
+(`useTheme.ts` `hexToHslTriplet`) accepts six digits only — an 8-digit value is
+silently skipped and the stylesheet default survives. Every value written to `ui`
+is therefore **composited over `--background`** (the theme's
+`editor.background`) and emitted as `#RRGGBB`. Truncating is wrong: it turns
+Catppuccin's deliberately invisible input border into a black one. A contract test
+asserts every `ui` value matches `^#[0-9a-f]{6}$`.
+
 ### 8.3 Monaco (`monaco`)
 
 `colors` is a passthrough of the keys Monaco understands, copied verbatim when
@@ -474,8 +491,13 @@ using `folderNamesExpanded` when expanded and `folderNames` otherwise, then
 
 All routes are **local-only**. They must not be reachable through
 `/api/remote/{host}/api/...` proxying: appearance is a property of the local
-SPA, and a remote host's themes/assets are irrelevant. A test asserts no proxy
-route and no `host` parameter is accepted.
+SPA, and a remote host's themes/assets are irrelevant.
+
+The generic remote proxy registers a catch-all (`/api/remote/{host}/api/{rest...}`),
+so "no route" is not enough: the appearance prefix is **denied** in the proxy
+itself, before any connect, for saved and unsaved hosts alike. A test with a
+saved host (`newTestHandlerWithRemote` + `installFakeSSH`) asserts 403 and that
+no connect starts.
 
 Wrapper choice, made deliberately as the repo rules require: every route is
 registered in `Server.registerRoutes()` as `s.authMiddleware(s.<handler>)`.
@@ -484,8 +506,8 @@ streaming.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/appearance/themes` | unified list `{id,label,source,kind,extension,has_icon_theme}` |
-| GET | `/api/appearance/theme/{id}` | `{id,label,kind,colors,ui,monaco,terminal,warnings[]}` |
+| GET | `/api/appearance/themes` | unified list `{id,label,source,kind,extension,has_icon_theme}` — builtin and opencode entries (`source: "builtin"`/`"opencode"`) first, then the VS Code block sorted by label |
+| GET | `/api/appearance/theme/{id...}` | `{id,label,kind,colors,ui,monaco,terminal,warnings[]}` — the wildcard is required because a theme id contains `/` |
 | GET | `/api/appearance/icon-themes` | icon theme list |
 | GET | `/api/appearance/icon-theme/{id}` | resolved icon model |
 | GET | `/api/appearance/icon-theme/{id}/asset?p=` | asset bytes |
