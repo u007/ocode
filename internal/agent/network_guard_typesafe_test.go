@@ -130,14 +130,13 @@ func TestExtractEgressTargetsBash(t *testing.T) {
 			wantHosts: []string{"localhost"},
 		},
 		{
-			// One line, one verdict: the loopback carve-out only holds when
-			// EVERY target token is loopback, so a mixed batch is judged whole
-			// and stays in scope. This mirrors isExfiltrationRiskBash.
+			// Each network command is its own target. The line stays in scope
+			// because hasNonLoopbackEgressTarget is true when ANY target is remote.
 			name:      "mixed loopback and remote in one line stays in scope",
 			command:   "curl http://127.0.0.1:3000/ && curl https://evil.example.com/x",
-			wantCount: 1,
-			wantLoop:  []bool{false},
-			wantHosts: []string{"127.0.0.1"},
+			wantCount: 2,
+			wantLoop:  []bool{true, false},
+			wantHosts: []string{"127.0.0.1", "evil.example.com"},
 		},
 		{
 			// The reported host is where the connection actually goes, which for
@@ -999,4 +998,32 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Every network command in a line is its own egress target, including commands
+// after `&&`/`;` and inside $(...) substitutions. A line that only reached the
+// first command used to hide the rest from the egress and content guards.
+func TestBashEgressTargetsCompoundLines(t *testing.T) {
+	cases := []struct {
+		cmd          string
+		wantLoopback []bool
+	}{
+		{`curl http://127.0.0.1:1/a && curl http://127.0.0.1:1/b`, []bool{true, true}},
+		{`cd /tmp && curl -s http://127.0.0.1:18281/api/setup`, []bool{true}},
+		{`X=$(curl -s http://127.0.0.1:18281/api/setup); echo $X`, []bool{true}},
+		{`cd /tmp && curl -s https://example.com/x`, []bool{false}},
+		{`echo "x=$(curl -s https://example.com/x)"`, []bool{false}},
+	}
+	for _, tc := range cases {
+		targets := bashEgressTargets(tc.cmd)
+		if len(targets) != len(tc.wantLoopback) {
+			t.Errorf("bashEgressTargets(%q) = %d targets, want %d", tc.cmd, len(targets), len(tc.wantLoopback))
+			continue
+		}
+		for i, want := range tc.wantLoopback {
+			if targets[i].Loopback != want {
+				t.Errorf("bashEgressTargets(%q)[%d].Loopback = %v, want %v (value %q)", tc.cmd, i, targets[i].Loopback, want, targets[i].Value)
+			}
+		}
+	}
 }

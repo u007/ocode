@@ -839,6 +839,10 @@ func TestBashTargetsOnlyLoopback(t *testing.T) {
 		{`curl http://127.0.0.1/ && curl https://evil.example.com/x`, false},
 		{`curl --proxy http://evil.example.com:8080 http://localhost/x`, false},
 		{`git log`, false},
+		{`cd /tmp && curl -s http://127.0.0.1:18281/api/setup`, true},
+		{`X=$(curl -s http://127.0.0.1:18281/api/setup); echo $X`, true},
+		{`cd /tmp && curl -s https://example.com/x`, false},
+		{`cd /Users/james/www/mail-archive && D=$(mktemp -d); (/tmp/ma-b4 serve -data-dir "$D" -addr 127.0.0.1:18281 >"$D/serve.log" 2>&1 &); echo "GET_setup=$(curl -s http://127.0.0.1:18281/api/setup)"; echo "POST_setup=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "{\"token\":\"$TOKEN\"}" http://127.0.0.1:18281/api/setup)"; rm -rf "$D"`, true},
 	}
 	for _, tc := range cases {
 		if got := bashTargetsOnlyLoopback(tc.cmd); got != tc.want {

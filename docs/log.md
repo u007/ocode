@@ -13,6 +13,10 @@
 
 * **Update**: preview find anchors re-derived after PdfViewer.tsx and previewKind.ts moved (Find button, FindBar, keydown gate, overlay, FileTabContent Print button, `.mdx` mapping) ([concepts/preview-find.md](/concepts/preview-find.md))
 
+* **Update**: outbound-network guardrail bash extraction now walks every parsed command on the line (compounds, pipes and `$(...)` substitutions) and emits one target per network command instead of only the first command. A mixed loopback+remote line yields two targets; parse errors keep the old single split; the `/dev/tcp` redirect gap is recorded as predating this change; anchors re-derived; 32 tests ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+
+* **Update**: inbound content guard loopback exemption is now proven per network command across the whole line, so a loopback-only compound is exempt and a compound with a remote fetch is scanned; cites the spurious 0.48 ask on a loopback smoke test; stale anchors re-derived after the 2026-10-28 rubric change ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+
 ## 2026-11-03
 
 * **Update**: Horizontal `fill` alignment renders left in the Excel preview, now an approved known gap (user approved 2026-11-03; Univer has no fill alignment). Supersedes the "not yet approved" wording in the earlier 2026-11-03 entry ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
