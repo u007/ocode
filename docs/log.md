@@ -7,6 +7,12 @@
 
 * **Update**: soft-keyboard Backspace: ghostty-web drops it on both keydown (keyCode 229) and beforeinput (`deleteContentBackward` maps to empty), so the earlier claim that Backspace works through beforeinput is removed; the uncommitted `softKeyboardBackspace` fix and its possible double-send are recorded as unverified on device; re-derived the TerminalPanel.tsx, terminalSoftKeyboard.ts and handler_terminal.go anchors ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 
+* **Update**: PDF desktop print refreshed to the current path: pages render at `PDF_PRINT_SCALE` (2, 144 dpi) instead of 1.5, with the 8 MiB bridge cap hit sooner; more than 50 pages throws instead of truncating; Print shows busy and transient failed states instead of the inline `setError` line; offscreen pages are released in `finally`; abandoned prints log `console.warn`; `printDocument` moved to `printDocument.ts`; all PdfViewer anchors re-derived ([concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md))
+
+* **Update**: preview print: `printDocument` now lives in `printDocument.ts` (split from printPreview.tsx so the PDF chunk stays small); mermaid prints under `strict` with theme restore in `finally` and shares `runMermaid` with the viewer; excel keeps blank rows and empty-cell heights; pptx renders sequentially with a 200-slide cap; image MIME parity test added ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+
+* **Update**: preview find anchors re-derived after PdfViewer.tsx and previewKind.ts moved (Find button, FindBar, keydown gate, overlay, FileTabContent Print button, `.mdx` mapping) ([concepts/preview-find.md](/concepts/preview-find.md))
+
 ## 2026-11-03
 
 * **Update**: Horizontal `fill` alignment renders left in the Excel preview, now an approved known gap (user approved 2026-11-03; Univer has no fill alignment). Supersedes the "not yet approved" wording in the earlier 2026-11-03 entry ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))

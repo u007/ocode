@@ -131,9 +131,12 @@ func handlePrintWindowMessage(window application.Window, message string) {
 	// Print() runs InvokeSyncWithError on the Wails main thread, and this handler
 	// may itself be running there. Calling it inline could block the thread on
 	// itself, so the call runs in its own goroutine.
+	log.Printf("ocode-desktop: print window %d ready, opening print panel", window.ID())
 	crashguard.Go(func() {
 		if err := printWindow(window); err != nil {
 			log.Printf("ocode-desktop: print window %d failed to print: %v", window.ID(), err)
+			return
 		}
+		log.Printf("ocode-desktop: print window %d print panel returned", window.ID())
 	})
 }

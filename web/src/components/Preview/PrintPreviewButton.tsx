@@ -2,22 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import { Printer, TriangleAlert } from "lucide-react";
 import type { PreviewKind } from "../../lib/previewKind";
 import { cn } from "../../lib/utils";
-import { isPrintableKind, printPreview } from "./printPreview";
+import { isPrintableKind, printPreview, type PrintSource } from "./printPreview";
 
 const FAILED_RESET_MS = 2500;
 
 /**
  * Prints a preview's rendered document, or saves it as PDF from the print
- * dialog. `load` resolves the source at click time, so the button always prints
- * what the user sees now. Renders nothing for kinds that cannot be printed.
- * A failed request shows a warning icon (also in iconOnly mode) and its reason
- * in the tooltip, then resets after a short delay.
+ * dialog. The document is read at click time from `source`, so the button
+ * always prints what the user sees now. Renders nothing for kinds that cannot
+ * be printed. A failed request shows a warning icon (also in iconOnly mode) and
+ * its reason in the tooltip, then resets after a short delay.
  */
-export function PrintPreviewButton({ kind, title, load, className, iconOnly }: {
+export function PrintPreviewButton({ kind, title, source, className, iconOnly }: {
   kind: PreviewKind;
   title: string;
-  /** Resolves the document source when the user clicks (live editor text, or a fetch from disk). */
-  load: () => string | Promise<string>;
+  /** Where the document comes from: live editor text, or the saved file. */
+  source: PrintSource;
   className?: string;
   iconOnly?: boolean;
 }) {
@@ -33,7 +33,7 @@ export function PrintPreviewButton({ kind, title, load, className, iconOnly }: {
     window.clearTimeout(resetTimer.current);
     setState("busy");
     try {
-      await printPreview({ kind, title, content: await load() });
+      await printPreview({ kind, title, source });
       setState("idle");
     } catch (err) {
       console.error("print preview failed", { kind, title }, err);

@@ -414,7 +414,7 @@ export default function PreviewHost({
             <PrintPreviewButton
               kind={doc.kind}
               title={doc.path.split("/").pop() || doc.path}
-              load={async () => (await api.getFileContent(doc.path, doc.projectRoot, doc.projectHost ?? projectHost)).content}
+              source={{ origin: "disk", path: doc.path, projectRoot: doc.projectRoot, projectHost: doc.projectHost ?? projectHost }}
               className="shrink-0 flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted"
             />
             {!(doc.projectHost ?? projectHost) && (

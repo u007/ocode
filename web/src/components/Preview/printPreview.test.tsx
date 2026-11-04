@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildPrintDocument, collectAppStyles, printDocument, printPreview } from "./printPreview";
+import { buildPrintDocument, collectAppStyles, printPreview } from "./printPreview";
+import { printDocument } from "./printDocument";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -13,7 +14,7 @@ afterEach(() => {
 
 describe("buildPrintDocument", () => {
   it("renders markdown on white without the dark class and appends the bootstrap", async () => {
-    const html = await buildPrintDocument("markdown", "# Title\n\ntext", "a.md");
+    const html = await buildPrintDocument("markdown", { origin: "editor", path: "a.md", content: "# Title\n\ntext" }, "a.md");
 
     expect(html).toContain("<h1>Title</h1>");
     expect(html).toContain("<title>a.md</title>");
@@ -33,7 +34,7 @@ describe("buildPrintDocument", () => {
     style.textContent = ".inline{color:red}";
     document.head.appendChild(style);
 
-    const html = await buildPrintDocument("markdown", "text", "a.md");
+    const html = await buildPrintDocument("markdown", { origin: "editor", path: "a.md", content: "text" }, "a.md");
 
     expect(html).toContain("<style>body{}</style>");
     expect(html).toContain("<style>.inline{color:red}</style>");
@@ -106,24 +107,58 @@ describe("buildPrintDocument", () => {
   });
 
   it("escapes text content", async () => {
-    const html = await buildPrintDocument("text", "<b>x</b>", "t.txt");
+    const html = await buildPrintDocument("text", { origin: "editor", path: "t.txt", content: "<b>x</b>" }, "t.txt");
 
     expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
     expect(html).not.toContain("<b>x</b>");
   });
 
-  it("prints html verbatim and appends only the bootstrap", async () => {
+  it("prints html as a sanitized document and appends only the bootstrap", async () => {
     const source = '<p class="x">hi</p>';
 
-    const html = await buildPrintDocument("html", source, "p.html");
+    const html = await buildPrintDocument("html", { origin: "editor", path: "p.html", content: source }, "p.html");
 
-    expect(html.startsWith(source)).toBe(true);
+    expect(html).toContain('<body><p class="x">hi</p></body>');
     expect(html).toContain("ocode:print-window-ready");
     expect(html.endsWith("</script>")).toBe(true);
   });
 
+  it("removes script, event handlers and javascript: URLs from html", async () => {
+    const source = '<body onload="steal()"><p onclick="x()">hi</p><a href="javascript:alert(1)">l</a><script>alert(2)</script></body>';
+
+    const html = await buildPrintDocument("html", { origin: "editor", path: "p.html", content: source }, "p.html");
+
+    expect(html).not.toContain("alert(");
+    expect(html).not.toContain("steal()");
+    expect(html).not.toContain("onclick");
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("<p>hi</p>");
+    expect(html).toContain("ocode:print-window-ready");
+  });
+
+  it("keeps the author's doctype, head styles, stylesheet links and style attributes", async () => {
+    const source =
+      '<!DOCTYPE html><html><head><title>T</title><link rel="stylesheet" href="https://cdn.example.com/a.css"><style>p{color:red}</style></head><body><p style="color:blue">hi</p></body></html>';
+
+    const html = await buildPrintDocument("html", { origin: "editor", path: "p.html", content: source }, "p.html");
+
+    expect(html.startsWith("<!doctype html>")).toBe(true);
+    expect(html).toContain('<link rel="stylesheet" href="https://cdn.example.com/a.css">');
+    expect(html).toContain("<style>p{color:red}</style>");
+    expect(html).toContain('<p style="color:blue">hi</p>');
+  });
+
+  it("keeps a <style> that leads a fragment", async () => {
+    const html = await buildPrintDocument("html", { origin: "editor", path: "p.html", content: "<style>p{color:red}</style><p>x</p>" }, "p.html");
+
+    expect(html).toContain("<style>p{color:red}</style>");
+    expect(html).toContain("<p>x</p>");
+  });
+
   it("rejects kinds it cannot print", async () => {
-    await expect(buildPrintDocument("pdf", "", "a.pdf")).rejects.toThrow('print: unsupported preview kind "pdf"');
+    await expect(buildPrintDocument("pdf", { origin: "editor", path: "a.pdf", content: "" }, "a.pdf")).rejects.toThrow(
+      'print: unsupported preview kind "pdf"',
+    );
   });
 });
 
@@ -187,7 +222,7 @@ describe("printDocument on the desktop shell", () => {
   async function loadWithLocation(path: string) {
     window.history.replaceState({}, "", path);
     vi.resetModules();
-    return import("./printPreview");
+    return import("./printDocument");
   }
 
   it("hands the document to the shell with the clipboard nonce", async () => {
@@ -211,7 +246,7 @@ describe("printDocument on the desktop shell", () => {
 
 describe("printPreview", () => {
   it("builds the document and prints it once the frame loads", async () => {
-    const printed = printPreview({ kind: "text", title: "a.txt", content: "plain" });
+    const printed = printPreview({ kind: "text", title: "a.txt", source: { origin: "editor", path: "a.txt", content: "plain" } });
 
     await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
     const frame = document.querySelector("iframe");

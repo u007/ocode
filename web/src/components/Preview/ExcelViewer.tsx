@@ -1,21 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import * as XLSX from "xlsx";
 import { api } from "../../api/client";
-import { isDelimitedTextPath } from "../../lib/previewKind";
 import { useResolvedEditorTheme } from "../../hooks/useResolvedEditorTheme";
 import { errorMessage } from "./xlsxStyle";
 import {
-  assertWithinFileLimit,
   MAX_COLS,
   MAX_ROWS,
-  SHEETJS_READ_ROWS,
-  workbookFromExcelJs,
-  workbookFromSheetJs,
+  workbookFromDelimitedText,
+  workbookFromFileBytes,
   type ConvertedWorkbook,
 } from "./univerData";
 import type { UniverSheetHandle } from "./univerMount";
-
-const OOXML_WORKBOOK = /\.(xlsx|xlsm)$/i;
 
 /**
  * Spreadsheet viewer. Read-only by design (same as Word/PowerPoint/PDF): sheet
@@ -80,9 +74,7 @@ export default function ExcelViewer({
     // typing in the split-view editor does not flash the loading state.
     if (content !== undefined) {
       try {
-        assertWithinFileLimit(new TextEncoder().encode(content).byteLength);
-        // TSV is just CSV with tab delimiters — SheetJS handles both via type:"string".
-        show(workbookFromSheetJs(XLSX.read(content, { type: "string", sheetRows: SHEETJS_READ_ROWS }), true));
+        show(workbookFromDelimitedText(content));
       } catch (e) {
         fail(e, "parsing live CSV/TSV content");
       }
@@ -95,25 +87,7 @@ export default function ExcelViewer({
     const load = async (): Promise<void> => {
       const buf = await api.fetchFileRaw(path, projectRoot, projectHost);
       if (cancelled) return;
-      // Refused before any parser runs: ExcelJS and SheetJS hold the whole file.
-      assertWithinFileLimit(buf.byteLength);
-      // Delimited text has no binary magic, so it must be decoded as UTF-8
-      // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
-      // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
-      if (isDelimitedTextPath(path)) {
-        show(workbookFromSheetJs(XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: SHEETJS_READ_ROWS }), true));
-        return;
-      }
-      if (OOXML_WORKBOOK.test(path)) {
-        // Dynamic so ExcelJS stays out of the main bundle.
-        const { Workbook: ExcelWorkbook } = await import("exceljs");
-        const wb = new ExcelWorkbook();
-        await wb.xlsx.load(buf);
-        if (cancelled) return;
-        show(workbookFromExcelJs(wb));
-        return;
-      }
-      show(workbookFromSheetJs(XLSX.read(buf, { type: "array", sheetRows: SHEETJS_READ_ROWS }), false));
+      show(await workbookFromFileBytes(path, buf));
     };
     load().catch((e: unknown) => fail(e, `loading ${path}`));
     return () => {

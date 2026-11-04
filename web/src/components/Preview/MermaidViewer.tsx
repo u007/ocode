@@ -2,11 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import mermaid from "mermaid";
 import { dispatchPreviewContext } from "../../lib/previewKind";
 import type { EditorAppearance } from "../../lib/editorAppearance";
-
-// Default init (dark) so a viewer that never receives an `appearance` prop
-// renders exactly as before. The render effect re-initializes with the resolved
-// theme before each render, since mermaid's theme is a global, not a render arg.
-mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });
+import { runMermaid } from "./mermaidQueue";
 
 /**
  * Flowchart viewer (mermaid — stable/maintained).
@@ -48,10 +44,13 @@ export default function MermaidViewer({
     setActiveNode(null);
     // mermaid's theme is a global set by `initialize`, not a render argument,
     // so it must be (re)applied immediately before each render — otherwise the
-    // diagram keeps the previous appearance after a toggle.
-    mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: appearance === "light" ? "default" : "dark" });
-    mermaid
-      .render(renderId, code)
+    // diagram keeps the previous appearance after a toggle. The pair runs queued
+    // with every other mermaid render (mermaidQueue.ts), so a print render cannot
+    // interleave with it.
+    runMermaid(() => {
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: appearance === "light" ? "default" : "dark" });
+      return mermaid.render(renderId, code);
+    })
       .then(({ svg }) => {
         if (!cancelled) setSvg(svg);
       })

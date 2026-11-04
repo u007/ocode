@@ -20,28 +20,27 @@ afterEach(() => {
 
 describe("PrintPreviewButton", () => {
   it("renders nothing for a kind that cannot be printed", () => {
-    const { container } = render(<PrintPreviewButton kind="pdf" title="a.pdf" load={() => ""} />);
+    const { container } = render(
+      <PrintPreviewButton kind="pdf" title="a.pdf" source={{ origin: "editor", path: "a.pdf", content: "" }} />,
+    );
 
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("loads the source on click and prints it", async () => {
+  it("passes its source to printPreview on click", async () => {
     printPreview.mockResolvedValue(undefined);
-    const load = vi.fn(() => "# Hi");
-    render(<PrintPreviewButton kind="markdown" title="a.md" load={load} />);
+    const source = { origin: "editor" as const, path: "a.md", content: "# Hi" };
+    render(<PrintPreviewButton kind="markdown" title="a.md" source={source} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Print" }));
 
-    await waitFor(() =>
-      expect(printPreview).toHaveBeenCalledWith({ kind: "markdown", title: "a.md", content: "# Hi" }),
-    );
-    expect(load).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(printPreview).toHaveBeenCalledWith({ kind: "markdown", title: "a.md", source }));
   });
 
   it("shows Print failed and logs when printing rejects", async () => {
     printPreview.mockRejectedValue(new Error("boom"));
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    render(<PrintPreviewButton kind="markdown" title="a.md" load={() => "# Hi"} />);
+    render(<PrintPreviewButton kind="markdown" title="a.md" source={{ origin: "editor", path: "a.md", content: "# Hi" }} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Print" }));
 
@@ -52,7 +51,7 @@ describe("PrintPreviewButton", () => {
   it("shows the warning icon and the reason in icon-only mode when printing rejects", async () => {
     printPreview.mockRejectedValue(new Error("print: document is 9 bytes, over the 8-byte print limit"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    render(<PrintPreviewButton kind="markdown" title="a.md" load={() => "# Hi"} iconOnly className="rounded" />);
+    render(<PrintPreviewButton kind="markdown" title="a.md" source={{ origin: "editor", path: "a.md", content: "# Hi" }} iconOnly className="rounded" />);
 
     fireEvent.click(screen.getByRole("button", { name: "Print" }));
 

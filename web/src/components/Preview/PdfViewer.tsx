@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { api } from "../../api/client";
@@ -9,6 +10,8 @@ import { FindBar } from "./FindBar";
 import { isEditableTarget } from "./findDom";
 import { usePdfFind } from "./usePdfFind";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
+import { isDesktopShell } from "../../lib/desktopShell";
+import { documentShell, printDocument } from "./printDocument";
 
 // WebKit has no ReadableStream async iteration, which pdf.js's getTextContent()
 // needs (`for await … of streamTextContent()`). Install it before the first
@@ -48,6 +51,20 @@ const PDF_PRINT_LOAD_TIMEOUT_MS = 30_000;
 const PDF_PRINT_SETTLE_MS = 500;
 /** Print: safety teardown if afterprint never fires; the dialog can stay open for minutes. */
 const PDF_PRINT_CLEANUP_MS = 600_000;
+/** Desktop print: JPEG quality of each rasterized page. */
+const PDF_PRINT_JPEG_QUALITY = 0.85;
+/** Desktop print: render scale of each page (2 = 144 dpi). */
+const PDF_PRINT_SCALE = 2;
+/** Desktop print: most pages rasterized for one print. Every page is held as a
+ *  JPEG data URL until the document is built, so this bounds that array. The
+ *  8 MiB bridge cap (MAX_PRINT_DOCUMENT_BYTES) is the real output ceiling and
+ *  is checked later, after every page is rendered. */
+const PDF_PRINT_DESKTOP_MAX_PAGES = 50;
+/** Desktop print: how long the failed indicator stays on the Print button. */
+const PDF_PRINT_FAILED_RESET_MS = 2500;
+/** Desktop print: one page per sheet, no margins, no break after the last page. */
+const PDF_PRINT_CSS =
+  "@page { margin: 0 } html, body { margin: 0; background: #fff } main img { display: block; width: 100%; page-break-after: always } main img:last-child { page-break-after: auto }";
 
 type PageDim = { w: number; h: number };
 /** How to re-map the scroll position after a zoom layout change. */
@@ -191,6 +208,11 @@ export default function PdfViewer({
   const [docVersion, setDocVersion] = useState(0);
   const [spaceHeld, setSpaceHeld] = useState(false);
   const [dragging, setDragging] = useState(false);
+  /** Desktop print: "busy" while pages are rasterized, "failed" briefly after a
+   *  failure. A print failure never touches `error`, so the viewer stays loaded. */
+  const [printState, setPrintState] = useState<"idle" | "busy" | "failed">("idle");
+  const [printFailure, setPrintFailure] = useState("");
+  const printResetTimer = useRef<number | undefined>(undefined);
 
   const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -637,10 +659,64 @@ export default function PdfViewer({
     void saveBlobAsFile(blob, pdfFileName);
   }, [pdfFileName]);
 
+  /** Desktop shell: WKWebView ignores iframe print(), so every page is rasterized
+   *  to a JPEG on an offscreen canvas (never the on-screen ones) at the page's own
+   *  rotation, the same view the browser's PDF engine prints. The document goes
+   *  to the shell's print window through printDocument. A document replaced or
+   *  unmounted mid-print (docRef no longer holds it) abandons the print quietly. */
+  const printPdfDesktop = useCallback(async () => {
+    const doc = docRef.current;
+    if (!doc) return;
+    if (doc.numPages > PDF_PRINT_DESKTOP_MAX_PAGES) {
+      throw new Error(`print: ${pdfFileName} has ${doc.numPages} pages, over the ${PDF_PRINT_DESKTOP_MAX_PAGES}-page desktop print limit`);
+    }
+    const pages: string[] = [];
+    try {
+      for (let n = 1; n <= doc.numPages; n++) {
+        if (docRef.current !== doc) return;
+        const pg = await doc.getPage(n);
+        const off = document.createElement("canvas");
+        try {
+          const viewport = pg.getViewport({ scale: PDF_PRINT_SCALE });
+          off.width = Math.floor(viewport.width);
+          off.height = Math.floor(viewport.height);
+          await pg.render({ canvas: off, viewport }).promise;
+          const src = off.toDataURL("image/jpeg", PDF_PRINT_JPEG_QUALITY);
+          if (!src.startsWith("data:image/jpeg")) throw new Error(`print: page ${n} did not encode as JPEG`);
+          pages.push(`<img src="${src}" alt="Page ${n}">`);
+        } finally {
+          off.width = 0;
+          off.height = 0;
+          pg.cleanup();
+        }
+      }
+    } catch (err) {
+      if (docRef.current === doc) throw err;
+      console.warn("pdf print: document replaced or viewer unmounted mid-print, print abandoned", { file: pdfFileName }, err);
+      return;
+    }
+    if (docRef.current !== doc) return;
+    await printDocument(documentShell(pdfFileName, `<style>${PDF_PRINT_CSS}</style>`, `<main>${pages.join("")}</main>`));
+  }, [pdfFileName]);
+
   /** Print via a hidden iframe hosting the PDF blob: the browser's own PDF
    *  engine renders it and its print dialog opens. Fallback chain: iframe →
-   *  popup tab → forced download (popup blocked). */
+   *  popup tab → forced download (popup blocked). The desktop shell takes
+   *  printPdfDesktop instead. */
   const printPdf = useCallback(() => {
+    if (isDesktopShell()) {
+      window.clearTimeout(printResetTimer.current);
+      setPrintState("busy");
+      printPdfDesktop()
+        .then(() => setPrintState("idle"))
+        .catch((err: unknown) => {
+          console.error("pdf print: rendering pages for the desktop print window failed", { file: pdfFileName }, err);
+          setPrintFailure(err instanceof Error ? err.message : String(err));
+          setPrintState("failed");
+          printResetTimer.current = window.setTimeout(() => setPrintState("idle"), PDF_PRINT_FAILED_RESET_MS);
+        });
+      return;
+    }
     const blob = blobRef.current;
     if (!blob) return;
     const url = URL.createObjectURL(blob);
@@ -706,7 +782,9 @@ export default function PdfViewer({
     document.body.appendChild(frame);
     // WKWebView can leave a blob: frame without onload; wait the full window before giving up.
     const watchdog = window.setTimeout(fallback, PDF_PRINT_LOAD_TIMEOUT_MS);
-  }, [downloadPdf, pdfFileName]);
+  }, [downloadPdf, pdfFileName, printPdfDesktop]);
+
+  useEffect(() => () => window.clearTimeout(printResetTimer.current), []);
 
   const rotate = useCallback(() => {
     const doc = docRef.current;
@@ -1019,7 +1097,17 @@ export default function PdfViewer({
         <button type="button" disabled={!total} onClick={fitPage} className={idleBtn} aria-label="Fit page" title="Fit whole page">Page</button>
         <button type="button" disabled={!total} onClick={rotate} className={idleBtn} aria-label="Rotate clockwise" title="Rotate 90° clockwise">⟳</button>
         <span className="flex-1" />
-        <button type="button" disabled={!total} onClick={printPdf} className={idleBtn} aria-label="Print" title="Print (browser print dialog)">Print</button>
+        <button
+          type="button"
+          disabled={!total || printState === "busy"}
+          onClick={printPdf}
+          className={printState === "failed" ? `${idleBtn} text-destructive` : idleBtn}
+          aria-label={printState === "failed" ? "Print failed" : "Print"}
+          title={printState === "failed" ? `Print failed: ${printFailure}` : "Print (browser print dialog)"}
+        >
+          {printState === "failed" && <TriangleAlert className="h-3.5 w-3.5" />}
+          {printState === "busy" ? "Printing…" : printState === "failed" ? "Print failed" : "Print"}
+        </button>
         <button type="button" disabled={!total} onClick={downloadPdf} className={idleBtn} aria-label="Download" title={`Download ${pdfFileName}`}>Download</button>
         <button type="button" disabled={!total} onClick={find.show} className={idleBtn} aria-label="Find in document" title="Find (Ctrl/⌘ F)">Find</button>
       </div>

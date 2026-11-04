@@ -1,5 +1,12 @@
 # TODO
 
+## Open: print gaps for binary previews (2026-11-04)
+
+- **Files-tab binary preview-only branch has no Print button.** `FileTabContent` renders `PreviewSurface` directly for `.xlsx`, `.docx`, `.pptx` and images, with no toolbar. Add a header with `PrintPreviewButton` and `source={{ origin: "disk", ... }}`. Not done: the request named the three existing call sites only, and this branch has no header to put it in.
+- **Excel print drops cell styles, merges and column widths.** Values print as displayed. Map `mergeData` to spans if needed.
+- **Unverified live: the new print kinds.** docx, pptx, excel, image and mermaid documents have not been printed in Chrome or WebKit, or through the desktop print window. Unit tests only (`printPreview.kinds.test.ts`).
+- **In-app DocxViewer hyperlink hazard (pre-existing).** `DocxViewer` inserts docx-preview's output into the app DOM. docx-preview copies a hyperlink target verbatim (`renderHyperlink`), so a `.docx` with a `javascript:` link runs script in the app origin when clicked. The print path now drops those hrefs; the viewer does not. Apply the same filter to the viewer and confirm its link clicks.
+
 ## Open: auto-continue verdict clips at the selection cap (2026-11-02)
 
 - **Known limit (exactly at the cap):** at `autoContinueTranscriptCap` (20) messages, each at the 4000-rune cap and markup-heavy (JSON escaping inflates it), the verdict state is ~168 KB, over the 96 KB `decisionStateBudgetBytes`. Nothing is scored at or under the cap, so `fitTypesafeTranscript` has nothing it may drop and `prepareDecisionState` projects the state to ~45 KB, clipping every message to ~1 KB; that clip is signalled through `_projection`. Pinned by the `auto-continue-verdict-20-markup` case in `TestSharedStateBudget_WorstCaseProductionPayloads`.
@@ -10,7 +17,7 @@
 
 ## Open: desktop print unverified live (2026-11-02)
 
-- **Unverified live:** PDF print through the hidden iframe (`PdfViewer` `printPdf`) inside the WKWebView blob frame. Unit tests only.
+- **Unverified live:** PDF print on the desktop shell (`PdfViewer` `printPdfDesktop`: pages rasterized to JPEG, sent through `printDocument` to the native print window). Unit tests only. The browser iframe path is unchanged.
 - **Unverified live:** macOS print panel. `ocode_printWindow` (`cmd/ocode-desktop/native_darwin.m`) opens the system print panel using the user's saved print settings on the largest visible WKWebView. Not yet checked in the running app.
 
 ## Open: reopen-and-answer of a dismissed question in TUI `/rc` bridge mode (2026-11-02)

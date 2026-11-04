@@ -1,37 +1,70 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import JSZip from "jszip";
 import { api } from "../../api/client";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+import { parsePptx, type DeckBlock } from "./pptxDeck";
 
-interface SlideBlock {
-  text: string;
-}
-
-interface Slide {
-  index: number;
-  blocks: SlideBlock[];
+/** A slide ready to draw: its images are URLs the page can load. */
+export interface SlideView {
+  blocks: DeckBlock[];
   images: string[];
   aspect: number;
 }
 
-function xmlDoc(text: string): Document {
-  return new DOMParser().parseFromString(text, "application/xml");
-}
-
-/** Resolve a rels Target (e.g. "../media/image1.png") against its base dir. */
-function resolveTarget(baseDir: string, target: string): string {
-  const parts = `${baseDir}/${target}`.split("/");
-  const out: string[] = [];
-  for (const p of parts) {
-    if (p === "..") out.pop();
-    else if (p !== ".") out.push(p);
-  }
-  return out.join("/");
+interface Slide extends SlideView {
+  index: number;
 }
 
 /**
- * PowerPoint viewer (jszip — stable/maintained — unzips the .pptx package;
- * slides render as structured cards from the slide XML).
+ * One slide as a card. The viewer and the print document both render it, so
+ * the printed slide is the one on screen. `forPresent` sizes it for the
+ * fullscreen view; `revealed` steps through its blocks and images there.
+ */
+export function SlideCard({
+  slide,
+  number,
+  forPresent,
+  revealAll,
+  revealed,
+}: {
+  slide: SlideView;
+  number: number;
+  forPresent: boolean;
+  revealAll: boolean;
+  revealed: number;
+}) {
+  return (
+    <div
+      className={`w-full overflow-hidden rounded border border-border bg-card ${forPresent ? "max-h-full" : ""}`}
+      style={{ aspectRatio: `${slide.aspect}` }}
+    >
+      <div className={`flex h-full flex-col gap-2 overflow-auto ${forPresent ? "p-8 text-lg" : "p-4 text-sm"}`}>
+        {slide.blocks.map((b, i) => (
+          <div
+            key={i}
+            className={`pptx-block rounded px-1 ${!revealAll && forPresent && i >= revealed ? "pptx-hidden" : ""}`}
+          >
+            {b.text}
+          </div>
+        ))}
+        {slide.images.map((u, i) => (
+          <img
+            key={`img-${i}`}
+            src={u}
+            alt={`Slide ${number} image ${i + 1}`}
+            className={`max-h-48 rounded object-contain ${!revealAll && forPresent && slide.blocks.length + i >= revealed ? "pptx-hidden" : ""}`}
+          />
+        ))}
+        {slide.blocks.length === 0 && slide.images.length === 0 && (
+          <div className="text-xs text-muted-foreground">(blank slide)</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * PowerPoint viewer (jszip — stable/maintained — unzips the .pptx package via
+ * parsePptx; slides render as structured cards from the slide XML).
  *
  * - Filmstrip + slide view with pager, multi-slide decks fully navigable.
  * - Present mode: fullscreen click-through (click/→ advances, ← back,
@@ -72,82 +105,18 @@ export default function PptxViewer({
     urlsRef.clear();
 
     (async () => {
-      const buf = await api.fetchFileRaw(path, projectRoot, projectHost);
-      const zip = await JSZip.loadAsync(buf);
-
-      const presXml = await zip.file("ppt/presentation.xml")?.async("string");
-      if (!presXml) throw new Error("not a readable .pptx (missing presentation.xml)");
-      const pres = xmlDoc(presXml);
-
-      let aspect = 16 / 9;
-      const sz = pres.getElementsByTagName("p:sldSz")[0];
-      if (sz) {
-        const cx = parseFloat(sz.getAttribute("cx") || "0");
-        const cy = parseFloat(sz.getAttribute("cy") || "0");
-        if (cx > 0 && cy > 0) aspect = cx / cy;
-      }
-
-      const relsXml = await zip.file("ppt/_rels/presentation.xml.rels")?.async("string");
-      const rels = relsXml ? xmlDoc(relsXml) : null;
-      const idToTarget = new Map<string, string>();
-      if (rels) {
-        const r = rels.getElementsByTagName("Relationship");
-        for (let i = 0; i < r.length; i++) {
-          const id = r[i].getAttribute("Id") || "";
-          const target = r[i].getAttribute("Target") || "";
-          if (id && target) idToTarget.set(id, target.startsWith("ppt/") ? target : `ppt/${target}`);
-        }
-      }
-
-      const order: string[] = [];
-      const sldIds = pres.getElementsByTagName("p:sldId");
-      for (let i = 0; i < sldIds.length; i++) {
-        const rid = sldIds[i].getAttribute("r:id") || "";
-        const target = idToTarget.get(rid);
-        if (target) order.push(target);
-      }
-      if (order.length === 0) throw new Error("no slides found in deck");
-
-      const parsed: Slide[] = [];
-      for (let si = 0; si < order.length; si++) {
-        const slidePath = order[si];
-        const slideXml = await zip.file(slidePath)?.async("string");
-        if (!slideXml) continue;
-        const doc = xmlDoc(slideXml);
-        const blocks: SlideBlock[] = [];
-        const paras = doc.getElementsByTagName("a:p");
-        for (let pi = 0; pi < paras.length; pi++) {
-          const runs = paras[pi].getElementsByTagName("a:t");
-          let text = "";
-          for (let ti = 0; ti < runs.length; ti++) text += runs[ti].textContent ?? "";
-          text = text.trim();
-          if (text) blocks.push({ text });
-        }
-
-        const images: string[] = [];
-        const baseDir = slidePath.slice(0, slidePath.lastIndexOf("/"));
-        const relName = slidePath.slice(slidePath.lastIndexOf("/") + 1);
-        const slideRels = await zip.file(`${baseDir}/_rels/${relName}.rels`)?.async("string");
-        if (slideRels) {
-          const rd = xmlDoc(slideRels);
-          const rr = rd.getElementsByTagName("Relationship");
-          for (let i = 0; i < rr.length; i++) {
-            const type = rr[i].getAttribute("Type") || "";
-            const target = rr[i].getAttribute("Target") || "";
-            if (!type.endsWith("/image") || !target) continue;
-            const resolved = target.startsWith("..") ? resolveTarget(baseDir, target) : `${baseDir}/${target}`;
-            const file = zip.file(resolved);
-            if (!file) continue;
-            const blob = await file.async("blob");
+      const parsed = await parsePptx(await api.fetchFileRaw(path, projectRoot, projectHost));
+      if (cancelled) return;
+      setSlides(
+        parsed.map((slide) => ({
+          ...slide,
+          images: slide.images.map((blob) => {
             const url = URL.createObjectURL(blob);
             urlsRef.add(url);
-            images.push(url);
-          }
-        }
-        parsed.push({ index: si + 1, blocks, images, aspect });
-      }
-      if (cancelled) return;
-      setSlides(parsed);
+            return url;
+          }),
+        })),
+      );
       setLoading(false);
     })().catch((e) => {
       if (!cancelled) {
@@ -192,35 +161,6 @@ export default function PptxViewer({
 
   const steps = current.blocks.length + current.images.length;
 
-  const slideCard = (forPresent: boolean, revealAll: boolean) => (
-    <div
-      className={`w-full overflow-hidden rounded border border-border bg-card ${forPresent ? "max-h-full" : ""}`}
-      style={{ aspectRatio: `${current.aspect}` }}
-    >
-      <div className={`flex h-full flex-col gap-2 overflow-auto ${forPresent ? "p-8 text-lg" : "p-4 text-sm"}`}>
-        {current.blocks.map((b, i) => (
-          <div
-            key={i}
-            className={`pptx-block rounded px-1 ${!revealAll && forPresent && i >= revealed ? "pptx-hidden" : ""}`}
-          >
-            {b.text}
-          </div>
-        ))}
-        {current.images.map((u, i) => (
-          <img
-            key={`img-${i}`}
-            src={u}
-            alt={`Slide ${safe} image ${i + 1}`}
-            className={`max-h-48 rounded object-contain ${!revealAll && forPresent && current.blocks.length + i >= revealed ? "pptx-hidden" : ""}`}
-          />
-        ))}
-        {current.blocks.length === 0 && current.images.length === 0 && (
-          <div className="text-xs text-muted-foreground">(blank slide)</div>
-        )}
-      </div>
-    </div>
-  );
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1 text-xs">
@@ -255,7 +195,7 @@ export default function PptxViewer({
           ))}
         </div>
         <div ref={ref} className="min-w-0 flex-1 overflow-auto p-2">
-          {slideCard(false, true)}
+          <SlideCard slide={current} number={safe} forPresent={false} revealAll revealed={revealed} />
         </div>
       </div>
       <style>{`.pptx-block{transition:opacity .35s ease,transform .35s ease;}.pptx-hidden{opacity:0;transform:translateY(8px);}`}</style>
@@ -285,7 +225,7 @@ export default function PptxViewer({
           </div>
           <div className="flex min-h-0 flex-1 items-center justify-center" onClick={(e) => e.stopPropagation()}>
             <div className="w-full max-w-4xl text-white" onClick={stepForward}>
-              {slideCard(true, false)}
+              <SlideCard slide={current} number={safe} forPresent revealAll={false} revealed={revealed} />
             </div>
           </div>
         </div>

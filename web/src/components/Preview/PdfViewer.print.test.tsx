@@ -4,10 +4,16 @@ import { act, cleanup, fireEvent, render as renderView, waitFor } from "@testing
 // Print & Download: both reuse an independent Blob snapshot of the PDF bytes
 // (pdf.js may detach the buffer handed to getDocument). Download mints an
 // object URL and clicks an anchor; print hosts the blob in a hidden iframe
-// and calls print() on its window, with popup-tab and download fallbacks.
+// and calls print() on its window, with popup-tab and download fallbacks. On the
+// desktop shell (isDesktopShell) pages are rasterized and sent to printDocument
+// instead; that suite stubs canvas toDataURL, which jsdom does not implement.
 
 const mocks = vi.hoisted(() => {
-  const renderMock = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
+  // Desktop-shell toggle: false everywhere except the desktop print case.
+  const desktop = { on: false };
+  const printDocument = vi.fn(async (_html: string) => {});
+  const renderMock = vi.fn((_args: { canvas: HTMLCanvasElement; viewport: { scale: number } }) => ({ promise: Promise.resolve(), cancel: vi.fn() }));
+  const pageCleanup = vi.fn(() => true);
   const getPage = vi.fn(async () => ({
     getViewport: ({ scale }: { scale: number }) => ({
       width: 400 * (scale / 1.5),
@@ -17,17 +23,28 @@ const mocks = vi.hoisted(() => {
     }),
     rotate: 0,
     render: renderMock,
+    cleanup: pageCleanup,
     getTextContent: async () => ({ items: [] }),
   }));
   const doc = { numPages: 2, cleanup: vi.fn(), getPage };
   const getDocument = vi.fn(() => ({ promise: Promise.resolve(doc) }));
-  return { renderMock, getPage, doc, getDocument };
+  return { desktop, printDocument, renderMock, pageCleanup, getPage, doc, getDocument };
 });
 
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: { workerSrc: "" },
   Util: { transform: vi.fn() },
   getDocument: mocks.getDocument,
+}));
+
+vi.mock("../../lib/desktopShell", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/desktopShell")>()),
+  isDesktopShell: () => mocks.desktop.on,
+}));
+
+vi.mock("./printDocument", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./printDocument")>()),
+  printDocument: mocks.printDocument,
 }));
 
 vi.mock("../../api/client", () => ({
@@ -299,5 +316,122 @@ describe("PdfViewer print & download", () => {
     const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
     expect((view.getByLabelText("Print") as HTMLButtonElement).disabled).toBe(true);
     expect((view.getByLabelText("Download") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// Desktop shell: WKWebView ignores iframe print(), so pages are rasterized and
+// handed to printDocument as one HTML document instead of a hidden iframe.
+describe("PdfViewer print on the desktop shell", () => {
+  beforeEach(() => {
+    mocks.desktop.on = true;
+  });
+  afterEach(() => {
+    mocks.desktop.on = false;
+    mocks.doc.numPages = 2;
+  });
+
+  it("rasterizes each page at print scale, releases it, and passes one HTML document to printDocument", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    await waitFor(() => expect(mocks.printDocument).toHaveBeenCalledTimes(1));
+
+    const html = mocks.printDocument.mock.calls[0][0];
+    expect(html).toContain("<title>doc.pdf</title>");
+    expect(html.match(/<img /g)).toHaveLength(2);
+    expect(toDataURL).toHaveBeenCalledWith("image/jpeg", 0.85);
+    expect(mocks.renderMock.mock.calls.filter(([args]) => args.viewport.scale === 2)).toHaveLength(2);
+    expect(mocks.pageCleanup).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("iframe")).toBeNull();
+    toDataURL.mockRestore();
+  });
+
+  it("disables Print and shows Printing… until printDocument settles", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    let release: () => void = () => {};
+    mocks.printDocument.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    await waitFor(() => expect(mocks.printDocument).toHaveBeenCalledTimes(1));
+    const busy = view.getByLabelText("Print");
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveTextContent("Printing…");
+
+    await act(async () => release());
+    await waitFor(() => expect(view.getByLabelText("Print")).toBeEnabled());
+    expect(view.getByLabelText("Print")).toHaveTextContent(/^Print$/);
+    toDataURL.mockRestore();
+  });
+
+  it("logs and shows a transient failure on Print without clearing the loaded pages", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    mocks.printDocument.mockRejectedValueOnce(new Error("print: document is 9 bytes, over the limit"));
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    const failed = await view.findByRole("button", { name: "Print failed" });
+    expect(failed).toHaveAttribute("title", "Print failed: print: document is 9 bytes, over the limit");
+    expect(view.queryByText(/PDF failed/)).toBeNull();
+    expect(view.container.querySelectorAll("canvas").length).toBe(2);
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining("pdf print"),
+      { file: "doc.pdf" },
+      expect.objectContaining({ message: "print: document is 9 bytes, over the limit" }),
+    );
+    logError.mockRestore();
+    toDataURL.mockRestore();
+  });
+
+  it("clears the failed indicator after 2.5 s", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    mocks.printDocument.mockRejectedValueOnce(new Error("print: nope"));
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    await view.findByRole("button", { name: "Print failed" });
+    await waitFor(() => expect(view.getByLabelText("Print")).toBeTruthy(), { timeout: 4000 });
+    logError.mockRestore();
+    toDataURL.mockRestore();
+  });
+
+  it("refuses a document over the page limit before rasterizing any page", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+    mocks.doc.numPages = 51; // one over PDF_PRINT_DESKTOP_MAX_PAGES (50)
+
+    fireEvent.click(view.getByLabelText("Print"));
+    const failed = await view.findByRole("button", { name: "Print failed" });
+    expect(failed).toHaveAttribute("title", "Print failed: print: doc.pdf has 51 pages, over the 50-page desktop print limit");
+    expect(toDataURL).not.toHaveBeenCalled();
+    expect(mocks.printDocument).not.toHaveBeenCalled();
+    expect(view.container.querySelectorAll("canvas").length).toBe(2);
+    expect(logError).toHaveBeenCalled();
+    logError.mockRestore();
+    toDataURL.mockRestore();
+  });
+
+  it("abandons the print quietly when the viewer unmounts mid-print", async () => {
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/jpeg;base64,AAAA");
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = renderView(<PdfViewer path="doc.pdf" page={1} onPageChange={() => {}} />);
+    await waitFor(() => expect(view.container.querySelectorAll("canvas").length).toBe(2));
+
+    fireEvent.click(view.getByLabelText("Print"));
+    view.unmount();
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 20)));
+    expect(mocks.printDocument).not.toHaveBeenCalled();
+    expect(logError).not.toHaveBeenCalled();
+    logError.mockRestore();
+    toDataURL.mockRestore();
   });
 });

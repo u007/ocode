@@ -24,6 +24,7 @@ import {
   univerCellStyle,
   DEFAULT_THEME_PALETTE,
 } from "./xlsxStyle";
+import { isDelimitedTextPath } from "../../lib/previewKind";
 
 /**
  * Converts parsed spreadsheets into Univer `IWorkbookData`. No Univer runtime
@@ -388,4 +389,39 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
     colCapped: totalCols > MAX_COLS,
     body: { rowCount, columnCount, cellData, rowData: {}, columnData, mergeData: [] },
   };
+}
+
+/**
+ * Converts a CSV/TSV document already decoded to a string (the split-view
+ * editor's live text). SheetJS handles both delimiters.
+ */
+export function workbookFromDelimitedText(text: string): ConvertedWorkbook {
+  assertWithinFileLimit(new TextEncoder().encode(text).byteLength);
+  return workbookFromSheetJs(XLSX.read(text, { type: "string", sheetRows: SHEETJS_READ_ROWS }), true);
+}
+
+const OOXML_WORKBOOK = /\.(xlsx|xlsm)$/i;
+
+/**
+ * Converts a spreadsheet file's bytes by extension: `.xlsx`/`.xlsm` through
+ * ExcelJS (formatting kept), CSV/TSV decoded as UTF-8 first, anything else
+ * (legacy `.xls`) through SheetJS.
+ */
+export async function workbookFromFileBytes(path: string, buf: ArrayBuffer): Promise<ConvertedWorkbook> {
+  // Refused before any parser runs: ExcelJS and SheetJS hold the whole file.
+  assertWithinFileLimit(buf.byteLength);
+  // Delimited text has no binary magic, so it must be decoded as UTF-8
+  // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
+  // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
+  if (isDelimitedTextPath(path)) {
+    return workbookFromSheetJs(XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: SHEETJS_READ_ROWS }), true);
+  }
+  if (OOXML_WORKBOOK.test(path)) {
+    // Dynamic so ExcelJS stays out of the main bundle.
+    const { Workbook: ExcelWorkbook } = await import("exceljs");
+    const wb = new ExcelWorkbook();
+    await wb.xlsx.load(buf);
+    return workbookFromExcelJs(wb);
+  }
+  return workbookFromSheetJs(XLSX.read(buf, { type: "array", sheetRows: SHEETJS_READ_ROWS }), false);
 }

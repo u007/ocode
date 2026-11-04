@@ -5,7 +5,6 @@ import PreviewSurface from "./PreviewSurface";
 import { PreviewWidthMenu } from "./PreviewWidthMenu";
 import { previewKindForPath, type PreviewKind, type PreviewOpenRequest } from "../../lib/previewKind";
 import { resolveAgainstRoot } from "../../lib/outOfProjectFiles";
-import { api } from "../../api/client";
 import { PrintPreviewButton } from "./PrintPreviewButton";
 import { OutsideRootGrantPrompt, type GrantAnchor } from "./OutsideRootGrantPrompt";
 import { isOutsideProjectRoot } from "./outsideRootAccess";
@@ -145,7 +144,7 @@ function PreviewTabPage({
               iconOnly
               kind={selected.kind}
               title={selected.path.split("/").pop() || selected.path}
-              load={async () => (await api.getFileContent(selected.path, selected.projectRoot, selected.projectHost)).content}
+              source={{ origin: "disk", path: selected.path, projectRoot: selected.projectRoot, projectHost: selected.projectHost }}
               className="shrink-0 rounded border border-border bg-background p-1.5 hover:bg-muted transition-colors"
             />
           )}

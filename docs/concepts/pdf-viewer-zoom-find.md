@@ -2,7 +2,7 @@
 type: Concept
 title: PDF viewer zoom, Space navigation, and find
 description: "PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find (rendered through the shared preview FindBar) with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas."
-resource: web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/lib/previewViewState.ts
+resource: web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/components/Preview/printDocument.ts; web/src/lib/previewViewState.ts
 tags:
   - web
   - pdf
@@ -14,13 +14,13 @@ tags:
   - jsdom
   - persistence
   - project-switch
-timestamp: 2026-11-03T05:46:54Z
+timestamp: 2026-11-04T07:46:00Z
 ---
 # PDF viewer zoom, Space navigation, and find
 
 **Type:** Concept
 **Description:** PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find (rendered through the shared preview FindBar) with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
-**Resource:** web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/lib/previewViewState.ts; web/src/components/Preview/sidebarPreviewState.ts
+**Resource:** web/src/components/Preview/PdfViewer.tsx; web/src/components/Preview/usePdfFind.ts; web/src/components/Preview/FindBar.tsx; web/src/components/Preview/printDocument.ts; web/src/lib/previewViewState.ts; web/src/components/Preview/sidebarPreviewState.ts
 **Tags:**
   - web
   - pdf
@@ -62,16 +62,16 @@ Holding Space turns the plain wheel into **zoom-at-cursor** (same anchor math as
 | Prev/next page | — | ArrowLeft / ArrowRight (pre-existing) | |
 
 The **Find** toolbar button is the shared `"Find in document"` control
-(`PdfViewer.tsx:1024`), not a PDF-only widget.
+(`PdfViewer.tsx:1112`), not a PDF-only widget.
 
 Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale: PAGE_SCALE, rotation: (pg.rotate + rot) % 360})` and re-renders the visible window (unrenders all pages first).
 
 ## Find (`usePdfFind.ts`) — PDF engine behind the shared FindBar
 
-- **The bar is the shared `FindBar`, not a PDF-specific one.** `PdfViewer` renders the same component the Markdown, Word and HTML previews use (`PdfViewer.tsx:1027`) and imports `isEditableTarget` from `findDom.ts` (`PdfViewer.tsx:9`). Labels, key handling and the highlight palette are documented once in [preview-find.md](preview-find.md).
+- **The bar is the shared `FindBar`, not a PDF-specific one.** `PdfViewer` renders the same component the Markdown, Word and HTML previews use (`PdfViewer.tsx:1115`) and imports `isEditableTarget` from `findDom.ts` (`PdfViewer.tsx:10`). Labels, key handling and the highlight palette are documented once in [preview-find.md](preview-find.md).
 - **`usePdfFind` is the PDF-ONLY engine** (`usePdfFind.ts:29`): pdf.js text items are not DOM text, so a PDF cannot use the DOM engine (`useDomFind`) that serves Markdown/Word.
 - **Index**: per-page text index built once per document from the SAME `getTextContent()` items joined with single spaces that the DOM text-layer spans use (viewer appends `" "` text nodes between item spans) — match character offsets map 1:1 onto DOM spans.
-- **Search**: regex over ALL pages (not just rendered). Toggles: Aa (case-sensitive), ab (whole-word `\b(?:escaped)\b`). Counter n/total; Enter/Shift+Enter, F3/Shift+F3 walk with wrap; Esc closes. Ctrl/⌘F is claimed only by the **visible** viewer: the window keydown effect returns early unless the `active` prop is set (`PdfViewer.tsx:818`), so N mounted-but-hidden PDF panes cannot all flip `find.active` or race on F3. (The DOM viewers use `previewWantsFindShortcut` instead — see preview-find.md.)
+- **Search**: regex over ALL pages (not just rendered). Toggles: Aa (case-sensitive), ab (whole-word `\b(?:escaped)\b`). Counter n/total; Enter/Shift+Enter, F3/Shift+F3 walk with wrap; Esc closes. Ctrl/⌘F is claimed only by the **visible** viewer: the window keydown effect returns early unless the `active` prop is set (`PdfViewer.tsx:896`), so N mounted-but-hidden PDF panes cannot all flip `find.active` or race on F3. (The DOM viewers use `previewWantsFindShortcut` instead — see preview-find.md.)
 - **Highlights**: DOM Range over live text-layer spans → `getClientRects()` → page-relative overlay divs over each page (yellow = all matches, orange = current), recomputed on renderTick bumps. The colours are deliberately identical to `FindHighlights.tsx` so find looks the same on every surface. Current match scrolls to ~⅓ viewport height; if its page isn't rendered, falls back to scrolling to the page via `onPageChange`.
 - **Hook guards**: `Range.getClientRects` wrapped in try/catch + optional call (jsdom lacks it); search runs use `runRef` generation so stale async runs can't commit (`usePdfFind.ts:48`); index cached per document object (identity check); `docVersion` bump on new document resets all find state.
 - **State is per-mount, not persisted**: `previewViewState.ts` stores only `page`/`zoom`/`scrollTop`, so an active search survives a close/reopen within the mount but not a remount.
@@ -80,9 +80,10 @@ Rotation: 90° steps; re-measures every page's base dims via `getViewport({scale
 
 - Both reuse an independent `blobRef` Blob snapshot of the PDF bytes taken at load — pdf.js may transfer (detach) the ArrayBuffer handed to `getDocument`, so always snapshot `new Blob([buf.slice(0)])` BEFORE calling `getDocument`; reset `blobRef.current = null` in the load effect's cleanup.
 - **Download**: `saveBlobAsFile(blob, basename)` (`web/src/lib/saveBlob.ts`; the basename appends `.pdf` if missing). In a browser that is an object URL on a temp anchor, revoked after 10s (Safari navigates to `about:blank` if revoked synchronously). In the desktop app the bytes go to the shell over the `ocode:save-file:` bridge message and the native save panel opens (`cmd/ocode-desktop/save_file.go`), because WKWebView drops blob `<a download>` clicks without any error. The desktop save is unverified live; see `TODO.md`.
-- **Print**: `printPdf` (`PdfViewer.tsx`) makes an object URL from the blob and loads it in a hidden 1px iframe. On `load` it waits 500 ms (`PDF_PRINT_SETTLE_MS`) for the PDF viewer to render, then calls `contentWindow.print()`, so the browser's PDF engine opens the print dialog. If `print()` throws, it logs the error with `console.error` (what was attempted, the file name, and the error) and opens the URL in a popup tab. A 30 s watchdog (`PDF_PRINT_LOAD_TIMEOUT_MS`, also wired to `onerror`) opens a popup tab only if the frame's `onload` never fired (the `loaded` flag), and falls back to `downloadPdf` if the popup is blocked; the object URL is revoked on the 10 min timer (`PDF_PRINT_CLEANUP_MS`) on either branch. A successful print therefore opens no popup tab. The frame and URL are cleaned up on the iframe's `afterprint` event, with a 10 min safety timer (`PDF_PRINT_CLEANUP_MS`) if it never fires.
-  - Desktop PDF print inside the WKWebView blob frame is unverified live; see `TODO.md`.
-- Buttons in the toolbar next to Find: Print, Download (disabled until `total > 0`).
+- **Print** (`printPdf`, `PdfViewer.tsx`) branches on `isDesktopShell()` (`web/src/lib/desktopShell.ts`):
+  - **Desktop shell**: `printPdfDesktop` renders every page through pdf.js onto an offscreen canvas at `PDF_PRINT_SCALE` (2, 144 dpi), never the on-screen canvases, at the page's own rotation. Each canvas is encoded as `image/jpeg` at quality 0.85 (`PDF_PRINT_JPEG_QUALITY`), released with `width = height = 0` in a `finally`, and the pages go into one `<main>` of `<img>` elements (`PDF_PRINT_CSS`: one page per sheet, no margins) inside `documentShell` (`printDocument.ts`). That document goes to `printDocument` (same file), which opens the shell's native print window. The 8 MiB bridge cap (`MAX_PRINT_DOCUMENT_BYTES`, `web/src/lib/wails.ts`) is checked only after every page is rendered, so a long PDF pays the full render before it is refused. At scale 2 each JPEG is about 1.8x the size it was at 1.5, so the cap is reached sooner; the refusal surfaces through the failed state below. More than `PDF_PRINT_DESKTOP_MAX_PAGES` (50) pages throws before any rendering, and a print is never truncated. Each offscreen page is released with `pg.cleanup()` in a `finally`. A failure at any step is logged with `console.error` ("pdf print: rendering pages for the desktop print window failed", the file name, and the error). It does not touch the viewer's error line: the Print button goes to a transient `failed` state, shows a `TriangleAlert` icon with the reason as its title, and resets to idle after `PDF_PRINT_FAILED_RESET_MS` (2500 ms). The viewer stays mounted. While rendering, the button reads `Printing…` and is disabled. If the document is replaced or the viewer unmounts mid-print (`docRef` no longer holds it), the print is abandoned with a `console.warn` and no failure state. Unverified live; see `TODO.md`.
+  - **Browser**: makes an object URL from the blob and loads it in a hidden 1px iframe. On `load` it waits 500 ms (`PDF_PRINT_SETTLE_MS`) for the PDF viewer to render, then calls `contentWindow.print()`, so the browser's PDF engine opens the print dialog. If `print()` throws, it logs the error with `console.error` (what was attempted, the file name, and the error) and opens the URL in a popup tab. A 30 s watchdog (`PDF_PRINT_LOAD_TIMEOUT_MS`, also wired to `onerror`) opens a popup tab only if the frame's `onload` never fired (the `loaded` flag), and falls back to `downloadPdf` if the popup is blocked; the object URL is revoked on the 10 min timer (`PDF_PRINT_CLEANUP_MS`) on either branch. A successful print therefore opens no popup tab. The frame and URL are cleaned up on the iframe's `afterprint` event, with a 10 min safety timer (`PDF_PRINT_CLEANUP_MS`) if it never fires.
+- Buttons in the toolbar next to Find: Print (disabled until `total > 0` and while a desktop print is `busy`), Download (disabled until `total > 0`).
 
 ## View-state persistence (2026-09-20)
 
@@ -110,7 +111,7 @@ localStorage `ocode.ui.sidebarPreview.v1`, keyed `host::root`. Shape `{surface, 
 3. **CSS-escaped class names are invalid selectors**: `.bg-yellow-300/45` is NOT valid for `querySelectorAll` — match by `[aria-hidden="true"]` + `className.includes` instead.
 4. **`getByLabelText` must come from the render result object**, not `container`.
 5. **`vi.mock` of `pdfjs-dist` must implement `Util.transform` as a real matrix product** when the viewer builds text spans — `vi.fn()` returning undefined causes a `tx[4]` crash.
-6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). Print assertions check the hidden iframe's `src`. The object URL is revoked on `afterprint` or a 10 min timer, so use fake timers to observe the revoke.
+6. **No `URL.createObjectURL` in jsdom**: install fakes on `URL` and restore natively (don't `vi.spyOn` — it throws "does not exist"). Print assertions check the hidden iframe's `src`. The object URL is revoked on `afterprint` or a 10 min timer, so use fake timers to observe the revoke. `HTMLCanvasElement.prototype.toDataURL` is also unimplemented in jsdom, so the desktop-print tests stub it with `vi.spyOn(...).mockReturnValue("data:image/jpeg;base64,…")`.
 
 ### Test hygiene
 

@@ -37,6 +37,20 @@ export type PreviewKind =
   | "sqlite"
   | "text";
 
+/**
+ * Image extensions and the MIME type each is printed and previewed as. This is
+ * the single source: `previewKindForPath` resolves these to "image" and
+ * `imageMimeForPath` reads the MIME type from here.
+ */
+export const IMAGE_MIME_BY_EXT: ReadonlyMap<string, string> = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".svg", "image/svg+xml"],
+]);
+
 const kindByExt: Record<string, PreviewKind> = {
   ".pdf": "pdf",
   ".docx": "docx",
@@ -46,12 +60,6 @@ const kindByExt: Record<string, PreviewKind> = {
   ".xls": "excel",
   ".csv": "excel",
   ".tsv": "excel",
-  ".png": "image",
-  ".jpg": "image",
-  ".jpeg": "image",
-  ".gif": "image",
-  ".webp": "image",
-  ".svg": "image",
   // Audio/video: browser-playable containers only (mirrors
   // HandleFileRaw.previewRawTypes / preview_open's previewOpenKinds; .mkv
   // and .avi stay out — no reliable renderer).
@@ -163,6 +171,7 @@ export function previewKindForPath(path: string): PreviewKind | null {
   const ext = extensionOf(path);
   const kind = kindByExt[ext];
   if (kind) return kind;
+  if (IMAGE_MIME_BY_EXT.has(ext)) return "image";
   if (NON_PREVIEWABLE_EXTS.has(ext)) return null;
   return "text";
 }
@@ -220,6 +229,11 @@ export function splitPreviewKindForPath(path: string): PreviewKind | null {
   if (ext === ".mmd") return "mermaid";
   if (ext === ".json") return "json";
   return null;
+}
+
+/** MIME type of an image file by extension, or null for anything else. */
+export function imageMimeForPath(path: string): string | null {
+  return IMAGE_MIME_BY_EXT.get(extensionOf(path)) ?? null;
 }
 
 /**
