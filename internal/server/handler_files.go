@@ -132,21 +132,26 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	if node.Children == nil {
 		node.Children = []FileNode{}
 	}
-	// Annotate with git status badges (M/?/A/D/R) when this is a repo.
-	if m := gitStatusMapForDir(r.Context(), anchor); len(m) > 0 {
-		annotateFileTreeGitStatus(&node, anchor, m)
-	}
-	// Use git itself so worktrees and non-standard layouts are recognised,
-	// not just a literal ".git" directory entry.
-	// rev-parse never takes an optional lock, so the bounded helper's
-	// gitexec.Env() is inert here; the deadline is what matters.
+	// Probe once. Use git itself so worktrees and non-standard layouts are
+	// recognised, not just a literal ".git" directory entry. rev-parse never
+	// takes an optional lock, so the bounded helper's gitexec.Env() is inert
+	// here; the deadline is what matters.
 	out, err := gitRunInDirTimeout(r.Context(), anchor, "rev-parse", "--is-inside-work-tree")
 	isGitRepo := err == nil && out == "true"
+	var exitErr *exec.ExitError
 	if errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("file tree: git repo probe timed out", "dir", anchor, "bound", worktreeGitTimeout, "err", err)
+	} else if err != nil && !errors.As(err, &exitErr) {
+		logGitStatusProbeError(anchor, "rev-parse --is-inside-work-tree", err)
 	}
 	// intentionally not logged: rev-parse exits non-zero outside a work tree,
 	// which is the normal non-repo answer, and a client disconnect is benign.
+	// Annotate with git status badges (M/?/A/D/R) only when this is a repo.
+	if isGitRepo {
+		if m := gitStatusMapForDir(r.Context(), anchor); len(m) > 0 {
+			annotateFileTreeGitStatus(&node, anchor, m)
+		}
+	}
 	writeJSON(w, http.StatusOK, FileTreeResponse{
 		Children:  node.Children,
 		Truncated: walk.truncated,
@@ -168,25 +173,13 @@ type FileTreeResponse struct {
 
 // gitStatusMapForDir runs `git status --short` in dir and returns a map
 // of relative path -> badge (M/?/A/D/R), mirroring the TUI's
-// parseGitStatusShort. Returns nil for non-repos or on error. Uses git
-// plumbing so worktrees (where .git is a file) are handled. Both git calls
-// run under the worktreeGitTimeout deadline and ctx (the request), with
-// gitexec.Env() so the badge probe never takes .git/index.lock.
+// parseGitStatusShort. dir must already be a work tree: the caller probes
+// that once, so this does not run rev-parse. Returns nil when there are no
+// changes or on error (logged). Uses git plumbing so worktrees (where .git is
+// a file) are handled. The status run uses the worktreeGitTimeout deadline and
+// ctx (the request), with gitexec.Env() so the badge probe never takes
+// .git/index.lock.
 func gitStatusMapForDir(ctx context.Context, dir string) map[string]string {
-	const revParse = "rev-parse --is-inside-work-tree"
-	inside, err := gitRunInDirTimeout(ctx, dir, "rev-parse", "--is-inside-work-tree")
-	if err != nil {
-		// A non-zero exit is git's normal answer outside a work tree, so it is
-		// not logged. Anything else (deadline, missing git, client gone) is.
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			logGitStatusProbeError(dir, revParse, err)
-		}
-		return nil
-	}
-	if inside != "true" {
-		return nil
-	}
 	// Raw, not trimmed: the first status line can start with the space of an
 	// unstaged change (" M a.txt"), which the parser below depends on.
 	out, err := gitRunInDirTimeoutRaw(ctx, dir, "-c", "core.quotepath=false", "status", "--short")
