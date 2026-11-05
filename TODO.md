@@ -1,10 +1,22 @@
 # TODO
 
+## Open: review follow-ups round 2 (2026-11-05)
+
+- **Univer: throw and cancel leak the in-flight counter.** `univerMount.ts` `commandDepth` only decrements on `CommandExecuted`. Univer's `CommandService` emits nothing when a handler throws, when a command is cancelled, or when a before-listener cancels. Mutations then count as in flight and can mark the tab dirty spuriously. Needs a different completion signal (for example an undo-stack or command-error event). Not implemented.
+- **Univer: Undo and Redo are filtered out.** They are `COMMAND` type and are excluded from both events, so their mutations run at depth 0 and do not mark the tab dirty. Undoing back to the saved state can leave the tab looking clean while content differs from disk.
+- **Univer loader drops types, formulas and number formats (data loss on save).** `univerData.ts` `excelJsCell` keeps display strings only. On save, numbers, dates, booleans and formulas are written back as text, and formulas are lost. `univerSerialize.test.ts` pins this as KNOWN LOSS assertions; flip them when the loader keeps raw `v`, `t`, `f` and `numFmt`. Decision needed first: block or warn on save for workbooks with formulas until then.
+- **Remote fsync missing.** `remoteWriteFileAtomic` (`handler_remote_files.go`) and the remote `.gitignore` write have no fsync before rename. Busybox and macOS remotes may reject `sync -f`, so probe support before adding it. The local raw save now fsyncs the temp file; no directory fsync after rename on either side.
+- **Remote text save not routed through the atomic helper (decision).** `handler_remote_files.go` text save uses `cat >`, which follows symlinks. `mv -f` would replace a symlink with a regular file, and the local path refuses symlinks via `O_NOFOLLOW`. Pick the behaviour, then route it.
+- **Remote `.gitignore` is still non-atomic (decision).** It preserves existing content now (fixed), but the write is `cat >`. Routing it through the helper would create a new file as 0600, while the local path creates 0644 (`handler_git_ignore.go` ~line 96). Needs a mode decision.
+- **Undetermined writer of `tools.task = "ask"`.** No `internal/tui` test writes that rule; the leak is from another package or a live trace. The package config dir is `XDG_CONFIG_HOME=tmp` in `internal/tui/testmain_test.go` (~line 44), not `tmp/.config`, which splits the darwin and Linux paths CLAUDE.md warns about. Fixing that means editing `testmain_test.go`.
+- **Unverified review items (not checked):** `internal/session/sqlitestore.go:749` accepts an answer to a dismissed question; check it against `docs/concepts/question-dismiss-reopen-answer.md` before treating it as a bug. `internal/browse/capture.js`: wrapped records expire only on `endWrapped`, and the response tee may buffer past the cap.
+- **Stale comment:** `univerMount.ts` `mountUniverSheet` doc says the sheet bar is shown; `footer: false` hides it.
+
 ## Open: TUI permission tests leak rules through the shared global config (2026-11-05)
 
 - **Fixed for one test.** `TestNestedSubagentPermissionPromptSurfacesToMainTUI` (`internal/tui/model_test.go`) now isolates HOME and XDG with `setVoiceHomeTree` plus `chdirTempForConfigTest`. Before, it failed intermittently with a 15 s keep-alive, because `refreshFileRules` (`internal/agent/permission_filerules.go`) layers the process-wide global `ocodeconfig.json` over every manager and that file held `permissions.tools.task = "ask"` from an earlier test.
 - **Still open: the writer.** The package-wide HOME (`internal/tui/testmain_test.go`) gets a full rule table persisted by some earlier test. Not identified. Find it with a `permissions.tools.task` check on the file after each test.
-- **Still open: bare HOME overrides.** `TestAlwaysAllowConfirmationDefersPersist` (`model_test.go`) and `TestSandboxPersistsAsDefault` (`sandbox_mode_test.go`) use `t.Setenv("HOME", …)` only. On Linux the XDG variables still point at the package-wide home, so their writes reach other tests. Switch them to `setVoiceHomeTree`.
+- ~~**Still open: bare HOME overrides.**~~ DONE (2026-11-05): `TestAlwaysAllowConfirmationDefersPersist` and `TestSandboxPersistsAsDefault` now use `setVoiceHomeTree` plus `chdirTempForConfigTest`.
 
 ## Open: print gaps for binary previews (2026-11-04)
 
