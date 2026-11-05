@@ -45,6 +45,7 @@ vi.mock("./terminalAlertSound", () => ({ playAlertSound: vi.fn() }));
 vi.mock("./terminalFocus", () => ({
   registerTerminalFocus: vi.fn(),
   unregisterTerminalFocus: vi.fn(),
+  focusTerminalInput: vi.fn(),
 }));
 vi.mock("./terminalPersistence", () => ({
   loadProjectTerminals: () => ({ terminals: [{ id: "t1", title: "Terminal 1" }], activeId: "t1" }),

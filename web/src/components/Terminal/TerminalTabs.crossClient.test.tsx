@@ -92,6 +92,7 @@ vi.mock("./terminalAlertSound", () => ({ playAlertSound: vi.fn() }));
 vi.mock("./terminalFocus", () => ({
   registerTerminalFocus: vi.fn(),
   unregisterTerminalFocus: vi.fn(),
+  focusTerminalInput: vi.fn(),
   focusTerminalById: vi.fn(),
 }));
 vi.mock("@/lib/debug/terminalRegistry", () => ({

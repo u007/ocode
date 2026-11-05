@@ -76,6 +76,14 @@ export interface PreviewSurfaceProps {
    *  polarity-aware viewers (markdown prose, mermaid) follow it. Omitted by the
    *  sidebar/Preview-tab hosts so they keep inheriting the app theme. */
   appearance?: EditorAppearance;
+  /** Editable .xlsx (Files-tab preview-only branch): dirty notifications. */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** Editable .xlsx (Files-tab preview-only branch): exposed save handler. */
+  onSaveRef?: { current: (() => Promise<boolean>) | null };
+  /** Editable .xlsx (Files-tab preview-only branch): fired when the save handler
+   *  is registered, so the host can pick up the ref value (ref writes don't
+   *  trigger re-renders). */
+  onSaveHandlerRegistered?: () => void;
 }
 
 export default function PreviewSurface({
@@ -93,6 +101,9 @@ export default function PreviewSurface({
   revision,
   followTail,
   appearance,
+  onDirtyChange,
+  onSaveRef,
+  onSaveHandlerRegistered,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -103,7 +114,7 @@ export default function PreviewSurface({
         {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
-        {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
+        {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}
         {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
         {kind === "html" && <HtmlViewer content={content ?? ""} />}

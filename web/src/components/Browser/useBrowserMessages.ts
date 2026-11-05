@@ -5,6 +5,7 @@ import { isTrustedBrowseMessage } from "./browseOrigin";
 interface Handlers {
   pushConsole: (key: StateKey, ev: { level: string; text: string; ts: number }) => void;
   pushNetwork: (key: StateKey, ev: NetworkEvent) => void;
+  pushResponseBody: (key: StateKey, requestId: string, body: { body: string; base64Encoded: boolean; truncated: boolean }) => void;
   /** Local-mode page title (capture.js title observer). Display only. */
   onTitle?: (key: StateKey, title: string, url: string) => void;
   /** Local-mode scroll offset report (capture.js throttled scroll). */
@@ -33,7 +34,7 @@ export interface BrowseMessageSource {
 // tabs' origins, other frames — is dropped. "ocode:browse:nav" is a same-document
 // hint only: the receiver accepts it solely for the tab's current origin.
 export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, source: BrowseMessageSource, h: Handlers) {
-  const { pushConsole, pushNetwork, onTitle, onScroll, onNav } = h;
+  const { pushConsole, pushNetwork, pushResponseBody, onTitle, onScroll, onNav } = h;
   const { originRef, frameRef } = source;
   useEffect(() => {
     if (!browseBase) return;
@@ -51,17 +52,49 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
             ts: Number(d.ts) || Date.now(),
           });
           break;
-        case "ocode:browse:network":
+        case "ocode:browse:network": {
           // capture.js reports `duration`; the store's NetworkEvent is
           // `durationMs` — map at the boundary.
+          const requestId = String(d.requestId ?? "");
           pushNetwork(stateKey, {
-            requestId: "",
+            requestId,
             method: String(d.method),
             url: String(d.url),
             status: Number(d.status) || 0,
-            durationMs: Number(d.duration) || 0,
+            durationMs: Number(d.durationMs ?? d.duration) || 0,
             ts: Number(d.ts) || Date.now(),
+            requestHeaders: d.requestHeaders && typeof d.requestHeaders === "object" ? d.requestHeaders : undefined,
+            responseHeaders: d.responseHeaders && typeof d.responseHeaders === "object" ? d.responseHeaders : undefined,
+            postData: typeof d.postData === "string" ? d.postData : undefined,
+            contentType: typeof d.contentType === "string" ? d.contentType : undefined,
+            size: typeof d.size === "number" ? d.size : undefined,
           });
+          // Two body delivery shapes reach this boundary:
+          //  - fetch reads the response stream asynchronously, so it posts the
+          //    body LATER as an `ocode:browse:networkbody` message;
+          //  - XHR already has `responseText` synchronously at `loadend` and
+          //    carries it inline on the row.
+          // Storing the inline one here (after the row, so `retainBodies` keeps
+          // it) is what gives an XHR row its Body tab.
+          if (requestId && typeof d.responseBody === "string") {
+            pushResponseBody(stateKey, requestId, {
+              body: d.responseBody,
+              base64Encoded: false,
+              truncated: !!d.responseBodyTruncated,
+            });
+          }
+          break;
+        }
+        case "ocode:browse:networkbody":
+          // Local-mode body, posted after its network row (same requestId). It
+          // is a separate message so it never creates a second row.
+          if (typeof d.responseBody === "string" && d.requestId) {
+            pushResponseBody(stateKey, String(d.requestId), {
+              body: d.responseBody,
+              base64Encoded: false,
+              truncated: !!d.responseBodyTruncated,
+            });
+          }
           break;
         case "ocode:browse:title":
           // Display-only page title (initial + JS-driven changes). The
@@ -87,5 +120,5 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, onTitle, onScroll, onNav]);
+  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, pushResponseBody, onTitle, onScroll, onNav]);
 }

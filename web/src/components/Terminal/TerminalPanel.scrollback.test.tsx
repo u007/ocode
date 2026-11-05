@@ -41,6 +41,7 @@ vi.mock("./terminalSerialize", () => ({ serializeTerminalBuffer: () => h.seriali
 vi.mock("./terminalFocus", () => ({
   registerTerminalFocus: vi.fn(),
   unregisterTerminalFocus: vi.fn(),
+  focusTerminalInput: vi.fn(),
 }));
 vi.mock("./terminalPersistence", () => ({
   loadTerminalBuffer: () => null,

@@ -43,7 +43,8 @@ vi.mock("@/api/client", () => ({
   isRemoteSession: () => false,
 }));
 vi.mock("./terminalAlertSound", () => ({ playAlertSound: vi.fn() }));
-vi.mock("./terminalFocus", () => ({
+vi.mock("./terminalFocus", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./terminalFocus")>()),
   registerTerminalFocus: vi.fn(),
   unregisterTerminalFocus: vi.fn(),
 }));
@@ -343,5 +344,32 @@ describe("soft-keyboard Backspace in the terminal", () => {
     const { event } = fireKeyDown(term.textarea!, { key: "Backspace", code: "Backspace", keyCode: 8 });
     expect(socket.send).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+describe("terminal focus on a phone", () => {
+  it("focuses the hidden textarea, not the contenteditable host, when the tab becomes active", async () => {
+    const panel = (active: boolean) => (
+      <TerminalProvider>
+        <TerminalPanel
+          active={active}
+          id="t1"
+          projectPath="/proj"
+          scrollbackLines={1000}
+          fontFamily="mono"
+          fontSize={12}
+          keybinds={[]}
+        />
+      </TerminalProvider>
+    );
+    const { rerender } = render(panel(false));
+    await waitFor(() => expect(FakeTerminal.instances.length).toBe(1));
+    const term = FakeTerminal.instances[0];
+    await act(async () => {
+      rerender(panel(true));
+    });
+    // A soft keyboard types into whatever is focused; only the textarea's beforeinput reaches the pty.
+    expect(document.activeElement).toBe(term.textarea);
+    expect(document.activeElement).not.toBe(term.element);
   });
 });

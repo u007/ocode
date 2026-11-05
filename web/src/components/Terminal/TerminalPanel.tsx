@@ -50,7 +50,7 @@ import { registerTerminal, unregisterTerminal } from "@/lib/debug/terminalRegist
 import { playAlertSound } from "./terminalAlertSound";
 import { onWake } from "@/lib/wakeSignal";
 import { useTerminalState } from "../../stores/terminalStore";
-import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
+import { focusTerminalInput, registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
 import { requestSpeech } from "../Speech/SpeechProvider";
 import { sanitizeSpeechText } from "../Speech/speechUtils";
 import { writeDesktopClipboard } from "@/lib/wails";
@@ -607,7 +607,7 @@ export default function TerminalPanel({
     // by the shell, and this text is model output, not something the user typed.
     inputGuard.noteInput();
     term.paste(text.replace(/\s*[\u0000-\u001f\u007f]+\s*/g, " ").trim());
-    term.focus();
+    focusTerminalInput(term);
   }, [inputGuard]);
   const voice = useTerminalVoice(insertVoiceTranscript);
 
@@ -729,7 +729,7 @@ export default function TerminalPanel({
     } catch {
       // Clipboard read requires a secure context / permission; hint the user.
       // As a fallback we focus the terminal so Ctrl+V / Cmd+V still works.
-      termRef.current?.focus();
+      if (termRef.current) focusTerminalInput(termRef.current);
     }
     setCtxMenu(null);
   }, []);
@@ -809,7 +809,7 @@ export default function TerminalPanel({
     setFindOpen(false);
     searchRef.current?.clear();
     setFindResult({ count: 0, index: -1 });
-    termRef.current?.focus();
+    if (termRef.current) focusTerminalInput(termRef.current);
   }, []);
 
   const handleFindNext = useCallback(() => {
@@ -2196,7 +2196,7 @@ export default function TerminalPanel({
         if (cancelled) return;
         cleanup = setup(ghostty);
         // The active-tab effect ran before the terminal existed.
-        if (activeRef.current) termRef.current?.focus();
+        if (activeRef.current && termRef.current) focusTerminalInput(termRef.current);
       })
       .catch((err: unknown) => {
         console.error("terminal: failed to start the ghostty-web terminal", err);
@@ -2284,7 +2284,7 @@ export default function TerminalPanel({
   useEffect(() => {
     if (active) {
       fitAndResize.current();
-      termRef.current?.focus();
+      if (termRef.current) focusTerminalInput(termRef.current);
     }
   }, [active]);
 
@@ -2292,7 +2292,7 @@ export default function TerminalPanel({
   // `active` does not change (already-active tab). The registry is keyed by
   // terminal id so UnifiedTabBar can call focus without threading refs through App.
   useEffect(() => {
-    const doFocus = () => termRef.current?.focus();
+    const doFocus = () => { if (termRef.current) focusTerminalInput(termRef.current); };
     registerTerminalFocus(id, doFocus);
     return () => unregisterTerminalFocus(id);
   }, [id]);

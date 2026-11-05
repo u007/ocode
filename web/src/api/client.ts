@@ -3655,6 +3655,37 @@ export const api = {
     return res.arrayBuffer();
   },
 
+  // ── Sidebar preview: save raw .xlsx bytes via PUT /api/files/raw (editable
+  // ExcelViewer). Body is octet-stream, never JSON. host routes to a remote
+  // project's server through the remote proxy prefix (same as fetchJSON's
+  // 3rd host arg) — NOT a ?host= query, so the proxy carries the body. A
+  // 409 (hash mismatch) throws an ApiError whose message holds the server's
+  // "changed on disk" text so the viewer can show a reload hint.
+  saveFileRaw: async (
+    path: string,
+    bytes: ArrayBuffer,
+    opts: { projectRoot?: string; expectedHash?: string; force?: boolean; host?: string } = {},
+  ): Promise<{ path: string; saved: boolean }> => {
+    const q = new URLSearchParams({ path });
+    if (opts.projectRoot) q.set("project_root", opts.projectRoot);
+    if (opts.expectedHash) q.set("expected_hash", opts.expectedHash);
+    if (opts.force) q.set("force", "1");
+    const prefixed = opts.host ? `${remoteApiBase(opts.host)}/api/files/raw?${q.toString()}` : `/api/files/raw?${q.toString()}`;
+    const res = await fetch(apiPath(prefixed), {
+      method: "PUT",
+      headers: { ...authHeaders(), "Content-Type": "application/octet-stream" },
+      body: bytes,
+    });
+    if (!res.ok) {
+      reportAuthFailure(res.status);
+      const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string; message?: string };
+      throw new ApiError(err.message || err.error || res.statusText, res.status, err);
+    }
+    const text = await res.text();
+    if (text.trim() === "") return { path, saved: true };
+    return JSON.parse(text) as { path: string; saved: boolean };
+  },
+
   // Containment probe for preview-only tabs: resolves when the server would
   // serve path to the editor (same rules as fetchFileRaw), without reading it.
   // Rejects with the server's message, e.g. "path is outside the project root".

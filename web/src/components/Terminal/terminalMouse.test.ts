@@ -30,7 +30,6 @@ function makeFake() {
     getMode: vi.fn((m: number) => modes.has(m)),
     hasMouseTracking: vi.fn(() => [9, 1000, 1002, 1003].some((m) => modes.has(m))),
     hasFocusEvents: vi.fn(() => modes.has(1004)),
-    focus: vi.fn(),
     attachCustomWheelEventHandler: vi.fn((fn?: (ev: WheelEvent) => boolean) => {
       wheelHandler = fn;
     }),
@@ -129,11 +128,12 @@ describe("attachMouseReporting presses", () => {
     attachMouseReporting(t.term, t.host);
     const below = vi.fn();
     t.canvas.addEventListener("mousedown", below);
+    const focus = vi.spyOn(t.textarea, "focus");
     const ev = mouse("mousedown", 2, 2);
     t.canvas.dispatchEvent(ev);
     expect(below).not.toHaveBeenCalled();
     expect(ev.defaultPrevented).toBe(true);
-    expect(t.fake.focus).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledTimes(1);
   });
 
   it("reports but does not stop propagation for the right button", () => {
@@ -141,12 +141,13 @@ describe("attachMouseReporting presses", () => {
     attachMouseReporting(t.term, t.host);
     const below = vi.fn();
     t.canvas.addEventListener("mousedown", below);
+    const focus = vi.spyOn(t.textarea, "focus");
     const ev = mouse("mousedown", 2, 2, { button: 2 });
     t.canvas.dispatchEvent(ev);
     expect(t.sent).toEqual(["\x1b[<2;2;2M"]);
     expect(below).toHaveBeenCalledTimes(1);
     expect(ev.defaultPrevented).toBe(false);
-    expect(t.fake.focus).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
   });
 });
 

@@ -51,6 +51,7 @@ vi.mock("./terminalAlertSound", () => ({
 vi.mock("./terminalFocus", () => ({
   registerTerminalFocus: vi.fn(),
   unregisterTerminalFocus: vi.fn(),
+  focusTerminalInput: vi.fn(),
 }));
 vi.mock("./terminalPersistence", () => ({
   // loadProjectTerminals is consumed by the store (activate / getProjectTerminals),

@@ -65,7 +65,7 @@ export function sendWheelReport(term: Reportable, rows: number, clientX: number,
 /** Installs press/release/motion/wheel/focus reporting on an opened terminal; returns the disposer. */
 export function attachMouseReporting(
   term: Reportable &
-    Pick<Terminal, "focus" | "hasFocusEvents" | "attachCustomWheelEventHandler" | "textarea">,
+    Pick<Terminal, "hasFocusEvents" | "attachCustomWheelEventHandler" | "textarea">,
   host: HTMLElement,
 ): () => void {
   const textarea = term.textarea;
@@ -90,7 +90,7 @@ export function attachMouseReporting(
       // the panel's onContextMenu, so they propagate.
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      term.focus();
+      textarea.focus();
     }
   };
 

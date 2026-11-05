@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, X } from "lucide-react";
-import type { ConsoleEvent, NetworkEvent, ResponseBody } from "../../lib/browserStore";
+import { isLocalRequestId, type ConsoleEvent, type NetworkEvent, type ResponseBody } from "../../lib/browserStore";
 import { copyTextToClipboard } from "../../lib/clipboard";
 
 export interface DevConsoleProps {
@@ -110,6 +110,10 @@ export function DevConsole(props: DevConsoleProps) {
   const [tab, setTab] = useState<"console" | "network" | "performance">("console");
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState(false);
+  const selectTab = (t: "console" | "network" | "performance") => {
+    setTab(t);
+    setOpen(true);
+  };
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [bodyTab, setBodyTab] = useState<"headers" | "body">("headers");
@@ -164,12 +168,16 @@ export function DevConsole(props: DevConsoleProps) {
     window.addEventListener("pointerup", onUp);
   }, [height]);
 
-  const toggleRow = useCallback((id: string) => {
+  const toggleRow = useCallback((id: string, requestId?: string) => {
     setExpandedRow((prev) => {
       const next = prev === id ? null : id;
-      // Request body when expanding a row that doesn't have one yet.
-      if (next && !props.responseBodies[next]) {
-        props.onRequestBody(next);
+      // Response bodies are fetched on demand ONLY for CDP events. A local-mode
+      // row carries its body inline (`local-` prefix, already in the store), and
+      // a synthetic row id (a legacy message with no requestId) has nothing to
+      // fetch — asking the CDP socket for either would be a request for a
+      // request id the backend has never seen.
+      if (next && requestId && !isLocalRequestId(requestId) && !props.responseBodies[requestId]) {
+        props.onRequestBody(requestId);
       }
       return next;
     });
@@ -214,7 +222,7 @@ export function DevConsole(props: DevConsoleProps) {
             key={t}
             role="tab"
             aria-selected={tab === t}
-            onClick={() => setTab(t)}
+            onClick={() => selectTab(t)}
             className={`px-3 py-1.5 text-[11px] transition-colors border-b-2 capitalize ${
               tab === t
                 ? "border-sky-500 text-neutral-100"
@@ -321,17 +329,21 @@ export function DevConsole(props: DevConsoleProps) {
                 netRows.map((e, i) => {
                   const id = e.requestId || `${e.ts}-${i}`;
                   const isExpanded = expandedRow === id;
-                  const hasDetails = !!(e.requestHeaders || e.responseHeaders || e.blocked || e.requestId);
+                  // Every row expands. A local-mode row always has something to
+                  // show (URL, timing and, when the page's JS could read it, the
+                  // headers/body); a row with nothing recorded still shows the
+                  // explicit "No … available" sections rather than silently
+                  // refusing the click.
                   const body: ResponseBody | undefined = props.responseBodies[e.requestId];
                   return (
                     <div key={id}>
                       <div
-                        className={`flex items-center gap-2 px-2 py-0.5 border-b border-neutral-800/50 hover:bg-neutral-800/30 ${hasDetails ? "cursor-pointer" : ""}`}
+                        className="flex items-center gap-2 px-2 py-0.5 border-b border-neutral-800/50 hover:bg-neutral-800/30 cursor-pointer"
                         onClick={() => {
                           // A drag-selection inside the row ends in a click; don't let it toggle the row.
                           const selection = window.getSelection();
                           if (selection && !selection.isCollapsed) return;
-                          if (hasDetails) toggleRow(id);
+                          toggleRow(id, e.requestId);
                         }}
                       >
                         <span className={`w-16 shrink-0 font-medium ${statusClass(e.status)}`}>
@@ -344,9 +356,7 @@ export function DevConsole(props: DevConsoleProps) {
                         )}
                         <span className="shrink-0 text-neutral-500 tabular-nums w-16 text-right">{formatDuration(e.durationMs)}</span>
                         <span className="shrink-0 text-neutral-500 tabular-nums w-14 text-right">{formatSize(e.size)}</span>
-                        {hasDetails && (
-                          <span className="shrink-0 text-neutral-600 select-none">{isExpanded ? "▾" : "▸"}</span>
-                        )}
+                        <span className="shrink-0 text-neutral-600 select-none">{isExpanded ? "▾" : "▸"}</span>
                       </div>
                       {/* Expanded detail */}
                       {isExpanded && (
@@ -442,7 +452,7 @@ export function DevConsole(props: DevConsoleProps) {
                                 )}
                                 {body == null && (
                                   <div className="text-neutral-500 italic">
-                                    {e.requestId ? "Loading body…" : "Body not available"}
+                                    {e.requestId && !isLocalRequestId(e.requestId) ? "Loading body…" : "Body not captured in local mode"}
                                   </div>
                                 )}
                               </div>

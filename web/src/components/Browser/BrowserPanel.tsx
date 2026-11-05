@@ -110,6 +110,7 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   useBrowserMessages(stateKey, base, { originRef: pageOriginRef, frameRef: iframeRef }, {
     pushConsole: actions.pushConsole,
     pushNetwork: actions.pushNetwork,
+    pushResponseBody: actions.setResponseBody,
     // Local-mode page title (capture.js observer): tab strip only, applied
     // with the stale-URL guard in setPageTitle.
     onTitle: (key, title, url) => actions.setPageTitle(key, title, url || undefined),

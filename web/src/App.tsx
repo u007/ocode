@@ -593,6 +593,9 @@ function HomeApp() {
     forceSaveEditorTab,
     reloadTabFromDisk,
     dismissExternalChange,
+    setTabDirty,
+    registerExcelSaveHandler,
+    unregisterExcelSaveHandler,
   } = useEditorTabs();
 
   // Editor tabs are global state (so switching projects preserves each
@@ -1865,6 +1868,16 @@ function HomeApp() {
                             dirty={et.isDirty}
                             onSave={() => {
                               void saveEditorTab(et.id).catch((err) => reportActionError(err, "Save file"));
+                            }}
+                            tabId={et.id}
+                            onDirtyChange={(dirty) => setTabDirty(et.id, dirty)}
+                            registerExcelSaveHandler={(tabId: string, saveFn: () => Promise<boolean>) => {
+                              const reg = registerExcelSaveHandler;
+                              reg(tabId, saveFn);
+                            }}
+                            unregisterExcelSaveHandler={(tabId: string) => {
+                              const unreg = unregisterExcelSaveHandler;
+                              unreg(tabId);
                             }}
                           />
                         </div>

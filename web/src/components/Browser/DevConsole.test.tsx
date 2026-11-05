@@ -53,11 +53,98 @@ describe("DevConsole", () => {
     expect(onClearConsole).toHaveBeenCalled();
   });
 
-  it("switches to the Network tab", () => {
+  it("switches to the Network tab and expands the collapsed panel", () => {
     render(<DevConsole {...base} />);
-    fireEvent.click(screen.getByLabelText("Expand console"));
+    expect(screen.queryByText("hello world")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: /network/i }));
     expect(screen.getByText("https://a.dev/x")).toBeInTheDocument();
+    expect(screen.getByLabelText("Collapse console")).toBeInTheDocument();
+    // Clicking the already-active tab does not collapse the panel.
+    fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+    expect(screen.getByLabelText("Collapse console")).toBeInTheDocument();
+  });
+
+  it("expands a local network row without requesting a CDP body", () => {
+    const onRequestBody = vi.fn();
+    const localEvents = [
+      { requestId: "local-1-1", method: "POST", url: "https://api.dev/collect", status: 204, durationMs: 5, ts: 1, requestHeaders: { "content-type": "application/json" }, responseHeaders: { "x-req": "1" } },
+    ];
+    render(
+      <DevConsole
+        {...base}
+        networkEvents={localEvents}
+        responseBodies={{ "local-1-1": { body: "{\"ok\":true}", base64Encoded: false, truncated: false } }}
+        onRequestBody={onRequestBody}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+    fireEvent.click(screen.getByText("https://api.dev/collect"));
+    expect(screen.getByText("Request Headers")).toBeInTheDocument();
+    expect(screen.getByText("Response Headers")).toBeInTheDocument();
+    expect(onRequestBody).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /body/i }));
+    expect(screen.getByText("{\"ok\":true}")).toBeInTheDocument();
+  });
+
+  it("keeps an expanded local row open when its body arrives later", () => {
+    // A fetch body is a SEPARATE message posted after the row. It must update
+    // the row's detail in place, never re-mount the list and collapse the row
+    // the user just opened.
+    const row = { requestId: "local-2-1", method: "POST", url: "https://api.dev/late", status: 200, durationMs: 9, ts: 2 };
+    const { rerender } = render(<DevConsole {...base} networkEvents={[row]} responseBodies={{}} />);
+    fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+    fireEvent.click(screen.getByText("https://api.dev/late"));
+    fireEvent.click(screen.getByRole("button", { name: /body/i }));
+    expect(screen.getByText("Body not captured in local mode")).toBeInTheDocument();
+
+    rerender(
+      <DevConsole
+        {...base}
+        networkEvents={[row]}
+        responseBodies={{ "local-2-1": { body: "{\"late\":true}", base64Encoded: false, truncated: false } }}
+      />,
+    );
+    // Still expanded, still on the Body sub-tab, and the body is now visible.
+    expect(screen.getByRole("button", { name: /headers/i })).toBeInTheDocument();
+    expect(screen.getByText("{\"late\":true}")).toBeInTheDocument();
+  });
+
+  it("requests a body for a CDP row that has none yet", () => {
+    const onRequestBody = vi.fn();
+    render(
+      <DevConsole
+        {...base}
+        networkEvents={[
+          { requestId: "1234.56", method: "GET", url: "https://a.dev/cdp", status: 200, durationMs: 4, ts: 9 },
+        ]}
+        responseBodies={{}}
+        onRequestBody={onRequestBody}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+    fireEvent.click(screen.getByText("https://a.dev/cdp"));
+    expect(onRequestBody).toHaveBeenCalledWith("1234.56");
+    // Collapsing the row fetches nothing.
+    fireEvent.click(screen.getByText("https://a.dev/cdp"));
+    expect(onRequestBody).toHaveBeenCalledTimes(1);
+  });
+
+  it("expands a legacy row with no requestId and never asks CDP for one", () => {
+    const onRequestBody = vi.fn();
+    render(
+      <DevConsole
+        {...base}
+        networkEvents={[{ requestId: "", method: "GET", url: "https://a.dev/legacy", status: 200, durationMs: 2, ts: 7 }]}
+        responseBodies={{}}
+        onRequestBody={onRequestBody}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+    fireEvent.click(screen.getByText("https://a.dev/legacy"));
+    expect(screen.getByText("No headers available")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /body/i }));
+    expect(screen.getByText("Body not captured in local mode")).toBeInTheDocument();
+    expect(onRequestBody).not.toHaveBeenCalled();
   });
 
   it("performance tab shows Stop + Recording indicator while recording", () => {
