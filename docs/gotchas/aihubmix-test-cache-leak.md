@@ -1,16 +1,22 @@
 ---
 type: Gotcha
 title: AIHubMix Test — Global Cache State Leakage
-description: AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
+description: RESOLVED. AIHubMix tests once leaked global live-cache state because they had no t.Cleanup snapshot/restore; the helper now snapshots and restores it. Kept as history of the cache-leak bug.
 tags:
   - aihubmix
   - test-leak
   - cache
   - global-state
   - flaky-tests
-timestamp: 2026-08-26T03:26:28Z
+timestamp: 2026-11-05T13:12:09Z
 ---
 ## AIHubMix test cache leakage
+
+**Status: resolved.** `resetAIHubMixCache(t)` now snapshots `aiHubMixLiveData` and restores it in `t.Cleanup`. The "no cleanup" text under *The problem* describes the code before that fix and is kept as history. Evidence (checked 2026-11-05):
+
+- `internal/agent/models_registry_aihubmix_test.go:11-25`: the helper takes `t`, saves `models` and `lastFetch` under the mutex (lines 13-18), clears `models`, and registers a `t.Cleanup` at lines 19-24 that writes both values back.
+- `TestProviderModelsAIHubMixMergesLive` (line 67) calls `resetAIHubMixCache(t)` at line 74, so it gets the restore.
+- The helper's signature differs from the snippet in *Fix direction* below (which shows a no-argument call with an inline snapshot). The behaviour is the same, and the helper form is the one in the code.
 
 **File:** `internal/agent/models_registry_aihubmix_test.go`
 

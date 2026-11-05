@@ -5,7 +5,7 @@ status: resolved-with-follow-ups
 tags: [session, sqlite, concurrency, persistence]
 type: Gotcha
 description: Concurrent session writers — conflict semantics and recovery (updated with 2026-11-05 dismissed-question incident)
-timestamp: 2026-11-05T12:21:06Z
+timestamp: 2026-11-05T13:12:09Z
 ---
 
 # Concurrent session writers — conflict semantics and recovery
@@ -191,7 +191,7 @@ Two coupled defects in the concurrent-writer reconcile (`internal/session/sessio
    `rebaseAppend` produced a merge whose last rows were still the raw
    rows (calls intact), but `reconcileAppendToDirWithMessages` returned
    `removeIncompleteToolRequests(merged)` — the filtered view.
-   `persistTurnTranscript` (`internal/server/agent_session.go:1759`) adopted
+   `persistTurnTranscript` (`internal/server/agent_session.go:1748`; the adoption is at `:1759`) adopted
    it as `as.messages`, erasing the trailing PERMISSION_ASK sentinel + its
    tool-call from the resident transcript. `tailIsPermissionAsk` went
    false (the next user message started a fresh turn, the orphaned call
@@ -279,7 +279,7 @@ Regression tests are in `internal/session/ask_resolve_test.go`:
 `TestRewriteAskResultAcceptsDismissedQuestion` and
 `TestRewriteAskResultRefusesPlainToolRow`.
 
-`HandleDismissQuestion` (`internal/server/handler_questions.go:140`) logs a `question dismiss` message with the fields `session`, `request_id`, `pulse` (`isPulseOrigin`, true for the in-process Pulse tool) and `remote` (`RemoteAddr`) to trace the caller. User-Agent, Referer and X-Requested-With are deliberately not logged, because a Referer can carry a URL with tokens or paths. The original dismissal of this incident was not attributed. Candidate callers are
+`HandleDismissQuestion` (`internal/server/handler_questions.go:123`; the log call is at `:140`) calls `slog.Info("question dismiss", "session", ..., "request_id", ..., "pulse", ..., "remote", ...)` to trace the caller. The repo sets no slog default, so slog's default handler writes the record through the stdlib `log` package, and `cmd/ocode-desktop` tees `log` output into `desktop.log`. The line reads `<YYYY/MM/DD> <HH:MM:SS> INFO question dismiss session=<id> request_id=<id> pulse=<true|false> remote=<addr>`. An empty value prints as `""`: `session=""` when the request omits `session_id`, and `remote=""` for a Pulse call, which has no `RemoteAddr`. `pulse` is `isPulseOrigin`, true for the in-process Pulse tool. User-Agent, Referer and X-Requested-With are deliberately not logged, because a Referer can carry a URL with tokens or paths. The original dismissal of this incident was not attributed. Candidate callers are
 the dialog's "Don't answer" button (`useChat` `cancelQuestion`, which posts to
 `/api/questions/cancel`), the Pulse tool `pulseQuestionDismissTool`
 (`internal/server/pulse_tools_write.go:569`, reached through `pulseCall` and

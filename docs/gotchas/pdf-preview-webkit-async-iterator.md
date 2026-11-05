@@ -18,7 +18,7 @@ tags:
   - feature-detection
   - typescript
   - tsgo
-timestamp: 2026-09-16T13:16:00Z
+timestamp: 2026-11-05T13:12:09Z
 ---
 # PDF preview fails on WebKit with `undefined is not a function (near '...e of t...')`
 
@@ -44,8 +44,8 @@ inside a third-party dependency — not from your own code. Two corollaries:
    silently in the desktop shell. The WebKit implementation gap is invisible at
    authoring time.
 2. **TypeScript's DOM libs (`lib.dom.asynciterable`) type
-   `ReadableStream[Symbol.asyncIterator]` as always present.** `tsgo --noEmit`
-   (or `tsc`) **cannot catch** this class of bug — the type says the method
+   `ReadableStream[Symbol.asyncIterator]` as always present.** `bun check .`
+   (the web `typecheck` script; `tsc --noEmit` is the legacy one) **cannot catch** this class of bug — the type says the method
    exists even though the engine does not implement it. **Runtime
    feature-detection is required.**
 

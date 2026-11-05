@@ -4,7 +4,7 @@ title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing
 description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
 resource: ""
 tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find]
-timestamp: 2026-11-03T15:00:00Z
+timestamp: 2026-11-05T13:12:09Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
@@ -437,7 +437,7 @@ Treat this as a **point-in-time** result, not a standing fact. A suite-status
 note captured while another file is mid-edit does not describe the committed
 tree — this section once briefly carried unrelated failures from a
 concurrently-modified hook, which were gone on a clean re-run. Re-run
-`pnpm vitest run` and `tsc --noEmit` in `web/` before repeating any
+`pnpm vitest run` and `bun check .` in `web/` before repeating any
 green/failing summary, and do not pin volatile file/test totals into the
 bundle.
 
