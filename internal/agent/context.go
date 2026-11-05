@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -255,7 +256,12 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, 
 		context += refCatalog
 	}
 	if memoryEnabled {
-		if mem := memory.PromptFragment(""); mem != "" {
+		// PromptFragment returns "" on a ResolvePaths failure without reporting
+		// it. Resolve here first so the failure is logged; the fragment is still
+		// omitted, and the load itself continues.
+		if _, err := memory.ResolvePaths(root); err != nil {
+			slog.Error("load context: memory fragment omitted, resolve memory paths failed", "root", root, "err", err)
+		} else if mem := memory.PromptFragment(root); mem != "" {
 			context += mem
 		}
 	}
