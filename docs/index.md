@@ -8,7 +8,7 @@ okf_version: 0.1
 - [Computer use](computer-use.md) - User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, and privacy.
 - [File-Edit Snapshot & Undo Mechanism](file-edit-snapshot.md) - ocode takes a per-agent file snapshot before every write/edit/patch and provides an undo_file_change tool to revert by tool_call_id.
 - [Knowledge Bundle System](knowledge-bundle.md) - Internal architecture of the OKF v0.1 knowledge bundle — bundle detection, scanning, frontmatter parsing, doc search, .okfignore exclusion, and store CRUD with documented edge cases and gotchas.
-- [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
+- [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, bundled plugins, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics. Also covers the reminders/tasks engine behind the Cron tab's Reminders and Tasks sub-views.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
 - [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
@@ -211,6 +211,7 @@ okf_version: 0.1
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [React 19 upgrade — act() timing in tests and the skipLibCheck dependency](gotchas/react-19-upgrade-test-timing-and-typings.md) - React 19's async act() can yield to macrotasks, so tests that race an async effect or jsdom's rAF clock go flaky; dnd-kit 6 / monaco-react typings still need skipLibCheck
 - [Remote config sync clobbers `extra_allowed_paths`](gotchas/remote-config-sync-clobbers-extra-allowed-paths.md) - `BuildSyncPayload` (internal/remote/sync.go) pushes `ocodeconfig.json` to the remote host. Before the 2026-10-28 fix the local `extra_allowed_paths` was pushed verbatim (only `terminal_shell` was stripped), so macOS `/Users/...` paths arrived at a Linux host where they matched nothing; `WritePayload`'s full-file replacement also erased any grants the host had made locally. Two guards: sender strips (`stripMachineLocalConfig`); receiver preserves (`preserveMachineLocalConfig`) before writing.
+
 - [Remote connection identity is user+host+port, never Target.String() - port-blind cache keys, the per-connection exec-slot pool, and the 6-of-8 foreground reserve](gotchas/remote-connection-identity-includes-port.md) - Gotcha: remote.Target.String() omits the SSH port, so every cache keyed on it collapses distinct connections onto one entry - the ssh ControlPath hash (a command aimed at port 2222 can execute on port 22 multiplexed master), the exec-slot pool, and the still-unfixed host registry. The pool now keys on user+host+port and reserves 6 of its 8 slots for short-lived foreground work so a host full of long remote shell commands cannot starve the 10s git_status poll; long commands are refused at the sub-cap rather than queued, and the refusal message reaches the client verbatim.
 - [Remote fs actions on a "~"-rooted project: root-joined paths and $HOME quoting](gotchas/remote-fs-tilde-root-pathing.md) - Why remote file operations on a project rooted at a ~ path fail: double-joined paths, unexpanded tilde in shell-quoted commands, and the root-as-paste-destination gap.
 - [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages and git pathspecs passed to remoteGitCommand must be shell-quoted by the caller; remote lookups against path sets keep the raw spec. Remote file operations quote at the command site and validate with remoteSpecCore.
@@ -268,6 +269,26 @@ okf_version: 0.1
 
 # superpowers
 
+- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
+- [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [browser_run — a Jev-driven step loop over the browser tool (design)](superpowers/specs/2026-11-01-browser-run-jev-step-loop-design.md) - Design spec for browser_run, an agent-layer tool that drives a browser task to completion by letting Jev pick each click from an indexed controls list, re-entering the normal browser tool call path per step so every mutating sub-step keeps its permission ask, while the main model pays one tool call for N steps. Modelled on agent-labs-dev/fastbrowse (Jev picks, LLM reads and writes, code owns the gates) and adapted to ocode's existing cdp snapshot, RefTable, fill_form, Decider slots and state budget.
 - [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.
@@ -300,26 +321,6 @@ okf_version: 0.1
 - [Reopen a locally hidden question dialog](superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md) - Implemented design spec: locally hide the QuestionDialog via X/Escape with request-ID-scoped hidden state and reopen it from the transcript's Open question button.
 - [Shared confirm dialog + confirmation coverage for destructive sidebar/actions](superpowers/specs/2026-09-25-shared-confirm-dialog-design.md) - Design record for a shared ConfirmDialog component replacing native window.confirm and bespoke confirms across six destructive web/desktop action sites.
 - [Shared Confirm Dialog Implementation Plan](superpowers/plans/2026-09-25-shared-confirm-dialog.md) - Shared Confirm Dialog implementation plan (tasks 1–8 done, task 9 pending)
-- [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
 - [System Permissions Settings Section (macOS TCC + cross-platform)](superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 - [Tab Loading Indicators — Design Spec](superpowers/specs/2026-09-24-tab-loading-indicators-design.md) - Design spec: accessible blocking initial-load overlays and non-blocking refresh spinners for web tab shells, keyed by (host, project, tab) with generation/abort stale-response rejection.
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28). Amended 2026-09-29: short plain-prose messages skip the summariser LLM entirely (§10.2 short-text gate). Amended 2026-09-29: client-side FIFO speak queue and now-playing `project · session` label (§7, §8).
@@ -496,3 +497,4 @@ okf_version: 0.1
 - [2026-10-20-suggested-responses-design.md](superpowers/specs/2026-10-20-suggested-responses-design.md)
 - [2026-10-29-todo-stream-cards-design.md](superpowers/specs/2026-10-29-todo-stream-cards-design.md)
 - [telegram-bot.md](telegram-bot.md)
+

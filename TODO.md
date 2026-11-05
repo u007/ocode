@@ -1,5 +1,12 @@
 # TODO
 
+## Open: bundled atlas plugin follow-ups (2026-11-06)
+
+- **Never run against a live helper.** The `atlas` binary is not installed on the dev machine, so every command in `.opencode/plugins/atlas/skills/atlas/SKILL.md` is verified against the upstream repo at commit `8aed936` only — not against a real helper. Install Atlas, run `atlas doctor`, then exercise `doctor`/`windows`/`open`/`screenshot`/`cleanup` through the skill before trusting it.
+- **Upstream `agent-desktop` alternative not evaluated or built.** `vercel-labs/agent-desktop` reads the AX tree on macOS/Windows/Linux and acts on the *current* desktop with no helper login (no hidden desktop). It is a candidate for replacing ocode's own `computer` tool, not for hidden-desktop work. Decision open: bundle it as a second plugin, or leave it out.
+- **Non-macOS users still see the plugin.** Bundled plugins default to enabled and the manifest has no platform field, so the `atlas:atlas` skill is listed on Linux and Windows, where its text says macOS only. Options: gate plugin discovery by GOOS, or accept the noise. Not implemented.
+- **No MCP status/view tool.** `plugin.json` `mcp.auto_register` fires only on `/plugin install`; a bundled plugin is never installed, so nothing registers `atlas mcp`. The skill therefore uses the CLI for observation. If a status or `show_screen` tool is wanted, registration needs an explicit path (config seed or a documented manual step).
+
 ## Open: review follow-ups round 2 (2026-11-05)
 
 - **Univer: throw and cancel leak the in-flight counter.** `univerMount.ts` `commandDepth` only decrements on `CommandExecuted`. Univer's `CommandService` emits nothing when a handler throws, when a command is cancelled, or when a before-listener cancels. Mutations then count as in flight and can mark the tab dirty spuriously. Needs a different completion signal (for example an undo-stack or command-error event). Not implemented.

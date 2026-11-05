@@ -3,6 +3,13 @@
 
 
 
+
+## 2026-11-06
+
+* **Update**: Plugin System ([plugins.md](/plugins.md))
+
+* **Update**: desktop print window ready check now polls for `window._wails.invoke` (every 30 ms, 15 s bound, sends ready once) instead of a one-shot check on `load`, which never found the Wails bridge on macOS and left the print panel unopened; added the gotcha note against reverting to a load check ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+
 ## 2026-11-05
 
 * **Update**: Excel preview and Save: Univer sheet over ExcelJS and SheetJS ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))

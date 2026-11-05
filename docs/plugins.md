@@ -1,13 +1,13 @@
 ---
 type: Concept
 title: Plugin System
-description: 'Overview of ocode''s plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.'
+description: 'Overview of ocode''s plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, bundled plugins, and plugin lifecycle management.'
 tags:
   - plugins
   - extensibility
   - mcp
   - architecture
-timestamp: 2026-08-27T15:04:53Z
+timestamp: 2026-11-05T16:13:41Z
 ---
 # Plugin System
 
@@ -68,6 +68,32 @@ plugins/my-plugin/
   tools/             # Custom tools (optional)
   commands/          # Custom slash commands (optional)
 ```
+
+### Bundled Plugins That Ship a Skill (`atlas`)
+
+A bundled plugin can contribute nothing but a skill. `atlas` (`.opencode/plugins/atlas/`)
+is the current example: its `plugin.json` declares empty `commands` and `tools`, and it
+ships `skills/atlas/SKILL.md`. The skill teaches the agent to drive the upstream `atlas`
+macOS CLI — a hidden second login for seeing and using GUI apps without disturbing the
+person's desktop. Atlas itself is not bundled and needs its own admin setup (a helper
+macOS account, a signed daemon); the skill tells the agent to ask the person to finish
+that setup and never run the installer or `sudo`.
+
+- **Actions are ordinary `bash` calls.** ocode has no Atlas tool, so every Atlas step runs
+  through the normal `bash` tool and ocode's permission rules. There is no embedded Atlas
+  view and no `show_screen`; screenshots are read from the returned `path`, and
+  `ATLAS_SESSION=ocode` supplies the session label ocode does not report.
+- **Namespaced as `<plugin>:<skill>`.** This plugin exposes `atlas:atlas`. A bare `atlas`
+  resolves to it only when no user/project skill has that name. Loaded plugin skill bodies
+  carry a `Plugin root:` header and have `${CLAUDE_PLUGIN_ROOT}` expanded.
+- **Enabled by default, and read-only.** Bundled plugins appear enabled with no config
+  entry. They cannot be removed, so the toggle is `/plugin disable atlas` /
+  `/plugin enable atlas`, which writes an `external_plugins` entry.
+- **A bundled `mcp` block would never register.** `mcp.auto_register` runs only at install
+  time, and bundled plugins are never installed, so `atlas` (and any bundled plugin that
+  needs a server) ships no `mcp` block; the user must add the server themselves.
+- **macOS only, ungated at discovery.** Plugin discovery does not filter by platform, so
+  `atlas:atlas` is listed everywhere; the skill itself says to refuse off macOS.
 
 ## The `plugin.json` Manifest
 

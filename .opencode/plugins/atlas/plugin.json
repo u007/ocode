@@ -1,0 +1,7 @@
+{
+  "name": "atlas",
+  "description": "Test and operate macOS GUI apps in a hidden second login (the helper) without touching the person's desktop. Bundles the Atlas skill; toggle with /plugin enable|disable atlas.",
+  "version": "0.1.0",
+  "commands": [],
+  "tools": []
+}
