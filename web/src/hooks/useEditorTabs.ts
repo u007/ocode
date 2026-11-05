@@ -70,6 +70,14 @@ export interface UseEditorTabsResult {
   confirmDiscardAndClose: () => void;
   cancelClose: () => void;
   saveError: string | null;
+  /** Marks a tab's `isDirty` flag (used by Excel preview tabs to report
+   *  grid dirtiness up to the tab level for close-confirm / quit guard). */
+  setTabDirty: (id: string, dirty: boolean) => void;
+  /** Registers an Excel preview tab's save handler so `saveEditorTab` can
+   *  delegate to it instead of `api.saveFileContent`. */
+  registerExcelSaveHandler: (tabId: string, handler: () => Promise<boolean>) => void;
+  /** Unregisters an Excel preview tab's save handler (tab closed / unmounted). */
+  unregisterExcelSaveHandler: (tabId: string) => void;
 }
 
 /**
@@ -102,6 +110,9 @@ export function useEditorTabs(): UseEditorTabsResult {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
   const openFileIdsRef = useRef<Set<string>>(new Set());
+  /** Tab id → Excel save handler, for preview-only .xlsx tabs whose save goes
+   *  through the Univer grid handler rather than `api.saveFileContent`. */
+  const excelSaveHandlers = useRef<Map<string, () => Promise<boolean>>>(new Map());
 
   // Refs so callbacks that fire on the typing hot path don't need to close
   // over `editorTabs` / `activeEditorTabId` and thus don't change identity
@@ -493,6 +504,33 @@ export function useEditorTabs(): UseEditorTabsResult {
     });
   }, [editorTabs]);
 
+  const setTabDirty = useCallback((id: string, dirty: boolean) => {
+    // Returns `prev` when nothing changes, so a caller that re-reports the same
+    // flag from an effect does not re-render the whole editor.
+    setEditorTabs((prev) => {
+      const tab = prev.find((t) => t.id === id);
+      if (tab === undefined || tab.isDirty === dirty) return prev;
+      return prev.map((t) => (t.id === id ? { ...t, isDirty: dirty } : t));
+    });
+    // Arm the quit guard while an Excel preview tab holds unsaved grid edits, and
+    // disarm it once they're saved or discarded. Monaco tabs arm/disarm via
+    // noteDraftPersistPending/Success on keystroke/flush; Excel tabs go through
+    // this path instead. Kept out of the updater: React may run it twice, and the
+    // guard is module-level state.
+    const tab = editorTabsRef.current.find((t) => t.id === id);
+    if (tab === undefined) return;
+    if (dirty) noteDraftPersistPending(id, tab.path);
+    else noteDraftPersistSuccess(id);
+  }, []);
+
+  const registerExcelSaveHandler = useCallback((tabId: string, handler: () => Promise<boolean>) => {
+    excelSaveHandlers.current.set(tabId, handler);
+  }, []);
+
+  const unregisterExcelSaveHandler = useCallback((tabId: string) => {
+    excelSaveHandlers.current.delete(tabId);
+  }, []);
+
   const requestCloseTab = useCallback(
     (id: string) => {
       const tab = editorTabs.find((t) => t.id === id);
@@ -511,6 +549,24 @@ export function useEditorTabs(): UseEditorTabsResult {
       const tab = editorTabs.find((t) => t.id === id);
       if (!tab) return;
       try {
+        // Excel preview-only tabs (.xlsx) save through the Univer grid handler
+        // registered via registerExcelSaveHandler, not api.saveFileContent
+        // (tab.content is "" for preview-only tabs).
+        if (previewOnlyKindForPath(tab.path) === "excel" && /\.xlsx$/i.test(tab.path)) {
+          const handler = excelSaveHandlers.current.get(id);
+          if (!handler) throw new Error("Excel save handler not registered");
+          const success = await handler();
+          if (!success) throw new Error("Save failed or was cancelled");
+          setEditorTabs((prev) =>
+            prev.map((t) =>
+              t.id === id ? { ...t, isDirty: false, diffVersion: t.diffVersion + 1 } : t,
+            ),
+          );
+          clearEditorDraft(id);
+          noteDraftPersistSuccess(id);
+          setSaveError(null);
+          return;
+        }
         const expectedHash = tab.baseHash;
         await api.saveFileContent(tab.path, tab.content, tab.projectRoot, expectedHash, opts?.force, tab.projectHost);
         setSaveError(null);
@@ -783,5 +839,8 @@ export function useEditorTabs(): UseEditorTabsResult {
     confirmDiscardAndClose,
     cancelClose,
     saveError,
+    setTabDirty,
+    registerExcelSaveHandler,
+    unregisterExcelSaveHandler,
   };
 }

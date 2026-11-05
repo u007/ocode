@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import FileTabContent from "./FileTabContent";
 import { previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 
@@ -18,19 +19,69 @@ if (typeof window.PointerEvent === "undefined") {
   window.PointerEvent = PointerEventPolyfill;
 }
 
-// Keep the routing test free of Monaco / pdf.js / docx-preview dependencies.
+const excelSaveMock = vi.fn(async () => {});
+/** The onSaveRef the mocked Excel viewer was handed, so a test can simulate the
+ *  viewer replacing its save handler on a later edit. */
+let capturedSaveRef: { current: (() => Promise<void>) | null } | undefined;
+
 vi.mock("./FileEditor", () => ({ default: () => <div data-testid="monaco" /> }));
 vi.mock("../Preview/PreviewSurface", () => ({
-  default: ({ kind, content, page, slide }: { kind: string; content?: string; page?: number; slide?: number }) => (
-    <div
-      data-testid={`preview-${kind}`}
-      data-content={content ?? ""}
-      data-page={String(page ?? "")}
-      data-slide={String(slide ?? "")}
-    />
-  ),
+  default: ({
+    kind,
+    content,
+    page,
+    slide,
+    onDirtyChange,
+    onSaveRef,
+  }: {
+    kind: string;
+    content?: string;
+    page?: number;
+    slide?: number;
+    onDirtyChange?: (dirty: boolean) => void;
+    onSaveRef?: { current: (() => Promise<void>) | null };
+  }) => {
+    useEffect(() => {
+      if (kind === "excel" && onSaveRef) {
+        capturedSaveRef = onSaveRef;
+        onSaveRef.current = async () => {
+          await excelSaveMock();
+        };
+      }
+      return () => {
+        if (onSaveRef) onSaveRef.current = null;
+      };
+    }, [kind, onSaveRef]);
+
+    return (
+      <div
+        data-testid={`preview-${kind}`}
+        data-content={content ?? ""}
+        data-page={String(page ?? "")}
+        data-slide={String(slide ?? "")}
+        onClick={() => {
+          if (kind === "excel" && onDirtyChange) {
+            onDirtyChange(true);
+          }
+        }}
+      >
+        {kind === "excel" && (
+          <button type="button" data-testid="excel-mark-dirty" onClick={() => onDirtyChange?.(true)}>
+            mark dirty
+          </button>
+        )}
+      </div>
+    );
+  },
 }));
 vi.mock("../Preview/LegacyOfficePane", () => ({ default: () => <div data-testid="legacy-office" /> }));
+vi.mock("../Preview/PrintPreviewButton", () => ({
+  PrintPreviewButton: ({ kind }: { kind: string }) => (
+    <button type="button" aria-label="Print" data-kind={kind}>
+      Print
+    </button>
+  ),
+}));
 
 async function testIdFor(path: string): Promise<string> {
   const { container } = render(<FileTabContent path={path} content="x" />);
@@ -469,5 +520,126 @@ describe("FileTabContent viewer-state persistence", () => {
     render(<FileTabContent path="docs/report.pdf" projectRoot="/proj-b" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
     expect(screen.getByTestId("preview-pdf").getAttribute("data-page")).toBe("1");
+  });
+});
+
+describe("FileTabContent preview-only toolbar (t4)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    excelSaveMock.mockClear();
+  });
+
+  it("shows Print + disabled-until-dirty Save for .xlsx", async () => {
+    render(<FileTabContent path="docs/budget.xlsx" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /print/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save spreadsheet/i })).toBeDisabled();
+  });
+
+  it("enables Save once dirty and calls the registered save handler", async () => {
+    render(<FileTabContent path="docs/budget.xlsx" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("excel-mark-dirty"));
+    expect(screen.getByRole("button", { name: /save spreadsheet/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /save spreadsheet/i }));
+    await waitFor(() => expect(excelSaveMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("saves on Cmd/Ctrl+S when dirty", async () => {
+    render(<FileTabContent path="docs/budget.xlsx" content="" active />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("excel-mark-dirty"));
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(excelSaveMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("ignores Cmd/Ctrl+S on an Excel tab that is not the active tab", async () => {
+    render(<FileTabContent path="docs/budget.xlsx" content="" active={false} />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("excel-mark-dirty"));
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(excelSaveMock).not.toHaveBeenCalled();
+  });
+
+  it("saves only the active Excel tab when two dirty tabs are open", async () => {
+    render(
+      <>
+        <FileTabContent path="docs/a.xlsx" content="" active />
+        <FileTabContent path="docs/b.xlsx" content="" active={false} />
+      </>,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("excel-mark-dirty")).toHaveLength(2));
+    for (const button of screen.getAllByTestId("excel-mark-dirty")) fireEvent.click(button);
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(excelSaveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the parent a handler that reaches the viewer's latest save, not the one from the first edit", async () => {
+    const registerMock = vi.fn();
+    const unregisterMock = vi.fn();
+    render(
+      <FileTabContent
+        path="docs/ledger.xlsx"
+        content=""
+        tabId="editor-docs/ledger.xlsx"
+        registerExcelSaveHandler={registerMock}
+        unregisterExcelSaveHandler={unregisterMock}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("excel-mark-dirty"));
+    await waitFor(() => expect(registerMock).toHaveBeenCalled());
+    const registered = registerMock.mock.calls[registerMock.mock.calls.length - 1][1] as () => Promise<void>;
+
+    // The viewer replaces its save on every edit; simulate a later edit's save.
+    const latestSave = vi.fn(async () => {});
+    if (capturedSaveRef === undefined) throw new Error("the Excel viewer was not handed onSaveRef");
+    capturedSaveRef.current = latestSave;
+
+    await registered();
+    expect(latestSave).toHaveBeenCalledTimes(1);
+    expect(excelSaveMock).not.toHaveBeenCalled();
+  });
+
+  it("shows Print only for pdf (no Save)", async () => {
+    render(<FileTabContent path="docs/report.pdf" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    // PdfViewer owns its own print UI; FileTabContent does not add one.
+    expect(screen.queryByRole("button", { name: /print/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+  });
+
+  it("shows neither Print nor Save for sqlite", async () => {
+    render(<FileTabContent path="docs/data.sqlite" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-sqlite")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /print/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+  });
+
+  it("shows Print but hides Save for .xlsm (non-editable ext)", async () => {
+    render(<FileTabContent path="docs/book.xlsm" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /print/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+  });
+
+  it("unregisters the Excel save handler on unmount (t5 lifecycle)", async () => {
+    const registerMock = vi.fn();
+    const unregisterMock = vi.fn();
+    const { unmount } = render(
+      <FileTabContent
+        path="docs/budget.xlsx"
+        content=""
+        tabId="editor-docs/budget.xlsx"
+        registerExcelSaveHandler={registerMock}
+        unregisterExcelSaveHandler={unregisterMock}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("excel-mark-dirty"));
+    await waitFor(() => expect(registerMock).toHaveBeenCalled());
+
+    unmount();
+    expect(unregisterMock).toHaveBeenCalledWith("editor-docs/budget.xlsx");
   });
 });

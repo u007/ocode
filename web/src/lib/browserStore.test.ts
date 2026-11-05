@@ -4,8 +4,13 @@ import {
   browserActions,
   CONSOLE_CAP,
   HISTORY_CAP,
+  NETWORK_BODY_CAP,
+  NETWORK_CAP,
+  isLocalRequestId,
   normalizeBrowseURL,
   isPrivateHost,
+  type NetworkEvent,
+  type ResponseBody,
 } from "./browserStore";
 
 const KEY = "tab:abc" as const;
@@ -119,6 +124,61 @@ describe("browserStore", () => {
     browserActions.rekey(KEY, next);
     expect(browserStore.state.byKey[next]?.url).toBe("https://live.com");
     expect(browserStore.state.byKey[KEY]?.url).toBe("https://old.com");
+  });
+
+  it("retains response bodies for only the newest rows and drops them on clear", () => {
+    browserActions.open(KEY);
+    // Local mode pushes every body EAGERLY (a consumed response cannot be
+    // re-read), so the store must bound what it keeps.
+    const total = NETWORK_BODY_CAP + 4;
+    for (let i = 0; i < total; i++) {
+      const requestId = `local-${i}`;
+      browserActions.pushNetwork(KEY, {
+        requestId,
+        method: "GET",
+        url: `https://a.dev/${i}`,
+        status: 200,
+        durationMs: 1,
+        ts: i,
+      });
+      browserActions.setResponseBody(KEY, requestId, { body: `body-${i}`, base64Encoded: false, truncated: false });
+    }
+
+    const bodies = browserStore.state.byKey[KEY].responseBodies;
+    expect(Object.keys(bodies)).toHaveLength(NETWORK_BODY_CAP);
+    expect(bodies[`local-${total - 1}`].body).toBe(`body-${total - 1}`);
+    expect(bodies["local-0"]).toBeUndefined();
+
+    browserActions.clearNetwork(KEY);
+    expect(browserStore.state.byKey[KEY].responseBodies).toEqual({});
+  });
+
+  it("keeps an on-demand CDP body while its row is in the ring buffer, even past the local body cap", () => {
+    browserActions.open(KEY);
+    const cdpId = "1234.56";
+    browserActions.pushNetwork(KEY, { requestId: cdpId, method: "GET", url: "https://a.dev/api", status: 200, durationMs: 1, ts: 0 });
+    // The user opens the row: the body arrives on demand, after the row.
+    browserActions.setResponseBody(KEY, cdpId, { body: "cdp-body", base64Encoded: false, truncated: false });
+
+    // Local rows push their own bodies eagerly, far past the local cap.
+    for (let i = 0; i < NETWORK_BODY_CAP + 5; i++) {
+      const requestId = `local-${i}`;
+      browserActions.pushNetwork(KEY, { requestId, method: "GET", url: `https://a.dev/${i}`, status: 200, durationMs: 1, ts: i + 1 });
+      browserActions.setResponseBody(KEY, requestId, { body: `body-${i}`, base64Encoded: false, truncated: false });
+    }
+
+    const bodies = browserStore.state.byKey[KEY].responseBodies;
+    expect(bodies[cdpId]?.body).toBe("cdp-body");
+    const localIds = Object.keys(bodies).filter(isLocalRequestId);
+    expect(localIds).toHaveLength(NETWORK_BODY_CAP);
+    expect(bodies["local-0"]).toBeUndefined();
+
+    // Once the ring buffer drops the CDP row, its body goes with it.
+    for (let i = 0; i < NETWORK_CAP; i++) {
+      browserActions.pushNetwork(KEY, { requestId: `filler-${i}`, method: "GET", url: "https://a.dev/f", status: 200, durationMs: 1, ts: i + 1000 });
+    }
+    expect(browserStore.state.byKey[KEY].networkEvents.some((e) => e.requestId === cdpId)).toBe(false);
+    expect(browserStore.state.byKey[KEY].responseBodies[cdpId]).toBeUndefined();
   });
 });
 
@@ -341,5 +401,110 @@ describe("history cap", () => {
     const t = browserStore.get().byKey[key];
     expect(t.history).toHaveLength(HISTORY_CAP);
     expect(t.historyIndex).toBe(HISTORY_CAP - 1);
+  });
+});
+
+describe("retainBodies equivalence", () => {
+  // The full-recompute retention that retainBodies replaced, copied here as a
+  // fixed reference: every row is walked, then every body is checked against it.
+  function referenceRetainBodies(
+    bodies: Record<string, ResponseBody>,
+    networkEvents: NetworkEvent[],
+  ): Record<string, ResponseBody> {
+    const recentLocal = new Set<string>();
+    const rowIds = new Set<string>();
+    for (let i = networkEvents.length - 1; i >= 0; i--) {
+      const id = networkEvents[i].requestId;
+      if (!id) continue;
+      rowIds.add(id);
+      if (isLocalRequestId(id) && recentLocal.size < NETWORK_BODY_CAP) recentLocal.add(id);
+    }
+    const next: Record<string, ResponseBody> = {};
+    for (const id of Object.keys(bodies)) {
+      const keep = isLocalRequestId(id) ? recentLocal.has(id) : rowIds.has(id);
+      if (keep) next[id] = bodies[id];
+    }
+    return Object.keys(next).length === Object.keys(bodies).length ? bodies : next;
+  }
+
+  // mulberry32: a small seeded PRNG, so a failing sequence reproduces exactly.
+  function seededRandom(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  it.each([7, 99])("matches the full-recompute reference over a random sequence (seed %i)", (seed) => {
+    browserActions.open(KEY);
+    const rand = seededRandom(seed);
+    const pick = (n: number) => Math.floor(rand() * n);
+    const body = (tag: string): ResponseBody => ({ body: tag, base64Encoded: false, truncated: false });
+    let unique = 0;
+    // Row and body ids: local and CDP rows, duplicate CDP ids (redirect reuse),
+    // empty ids, and body ids that never get a row (orphans). Local ids repeat
+    // past NETWORK_BODY_CAP distinct rows.
+    const requestId = () => {
+      const r = rand();
+      if (r < 0.05) return "";
+      if (r < 0.35) return `local-${pick(40)}`;
+      if (r < 0.6) return `cdp-${pick(30)}`;
+      if (r < 0.9) return `${rand() < 0.5 ? "local" : "cdp"}-u${unique++}`;
+      return `${rand() < 0.5 ? "local" : "cdp"}-orphan-${pick(10)}`;
+    };
+
+    let shadowRows: NetworkEvent[] = [];
+    let shadowBodies: Record<string, ResponseBody> = {};
+    let evictions = 0;
+    let droppedOnPush = 0;
+    let keptOnPush = 0;
+    for (let step = 0; step < 4000; step++) {
+      const op = rand();
+      // One clear, after the ring has evicted: the sequence must cover both.
+      if (step === 2500) {
+        browserActions.clearNetwork(KEY);
+        shadowRows = [];
+        shadowBodies = {};
+      } else if (op < 0.35) {
+        const id = requestId();
+        const b = body(`b${step}`);
+        browserActions.setResponseBody(KEY, id, b);
+        shadowBodies = { ...shadowBodies, [id]: b };
+      } else {
+        const ev: NetworkEvent = {
+          requestId: requestId(),
+          method: "GET",
+          url: `https://a.dev/${step}`,
+          status: 200,
+          durationMs: 1,
+          ts: step,
+        };
+        const storeBefore = browserStore.state.byKey[KEY].responseBodies;
+        const shadowBefore = shadowBodies;
+        browserActions.pushNetwork(KEY, ev);
+        const grown = [...shadowRows, ev];
+        if (grown.length > NETWORK_CAP) evictions++;
+        shadowRows = grown.length > NETWORK_CAP ? grown.slice(grown.length - NETWORK_CAP) : grown;
+        shadowBodies = referenceRetainBodies(shadowBodies, shadowRows);
+        // Identity is observable (selectors re-render on it): the map is reused
+        // exactly when the reference reuses it.
+        const storeKept = browserStore.state.byKey[KEY].responseBodies === storeBefore;
+        expect(storeKept).toBe(shadowBodies === shadowBefore);
+        if (storeKept) keptOnPush++;
+        else droppedOnPush++;
+      }
+      const state = browserStore.state.byKey[KEY];
+      expect(state.networkEvents.map((e) => e.ts)).toEqual(shadowRows.map((e) => e.ts));
+      expect(Object.keys(state.responseBodies)).toEqual(Object.keys(shadowBodies));
+      expect(state.responseBodies).toEqual(shadowBodies);
+    }
+    // The sequence must reach the paths under test, or the equivalence proves little.
+    expect(evictions).toBeGreaterThan(0);
+    expect(droppedOnPush).toBeGreaterThan(0);
+    expect(keptOnPush).toBeGreaterThan(0);
   });
 });

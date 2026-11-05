@@ -10,7 +10,7 @@ tags:
   - web
   - session-lifecycle
   - sse
-timestamp: 2026-10-01T08:28:01Z
+timestamp: 2026-11-05T12:21:06Z
 ---
 # Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass
 
@@ -78,9 +78,9 @@ To support this, `runCompact` was split: `runCompact` (`internal/agent/agent.go:
 
 On `errors.Is(result.Err, agent.ErrCompactionCanceled)` with a **live** request (`internal/server/handler.go:2178`): `finish("")` — a clean `compaction_done {ok:true}`, no error banner — then `200 {"cancelled": true, "original_len": result.OriginalLen, "compacted_len": len(as.messages)}` (`internal/server/handler.go:2187-2191`). The branch sits **after** the `ErrCompactionTimeout` and `r.Context().Err() != nil` branches, never before them.
 
-### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2533`)
+### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2711`)
 
-Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2538-2542`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2550-2552` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2546-2548`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
+Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2716-2720`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2728-2730` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2724-2726`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
 
 ### Latch: a cancel never stops auto-compaction
 

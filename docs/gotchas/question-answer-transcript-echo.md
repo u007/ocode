@@ -9,7 +9,7 @@ tags:
   - transcript
   - sentinel
   - client-echo
-timestamp: 2026-09-17T12:33:27Z
+timestamp: 2026-11-05T12:21:06Z
 ---
 # Question-answer transcript echo: client must mirror server payload shape
 
@@ -58,7 +58,7 @@ payload shape (`QuestionAnswerPayload` in `web/src/api/types.ts` —
 The two payloads are **shape-compatible, not byte-identical**. The server
 re-marshals the browser's answers through `questionAnswerPayload`, whose
 `header`, `text`, and `custom` fields carry `omitempty`
-(`handler_questions.go:29-39`). An answer with an empty custom text or a
+(`handler_questions.go:30-40`). An answer with an empty custom text or a
 `custom: false` therefore serializes without those keys server-side but with
 them in the client's `JSON.stringify(answers)`. Rendering is unaffected (the
 card treats missing and falsy fields the same), and the turn-end snapshot

@@ -1080,6 +1080,23 @@ func TestPermissionDialogUppercaseKeysWork(t *testing.T) {
 }
 
 func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
+	// Every PermissionManager in the process layers the shared global
+	// ocodeconfig.json (and the project's .ocode/settings.json) over its own
+	// rules on each Decide. The package-wide HOME is shared by every test, so a
+	// tools.task entry persisted by an earlier test would override the
+	// SetRule("task", allow) below: the parent task call then parks on a
+	// PERMISSION_ASK and the sub-agent ask never reaches the listener.
+	setVoiceHomeTree(t, t.TempDir())
+	chdirTempForConfigTest(t)
+	// The child session's live writer is asynchronous and can still be writing
+	// into the isolated home when t.TempDir's RemoveAll runs. Cleanups run
+	// last-in-first-out, so this drains before the home is removed.
+	t.Cleanup(func() {
+		if err := session.FlushAll(5 * time.Second); err != nil {
+			t.Errorf("flush live session writes: %v", err)
+		}
+	})
+
 	client := &nestedTaskClient{responses: []*agent.Message{
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested","agent":"build"}`)}},
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-child-task", "task", `{"prompt":"use ask tool","agent":"general"}`)}},
@@ -1152,6 +1169,10 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		t.Fatal("expected pending sub-agent response to clear after approval")
 	}
 
+	// No wall-clock bound after approval: the remaining child and parent turns
+	// load context through git and vary from ~0.4s to over 2s on a loaded
+	// machine, which says nothing about whether the approval was routed. A
+	// wedged step is still caught by the package -timeout.
 	select {
 	case err := <-stepErr:
 		t.Fatalf("Step err: %v", err)
@@ -1163,8 +1184,6 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		if !strings.Contains(joined, "parent complete") {
 			t.Fatalf("expected parent completion after permission approval, got %q", joined)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for nested subagent step to finish")
 	}
 
 	if got.agent.Permissions().Check("ask_tool") != agent.PermissionAsk {

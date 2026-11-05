@@ -4,8 +4,8 @@ date: 2026-09-06
 status: resolved-with-follow-ups
 tags: [session, sqlite, concurrency, persistence]
 type: Gotcha
-description: Concurrent session writers — conflict semantics and recovery (updated with 2026-09-20 incident)
-timestamp: 2026-09-19T18:27:52Z
+description: Concurrent session writers — conflict semantics and recovery (updated with 2026-11-05 dismissed-question incident)
+timestamp: 2026-11-05T12:21:06Z
 ---
 
 # Concurrent session writers — conflict semantics and recovery
@@ -71,8 +71,12 @@ below.
   tool result's content in memory. `RewriteAskResultForDir` (server
   `rewriteAskResult`, called by both resolve handlers before the
   continuation Steps) applies the same rewrite to the stored row — guarded:
-  only a tool row still holding an ask sentinel for that tool-call id at
-  that seq. Without it every later save overlapped the stored sentinel with
+  only a tool row still holding an ask sentinel (PERMISSION_ASK /
+  QUESTION_PROMPT) or a dismissed question (`tool.QuestionDismissedResult`)
+  for that tool-call id at that seq. The dismissed case is the 2026-11-05
+  fix: a dismissed question that the user then answered used to fail the
+  guard, so the dismissal text stayed on disk (see that incident). Without
+  the rewrite every later save overlapped the stored sentinel with
   different bytes: live snapshots dropped and the turn-end sync save
   conflicted (and the handlers discarded that error), so the disk transcript
   froze at the already-answered ask while memory moved on. Every disk-backed
@@ -177,7 +181,7 @@ Two coupled defects in the concurrent-writer reconcile (`internal/session/sessio
    caller's *raw* in-memory row (calls intact) — never byte-equal — so it
    treated its own already-live-written assistant row as an unsaved suffix
    and appended a byte-identical duplicate.
-   **Fix** (`rebaseAppend` at `internal/session/session.go:510`): new
+   **Fix** (`rebaseAppend` at `internal/session/session.go:525`): new
    `stripUncompletedToolCalls` normalizes the caller's rows the same way
    the filter applies to stored rows (index-preserving) so the comparison
    is fair; the merge still appends the caller's real rows with
@@ -187,7 +191,7 @@ Two coupled defects in the concurrent-writer reconcile (`internal/session/sessio
    `rebaseAppend` produced a merge whose last rows were still the raw
    rows (calls intact), but `reconcileAppendToDirWithMessages` returned
    `removeIncompleteToolRequests(merged)` — the filtered view.
-   `persistTurnTranscript` (`internal/server/agent_session.go:1472`) adopted
+   `persistTurnTranscript` (`internal/server/agent_session.go:1759`) adopted
    it as `as.messages`, erasing the trailing PERMISSION_ASK sentinel + its
    tool-call from the resident transcript. `tailIsPermissionAsk` went
    false (the next user message started a fresh turn, the orphaned call
@@ -231,6 +235,81 @@ resident (`tailIsPendingAsk`), matching the permission-ask exemption, so
 the common way into a filtered base (30-min idle on an unanswered dialog)
 is closed too. Splitting the transcript views — raw for persistence,
 filtered for LLM requests — remains the structural follow-up.
+
+## Incident (2026-11-05, ses_2026-11-05-100024-63d1c4b3, web/desktop): dismissed question answered, disk never rewritten
+
+Symptom: the user answered a `question` prompt, the agent ran several steps,
+then the chat reset to the question message. Every later answer in the same
+session did the same.
+
+Cause: the question's stored tool row had been rewritten to
+`tool.QuestionDismissedResult` ("The user dismissed the question prompt
+without answering."). The user then reopened the dismissed prompt from its
+transcript card and answered it. `HandleAnswerQuestion`
+(`internal/server/handler_questions.go`) deliberately accepts a dismissed
+question, applies the answer in memory, and calls `rewriteAskResult`
+(`internal/server/agent_session.go:2774`), which calls
+`session.RewriteAskResultForDir` and then `rewriteAskResultRow`
+(`internal/session/sqlitestore.go:721`). That guard accepted only ask
+sentinels, so it refused with `serve: rewrite ask result for <id> seq N:
+session: rewrite ask result <id> seq N: stored row is not a pending ask for
+tool call "..."`. Disk kept the dismissal text while memory held the answer,
+and every later save diverged from it.
+
+Consequences, all visible in desktop.log for the session:
+
+- every live snapshot was dropped with `session: live snapshot dropped for
+  <id>: stored rows are not a prefix of the snapshot`. This fires even when
+  the row counts match, because the bytes at the question's seq differ;
+- the continuation's turn-end save logged `serve: question-continuation save
+  for <id> diverged from a concurrent writer; re-synced to disk`, then `hit a
+  transcript conflict; releasing the agent so the next turn re-bootstraps from
+  disk`. The turn output was discarded and the next turn re-bootstrapped from
+  disk, which ended at the question again;
+- at 15:14 `session: replace <id>: shrink 71 -> 39 stored rows` cut the stored
+  transcript back to the question.
+
+It repeated at 12:07, 12:31, 14:00, 15:06 and 15:34.
+
+Fix (uncommitted when written): `rewriteAskResultRow` now accepts
+`isAskSentinel(stored.Content) || dismissedQuestion(stored.Content)`. The
+helper was later deduped into `tool.QuestionDismissed` (`internal/tool/ask_sentinel.go:35`), and the guard now reads `isAskSentinel(stored.Content) || tool.QuestionDismissed(stored.Content)`.
+The refusal text is now "stored row is not a pending or dismissed ask".
+Regression tests are in `internal/session/ask_resolve_test.go`:
+`TestRewriteAskResultAcceptsDismissedQuestion` and
+`TestRewriteAskResultRefusesPlainToolRow`.
+
+`HandleDismissQuestion` (`internal/server/handler_questions.go:140`) logs a `question dismiss` message with the fields `session`, `request_id`, `pulse` (`isPulseOrigin`, true for the in-process Pulse tool) and `remote` (`RemoteAddr`) to trace the caller. User-Agent, Referer and X-Requested-With are deliberately not logged, because a Referer can carry a URL with tokens or paths. The original dismissal of this incident was not attributed. Candidate callers are
+the dialog's "Don't answer" button (`useChat` `cancelQuestion`, which posts to
+`/api/questions/cancel`), the Pulse tool `pulseQuestionDismissTool`
+(`internal/server/pulse_tools_write.go:569`, reached through `pulseCall` and
+identified by `isPulseOrigin`), and `web/src/components/Pulse/PulseFocusPane.tsx`.
+The next dismissal logs whether it came from the Pulse tool (`pulse=true`) or a remote address. It does not separate the dialog's button from `PulseFocusPane`, since both send an ordinary browser request.
+
+Follow-up, done: `isQuestionDismissed` in `handler_questions.go` and `session.dismissedQuestion` were deduped into `tool.QuestionDismissed` (`internal/tool/ask_sentinel.go:35`). The handler, the sqlite guard and the transcript tail now share that one check.
+
+Diagnostic recipe:
+
+1. Open `desktop.log` in the logs directory (`paths.LogsDir()`, which is
+   `~/.local/share/opencode/logs` on macOS) and grep for the session id
+   together with the markers: `rewrite ask result`, `stored rows are not a
+   prefix`, `question-continuation save`, `hit a transcript conflict`,
+   `session: replace`, `question dismiss`.
+2. A `rewrite ask result ... not a pending ask` line for the question's tool
+   call is the signature of this incident. Before the fix it appears on every
+   answer to a dismissed question. After the fix an answer to a dismissed
+   question logs nothing here.
+3. Compare disk with memory. Find the stored file with `find
+   ~/.local/share/opencode/project -name '<id>.sqlite'` and run `sqlite3 <file>
+   "select seq, json_extract(data,'$.role'), json_extract(data,'$.tool_call_id'),
+   substr(json_extract(data,'$.content'),1,80) from messages order by seq desc
+   limit 6"`. A question row that still reads "The user dismissed the question
+   prompt without answering." while the snapshot in the drop line is ahead of
+   it means the disk never received the answer.
+4. Read the counts in the drop and conflict lines (`snapshot N msgs, stored M
+   rows`). Equal counts with "not a prefix" mean the bytes at the same seq
+   differ, which is this case. A count gap points at a different cause, such
+   as the 2026-09-22 incident above.
 
 ## Test hygiene
 

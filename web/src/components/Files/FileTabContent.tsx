@@ -1,10 +1,11 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Columns2, Eye, Moon, Pencil, Sun } from "lucide-react";
 import type { FileEditorProps } from "./FileEditor";
 import PreviewSurface from "../Preview/PreviewSurface";
 import LegacyOfficePane from "../Preview/LegacyOfficePane";
 import { PrintPreviewButton } from "../Preview/PrintPreviewButton";
 import { isLegacyOfficePath, previewOnlyKindForPath, splitPreviewKindForPath } from "../../lib/previewKind";
+import { isPrintableKind } from "../Preview/printPreview";
 import { useResizableSplit } from "../../hooks/useResizableSplit";
 import { useResolvedEditorTheme } from "../../hooks/useResolvedEditorTheme";
 import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
@@ -79,8 +80,56 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
  * Routing lives here rather than in `FileEditor` so `FileEditor` stays a pure
  * Monaco surface (it is reused by TextViewer / MarkdownViewer for real text).
  */
-export default function FileTabContent(props: FileEditorProps & { active?: boolean }) {
+export default function FileTabContent(props: FileEditorProps & { active?: boolean; tabId?: string; onDirtyChange?: (dirty: boolean) => void; registerExcelSaveHandler?: (tabId: string, handler: () => Promise<boolean>) => void; unregisterExcelSaveHandler?: (tabId: string) => void }) {
   const previewKind = previewOnlyKindForPath(props.path);
+  const isExcelPreview = previewKind === "excel" && /\.xlsx$/i.test(props.path);
+  const showPreviewToolbar = previewKind !== null && (isExcelPreview || isPrintableKind(previewKind));
+  const [excelDirty, setExcelDirty] = useState(false);
+  const excelSaveRef = useRef<(() => Promise<boolean>) | null>(null);
+
+  // Report Excel dirtiness to the parent (useEditorTabs) so close-confirm and the
+  // quit guard see this tab as dirty. `excelDirty` is the source of truth for
+  // Excel tabs; `props.dirty` (from FileEditorProps) is only for Monaco tabs.
+  const { onDirtyChange, registerExcelSaveHandler, unregisterExcelSaveHandler } = props;
+  useEffect(() => {
+    if (!isExcelPreview) return;
+    onDirtyChange?.(excelDirty);
+  }, [isExcelPreview, excelDirty, onDirtyChange]);
+
+  // Stable for the life of this tab. ExcelViewer replaces `excelSaveRef.current`
+  // on every edit (its save closes over the revision), so this reads the ref
+  // when it runs; a handler captured at registration would save a stale revision.
+  const invokeExcelSave = useCallback(async (): Promise<boolean> => {
+    const save = excelSaveRef.current;
+    if (save === null) throw new Error("Spreadsheet viewer is not mounted, so its edits cannot be saved");
+    return save();
+  }, []);
+  // Registered on mount: the handler above resolves the viewer lazily, so it does
+  // not need to wait for a dirty change.
+  const excelTabKey = props.tabId ?? props.path;
+  useEffect(() => {
+    if (!isExcelPreview) return;
+    registerExcelSaveHandler?.(excelTabKey, invokeExcelSave);
+    return () => {
+      unregisterExcelSaveHandler?.(excelTabKey);
+    };
+  }, [isExcelPreview, excelTabKey, invokeExcelSave, registerExcelSaveHandler, unregisterExcelSaveHandler]);
+
+  useEffect(() => {
+    if (!isExcelPreview) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Every editor tab stays mounted, so a background dirty workbook must not
+      // save on someone else's keystroke. The App's Cmd/Ctrl+S also saves the
+      // active tab; ExcelViewer joins the two calls into one PUT.
+      if (!props.active) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && excelDirty && excelSaveRef.current) {
+        e.preventDefault();
+        void excelSaveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isExcelPreview, excelDirty, props.active]);
   // Page/slide for the paginated viewers (PDF, PPTX). PreviewSurface's viewers
   // are controlled by their host, so the Files tab owns the state; it survives
   // tab switches AND project switches because every editor tab stays mounted
@@ -233,6 +282,31 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
       // (the tab body is `absolute inset-0`). This is the same host shape
       // PreviewHost / PreviewTabPage provide.
       <div className="flex h-full min-h-0 flex-col">
+        {showPreviewToolbar && (
+          <div className="flex shrink-0 items-center gap-1 border-b border-border bg-muted/30 px-2 py-1 text-xs">
+            <span className="truncate text-muted-foreground" title={props.path}>{fileName}</span>
+            <div className="ml-auto flex items-center gap-1">
+              {isExcelPreview && (
+                <button
+                  type="button"
+                  onClick={() => void excelSaveRef.current?.()}
+                  disabled={!excelDirty}
+                  aria-label="Save spreadsheet"
+                  title={excelDirty ? "Save spreadsheet" : "No unsaved edits"}
+                  className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                >
+                  Save
+                </button>
+              )}
+              <PrintPreviewButton
+                kind={previewKind}
+                title={fileName}
+                source={{ origin: "disk", path: props.path, projectRoot: props.projectRoot, projectHost: props.projectHost }}
+                className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              />
+            </div>
+          </div>
+        )}
         <PreviewSurface
           path={props.path}
           kind={previewKind}
@@ -243,6 +317,8 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
           slide={slide}
           onSlideChange={setSlide}
           active={props.active}
+          onDirtyChange={setExcelDirty}
+          onSaveRef={excelSaveRef}
         />
       </div>
     );

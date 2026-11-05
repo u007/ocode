@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import { api } from "../api/client";
@@ -525,5 +526,210 @@ describe("useEditorTabs in-memory draft guard", () => {
     });
     const raw = window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt");
     expect(JSON.parse(raw!).content).toBe("edit 5");
+  });
+});
+
+describe("Excel preview tab close-confirm (t5)", () => {
+  const XLSX_TAB = "editor-docs/budget.xlsx";
+
+  beforeEach(() => {
+    __resetDraftGuardForTests();
+  });
+
+  afterEach(() => {
+    __resetDraftGuardForTests();
+  });
+
+  it("setTabDirty marks an Excel tab dirty and arms the quit guard", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    expect(result.current.editorTabs[0].isDirty).toBe(false);
+    expect(draftPersistenceBlocked()).toBe(false);
+
+    act(() => {
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+
+    expect(result.current.editorTabs[0].isDirty).toBe(true);
+    expect(draftPersistenceBlocked()).toBe(true);
+
+    act(() => {
+      result.current.setTabDirty(XLSX_TAB, false);
+    });
+
+    expect(result.current.editorTabs[0].isDirty).toBe(false);
+    expect(draftPersistenceBlocked()).toBe(false);
+  });
+
+  it("setTabDirty with an unchanged flag keeps the same tabs array", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    const before = result.current.editorTabs;
+    act(() => {
+      result.current.setTabDirty(XLSX_TAB, false);
+    });
+    expect(result.current.editorTabs).toBe(before);
+  });
+
+  it("does not re-render when an effect re-reports the same Excel dirty flag", async () => {
+    let renders = 0;
+    const { result } = renderHook(() => {
+      const tabs = useEditorTabs();
+      renders += 1;
+      if (renders > 50) throw new Error("render loop: setTabDirty keeps re-rendering the editor tabs");
+      // Mirrors App.tsx and FileTabContent: the caller re-reports the dirty flag
+      // from an effect that runs on every render.
+      useEffect(() => {
+        tabs.setTabDirty(XLSX_TAB, false);
+      });
+      return tabs;
+    });
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    expect(renders).toBeLessThan(10);
+  });
+
+  it("saves Excel preview tabs through the registered save handler", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    const handler = vi.fn(async () => true);
+    act(() => {
+      result.current.registerExcelSaveHandler(XLSX_TAB, handler);
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+
+    expect(draftPersistenceBlocked()).toBe(true);
+
+    await act(async () => {
+      await result.current.saveEditorTab(XLSX_TAB);
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result.current.editorTabs[0].isDirty).toBe(false);
+    expect(draftPersistenceBlocked()).toBe(false);
+  });
+
+  it("keeps the tab open when Excel save returns false (cancelled/failed)", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    const handler = vi.fn(async () => false); // first-save confirm declined
+    act(() => {
+      result.current.registerExcelSaveHandler(XLSX_TAB, handler);
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].isDirty).toBe(true));
+    act(() => {
+      result.current.requestCloseTab(XLSX_TAB);
+    });
+
+    expect(result.current.pendingClose).not.toBeNull();
+    expect(draftPersistenceBlocked()).toBe(true);
+
+    await act(async () => {
+      await result.current.confirmSaveAndClose();
+    });
+
+    // Save was cancelled → tab stays open, dialog stays open, guard stays armed
+    expect(result.current.editorTabs).toHaveLength(1);
+    expect(result.current.pendingClose).not.toBeNull();
+    expect(draftPersistenceBlocked()).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the tab when Excel save succeeds", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    const handler = vi.fn(async () => true);
+    act(() => {
+      result.current.registerExcelSaveHandler(XLSX_TAB, handler);
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].isDirty).toBe(true));
+    act(() => {
+      result.current.requestCloseTab(XLSX_TAB);
+    });
+
+    expect(result.current.pendingClose).not.toBeNull();
+
+    await act(async () => {
+      await result.current.confirmSaveAndClose();
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result.current.editorTabs).toHaveLength(0);
+    expect(result.current.pendingClose).toBeNull();
+    expect(draftPersistenceBlocked()).toBe(false);
+  });
+
+  it("discards an Excel tab without saving", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    act(() => {
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].isDirty).toBe(true));
+    act(() => {
+      result.current.requestCloseTab(XLSX_TAB);
+    });
+    expect(result.current.pendingClose).not.toBeNull();
+
+    act(() => {
+      result.current.confirmDiscardAndClose();
+    });
+
+    expect(result.current.editorTabs).toHaveLength(0);
+    expect(result.current.pendingClose).toBeNull();
+    expect(draftPersistenceBlocked()).toBe(false);
+  });
+
+  it("reconcileDraftGuard removes stale entries for closed Excel tabs", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/budget.xlsx");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    act(() => {
+      result.current.setTabDirty(XLSX_TAB, true);
+    });
+    await waitFor(() => expect(result.current.editorTabs[0].isDirty).toBe(true));
+    expect(draftPersistenceBlocked()).toBe(true);
+
+    act(() => {
+      result.current.requestCloseTab(XLSX_TAB);
+    });
+    expect(result.current.pendingClose).not.toBeNull();
+
+    act(() => {
+      result.current.confirmDiscardAndClose();
+    });
+    expect(result.current.editorTabs).toHaveLength(0);
+    expect(draftPersistenceBlocked()).toBe(false);
   });
 });

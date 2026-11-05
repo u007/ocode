@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -67,14 +68,6 @@ func isQuestionAsk(content string) bool {
 		strings.Contains(content, tool.SentinelWaitingForUser)
 }
 
-// isQuestionDismissed reports whether a tool result is a question prompt the
-// user dismissed without answering (tool.QuestionDismissedResult). Mirror of
-// dismissedQuestion in internal/session/transcript_tail.go, which this package
-// cannot reuse because it is unexported there.
-func isQuestionDismissed(content string) bool {
-	return strings.TrimSpace(content) == tool.QuestionDismissedResult
-}
-
 // tailIsQuestionAsk reports whether the most recent tool-call round still has
 // an unresolved question prompt anywhere in it. Mirror of tailIsPermissionAsk
 // in run_states.go — see trailingToolRunStart for why the whole round (not
@@ -102,7 +95,7 @@ func applyQuestionAnswer(msgs []agent.Message, requestID, answerJSON string) boo
 		return false
 	}
 	last := &msgs[len(msgs)-1]
-	if last.Role != "tool" || last.ToolID != requestID || (!isQuestionAsk(last.Content) && !isQuestionDismissed(last.Content)) {
+	if last.Role != "tool" || last.ToolID != requestID || (!isQuestionAsk(last.Content) && !tool.QuestionDismissed(last.Content)) {
 		return false
 	}
 	last.Content = answerJSON
@@ -122,7 +115,8 @@ func applyQuestionAnswer(msgs []agent.Message, requestID, answerJSON string) boo
 // starts an ordinary turn. Re-stepping would spend a model round-trip narrating
 // a non-answer and could raise a fresh ask the user must dismiss again. The
 // dismissed result can still be answered from the transcript card while it is
-// the trailing tool round (see HandleAnswerQuestion).
+// the trailing tool round (see HandleAnswerQuestion); that answer rewrites the
+// stored dismissal row too (session.RewriteAskResultForDir accepts it).
 //
 // In /rc bridge mode the dismissal is forwarded to the TUI (which owns the
 // agent and its own dialog), mirroring HandleAnswerQuestion.
@@ -139,6 +133,12 @@ func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "request_id is required")
 		return
 	}
+	// Trace which caller dismissed (dialog button, Pulse write tool, other).
+	// A Pulse request is in-process (pulseCall): it has no RemoteAddr, so
+	// isPulseOrigin is what identifies it. User-Agent and Referer are not
+	// logged: a Referer can carry a URL with tokens or paths.
+	slog.Info("question dismiss", "session", req.SessionID, "request_id", req.RequestID,
+		"pulse", isPulseOrigin(r), "remote", r.RemoteAddr)
 
 	if rc := h.RCBridge(); rc != nil {
 		// The TUI owns the agent and its question dialog; forward the dismissal
@@ -276,7 +276,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// background continuation (dispatchAskContinuation); every error path below
 	// must therefore unlock as.mu explicitly.
 	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
-		return m.Role == "tool" && (isQuestionAsk(m.Content) || isQuestionDismissed(m.Content))
+		return m.Role == "tool" && (isQuestionAsk(m.Content) || tool.QuestionDismissed(m.Content))
 	})
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")

@@ -13,7 +13,7 @@ tags:
   - async
   - concurrency
   - locks
-timestamp: 2026-10-01T05:24:05Z
+timestamp: 2026-11-05T12:21:06Z
 ---
 # Web ask dialogs: 202 + background continuation (broadcast `*_resolved` before Step)
 
@@ -29,8 +29,8 @@ HTTP request, so the POST stayed pending for the whole model round (Step can
 run for minutes). The browser's `await` never settled, the dialog's local
 answer echo + dismissal were gated on it, and the request held one of the
 browser's ~6 connections per origin for its whole duration — the same
-starvation the async send path was fixed for (`web/src/api/client.ts:2770`
-`async: true`; see the comment at `web/src/hooks/useChat.ts:161`). The TUI
+starvation the async send path was fixed for (`web/src/api/client.ts:3189`
+`async: true`; see the comment at `web/src/hooks/useChat.ts:212`). The TUI
 never had this problem: resolving a dialog just resumes its single in-process
 loop.
 
@@ -41,42 +41,42 @@ via:
 - `(*Handler).dispatchAskContinuation(sessionID, as, fn)` —
   `internal/server/handler_ask_continuation.go:31`.
 - `HandleAnswerQuestion` dispatches at
-  `internal/server/handler_questions.go:282` and writes 202 at
-  `handler_questions.go:342`. The callback wires callbacks, sets
+  `internal/server/handler_questions.go:310` and writes 202 at
+  `handler_questions.go:370`. The callback wires callbacks, sets
   `turnActive(true)`, starts the heartbeat + activity broadcast, broadcasts
   `question_resolved`, runs `Step`, persists, broadcasts `messages` +
   `turn_done`, and calls `MaybeCompactAsync`.
 - `HandleResolvePermission` dispatches at
-  `internal/server/handler_permissions_resolve.go:282` and writes 202 at
-  `handler_permissions_resolve.go:371`. The approved-tool execution (the
+  `internal/server/handler_permissions_resolve.go:337` and writes 202 at
+  `handler_permissions_resolve.go:481`. The approved-tool execution (the
   `executeApprovedWithTempPath` call) AND the re-Step both run inside the
   dispatched callback — they previously ran inline before Step. The
   `permission_resolved` broadcast still happens synchronously BEFORE dispatch
-  (`handler_permissions_resolve.go:270-274`); for questions the
+  (`handler_permissions_resolve.go:325-329`); for questions the
   `question_resolved` broadcast happens inside the callback but still before
-  `Step` (`handler_questions.go:315`, Step at `:317`).
+  `Step` (`handler_questions.go:343`, Step at `:345`).
 - Multi-ask branch: if another unresolved permission ask remains in the same
   trailing round, the callback saves the single resolution and broadcasts
-  `messages` without running Step (`handler_permissions_resolve.go:308-322`),
+  `messages` without running Step (`handler_permissions_resolve.go:412-421`),
   and the handler still returns 202.
 
 ### Lock-ownership handoff (the subtle part)
 
 `findPendingSession` returns the `agentSession` with `as.mu` **held**
-(`handler_questions.go:250`,
-`handler_permissions_resolve.go:214`). The caller must **NOT** unlock it on
+(`handler_questions.go:278`,
+`handler_permissions_resolve.go:257`). The caller must **NOT** unlock it on
 the success path — `dispatchAskContinuation` transfers ownership to the
 callback goroutine, which unlocks via `defer as.mu.Unlock()` when `fn`
-returns (`handler_ask_continuation.go:70`). Consequently there is no
+returns (`handler_ask_continuation.go:67`). Consequently there is no
 handler-level unlock defer anymore: every post-`findPendingSession` error
-path must unlock explicitly (e.g. `handler_questions.go:260,266`;
-`handler_permissions_resolve.go:228,234,243,250,256`). A new validation
+path must unlock explicitly (e.g. `handler_questions.go:288,294`;
+`handler_permissions_resolve.go:271,277,286,292,299,310`). A new validation
 branch added after `findPendingSession` that forgets its explicit unlock
 deadlocks the session.
 
 ### Shutdown admission mirrors `dispatchTurn`
 
-`dispatchTurn` (`internal/server/agent_session.go:1702`) is the pattern;
+`dispatchTurn` (`internal/server/agent_session.go:1978`) is the pattern;
 `dispatchAskContinuation` mirrors it exactly:
 
 - Under `shutdownMu`, if `shutdownStarted`: unlock and run `fn` INLINE on the
@@ -89,15 +89,17 @@ deadlocks the session.
   (`:39`), then register `turnInFlight[sessionID]++` BEFORE starting the
   goroutine (`:45-50`) so a racing `Stop` (and `shutdownAgentSessions`
   cancellation) still sees the session as in-flight.
-- The goroutine's defer chain (LIFO): unlock `as.mu` → recover panics (logged
+- The goroutine's defer chain (LIFO): unlock `as.mu` → flush deferred memory maintenance → recover panics (logged
   as `serve error: ask continuation panic`) → decrement `turnInFlight` →
-  `turnJobsWG.Done()` (`handler_ask_continuation.go:52-72`).
+  `turnJobsWG.Done()` (`handler_ask_continuation.go:52-69`).
+
+The flush in that chain (`handler_ask_continuation.go:66`) is one of two ways a deferred memory pass runs. A job event that finds `as.mu` busy is deferred by `queueJobMemoryMaintenance` (`internal/server/agent_session.go:2488`), which keeps only the latest event and starts `awaitDeferredMemoryMaintenance` (`agent_session.go:2510`) on its own goroutine. That waiter blocks for `as.mu` off the job loop and takes the marker once the lock is released, so a holder that never flushes (an HTTP compaction, recap or stream) still gets the pass. Lock order is `as.mu` then `memoryMaintMu`; `h.mu` is not taken.
 
 The continuation keeps the full `turnActive`/heartbeat contract from the
 original fix below: `setTurnActive(true)` + `startTurnHeartbeat` +
 `startAgentActivityBroadcast` with defers declared last so they run first,
 preserving the `drainPendingClose` → `setTurnActive(false)` order
-(`handler_questions.go:288-303`, `handler_permissions_resolve.go:336-350`).
+(`handler_questions.go:321-331`, `handler_permissions_resolve.go:434-443`).
 
 ## Web client: echo/dismiss BEFORE the await, re-hydrate on retryable failure
 
@@ -106,15 +108,15 @@ preserving the `drainPendingClose` → `setTurnActive(false)` order
 the POST, so the visible result never depends on response latency:
 
 - `resolvePermission` dispatches `PERMISSION_RESOLVED` first
-  (`useChat.ts:255`), then awaits `api.resolvePermission`.
+  (`useChat.ts:376`), then awaits `api.resolvePermission`.
 - `submitQuestionAnswers` dispatches `QUESTION_ANSWERED` (local transcript
-  echo of the answers) + `QUESTION_RESOLVED` first (`useChat.ts:394-395`),
+  echo of the answers) + `QUESTION_RESOLVED` first (`useChat.ts:416-417`),
   then awaits `api.answerQuestion`.
 - On a retryable failure (anything that is not HTTP 404/409) they call
-  `hydratePendingAsks()` (`useChat.ts:101`, called at `:266` and `:300`),
+  `hydratePendingAsks()` (`useChat.ts:154`, called at `:391` and `:429`),
   which refetches `GET /api/sessions/:id/state` and re-dispatches
   `PERMISSION_REQUEST`/`QUESTION_REQUEST` from the server's live
-  `pending_asks` (`internal/server/handler_session_state.go:78`) — so an
+  `pending_asks` (`internal/server/handler_session_state.go:64`) — so an
   optimistically dismissed dialog reappears and the user can retry (the
   continuation never ran). A 404/409 means the server no longer holds the
   ask, so staying dismissed is correct.
@@ -137,17 +139,17 @@ permissions earlier; questions fixed 2026-09-08; endpoints made async
 
 ## Tests
 
-- `internal/server/handler_questions_test.go:288`
+- `internal/server/handler_questions_test.go:289`
   `TestHandleAnswerQuestionReturns202BeforeContinuation` and
-  `handler_questions_test.go:335`
+  `handler_questions_test.go:336`
   `TestHandleResolvePermissionReturns202BeforeContinuation` — the endpoint
   must return 202 while the continuation is still blocked; reverting to
   inline Step fails both (mutation-verified).
 - Broadcast-before-Step guards still stand:
   `TestHandleAnswerQuestionBroadcastsResolvedBeforeContinuation`
-  (`handler_questions_test.go:577`) and
+  (`handler_questions_test.go:624`) and
   `TestHandleResolvePermissionBroadcastsResolvedBeforeContinuation`
-  (`handler_permissions_resolve_test.go:621`) — they gate the fake model
+  (`handler_permissions_resolve_test.go:827`) — they gate the fake model
   client so the test only passes if the frame arrives while the model round
   is still blocked.
 - Continuation still emits heartbeats:
@@ -156,7 +158,7 @@ permissions earlier; questions fixed 2026-09-08; endpoints made async
 - Continuation emits `turn_started` before `Step` and `turn_done` after:
   `TestHandleAnswerQuestionContinuationEmitsTurnStarted`,
   `TestHandleResolvePermissionContinuationEmitsTurnStarted`.
-- Web: `web/src/hooks/useChat.remoteHost.test.tsx:273`
+- Web: `web/src/hooks/useChat.remoteHost.test.tsx:357`
   `describe("useChat.submitQuestionAnswers optimistic echo")` and
   `web/src/hooks/useChat.test.tsx:51` (404/409 stays dismissed;
   retryable failure re-hydrates the ask; success dismisses).

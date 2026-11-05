@@ -157,6 +157,13 @@ interface BrowserState {
  *  entries are dropped past the cap, so consumers render the tail. */
 export const CONSOLE_CAP = 1000;
 export const NETWORK_CAP = 1000;
+/** How many LOCAL-mode network rows keep their response body in memory. Local
+ *  bodies arrive EAGERLY (a page cannot re-fetch a consumed response), so an
+ *  unbounded map would retain every byte a page ever downloaded; local bodies
+ *  for rows past this count are dropped and the row falls back to "Body not
+ *  available". CDP bodies are fetched on demand and are not capped by this:
+ *  they live as long as their row is in the ring buffer. */
+export const NETWORK_BODY_CAP = 20;
 /** Cap on one surface's history list. navigate() and a page's pushState both
  *  append, so a page that pushes on every route would otherwise grow it without
  *  bound. The oldest entries are dropped past the cap. */
@@ -199,6 +206,59 @@ function mutate(key: string, fn: (t: BrowserTabState) => BrowserTabState) {
 
 function cap<T>(arr: T[], limit: number): T[] {
   return arr.length > limit ? arr.slice(arr.length - limit) : arr;
+}
+
+/** Local-mode rows carry a `local-` request id (capture.js `localId`). The id is
+ *  the only record of which delivery path a body took: local and CDP bodies both
+ *  reach the store through `setResponseBody`. */
+export function isLocalRequestId(requestId: string): boolean {
+  return requestId.startsWith("local-");
+}
+
+/** Keeps a body while its row is still shown. A local body is kept only for the
+ *  newest `NETWORK_BODY_CAP` local rows. A CDP body was fetched on demand for a
+ *  row the user opened, and the row has no way to ask again, so it is kept
+ *  until the ring buffer drops the row. Rows are the authoritative order: a body
+ *  whose row is gone can never render, so it is dropped.
+ *  The rows are walked newest first and only until every body is decided, so a
+ *  push costs about the number of bodies, not the whole ring buffer. */
+function retainBodies(
+  bodies: Record<string, ResponseBody>,
+  networkEvents: NetworkEvent[],
+): Record<string, ResponseBody> {
+  const ids = Object.keys(bodies);
+  if (ids.length === 0) return bodies;
+  const pendingLocal = new Set<string>();
+  const pendingCdp = new Set<string>();
+  for (const id of ids) {
+    if (isLocalRequestId(id)) pendingLocal.add(id);
+    else pendingCdp.add(id);
+  }
+  // A body leaves `pending` when its row is found: a CDP row at any age, a local
+  // row only while the local window has room. Whatever is still pending after the
+  // walk has no such row, so it is dropped. The local window is the distinct local
+  // row ids among the newest NETWORK_BODY_CAP local rows; once it is full, a local
+  // body not yet seen can never join it.
+  const recentLocal = new Set<string>();
+  for (let i = networkEvents.length - 1; i >= 0; i--) {
+    if (pendingCdp.size === 0 && (pendingLocal.size === 0 || recentLocal.size >= NETWORK_BODY_CAP)) break;
+    const id = networkEvents[i].requestId;
+    if (!id) continue;
+    if (isLocalRequestId(id)) {
+      if (recentLocal.size < NETWORK_BODY_CAP) {
+        recentLocal.add(id);
+        pendingLocal.delete(id);
+      }
+    } else {
+      pendingCdp.delete(id);
+    }
+  }
+  if (pendingLocal.size === 0 && pendingCdp.size === 0) return bodies;
+  const next: Record<string, ResponseBody> = {};
+  for (const id of ids) {
+    if (!pendingLocal.has(id) && !pendingCdp.has(id)) next[id] = bodies[id];
+  }
+  return next;
 }
 
 /** How a same-document page hint changed the history: "push" = pushState (adds
@@ -422,7 +482,10 @@ export const browserActions = {
   },
 
   pushNetwork(key: StateKey, ev: NetworkEvent) {
-    mutate(key, (t) => ({ ...t, networkEvents: cap([...t.networkEvents, ev], NETWORK_CAP) }));
+    mutate(key, (t) => {
+      const networkEvents = cap([...t.networkEvents, ev], NETWORK_CAP);
+      return { ...t, networkEvents, responseBodies: retainBodies(t.responseBodies, networkEvents) };
+    });
   },
 
   clearConsole(key: StateKey) {
@@ -430,7 +493,7 @@ export const browserActions = {
   },
 
   clearNetwork(key: StateKey) {
-    mutate(key, (t) => ({ ...t, networkEvents: [] }));
+    mutate(key, (t) => ({ ...t, networkEvents: [], responseBodies: {} }));
   },
 
   setResponseBody(key: StateKey, requestId: string, body: ResponseBody) {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -577,6 +579,185 @@ func (h *Handler) remoteSaveFileContent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"path": abs, "saved": true})
+}
+
+// remoteSaveFileRaw is HandleSaveFileRaw's PUT over the transport. It applies
+// the local guards in the same order: lexical containment, a realpath check on
+// the target's parent, a symlink refusal on the final component, the
+// byte-exact SHA-256 expected-hash guard, and a one-time .bak of the existing
+// bytes. project_root is required and the write travels via stdin
+// (remoteWriteFile). It never falls back to a local write.
+func (h *Handler) remoteSaveFileRaw(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	path := q.Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		mediaType, _, err := mime.ParseMediaType(ct)
+		if err != nil || !strings.EqualFold(mediaType, "application/octet-stream") {
+			writeError(w, http.StatusBadRequest, "Content-Type must be application/octet-stream")
+			return
+		}
+	}
+	expectedHash := q.Get("expected_hash")
+	force := q.Get("force") == "1" || strings.EqualFold(q.Get("force"), "true")
+
+	host := hostParam(r)
+	root := q.Get("project_root")
+	if root == "" {
+		writeError(w, http.StatusBadRequest, "project_root is required for remote saves")
+		return
+	}
+	rw, err := h.remoteWorkFor(host, root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx := r.Context()
+	abs := remoteAbsJoin(rw.Path, path)
+	rel, cerr := remoteRelCheck(rw.Path, abs)
+	if cerr != nil || rel == "." {
+		writeError(w, http.StatusBadRequest, "path is outside the workspace")
+		return
+	}
+	// .xlsx-only gate on the resolved (remote-absolute) target path.
+	if !strings.EqualFold(filepath.Ext(abs), ".xlsx") {
+		writeError(w, http.StatusBadRequest, "only .xlsx files can be saved as raw")
+		return
+	}
+
+	// Realpath containment: the parent must resolve inside the project root on
+	// the host, so a symlinked directory cannot redirect the write elsewhere.
+	inside, cerr := remoteDirInside(ctx, rw, filepath.Dir(abs))
+	if cerr != nil {
+		slog.Warn("raw save: resolve remote parent failed", "host", host, "path", abs, "err", cerr)
+		if isRemoteTransportError(cerr) {
+			writeError(w, http.StatusBadGateway, "failed to resolve path on the remote host")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	if !inside {
+		writeError(w, http.StatusBadRequest, "path is outside the workspace")
+		return
+	}
+
+	data, ok := readRawSaveBody(w, r)
+	if !ok {
+		return
+	}
+
+	saveMu := h.saveLockFor("remote:" + rw.Target.String() + ":" + abs)
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
+	// Refuse a symlinked final component before reading it: remote reads and
+	// the `cat >` write both follow links.
+	kind, kerr := remoteLstatKind(ctx, rw, abs)
+	if kerr != nil {
+		slog.Error("raw save: remote stat failed", "host", host, "path", abs, "err", kerr)
+		writeError(w, http.StatusBadGateway, "failed to inspect file on the remote host")
+		return
+	}
+	if kind == "symlink" {
+		writeError(w, http.StatusBadRequest, "refusing to save through a symlink")
+		return
+	}
+
+	// The existing bytes are read on every save, not only when expected_hash
+	// is set, because the one-time .bak needs them. Any read failure, including
+	// a transport error, aborts with 502 and is never treated as a missing file.
+	existing, found, rerr := remoteReadFile(ctx, rw, abs)
+	if rerr != nil {
+		slog.Error("raw save: remote read failed", "host", host, "path", abs, "err", rerr)
+		writeError(w, http.StatusBadGateway, "failed to read current file on the remote host")
+		return
+	}
+	// Overwriting an existing file needs expected_hash unless force=1, the same
+	// rule as the local save. A missing target may still be created without one.
+	if !force && expectedHash == "" && found {
+		writeError(w, http.StatusBadRequest, "expected_hash required unless force=1")
+		return
+	}
+	if expectedHash != "" && !force {
+		diskHash := rawMissingHash
+		if found {
+			diskHash = rawContentHash(existing)
+		}
+		if diskHash != expectedHash {
+			writeError(w, http.StatusConflict, "file has changed on disk since it was opened; reload or force-save to overwrite")
+			return
+		}
+	}
+
+	// One-time .bak of the pre-existing bytes. A backup that cannot be made
+	// aborts the save, and an existing .bak (or a directory at that path) is
+	// left alone.
+	if found {
+		bak := abs + ".bak"
+		bakKind, berr := remoteLstatKind(ctx, rw, bak)
+		if berr != nil {
+			slog.Error("raw save: remote backup stat failed", "host", host, "path", bak, "err", berr)
+			writeError(w, http.StatusBadGateway, "failed to inspect backup on the remote host")
+			return
+		}
+		if bakKind == "symlink" {
+			writeError(w, http.StatusBadRequest, "refusing to back up through a symlink")
+			return
+		}
+		if bakKind == "missing" {
+			if werr := remoteWriteFileAtomic(ctx, rw, bak, existing); werr != nil {
+				slog.Error("raw save: remote backup write failed", "host", host, "path", bak, "err", werr)
+				writeError(w, http.StatusInternalServerError, "failed to back up file before save")
+				return
+			}
+		}
+	}
+
+	if werr := remoteWriteFileAtomic(ctx, rw, abs, data); werr != nil {
+		writeError(w, http.StatusInternalServerError, werr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"path": abs, "saved": true})
+}
+
+// remoteWriteFileAtomic replaces the remote file at target with data without
+// ever leaving it half-written, mirroring the local raw save. The bytes go to a
+// temp file in the target's directory, which is renamed over the target in the
+// same remote command. An existing target's mode is kept (cp -p copies it onto
+// the temp file before the bytes are written); a new file gets mktemp's 0600,
+// the mode local raw saves create. The rename happens only if the temp file's
+// size equals len(data), so a stdin stream cut short cannot install a truncated
+// file. Every failure path removes the temp file and leaves the target as it was.
+func remoteWriteFileAtomic(ctx context.Context, rw remoteWork, target string, data []byte) error {
+	q := remote.ShellQuotePath(target)
+	template := remote.ShellQuotePath(filepath.Dir(target)) + "/.raw-save-XXXXXX"
+	script := `tmp=$(mktemp ` + template + `) || exit 1; ` +
+		`if [ -e ` + q + ` ]; then cp -p ` + q + ` "$tmp" || { rm -f "$tmp"; exit 1; }; fi; ` +
+		`cat > "$tmp" && [ "$(wc -c < "$tmp" | tr -d ' ')" = ` + strconv.Itoa(len(data)) + ` ] && mv -f "$tmp" ` + q +
+		` || { rm -f "$tmp"; exit 1; }`
+	return remoteWriteStdin(ctx, rw, script, data)
+}
+
+// remoteLstatKind reports what sits at path without following a final symlink:
+// "symlink", "dir", "file" or "missing". Unlike remoteExists and
+// remoteStatIsDir it returns the command error instead of folding it into
+// "absent", so a failed probe is never mistaken for a missing file.
+func remoteLstatKind(ctx context.Context, rw remoteWork, path string) (string, error) {
+	q := remote.ShellQuotePath(path)
+	out, err := remoteRun(ctx, rw, "if [ -L "+q+" ]; then echo symlink; elif [ -d "+q+" ]; then echo dir; elif [ -e "+q+" ]; then echo file; else echo missing; fi")
+	if err != nil {
+		return "", err
+	}
+	kind := strings.TrimSpace(out)
+	switch kind {
+	case "symlink", "dir", "file", "missing":
+		return kind, nil
+	}
+	return "", fmt.Errorf("remote stat failed: unexpected output %q", kind)
 }
 
 // remoteFileSearch is the paginated content search over the transport,

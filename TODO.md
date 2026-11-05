@@ -1,8 +1,14 @@
 # TODO
 
+## Open: TUI permission tests leak rules through the shared global config (2026-11-05)
+
+- **Fixed for one test.** `TestNestedSubagentPermissionPromptSurfacesToMainTUI` (`internal/tui/model_test.go`) now isolates HOME and XDG with `setVoiceHomeTree` plus `chdirTempForConfigTest`. Before, it failed intermittently with a 15 s keep-alive, because `refreshFileRules` (`internal/agent/permission_filerules.go`) layers the process-wide global `ocodeconfig.json` over every manager and that file held `permissions.tools.task = "ask"` from an earlier test.
+- **Still open: the writer.** The package-wide HOME (`internal/tui/testmain_test.go`) gets a full rule table persisted by some earlier test. Not identified. Find it with a `permissions.tools.task` check on the file after each test.
+- **Still open: bare HOME overrides.** `TestAlwaysAllowConfirmationDefersPersist` (`model_test.go`) and `TestSandboxPersistsAsDefault` (`sandbox_mode_test.go`) use `t.Setenv("HOME", …)` only. On Linux the XDG variables still point at the package-wide home, so their writes reach other tests. Switch them to `setVoiceHomeTree`.
+
 ## Open: print gaps for binary previews (2026-11-04)
 
-- **Files-tab binary preview-only branch has no Print button.** `FileTabContent` renders `PreviewSurface` directly for `.xlsx`, `.docx`, `.pptx` and images, with no toolbar. Add a header with `PrintPreviewButton` and `source={{ origin: "disk", ... }}`. Not done: the request named the three existing call sites only, and this branch has no header to put it in.
+- **Files-tab binary preview-only branch has no Print button.** ~~`FileTabContent` renders `PreviewSurface` directly for `.xlsx`, `.docx`, `.pptx` and images, with no toolbar~~ DONE (2026-11-05, t4): a header now renders `PrintPreviewButton source={{ origin: "disk", ... }}` for printable kinds (docx/pptx/image/excel) and, on `.xlsx`, a Save button + Cmd/Ctrl+S. Not done: print-live (print the live edited workbook, not the saved file); PDF uses PdfViewer's own print UI (no `printPreview` entry, so FileTabContent does not duplicate it).
 - **Excel print drops cell styles, merges and column widths.** Values print as displayed. Map `mergeData` to spans if needed.
 - **Unverified live: the new print kinds.** docx, pptx, excel, image and mermaid documents have not been printed in Chrome or WebKit, or through the desktop print window. Unit tests only (`printPreview.kinds.test.ts`).
 - **In-app DocxViewer hyperlink hazard (pre-existing).** `DocxViewer` inserts docx-preview's output into the app DOM. docx-preview copies a hyperlink target verbatim (`renderHyperlink`), so a `.docx` with a `javascript:` link runs script in the app origin when clicked. The print path now drops those hrefs; the viewer does not. Apply the same filter to the viewer and confirm its link clicks.
@@ -1843,11 +1849,12 @@ deferred at that time and is still open:
 - **Wire `todo_updated` into the CoworkSidebar TODO stub.** The event is published and the Pulse
   store consumes it; the CoworkSidebar's TODO panel (`web/src/components/Layout/CoworkSidebar.tsx`,
   the TODO row) still does not subscribe, so it only updates on a refetch.
-- **Dock-badge click → Pulse: needs a Wails capability that does not exist.** The spec asked for it;
-  Wails v3 beta.12's `dock` service is display-only (`SetBadge`/`RemoveBadge`/`SetCustomBadge`) and
-  `pkg/events` has no application-activated event, so a macOS dock click while ocode is already
-  running is indistinguishable from a plain activation. Landing this needs either a Wails release
-  exposing activation, or hand-rolled ObjC (`applicationDelegate applicationShouldHandleReopen:`)
+- **Dock-badge click → Pulse: no badge-vs-icon signal exists.** The spec asked for it;
+  Wails v3.1.0's `dock` service is display-only (`SetBadge`/`RemoveBadge`/`SetCustomBadge`).
+  `events.Mac.ApplicationShouldHandleReopen` does reach Go listeners, but it fires for a click
+  anywhere on the dock icon (not specifically the badge), Wails already consumes it to reveal
+  hidden windows, and `hasVisibleWindows` cannot separate the two. Landing this needs either a
+  dedicated badge-click event or hand-rolled ObjC (`applicationDelegate applicationShouldHandleReopen:`)
   in `cmd/ocode-desktop`. Until then the tray's "Open Pulse" item and Cmd/Ctrl+Shift+J are the
   reachable entry points. **This is the one spec item deliberately NOT substituted** — the plan
   said to stop and ask rather than quietly swap in a different mechanism.
@@ -6913,6 +6920,11 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - Split view remounts Univer on every debounced edit; may be slow on large CSVs.
 - Merges and theme are read from ExcelJS private fields (`ws._merges`, `wb._themes`); an ExcelJS upgrade will throw loudly rather than mis-render.
 - Remote `HandleFileStat` branch (5 s deadline, 502/500 split) has no test; no fake-remote harness covers it.
+- Raw save client contract: `expected_hash` on `PUT /api/files/raw` is lowercase hex SHA-256 of the exact bytes `GET /api/files/raw` returned, or `__missing__` for an absent file. It is NOT the text save's `hashContent`. The viewer sends it: `rawContentHash` in `web/src/components/Preview/univerSerialize.ts` uses `@noble/hashes` (pinned `^1`, pure JS), not `crypto.subtle`, so plain-http LAN origins work. Vectors are pinned on both sides (`univerSerialize.test.ts` and `TestRawContentHashIsSHA256Hex`).
+- Remote raw save writes via `cat >` (not temp+rename like local). The one-time `.bak` is the only recovery from a torn write. The existing bytes are read on every save (the `.bak` needs them), so force=1 still pays one base64 round trip.
+- Bundle anchors into `handler_files.go` are stale on `docs/concepts/{file-editor-grants,file-tree-walk-budget,file-search-shortest-path-ordering,web-server-project-scoping,excel-preview-univer-sheet}.md` and `docs/gotchas/files-tab-preview-only-routing.md`. Example: `maxTreeNodes` is cited at 1730 but is at 1976. Most were already wrong before the raw-save fixes; re-derive every one by symbol, not by line. `excel-preview-univer-sheet.md` also still documents the removed djb2 `hashBytesForServerHash`/`goRangeCodeUnits` (now `rawContentHash`, SHA-256): route through the `context` writer, not by hand.
+- Editable Excel server slice done 2026-11-05: `PUT /api/files/raw` saves `.xlsx` only (local + remote twin), with expected_hash/force, 413 over 32 MiB, atomic temp+rename (local; remote is `cat >`), one-time `.bak`, symlink refusal. Client slice done: Univer unlock for `.xlsx` only, revision dirty tracking, ExcelJS serialize-back (values-only), `api.saveFileRaw`, SHA-256 `expected_hash` (the earlier djb2 "Go-parity" hash 409'd every save and is gone). Files-tab Save+Print toolbar (t4) done 2026-11-05: preview-only header with Save (dirty-gated) + Print (disk source) + Cmd/Ctrl+S for `.xlsx`. Not yet built: print-live (print the live edited workbook, not the saved file); close-confirm Save/Don't Save/Cancel + quit-guard (t5). Fidelity risk on round-trip (charts/images/pivots lost) unproven.
+- Excel edit-save untested in a real browser (2026-11-05): the save flow, the base-hash 409 path, and editable Univer rendering have only vitest/jsdom coverage; no live Chrome/WebKit/desktop check. The SHA-256 switch (2026-11-05) fixed the every-save 409 but is not yet proven live. Do not describe edit-save as working until one runs.
 
 ## Egress / content guard: `/dev/tcp` redirections are invisible (2026-11-04)
 
@@ -6924,3 +6936,68 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
   (probed 2026-11-04 while fixing the compound-line walk). Fix: treat a `/dev/tcp`/`/dev/udp` redirection
   on ANY fragment as a non-loopback egress target in `bashEgressTargets`, with tests in
   `network_guard_typesafe_test.go` and `content_guard_typesafe_test.go`.
+
+## Embedded browser: local-mode request-body capture is not secret-scanned (2026-11-05)
+
+- **Accepted risk:** `internal/browse/capture.js` now reports a local (reverse-proxy iframe) tab's request body (`postData`, 64 KB cap) and its response body inline, so the Network row can expand. Headers are redacted and bounded exactly like the CDP path (`redactHeaders`: `authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`, `x-csrf-token`), but a credential placed in the BODY (JSON `{"token": "..."}` or a form field) is shown verbatim — the CDP path behaves the same way, and DevTools does too.
+- **Containment:** the payload only travels page → parent SPA through a `postMessage` gated by exact origin + `event.source` (`browseOrigin.isTrustedBrowseMessage`), i.e. it never leaves the ocode origin. It is display state, not persisted, and bodies are retained for only the newest 20 rows (`NETWORK_BODY_CAP`).
+- **If tightened later:** apply a body-secret scrubber (the content-guard/redaction helpers live in `internal/agent`) to the JS capture path AND to the CDP `PostData`/`GetResponseBody` path together, or the two modes will disagree. Regression `web/src/components/Browser/browseCaptureNetwork.test.ts`.
+
+## Embedded browser: local-mode Network capture gaps (2026-11-05)
+
+- **A fetch that streams past 2 s shows its request twice.** The Resource Timing dedupe record is ended when the response headers arrive, and it expires `WRAP_GRACE_MS` (2 s) later, but the timing entry is queued at response end. A longer stream leaves its entry unmatched, so the request appears as the wrapped row plus an anonymous `-` row. Fix: end the record when the body finishes (the `readCapped` reader or the stream close), not at headers. Regression should start from a fetch whose body resolves after 5 s.
+- **No document row when `load` never fires.** The page's own navigation row is posted only from the finished entry (`loadEventEnd > 0`), so a hung subresource leaves the document out of the panel. Deliberate: a duplicate or a 0 ms row is worse. Revisit if users report a missing document row.
+- **Resource rows carry no headers or bodies.** `<img>`, `<script>` and CSS rows show method `-`, timing and Size only. Capturing them needs CDP or a proxy-side capture; the page's JS cannot read them.
+
+## Wails v3.1.0 upgrade follow-ups (2026-11-05)
+
+- **Linux cgo/GTK4 desktop build is unverified.** The bump to `wails v3.1.0` was validated
+  on darwin (cgo, `-tags "htr models"`), `GOOS=windows GOARCH=amd64 CGO_ENABLED=0`, and
+  `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 -tags purego`. The Linux path `make desktop` actually
+  uses (cgo + `libgtk-4-dev` + `libwebkitgtk-6.0-dev`) needs a Linux host or CI with those
+  headers; CI excludes `cmd/ocode-desktop` because `ubuntu-latest` has none. Verify before
+  claiming Linux desktop support.
+- **Live GUI boot of the v3.1.0 binary was not exercised.** Launching `/tmp/ocode-desktop-*`
+  would contend with the running desktop instance (Wails single-instance lock), so the
+  local-cert pin and the media-capture override were proven from the v3.1.0 source only.
+  After rebuilding the app, confirm: no `pin local cert: ... already implements` dialog, and
+  dictation shows the macOS TCC prompt only.
+- **`doc_write` silently drops a `status` key it did not set.** `docs/concepts/browse-per-tab-origin.md`
+  lost `status: active` when the tool rewrote it during the v3.1.0 doc pass; the line was restored
+  through the OKF skill's direct-write fallback and logged, but the tool still cannot set it.
+  The schema (`internal/agent/doc_tools.go`) has no status/frontmatter argument and
+  `knowledge.Store.Write` only changes status via `doc_deprecate`. Add a passthrough; audit
+  future `doc_write` calls for machine-dropped frontmatter.
+- **Go directive is 1.26.1, while Wails v3.1.0's release notes recommend building with Go
+  1.26.10** (GO-2026-6809, `crypto/x509`). CI reads `go-version-file: go.mod`, so it installs
+  what the directive says. The bump did not change the directive; decide separately whether
+  to raise the minimum.
+
+## Web dependency audit (2026-11-05)
+
+- **One low advisory remains: `katex <0.18.2` via `mermaid`.** `pnpm audit` went from
+  1 critical / 3 high / 9 moderate / 5 low to this single low via `pnpm up dompurify vite vitest`
+  plus `pnpm.overrides` (`source-map-js ^1.2.2`, `postcss-selector-parser ^6.1.5`,
+  `exceljs>uuid ^11.1.1`). Mermaid 11.17.2 pins katex `^0.16.47`; the fix is only in 0.18.2,
+  a breaking major for its math renderer, so it was NOT forced. Revisit when mermaid widens
+  the range, or confirm math-in-mermaid is unused and drop it.
+- `web` is pnpm-only (`packageManager: pnpm@10.27.0`, no `package-lock.json`). Do not run
+  `npm audit fix` there: it would create a second lockfile and resolve a tree the build never
+  uses. Use `pnpm audit --fix` / `pnpm up` and keep `pnpm-lock.yaml` authoritative.
+
+## Embedded browser: `pushNetwork` worst case still rebuilds the body Record (2026-11-05)
+
+- **Partial.** `retainBodies` (`web/src/lib/browserStore.ts`) now walks rows newest first only until every body is decided, so the common cases no longer scan the 1000-row ring: local mode about 15 us per push (was about 30), no retained bodies about 3 us (was about 20). The array copy in `cap([...t.networkEvents, ev])` costs about 5 us per push and is untouched.
+- **Remaining worst case:** when about 1000 CDP bodies are retained, each push still rebuilds a 1000-key `responseBodies` object (about 150 us, same as before). Removing it needs a non-Record body store or copy-on-drop, which changes the state shape consumers read. Not done.
+
+## Raw save: remote `.bak` semantics and check-then-write window (2026-11-05)
+
+- **Product decision: the `.bak` is one-time.** Local and remote raw saves keep the bytes from before the first save in `<path>.bak` and never refresh it (`docs/concepts/excel-preview-univer-sheet.md`, pinned by `TestSaveFileRawRemoteBacksUpOnceAndSaves`). After several saves the `.bak` is the original file, not the last good version. Deciding between keep-first, rotate-N and refresh-each-save is a product call. Not changed.
+- **Check-then-write window (parity with local).** `expected_hash` is compared before the write, and the rename happens later. An external writer can land between the two and be overwritten, on both hosts. Closing it needs the hash re-checked in the same step as the rename (remote: inside the same shell script before `mv`; local: under a lock or a re-check after the write). Not done.
+- **Other remote writes are still `cat >` (non-atomic).** Remote text save (`remoteSaveFileContent`, `handler_remote_files.go:577`) and the remote `.gitignore` write (`handler_git_ignore.go`) truncate the target on an interrupted stream. Only raw save uses `remoteWriteFileAtomic`. Route them through it, after deciding the new-file mode (raw save creates 0600, which would change a remote `.gitignore` created today as 0644).
+
+## Excel save: review follow-ups (2026-11-05)
+
+- **Force-save is dropped for Excel tabs (latent, not reachable).** `saveEditorTab` ignores `opts.force` on the `.xlsx` branch (`web/src/hooks/useEditorTabs.ts`, the `handler()` call), and `ExcelViewer`'s save hard-codes `expectedHash`. No UI reaches it today: `forceSaveEditorTab` is wired only to `FileEditor`'s `onForceSave` (`App.tsx`), which never renders for preview-only `.xlsx`. The Excel 409 is also swallowed in `ExcelViewer` (returns `false`), so no conflict banner or force button appears for an xlsx. Fix together with an Excel conflict UI: thread `force` through the handler to `saveFileRaw`.
+- **Cancelled or failed Cmd/Ctrl+S is an unhandled rejection.** `App.tsx` `useKeyboard` `onSave` calls `saveEditorTab(visibleActiveEditorTabId)` with no `.catch`, so "Save failed or was cancelled" (the first-save dialog declined) surfaces as an unhandled promise rejection. Same pattern for any failed save on that path; add a `reportActionError` catch.
+- **Stale docs.** `docs/concepts/excel-preview-univer-sheet.md` (lines ~78-79, ~85-89) still says the handler is registered on each dirty change, that `requestSave` returns `false` while the confirm is open, and that Save-and-close stops at the confirm. Now: the handler is registered on mount and forwards at call time, the returned promise waits for the answer, Save-and-close completes after Save, and a second Cmd/Ctrl+S joins an in-flight save. Route through the `context` writer, per the OKF rule.

@@ -898,7 +898,13 @@ func remoteReadFileCapped(ctx context.Context, rw remoteWork, path string, maxBy
 // interpolated into argv). The command is a fixed shell script; the only
 // variable input is the path (quoted) — the payload travels on stdin.
 func remoteWriteFile(ctx context.Context, rw remoteWork, path string, data []byte) error {
-	script := "cat > " + remote.ShellQuotePath(path)
+	return remoteWriteStdin(ctx, rw, "cat > "+remote.ShellQuotePath(path), data)
+}
+
+// remoteWriteStdin runs a fixed shell script on the remote host with data
+// on its stdin. The script is built by the caller; only quoted paths and
+// numbers are interpolated into it.
+func remoteWriteStdin(ctx context.Context, rw remoteWork, script string, data []byte) error {
 	cmd, err := remote.ExecCommand(rw.Target, script)
 	if err != nil {
 		return err

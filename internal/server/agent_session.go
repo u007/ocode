@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1238,6 +1239,9 @@ type turnOptions struct {
 // headless-only, because a bridged TUI broadcasts its own equivalents.
 func (h *Handler) runTurn(sessionID string, as *agentSession, content string, opts turnOptions) (string, error) {
 	as.mu.Lock()
+	// Registered before the unlock so it runs after it: a job deferred during
+	// this turn runs its memory pass once the transcript is final and free.
+	defer as.flushDeferredMemoryMaintenance()
 	defer as.mu.Unlock()
 
 	if tailIsPermissionAsk(as.messages) {
@@ -2463,6 +2467,119 @@ func (h *Handler) wireJobEventCallbacks(sessionID string, ag *agent.Agent) {
 	})
 }
 
+// memoryMaintenanceRecentLimit is how many recent conversation messages the
+// memory maintenance pass sees. It matches the TUI's memoryMaintenanceContext.
+const memoryMaintenanceRecentLimit = 8
+
+// deferredMemoryMaint is the memory maintenance pass a job event could not run
+// because a turn held as.mu. Only the latest event is kept: every deferred job
+// coalesces into one pass, and that pass reports the most recent job.
+type deferredMemoryMaint struct {
+	ag *agent.Agent
+	ev agent.JobEvent
+}
+
+// queueJobMemoryMaintenance queues the memory maintenance pass for a durable
+// job event, using the last memoryMaintenanceRecentLimit messages of the live
+// transcript. A running turn holds as.mu for its whole duration, so when the
+// lock is busy the event is recorded as deferred and the pass runs when the
+// turn ends (see flushDeferredMemoryMaintenance). It never loads the persisted
+// transcript: that costs a disk read per job event and is stale mid-turn.
+func (as *agentSession) queueJobMemoryMaintenance(ag *agent.Agent, ev agent.JobEvent) {
+	if as.mu.TryLock() {
+		msgs := recentMemoryContext(as.messages)
+		as.mu.Unlock()
+		queueMemoryMaintenanceNow(ag, ev, msgs)
+		return
+	}
+	as.memoryMaintMu.Lock()
+	as.memoryMaintDeferred = &deferredMemoryMaint{ag: ag, ev: ev}
+	as.memoryMaintMu.Unlock()
+	log.Printf("serve: memory maintenance for job %s deferred until the live lock is released", ev.ID)
+	// Not every holder of as.mu flushes (an HTTP compaction, recap or stream
+	// does not), so the marker needs its own waiter: it blocks for the lock off
+	// this goroutine and takes whatever marker is set once it gets it. A waiter
+	// that finds no marker does nothing, so N waiters still make one pass.
+	crashguard.Go(as.awaitDeferredMemoryMaintenance)
+}
+
+// awaitDeferredMemoryMaintenance waits for as.mu and runs the pass deferred by
+// queueJobMemoryMaintenance. It blocks, so it runs on its own goroutine and
+// never on the job-event loop or an HTTP request. It holds no other lock while
+// it waits, so the order stays as.mu -> memoryMaintMu.
+func (as *agentSession) awaitDeferredMemoryMaintenance() {
+	as.mu.Lock()
+	d, msgs := as.takeDeferredMemoryMaintenanceLocked()
+	as.mu.Unlock()
+	if d != nil {
+		queueMemoryMaintenanceNow(d.ag, d.ev, msgs)
+	}
+}
+
+// flushDeferredMemoryMaintenance runs the pass deferred by
+// queueJobMemoryMaintenance as ONE request. Callers must not hold as.mu: the
+// turn-end callers invoke it after unlocking. It only TryLocks; a busy lock
+// leaves the marker to the waiter started by queueJobMemoryMaintenance.
+func (as *agentSession) flushDeferredMemoryMaintenance() {
+	if d, msgs, ok := as.takeDeferredMemoryMaintenance(); ok {
+		queueMemoryMaintenanceNow(d.ag, d.ev, msgs)
+	}
+}
+
+// takeDeferredMemoryMaintenance removes the deferred marker and reads the
+// recent messages from the live transcript. It reports false when no marker is
+// set or the lock is busy; a busy lock leaves the marker in place.
+func (as *agentSession) takeDeferredMemoryMaintenance() (*deferredMemoryMaint, []agent.Message, bool) {
+	as.memoryMaintMu.Lock()
+	pending := as.memoryMaintDeferred != nil
+	as.memoryMaintMu.Unlock()
+	if !pending || !as.mu.TryLock() {
+		return nil, nil, false
+	}
+	d, msgs := as.takeDeferredMemoryMaintenanceLocked()
+	as.mu.Unlock()
+	return d, msgs, d != nil
+}
+
+// takeDeferredMemoryMaintenanceLocked removes the deferred marker and reads the
+// recent messages. The caller must hold as.mu.
+func (as *agentSession) takeDeferredMemoryMaintenanceLocked() (*deferredMemoryMaint, []agent.Message) {
+	as.memoryMaintMu.Lock()
+	d := as.memoryMaintDeferred
+	as.memoryMaintDeferred = nil
+	as.memoryMaintMu.Unlock()
+	var msgs []agent.Message
+	if d != nil {
+		msgs = recentMemoryContext(as.messages)
+	}
+	return d, msgs
+}
+
+// queueMemoryMaintenanceNow hands one maintenance request to the agent's
+// worker. The caller must not hold as.mu.
+func queueMemoryMaintenanceNow(ag *agent.Agent, ev agent.JobEvent, msgs []agent.Message) {
+	ag.QueueMemoryMaintenance(agent.MemoryMaintenanceRequest{
+		WorkDir:        ag.WorkDir(),
+		Job:            ev,
+		RecentMessages: msgs,
+	})
+}
+
+// recentMemoryContext keeps the last memoryMaintenanceRecentLimit messages
+// that are user or assistant turns with non-blank content, oldest first.
+func recentMemoryContext(msgs []agent.Message) []agent.Message {
+	var out []agent.Message
+	for i := len(msgs) - 1; i >= 0 && len(out) < memoryMaintenanceRecentLimit; i-- {
+		m := msgs[i]
+		if (m.Role != "user" && m.Role != "assistant") || strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		out = append(out, m)
+	}
+	slices.Reverse(out)
+	return out
+}
+
 // handleServerJobEvent injects a background job completion notice into the
 // session, mirroring the TUI's jobCompletedMsg handling: mid-turn, splice into
 // the running turn via the injection queue; otherwise dispatch a new turn so
@@ -2472,6 +2589,17 @@ func (h *Handler) handleServerJobEvent(sessionID string, ag *agent.Agent, ev age
 	// task tool return value; re-injecting would cause infinite re-dispatch.
 	if ev.Kind == "agent" && !ev.Background {
 		return
+	}
+	// Only durable job events (process exits and background agent runs) queue
+	// memory maintenance. Pulse has its own memory store and its WorkDir is the
+	// pulse root, so its jobs must never write project memory. A job that lands
+	// mid-turn is deferred to the turn's end, not dropped.
+	if !isPulseSession(sessionID) {
+		if as := h.lookupAgentSession(sessionID); as != nil {
+			as.queueJobMemoryMaintenance(ag, ev)
+		} else {
+			log.Printf("serve: memory maintenance for session %s job %s skipped: no live session", sessionID, ev.ID)
+		}
 	}
 	var header string
 	if ev.Kind == "agent" {

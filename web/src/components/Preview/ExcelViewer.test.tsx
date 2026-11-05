@@ -4,11 +4,13 @@ import * as XLSX from "xlsx";
 import { api } from "../../api/client";
 import { mountUniverSheet } from "./univerMount";
 import { MAX_COLS, MAX_FILE_BYTES, MAX_ROWS } from "./univerData";
+import { rawContentHash } from "./univerSerialize";
 import ExcelViewer from "./ExcelViewer";
 
-vi.mock("../../api/client", () => ({ api: { fetchFileRaw: vi.fn() } }));
+vi.mock("../../api/client", () => ({ api: { fetchFileRaw: vi.fn(), saveFileRaw: vi.fn() } }));
 // Univer draws to canvas, which jsdom does not have. The converter is covered
-// by univerData.test.ts; here the mount is replaced by a spy.
+// by univerData.test.ts; here the mount is replaced by a spy. The handle's
+// onCommandExecuted callback is captured so tests can simulate a mutation.
 vi.mock("./univerMount", () => ({ mountUniverSheet: vi.fn() }));
 
 const theme = vi.hoisted(() => ({ appearance: "light" as "light" | "dark" }));
@@ -22,13 +24,22 @@ beforeAll(async () => {
   await import("exceljs");
 });
 
-let handle: { activateSheet: Mock; setDarkMode: Mock; dispose: Mock };
+let handle: { activateSheet: Mock; setDarkMode: Mock; dispose: Mock; snapshot: Mock };
+let dirtyCb: (() => void) | null;
 
 beforeEach(() => {
   vi.mocked(api.fetchFileRaw).mockReset();
-  handle = { activateSheet: vi.fn(), setDarkMode: vi.fn(), dispose: vi.fn() };
+  vi.mocked(api.saveFileRaw).mockReset();
+  vi.mocked(api.saveFileRaw).mockResolvedValue({ path: "x.xlsx", saved: true });
+  dirtyCb = null;
+  handle = { activateSheet: vi.fn(), setDarkMode: vi.fn(), dispose: vi.fn(), snapshot: vi.fn() };
   vi.mocked(mountUniverSheet).mockReset();
-  vi.mocked(mountUniverSheet).mockImplementation(async () => handle);
+  vi.mocked(mountUniverSheet).mockImplementation(async (_c, _d, _dark, opts) => {
+    dirtyCb = opts?.onDirty ?? null;
+    // snapshot returns the mounted data so the save path serializes real content.
+    handle.snapshot.mockImplementation(() => _d);
+    return handle;
+  });
   theme.appearance = "light";
 });
 
@@ -212,6 +223,249 @@ describe("ExcelViewer tab-separated files", () => {
     rerender(<ExcelViewer path="cities.tsv" content={"a\tb\nc\td\n"} />);
     await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(2));
     expect(handle.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ExcelViewer editable mode", () => {
+  /** Clicks the toolbar Save, then confirms the first-save dialog. */
+  async function clickSaveAndConfirm() {
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+  }
+
+  it("mounts .xlsx editable and shows Save once dirty; save PUTs bytes with the base hash", async () => {
+    const onDisk = workbookBytes();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(onDisk);
+    render(<ExcelViewer path="budget.xlsx" projectRoot="/root" projectHost="h1" />);
+
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const opts = vi.mocked(mountUniverSheet).mock.calls[0][3];
+    expect(opts?.editable).toBe(true);
+
+    // No Save button until dirty.
+    expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull();
+
+    // Simulate a mutation through the captured onDirty callback.
+    dirtyCb?.();
+    await clickSaveAndConfirm();
+
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
+    const [p, bytes, saveOpts] = vi.mocked(api.saveFileRaw).mock.calls[0];
+    expect(p).toBe("budget.xlsx");
+    expect(bytes).toBeInstanceOf(ArrayBuffer);
+    expect((bytes as ArrayBuffer).byteLength).toBeGreaterThan(0);
+    expect(saveOpts?.projectRoot).toBe("/root");
+    expect(saveOpts?.host).toBe("h1");
+    // The base hash is the SHA-256 of the bytes GET returned, byte for byte.
+    expect(saveOpts?.expectedHash).toBe(rawContentHash(onDisk));
+
+    // After a successful save the dirty flag clears: Save disappears.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull());
+  });
+
+  it("stays read-only for .xlsm and CSV", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const { unmount } = render(<ExcelViewer path="budget.xlsm" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(mountUniverSheet).mock.calls[0][3]?.editable).toBe(false);
+    unmount();
+
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(textBytes("a,b\n1,2\n"));
+    render(<ExcelViewer path="data.csv" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(mountUniverSheet).mock.calls[1][3]?.editable).toBe(false);
+    expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull();
+  });
+
+  it("stays read-only when the sheet was truncated", async () => {
+    const lines = Array.from({ length: MAX_ROWS + 1 }, (_, i) => `row-${i}`).join("\n");
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(textBytes(lines));
+    render(<ExcelViewer path="long.csv" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(mountUniverSheet).mock.calls[0][3]?.editable).toBe(false);
+  });
+
+  it("shows a save error and stays dirty on 409", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    vi.mocked(api.saveFileRaw).mockRejectedValue(Object.assign(new Error("file has changed on disk"), { status: 409 }));
+    render(<ExcelViewer path="ledger.xlsx" />);
+
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+    await clickSaveAndConfirm();
+
+    expect(await screen.findByText(/file has changed on disk.*Reload/)).toBeDefined();
+    // Still dirty: Save remains.
+    expect(screen.getByRole("button", { name: "Save spreadsheet" })).toBeDefined();
+  });
+
+  it("asks before the first Save and writes nothing when the user cancels", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="cancel.xlsx" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    expect(await screen.findByText("Save spreadsheet?")).toBeDefined();
+    expect(screen.getByText(/formulas, charts, images and pivot tables/i)).toBeDefined();
+    expect(screen.getByText(/cancel\.xlsx\.bak/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Save spreadsheet?")).toBeNull());
+    expect(api.saveFileRaw).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Save spreadsheet" })).toBeDefined();
+  });
+
+  it("skips the confirmation on later Saves of the same file in the session", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="repeat.xlsx" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+    await clickSaveAndConfirm();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull());
+
+    dirtyCb?.();
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    expect(screen.queryByText("Save spreadsheet?")).toBeNull();
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(2));
+    // The second save's expected_hash is the SHA-256 of what the first save wrote.
+    const [, firstBytes] = vi.mocked(api.saveFileRaw).mock.calls[0];
+    const [, , secondOpts] = vi.mocked(api.saveFileRaw).mock.calls[1];
+    expect(secondOpts?.expectedHash).toBe(rawContentHash(firstBytes as ArrayBuffer));
+  });
+
+  it("says edits are saved when Save is clicked, not automatically", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="label.xlsx" />);
+    expect(await screen.findByText("Editable — edits are saved when you click Save")).toBeDefined();
+  });
+
+  it("clears the dirty flag after an onSave override resolves", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<ExcelViewer path="override.xlsx" onSave={onSave} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+    await clickSaveAndConfirm();
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull());
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces an onSave override failure and stays dirty", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSave = vi.fn().mockRejectedValue(new Error("disk full"));
+    render(<ExcelViewer path="override-fail.xlsx" onSave={onSave} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+    await clickSaveAndConfirm();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+    expect(screen.getByRole("button", { name: "Save spreadsheet" })).toBeDefined();
+  });
+
+  it("reports dirty changes via onDirtyChange", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onDirtyChange = vi.fn();
+    render(<ExcelViewer path="budget.xlsx" onDirtyChange={onDirtyChange} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    dirtyCb?.();
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+  });
+
+  it("exposes its save handler through onSaveRef", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    render(<ExcelViewer path="budget.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(typeof onSaveRef.current).toBe("function");
+    const first = onSaveRef.current?.();
+    // First save opens the confirm dialog rather than writing, and the handler
+    // waits for the user's answer.
+    await waitFor(() => expect(screen.getByText(/Save spreadsheet\?/)).toBeDefined());
+    expect(api.saveFileRaw).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await first).toBe(true);
+    expect(api.saveFileRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the first-save request false when the dialog is cancelled", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    render(<ExcelViewer path="cancel-ref.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const first = onSaveRef.current?.();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(await first).toBe(false);
+    expect(api.saveFileRaw).not.toHaveBeenCalled();
+  });
+
+  it("shares one dialog and one answer between requests made while it is open", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    render(<ExcelViewer path="shared-ask.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const first = onSaveRef.current?.();
+    const second = onSaveRef.current?.();
+    await waitFor(() => expect(screen.getAllByText("Save spreadsheet?")).toHaveLength(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    expect(api.saveFileRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("joins a save already in flight instead of sending a second PUT", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    render(<ExcelViewer path="in-flight.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const confirmed = onSaveRef.current?.();
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    expect(await confirmed).toBe(true);
+
+    let release: () => void = () => {};
+    vi.mocked(api.saveFileRaw).mockImplementation(
+      () => new Promise((resolve) => {
+        release = () => resolve({ path: "in-flight.xlsx", saved: true });
+      }),
+    );
+    // Two requests in the same tick, before React re-renders: both see the same
+    // closure, so only an in-flight check (not the `saving` state) can join them.
+    const a = onSaveRef.current?.();
+    const b = onSaveRef.current?.();
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(2));
+    release();
+    expect(await a).toBe(true);
+    expect(await b).toBe(true);
+    expect(api.saveFileRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("resolves a pending first-save request false when the viewer unmounts", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    const { unmount } = render(<ExcelViewer path="unmount-ask.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const pending = onSaveRef.current?.();
+    unmount();
+    expect(await pending).toBe(false);
+  });
+
+  it("clears onSaveRef on unmount", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    const onSaveRef = { current: null as (() => Promise<boolean>) | null };
+    const { unmount } = render(<ExcelViewer path="budget.xlsx" onSaveRef={onSaveRef} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(onSaveRef.current).not.toBeNull();
+    unmount();
+    expect(onSaveRef.current).toBeNull();
+  });
+
+  it("does not show Save in controlled (content) mode", async () => {
+    render(<ExcelViewer path="cities.tsv" content={"a\tb\n"} />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(mountUniverSheet).mock.calls[0][3]?.editable).toBe(false);
+    expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull();
   });
 });
 
