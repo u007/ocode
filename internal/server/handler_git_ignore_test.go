@@ -238,6 +238,27 @@ func TestRemoteGitIgnoreOverFakeSSH(t *testing.T) {
 	}
 }
 
+// Regression: the remote write used to send only the appended lines through
+// `cat >`, truncating existing .gitignore content.
+func TestRemoteGitIgnoreKeepsExistingContent(t *testing.T) {
+	installFakeSSH(t)
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	writeFile(t, filepath.Join(repo, "new.txt"), "x\n")
+	writeFile(t, filepath.Join(repo, ".gitignore"), "node_modules/\n*.log")
+
+	h := newTestHandlerWithRemote(t, "ci.local", repo)
+	query := "?host=ci.local&project=" + url.QueryEscape(repo)
+	w := postGitIgnore(t, h, query, `{"paths":["new.txt"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	want := "node_modules/\n*.log\n/new.txt\n"
+	if got := readGitignore(t, repo); got != want {
+		t.Errorf("remote .gitignore = %q, want %q", got, want)
+	}
+}
+
 func TestGitignoreLineForPath(t *testing.T) {
 	cases := []struct {
 		in      string

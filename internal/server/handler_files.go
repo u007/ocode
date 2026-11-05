@@ -3,11 +3,14 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1687,6 +1690,258 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":  req.Path,
+		"saved": true,
+	})
+}
+
+// rawMissingHash is the expected_hash the raw save guard compares against when
+// the target does not exist.
+const rawMissingHash = "__missing__"
+
+// writeRawBackup writes the one-time .bak. It is a package var only so a test
+// can force a write failure; production code never reassigns it.
+var writeRawBackup = os.WriteFile
+
+// rawContentHash is the expected_hash for PUT /api/files/raw: lowercase hex
+// SHA-256 of the exact stored bytes. It must not be hashContent, which hashes
+// runes: distinct binary files whose invalid UTF-8 bytes decode to the same
+// replacement character collide, so a stale save would pass the guard.
+func rawContentHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// readRawSaveBody reads a raw save body under the previewRawMaxBytes cap. Only
+// an over-cap body is a 413; any other read failure is a logged 400, so a
+// broken upload is never reported as a size problem. Shared by the local and
+// remote raw save handlers.
+func readRawSaveBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, previewRawMaxBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "file exceeds the 32 MiB limit")
+			return nil, false
+		}
+		slog.Warn("raw save: read request body failed", "path", r.URL.Query().Get("path"), "err", err)
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return nil, false
+	}
+	return data, true
+}
+
+// HandleSaveFileRaw saves raw binary bytes (PUT /api/files/raw) for .xlsx
+// files edited by an in-browser spreadsheet editor. Mirrors the containment,
+// save-lock and expected-hash guard of HandleSaveFileContent; the body is raw
+// bytes (application/octet-stream), never JSON.
+func (h *Handler) HandleSaveFileRaw(w http.ResponseWriter, r *http.Request) {
+	// Remote project (?host=): write the file on the remote host.
+	if hostParam(r) != "" {
+		h.remoteSaveFileRaw(w, r)
+		return
+	}
+	q := r.URL.Query()
+	path := q.Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	// Content-Type must be application/octet-stream (or empty: some clients
+	// send none). ParseMediaType strips parameters such as charset/boundary.
+	ct := r.Header.Get("Content-Type")
+	if ct != "" {
+		mediaType, _, err := mime.ParseMediaType(ct)
+		if err != nil || !strings.EqualFold(mediaType, "application/octet-stream") {
+			writeError(w, http.StatusBadRequest, "Content-Type must be application/octet-stream")
+			return
+		}
+	}
+	expectedHash := q.Get("expected_hash")
+	force := q.Get("force") == "1" || strings.EqualFold(q.Get("force"), "true")
+
+	root, errMsg := h.writeScopeRoot(q.Get("project_root"), path)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve work dir")
+		return
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve work dir")
+		return
+	}
+	absTarget, err := filepath.Abs(path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	// Resolve symlinks in the target's parent, then re-check containment
+	// against the real root (same structure as HandleSaveFileContent).
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(absTarget))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	realTarget := filepath.Join(realParent, filepath.Base(absTarget))
+	rel, err := filepath.Rel(realRoot, realTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		writeError(w, http.StatusBadRequest, "path is outside the workspace")
+		return
+	}
+	// .xlsx-only gate on the RESOLVED target path. .xls/.xlsm/.csv exist in
+	// the preview allowlist but are deliberately not writable here.
+	if !strings.EqualFold(filepath.Ext(realTarget), ".xlsx") {
+		writeError(w, http.StatusBadRequest, "only .xlsx files can be saved as raw")
+		return
+	}
+
+	data, ok := readRawSaveBody(w, r)
+	if !ok {
+		return
+	}
+
+	// Serialize concurrent ocode saves for the same path (same contract as
+	// HandleSaveFileContent).
+	saveMu := h.saveLockFor(realTarget)
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
+	// Refuse a symlinked final component before reading or backing up
+	// anything: reading would follow the link, and the temp-file + rename
+	// below would replace the link itself.
+	linfo, lerr := os.Lstat(realTarget)
+	if lerr != nil && !errors.Is(lerr, fs.ErrNotExist) {
+		slog.Error("raw save: stat target failed", "path", realTarget, "err", lerr)
+		writeError(w, http.StatusInternalServerError, "failed to inspect file before save")
+		return
+	}
+	if lerr == nil && linfo.Mode()&fs.ModeSymlink != 0 {
+		writeError(w, http.StatusBadRequest, "refusing to save through a symlink")
+		return
+	}
+
+	// Read the current bytes once: the hash guard and the one-time .bak both
+	// derive from this read. Only "does not exist" counts as a missing file;
+	// any other read failure aborts so nothing is overwritten unbacked.
+	existing, readErr := os.ReadFile(realTarget)
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		slog.Error("raw save: read current file failed", "path", realTarget, "err", readErr)
+		writeError(w, http.StatusInternalServerError, "failed to read current file before save")
+		return
+	}
+	// Overwriting an existing file needs expected_hash unless force=1. A missing
+	// target may still be created without one.
+	if !force && expectedHash == "" && exists {
+		writeError(w, http.StatusBadRequest, "expected_hash required unless force=1")
+		return
+	}
+	if expectedHash != "" && !force {
+		diskHash := rawMissingHash
+		if exists {
+			diskHash = rawContentHash(existing)
+		}
+		if diskHash != expectedHash {
+			writeError(w, http.StatusConflict, "file has changed on disk since it was opened; reload or force-save to overwrite")
+			return
+		}
+	}
+
+	// Atomic write: temp file in the same directory, then rename over the
+	// target. Re-verify the temp dir containment before the rename.
+	tmp, err := os.CreateTemp(realParent, ".raw-save-*.tmp")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Flush the temp file's bytes to disk before the rename makes them the
+	// target. Without this a crash after the rename can leave the target name
+	// pointing at an empty or partial file.
+	if err := tmp.Sync(); err != nil {
+		slog.Error("raw save: fsync temp file failed", "path", tmpName, "err", err)
+		_ = tmp.Close()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	realTmpDir, err := filepath.EvalSymlinks(filepath.Dir(tmpName))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	relTmp, err := filepath.Rel(realRoot, realTmpDir)
+	if err != nil || relTmp == ".." || strings.HasPrefix(relTmp, ".."+string(filepath.Separator)) {
+		writeError(w, http.StatusBadRequest, "path is outside the workspace")
+		return
+	}
+	// The rename replaces the target's inode, so the temp file takes over the
+	// target's permission bits. A new file gets 0600, the mode
+	// HandleSaveFileContent opens new files with.
+	mode := os.FileMode(0600)
+	if exists {
+		tinfo, serr := os.Stat(realTarget)
+		if serr != nil {
+			slog.Error("raw save: stat target for mode failed", "path", realTarget, "err", serr)
+			writeError(w, http.StatusInternalServerError, "failed to inspect file before save")
+			return
+		}
+		mode = tinfo.Mode().Perm()
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		slog.Error("raw save: chmod temp file failed", "path", tmpName, "err", err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// One-time .bak of the pre-existing bytes. It is written last, after every
+	// containment and symlink check has passed. A backup that cannot be made
+	// aborts the save: the target is never overwritten without one.
+	if exists {
+		bak := realTarget + ".bak"
+		binfo, berr := os.Lstat(bak)
+		if berr != nil && !errors.Is(berr, fs.ErrNotExist) {
+			slog.Error("raw save: stat backup failed", "path", bak, "err", berr)
+			writeError(w, http.StatusInternalServerError, "failed to back up file before save")
+			return
+		}
+		if berr == nil && binfo.Mode()&fs.ModeSymlink != 0 {
+			writeError(w, http.StatusBadRequest, "refusing to back up through a symlink")
+			return
+		}
+		if errors.Is(berr, fs.ErrNotExist) {
+			if werr := writeRawBackup(bak, existing, 0600); werr != nil {
+				slog.Error("raw save: write backup failed", "path", bak, "err", werr)
+				writeError(w, http.StatusInternalServerError, "failed to back up file before save")
+				return
+			}
+		}
+	}
+
+	if err := os.Rename(tmpName, realTarget); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path":  path,
 		"saved": true,
 	})
 }

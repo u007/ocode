@@ -162,7 +162,7 @@ func (h *Handler) gitIgnoreRemote(w http.ResponseWriter, r *http.Request, host s
 	}
 	payload, _ := buildGitignoreAppend(existing, entries)
 	if len(payload) > 0 {
-		if werr := remoteWriteFile(r.Context(), rw, gi, payload); werr != nil {
+		if werr := remoteWriteFile(r.Context(), rw, gi, append(existing, payload...)); werr != nil {
 			writeError(w, http.StatusInternalServerError, "write remote .gitignore failed: "+werr.Error())
 			return
 		}
