@@ -820,7 +820,8 @@ func TestPermissionViewportIsSyncedDuringLayout(t *testing.T) {
 // the rule is written only after the user confirms with "y"; backing out with
 // "n" returns to step 1 having persisted nothing.
 func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // isolate persistPermissions disk writes
+	setVoiceHomeTree(t, t.TempDir()) // isolate persistPermissions disk writes
+	chdirTempForConfigTest(t)
 
 	newModel := func() model {
 		a := newTestAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil, nil)

@@ -207,7 +207,8 @@ func TestSandboxCommandSetsMode(t *testing.T) {
 // unaffected: they resolve their own per-job permission mode independently
 // (internal/server/scheduler_runner.go resolveCronPermissionMode).
 func TestSandboxPersistsAsDefault(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setVoiceHomeTree(t, t.TempDir())
+	chdirTempForConfigTest(t)
 	m := model{
 		agent:  newTestAgent(nil, nil, nil, nil),
 		ready:  true,
