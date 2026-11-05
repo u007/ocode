@@ -135,7 +135,7 @@ func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {
 	}
 	client := a.memoryMaintenanceClient()
 	if client == nil {
-		a.emitDebug("MEMORY", "skipped: no small-model client available")
+		a.emitDebug("MEMORY", "skipped: no LLM client available")
 		return
 	}
 	if strings.TrimSpace(req.WorkDir) == "" {

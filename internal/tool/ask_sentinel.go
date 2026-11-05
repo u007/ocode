@@ -25,3 +25,13 @@ func UnansweredAsk(content string) bool {
 	return strings.HasPrefix(content, SentinelQuestionPrompt) &&
 		strings.Contains(content, SentinelWaitingForUser)
 }
+
+// QuestionDismissed reports whether a tool result is a question prompt the user
+// cancelled without answering: the in-place rewrite of the sentinel to
+// QuestionDismissedResult. Surrounding whitespace is ignored.
+//
+// internal/server and internal/session both need this check, and each would
+// otherwise carry its own copy of the comparison.
+func QuestionDismissed(content string) bool {
+	return strings.TrimSpace(content) == QuestionDismissedResult
+}

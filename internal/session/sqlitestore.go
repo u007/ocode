@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -715,7 +716,8 @@ func appendUserMessageTail(dir, id, content string) error {
 
 // rewriteAskResultRow replaces the data of the row at seq in one immediate
 // transaction, guarded so only a tool-result row still holding an ask
-// sentinel for msg.ToolID is ever rewritten. See RewriteAskResultForDir.
+// sentinel or a dismissed-question result for msg.ToolID is ever rewritten.
+// See RewriteAskResultForDir.
 func rewriteAskResultRow(dir, id string, seq int, msg agent.Message) error {
 	if msg.Role != "tool" || msg.ToolID == "" {
 		return fmt.Errorf("session: rewrite ask result %s seq %d: replacement is not a tool result", id, seq)
@@ -744,8 +746,8 @@ func rewriteAskResultRow(dir, id string, seq int, msg agent.Message) error {
 	if err := json.Unmarshal([]byte(data), &stored); err != nil {
 		return fmt.Errorf("session: rewrite ask result %s seq %d: decode row: %w", id, seq, err)
 	}
-	if stored.Role != "tool" || stored.ToolID != msg.ToolID || !isAskSentinel(stored.Content) {
-		return fmt.Errorf("session: rewrite ask result %s seq %d: stored row is not a pending ask for tool call %q", id, seq, msg.ToolID)
+	if stored.Role != "tool" || stored.ToolID != msg.ToolID || !(isAskSentinel(stored.Content) || tool.QuestionDismissed(stored.Content)) {
+		return fmt.Errorf("session: rewrite ask result %s seq %d: stored row is not a pending or dismissed ask for tool call %q", id, seq, msg.ToolID)
 	}
 	out, err := json.Marshal(msg)
 	if err != nil {

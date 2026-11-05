@@ -247,7 +247,9 @@ func ReplaceForDir(wd, id string, title string, messages []agent.Message, metada
 
 // RewriteAskResultForDir rewrites the stored row at seq — which must be a
 // tool result still holding an ask sentinel (PERMISSION_ASK / QUESTION_PROMPT)
-// for msg.ToolID — with msg, the resolved tool result. The server's resolve
+// or a dismissed question (tool.QuestionDismissedResult, the user cancelled a
+// question prompt and then answered it from the transcript card) for
+// msg.ToolID — with msg, the resolved tool result. The server's resolve
 // handlers mutate that row in memory when the user answers; the stored copy
 // must change identically BEFORE the continuation runs, or every later save
 // of the transcript overlaps the stored sentinel with different bytes: the
@@ -256,8 +258,8 @@ func ReplaceForDir(wd, id string, title string, messages []agent.Message, metada
 // disk-backed reload/reconcile shows the already-answered ask again
 // (ses_2026-09-10-153254-b55bec37). Like appendUserMessageTail it touches
 // only that one row plus updated_at, so it cannot trip the overlap check.
-// Any shape other than "sentinel row for this tool id at this seq" is an
-// error, never a rewrite.
+// Any shape other than "sentinel or dismissed row for this tool id at this
+// seq" is an error, never a rewrite.
 func RewriteAskResultForDir(projectRoot, id string, seq int, msg agent.Message) error {
 	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)

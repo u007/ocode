@@ -1046,7 +1046,7 @@ func TestHandleAnswerQuestionAfterDismissResolvesAndContinues(t *testing.T) {
 	waitForAskContinuation(t, as)
 
 	answered := as.messages[2]
-	if isQuestionDismissed(answered.Content) {
+	if tool.QuestionDismissed(answered.Content) {
 		t.Fatalf("dismissal was not replaced by the answer: %q", answered.Content)
 	}
 	if !strings.Contains(answered.Content, `"label":"Staging"`) {

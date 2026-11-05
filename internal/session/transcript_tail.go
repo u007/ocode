@@ -60,7 +60,11 @@ func transcriptTailVerdictFor(msgs []agent.Message) transcriptTailVerdict {
 			if unansweredAsk(msgs[i].Content) {
 				return tailWaiting
 			}
-			if dismissedQuestion(msgs[i].Content) {
+			// A dismissed `question` (Cancel / Escape / X) is the user deliberately
+			// ending the turn: unlike an unanswered ask (the dialog owns it) or an
+			// answered ask (a continuation round is owed), nothing is owed, so it
+			// must not read as an interruption.
+			if tool.QuestionDismissed(msgs[i].Content) {
 				stopped = true
 			}
 		}
@@ -92,16 +96,6 @@ func TranscriptTailUnfinished(msgs []agent.Message) bool {
 // disagree about what counts as a live dialog.
 func unansweredAsk(content string) bool {
 	return tool.UnansweredAsk(content)
-}
-
-// dismissedQuestion reports whether a tool-result row is the in-place rewrite
-// written when the user cancelled a `question` prompt (Cancel / Escape / X) —
-// see tool.QuestionDismissedResult. Unlike an unanswered ask (the dialog owns
-// it) or an answered ask (a continuation round is owed), a dismissal is the
-// user deliberately ending the turn: nothing is owed, so it must not read as
-// an interruption.
-func dismissedQuestion(content string) bool {
-	return strings.TrimSpace(content) == tool.QuestionDismissedResult
 }
 
 // trailingToolRunStart returns the index of the first message in the run of

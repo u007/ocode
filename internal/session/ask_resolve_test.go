@@ -88,6 +88,46 @@ func TestRewriteAskResultRejectsNonAskRow(t *testing.T) {
 	assertContents(t, readStoredContents(t, projectRootSessionsDir(t, projectRoot), id), "do it", "", tool.SentinelQuestionPrompt+"\n[]")
 }
 
+// A question the user dismissed is stored as tool.QuestionDismissedResult. The
+// transcript card can reopen it and the user can still answer it, so the
+// stored dismissal must be rewritten to the answer, or the continuation save
+// conflicts exactly like the sentinel case above.
+func TestRewriteAskResultAcceptsDismissedQuestion(t *testing.T) {
+	projectRoot, sessionsDir := isolatedProjectRoot(t)
+	id := "ses_ask-resolve-dismissed"
+	if err := SaveForDir(projectRoot, id, "", askTranscript(tool.QuestionDismissedResult), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	answered := askTranscript(tool.QuestionDismissedResult)
+	answered[2].Content = `[{"answer":"yes"}]`
+	if err := RewriteAskResultForDir(projectRoot, id, 2, answered[2]); err != nil {
+		t.Fatalf("RewriteAskResultForDir over dismissal: %v", err)
+	}
+	assertContents(t, readStoredContents(t, sessionsDir, id), "do it", "", `[{"answer":"yes"}]`)
+
+	continued := append(append([]agent.Message(nil), answered...),
+		agent.Message{Role: "assistant", Content: "done"})
+	if err := SaveForDir(projectRoot, id, "", continued, nil); err != nil {
+		t.Fatalf("continuation save after rewriting dismissal: %v", err)
+	}
+	assertContents(t, readStoredContents(t, sessionsDir, id), "do it", "", `[{"answer":"yes"}]`, "done")
+}
+
+// A plain tool result (not an ask, not a dismissal) must never be rewritten,
+// even with the right seq and tool id.
+func TestRewriteAskResultRefusesPlainToolRow(t *testing.T) {
+	projectRoot, sessionsDir := isolatedProjectRoot(t)
+	id := "ses_ask-resolve-plain"
+	if err := SaveForDir(projectRoot, id, "", askTranscript("file contents"), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := RewriteAskResultForDir(projectRoot, id, 2, agent.Message{Role: "tool", ToolID: "call_1", Content: "x"}); err == nil {
+		t.Fatal("expected error rewriting a plain tool result row")
+	}
+	assertContents(t, readStoredContents(t, sessionsDir, id), "do it", "", "file contents")
+}
+
 func projectRootSessionsDir(t *testing.T, projectRoot string) string {
 	t.Helper()
 	dir, err := GetStorageDirForPath(projectRoot)

@@ -61,6 +61,9 @@ func (h *Handler) dispatchAskContinuation(sessionID string, as *agentSession, fn
 				log.Printf("serve error: ask continuation panic for %s: %v", sessionID, r)
 			}
 		}()
+		// Flush runs after the unlock below, like runTurn's: a job deferred
+		// during this continuation's Step runs its memory pass at its end.
+		defer as.flushDeferredMemoryMaintenance()
 		defer as.mu.Unlock()
 		fn()
 	}()

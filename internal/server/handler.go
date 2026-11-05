@@ -663,6 +663,11 @@ type agentSession struct {
 	outTokens    atomic.Int64
 	cachedTokens atomic.Int64
 	totalTokens  atomic.Int64
+	// memoryMaintMu guards memoryMaintDeferred. Own mutex, never as.mu: a job
+	// that completes while a turn holds as.mu records its memory maintenance
+	// pass here instead of running it (see queueJobMemoryMaintenance).
+	memoryMaintMu       sync.Mutex
+	memoryMaintDeferred *deferredMemoryMaint
 }
 
 func NewHandler() *Handler {

@@ -412,6 +412,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/stat", s.authMiddleware(s.handler.HandleFileStat))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
+	s.mux.HandleFunc("PUT /api/files/raw", s.authMiddleware(s.handleSaveFileRaw))
 	// Editor grants: directories OUTSIDE any project root the user explicitly
 	// opened the file editor/preview at. Editor-only — these never reach the
 	// agent's permission scope (see internal/server/handler_file_grants.go).
@@ -2075,6 +2076,10 @@ func (s *Server) handleMediaToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSaveFileContent(w, r)
+}
+
+func (s *Server) handleSaveFileRaw(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSaveFileRaw(w, r)
 }
 
 func (s *Server) handleGrantFilePath(w http.ResponseWriter, r *http.Request) {
