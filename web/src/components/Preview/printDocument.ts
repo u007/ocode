@@ -12,14 +12,28 @@ const PRINT_FRAME_LIFETIME_MS = 60_000;
 
 // Runs inside every printed document. The parent cannot call print() on a
 // sandboxed frame, so it posts PRINT_MESSAGE instead. On the desktop shell the
-// load event tells the native window that its document is ready to print.
+// document tells the native window that it is ready to print.
+//
+// Wails injects window._wails.invoke with an ExecJS that runs only after its
+// WebViewDidFinishNavigation hook, which is AFTER the document's load event, so
+// a one-shot check on load never finds the bridge and the window never prints.
+// The bootstrap therefore polls for the bridge, as Wails' own inline event shim
+// does, and sends the ready message once. In a browser print frame there is no
+// bridge, so the poll gives up after PRINT_BRIDGE_WAIT_MS.
+const PRINT_BRIDGE_WAIT_MS = 15_000;
+const PRINT_BRIDGE_POLL_MS = 30;
+
 export const PRINT_BOOTSTRAP = `<script>
 window.addEventListener("message", function (event) {
   if (event.data === "ocode:print") { window.focus(); window.print(); }
 });
-window.addEventListener("load", function () {
-  if (window._wails && window._wails.invoke) { window._wails.invoke("ocode:print-window-ready"); }
-});
+(function ready(remaining) {
+  if (window._wails && typeof window._wails.invoke === "function") {
+    window._wails.invoke("ocode:print-window-ready");
+  } else if (remaining > 0) {
+    setTimeout(function () { ready(remaining - ${PRINT_BRIDGE_POLL_MS}); }, ${PRINT_BRIDGE_POLL_MS});
+  }
+})(${PRINT_BRIDGE_WAIT_MS});
 </script>`;
 
 export function escapeHtml(text: string): string {

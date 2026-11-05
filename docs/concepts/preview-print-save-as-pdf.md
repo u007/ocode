@@ -4,7 +4,7 @@ title: Preview Print / Save as PDF
 description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path."
 resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-05T07:04:34Z
+timestamp: 2026-11-05T16:34:46Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -173,11 +173,29 @@ The steps:
 3. `openPrintWindow` registers the name (`ocode-print-<n>`) in `printWindows`
    BEFORE `NewWithOptions` creates the window, because Wails runs each window
    message on its own goroutine and the ready message can arrive first.
-4. The print window's bootstrap sends `ocode:print-window-ready` on `load`;
+4. The print window's bootstrap polls for the Wails bridge. It checks for
+   `window._wails.invoke` every 30 ms, sends `ocode:print-window-ready` once when
+   the bridge appears, and stops after 15 s (`PRINT_BRIDGE_WAIT_MS`).
    `consumePrintWindowReady` (one-shot `CompareAndSwap`) calls the platform print
    path (`printWindow`) via `crashguard.Go` (it is `InvokeSyncWithError` onto the main thread, which
    the raw handler may already be on). The window stays registered until it
    closes, so later messages are dropped (see Security invariant).
+
+   The poll exists because a one-shot check on `load` never finds the bridge.
+   Wails injects `window._wails.invoke` from its `WebViewDidFinishNavigation`
+   hook, which runs after the document's `load` event. A `load` check therefore
+   sends no ready message, the window opens as a preview with no print panel,
+   and the shell logs no "print window N ready" line. The 15 s bound is needed
+   because the browser print frame has no bridge at all.
+
+> **Gotcha: do not move the ready check back to `load`.** Any single check that
+> runs before `WebViewDidFinishNavigation` misses the bridge on macOS, and the
+> failure is silent. The http:// no-op in
+> [desktop-shell-webview-no-wails-events.md](../gotchas/desktop-shell-webview-no-wails-events.md)
+> does not apply here: the print window is created from `HTML` content, not an
+> `http://` URL, so Wails does run the injection for it. The poll fix is covered
+> by `printDocument.test.ts` and the existing print tests only. The macOS panel is
+> still unverified live (see Known gaps).
 
 `printDesktopDocument` still throws over `MAX_PRINT_DOCUMENT_BYTES` (8 MiB,
 UTF-8 bytes of prefix + nonce + document) and the shell still sends no
