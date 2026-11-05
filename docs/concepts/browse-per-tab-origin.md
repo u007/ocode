@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Embedded Browser — Per-Tab Root-Mounted Origin for Root-Basepath SPAs
-description: Why client routers (TanStack Router SPA mode, React Router, Vue Router) failed inside the embedded browser with "Expected to find a match below the root match", and how local and remote tabs now load on a root-mounted per-tab origin: one loopback listener per (stateKey, scheme, host), a stable persisted port, a per-tab cookie, a reserved route for foreign upstreams, and a root-mode request header for remote projects.
+description: 'Why client routers (TanStack Router SPA mode, React Router, Vue Router) failed inside the embedded browser with "Expected to find a match below the root match", and how local and remote tabs now load on a root-mounted per-tab origin: one loopback listener per (stateKey, scheme, host), a stable persisted port, a per-tab cookie, a reserved route for foreign upstreams, and a root-mode request header for remote projects.'
 resource: internal/browse/tab_origin.go
 tags:
   - browser
@@ -9,7 +9,7 @@ tags:
   - remote
   - spa
   - routing
-timestamp: 2026-11-02T00:00:00Z
+timestamp: 2026-11-05T06:55:29Z
 status: active
 ---
 
@@ -311,7 +311,7 @@ and re-checked against the code. Items the code has since overtaken are left out
 - **Slow eviction test.** `TestTabOriginStoreEvictsLeastRecentlyUsed` writes 513 entries one
   at a time (about 3 s).
 - **Stable ports across restart rely on the WKWebView data store.** Plan 05 found no
-  non-persistent store in Wails v3 beta.12 or ocode-desktop, so the default store is assumed
+  non-persistent store in Wails v3.1.0 or ocode-desktop, so the default store is assumed
   to persist. Not confirmed at runtime.
 
 ## Verification

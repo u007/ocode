@@ -9,7 +9,7 @@ tags:
   - http2
   - tls
   - webview
-timestamp: 2026-09-28T13:00:00Z
+timestamp: 2026-11-05T06:49:45Z
 ---
 # Desktop webview: HTTPS + HTTP/2
 
@@ -47,6 +47,9 @@ answered in <60 ms at the same time — the server was not wedged.
 - **Wails upgrade:** if `WebviewWindowDelegate` ever implements the challenge
   method itself, `class_addMethod` returns NO and boot fails with a dialog
   (`pin local cert: ... already implements`). Re-check the pin then.
+  **Checked at v3.1.0:** the darwin delegate still does NOT implement
+  `webView:didReceiveAuthenticationChallenge:completionHandler:`, so
+  `class_addMethod` remains valid.
 - **Origin change:** http→https is a new localStorage origin. The first launch
   after the switch opens the http origin with `migrateTo=`; the SPA POSTs all
   localStorage to `/api/desktop/storage-migration` and redirects; the https page

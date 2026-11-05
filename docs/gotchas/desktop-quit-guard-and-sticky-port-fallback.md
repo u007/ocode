@@ -10,7 +10,7 @@ tags:
   - debounce
   - port
   - editor-drafts
-timestamp: 2026-09-25T02:23:28Z
+timestamp: 2026-11-05T06:49:59Z
 ---
 # Desktop: unsaved-draft quit guard & sticky-port fallback no longer re-saves (2026-09-25)
 
@@ -28,9 +28,9 @@ Two related desktop-shell fixes, both about **not destroying state the webview o
 - **Feed**: `cmd/ocode-desktop/main.go` — `application.Options.RawMessageHandler` routes messages into the guard.
 - **Quit refusal**: `ShouldQuit` returns `false` while blocked (covers ⌘Q / tray / menu / programmatic quit). Red-X close is cancelled by a `window.RegisterHook(events.Common.WindowClosing, …)` that calls `event.Cancel()` while blocked.
 
-### KEY WAILS FACT (v3 beta.12): use `RegisterHook`, not `OnWindowEvent`, to cancel close
+### KEY WAILS FACT (v3.1.0, re-verified): use `RegisterHook`, not `OnWindowEvent`, to cancel close
 
-`WebviewWindow.HandleWindowEvent` runs `RegisterHook` hooks **before** listeners and **returns early when the event is cancelled**, so Wails' internal `WindowClosing` listener that destroys the window never runs. An `OnWindowEvent(WindowClosing)` listener runs **too late** — the window is already destroyed by the time it fires. This is why the close-cancel must be a `RegisterHook` hook.
+`WebviewWindow.HandleWindowEvent` runs `RegisterHook` hooks **before** listeners and **returns early when the event is cancelled**, so Wails' internal `WindowClosing` listener that destroys the window never runs. An `OnWindowEvent(WindowClosing)` listener runs **too late** — the window is already destroyed by the time it fires. This is why the close-cancel must be a `RegisterHook` hook. The ordering was re-verified against v3.1.0.
 
 ### The two guard states (`web/src/lib/editorDraftGuard.ts`)
 

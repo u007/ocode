@@ -11,7 +11,7 @@ tags:
   - poll
   - web
   - gotcha
-timestamp: 2026-10-06T16:30:25Z
+timestamp: 2026-11-05T08:42:21Z
 ---
 ## Symptom
 
@@ -33,7 +33,7 @@ oversized paste poisoned the whole UI's polling surface. Measured live:
 Two compounding costs:
 
 1. **Payload.** `web/src/hooks/useSessionRevisionSync.ts` polls `/state` every
-   `REVISION_POLL_MS = 15_000` (`useSessionRevisionSync.ts:13`) for **every**
+   `REVISION_POLL_MS = 15_000` (`useSessionRevisionSync.ts:14`) for **every**
    open tab, and `/api/tabs` echoes the whole store, so one giant label
    multiplies across the poll and the shared tab store.
 2. **Layout.** `UnifiedTabBar.tsx` renders the label as a
@@ -64,15 +64,15 @@ denial-of-service on the whole UI from a single paste. Bound it at **both** ends
 ## Fix pattern
 
 Server (`session.TruncateTitle` + `session.MaxStoredTitleRunes = 300`,
-`session.go:888`/`session.go:896`):
+`session.go:903`/`session.go:911`):
 
 - **Write path:** the auto-title branch calls
   `TruncateTitle(t, MaxStoredTitleRunes)` before storing —
-  `internal/session/session.go:705`.
+  `internal/session/session.go:719`.
 - **Read path:** `storedTitleForDir` (serving `StoredTitleForDir`, used by
   `/state`'s lazy tab hydration) returns
   `TruncateTitle(title, MaxStoredTitleRunes)` —
-  `internal/session/revision.go:140`. This is what repairs an already-poisoned
+  `internal/session/revision.go:143`. This is what repairs an already-poisoned
   row **without rewriting it**.
 - **Shared tab store:** `internal/tabs` `capTabTitles` (`tabs.go:59`) bounds
   every tab title on **load** (`tabs.go:143`) and on **write** (`ApplyBulk`,
@@ -89,19 +89,19 @@ The auto-title branch above was the first place the cap landed, but the
 **stored** value is bounded at both sqlite row-builders too, so persistence
 itself is capped and a row poisoned by an older binary heals on its next save:
 
-- `writeSqliteSessionFull` — the `INSERT INTO meta` path (`sqlitestore.go:321`)
+- `writeSqliteSessionFull` — the `INSERT INTO meta` path (`sqlitestore.go:349`)
   applies `s.Title = TruncateTitle(s.Title, MaxStoredTitleRunes)`
-  (`sqlitestore.go:334`) before marshalling metadata.
+  (`sqlitestore.go:335`) before marshalling metadata.
 - `appendSqliteSessionOnce` — the `UPDATE meta SET title = …` path
-  (`sqlitestore.go:429`) re-bounds `resolvedTitle` after resolving
-  explicit-vs-carried-over title (`sqlitestore.go:513`); that re-bound is what
+  (`sqlitestore.go:610`) re-bounds `resolvedTitle` after resolving
+  explicit-vs-carried-over title (`sqlitestore.go:514`); that re-bound is what
   heals an already-stored oversized title the next time the session saves new
   content.
 
 This is **deliberately silent truncation** — the user asked for a hard limit, so
 it is intentional behaviour, not a hidden fallback. It is safe because the title
 is a label, never the transcript: the `messages` table is untouched.
-`TruncateTitle` (`session.go:896`) is rune-based (it walks at most `maxRunes`
+`TruncateTitle` (`session.go:911`) is rune-based (it walks at most `maxRunes`
 runes and never materializes a multi-megabyte string) and counts the `...`
 **inside** the limit (`out[:maxRunes-3] + "..."`), so the result is at most
 `MaxStoredTitleRunes` runes.

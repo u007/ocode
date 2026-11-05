@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Pending ask recovery from live session state (sentinel-less transcript)
-description: 'Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp; livePendingAsks now merges the child permission-ask registry (own mutex, read unconditionally) with the TryLock-gated transcript scan.'
+description: 'Gotcha: pending permission/question dialog not appearing when the SSE frame was missed, the transcript has no sentinel, or a send was refused as pending (409 or async turn_error) — livePendingAsks recovery, TryLock rule and child permission-ask registry.'
 tags:
   - gotcha
   - web
@@ -14,14 +14,7 @@ tags:
   - pending-ask
   - async
   - turn_error
-timestamp: 2026-10-03T00:26:24Z
----
----
-type: Gotcha
-title: "Pending ask recovery from live session state (sentinel-less transcript)"
-description: "Gotcha: pending permission/question dialog not appearing when SSE frame missed and transcript has no sentinel — livePendingAsks recovery"
-tags: [gotcha, web, desktop, permission, dialog, sse, reconcile, TryLock, pending-ask]
-timestamp: 2026-09-17T00:00:00Z
+timestamp: 2026-11-05T08:19:36Z
 status: active
 ---
 
@@ -62,7 +55,7 @@ response. The field is populated by `livePendingAsks`, which merges **TWO
 sources** that are readable under OPPOSITE lock conditions:
 
 - **Sentinel (main-agent) asks** — the live agent's trailing tool round, read via
-  `pendingAsksFromMessages` → `trailingToolRunStart` (`run_states.go:142`), under a
+  `pendingAsksFromMessages` → `trailingToolRunStart` (`run_states.go:160`), under a
   non-blocking `as.mu.TryLock()`.
 - **Sub-agent permission asks** — `as.childAsks`, the per-session registry in
   `internal/server/child_perm_asks.go`. It has its OWN mutex and NEVER takes
@@ -127,7 +120,7 @@ dedupes by `request_id`, so an ask already set by the merge is unaffected.
 
 `web/src/hooks/useChat.ts` — when `api.sendMessage` fails with HTTP 409
 (`ErrPermissionPending`, `run_states.go:20`, turned into the 409 by
-`HandleSendMessage` at `handler.go:1588`), the catch
+`HandleSendMessage` at `handler.go:1867`), the catch
 block calls `hydratePendingAsks()` which fetches session state via
 `api.getSessionState` and dispatches `PERMISSION_REQUEST` / `QUESTION_REQUEST`
 for each pending ask, opening the dialog.

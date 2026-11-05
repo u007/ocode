@@ -2,7 +2,7 @@
 type: Concept
 title: "Speech-to-text (voice input)"
 description: 'How ocode records, transcribes and cleans voice input in the TUI, web UI and desktop app, including the local and OpenAI engines, live partials and the stt config.'
-timestamp: 2026-10-30T13:13:37Z
+timestamp: 2026-11-05T06:50:32Z
 ---
 # Speech-to-text (voice input)
 
@@ -152,11 +152,13 @@ with `stt.Options.KeepFillers` (zero value cleans); see Config below.
   `ctrl+x v` toggle, since terminals do not reliably report key release.
   The macOS `.app` needs `NSMicrophoneUsageDescription` in the `Info.plist` written
   by `scripts/bundle-macos.sh`; without it macOS denies the mic and `getUserMedia`
-  fails with `NotAllowedError` with no prompt. Wails v3 beta.12 has no darwin
-  media-capture delegate, so WebKit would show its own "localhost would like to
-  use your microphone" prompt before the macOS one. `cmd/ocode-desktop/native_darwin.m`
-  adds a `WebviewWindowDelegate` category that grants the WebKit-level request, leaving
-  the macOS system prompt as the single gate.
+  fails with `NotAllowedError` with no prompt. Wails v3.1.0 does implement the
+  darwin media-capture delegate, but its decision comes from
+  `resolveMediaCapturePermission(windowID, needAudio, needVideo)` — window-scoped
+  and origin-agnostic. `cmd/ocode-desktop/native_darwin.m` therefore adds a
+  `WebviewWindowDelegate (OcodeMediaCapture)` category that deliberately overrides
+  it, granting microphone-only on loopback origins and leaving the macOS TCC prompt
+  as the single user-facing gate.
 - **TUI**: `stt.StartRecording` runs `arecord` (Linux, if installed) or `ffmpeg`
   (Linux pulse, macOS avfoundation, Windows dshow) to a 16 kHz mono WAV. Output is
   captured, never inherited, so nothing paints over the alt-screen.

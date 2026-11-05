@@ -9,7 +9,7 @@ tags:
   - questions
   - server
   - web
-timestamp: 2026-11-02T04:00:00Z
+timestamp: 2026-11-05T08:42:21Z
 status: active
 ---
 A `question` prompt has three states, and the server stores each one in the same tool-result row. A user can dismiss a pending prompt, and since 2026-11-02 can reopen the dismissal from its transcript card and answer it. Reopening is a client-only step. The server only needs to accept the answer.
@@ -17,7 +17,7 @@ A `question` prompt has three states, and the server stores each one in the same
 ## The three states
 
 - **Pending.** The tool result is the `QUESTION_PROMPT:` sentinel. `isQuestionAsk` recognises it.
-- **Dismissed.** The tool result is the plain prose `tool.QuestionDismissedResult`. `isQuestionDismissed` recognises it. Plain prose survives a session load, so a dismissal persists across restarts.
+- **Dismissed.** The tool result is the plain prose `tool.QuestionDismissedResult`. `tool.QuestionDismissed` recognises it. Plain prose survives a session load, so a dismissal persists across restarts.
 - **Answered.** The tool result is the answers JSON, written by `applyQuestionAnswer`. Answered is terminal.
 
 ## Who may transition
@@ -50,6 +50,10 @@ When `HandleAnswerQuestion` receives a `session_id`, it calls `getOrCreateAgentS
 
 A dismissed tail reads as stopped, not interrupted, as described in [interrupted turn notice](interrupted-turn-notice.md). Answering it runs a normal continuation.
 
+## Dismiss, then answer (fixed 2026-11-05)
+
+Before 2026-11-05 an answer to a reopened dismissal never reached disk. `HandleAnswerQuestion` applied it in memory and called `rewriteAskResult`, which persists the rewrite through `session.RewriteAskResultForDir` and `rewriteAskResultRow`. That guard accepted only ask sentinels, so the stored row stayed the dismissal text while memory held the answer. Every later save then diverged from disk, and the chat kept resetting to the question. The guard now accepts a dismissed question too (`isAskSentinel` or `tool.QuestionDismissed`), so the answer persists. The incident, the log markers and the diagnosis recipe are in [session writers conflict recovery](../gotchas/session-writers-conflict-recovery.md).
+
 ## Known gap
 
 In `/rc` bridge mode the server forwards the answer to the TUI. The TUI matches a resolution only against `m.rcPendingQuestion` (the `rcResolveMsg` branch in `internal/tui/model.go`), which is nil after a dismissal, so it drops the answer. This is tracked in `TODO.md`.
@@ -57,6 +61,7 @@ In `/rc` bridge mode the server forwards the answer to the TUI. The TUI matches 
 ## Tests
 
 - `TestApplyQuestionAnswerAcceptsDismissedPrompt`
+- `TestRewriteAskResultAcceptsDismissedQuestion` (in `internal/session`, the sqlite guard)
 - `TestHandleAnswerQuestionAfterDismissResolvesAndContinues`
 - `TestHandleAnswerQuestionAfterDismissSupersededIs404`
 - `TestHandleAnswerQuestionAfterDismissLoadsSessionFromDisk`

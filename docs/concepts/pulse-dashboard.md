@@ -12,7 +12,7 @@ tags:
   - desktop
   - api
   - remote-ssh
-timestamp: 2026-10-13T00:00:00Z
+timestamp: 2026-11-05T06:53:04Z
 ---
 # Pulse — cross-project live-sessions dashboard
 
@@ -847,11 +847,13 @@ user was.
   `invokeWails("ocode:focus-window")` → `application.Options.RawMessageHandler`
   (`web/src/lib/wails.ts` `focusDesktopWindow`) — otherwise the dashboard opens
   behind another app and reads as "nothing happened".
-- **There is no dock-badge-click handler.** Wails v3 beta.12's `dock` service is
-  display-only and `pkg/events` exposes no application-activated event, so a
-  macOS dock click while ocode is running is indistinguishable from plain
-  activation. The tray item is the reachable equivalent; the gap is recorded in
-  `TODO.md`.
+- **There is no dock-badge-click handler.** Wails v3.1.0's `dock` service is
+  display-only (`SetBadge`/`SetCustomBadge`/`RemoveBadge`/`GetBadge`).
+  `events.Mac.ApplicationShouldHandleReopen` does reach Go listeners (it also
+  existed in beta.12), but it is an icon-level reopen event, not a badge click —
+  and Wails already consumes it to show hidden windows. A macOS dock click while
+  ocode is running is therefore still indistinguishable from plain activation.
+  The tray item is the reachable equivalent; the gap is recorded in `TODO.md`.
 
 ## Remote fan-out
 

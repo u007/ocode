@@ -4,7 +4,7 @@ title: Preview Print / Save as PDF
 description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path."
 resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-04T07:46:00Z
+timestamp: 2026-11-05T07:04:34Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -217,7 +217,7 @@ The desktop print window's bridge rules apply to the toolbar path:
   handling.
 - Wails itself honours only that window's own `wails:drag`,
   `wails:resize:` and `wails:runtime:ready` messages. These are handled in
-  `webview_window.go` of the Wails module (v3 beta.12, per `go.mod`).
+  `webview_window.go` of the Wails module (v3.1.0, per `go.mod`).
 
 ## Known gaps
 
@@ -264,5 +264,8 @@ The desktop print window's bridge rules apply to the toolbar path:
     not separate the document from the bootstrap.
   - CSP `script-src 'none'`: breaks the inline bootstrap. The sanitizer now drops
     the author's JS, so the CSP would add nothing the sanitizer does not already do.
-  - A native load-finished event as the print trigger: not available on Windows
-    in Wails beta.12.
+  - A native load-finished event as the print trigger: the Windows event exists
+    (`events.Windows.WebViewNavigationCompleted`; platform-specific, not in
+    `events.Common`), so a native trigger is possible, but the implementation
+    keeps the `ocode:print-window-ready` bootstrap message because it is the same
+    path on every platform.
