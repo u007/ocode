@@ -3,9 +3,10 @@
 // The shell serves its webview over TLS so WebKit negotiates HTTP/2 (plain
 // HTTP/1.1 caps a host at six connections, which long-lived SSE streams
 // exhaust). The certificate is a per-launch self-signed one, so WebKit would
-// reject it; Wails v3 (beta.12) does not implement
+// reject it; Wails v3.1.0 does not implement
 // webView:didReceiveAuthenticationChallenge:completionHandler: on its
-// navigation delegate, so it is added here with class_addMethod. It accepts
+// navigation delegate (verified against the v3.1.0 source), so it is added here
+// with class_addMethod. It accepts
 // exactly the pinned leaf certificate on the loopback host and leaves every
 // other challenge to WebKit's default handling.
 

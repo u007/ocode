@@ -610,7 +610,7 @@ For bare desktop binaries, `make desktop-remote-binaries` prepares the sibling
 Without a bundled artifact, provisioning can still compile from an ocode source
 checkout with Go installed. The desktop GUI itself is never uploaded as a CLI.
 
-Platform prerequisites: macOS — Xcode Command Line Tools; Linux — `webkit2gtk-4.1-dev`, `libgtk-3-dev` (no dock badge on Linux); Windows — WebView2 runtime (bootstrapped by Wails). Pinned to `github.com/wailsapp/wails/v3 v3.0.0-alpha2.111` (alpha — API may drift).
+Platform prerequisites: macOS — Xcode Command Line Tools; Linux — `libgtk-4-dev`, `libwebkitgtk-6.0-dev` (the `-tags gtk3` fallback needs `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`; no dock badge on Linux); Windows — WebView2 runtime (bootstrapped by Wails). Pinned to `github.com/wailsapp/wails/v3 v3.1.0`.
 
 The macOS bundle is unsigned (Gatekeeper prompts on other machines); signing/installers are tracked in `TODO.md`.
 

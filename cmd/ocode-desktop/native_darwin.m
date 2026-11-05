@@ -96,12 +96,13 @@ int ocode_printWindow(void *nativeWindow) {
 }
 
 // WebKit asks "localhost would like to use your microphone" per origin before
-// macOS shows its own system prompt, so dictation prompted twice. Wails v3's
-// WebviewWindowDelegate (the WKUIDelegate) implements no media-capture
-// handler, so WebKit falls back to its own prompt. This category adds one that
-// grants ONLY the microphone, and ONLY to the loopback origin the desktop shell
-// serves the app from; the macOS TCC prompt (driven by
-// NSMicrophoneUsageDescription) stays the single user-facing gate.
+// macOS shows its own system prompt, so dictation prompted twice. Wails v3.1.0
+// implements requestMediaCapturePermissionForOrigin:... on its
+// WebviewWindowDelegate, but that path answers from the WINDOW's Permissions
+// map and cannot scope a grant to an origin. This category therefore
+// deliberately overrides it: it grants ONLY the microphone, and ONLY to the
+// loopback origin the desktop shell serves the app from; the macOS TCC prompt
+// (driven by NSMicrophoneUsageDescription) stays the single user-facing gate.
 //
 // Do NOT widen this to every origin: OCODE_DESKTOP_DEV_URL can point the
 // webview at another host, and WKMediaCaptureType also covers the camera, which

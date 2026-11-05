@@ -42,7 +42,7 @@ func TestBundledModelConfigsResolve(t *testing.T) {
 // //go:embed all:skills, not only present in the source tree.
 func TestBundledSkillsEmbedded(t *testing.T) {
 	fsys := bundledSkillsFS()
-	for _, name := range []string{"changes", "standup"} {
+	for _, name := range []string{"changes", "standup", "mock-demo-foundation-review"} {
 		if _, err := fs.Stat(fsys, "skills/"+name+"/SKILL.md"); err != nil {
 			t.Fatalf("bundled skill %q missing from embedded FS: %v", name, err)
 		}

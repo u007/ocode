@@ -66,7 +66,8 @@ up-minor:
 # ── Desktop (Wails v3 shell) ────────────────────────────────────────────────
 # Build the ocode-desktop binary. Requires cgo and native platform SDKs:
 #   macOS: Xcode Command Line Tools
-#   Linux: webkit2gtk-4.1-dev, libgtk-3-dev, etc.
+#   Linux: libgtk-4-dev, libwebkitgtk-6.0-dev (or -tags gtk3: libgtk-3-dev,
+#          libwebkit2gtk-4.1-dev)
 #   Windows: WebView2 runtime
 # See https://wails.io/docs/guides/platform-installation
 

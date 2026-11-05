@@ -586,11 +586,13 @@ func main() {
 		// the dock badge it mirrors (running + needs-permission counts) is
 		// exactly what this view answers.
 		//
-		// NOTE: there is deliberately no dock-BADGE-click handler. Wails v3
-		// beta.12's dock service is display-only (SetBadge/RemoveBadge) and
-		// pkg/events exposes no application-activated event, so on macOS a
-		// dock click while ocode is already running is indistinguishable from a
-		// plain activation. This tray item is the reachable equivalent.
+		// NOTE: there is deliberately no dock-BADGE-click handler. Wails
+		// v3.1.0's dock service is still display-only
+		// (SetBadge/SetCustomBadge/RemoveBadge), and the only dock event
+		// (`Mac.ApplicationShouldHandleReopen`) fires for a click anywhere on
+		// the dock icon — Wails already consumes it to reveal hidden windows,
+		// and there is no badge-vs-icon distinction. This tray item is the
+		// reachable equivalent.
 		application.NewMenuItem("Open Pulse").OnClick(func(ctx *application.Context) {
 			window.Show()
 			window.Focus()

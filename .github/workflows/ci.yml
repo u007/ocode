@@ -72,8 +72,8 @@ jobs:
       # web/dist/.gitkeep and cmd/ocode-desktop/embedded-assets/.gitkeep let
       # //go:embed compile, so `go build ./...` works straight away; `web-build`
       # is only needed to exercise the real SPA in the web job below.
-      # `cmd/ocode-desktop` imports wails v3, whose Linux build requires the GTK3
-      # and WebKitGTK development headers. `ubuntu-latest` has neither, so the
+      # `cmd/ocode-desktop` imports wails v3, whose Linux build requires the GTK4
+      # and WebKitGTK 6.0 development headers. `ubuntu-latest` has neither, so the
       # package does not compile here at all — this is what turned the Build step
       # red on the workflow's first run. Resolved once into GITHUB_ENV so the
       # exclusion and its rationale live in exactly one place.
