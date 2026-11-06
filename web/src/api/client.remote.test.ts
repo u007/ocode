@@ -70,4 +70,31 @@ describe("remote host lifecycle client", () => {
     expect(headers.get("X-Ocode-Project")).toBe("/srv/app");
     expect(list).toEqual([terminalEntry]);
   });
+
+  // Regression: a remote .xlsx save used the /api/remote/{host} proxy prefix.
+  // Proxy admission reads ?path= as the PROJECT path, but here it is the FILE
+  // and ?project_root= is the project, so every save 403'd with "unknown host
+  // or unregistered project path". The local ?host= route dispatches to
+  // remoteSaveFileRaw, exactly like fetchFileRaw reads.
+  it("saves a remote .xlsx through the local ?host= route, never the proxy prefix", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ path: "/srv/app/book.xlsx", saved: true }));
+    const { api } = await import("./client");
+    const saved = await api.saveFileRaw("/srv/app/book.xlsx", new Uint8Array([1, 2, 3]).buffer, {
+      projectRoot: "/srv/app",
+      expectedHash: "deadbeef",
+      host: "user@box",
+    });
+    expect(saved).toEqual({ path: "/srv/app/book.xlsx", saved: true });
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url.startsWith("/api/files/raw?")).toBe(true);
+    expect(url).not.toContain("/api/remote/");
+    const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+    expect(q.get("path")).toBe("/srv/app/book.xlsx");
+    expect(q.get("project_root")).toBe("/srv/app");
+    expect(q.get("expected_hash")).toBe("deadbeef");
+    expect(q.get("host")).toBe("user@box");
+    expect(init.method).toBe("PUT");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/octet-stream");
+  });
 });

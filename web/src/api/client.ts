@@ -873,6 +873,13 @@ export interface DBColumn {
   decl_type: string;
   not_null: boolean;
   default?: string;
+  /** True when the database supplies a value on INSERT even without a `default`
+   *  expression: an identity column has no pg_attrdef row. Absent for SQLite. */
+  has_default?: boolean;
+  /** Client-only hint for the row editor: the sampled rows prove this textual
+   *  primary key holds UUIDv4 values (or its declared type is `uuid`). The
+   *  editor pre-fills a fresh v4 id when the field is empty on insert. */
+  uuid_like?: boolean;
   /** 1-based position in the primary key; 0 when not part of it. */
   pk: number;
   generated: boolean;
@@ -991,6 +998,13 @@ export interface DBConnectColumn {
   name: string;
   type: string;
   pk: number;
+  /** Optional: an older remote server omits these. The row editor treats an
+   *  absent flag as false and an absent default as none, so a stale host keeps
+   *  working instead of marking every column generated or required. */
+  not_null?: boolean;
+  default?: string;
+  has_default?: boolean;
+  generated?: boolean;
 }
 
 /** One page of a table's rows. Each row is in column order. */
@@ -3656,10 +3670,18 @@ export const api = {
   },
 
   // ── Sidebar preview: save raw .xlsx bytes via PUT /api/files/raw (editable
-  // ExcelViewer). Body is octet-stream, never JSON. host routes to a remote
-  // project's server through the remote proxy prefix (same as fetchJSON's
-  // 3rd host arg) — NOT a ?host= query, so the proxy carries the body. A
-  // 409 (hash mismatch) throws an ApiError whose message holds the server's
+  // ExcelViewer). Body is octet-stream, never JSON.
+  //
+  // A remote project's save travels in the ?host= query, exactly like
+  // fetchFileRaw / saveFileContent / checkFileAccess: HandleSaveFileRaw
+  // dispatches on hostParam(r) and writes on the host through the transport.
+  // It must NOT use the /api/remote/{host} proxy prefix. That prefix is for
+  // endpoints with no local remote branch, and its admission treats ?path= as
+  // the PROJECT path — here ?path= is the FILE and ?project_root= is the
+  // project, so the proxied form 403s with "unknown host or unregistered
+  // project path" and every Excel save fails.
+  //
+  // A 409 (hash mismatch) throws an ApiError whose message holds the server's
   // "changed on disk" text so the viewer can show a reload hint.
   saveFileRaw: async (
     path: string,
@@ -3670,8 +3692,8 @@ export const api = {
     if (opts.projectRoot) q.set("project_root", opts.projectRoot);
     if (opts.expectedHash) q.set("expected_hash", opts.expectedHash);
     if (opts.force) q.set("force", "1");
-    const prefixed = opts.host ? `${remoteApiBase(opts.host)}/api/files/raw?${q.toString()}` : `/api/files/raw?${q.toString()}`;
-    const res = await fetch(apiPath(prefixed), {
+    if (opts.host) q.set("host", opts.host);
+    const res = await fetch(apiPath(`/api/files/raw?${q.toString()}`), {
       method: "PUT",
       headers: { ...authHeaders(), "Content-Type": "application/octet-stream" },
       body: bytes,

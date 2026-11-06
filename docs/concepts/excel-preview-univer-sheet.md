@@ -1,8 +1,8 @@
 ---
 type: Concept
 title: 'Excel preview and Save: Univer sheet over ExcelJS and SheetJS'
-description: 'How the Excel viewer works: .xlsx converted through ExcelJS, csv/tsv/.xls through SheetJS, all shown in a Univer sheet. Uncontrolled .xlsx is editable and Save writes it back through PUT /api/files/raw (values only, one-time .bak); closing a dirty tab asks Save / Discard / Cancel, and dirty tabs arm the desktop quit guard. Covers limits, loud failures, the ExcelJS internals it reads, and the raw save contract (client and server SHA-256 expected_hash).'
-resource: web/src/components/Preview/ExcelViewer.tsx; web/src/components/Preview/univerMount.ts; web/src/components/Preview/univerSerialize.ts; web/src/components/Preview/univerData.ts; web/src/hooks/useEditorTabs.ts; web/src/components/Files/FileTabContent.tsx; internal/server/handler_files.go; internal/server/handler_remote_files.go; internal/server/handler_remote_work.go
+description: 'How the Excel viewer works: .xlsx converted through ExcelJS, csv/tsv/.xls through SheetJS, all shown in a Univer sheet. Uncontrolled .xlsx is editable and Save writes it back through PUT /api/files/raw (values only, one-time .bak); closing a dirty tab asks Save / Discard / Cancel, and dirty tabs arm the desktop quit guard. Covers limits, loud failures, the ExcelJS internals it reads, and the raw save contract (client and server SHA-256 expected_hash). A remote save uses the local ?host= route, never the /api/remote/{host} proxy prefix.'
+resource: web/src/components/Preview/ExcelViewer.tsx; web/src/components/Preview/univerMount.ts; web/src/components/Preview/univerSerialize.ts; web/src/components/Preview/univerData.ts; web/src/hooks/useEditorTabs.ts; web/src/components/Files/FileTabContent.tsx; web/src/api/client.ts; internal/server/handler_files.go; internal/server/handler_remote_files.go; internal/server/handler_remote_work.go; internal/server/handler_remote_proxy.go
 tags:
   - web
   - preview
@@ -14,7 +14,7 @@ tags:
   - spreadsheet
   - save
   - quit-guard
-timestamp: 2026-11-05T13:12:09Z
+timestamp: 2026-11-06T03:49:28Z
 status: active
 ---
 # Excel preview and Save: Univer sheet over ExcelJS and SheetJS
@@ -99,6 +99,8 @@ Check both when bumping `exceljs` (`^4.4.0` in `web/package.json`).
 
 The route is `PUT /api/files/raw` behind `authMiddleware` (`internal/server/server.go:415`). A local project uses `HandleSaveFileRaw` (`internal/server/handler_files.go:1737`). A remote project (`?host=`) uses `remoteSaveFileRaw` (`internal/server/handler_remote_files.go:590`). Both apply the same checks in the same order.
 
+**The client always calls this local route, never the proxy prefix.** `apiClient.saveFileRaw` (`web/src/api/client.ts:3672`) builds `PUT /api/files/raw?path=…&project_root=…&expected_hash=…[&force=1][&host=…]` on its own origin; a remote project's `host` rides in the query (`:3681`), so `HandleSaveFileRaw` dispatches to `remoteSaveFileRaw` on `hostParam(r)` (`handler_files.go:1739-1741`). It must not be routed through `/api/remote/{host}/api/files/raw`. That proxy's admission resolves the project identity from `?project=` or `?path=`, then the `X-Ocode-Project` header, then `?project_path=`, then a POST body `project_path` (`resolveProjectPath`, `internal/server/handler_remote_proxy.go:272`), and it never reads `?project_root=`. For a raw save `?path=` is the FILE and `?project_root=` is the project, so the proxied form resolved the file path as the project and always answered 403 `unknown host or unregistered project path` (`handler_remote_proxy.go:79`). **Rule:** a call routed through `/api/remote/{host}` must carry the project identity in `?project=`, `X-Ocode-Project` or `?project_path=`; an endpoint that already has a local `?host=` remote branch (file read, save and access checks) uses that branch instead of the proxy. `?path=` is ambiguous — it is the project path only on `/api/projects/sessions`.
+
 - **Body.** `application/octet-stream`, or no Content-Type. Any other type is a 400 (`handler_files.go:1751-1758`). The body is read by `readRawSaveBody` (`handler_files.go:1718`) under a 32 MiB cap (`previewRawMaxBytes`, `handler_files.go:1186`). Only an over-cap body is a 413. Any other read failure is a logged 400.
 - **Query.** `path`, `expected_hash`, `force` (`1` or `true`, `handler_files.go:1759-1760`). `project_root` is required for remote saves (`handler_remote_files.go:610`).
 - **Extension.** Only `.xlsx` (case-insensitive), checked on the resolved target path. Anything else is a 400 (`handler_files.go:1800-1803`; remote `handler_remote_files.go:626-628`).
@@ -128,6 +130,7 @@ The old DOM grid's selection toolbar (Copy, Ask LLM) and its column-resize drag 
 ## Tests
 
 - `web/src/components/Preview/univerData.test.ts`, `xlsxStyle.test.ts`, `univerMount.test.ts`, `univerSerialize.test.ts` and `ExcelViewer.test.tsx`. The styled fixture is `web/src/components/Preview/__fixtures__/styled.xlsx`.
+- `web/src/api/client.remote.test.ts` (`saves a remote .xlsx through the local ?host= route, never the proxy prefix`) pins the remote save route: the request goes to `/api/files/raw?…&host=…` on this origin and never to `/api/remote/{host}/…`.
 - `internal/server/handler_files_raw_test.go` covers the raw save contract: the `.bak` rules, the SHA-256 hash (`TestRawContentHashIsSHA256Hex`), the 409 and force paths, the symlink and traversal refusals, and the remote twin. `TestSaveFileRawRemoteBacksUpOnceAndSaves` pins the remote one-time `.bak`; that the backup is one-time is a product decision recorded in `TODO.md`.
 - The `rawContentHash` vectors are mirrored by convention: `univerSerialize.test.ts` (`describe("rawContentHash")`) and `TestRawContentHashIsSHA256Hex` change together, never one alone. `ExcelViewer.test.tsx` asserts that the viewer sends `rawContentHash` of the loaded bytes, then of the saved bytes, as `expectedHash`.
 - `web/src/hooks/useEditorTabs.test.ts`, `describe("Excel preview tab close-confirm (t5)")`: `setTabDirty` marks an Excel tab dirty and arms the quit guard, save goes through the registered handler, a `false` handler keeps the tab and dialog open with the guard armed, success closes and disarms, Discard closes without saving, and `reconcileDraftGuard` drops entries for closed Excel tabs.
