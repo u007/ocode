@@ -106,4 +106,13 @@ cat > "$PLIST" <<PLIST_EOF
 </plist>
 PLIST_EOF
 
+# A linker-signed Go binary is treated as unsigned by TCC: macOS lists the app
+# in Privacy & Security and the toggle reads ON, but the grant never matches, so
+# Accessibility, Screen Recording and Microphone stay denied. Re-sign the
+# finished bundle ad-hoc with the bundle identifier baked in, which puts a real
+# CodeDirectory and the Info.plist hash in the signature. `set -e` makes a
+# signing failure stop the build instead of shipping an app whose grants are
+# silently inert.
+codesign --force --sign - --identifier com.u007.ocode "$APP"
+
 echo "bundled: $APP"
