@@ -54,7 +54,7 @@ export default function RecentInputsStrip({ inputs }: Props) {
         id={hintId}
         className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60"
       >
-        Sent — not queued
+        Sent
       </div>
       <ul
         aria-label="Recent inputs"
