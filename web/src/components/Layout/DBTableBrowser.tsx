@@ -6,7 +6,7 @@
 // The toolbar stays mounted through a failed load, so a bad filter can be fixed
 // in place. Only the grid area changes state (loading, error, rows).
 import { ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
   api,
@@ -20,9 +20,45 @@ import { ConfirmDialog, RowEditorDialog } from "../Preview/SQLiteDialogs";
 import { ResultGrid } from "../Preview/SQLiteResultGrid";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { columnHasUUIDIds } from "../../lib/dbIds";
 import { pgInputToCell, toCell } from "./dbConnectCells";
 
 const PAGE_SIZE = 100;
+
+/** The shared row-editor schema for one page. `uuid_like` is derived from the
+ * page's own values, so a textual primary key that holds UUIDv4s is auto-filled
+ * while a slug key is not. */
+function schemaOf(table: string, p: DBConnectBrowsePage): DBTableSchema {
+  return {
+    name: table,
+    type: "table",
+    columns: p.columns.map((c, i) => ({
+      name: c.name,
+      decl_type: c.type,
+      // A remote project proxies these calls to its host's own server, which may
+      // predate the metadata fields. An absent flag means false, so a stale host
+      // never marks a column generated or required by accident.
+      not_null: c.not_null === true,
+      default: c.default,
+      has_default: c.has_default === true,
+      uuid_like: columnHasUUIDIds(
+        {
+          declType: c.type,
+          pk: c.pk,
+          hasDefault: c.has_default === true,
+          generated: c.generated === true,
+        },
+        p.rows.map((row) => row[i]),
+      ),
+      pk: c.pk,
+      generated: c.generated === true,
+    })),
+    indexes: [],
+    foreign_keys: [],
+    ddl: "",
+    rowid: false,
+  };
+}
 
 /** Text for a failed dbconnect call. A call routed to a remote host that answers
  *  404 or 405 names the host and the status, so a host whose server lacks the route
@@ -100,6 +136,9 @@ export default function DBTableBrowser({
   }, [surface, connection, table, target, sort, desc, filter, offset, version]);
 
   const keyless = page !== null && page.primaryKey.length === 0;
+  // Rebuilt only when the page changes, so a parent re-render (a row error, a
+  // notice) does not reset the open dialog's draft.
+  const schema = useMemo(() => (page ? schemaOf(table, page) : null), [page, table]);
 
   // The key of a row is its primary-key values exactly as the server sent them,
   // so a bigint over 2^53 goes back as the same digits.
@@ -111,22 +150,6 @@ export default function DBTableBrowser({
     }
     return key;
   };
-
-  const schemaOf = (p: DBConnectBrowsePage): DBTableSchema => ({
-    name: table,
-    type: "table",
-    columns: p.columns.map((c) => ({
-      name: c.name,
-      decl_type: c.type,
-      not_null: false,
-      pk: c.pk,
-      generated: false,
-    })),
-    indexes: [],
-    foreign_keys: [],
-    ddl: "",
-    rowid: false,
-  });
 
   const initialFor = (p: DBConnectBrowsePage, index: number): Record<string, DBCell> => {
     const row = p.rows[index];
@@ -323,10 +346,10 @@ export default function DBTableBrowser({
         </div>
       </div>
 
-      {rowEdit && page && (
+      {rowEdit && page && schema && (
         <RowEditorDialog
           open
-          schema={schemaOf(page)}
+          schema={schema}
           initial={rowEdit.index == null ? null : initialFor(page, rowEdit.index)}
           busy={rowBusy}
           error={rowError}

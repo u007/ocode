@@ -30,10 +30,12 @@ import {
   type DBTableSchema,
 } from "../../api/client";
 import { cn } from "../../lib/utils";
+import { columnHasUUIDIds } from "../../lib/dbIds";
 import {
   ConfirmDialog,
   RowEditorDialog,
   SchemaDialog,
+  columnHasDefault,
   inputToCell,
   type SchemaAction,
 } from "./SQLiteDialogs";
@@ -359,6 +361,32 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     return [];
   }, [table]);
   const editable = keyColumns.length > 0 && table?.schema.type === "table";
+
+  // The row editor's schema: the server's columns plus a UUID hint derived from
+  // the page's own values, so a TEXT primary key holding UUIDv4 ids is
+  // pre-filled on insert. Memoised so a parent re-render cannot reset the open
+  // dialog's draft.
+  const editorSchema = useMemo(() => {
+    if (!table) return null;
+    const { schema, result } = table;
+    const columns = schema.columns.map((c) => {
+      const index = result.columns.findIndex((rc) => rc.name === c.name);
+      const sample = index < 0 ? [] : result.rows.map((row) => row[index]);
+      return {
+        ...c,
+        uuid_like: columnHasUUIDIds(
+          {
+            declType: c.decl_type,
+            pk: c.pk,
+            hasDefault: columnHasDefault(c),
+            generated: c.generated,
+          },
+          sample,
+        ),
+      };
+    });
+    return { ...schema, columns };
+  }, [table]);
 
   // Prefer the server's EXACT key for a row. Rebuilding one from the cells is
   // lossy for an integer id past 2^53 — JSON.parse has already rounded it, so
@@ -1142,10 +1170,10 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
           onConfirm={runConfirm}
         />
       ) : null}
-      {rowEdit && table ? (
+      {rowEdit && table && editorSchema ? (
         <RowEditorDialog
           open
-          schema={table.schema}
+          schema={editorSchema}
           initial={rowEdit.index == null ? null : rowByName(table.result.rows[rowEdit.index])}
           busy={rowBusy}
           error={rowError}

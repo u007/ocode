@@ -179,6 +179,34 @@ describe("SQLiteViewer writes (P2–P4)", () => {
     );
   });
 
+  it("pre-fills a UUID for a TEXT primary key whose sampled rows are UUIDs", async () => {
+    const uuidTable = {
+      ...TABLE_RESPONSE,
+      schema: {
+        ...TABLE_RESPONSE.schema,
+        columns: [
+          { name: "id", decl_type: "TEXT", not_null: true, pk: 1, generated: false },
+          { name: "name", decl_type: "TEXT", not_null: false, default: "'anon'", pk: 0, generated: false },
+        ],
+      },
+      result: {
+        ...TABLE_RESPONSE.result,
+        rows: [["b15540d4-36b2-43ce-a4b9-00a33851ac3c", "alice"]],
+        row_count: 1,
+      },
+    };
+    dbTable.mockResolvedValueOnce(uuidTable);
+    render(<SQLiteViewer path="app.db" />);
+    fireEvent.click(await screen.findByText("users"));
+    await screen.findByText("alice");
+
+    fireEvent.click(screen.getByTestId("sqlite-add-row"));
+    const id = (await screen.findByTestId("db-field-id")) as HTMLInputElement;
+    expect(id.value).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
   it("deletes a row only after the confirmation dialog", async () => {
     dbRow.mockResolvedValue({ rows_affected: 1, elapsed_ms: 1 });
     render(<SQLiteViewer path="app.db" />);

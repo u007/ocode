@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -9,7 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
-import type { DBCell, DBCellInput, DBColumnDef, DBTableSchema } from "../../api/client";
+import type { DBCell, DBCellInput, DBColumn, DBColumnDef, DBTableSchema } from "../../api/client";
+import { canGenerateUUID, uuidv4 } from "../../lib/dbIds";
 
 /**
  * Confirmation and editing dialogs for the SQLite browser (phases P2–P4).
@@ -34,6 +35,38 @@ const INPUT = "w-full rounded border border-border bg-transparent px-2 py-1 font
  */
 export function isBlobColumn(declType: string): boolean {
   return (declType || "").toUpperCase().includes("BLOB");
+}
+
+/** True when an empty field can be left out of an INSERT so the database fills
+ * it. An identity column has `has_default` but no displayable expression. */
+export function columnHasDefault(c: DBColumn): boolean {
+  return c.has_default === true || c.default != null;
+}
+
+/**
+ * SQLite's INTEGER PRIMARY KEY is an alias for rowid: an INSERT of NULL assigns
+ * the next rowid, even when the column is declared NOT NULL. It must therefore
+ * never be treated as a missing required value. Only a single-column key whose
+ * declared type is exactly INTEGER is the alias (INT PRIMARY KEY is not).
+ */
+export function isRowidAlias(schema: DBTableSchema, c: DBColumn): boolean {
+  if (!schema.rowid || c.pk !== 1) return false;
+  if (c.decl_type.trim().toUpperCase() !== "INTEGER") return false;
+  return schema.columns.filter((x) => x.pk > 0).length === 1;
+}
+
+function uuidCandidateOf(c: DBColumn) {
+  return {
+    declType: c.decl_type,
+    pk: c.pk,
+    hasDefault: columnHasDefault(c),
+    generated: c.generated,
+  };
+}
+
+/** The Generate button's rule: any textual PK the database does not fill. */
+function canGenerateId(c: DBColumn): boolean {
+  return canGenerateUUID(uuidCandidateOf(c));
 }
 
 /** Read a File as bare base64 (no data: prefix), which is what `$blob` wants. */
@@ -175,36 +208,71 @@ export function RowEditorDialog({
     Record<string, { name: string; size: number; data: string } | null>
   >({});
   const [blobError, setBlobError] = useState<string | null>(null);
+  // NOT NULL columns with no default, left empty on insert. Reported here so a
+  // missing value costs no server round trip.
+  const [requiredError, setRequiredError] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open) return;
     const next: Record<string, string> = {};
-    for (const c of editable) next[c.name] = isEdit ? cellToInput(initial?.[c.name] ?? null) : "";
+    for (const c of editable) {
+      const base = isEdit ? cellToInput(initial?.[c.name] ?? null) : "";
+      // Preview an id the database will not supply, but only when the format is
+      // proven (uuid type or sampled UUID rows). The value is editable and is
+      // written only if the user saves.
+      const uuidTyped = c.decl_type.trim().toLowerCase() === "uuid";
+      next[c.name] =
+        !isEdit && base === "" && canGenerateId(c) && (c.uuid_like === true || uuidTyped)
+          ? uuidv4()
+          : base;
+    }
     setDraft(next);
     setBlobDraft({});
     setBlobError(null);
+    setRequiredError([]);
   }, [open, isEdit, editable, initial]);
 
   const submit = () => {
     const values: Record<string, DBCellInput> = {};
+    const missing: string[] = [];
     for (const c of editable) {
-      if (isBlobColumn(c.decl_type)) {
+      const isBlob = isBlobColumn(c.decl_type);
+      const picked = blobDraft[c.name];
+      const untouchedBlob = !Object.prototype.hasOwnProperty.call(blobDraft, c.name);
+      const empty = isBlob ? untouchedBlob : (draft[c.name] ?? "") === "";
+      // Postgres applies a column DEFAULT only when the column is omitted, never
+      // when NULL is passed. On insert, an empty NOT NULL defaulted column is
+      // left out; an empty NOT NULL column with no default is reported instead of
+      // failing at the server. Edit mode always sends the shown value, so an
+      // explicit clear on a stored row stays an explicit NULL.
+      if (!isEdit && empty && !isRowidAlias(schema, c)) {
+        if (c.not_null && columnHasDefault(c)) continue;
+        if (c.not_null) {
+          missing.push(c.name);
+          continue;
+        }
+      }
+      if (isBlob) {
         // Three states, keyed on PRESENCE rather than truthiness, because a
         // cleared blob (null) and an untouched one (absent) are both falsy but
         // mean opposite things:
         //   absent  → leave the stored value alone on an update; NULL on insert
         //   null    → the user cleared it, so store NULL
         //   object  → the user picked a file, so store its bytes
-        if (!Object.prototype.hasOwnProperty.call(blobDraft, c.name)) {
+        if (untouchedBlob) {
           if (!isEdit) values[c.name] = null;
           continue;
         }
-        const picked = blobDraft[c.name];
         values[c.name] = picked ? { $blob: true, data: picked.data } : null;
         continue;
       }
       values[c.name] = parseInput(draft[c.name] ?? "", c.decl_type);
     }
+    if (missing.length > 0) {
+      setRequiredError(missing);
+      return;
+    }
+    setRequiredError([]);
     onSubmit(values);
   };
 
@@ -216,7 +284,8 @@ export function RowEditorDialog({
             {isEdit ? "Edit row" : "Add row"} · {schema.name}
           </DialogTitle>
           <DialogDescription className="text-xs">
-            Empty fields are stored as NULL.
+            Empty fields are stored as NULL, or use the column default when the
+            column is NOT NULL and has one.
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-2 overflow-auto pr-1">
@@ -227,6 +296,14 @@ export function RowEditorDialog({
                 <span className="opacity-70">{c.decl_type}</span>
                 {c.pk ? <span className="text-amber-500">pk</span> : null}
                 {c.not_null ? <span className="text-destructive">not null</span> : null}
+                {columnHasDefault(c) ? (
+                  <span
+                    className="max-w-[14rem] truncate opacity-70"
+                    title={c.default ? `default ${c.default}` : "default"}
+                  >
+                    {c.default ? `default ${c.default}` : "default"}
+                  </span>
+                ) : null}
               </span>
               {isBlobColumn(c.decl_type) ? (
                 <span className="flex items-center gap-1">
@@ -238,6 +315,7 @@ export function RowEditorDialog({
                     onChange={(e) => {
                       const f = e.target.files?.[0];
                       if (!f) return;
+                      setRequiredError([]);
                       setBlobError(null);
                       fileToBase64(f)
                         .then((data) => setBlobDraft((d) => ({ ...d, [c.name]: { name: f.name, size: f.size, data } })))
@@ -267,14 +345,33 @@ export function RowEditorDialog({
                   )}
                 </span>
               ) : (
-                <input
-                  value={draft[c.name] ?? ""}
-                  onChange={(e) => setDraft((d) => ({ ...d, [c.name]: e.target.value }))}
-                  placeholder="NULL"
-                  aria-label={c.name}
-                  data-testid={`db-field-${c.name}`}
-                  className={INPUT}
-                />
+                <span className="flex items-center gap-1">
+                  <input
+                    value={draft[c.name] ?? ""}
+                    onChange={(e) => {
+                      setRequiredError([]);
+                      setDraft((d) => ({ ...d, [c.name]: e.target.value }));
+                    }}
+                    placeholder={!isEdit && c.not_null && columnHasDefault(c) ? "DEFAULT" : "NULL"}
+                    aria-label={c.name}
+                    data-testid={`db-field-${c.name}`}
+                    className={`${INPUT} min-w-0 flex-1`}
+                  />
+                  {canGenerateId(c) ? (
+                    <button
+                      type="button"
+                      aria-label={`Generate UUID for ${c.name}`}
+                      title="Generate UUID"
+                      onClick={() => {
+                        setRequiredError([]);
+                        setDraft((d) => ({ ...d, [c.name]: uuidv4() }));
+                      }}
+                      className="shrink-0 rounded border border-border p-1 hover:bg-muted"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                    </button>
+                  ) : null}
+                </span>
               )}
             </label>
           ))}
@@ -282,6 +379,11 @@ export function RowEditorDialog({
         {blobError ? (
           <p role="alert" className="text-xs text-destructive" data-testid="db-blob-error">
             {blobError}
+          </p>
+        ) : null}
+        {requiredError.length > 0 ? (
+          <p role="alert" className="text-xs text-destructive" data-testid="db-required-error">
+            Required: {requiredError.join(", ")}
           </p>
         ) : null}
         {error ? (

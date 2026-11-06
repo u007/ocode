@@ -19,10 +19,21 @@ var ErrInvalidInput = errors.New("invalid input")
 // output (for example "numeric(10,2)"); it is the cast applied to every text
 // parameter bound to this column. PK is the 1-based position in the primary key,
 // or 0 when the column is not part of it.
+//
+// NotNull, Default and HasDefault let the row editor fill a row correctly:
+// Postgres applies a DEFAULT only when the column is omitted, never when NULL is
+// supplied, so a NOT NULL column with a default must be left out of the INSERT.
+// HasDefault also covers identity columns, which have no pg_attrdef row.
+// Generated marks a stored generated column, which can be neither inserted nor
+// updated.
 type Column struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	PK   int    `json:"pk"`
+	Name       string  `json:"name"`
+	Type       string  `json:"type"`
+	PK         int     `json:"pk"`
+	NotNull    bool    `json:"not_null"`
+	Default    *string `json:"default,omitempty"`
+	HasDefault bool    `json:"has_default"`
+	Generated  bool    `json:"generated"`
 }
 
 // TableColumns returns the columns of public.table in table order. An empty
@@ -32,11 +43,16 @@ type Column struct {
 func TableColumns(ctx context.Context, db *sql.DB, table string) ([]Column, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT a.attname, format_type(a.atttypid, a.atttypmod),
-       COALESCE(array_position(i.indkey::int2[], a.attnum) + 1, 0)
+       COALESCE(array_position(i.indkey::int2[], a.attnum) + 1, 0),
+       a.attnotnull,
+       pg_get_expr(d.adbin, d.adrelid),
+       (a.attidentity <> ''),
+       (a.attgenerated <> '')
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE n.nspname = 'public' AND c.relname = $1 AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`, table)
 	if err != nil {
@@ -46,9 +62,16 @@ ORDER BY a.attnum`, table)
 	cols := []Column{}
 	for rows.Next() {
 		var c Column
-		if err := rows.Scan(&c.Name, &c.Type, &c.PK); err != nil {
+		var def sql.NullString
+		var identity, generated bool
+		if err := rows.Scan(&c.Name, &c.Type, &c.PK, &c.NotNull, &def, &identity, &generated); err != nil {
 			return nil, fmt.Errorf("table columns: scan: %w", err)
 		}
+		c.HasDefault = identity || def.Valid
+		if def.Valid {
+			c.Default = &def.String
+		}
+		c.Generated = generated
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {

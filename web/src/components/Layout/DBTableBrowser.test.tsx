@@ -46,9 +46,63 @@ const KEYLESS = {
   hasMore: false,
   primaryKey: [],
 };
+// Postgres metadata: id and createdAt are database-defaulted; name is required.
+const WITH_DEFAULTS = {
+  columns: [
+    {
+      name: "id",
+      type: "character varying(255)",
+      pk: 1,
+      not_null: true,
+      has_default: true,
+      default: "gen_random_uuid()",
+    },
+    { name: "name", type: "character varying(255)", pk: 0, not_null: true },
+    {
+      name: "createdAt",
+      type: "timestamp with time zone",
+      pk: 0,
+      not_null: true,
+      has_default: true,
+      default: "CURRENT_TIMESTAMP",
+    },
+  ],
+  rows: [["r1", "admin", "2026-01-01 00:00:00+00"]],
+  hasMore: false,
+  primaryKey: ["id"],
+};
+
+// A textual key whose sampled rows are all UUIDv4: the Add-row dialog can
+// pre-fill a fresh one.
+const UUID_KEYS = {
+  columns: [
+    { name: "id", type: "character varying(255)", pk: 1, not_null: true },
+    { name: "name", type: "text", pk: 0, not_null: true },
+  ],
+  rows: [
+    ["b15540d4-36b2-43ce-a4b9-00a33851ac3c", "admin"],
+    ["98b82bc4-2643-41bb-9e23-8359d53db3ed", "user"],
+  ],
+  hasMore: false,
+  primaryKey: ["id"],
+};
+// A slug key: textual and primary, but the values prove nothing about UUIDs.
+const SLUG_KEYS = {
+  columns: [
+    { name: "id", type: "text", pk: 1, not_null: true },
+    { name: "name", type: "text", pk: 0, not_null: true },
+  ],
+  rows: [
+    ["admin", "Administrator"],
+    ["user", "User"],
+  ],
+  hasMore: false,
+  primaryKey: ["id"],
+};
 
 // A remote project's calls are routed to its host, so the target is forwarded on every call.
 const TARGET = { host: "me@host", projectPath: "~/proj" };
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function renderBrowser(table = "orders") {
   return render(<DBTableBrowser surface={SURFACE} connection="prod" table={table} target={TARGET} />);
@@ -148,6 +202,77 @@ describe("DBTableBrowser", () => {
     await waitFor(() =>
       expect(mockRow).toHaveBeenCalledWith(SURFACE, "prod", "insert", "orders", {}, expect.objectContaining({ amount: "1.00" }), TARGET),
     );
+  });
+
+  it("omits empty database-defaulted columns on insert and requires the rest", async () => {
+    mockRows.mockResolvedValue(WITH_DEFAULTS);
+    renderBrowser();
+    await screen.findByTestId("dbconnect-rows");
+    fireEvent.click(screen.getByRole("button", { name: /Add row/ }));
+
+    // name has no default, so an empty value is refused before the server call.
+    fireEvent.click(screen.getByTestId("sqlite-row-save"));
+    expect(screen.getByTestId("db-required-error").textContent).toContain("name");
+    expect(mockRow).not.toHaveBeenCalled();
+
+    fireEvent.change(await screen.findByLabelText("name"), { target: { value: "editor" } });
+    fireEvent.click(screen.getByTestId("sqlite-row-save"));
+    await waitFor(() =>
+      expect(mockRow).toHaveBeenCalledWith(
+        SURFACE,
+        "prod",
+        "insert",
+        "orders",
+        {},
+        { name: "editor" },
+        TARGET,
+      ),
+    );
+  });
+
+  it("shows the Postgres not-null and default metadata in the editor", async () => {
+    mockRows.mockResolvedValue(WITH_DEFAULTS);
+    renderBrowser();
+    fireEvent.click(await screen.findByRole("button", { name: /Add row/ }));
+    expect(screen.getAllByText("not null")).toHaveLength(3);
+    expect(screen.getByText("default gen_random_uuid()")).toBeTruthy();
+    expect(screen.getByText("default CURRENT_TIMESTAMP")).toBeTruthy();
+  });
+
+  it("pre-fills a UUID id when the page proves the key is a UUID, and sends it", async () => {
+    mockRows.mockResolvedValue(UUID_KEYS);
+    renderBrowser();
+    await screen.findByTestId("dbconnect-rows");
+    fireEvent.click(screen.getByRole("button", { name: /Add row/ }));
+
+    const id = (await screen.findByLabelText("id")) as HTMLInputElement;
+    expect(id.value).toMatch(UUID_V4);
+    fireEvent.change(screen.getByLabelText("name"), { target: { value: "auditor" } });
+    fireEvent.click(screen.getByTestId("sqlite-row-save"));
+
+    await waitFor(() =>
+      expect(mockRow).toHaveBeenCalledWith(
+        SURFACE,
+        "prod",
+        "insert",
+        "orders",
+        {},
+        { id: id.value, name: "auditor" },
+        TARGET,
+      ),
+    );
+  });
+
+  it("does not invent a UUID for a slug key", async () => {
+    mockRows.mockResolvedValue(SLUG_KEYS);
+    renderBrowser();
+    await screen.findByTestId("dbconnect-rows");
+    fireEvent.click(screen.getByRole("button", { name: /Add row/ }));
+
+    expect((screen.getByLabelText("id") as HTMLInputElement).value).toBe("");
+    fireEvent.click(screen.getByTestId("sqlite-row-save"));
+    expect(screen.getByTestId("db-required-error").textContent).toContain("id");
+    expect(mockRow).not.toHaveBeenCalled();
   });
 
   it("shows a 409 from a row write verbatim inside the editor", async () => {
