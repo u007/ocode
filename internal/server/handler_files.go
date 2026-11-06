@@ -1795,10 +1795,11 @@ func (h *Handler) HandleSaveFileRaw(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is outside the workspace")
 		return
 	}
-	// .xlsx-only gate on the RESOLVED target path. .xls/.xlsm/.csv exist in
-	// the preview allowlist but are deliberately not writable here.
-	if !strings.EqualFold(filepath.Ext(realTarget), ".xlsx") {
-		writeError(w, http.StatusBadRequest, "only .xlsx files can be saved as raw")
+	// Raw-save allowlist on the RESOLVED target path. .xls/.xlsm/.csv exist in
+	// the preview allowlist but are deliberately not writable here; .docx and
+	// .pdf are writable by the in-app Word/PDF editors.
+	if !rawSaveAllowedExt(filepath.Ext(realTarget)) {
+		writeError(w, http.StatusBadRequest, "file type cannot be saved as raw")
 		return
 	}
 

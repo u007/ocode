@@ -603,7 +603,7 @@ import EditorContextChip from "./EditorContextChip";
 import type { EditorSelection } from "../../hooks/useEditorTabs";
 ```
 
-Extend `ChatInputProps` (`ChatInput.tsx:9-12`):
+Extend `ChatInputProps` (`ChatInput.tsx:36`):
 
 ```ts
 interface ChatInputProps {
@@ -613,7 +613,7 @@ interface ChatInputProps {
 }
 ```
 
-Update the function signature (`ChatInput.tsx:14`):
+Update the function signature (`ChatInput.tsx:105`):
 
 ```ts
 export default function ChatInput({ onSlashCommand, activeEditorContext }: ChatInputProps) {
@@ -621,7 +621,7 @@ export default function ChatInput({ onSlashCommand, activeEditorContext }: ChatI
 
 - [ ] **Step 2: Render the chip**
 
-Add just before the existing `attachedFiles` chip block (`ChatInput.tsx:152`):
+Add just before the existing `attachedFiles` chip block (`ChatInput.tsx:1346`):
 
 ```tsx
       {activeEditorContext && (
@@ -633,7 +633,7 @@ Add just before the existing `attachedFiles` chip block (`ChatInput.tsx:152`):
 
 - [ ] **Step 3: Include the context ref in the outgoing message**
 
-Replace the message-building lines in `handleSend` (`ChatInput.tsx:99-102`):
+Replace the message-building lines in `submitComposer` (`ChatInput.tsx:925`):
 
 ```ts
     const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
@@ -737,7 +737,7 @@ Update the `FileEditor` usage (added in the core plan's Task 9):
                   />
 ```
 
-Update the `ChatInput` usage (`App.tsx:297`):
+Update the `ChatInput` usage (`App.tsx:2136`):
 
 ```tsx
                 <ChatInput onSlashCommand={handleCommand} activeEditorContext={activeEditorContext} />

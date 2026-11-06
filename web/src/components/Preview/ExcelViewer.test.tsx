@@ -6,6 +6,7 @@ import { mountUniverSheet } from "./univerMount";
 import { MAX_COLS, MAX_FILE_BYTES, MAX_ROWS } from "./univerData";
 import { rawContentHash } from "./univerSerialize";
 import ExcelViewer from "./ExcelViewer";
+import { ViewerReportContext, readViewerState, resetViewerStates, setViewerDoc } from "../../lib/viewerContext";
 
 vi.mock("../../api/client", () => ({ api: { fetchFileRaw: vi.fn(), saveFileRaw: vi.fn() } }));
 // Univer draws to canvas, which jsdom does not have. The converter is covered
@@ -24,7 +25,15 @@ beforeAll(async () => {
   await import("exceljs");
 });
 
-let handle: { activateSheet: Mock; setDarkMode: Mock; dispose: Mock; snapshot: Mock };
+let handle: {
+  activateSheet: Mock;
+  setDarkMode: Mock;
+  dispose: Mock;
+  snapshot: Mock;
+  activeSheetName: Mock;
+  selection: Mock;
+  onSelectionChange: Mock;
+};
 let dirtyCb: (() => void) | null;
 
 beforeEach(() => {
@@ -32,7 +41,15 @@ beforeEach(() => {
   vi.mocked(api.saveFileRaw).mockReset();
   vi.mocked(api.saveFileRaw).mockResolvedValue({ path: "x.xlsx", saved: true });
   dirtyCb = null;
-  handle = { activateSheet: vi.fn(), setDarkMode: vi.fn(), dispose: vi.fn(), snapshot: vi.fn() };
+  handle = {
+    activateSheet: vi.fn(),
+    setDarkMode: vi.fn(),
+    dispose: vi.fn(),
+    snapshot: vi.fn(),
+    activeSheetName: vi.fn(() => "Stock"),
+    selection: vi.fn(() => null),
+    onSelectionChange: vi.fn(() => () => {}),
+  };
   vi.mocked(mountUniverSheet).mockReset();
   vi.mocked(mountUniverSheet).mockImplementation(async (_c, _d, _dark, opts) => {
     dirtyCb = opts?.onDirty ?? null;
@@ -466,6 +483,94 @@ describe("ExcelViewer editable mode", () => {
     await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
     expect(vi.mocked(mountUniverSheet).mock.calls[0][3]?.editable).toBe(false);
     expect(screen.queryByRole("button", { name: "Save spreadsheet" })).toBeNull();
+  });
+});
+
+describe("ExcelViewer report to the chat session", () => {
+  beforeEach(() => resetViewerStates());
+
+  it("reports the selected cells, tab-separated, when the selection changes", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    setViewerDoc("s1", { path: "budget.xlsx", kind: "excel" });
+    const listener = { cb: null as (() => void) | null };
+    handle.onSelectionChange.mockImplementation((cb: () => void) => {
+      listener.cb = cb;
+      return () => {};
+    });
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="budget.xlsx" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(readViewerState("s1")?.location.sheet).toBe("Stock"));
+
+    handle.selection.mockReturnValue({
+      sheet: "Stock",
+      range: "A1:B2",
+      values: [
+        ["name", "qty"],
+        ["apples", "3"],
+      ],
+    });
+    listener.cb?.();
+
+    const state = readViewerState("s1");
+    expect(state?.location).toEqual({ sheet: "Stock", range: "A1:B2" });
+    // The store keeps tabs (column boundaries) and drops blank lines.
+    expect(state?.selection).toBe("name\tqty\napples\t3");
+  });
+
+  it("reports the new sheet with no range when a sheet tab is clicked", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    setViewerDoc("s1", { path: "budget.xlsx", kind: "excel" });
+    const listener = { cb: null as (() => void) | null };
+    handle.onSelectionChange.mockImplementation((cb: () => void) => {
+      listener.cb = cb;
+      return () => {};
+    });
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="budget.xlsx" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(readViewerState("s1")?.location.sheet).toBe("Stock"));
+
+    // After a switch, Univer activates the sheet, fires its change event and
+    // reports the sheet's default selection: A1, no cell content.
+    handle.activeSheetName.mockReturnValue("Cities");
+    handle.selection.mockReturnValue({ sheet: "Cities", range: "A1", values: [[""]] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Cities" }));
+    listener.cb?.();
+
+    const state = readViewerState("s1");
+    expect(state?.location).toEqual({ sheet: "Cities", range: undefined });
+    expect(state?.selection).toBeNull();
+  });
+
+  it("keeps the range of a single non-empty cell the user selected", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    setViewerDoc("s1", { path: "budget.xlsx", kind: "excel" });
+    const listener = { cb: null as (() => void) | null };
+    handle.onSelectionChange.mockImplementation((cb: () => void) => {
+      listener.cb = cb;
+      return () => {};
+    });
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="budget.xlsx" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(readViewerState("s1")?.location.sheet).toBe("Stock"));
+
+    handle.selection.mockReturnValue({ sheet: "Stock", range: "B2", values: [["3"]] });
+    listener.cb?.();
+
+    const state = readViewerState("s1");
+    expect(state?.location).toEqual({ sheet: "Stock", range: "B2" });
+    expect(state?.selection).toBe("3");
   });
 });
 

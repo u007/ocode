@@ -67,7 +67,7 @@ The project **list** is the one place linked worktrees are grouped. `GET /api/pr
 - **Collapsed by default.** The `worktrees` key in `ocode.ui.git-panel.v1` defaults to `false` (`GitPanel.tsx`, `DEFAULT_SECTIONS`). The list is fetched only once the section is expanded, so projects that never use worktrees pay nothing.
 - **Keyed by project.** `GitPanel.tsx:1501` mounts the section with `key` set to the host and project path, so switching projects discards the old list instead of briefly showing it.
 - **Loaded separately.** The list is not part of the workspace refresh `Promise.all`. A failed list shows an inline error in the section and cannot break the Files or Changes panes.
-- **Open is optional.** `GitPanel` takes `onOpenWorktree` as an optional prop (`GitPanel.tsx:245`). When it is omitted the list still shows and the Open action is hidden. The app wires it at `web/src/App.tsx:1695` to `openProjectPath`.
+- **Open is optional.** `GitPanel` takes `onOpenWorktree` as an optional prop (`GitPanel.tsx:245`). When it is omitted the list still shows and the Open action is hidden. The app wires it at `web/src/App.tsx:1953` to `openProjectPath`.
 - **Open registers, then selects.** `openProjectPath` (`web/src/stores/projectStore.tsx:1027`) calls `POST /api/projects` (idempotent on the server), reloads the project list, and selects the entry for that path. It rejects on failure instead of swallowing the error the way `addProject` does, so the section can show the reason.
 - Create and remove use a dialog and a `ConfirmDialog`. A rejected request keeps the dialog open with git's message.
 

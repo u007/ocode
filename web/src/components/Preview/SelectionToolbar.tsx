@@ -13,12 +13,18 @@ export interface TextSelection {
  * toolbar anchor. Copy writes the clipboard; Ask LLM pushes a
  * `ocode:preview-context` event (file + label + excerpt) that App funnels
  * into the chat composer's context chip.
+ *
+ * `onSelection` receives the trimmed text of a highlight found in the
+ * container, and `null` when a mouseup in the container left no usable
+ * highlight (a deselect made inside the viewer).
  */
-export function usePreviewSelection<T extends HTMLElement>(label: () => string) {
+export function usePreviewSelection<T extends HTMLElement>(label: () => string, onSelection?: (text: string | null) => void) {
   const ref = useRef<T | null>(null);
   const [sel, setSel] = useState<TextSelection | null>(null);
   const labelRef = useRef(label);
   labelRef.current = label;
+  const onSelectionRef = useRef(onSelection);
+  onSelectionRef.current = onSelection;
 
   const onMouseUp = useCallback(() => {
     // Let the browser finish the selection before reading it.
@@ -27,24 +33,32 @@ export function usePreviewSelection<T extends HTMLElement>(label: () => string) 
       const el = ref.current;
       if (!s || s.isCollapsed || !el || !s.toString().trim()) {
         setSel(null);
+        onSelectionRef.current?.(null);
         return;
       }
       const anchor = s.anchorNode ? (s.anchorNode instanceof Element ? s.anchorNode : s.anchorNode.parentElement) : null;
       if (!anchor || !el.contains(anchor)) {
         setSel(null);
+        onSelectionRef.current?.(null);
         return;
       }
+      const text = s.toString().trim();
       const r = s.getRangeAt(0).getBoundingClientRect();
-      setSel({ text: s.toString().trim().slice(0, 2000), rect: { top: r.top, left: r.left + r.width / 2 } });
+      setSel({ text: text.slice(0, 2000), rect: { top: r.top, left: r.left + r.width / 2 } });
+      onSelectionRef.current?.(text);
     });
   }, []);
 
+  // No dependency array: the viewers render their container conditionally
+  // (after a "Loading…" branch), so a mount-only effect bound while
+  // `ref.current` was still null and the listener never attached. Re-binding
+  // after every render is one add/remove pair and always sees the live node.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.addEventListener("mouseup", onMouseUp);
     return () => el.removeEventListener("mouseup", onMouseUp);
-  }, [onMouseUp]);
+  });
 
   const clear = useCallback(() => {
     setSel(null);

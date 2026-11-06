@@ -259,4 +259,4 @@ moves another window's page. Rules recorded only here:
   migrated: that old key was bare-path only.
 
 ### Editor file-access grants (see `docs/concepts/file-editor-grants.md`)
-The editor/preview opens files outside the active project via an EDITOR-ONLY in-memory grant (internal/server/handler_file_grants.go), separate from extra_allowed_paths — which feeds the agent scope. resolveEditorFilePath (scopeEditorRoots, handler_files.go:966) uses it; the DB browser (scopeProjectRoots) excludes grants (handler_db.go:46). See file-editor-grants.md for the LFI-shaped hole (handler_files.go:1007) and verified anchors.
+The editor/preview opens files outside the active project via an EDITOR-ONLY in-memory grant (internal/server/handler_file_grants.go), separate from extra_allowed_paths — which feeds the agent scope. resolveEditorFilePath (scopeEditorRoots, handler_files.go:992) uses it; the DB browser (scopeProjectRoots) excludes grants (handler_db.go:46). See file-editor-grants.md for the LFI-shaped hole (handler_files.go:1007) and verified anchors.

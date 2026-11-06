@@ -196,7 +196,7 @@ second browser tab invoking `/btw`).
 
 A new `BtwPanel` component (`web/src/components/Chat/BtwPanel.tsx`) renders the active
 session's side-query state. It is **docked above the composer** in `App.tsx` (between
-`ChatPanel` and `ChatInput`, near `AgentPreview` at `App.tsx:1781`), not a modal:
+`ChatPanel` and `ChatInput`, near `AgentPreview` at `App.tsx:2129`), not a modal:
 
 - Header `↳ By the Way` with the question and a close (X) button.
 - Scrollable, wrapped body: live activity lines (`→ tool args`) then the streamed answer;

@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../../api/client";
@@ -17,6 +17,8 @@ import {
   resolvePreviewWidth,
   usePreviewWidthPreset,
 } from "../../lib/previewWidth";
+import { useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
+import { collectVisibleText, throttleTrailing } from "../../lib/viewerDom";
 
 /**
  * The mermaid source a fenced block holds, or null for any other code block.
@@ -76,7 +78,8 @@ export default function MarkdownViewer({
   const [error, setError] = useState<string | null>(null);
   const [isBinary, setIsBinary] = useState(false);
   const [forceEdit, setForceEdit] = useState(false);
-  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
+  const report = useViewerReport(path);
+  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc", (text) => report({ selection: text }));
   // Rendered prose root: the searchable text lives here, while `ref` is the
   // scroll container whose geometry the highlight layer uses.
   const columnRef = useRef<HTMLDivElement | null>(null);
@@ -191,11 +194,27 @@ export default function MarkdownViewer({
   const pendingFollowRef = useRef(false);
   const lastMdRef = useRef<string | null | undefined>(md);
 
+  // What the reader sees: the nearest heading and the visible text. Reported
+  // once per rendered document and throttled while scrolling.
+  const snapshot = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const view = collectVisibleText(el, VIEWER_VISIBLE_MAX);
+    report({ location: { heading: view.heading ?? undefined }, visibleText: view.text });
+  }, [ref, report]);
+  const throttledSnapshot = useMemo(() => throttleTrailing(snapshot, 250), [snapshot]);
+  useEffect(() => () => throttledSnapshot.cancel(), [throttledSnapshot]);
+  // Throttled because controlled mode (Files-tab split) re-renders on every keystroke.
+  useEffect(() => {
+    if (md !== null) throttledSnapshot();
+  }, [md, throttledSnapshot]);
+
   const handleScroll = () => {
     const el = ref.current;
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     atBottomRef.current = distance < 24;
+    throttledSnapshot();
   };
 
   // The scroller is rendered conditionally (the "Loading…"/binary branches

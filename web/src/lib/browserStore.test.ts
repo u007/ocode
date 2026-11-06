@@ -508,3 +508,28 @@ describe("retainBodies equivalence", () => {
     expect(keptOnPush).toBeGreaterThan(0);
   });
 });
+
+describe("reader mode flag", () => {
+  it("defaults to false and setReader flips it per surface", () => {
+    browserActions.open(KEY);
+    expect(browserStore.state.byKey[KEY].reader).toBe(false);
+    browserActions.setReader(KEY, true);
+    expect(browserStore.state.byKey[KEY].reader).toBe(true);
+    browserActions.setReader(KEY, false);
+    expect(browserStore.state.byKey[KEY].reader).toBe(false);
+  });
+
+  it("setReader leaves other surfaces and the collapsed flag alone", () => {
+    browserActions.open(KEY);
+    browserActions.open("tab:other" as const);
+    browserActions.setCollapsed(KEY, true);
+    browserActions.setReader(KEY, true);
+    expect(browserStore.state.byKey[KEY].collapsed).toBe(true);
+    expect(browserStore.state.byKey["tab:other" as const].reader).toBe(false);
+  });
+
+  it("setReader on an unknown key is a no-op", () => {
+    browserActions.setReader("tab:missing" as const, true);
+    expect(browserStore.state.byKey["tab:missing" as const]).toBeUndefined();
+  });
+});

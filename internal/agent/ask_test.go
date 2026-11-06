@@ -362,7 +362,7 @@ func TestFormatSideQueryActivity(t *testing.T) {
 // TestBtwExcludedToolsComplete guards the shared side-query exclusion list
 // against silent drift: every non-interactive tool must be named.
 func TestBtwExcludedToolsComplete(t *testing.T) {
-	want := []string{"question", "task", "task_status", "agent_status", "task_cancel", "wait", "todo_write", "todo_update", "plan_enter", "plan_exit", "discover_more", "knowledge_lookup", "advisor"}
+	want := []string{"question", "task", "task_status", "agent_status", "task_cancel", "wait", "todo_write", "todo_update", "plan_enter", "plan_exit", "discover_more", "knowledge_lookup", "advisor", "viewer_control"}
 	if len(BtwExcludedTools) != len(want) {
 		t.Fatalf("len = %d, want %d", len(BtwExcludedTools), len(want))
 	}

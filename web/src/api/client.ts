@@ -97,6 +97,7 @@ import type {
 } from "./types";
 
 import { noteSessionRevision } from "../lib/sessionRevision";
+import type { ViewerState } from "../lib/viewerContext";
 
 /** Speech summarising: shortens assistant text before TTS reads it aloud.
  *  `model` empty resolves at call time to small -> main. `enabled` is ALWAYS
@@ -127,6 +128,20 @@ export interface OfficeAddinPath {
   allowed_path?: string;
   /** Platform caveat, e.g. the Windows shared-folder catalog note. */
   note?: string;
+}
+
+/**
+ * One Office add-in folder's OS access report, returned after a save. On macOS
+ * the server's folder read is what raises the "access data from other apps"
+ * consent dialog; Windows and Linux report filesystem access instead.
+ */
+export interface OfficeAddinAccessResult {
+  app: string;
+  path: string;
+  status: "granted" | "denied" | "not_required" | "not_determined" | "missing" | "unknown";
+  message?: string;
+  /** The server opened the relevant System Settings pane for the user. */
+  opened_settings?: boolean;
 }
 
 export interface CompactConfig {
@@ -1488,6 +1503,20 @@ export const api = {
       { method: "DELETE" },
       host,
     ),
+  // The chat's viewer record (what the user is looking at), mirrored to the
+  // server so a Go tool can read it mid-turn. PUT replaces it; DELETE clears it.
+  putSessionViewer: (sessionId: string, state: ViewerState, host?: string) =>
+    fetchEmpty(
+      `/api/sessions/${encodeURIComponent(sessionId)}/viewer`,
+      { method: "PUT", body: JSON.stringify(state) },
+      host,
+    ),
+  deleteSessionViewer: (sessionId: string, host?: string) =>
+    fetchEmpty(
+      `/api/sessions/${encodeURIComponent(sessionId)}/viewer`,
+      { method: "DELETE" },
+      host,
+    ),
   getSmallModel: (host?: string) =>
     fetchJSON<{ model: string; priority: string }>(
       "/api/config/small-model",
@@ -2070,6 +2099,17 @@ export const api = {
         body: JSON.stringify({ extra_allowed_paths, upload_dir }),
       },
     ),
+  // Requests OS access for the named Office add-in folders. Runs after the
+  // save so a denied consent dialog never undoes the persisted grant.
+  requestOfficeAddinAccess: (apps: string[]) =>
+    fetchJSON<{
+      platform: string;
+      supported: boolean;
+      results: OfficeAddinAccessResult[];
+    }>("/api/config/ocode/paths/request", {
+      method: "POST",
+      body: JSON.stringify({ apps }),
+    }),
 
   getLimitsConfig: () =>
     fetchJSON<{

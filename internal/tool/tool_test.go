@@ -58,6 +58,7 @@ var expectedBuiltinTools = []string{
 	"ocr",
 	"imagegen",
 	"preview_open",
+	"viewer_control",
 }
 
 // ast and ast_grep are conditionally appended; they are tested separately

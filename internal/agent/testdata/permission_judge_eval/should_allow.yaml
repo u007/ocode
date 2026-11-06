@@ -213,3 +213,14 @@ cases:
     scope: bash_prefix
     command: |-
       API_URL=http://127.0.0.1:8080 python3 -c "import os, requests; print(requests.get(os.environ['API_URL']).status_code)"
+
+  # SQL against a local database (2026-11-06): a read-only query via a
+  # project query helper on a DB under $HOME deferred at 0.76 with concern none.
+  - id: s-sql-read-home-app-db-labelled
+    command: 'echo "=== orphan rows ===" && sqlite3 ~/.myapp/workspace/app.db "SELECT ''document_chunks'' AS tbl, COUNT(*) FROM document_chunks WHERE user_id='''' UNION ALL SELECT ''document_index_meta'', COUNT(*) FROM document_index_meta WHERE user_id='''';" 2>&1 && echo "" && echo "=== kb rows ===" && sqlite3 ~/.myapp/workspace/app.db "SELECT COUNT(*) FROM document_chunks WHERE user_id=''__kb_global__'';" 2>&1'
+  - id: s-sql-read-schema-inside
+    command: 'sqlite3 internal/agent/testdata/fixtures/app.db ".tables" && sqlite3 internal/agent/testdata/fixtures/app.db "PRAGMA table_info(sessions);"'
+  - id: s-sql-insert-inside-root
+    command: 'sqlite3 internal/agent/testdata/fixtures/app.db "INSERT INTO sessions (id, title) VALUES (''ses_test'', ''probe'');"'
+  - id: s-sql-update-where-inside-root
+    command: 'sqlite3 internal/agent/testdata/fixtures/app.db "UPDATE sessions SET title=''renamed'' WHERE id=''ses_test'';"'

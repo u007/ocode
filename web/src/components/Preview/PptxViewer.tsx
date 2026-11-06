@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+import { useViewerReport } from "../../lib/viewerContext";
 import { parsePptx, type DeckBlock } from "./pptxDeck";
 
 /** A slide ready to draw: its images are URLs the page can load. */
@@ -93,7 +94,8 @@ export default function PptxViewer({
   const [presenting, setPresenting] = useState(false);
   const [revealed, setRevealed] = useState(0);
   const urlsRef = useMemo(() => new Set<string>(), []);
-  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => `slide ${slide}`);
+  const report = useViewerReport(path);
+  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => `slide ${slide}`, (text) => report({ selection: text }));
 
   useEffect(() => {
     let cancelled = false;
@@ -139,6 +141,12 @@ export default function PptxViewer({
   const total = slides.length;
   const safe = Math.min(Math.max(1, slide), Math.max(1, total));
   const current = slides[safe - 1];
+
+  // The current slide's text, reported on slide change and after the deck loads.
+  useEffect(() => {
+    if (!current) return;
+    report({ location: { slide: safe, slideCount: total }, visibleText: current.blocks.map((b) => b.text).join("\n") });
+  }, [report, current, safe, total]);
 
   const stepForward = useCallback(() => {
     if (!current) return;

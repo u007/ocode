@@ -10,6 +10,8 @@ import { FindBar } from "./FindBar";
 import { isEditableTarget } from "./findDom";
 import { usePdfFind } from "./usePdfFind";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
+import { useViewerReport } from "../../lib/viewerContext";
+import { throttleTrailing } from "../../lib/viewerDom";
 import { isDesktopShell } from "../../lib/desktopShell";
 import { documentShell, printDocument } from "./printDocument";
 
@@ -253,7 +255,23 @@ export default function PdfViewer({
   const find = usePdfFind({ docRef, textRefs, canvasRefs, renderTick, docVersion });
   const findInputRef = useRef<HTMLInputElement | null>(null);
 
-  const { ref: selContainerRef, sel, clear } = usePreviewSelection<HTMLDivElement>(() => `p.${visibleRef.current}`);
+  const report = useViewerReport(path);
+  const { ref: selContainerRef, sel, clear } = usePreviewSelection<HTMLDivElement>(() => `p.${visibleRef.current}`, (text) => report({ selection: text }));
+  // Where the reader is, and the visible page's text layer. Re-reported when
+  // the page or count changes and when a text layer is (re)built or dropped
+  // (`renderTick`); an unbuilt layer reports no text.
+  const reportView = useMemo(
+    () =>
+      throttleTrailing(() => {
+        const text = textRefs.current.get(visibleRef.current)?.textContent ?? "";
+        report({ location: { page: visibleRef.current, pageCount: totalRef.current }, visibleText: text });
+      }, 250),
+    [report],
+  );
+  useEffect(() => () => reportView.cancel(), [reportView]);
+  useEffect(() => {
+    if (total) reportView();
+  }, [reportView, total, visiblePage, renderTick]);
 
   /** Storage key for this file's viewer state (page/zoom/scroll). A host- or
    *  root-qualified key keeps a remote project's file distinct from a local

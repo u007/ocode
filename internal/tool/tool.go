@@ -247,6 +247,9 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 	// PreviewHost (pdf/docx/pptx/mermaid/image/text). The result carries a
 	// PREVIEW_OPEN sentinel the SPA auto-opens; no server push needed.
 	builtins = append(builtins, &PreviewOpenTool{})
+	// Preview driver — scrolls, selects or finds in the preview beside the
+	// chat. The result carries a VIEWER_CONTROL sentinel the web UI applies.
+	builtins = append(builtins, &ViewerControlTool{})
 	// Computer tool — opt-in via cfg.Ocode.ComputerUse.Enabled.
 	if cfg != nil && cfg.Ocode.ComputerUse.Enabled {
 		builtins = append(builtins, &ComputerTool{Config: cfg, Driver: computerDriver, DriverErr: computerDriverErr})

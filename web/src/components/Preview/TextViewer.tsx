@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import FileEditor from "../Files/FileEditor";
 import { api } from "../../api/client";
 import { previewKindForPath } from "../../lib/previewKind";
 import { languageForFile } from "../../lib/editorLanguage";
+import { useViewerReport } from "../../lib/viewerContext";
 import { Button } from "../ui/button";
 
 export default function TextViewer({
@@ -27,6 +28,11 @@ export default function TextViewer({
   const [savedTick, setSavedTick] = useState(false);
   const [isBinary, setIsBinary] = useState(false);
   const [forceEdit, setForceEdit] = useState(false);
+  const report = useViewerReport(path);
+  // Selection line numbers refer to the editor's text, which is the draft. The
+  // editor memoizes its props, so the selection callback reads the draft here.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   useEffect(() => {
     let cancelled = false;
@@ -145,6 +151,16 @@ export default function TextViewer({
           onChange={(v) => {
             setDraft(v);
             setDirty(v !== content);
+          }}
+          onSelectionChange={(sel) => {
+            if (!sel) {
+              report({ location: { lines: undefined }, selection: null });
+              return;
+            }
+            report({
+              location: { lines: { start: sel.startLine, end: sel.endLine } },
+              selection: draftRef.current.split("\n").slice(sel.startLine - 1, sel.endLine).join("\n"),
+            });
           }}
         />
       </div>

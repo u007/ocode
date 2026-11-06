@@ -64,7 +64,7 @@ timestamp: 2026-10-07T12:40:26Z
 
 The web SPA has its OWN per-tab queue (`web/src/lib/tabQueue.ts`, mirroring the
 TUI's `queuedItems`), and whether a typed item is queued or dispatched
-immediately is decided in `handleSend`
+immediately is decided in `submitComposer`
 (`web/src/components/Chat/ChatInput.tsx`). The web queue originally had no
 instant-command list at all, so every `/command` and `!shell` typed while busy
 was queued. `/btw` and `/by-the-way` now bypass it
@@ -96,10 +96,10 @@ clear) queues while a turn runs, unlike the TUI.
   replaces (cancels) the first; `/reset-id` cancels the run and drops its
   registry entry (`internal/server/handler_reset_id.go`).
 - **Compaction queueing differs by platform.** The web SPA queues EVERY command
-  while a compaction is active, instant ones included: in `handleSend`
-  (`web/src/components/Chat/ChatInput.tsx:860`) the queue condition is
+  while a compaction is active, instant ones included: in `submitComposer`
+  (`web/src/components/Chat/ChatInput.tsx:968-971`) the queue condition is
   `compactionActive || (!isInstantCommand(trimmed) && (effectiveBusy || drainingRef.current.has(sessionTabId)))`
-  (`web/src/components/Chat/ChatInput.tsx:904`), and `compactionActive` is the
+  (`web/src/components/Chat/ChatInput.tsx:961`), and `compactionActive` is the
   first, unconditional clause — so `/btw` does NOT bypass compaction on the web.
   The TUI does NOT withhold instant commands while compacting: its gate is
   `(m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd`

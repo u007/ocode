@@ -19,26 +19,26 @@ binary/Office/media kinds never open Monaco.
 
 ## Routing rule
 
-`FileTabContent` (`web/src/components/Files/FileTabContent.tsx:17`) is the sole
+`FileTabContent` (`web/src/components/Files/FileTabContent.tsx:83`) is the sole
 routing point for a Files-tab editor tab body, in priority order:
 
 1. `previewOnlyKindForPath(path)` returns a kind → render the shared
-   `PreviewSurface` (`FileTabContent.tsx:32`).
+   `PreviewSurface` (`FileTabContent.tsx:314`).
 2. `isLegacyOfficePath(path)` → render `LegacyOfficePane`
-   (`FileTabContent.tsx:47`).
-3. otherwise → render `FileEditor` (Monaco) (`FileTabContent.tsx:50`).
+   (`FileTabContent.tsx:332-333`).
+3. otherwise → render `FileEditor` (Monaco) (`FileTabContent.tsx:338`).
 
 The **preview-only kind set** is `pdf`, `docx`, `pptx`, `excel`, `image`,
-`audio`, `video` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:84`). These
+`audio`, `video` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:185`). These
 are binary containers with no editable text representation. `markdown`, `text`,
 are **deliberately excluded** and keep the Monaco editor. (2026-09-28: `.mmd` was promoted to split-preview — see the history note below.)
 `.mdx` is also **deliberately excluded** and keeps the Monaco editor (it routes
 to the same markdown mode switch as `.md`/`.markdown`).
-`previewOnlyKindForPath` (`previewKind.ts:91`) is therefore the narrow
+`previewOnlyKindForPath` (`previewKind.ts:258`) is therefore the narrow
 "must not open in Monaco" subset of the broader previewable set.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
-(`FileTabContent.tsx:78-79`) that the controlled viewers need; every editor
+(`FileTabContent.tsx:77-78`) that the controlled viewers need; every editor
 tab stays mounted (hidden, not unmounted — `App.tsx` renders panes for **all**
 `editorTabs` and hides non-visible ones with the CSS `hidden` class, gated by a
 `visitedEditorTabsRef` lazy-mount set), so this state survives tab switches
@@ -61,7 +61,7 @@ and per-file viewer state lives in `web/src/lib/previewViewState.ts`. See
 ## Find in the preview — per kind (2026-11-03)
 
 Find is a **viewer** feature, not a routing feature. `FileTabContent`'s
-toolbar holds Print (`FileTabContent.tsx:151`) and the light/dark toggle; it
+toolbar holds Print (`FileTabContent.tsx:305`) and the light/dark toggle; it
 renders no find control at all. Each viewer owns its own header row with a
 visible **Find** button (`aria-label="Find in document"`), so availability
 follows the viewer that was routed to.
@@ -77,8 +77,8 @@ follows the viewer that was routed to.
 Two consequences of that placement:
 
 - **The Word body is written asynchronously.** `DocxViewer` bumps `docVersion`
-  (`DocxViewer.tsx:23`) only after `docx-preview`'s `renderAsync` resolves
-  (`:44`), and `useDomFind` keys its text index on that value (`:26`). Without
+  (`DocxViewer.tsx:25`) only after `docx-preview`'s `renderAsync` resolves
+  (`:62`), and `useDomFind` keys its text index on that value (`:29`). Without
   the bump the first find after a load indexes an empty body and reports 0
   matches.
 - **Find state is per-mount.** It is deliberately absent from
@@ -132,7 +132,7 @@ fetch).
 `.md`/`.markdown`/`.mdx` files (when `!props.isBinary`). The mode control is a
 `role="group"` (`aria-label="Markdown view mode"`) of `aria-pressed` toggle
 buttons — the same pattern as `FileTree.tsx`'s list/column view switch. New
-exported helper `isMarkdownPath(path)` (`previewKind.ts:92`) returns
+exported helper `isMarkdownPath(path)` (`previewKind.ts:198`) returns
 `previewKindForPath(path) === "markdown"` — this is `true` for `.md`,
 `.markdown`, AND `.mdx`.
 
@@ -148,12 +148,12 @@ exported helper `isMarkdownPath(path)` (`previewKind.ts:92`) returns
 
 - **Monaco is hidden with CSS, never unmounted** when the mode changes, so
   cursor, scroll, and undo history survive. `FileEditor` now sets
-  `automaticLayout: true` in its `editorOptions` (`FileEditor.tsx:296`) because
+  `automaticLayout: true` in its `editorOptions` (`FileEditor.tsx:304`) because
   the pane width changes (split drag + the pre-existing file-tree pane resize);
   without it Monaco paints against stale geometry.
 
 - **`.md`/`.markdown`/`.mdx` remain deliberately excluded from
-  `PREVIEW_ONLY_KINDS`** (`previewKind.ts:84`). The fetch-skip invariant for
+  `PREVIEW_ONLY_KINDS`** (`previewKind.ts:185`). The fetch-skip invariant for
   preview-only paths is unaffected — `/api/files/content` is still always
   fetched for markdown tabs.
 
@@ -164,9 +164,9 @@ exported helper `isMarkdownPath(path)` (`previewKind.ts:92`) returns
 
 ## Audio/video were added to the preview-only set
 
-`PreviewKind` (`previewKind.ts:13`) gained `audio` and `video`, and
+`PreviewKind` (`previewKind.ts:25`) gained `audio` and `video`, and
 `previewOpenKinds` (`internal/tool/preview.go`) and `previewRawTypes`
-(`internal/server/handler_files.go:960`) gained matching types/captured
+(`internal/server/handler_files.go:1224`) gained matching types/captured
 extensions. 2026-09-16: `.mmd` (Mermaid flow) was already in the markdown kind
 and renders through `MermaidViewer`. 2026-09-21: `.mdx` added to the markdown
 kind. 2026-09-28: `.mmd` promoted to Edit/Preview/Split — `splitPreviewKindForPath`
@@ -203,7 +203,7 @@ Tests: `internal/server/text_content_test.go`,
 ## Transport caps stayed in place
 
 The 32 MiB document budget and the 128 MiB remote-buffered cap were kept; media
-was carved out first (branching at `handler_files.go:1053`), so media streams
+was carved out first (branching at `handler_files.go:1307`), so media streams
 while documents stay buffered. The split is verified by
 `TestPreviewRawCoversOfficeSet` and `TestPreviewRawCapSplitsMedia`
 (`handler_preview_test.go`).
@@ -214,11 +214,11 @@ while documents stay buffered. The split is verified by
 | Remote (`remoteFileRaw`) | 32 MiB buffered | 128 MiB buffered (`previewRawMediaMaxBytes`) |
 
 The local non-media path only ever sees the 32 MiB document budget
-(`handler_files.go:1058`), because media already branched to streaming at
-`:1053`. `previewRawMediaMaxBytes` therefore now applies **only to the remote
+(`handler_files.go:1312`), because media already branched to streaming at
+`:1307`. `previewRawMediaMaxBytes` therefore now applies **only to the remote
 buffered path**: `remoteFileRaw`
-(`internal/server/handler_remote_files.go:419`) calls
-`remoteReadFileCapped(..., previewRawCap(ct))` (`:449`) — remote media is
+(`internal/server/handler_remote_files.go:481`) calls
+`remoteReadFileCapped(..., previewRawCap(ct))` (`:506`) — remote media is
 still fetch-into-memory + base64 over the transport, so it keeps the 128 MiB
 budget and the stat-before-read guard that stops a huge binary OOMing the
 server. There is **no range transport over SSH**, so remote media cannot use
@@ -233,15 +233,15 @@ devtools). The local streaming path therefore uses a **short-lived, single-file
 capability** in `?media_token=`:
 
 - **Store** — `internal/server/media_tokens.go`, an in-memory `mediaTokenStore`
-  held on the `Handler` (`internal/server/handler.go:390`, initialized `:724`).
+  held on the `Handler` (`internal/server/handler.go:407`, initialized `:760`).
   `mediaTokenTTL = 6h`, `mediaTokenMaxLen = 128`, and tokens are 32 bytes of
   `crypto/rand` base64url (**256 bits**). A `mediaGrant` is bound to the exact
   `(path, project_root, host)` triple and authorizes nothing else. Pruning is
   lazy, on `issue` (the only growth point). Tokens are in-process only and die
   with the server — no on-disk store to leak; a restart drops them by design.
 - **Issue endpoint** — `POST /api/files/media-token` → `Handler.HandleMediaToken`
-  (`internal/server/handler_files.go:1105`), registered as
-  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:399`), i.e.
+  (`internal/server/handler_files.go:1500`), registered as
+  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:413`), i.e.
   issuing **requires the normal credential**. Validation: non-empty `path`;
   `host` must be empty (`"media streaming is local-only"` — remote is
   blob-only); the extension must be media (`previewExtIsMedia`); `project_root`,
@@ -249,12 +249,12 @@ capability** in `?media_token=`:
   `..`. Returns `{"token": "..."}`; a 500 (never a predictable token) if the
   system RNG fails.
 - **Grant validation happens at use time, in the middleware**, against the exact
-  triple (`server.go:917`) — the token is a capability, never a substitute for
+  triple (`server.go:980`) — the token is a capability, never a substitute for
   the raw handler's own anchoring/containment checks.
 
 ## `mediaAuthMiddleware` — the rejection policy is load-bearing
 
-`mediaAuthMiddleware` (`server.go:917`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
+`mediaAuthMiddleware` (`server.go:957`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
 three constraints that make the capability safe even if leaked:
 
 - **No cross-host reuse.** A token granted for `(path, root, host_A)` fails
@@ -281,16 +281,16 @@ having **no editable buffer**, so it must not fetch `/api/files/content` for it.
 The viewers read their own bytes through `/api/files/raw`.
 
 - `handleOpenFile` skips the content fetch entirely for preview-only paths
-  (`useEditorTabs.ts:125`), so a large binary is not transferred and
+  (`useEditorTabs.ts:160-164`), so a large binary is not transferred and
   JSON-decoded into a JS string a second time.
-- The module-scope helper `isPreviewOnlyPath` (`useEditorTabs.ts:75`, =
+- The module-scope helper `isPreviewOnlyPath` (`useEditorTabs.ts:92`, =
   `previewOnlyKindForPath(path) !== null || isLegacyOfficePath(path)`) guards
   **all three external-change watchers** so they do not re-download the whole
   binary just to compare an unused hash:
-  - `reloadTabFromDisk` — `useEditorTabs.ts:446`
+  - `reloadTabFromDisk` — `useEditorTabs.ts:634-638`
   - `checkAll` (the 10s / focus / visibilitychange poll) — the per-tab
-    `checkOne` early return at `useEditorTabs.ts:522`
-  - the **activate-tab re-check effect** — `useEditorTabs.ts:589`
+    `checkOne` early return at `useEditorTabs.ts:719`
+  - the **activate-tab re-check effect** — `useEditorTabs.ts:787-794`
 
 **These guards are load-bearing and must stay in sync with the open-time skip.**
 Without the activate-tab guard, switching to a preview tab re-ran the
@@ -320,11 +320,11 @@ flow and the known gaps are in
 
 Legacy binary Office formats (`.doc`, `.ppt`) have no in-browser renderer
 (`docx-preview` handles only `.docx`; there is no server-side conversion in v1).
-`isLegacyOfficePath` (`previewKind.ts:101`) matches them and
+`isLegacyOfficePath` (`previewKind.ts:268`) matches them and
 `LegacyOfficePane` (`web/src/components/Preview/LegacyOfficePane.tsx`) renders
 the OS-open fallback instead of a "Binary File" editor dead-end. The pane was
 extracted out of `PreviewHost`, which now shares it
-(`web/src/components/Preview/PreviewHost.tsx:7`, used at `:144`).
+(`web/src/components/Preview/PreviewHost.tsx:12`, used at `:414`).
 "Open in app" runs on the **server** host (`POST /api/files/open` has no remote
 path — it uses the local OS on the server machine, not the user's browser/OS),
 so the user sees the server's default app for that type. The server must have a
@@ -336,7 +336,7 @@ path is the only option — there is no web player fallback. See the media
 section above for the streaming exception for native formats (`.mp4`, `.webm`,
 `.mp3`, `.wav`).
 
-`isPreviewOnlyPath` (`useEditorTabs.ts:75`) combines preview-only kinds
+`isPreviewOnlyPath` (`useEditorTabs.ts:92`) combines preview-only kinds
 (`previewOnlyKindForPath(path) !== null`) with the legacy Office fallback
 (`isLegacyOfficePath(path)`), so both groups skip the content fetch and the
 external-change watchers. The legacy group is binary and has no editor anyway.

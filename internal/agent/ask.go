@@ -40,6 +40,7 @@ var BtwExcludedTools = []string{
 	"discover_more",
 	"knowledge_lookup",
 	"advisor",
+	"viewer_control",
 }
 
 // FormatSideQueryActivity renders a compact activity line for a side-query

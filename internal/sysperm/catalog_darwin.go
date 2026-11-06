@@ -98,8 +98,7 @@ func detectEntry(ctx context.Context, e Entry) Status {
 }
 
 // isProtectedPath reports whether the path is (or is under) one of the macOS
-// TCC-protected locations whose first access raises the Files & Folders
-// consent dialog.
+// TCC-protected locations whose first access raises a consent dialog.
 func isProtectedPath(path string) bool {
 	home, _ := os.UserHomeDir()
 	roots := []string{
@@ -107,7 +106,31 @@ func isProtectedPath(path string) bool {
 		filepath.Join(home, "Documents"),
 		filepath.Join(home, "Downloads"),
 		filepath.Join(home, "Library", "Mobile Documents"),
+		filepath.Join(home, "Library", "Containers"),
+		filepath.Join(home, "Library", "Group Containers"),
 		"/Volumes",
+	}
+	clean := filepath.Clean(path)
+	for _, root := range roots {
+		if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAppDataPath reports whether the path is (or is under) another
+// application's container. macOS protects these with the "access data from
+// other apps" TCC service, whose only Settings remedy is Full Disk Access.
+// Office add-in folders live under ~/Library/Containers/com.microsoft.*.
+func isAppDataPath(path string) bool {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return false
+	}
+	roots := []string{
+		filepath.Join(home, "Library", "Containers"),
+		filepath.Join(home, "Library", "Group Containers"),
 	}
 	clean := filepath.Clean(path)
 	for _, root := range roots {
@@ -153,14 +176,22 @@ func requestEntry(ctx context.Context, e Entry) RequestResult {
 
 	default:
 		if e.Kind == KindPath && e.Path != "" {
-			// The read attempt is what makes macOS show the Files & Folders
-			// dialog for this location.
+			// The read attempt is what makes macOS show the consent dialog for
+			// this location. For another app's container that dialog is the
+			// "access data from other apps" prompt, not Files & Folders.
 			_, _ = os.ReadDir(e.Path)
 			probed := e
 			probed.Requested = true
 			if detectEntry(ctx, probed) != StatusGranted {
-				res.OpenedSettings = openPane(ctx, paneFilesAndFolders)
-				res.Message = "Approve the macOS dialog, or enable the location under System Settings → Privacy & Security → Files and Folders."
+				if isAppDataPath(e.Path) {
+					// No Files & Folders toggle covers another app's data;
+					// Full Disk Access is the only remedy after a denial.
+					res.OpenedSettings = openPane(ctx, paneFullDiskAccess)
+					res.Message = "macOS asked whether ocode may access data from another app. If the prompt was denied, enable ocode under System Settings → Privacy & Security → Full Disk Access, then relaunch ocode."
+				} else {
+					res.OpenedSettings = openPane(ctx, paneFilesAndFolders)
+					res.Message = "Approve the macOS dialog, or enable the location under System Settings → Privacy & Security → Files and Folders."
+				}
 			} else {
 				res.Message = "Access granted."
 			}

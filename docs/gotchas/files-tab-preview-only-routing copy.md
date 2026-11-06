@@ -35,36 +35,36 @@ binary/Office/media kinds never open Monaco.
 
 ## Routing rule
 
-`FileTabContent` (`web/src/components/Files/FileTabContent.tsx:17`) is the sole
+`FileTabContent` (`web/src/components/Files/FileTabContent.tsx:83`) is the sole
 routing point for a Files-tab editor tab body, in priority order:
 
 1. `previewOnlyKindForPath(path)` returns a kind → render the shared
-   `PreviewSurface` (`FileTabContent.tsx:27`).
+   `PreviewSurface` (`FileTabContent.tsx:314`).
 2. `isLegacyOfficePath(path)` → render `LegacyOfficePane`
-   (`FileTabContent.tsx:40`).
-3. otherwise → render `FileEditor` (Monaco) (`FileTabContent.tsx:44`).
+   (`FileTabContent.tsx:332-333`).
+3. otherwise → render `FileEditor` (Monaco) (`FileTabContent.tsx:338`).
 
 The **preview-only kind set** is `pdf`, `docx`, `pptx`, `excel`, `image`
-(`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:66`). These are binary
+(`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:185`). These are binary
 containers with no editable text representation. `markdown`, `text`, and
 `mermaid` are **deliberately excluded** and keep the Monaco editor, even though
 `previewKindForPath` still resolves them as previewable
-(`previewKind.ts:54`). `previewOnlyKindForPath` (`previewKind.ts:73`) is
+(`previewKind.ts:54`). `previewOnlyKindForPath` (`previewKind.ts:258`) is
 therefore the narrow "must not open in Monaco" subset of the broader preview
 allowlist; `previewKindForPath` remains the sidebar/`PreviewSurface` dispatch
 helper.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
-(`FileTabContent.tsx:19`) that the controlled viewers need; every editor tab
-stays mounted (hidden, not unmounted — see `App.tsx:1015`), so this state
+(`FileTabContent.tsx:20`) that the controlled viewers need; every editor tab
+stays mounted (hidden, not unmounted — see `App.tsx:1897`), so this state
 survives tab switches.
 
 ## Why `FileEditor` was left pure
 
 Routing lives in `FileTabContent`, **not** inside `FileEditor`. `FileEditor`
 stays a pure Monaco surface because it is reused for real text by the preview
-viewers: `TextViewer` (`web/src/components/Preview/TextViewer.tsx:112`) and
-`MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:73`). Putting
+viewers: `TextViewer` (`web/src/components/Preview/TextViewer.tsx:145`) and
+`MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:295`). Putting
 the preview/legacy routing inside `FileEditor` would make those text viewers
 inherit binary-preview branches they must never take.
 
@@ -75,16 +75,16 @@ having **no editable buffer**, so it must not fetch `/api/files/content` for it.
 The viewers read their own bytes through `/api/files/raw`.
 
 - `handleOpenFile` skips the content fetch entirely for preview-only paths
-  (`useEditorTabs.ts:125`), so a large binary is not transferred and
+  (`useEditorTabs.ts:160-164`), so a large binary is not transferred and
   JSON-decoded into a JS string a second time.
-- The module-scope helper `isPreviewOnlyPath` (`useEditorTabs.ts:75`, =
+- The module-scope helper `isPreviewOnlyPath` (`useEditorTabs.ts:92`, =
   `previewOnlyKindForPath(path) !== null || isLegacyOfficePath(path)`) guards
   **all three external-change watchers** so they do not re-download the whole
   binary just to compare an unused hash:
-  - `reloadTabFromDisk` — `useEditorTabs.ts:446`
+  - `reloadTabFromDisk` — `useEditorTabs.ts:634-638`
   - `checkAll` (the 10s / focus / visibilitychange poll) — the per-tab
-    `checkOne` early return at `useEditorTabs.ts:522`
-  - the **activate-tab re-check effect** — `useEditorTabs.ts:589`
+    `checkOne` early return at `useEditorTabs.ts:719`
+  - the **activate-tab re-check effect** — `useEditorTabs.ts:787-794`
 
 **These guards are load-bearing and must stay in sync with the open-time skip.**
 Without the activate-tab guard, switching to a preview tab re-ran the
@@ -97,11 +97,11 @@ four places: a preview-only path is never fetched for content, only opened.
 
 Legacy binary Office formats (`.doc`, `.ppt`) have no in-browser renderer
 (`docx-preview` handles only `.docx`; there is no server-side conversion in v1).
-`isLegacyOfficePath` (`previewKind.ts:83`) matches them and
+`isLegacyOfficePath` (`previewKind.ts:268`) matches them and
 `LegacyOfficePane` (`web/src/components/Preview/LegacyOfficePane.tsx`) renders
 the OS-open fallback instead of a "Binary File" editor dead-end. The pane was
 extracted out of `PreviewHost`, which now shares it
-(`web/src/components/Preview/PreviewHost.tsx:7`, used at `:144`).
+(`web/src/components/Preview/PreviewHost.tsx:12`, used at `:414`).
 "Open in app" runs on the **server** host (`POST /api/files/open` has no remote
 branch), so the button is hidden for a remote project
 (`LegacyOfficePane.tsx:8`, `:45`) — showing it would open an unrelated
@@ -121,7 +121,7 @@ divergences (recorded, not silently fixed — the spec is historical):
 2. **`.md` default differs.** The spec (§2, §7, §9) says "Monaco by default for
    both sidebar and full tab" with `MarkdownViewer` behind a toggle. Shipped
    code renders `MarkdownViewer` when `kind === "markdown"`
-   (`web/src/components/Preview/PreviewSurface.tsx:49`), i.e. rendered markdown
+   (`web/src/components/Preview/PreviewSurface.tsx:126`), i.e. rendered markdown
    is the default. This divergence is pre-existing and out of scope for the
    Files-tab change; do not silently "fix" the spec.
 3. **`PreviewSurface` signature differs.** The spec proposes
@@ -142,9 +142,9 @@ the description of the Files-tab routing.
   page/slide state.
 - `web/src/components/Preview/LegacyOfficePane.tsx` (new) — `.doc`/`.ppt`
   OS-open fallback, shared with `PreviewHost`.
-- `web/src/hooks/useEditorTabs.ts` — open-time fetch skip (`:125`) +
-  `isPreviewOnlyPath` (`:75`) guarding the three watchers (`:446`, `:522`,
-  `:589`).
+- `web/src/hooks/useEditorTabs.ts` — open-time fetch skip (`:160-164`) +
+  `isPreviewOnlyPath` (`:92`) guarding the three watchers (`:634-638`, `:719`,
+  `:787-794`).
 - Tests: `web/src/components/Files/FileTabContent.test.tsx` (routing),
   `web/src/lib/previewKind.test.ts` (helpers),
   `web/src/hooks/useEditorTabs.test.ts` (no `fetch` for preview-only opens).

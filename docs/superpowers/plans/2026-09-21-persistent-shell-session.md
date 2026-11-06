@@ -218,7 +218,7 @@ React/TypeScript web client (`web/src`).
 - Modify: `web/src/hooks/useChat.ts` — `executeShell` (:291) forwards the tab id
   (`useChat`'s first argument)
 - Modify: `web/src/components/Chat/ChatInput.tsx` — the `!` result message
-  (:275-277) renders the returned cwd
+  (:584-588) renders the returned cwd
 - Test: `web/src/hooks/useChat.shellHost.test.tsx` (extend),
   `web/src/components/Chat/ChatInput.test.tsx` (extend)
 

@@ -622,9 +622,9 @@ func (h *Handler) remoteSaveFileRaw(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is outside the workspace")
 		return
 	}
-	// .xlsx-only gate on the resolved (remote-absolute) target path.
-	if !strings.EqualFold(filepath.Ext(abs), ".xlsx") {
-		writeError(w, http.StatusBadRequest, "only .xlsx files can be saved as raw")
+	// Raw-save allowlist on the resolved (remote-absolute) target path.
+	if !rawSaveAllowedExt(filepath.Ext(abs)) {
+		writeError(w, http.StatusBadRequest, "file type cannot be saved as raw")
 		return
 	}
 

@@ -4,6 +4,7 @@ import { api } from "../../api/client";
 import PreviewHost from "./PreviewHost";
 import { loadSidebarPreviewState } from "./sidebarPreviewState";
 import { isOutsideProjectRoot } from "./outsideRootAccess";
+import { readViewerState, resetViewerStates } from "../../lib/viewerContext";
 
 // Passthrough by default; a single test overrides it to hold the probe open.
 vi.mock("./outsideRootAccess", async (importOriginal) => {
@@ -19,6 +20,8 @@ vi.mock("../../api/client", () => ({
     saveFileContent: vi.fn(),
     checkFileAccess: vi.fn(),
     grantFilePath: vi.fn(),
+    putSessionViewer: vi.fn(() => Promise.resolve()),
+    deleteSessionViewer: vi.fn(() => Promise.resolve()),
   },
 }));
 
@@ -571,5 +574,29 @@ describe("PreviewHost outside-root grant", () => {
     expect(loadSidebarPreviewState("side:chat:g2")?.path).toBeUndefined();
     expect(screen.queryByRole("button", GRANT_BUTTON)).toBeNull();
     expect(screen.queryByTestId("preview-surface")).toBeNull();
+  });
+});
+
+describe("PreviewHost viewer report", () => {
+  beforeEach(() => {
+    vi.mocked(api.checkFileAccess).mockReset();
+  });
+
+  it("reports the shown doc to the session's viewer context and clears it on unmount", async () => {
+    resetViewerStates();
+    const view = render(
+      <PreviewHost
+        stateKey="side:chat:v1"
+        sessionId="v1"
+        projectRoot="/proj"
+        request={{ path: "docs/report.pdf", kind: "pdf", page: 2 }}
+        nonce={1}
+      />,
+    );
+    await screen.findByTestId("preview-surface");
+    expect(readViewerState("v1")).toMatchObject({ path: "docs/report.pdf", kind: "pdf" });
+
+    view.unmount();
+    expect(readViewerState("v1")).toBeNull();
   });
 });

@@ -13,7 +13,7 @@
 - Path containment: any new file-write code must reject paths that resolve outside the server's work directory (spec: `2026-07-24-web-editor-core-design.md` §3).
 - No toast/notification library exists in this codebase — errors surface inline, matching the existing `SessionPage` error-state pattern.
 - Ctrl/Cmd+P and Ctrl/Cmd+S must `preventDefault()` to suppress the browser's native print/save dialogs.
-- Reuse existing primitives: `Command`/`CommandDialog` (`web/src/components/ui/command.tsx`) for the file picker, `Dialog`/`DialogFooter`/`Button` (pattern in `web/src/components/Changes/ChangesPanel.tsx:82-99`) for the close-confirmation dialog.
+- Reuse existing primitives: `Command`/`CommandDialog` (`web/src/components/ui/command.tsx`) for the file picker, `Dialog`/`DialogFooter`/`Button` (pattern in `web/src/components/Changes/ChangesPanel.tsx:120-140`) for the close-confirmation dialog.
 
 ---
 
@@ -64,7 +64,7 @@ export interface UseEditorTabsResult {
 
 **Files:**
 - Modify: `internal/server/handler_files.go`
-- Modify: `internal/server/server.go:117` (add route next to existing GET)
+- Modify: `internal/server/server.go:409` (add route next to existing GET)
 - Test: `internal/server/handler_files_test.go` (new file)
 
 **Interfaces:**
@@ -234,13 +234,13 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 
 Add `"encoding/json"` to the existing import block in `handler_files.go` (it currently imports `net/http`, `os`, `path/filepath`, `sort`, `strings`, and the snapshot package — `encoding/json` is new, `strings` is already present).
 
-In `internal/server/server.go`, add the route immediately after the existing `GET /api/files/content` line (`server.go:117`):
+In `internal/server/server.go`, add the route immediately after the existing `GET /api/files/content` line (`server.go:409`):
 
 ```go
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 ```
 
-And add the thin wrapper in the same style as the other `handleFileContent`-style wrappers (near `handler_files.go`-backed wrappers in `server.go:328-334`):
+And add the thin wrapper in the same style as the other `handleFileContent`-style wrappers (near `handler_files.go`-backed wrappers in `server.go:2062`):
 
 ```go
 func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +273,7 @@ git commit -m "feat(server): add PUT /api/files/content save endpoint with path-
 - Modify: `web/src/api/client.ts`
 
 **Interfaces:**
-- Consumes: `fetchJSON<T>(path, init)` (existing, `client.ts:66`).
+- Consumes: `fetchJSON<T>(path, init)` (existing, `client.ts:637`).
 - Produces: `api.saveFileContent(path: string, content: string): Promise<{path: string; saved: boolean}>`.
 
 - [ ] **Step 1: Add the method**
@@ -964,7 +964,7 @@ Update the existing call (`App.tsx:182-186`):
 
 - [ ] **Step 3: Update `TopTabs`, `FileEditor`, and add the new dialogs**
 
-Update the `TopTabs` usage (`App.tsx:266-271`):
+Update the `TopTabs` usage (`App.tsx:1670-1675`):
 
 ```tsx
           <TopTabs
@@ -987,7 +987,7 @@ Update the `FileEditor` usage (`App.tsx:283-290`):
                   />
 ```
 
-Add alongside the existing dialogs near the end of `HomeApp`'s JSX (after `ModelDialog`, `App.tsx:338-342`):
+Add alongside the existing dialogs near the end of `HomeApp`'s JSX (after `ModelDialog`, `App.tsx:2467-2473`):
 
 ```tsx
       <FilePicker

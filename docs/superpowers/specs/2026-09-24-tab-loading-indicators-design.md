@@ -51,9 +51,9 @@ Because panels use `forceMount` and callbacks can land late, loading flags also 
 
 | Area | File / symbol | Relevant detail |
 | --- | --- | --- |
-| Top-nav tabs | `web/src/components/Layout/TopTabs.tsx` `mainTabs` (`:24-31`) | Main tabs: `sessions, files, git, cron, assets, settings`. Hosts the overflow menu. |
-| Top-nav Git badge poll | `TopTabs.tsx:81-112` | Own `setInterval(fetchCounts, 10000)` + `eventBus.on("git_status")` → badge counts only. **Independent of `GitPanel.load`; must not emit loading events.** |
-| Overflow menu | `TopTabs.tsx:247-284` | Radix `Select` (`SelectContent`) rendered in a **portal** — indicators here are easy to forget and must be queried via `document.body`. |
+| Top-nav tabs | `web/src/components/Layout/TopTabs.tsx` `mainTabs` (`:29-40`) | Main tabs: `sessions, files, git, cron, assets, settings`. Hosts the overflow menu. |
+| Top-nav Git badge poll | `TopTabs.tsx:181-182` | Own `setInterval(fetchCounts, 10000)` + `eventBus.on("git_status")` → badge counts only. **Independent of `GitPanel.load`; must not emit loading events.** |
+| Overflow menu | `TopTabs.tsx:327-336` | Radix `Select` (`SelectContent`) rendered in a **portal** — indicators here are easy to forget and must be queried via `document.body`. |
 | Session sub-tabs | `SessionSubTabs.tsx` `subTabs` (`:6-12`) | Sub-tabs: `chat, agents, changes, logs, status, preview`. |
 | Main tab shell | `web/src/components/App.tsx` | `TabsContent` `forceMount` for `files:1323, git:1421, cron:1424, assets:1427, settings:1430, sessions:1434`; natural home for lifted loading state. |
 | GitPanel | `Git/GitPanel.tsx` | `load` `useCallback` `:244`; `REFRESH_INTERVAL = 10000` `:35`; `refreshing:197`; `workspace:154`. 10s background poll → refresh path. |

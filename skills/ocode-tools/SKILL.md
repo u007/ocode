@@ -103,6 +103,7 @@ Called from each process entry point, not from the agent: `internal/runcli/run.g
 | 32 | `OcrTool` | `ocr.go` | `ocr` | ❌ | allow |
 | 33 | `ImageGenTool` | `imagegen.go` | `imagegen` | ❌ | allow |
 | 34 | `PreviewOpenTool` | `preview.go` | `preview_open` | ✅ | ask |
+| 34a | `ViewerControlTool` | `viewer_control.go` | `viewer_control` | ❌ | ask |
 | | **Opt-in** | | | | |
 | 35 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | ask |
 | | **Conditional** | | | | |
@@ -232,6 +233,7 @@ timeout budget, empty intent, fail-open); `internal/agent/search_wiring_test.go`
 | `patch.go` | `PatchTool` — apply unified diff patches |
 | `plan.go` | `PlanEnterTool`, `PlanExitTool` — planning phase management |
 | `preview.go` | `PreviewOpenTool` — sidebar preview activation |
+| `viewer_control.go` | `ViewerControlTool` — scroll, select or find in the open preview |
 | `repo.go` | `RepoCloneTool`, `RepoOverviewTool` — external repo research |
 | `computer.go` | `ComputerTool` — host desktop control (opt-in via `computer_use.enabled`) |
 | `computer_driver.go` | `ComputerDriver` interface — platform abstraction for desktop control |

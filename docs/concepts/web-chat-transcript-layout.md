@@ -10,7 +10,7 @@ tags:
   - agent-preview
   - flex
   - invariant
-timestamp: 2026-11-01T05:28:30Z
+timestamp: 2026-11-06T12:24:00Z
 ---
 # Web Chat Transcript Layout — Flex Column and Shrink-Weight Invariant
 
@@ -27,7 +27,14 @@ children, top to bottom:
 
 1. `RemoteVersionBanner` — auto-height, deliberately OUTSIDE the confined ask
    surface.
-2. `chat-ask-surface` — `relative flex min-h-0 flex-1 flex-col`. Inside it:
+2. A row wrapper — `flex min-h-0 flex-1 flex-row`, always rendered. It holds
+   the ask surface and, in reader mode only, the preview slot and its resize
+   handle, placed BEFORE the surface (`docs/concepts/reader-mode-viewer-context.md`).
+   The row is never conditionally rendered, so the surface keeps its position
+   when reader mode toggles.
+3. `chat-ask-surface` — `relative flex min-h-0 flex-1 flex-col`. Inside it:
+   - **`ReaderChatHeader`** — reader mode only, the first child (a fixed `h-8`,
+     `shrink-0` strip). Its absence keeps the transcript slot at the same index.
    - **Transcript wrapper** — `relative flex-[1_1_10rem] min-h-0`,
      `data-testid="chat-transcript-slot"`. Wraps `ChatPanel` (the virtualized
      message list, the only vertical scroller).
@@ -43,6 +50,10 @@ children, top to bottom:
 The surface deliberately has NO `overflow` class: the composer must stay in the
 flow. The tab pane around it is `absolute inset-0` inside an `overflow-hidden`
 ancestor, so anything that does not fit is CLIPPED at the bottom, not scrolled.
+
+In reader mode the surface also gets an inline `width` and `flex: none` (the
+chat column width). It stays a flex column, so every rule below applies
+unchanged.
 
 ## The invariant: the transcript carries a basis, panels yield from the body
 
@@ -99,8 +110,14 @@ Four rules, all load-bearing:
 All three pin classes only. Restoring `shrink-0` on either body, collapsing the
 panels back into one `shrink-0` wrapper, or dropping the 10rem basis fails them.
 
+`web/src/App.askDialogScope.test.tsx` also pins the row: the version banner's
+parent is the surface's grandparent, so the row sits between the banner and
+the surface.
+
 ## Related
 
+- `docs/concepts/reader-mode-viewer-context.md`: reader mode adds the row slot
+  and the optional header described above.
 - `skills/ocode-web/SKILL.md` item 80 — the same rules in skill form.
 - `docs/gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md` — the separate
   tail-pin / virtualizer scroll contract; do not conflate the two.

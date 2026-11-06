@@ -28,10 +28,23 @@ const fake = vi.hoisted(() => {
       },
     };
   };
+  // Cell (r, c) of the fake sheet: blank at A1, 42 at B1, "r:c" elsewhere.
+  const cell = (r: number, c: number) => (r === 0 && c === 0 ? null : r === 0 && c === 1 ? 42 : `${r}:${c}`);
+  const grid = (rows: number, cols: number) =>
+    Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => cell(r, c)));
+  const activeRange: { current: Record<string, unknown> | null } = { current: null };
+  const sheet = {
+    getSheetName: vi.fn(() => "Stock"),
+    getActiveRange: vi.fn(() => activeRange.current),
+    getRange: vi.fn((_row: number, _col: number, rows: number, cols: number) => ({
+      getValues: () => grid(rows, cols),
+    })),
+  };
   const workbook = {
     setEditable: vi.fn(),
     setActiveSheet: vi.fn(),
     getSheetBySheetId: vi.fn(() => ({})),
+    getActiveSheet: vi.fn(() => sheet),
     save: vi.fn(() => ({}) as IWorkbookData),
   };
   const univerAPI = {
@@ -39,13 +52,16 @@ const fake = vi.hoisted(() => {
       LifeCycleChanged: "LifeCycleChanged",
       BeforeCommandExecute: "BeforeCommandExecute",
       CommandExecuted: "CommandExecuted",
+      SelectionChanged: "SelectionChanged",
+      SelectionMoveEnd: "SelectionMoveEnd",
+      ActiveSheetChanged: "ActiveSheetChanged",
     },
     addEvent: vi.fn(addEvent),
     createWorkbook: vi.fn(() => workbook),
     toggleDarkMode: vi.fn(),
   };
   const univer = { dispose: vi.fn() };
-  return { listeners, state, fire, workbook, univerAPI, univer };
+  return { listeners, state, fire, sheet, activeRange, workbook, univerAPI, univer };
 });
 
 vi.mock("@univerjs/presets", () => ({
@@ -84,7 +100,20 @@ beforeEach(() => {
   fake.univerAPI.addEvent.mockClear();
   fake.univer.dispose.mockClear();
   fake.workbook.setEditable.mockClear();
+  fake.sheet.getRange.mockClear();
+  fake.activeRange.current = null;
 });
+
+/** A selection starting at `row`/`col` of the given size, in the fake sheet. */
+function selectRange(row: number, col: number, height: number, width: number, a1: string) {
+  fake.activeRange.current = {
+    getRow: () => row,
+    getColumn: () => col,
+    getHeight: () => height,
+    getWidth: () => width,
+    getA1Notation: () => a1,
+  };
+}
 
 describe("mountUniverSheet user-edit tracking", () => {
   it("ignores every mutation until the grid has Rendered", async () => {
@@ -187,5 +216,65 @@ describe("mountUniverSheet user-edit tracking", () => {
     expect(fake.univer.dispose).toHaveBeenCalledTimes(1);
     userEdit();
     expect(onDirty).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountUniverSheet selection report", () => {
+  it("names the active sheet", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(handle.activeSheetName()).toBe("Stock");
+  });
+
+  it("reports null when no range is active", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(handle.selection()).toBeNull();
+  });
+
+  it("reports the sheet, A1 range and cell values as strings", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    selectRange(0, 0, 2, 2, "A1:B2");
+    expect(handle.selection()).toEqual({
+      sheet: "Stock",
+      range: "A1:B2",
+      values: [
+        ["", "42"],
+        ["1:0", "1:1"],
+      ],
+    });
+  });
+
+  it("reads at most 20 rows and 10 columns of a large selection", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    selectRange(3, 2, 1000, 500, "C4:BX1003");
+    const sel = handle.selection();
+    expect(fake.sheet.getRange).toHaveBeenCalledWith(3, 2, 20, 10);
+    expect(sel?.range).toBe("C4:BX1003");
+    expect(sel?.values).toHaveLength(20);
+    expect(sel?.values.every((row) => row.length === 10)).toBe(true);
+  });
+
+  it("calls back on selection and active-sheet changes until unsubscribed", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    const cb = vi.fn();
+    const unsubscribe = handle.onSelectionChange(cb);
+
+    fake.fire("SelectionChanged", {});
+    fake.fire("SelectionMoveEnd", {});
+    fake.fire("ActiveSheetChanged", {});
+    expect(cb).toHaveBeenCalledTimes(3);
+
+    unsubscribe();
+    fake.fire("SelectionChanged", {});
+    expect(cb).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops selection callbacks on dispose", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    const cb = vi.fn();
+    handle.onSelectionChange(cb);
+
+    handle.dispose();
+    fake.fire("SelectionChanged", {});
+    expect(cb).not.toHaveBeenCalled();
   });
 });

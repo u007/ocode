@@ -15,7 +15,9 @@ import { editorAppearanceClass, type EditorAppearance } from "../../lib/editorAp
 // ImageViewer/MediaViewer stay static: they pull nothing heavy, and the common
 // image path should never pay a Suspense round-trip.
 const PdfViewer = lazy(() => import("./PdfViewer"));
+const PdfEditor = lazy(() => import("./PdfEditor"));
 const DocxViewer = lazy(() => import("./DocxViewer"));
+const DocxEditor = lazy(() => import("./DocxEditor"));
 const PptxViewer = lazy(() => import("./PptxViewer"));
 const ExcelViewer = lazy(() => import("./ExcelViewer"));
 const MmdViewer = lazy(() => import("./MmdViewer"));
@@ -84,6 +86,8 @@ export interface PreviewSurfaceProps {
    *  is registered, so the host can pick up the ref value (ref writes don't
    *  trigger re-renders). */
   onSaveHandlerRegistered?: () => void;
+  /** When true, render the editable variant of a viewer (e.g. PdfEditor). */
+  editable?: boolean;
 }
 
 export default function PreviewSurface({
@@ -104,6 +108,7 @@ export default function PreviewSurface({
   onDirtyChange,
   onSaveRef,
   onSaveHandlerRegistered,
+  editable,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -111,8 +116,10 @@ export default function PreviewSurface({
   return (
     <div className={cn("min-h-0 flex-1", editorAppearanceClass(appearance), appearance && "bg-background text-foreground")}>
       <Suspense fallback={<ViewerLoading />}>
-        {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
-        {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "pdf" && editable && <PdfEditor path={path} projectRoot={projectRoot} projectHost={projectHost} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
+        {kind === "pdf" && !editable && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
+        {kind === "docx" && editable && <DocxEditor path={path} projectRoot={projectRoot} projectHost={projectHost} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
+        {kind === "docx" && !editable && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}

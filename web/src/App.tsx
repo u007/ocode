@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
-import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
+import { Maximize2, PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
@@ -12,6 +12,8 @@ import { BrowserPanel } from "./components/Browser/BrowserPanel";
 import PreviewHost from "./components/Preview/PreviewHost";
 import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
+import { useViewerControl } from "./lib/viewerControl";
+import { rekeyViewerState } from "./lib/viewerContext";
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, hostForProject, projectBrowseHost, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, consumePendingJumpView, resolveViewOnProjectSwitch, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
@@ -61,6 +63,8 @@ import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
+import { shouldRenderReaderPreview } from "./lib/readerMode";
+import { ReaderChatHeader } from "./components/Layout/ReaderChatHeader";
 import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
 import { basename, cn } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
@@ -486,6 +490,14 @@ function HomeApp() {
     collapsible: true,
     side: "right",
   });
+  // Chat column width while reader mode puts the preview in the main area.
+  const readerChatPane = useResizableSidebar({
+    storageKey: "ocode.ui.reader_chat_width",
+    defaultWidth: 440,
+    minWidth: 340,
+    maxWidth: 900,
+    side: "right",
+  });
   // Restore per-project view state on project switch. Falls back to defaults
   // for new/unknown projects.
   //
@@ -672,6 +684,8 @@ function HomeApp() {
   // "Preview in sidebar", diagram node links) arrive as request + nonce; a
   // fresh nonce opens the side panel so the file is actually visible.
   const { request: previewRequest, nonce: previewNonce, consume: consumePreviewActivation } = usePreviewActivation(activeTabId);
+  // Agent viewer-control directives (scroll/select/find) for the chat's preview.
+  useViewerControl(sidePanelKind === "chat" ? activeTabId : null);
   const [previewContext, setPreviewContext] = useState<PreviewSelection | null>(null);
 
   useEffect(() => {
@@ -1111,6 +1125,7 @@ function HomeApp() {
     // must move with the tab or the pane would detach and close on the first
     // message of a brand-new chat (and on /reset-id).
     rekeySidePaneState(tempTabId, sessionId);
+    rekeyViewerState(tempTabId, sessionId);
     // CLAUDE.md: every session-keyed map must move with the rekey or it is
     // stranded under the deleted id. This one holds the in-flight
     // command/skill bar.
@@ -1508,6 +1523,46 @@ function HomeApp() {
     focusedKind,
     isMobile,
   });
+  // Reader mode: the preview fills the session area and the chat is a narrow
+  // right-hand column. Computed once here; the per-tab block reads it.
+  const readerActive = shouldRenderReaderPreview({
+    sideStateKey,
+    sidePanelKind,
+    browserOpen,
+    collapsed: sideTabState?.collapsed,
+    reader: sideTabState?.reader,
+    sidePaneVisible,
+    isMobile,
+  });
+  // Reader mode hides the sessions and cowork sidebars. Exit restores what the
+  // user had open before entering it.
+  const readerSidebarsRef = useRef<{ sidebarOpen: boolean; coworkOpen: boolean } | null>(null);
+  useEffect(() => {
+    if (readerActive) {
+      readerSidebarsRef.current = { sidebarOpen, coworkOpen };
+      setSidebarOpen(false);
+      setCoworkOpen(false);
+    } else if (readerSidebarsRef.current) {
+      setSidebarOpen(readerSidebarsRef.current.sidebarOpen);
+      setCoworkOpen(readerSidebarsRef.current.coworkOpen);
+      readerSidebarsRef.current = null;
+    }
+  }, [readerActive]);
+  // The sidebar PreviewHost. One element at one tree position (the side pane
+  // slot in the row beside the main column). Reader mode only changes that
+  // slot's classes and order, so the instance is never remounted by a toggle.
+  const sidePreviewHost = sideStateKey ? (
+    <PreviewHost
+      key={sideStateKey}
+      stateKey={sideStateKey}
+      projectRoot={projectState.activeProject?.path}
+      projectHost={projectState.activeProject?.host}
+      request={previewRequest}
+      nonce={previewNonce}
+      onConsumeActivation={consumePreviewActivation}
+      sessionId={sidePanelKind === "chat" ? activeTabId : null}
+    />
+  ) : null;
   // Chat-session-bound dialogs (the permission/question asks, and any future
   // session-scoped prompt) may only mount while this session's Chat sub-tab is
   // actually on screen. Otherwise they render a full-screen Radix modal over a
@@ -1683,7 +1738,10 @@ function HomeApp() {
                 </div>
               )}
             <div className="flex flex-1 min-h-0">
-            <div className="flex-1 min-w-0 overflow-hidden flex flex-col pb-2">
+            <div
+              className="flex-1 min-w-0 overflow-hidden flex flex-col pb-2"
+              style={readerActive ? { width: readerChatPane.width, flex: "none" } : undefined}
+            >
               {/* Terminal is project-scoped and must stay mounted even when not visible. It lives inside the Tabs root
                   so TopTabs (which uses TabsList/TabsTrigger) keeps its Radix context, but outside the non-terminal
                   content region so switching away never unmounts the WebSocket/pty. Visibility is toggled via CSS only. */}
@@ -2008,6 +2066,7 @@ function HomeApp() {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "chat";
                       const key = `${tab.projectPath ?? ""}:${tab.id}:chat`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      const readerHere = isActive && readerActive;
                       return (
                         <div
                           key={key}
@@ -2015,8 +2074,8 @@ function HomeApp() {
                         >
                           {/* Remote (SSH/WSL) server version mismatch for the
                               active chat tab's project. One instance only.
-                              Deliberately a SIBLING of the ask's container, not
-                              a child of it: this banner is interactive (expand,
+                              Deliberately a SIBLING of the row that holds the
+                              ask's container, not a child of it: this banner is interactive (expand,
                               Update -> confirm), and covering it would make the
                               one piece of session chrome a pending ask can act
                               on unreachable. Same flex column as before — the
@@ -2024,69 +2083,80 @@ function HomeApp() {
                               `flex-1 min-h-0` column, whose own children keep
                               their original `flex-1` / auto sizing. */}
                           {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
-                          {/* Only the ACTIVE chat tab is a container: the others
-                              are `hidden`, so portalling into one would render an
-                              invisible dialog. React detaches this ref with null
-                              when the active tab changes. */}
-                          <div
-                            ref={isActive ? setChatSurfaceEl : undefined}
-                            data-testid="chat-ask-surface"
-                            className="relative flex min-h-0 flex-1 flex-col"
-                          >
-                            {/* No overflow class: the composer must stay in the
-                                flow, and the tab pane's overflow-hidden wrapper
-                                clips whatever does not fit. ChatPanel's
-                                transcript scroller is the one vertical scroller.
-                                The transcript slot is `flex-[1_1_10rem] min-h-0`:
-                                grow to fill the column, but with a 10rem BASIS,
-                                so it carries shrink weight. A basis-0 transcript
-                                gets no share of a squeeze and is left with
-                                whatever the panels did not take (blank messages).
-                                When the column is over-full the transcript and the
-                                panel BODIES shrink in proportion to their basis;
-                                the composer (min-content) and the panel headers
-                                (`shrink-0`) never give way. No viewport media
-                                query: the proportion does the work at every height. */}
+                          <div className="flex min-h-0 flex-1 flex-row">
+                            {/* Only the ACTIVE chat tab is a container: the others
+                                are `hidden`, so portalling into one would render an
+                                invisible dialog. React detaches this ref with null
+                                when the active tab changes. */}
                             <div
-                              data-testid="chat-transcript-slot"
-                              className="relative flex-[1_1_10rem] min-h-0"
+                              ref={isActive ? setChatSurfaceEl : undefined}
+                              data-testid="chat-ask-surface"
+                              className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+                              style={readerHere ? { width: readerChatPane.width, flex: "none" } : undefined}
                             >
-                              <ChatPanel
+                              {readerHere && (
+                                <ReaderChatHeader
+                                  onToggleSidebar={() => setSidebarOpen((open) => !open)}
+                                  onExit={() => {
+                                    if (sideStateKey) browserActions.setReader(sideStateKey, false);
+                                  }}
+                                />
+                              )}
+                              {/* No overflow class: the composer must stay in the
+                                  flow, and the tab pane's overflow-hidden wrapper
+                                  clips whatever does not fit. ChatPanel's
+                                  transcript scroller is the one vertical scroller.
+                                  The transcript slot is `flex-[1_1_10rem] min-h-0`:
+                                  grow to fill the column, but with a 10rem BASIS,
+                                  so it carries shrink weight. A basis-0 transcript
+                                  gets no share of a squeeze and is left with
+                                  whatever the panels did not take (blank messages).
+                                  When the column is over-full the transcript and the
+                                  panel BODIES shrink in proportion to their basis;
+                                  the composer (min-content) and the panel headers
+                                  (`shrink-0`) never give way. No viewport media
+                                  query: the proportion does the work at every height. */}
+                              <div
+                                data-testid="chat-transcript-slot"
+                                className="relative flex-[1_1_10rem] min-h-0"
+                              >
+                                <ChatPanel
+                                  sessionId={tab.id}
+                                  host={resolveSessionHost(projectState, tab.id)}
+                                  onContinueInterrupted={stableHandleContinueInterrupted}
+                                />
+                              </div>
+                              <PlanPanel
                                 sessionId={tab.id}
                                 host={resolveSessionHost(projectState, tab.id)}
-                                onContinueInterrupted={stableHandleContinueInterrupted}
+                                onOpenRun={(runId) => openAgentDetail(tab.id, runId)}
+                              />
+                              <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
+                              {isActive && (
+                                <BtwPanel
+                                  sessionId={tab.id}
+                                  host={resolveSessionHost(projectState, tab.id)}
+                                />
+                              )}
+                              <ChatInput
+                                ref={(handle) => {
+                                  if (handle) chatInputRefs.current.set(tab.id, handle);
+                                  else chatInputRefs.current.delete(tab.id);
+                                }}
+                                projectPath={tab.projectPath}
+                                onSlashCommand={stableHandleCommand}
+                                activeEditorContext={
+                                  effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
+                                }
+                                contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
+                                previewContext={
+                                  previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
+                                }
+                                onClearPreviewContext={handleClearPreviewContext}
+                                sessionTabId={tab.id}
+                                onSessionCreated={stableHandleSessionCreated}
                               />
                             </div>
-                            <PlanPanel
-                              sessionId={tab.id}
-                              host={resolveSessionHost(projectState, tab.id)}
-                              onOpenRun={(runId) => openAgentDetail(tab.id, runId)}
-                            />
-                            <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
-                            {isActive && (
-                              <BtwPanel
-                                sessionId={tab.id}
-                                host={resolveSessionHost(projectState, tab.id)}
-                              />
-                            )}
-                            <ChatInput
-                              ref={(handle) => {
-                                if (handle) chatInputRefs.current.set(tab.id, handle);
-                                else chatInputRefs.current.delete(tab.id);
-                              }}
-                              projectPath={tab.projectPath}
-                              onSlashCommand={stableHandleCommand}
-                              activeEditorContext={
-                                effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
-                              }
-                              contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
-                              previewContext={
-                                previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
-                              }
-                              onClearPreviewContext={handleClearPreviewContext}
-                              sessionTabId={tab.id}
-                              onSessionCreated={stableHandleSessionCreated}
-                            />
                           </div>
                         </div>
                       );
@@ -2234,76 +2304,113 @@ function HomeApp() {
                 </button>
               ) : (
                 <>
+                  {!readerActive && (
+                    <div
+                      ref={browserPane.handleRef}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-valuemin={browserPane.minWidth}
+                      aria-valuemax={browserPane.maxWidth}
+                      aria-valuenow={browserPane.width}
+                      aria-label="Resize browser panel"
+                      tabIndex={0}
+                      className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
+                      onPointerDown={browserPane.onPointerDown}
+                      onDoubleClick={browserPane.resetToDefault}
+                      onKeyDown={(e) => {
+                        const step = e.shiftKey ? 50 : 10;
+                        // Right-docked pane: moving the handle left grows it.
+                        if (e.key === "ArrowLeft") {
+                          e.preventDefault();
+                          browserPane.setWidth(browserPane.width + step);
+                        } else if (e.key === "ArrowRight") {
+                          e.preventDefault();
+                          browserPane.setWidth(browserPane.width - step);
+                        } else if (e.key === "Home") {
+                          e.preventDefault();
+                          browserPane.resetToDefault();
+                        }
+                      }}
+                    />
+                  )}
                   <div
-                    ref={browserPane.handleRef}
-                    role="separator"
-                    aria-orientation="vertical"
-                    aria-valuemin={browserPane.minWidth}
-                    aria-valuemax={browserPane.maxWidth}
-                    aria-valuenow={browserPane.width}
-                    aria-label="Resize browser panel"
-                    tabIndex={0}
-                    className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
-                    onPointerDown={browserPane.onPointerDown}
-                    onDoubleClick={browserPane.resetToDefault}
-                    onKeyDown={(e) => {
-                      const step = e.shiftKey ? 50 : 10;
-                      // Right-docked pane: moving the handle left grows it.
-                      if (e.key === "ArrowLeft") {
-                        e.preventDefault();
-                        browserPane.setWidth(browserPane.width + step);
-                      } else if (e.key === "ArrowRight") {
-                        e.preventDefault();
-                        browserPane.setWidth(browserPane.width - step);
-                      } else if (e.key === "Home") {
-                        e.preventDefault();
-                        browserPane.resetToDefault();
-                      }
-                    }}
-                  />
-                  <div
-                    style={{ width: browserPane.width }}
-                    className="flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
+                    style={readerActive ? undefined : { width: browserPane.width }}
+                    className={
+                      readerActive
+                        ? "order-first flex min-h-0 min-w-0 flex-1 flex-col pb-2"
+                        : "flex-shrink-0 h-full min-h-0 flex flex-col border-l border-border"
+                    }
                   >
-                    <div className="flex shrink-0 items-center justify-between h-8 pl-3 pr-1.5 border-b border-border">
-                      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">Browser / Preview</span>
-                      <div className="flex shrink-0 items-center gap-0.5">
-                        <button
-                          type="button"
-                          onClick={() => browserActions.setCollapsed(sideStateKey, true)}
-                          title="Collapse browser panel"
-                          aria-label="Collapse browser panel"
-                          className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                          <PanelRightClose className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (activeBrowseHost === null) return;
-                            browserActions.close(sideStateKey, activeBrowseHost);
-                          }}
-                          title="Close browser panel"
-                          aria-label="Close browser panel"
-                          className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
+                    {!readerActive && (
+                      <div className="flex shrink-0 items-center justify-between h-8 pl-3 pr-1.5 border-b border-border">
+                        <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">Browser / Preview</span>
+                        <div className="flex shrink-0 items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => browserActions.setReader(sideStateKey, true)}
+                            title="Focus preview (reader mode)"
+                            aria-label="Focus preview (reader mode)"
+                            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <Maximize2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => browserActions.setCollapsed(sideStateKey, true)}
+                            title="Collapse browser panel"
+                            aria-label="Collapse browser panel"
+                            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <PanelRightClose className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (activeBrowseHost === null) return;
+                              browserActions.close(sideStateKey, activeBrowseHost);
+                            }}
+                            title="Close browser panel"
+                            aria-label="Close browser panel"
+                            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                     <div className="flex-1 min-h-0">
-                      <PreviewHost
-                        key={sideStateKey}
-                        stateKey={sideStateKey}
-                        projectRoot={projectState.activeProject?.path}
-                        projectHost={projectState.activeProject?.host}
-                        request={previewRequest}
-                        nonce={previewNonce}
-                        onConsumeActivation={consumePreviewActivation}
-                        sessionId={sidePanelKind === "chat" ? activeTabId : null}
-                      />
+                      {sidePreviewHost}
                     </div>
                   </div>
+                  {readerActive && (
+                    <div
+                      ref={readerChatPane.handleRef}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-valuemin={readerChatPane.minWidth}
+                      aria-valuemax={readerChatPane.maxWidth}
+                      aria-valuenow={readerChatPane.width}
+                      aria-label="Resize chat panel"
+                      tabIndex={0}
+                      className="order-first w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
+                      onPointerDown={readerChatPane.onPointerDown}
+                      onDoubleClick={readerChatPane.resetToDefault}
+                      onKeyDown={(e) => {
+                        const step = e.shiftKey ? 50 : 10;
+                        // Right-docked chat: moving the handle left grows it.
+                        if (e.key === "ArrowLeft") {
+                          e.preventDefault();
+                          readerChatPane.setWidth(readerChatPane.width + step);
+                        } else if (e.key === "ArrowRight") {
+                          e.preventDefault();
+                          readerChatPane.setWidth(readerChatPane.width - step);
+                        } else if (e.key === "Home") {
+                          e.preventDefault();
+                          readerChatPane.resetToDefault();
+                        }
+                      }}
+                    />
+                  )}
                 </>
               )}
             </>

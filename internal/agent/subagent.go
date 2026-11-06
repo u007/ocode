@@ -1262,8 +1262,10 @@ func (t TaskTool) findAgent(name string) *AgentDefinition {
 // store-load-bearing rule: subagents must never write to the todo file —
 // only the main agent owns the plan. Subagents may still call todoread.
 var mainAgentOnlyTools = map[string]bool{
-	"todowrite":   true,
-	"todo_update": true,
+	"todowrite":      true,
+	"todo_update":    true,
+	"viewer_control": true,
+	"viewer_state":   true,
 }
 
 // agentOwnTools gives the named agent its own instance of every AgentScopedTool,

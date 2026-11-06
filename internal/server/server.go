@@ -322,6 +322,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/pulse-compact-thresholds", s.authMiddleware(s.handler.HandleSetPulseCompactThresholds))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
+	s.mux.HandleFunc("PUT /api/sessions/{id}/viewer", s.authMiddleware(s.handlePutSessionViewer))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/viewer", s.authMiddleware(s.handleDeleteSessionViewer))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleClearSessionThinkingBudget))
 	s.mux.HandleFunc("GET /api/sessions/{id}/todo", s.authMiddleware(s.handleGetSessionTodo))
@@ -588,6 +590,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/imagegen", s.authMiddleware(s.handleSetImageGenConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/paths", s.authMiddleware(s.handleGetPathsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/paths", s.authMiddleware(s.handleSetPathsConfig))
+	s.mux.HandleFunc("POST /api/config/ocode/paths/request", s.authMiddleware(s.handleRequestOfficeAddinAccess))
 	s.mux.HandleFunc("GET /api/config/ocode/autocontinue", s.authMiddleware(s.handleGetAutoContinue))
 	s.mux.HandleFunc("PUT /api/config/ocode/autocontinue", s.authMiddleware(s.handleSetAutoContinue))
 	s.mux.HandleFunc("GET /api/config/ocode/limits", s.authMiddleware(s.handleGetLimitsConfig))
@@ -1938,6 +1941,16 @@ func (s *Server) handleClearSessionModel(w http.ResponseWriter, r *http.Request)
 	s.handler.HandleClearSessionModel(w, r, id)
 }
 
+func (s *Server) handlePutSessionViewer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandlePutSessionViewer(w, r, id)
+}
+
+func (s *Server) handleDeleteSessionViewer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleDeleteSessionViewer(w, r, id)
+}
+
 func (s *Server) handleSetSessionThinkingBudget(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSetSessionThinkingBudget(w, r, id)
@@ -2947,6 +2960,9 @@ func (s *Server) handleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetPathsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetPathsConfig(w, r)
+}
+func (s *Server) handleRequestOfficeAddinAccess(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRequestOfficeAddinAccess(w, r)
 }
 func (s *Server) handleGetPathsInfo(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPathsInfo(w, r)

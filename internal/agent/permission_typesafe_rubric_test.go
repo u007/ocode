@@ -191,3 +191,25 @@ func TestTypesafeJudgeInstructionsProveLoopbackBeforeAllowing(t *testing.T) {
 		}
 	}
 }
+
+// The judge deferred a plain read-only SQL query (sqlite_query ... SELECT COUNT(*) ...) at 0.76, under the 0.80 floor, with concern none: the rubric had no rule for SQL, so an unfamiliar client binary and a database file under $HOME read as an unknown shape. Pin the rule that says the statement, not the client, decides, that an unknown helper is judged from its source, and that the client's file, program and network escapes are denied.
+func TestTypesafeJudgeInstructionsLocalSQLRule(t *testing.T) {
+	for _, frag := range []string{
+		"is judged by the SQL statement in its arguments",
+		"is NOT one of those clients: judge it from its source in executed_scripts",
+		"Read statements (SELECT, WITH ... SELECT, PRAGMA",
+		"an UPDATE with no WHERE clause",
+		"any write to a database outside allowed_roots and the temp roots",
+		"sqlite .shell, .system, .output, .once, .import, .load, .read, ATTACH, load_extension",
+		"COPY ... TO PROGRAM",
+		"is NOT project data",
+		"That home-directory data store is covered for READS ONLY",
+	} {
+		if !strings.Contains(typesafeJudgeInstructions, frag) {
+			t.Errorf("rubric lost local-SQL rule fragment %q:\n%s", frag, typesafeJudgeInstructions)
+		}
+	}
+	if strings.Contains(typesafeJudgeInstructions, "`") {
+		t.Fatal("verdict rubric contains a backtick; it is a Go raw string literal and an unescaped ` would terminate it")
+	}
+}

@@ -63,9 +63,9 @@ index*, and the index can legitimately be smaller than the project on disk for
 two independent reasons:
 
 1. **The server walk is bounded and stops dead.** The walk is capped by
-   `maxTreeNodes = 20000` (`internal/server/handler_files.go:1730`) and symlinked
+   `maxTreeNodes = 20000` (`internal/server/handler_files.go:2006`) and symlinked
    subtrees by a collective `maxSymlinkTreeNodes = 2000`
-   (`handler_files.go:1750`). Once the cap is hit the walk stops, everything
+   (`handler_files.go:2026`). Once the cap is hit the walk stops, everything
    not-yet-visited is dropped, and the server sets `Truncated: true`. The picker
    then appends " — results may be incomplete (truncated)" to the heading
    (`FilePicker.tsx:291`), and `filteredFiles` only ever sees the truncated

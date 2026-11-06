@@ -1,5 +1,17 @@
 # TODO
 
+## Open: reader mode + viewer context follow-ups (2026-11-06, tools added 2026-11-07)
+
+- ~~**The model only sees the viewer at send time.**~~ DONE (2026-11-07): the SPA pushes the record to `PUT /api/sessions/{id}/viewer` (throttled) and the per-session `viewer_state` tool reads it mid-turn; `viewer_control` (scroll / select / find next-prev) is a transcript directive the SPA applies and reports back in the same record.
+- **Pixel screenshot of the preview is deferred (option 2).** `viewer_state` is text only (visible text, heading, page, range). A real image needs a DOM rasteriser for Markdown/Word (html2canvas: fonts, iframes and cross-origin images break), `canvas.toDataURL` for PDF and Univer, and nothing for Monaco (no canvas). Not built; the text snapshot covers the stated use.
+- **Text/code preview reports visible lines since 2026-11-07** (`FileEditor.onViewportChange`); the item below about selection-only is closed.
+- **HtmlViewer reports nothing.** It renders into a sandboxed iframe, so the DOM helper (`viewerDom.ts`) cannot read its viewport. Needs a postMessage bridge or a same-origin read.
+- ~~**Text/code preview reports selection only.**~~ DONE (2026-11-07): see above.
+- **A preview that failed to load still reports its path.** `PreviewHost` calls `setViewerDoc` once the access check passes; a later "file not found" from the viewer does not clear it, so the chip and the `@path (kind)` head can name a file the viewer never showed.
+- **Spreadsheet "selection" is always present.** Univer always has an active cell, so a sheet preview sends `selected: "<cell>"` even when the user never selected anything; it is the active cell, which is still useful but reads as a deliberate highlight.
+- **Entering/leaving reader mode remounts `PreviewHost`** (it moves between the side pane and the main slot), so a live browser page in the Browser tab reloads; the previewed file and page restore from `sidebarPreviewState`.
+- **Composer chips can double up.** After Ask LLM the explicit preview chip and the viewer chip both show for the same file; the preview ref is dropped at send (the viewer block carries the excerpt), so the message is not duplicated, only the chips.
+
 ## Open: DB connector row editor — UUID pre-fill, other keys still required (2026-11-06)
 
 - **A UUID key is pre-filled; another key is not.** On INSERT the dialog generates a fresh UUIDv4 for a textual primary key with no DB default when either the declared type is `uuid` or every sampled value on the current page is a UUIDv4; a Generate button regenerates it. `aimsai_role.id` now qualifies (its rows are UUIDv4), so Add-row works without typing an id. A slug or prefixed key gets no invented value and stays `Required: …`. The value is client-generated, visible and editable before Save, and is written only if the user saves.
@@ -7035,3 +7047,9 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - **Force-save is dropped for Excel tabs (latent, not reachable).** `saveEditorTab` ignores `opts.force` on the `.xlsx` branch (`web/src/hooks/useEditorTabs.ts`, the `handler()` call), and `ExcelViewer`'s save hard-codes `expectedHash`. No UI reaches it today: `forceSaveEditorTab` is wired only to `FileEditor`'s `onForceSave` (`App.tsx`), which never renders for preview-only `.xlsx`. The Excel 409 is also swallowed in `ExcelViewer` (returns `false`), so no conflict banner or force button appears for an xlsx. Fix together with an Excel conflict UI: thread `force` through the handler to `saveFileRaw`.
 - **Cancelled or failed Cmd/Ctrl+S is an unhandled rejection.** `App.tsx` `useKeyboard` `onSave` calls `saveEditorTab(visibleActiveEditorTabId)` with no `.catch`, so "Save failed or was cancelled" (the first-save dialog declined) surfaces as an unhandled promise rejection. Same pattern for any failed save on that path; add a `reportActionError` catch.
 - **Stale docs.** `docs/concepts/excel-preview-univer-sheet.md` (lines ~78-79, ~85-89) still says the handler is registered on each dirty change, that `requestSave` returns `false` while the confirm is open, and that Save-and-close stops at the confirm. Now: the handler is registered on mount and forwards at call time, the returned promise waits for the answer, Save-and-close completes after Save, and a second Cmd/Ctrl+S joins an in-flight save. Route through the `context` writer, per the OKF rule.
+## Open: in-app Word/PDF editing (2026-11-06)
+
+- **PDF editor (PdfEditor.tsx): page ops only** — rotate/delete/reorder/merge via pdf-lib, save through `PUT /api/files/raw` (.pdf now in allowlist). No annotation layer yet; no text editing (PDF is final-form). Print still reads the saved file.
+- **Word editor (DocxEditor.tsx): plain paragraphs only** — docx importer/exporter (docxData.ts) handles paragraphs and run text; bold/italic/underline, tables, images, styles are dropped on round-trip. Univer Docs mount via univerDocMount.ts. First-save confirmation pending. Fidelity improvements are the follow-up.
+- **Backend**: `rawSaveAllowedExt` (.xlsx/.docx/.pdf) in `internal/server/raw_save_ext.go`, applied to both local and remote raw-save gates.
+- **Not yet integrated**: close-confirm/quit-guard for pdf/docx tabs (PdfEditor/DocxEditor own Save buttons work). Annotations for PDF TBD.

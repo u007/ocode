@@ -733,3 +733,82 @@ describe("Excel preview tab close-confirm (t5)", () => {
     expect(draftPersistenceBlocked()).toBe(false);
   });
 });
+
+describe("preview-only tab saves", () => {
+  beforeEach(() => {
+    __resetDraftGuardForTests();
+    vi.mocked(api.saveFileContent).mockClear();
+  });
+
+  afterEach(() => {
+    __resetDraftGuardForTests();
+  });
+
+  it.each(["docs/report.pdf", "docs/spec.docx"])(
+    "saves %s through its registered handler, never api.saveFileContent",
+    async (path) => {
+      const { result } = renderHook(() => useEditorTabs());
+      await act(async () => {
+        await result.current.handleOpenFile(path);
+      });
+      await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+      const tabId = result.current.editorTabs[0].id;
+
+      const handler = vi.fn(async () => true);
+      act(() => {
+        result.current.registerExcelSaveHandler(tabId, handler);
+        result.current.setTabDirty(tabId, true);
+      });
+
+      await act(async () => {
+        await result.current.saveEditorTab(tabId);
+      });
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(api.saveFileContent).not.toHaveBeenCalled();
+      expect(result.current.editorTabs[0].isDirty).toBe(false);
+    },
+  );
+
+  it("resolves without saving a clean preview-only tab that has no handler", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/photo.png");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    const tabId = result.current.editorTabs[0].id;
+
+    await act(async () => {
+      await result.current.saveEditorTab(tabId);
+    });
+
+    expect(api.saveFileContent).not.toHaveBeenCalled();
+    expect(result.current.saveError).toBeNull();
+  });
+
+  it("rejects saving a dirty preview-only tab with no handler without calling api.saveFileContent", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("docs/report.pdf");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    const tabId = result.current.editorTabs[0].id;
+    act(() => {
+      result.current.setTabDirty(tabId, true);
+    });
+
+    let rejection: unknown = null;
+    await act(async () => {
+      try {
+        await result.current.saveEditorTab(tabId);
+      } catch (err) {
+        rejection = err;
+      }
+    });
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe("No save handler is registered for docs/report.pdf; refusing to overwrite it with an empty buffer");
+    expect(api.saveFileContent).not.toHaveBeenCalled();
+    expect(result.current.saveError).toBe("No save handler is registered for docs/report.pdf; refusing to overwrite it with an empty buffer");
+  });
+});

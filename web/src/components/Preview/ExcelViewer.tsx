@@ -12,11 +12,17 @@ import {
 } from "./univerData";
 import { rawContentHash, serializeWorkbookBytes } from "./univerSerialize";
 import type { UniverSheetHandle } from "./univerMount";
+import { useViewerReport } from "../../lib/viewerContext";
 
 /** Files whose first Save the user has confirmed this session, keyed by host,
  *  root and path. Module scope so a remount (tab switch, split toggle) does not
  *  ask again. */
 const confirmedSaveKeys = new Set<string>();
+
+/** The selected cells as tab-separated lines, one line per row. */
+function formatCells(values: string[][]): string {
+  return values.map((row) => row.join("\t")).join("\n");
+}
 
 /**
  * Spreadsheet viewer: sheet tabs across the top, the active sheet as a Univer
@@ -98,6 +104,13 @@ export default function ExcelViewer({
   useEffect(() => {
     darkRef.current = dark;
   }, [dark]);
+  // Read by the mount effect's selection listener. A ref keeps Univer from
+  // re-mounting when the report function changes identity.
+  const report = useViewerReport(path);
+  const reportRef = useRef(report);
+  useEffect(() => {
+    reportRef.current = report;
+  }, [report]);
 
   // Editable only for uncontrolled .xlsx with no truncation in any sheet.
   const editable =
@@ -268,7 +281,10 @@ export default function ExcelViewer({
     const container = containerRef.current;
     if (book === null || container === null) return;
     let cancelled = false;
-    const mounted: { handle: UniverSheetHandle | null } = { handle: null };
+    const mounted: { handle: UniverSheetHandle | null; unsubscribe: (() => void) | null } = {
+      handle: null,
+      unsubscribe: null,
+    };
     const mountEditable =
       content === undefined && /\.xlsx$/i.test(path) && !book.sheets.some((s) => s.rowCapped || s.colCapped);
     import("./univerMount")
@@ -285,6 +301,20 @@ export default function ExcelViewer({
         }
         mounted.handle = handle;
         setHost(handle);
+        // Reports the active sheet and selection now, and again on each change.
+        const publish = () => {
+          const sel = handle.selection();
+          // Univer's default selection on a freshly activated sheet is one empty
+          // cell (A1). Report it as the sheet alone, as a tab click does.
+          const blankCell = sel !== null && !sel.range.includes(":") && formatCells(sel.values) === "";
+          const shown = sel === null || blankCell ? null : sel;
+          reportRef.current({
+            location: { sheet: handle.activeSheetName(), range: shown === null ? undefined : shown.range },
+            selection: shown === null ? null : formatCells(shown.values),
+          });
+        };
+        mounted.unsubscribe = handle.onSelectionChange(publish);
+        publish();
       })
       .catch((e: unknown) => {
         console.error(`ExcelViewer: mounting the spreadsheet grid failed for ${path}:`, e);
@@ -293,6 +323,7 @@ export default function ExcelViewer({
     return () => {
       cancelled = true;
       setHost(null);
+      if (mounted.unsubscribe !== null) mounted.unsubscribe();
       if (mounted.handle !== null) mounted.handle.dispose();
     };
     // `content` is deliberately NOT a dep: the load effect turns a content
@@ -335,7 +366,11 @@ export default function ExcelViewer({
             type="button"
             role="tab"
             aria-selected={i === active}
-            onClick={() => setActive(i)}
+            onClick={() => {
+              setActive(i);
+              // The selection listener reports this sheet's selection once Univer activates it.
+              report({ location: { sheet: s.name, range: undefined }, selection: null });
+            }}
             className={`shrink-0 rounded px-2 py-0.5 ${i === active ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
             title={`Sheet ${s.name}`}
           >

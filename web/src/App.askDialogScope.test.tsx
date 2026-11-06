@@ -282,8 +282,8 @@ describe("ask dialogs are confined to the active session's chat surface", () => 
     const surface = chatSurface();
     const banner = screen.getByTestId("version-banner");
     expect(surface.contains(banner)).toBe(false);
-    // It is a SIBLING of the surface, inside the same tab wrapper.
-    expect(banner.parentElement).toBe(surface.parentElement);
+    // It is a SIBLING of the row that holds the surface, inside the same tab wrapper.
+    expect(banner.parentElement).toBe(surface.parentElement?.parentElement);
   });
 });
 

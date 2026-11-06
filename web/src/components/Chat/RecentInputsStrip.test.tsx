@@ -25,11 +25,9 @@ describe("RecentInputsStrip", () => {
 
   it("labels itself as sent so it is not read as the queued list", () => {
     render(<RecentInputsStrip inputs={["an ask"]} />);
-    expect(screen.getByText(/sent — not queued/i)).toBeInTheDocument();
+    expect(screen.getByText("Sent")).toBeInTheDocument();
     // The list is *described by* that hint, so assistive tech gets it too.
-    expect(screen.getByLabelText(/recent inputs/i)).toHaveAccessibleDescription(
-      /sent — not queued/i,
-    );
+    expect(screen.getByLabelText(/recent inputs/i)).toHaveAccessibleDescription("Sent");
   });
 
   it("marks every line with a send glyph instead of a queue number", () => {

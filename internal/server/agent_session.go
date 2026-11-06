@@ -598,6 +598,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		if bt := h.browserToolFor(projectRoot, effCfg); bt != nil {
 			tools = append(tools, bt)
 		}
+		// Built under this session's id, so a /reset-id rebuild gets the rekeyed
+		// record without a lookup by any other id.
+		tools = append(tools, &viewerStateTool{h: h, sessionID: sessionID})
 	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)

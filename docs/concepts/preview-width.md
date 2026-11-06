@@ -28,7 +28,7 @@ Implementation lives in `web/src/lib/previewWidth.ts`, with the control in
 `web/src/components/Preview/PreviewWidthMenu.tsx`.
 
 The toolbar row that holds the width control now also carries the shared
-`"Find in document"` button (`MarkdownViewer.tsx:252`), so above the scroller
+`"Find in document"` button (`MarkdownViewer.tsx:303`), so above the scroller
 there is one slim header row of per-document actions (width menu, find, and the
 host-supplied print/preview buttons). Find itself — engine, overlay and shortcut
 gate — is documented in [preview-find.md](preview-find.md); it does not affect
@@ -89,22 +89,22 @@ the only way to tell F4 apart from A4, and it was not built.
 
 1. **`.prose` keeps `max-w-none`; the measure lives on a child wrapper.**
    `@tailwindcss/typography` sets `.prose { max-width: 65ch }`. The scroller
-   must stay neutralised (`MarkdownViewer.tsx:278`:
+   must stay neutralised (`MarkdownViewer.tsx:324`:
    `relative prose prose-sm max-w-none …`), and the 816/794 px measure is
    carried by `previewColumnClass()` on the inner wrapper
-   (`MarkdownViewer.tsx:280`). Don't merge the two: a 65ch cap on the scroller
+   (`MarkdownViewer.tsx:326`). Don't merge the two: a 65ch cap on the scroller
    wins over any child width. The original `max-w-none` existed to fix a 65ch
    right-gutter bug and that guard stays.
 
-   The scroller is also `relative` + `tabIndex={0}` (`MarkdownViewer.tsx:277`)
+   The scroller is also `relative` + `tabIndex={0}` (`MarkdownViewer.tsx:323-324`)
    because the find overlay is an absolutely positioned child of it — see
    [preview-find.md](preview-find.md). Any restructure of this element must keep
    both: `relative` for the overlay's containing block, `tabIndex` so a click
    focuses the reader and the find shortcut gate recognises it.
 
 2. **Control appears only for markdown.** `PreviewWidthMenu` is rendered only
-   when `doc.kind === "markdown"` (`PreviewHost.tsx:379`) and
-   `selected?.kind === "markdown"` (`PreviewTabPage.tsx:156`). Every other kind
+   when `doc.kind === "markdown"` (`PreviewHost.tsx:431`) and
+   `selected?.kind === "markdown"` (`PreviewTabPage.tsx:155`). Every other kind
    either ignores it (PDF/deck/image) or is code, which stays full width.
 
 3. **One global preference, cross-window.** Storage key

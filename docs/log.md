@@ -6,6 +6,14 @@
 
 ## 2026-11-06
 
+* **Update**: Office Add-in Path Presets — Save-Time OS Access Request ([concepts/office-addin-path-presets.md](/concepts/office-addin-path-presets.md))
+* **Update**: File Editor Grants — Editor-Only Out-of-Project Access ([concepts/file-editor-grants.md](/concepts/file-editor-grants.md))
+* **Creation**: Office Add-in Path Presets — Save-Time OS Access Request ([concepts/office-addin-path-presets.md](/concepts/office-addin-path-presets.md))
+* **Update**: Linker-signed Go .app can never hold a TCC grant ([gotchas/macos-linker-signed-app-tcc-grant.md](/gotchas/macos-linker-signed-app-tcc-grant.md))
+* **Update**: Linker-signed Go .app can never hold a TCC grant ([gotchas/macos-linker-signed-app-tcc-grant.md](/gotchas/macos-linker-signed-app-tcc-grant.md))
+* **Update**: Computer use ([computer-use.md](/computer-use.md))
+* **Update**: Computer use ([computer-use.md](/computer-use.md))
+* **Creation**: Linker-signed Go .app can never hold a TCC grant ([gotchas/macos-linker-signed-app-tcc-grant.md](/gotchas/macos-linker-signed-app-tcc-grant.md))
 * **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
 * **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
 * **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
@@ -18,6 +26,13 @@
 * **Update**: Plugin System ([plugins.md](/plugins.md))
 
 * **Update**: desktop print window ready check now polls for `window._wails.invoke` (every 30 ms, 15 s bound, sends ready once) instead of a one-shot check on `load`, which never found the Wails bridge on macOS and left the print panel unopened; added the gotcha note against reverting to a load check ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+* **Update**: SQL through a well-known client is judged by the statement; project query helpers are judged from source ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: SQL judge rule added to the eval: should-allow 66% to 68%, zero hand-written leaks, per-case results ([concepts/auto-permission-judge-eval.md](/concepts/auto-permission-judge-eval.md))
+
+* **Creation**: Reader mode and viewer context: the chat's side preview fills the session area with the chat as a narrow column, and the viewer's document, location and selection or visible text ride with the next message. Covers the no-remount layout invariant, the reader gate, the contract module and what each viewer reports ([concepts/reader-mode-viewer-context.md](/concepts/reader-mode-viewer-context.md))
+* **Creation**: Preview selection listener bound once on mount never attached when the viewer rendered late, so the Copy / Ask LLM toolbar was missing on markdown previews; the effect now re-binds every render ([gotchas/preview-selection-mouseup-listener-mount-only.md](/gotchas/preview-selection-mouseup-listener-mount-only.md))
+* **Update**: Side pane state key: the reader flag sits beside `collapsed` under the same per-session key, and reader mode is chat-only ([gotchas/side-pane-statekey-convention.md](/gotchas/side-pane-statekey-convention.md))
+* **Update**: Web chat transcript layout: the always-present row wrapper and the optional reader header inside the ask surface ([concepts/web-chat-transcript-layout.md](/concepts/web-chat-transcript-layout.md))
 
 ## 2026-11-05
 

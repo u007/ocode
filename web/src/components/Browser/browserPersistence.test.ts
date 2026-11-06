@@ -26,6 +26,7 @@ function surface(overrides: Partial<BrowserTabState>): BrowserTabState {
     historyIndex: 0,
     panelOpen: true,
     collapsed: false,
+    reader: false,
     consoleEvents: [],
     networkEvents: [],
     responseBodies: {},

@@ -70,13 +70,15 @@ export interface UseEditorTabsResult {
   confirmDiscardAndClose: () => void;
   cancelClose: () => void;
   saveError: string | null;
-  /** Marks a tab's `isDirty` flag (used by Excel preview tabs to report
-   *  grid dirtiness up to the tab level for close-confirm / quit guard). */
+  /** Marks a tab's `isDirty` flag (used by preview-only tabs with an in-viewer
+   *  editor, such as Excel grids and PDF/DOCX edits, to report dirtiness up to
+   *  the tab level for close-confirm / quit guard). */
   setTabDirty: (id: string, dirty: boolean) => void;
-  /** Registers an Excel preview tab's save handler so `saveEditorTab` can
-   *  delegate to it instead of `api.saveFileContent`. */
+  /** Registers a preview-only tab's save handler (Excel, PDF, DOCX viewers) so
+   *  `saveEditorTab` can delegate to it. Preview-only tabs never reach
+   *  `api.saveFileContent`. */
   registerExcelSaveHandler: (tabId: string, handler: () => Promise<boolean>) => void;
-  /** Unregisters an Excel preview tab's save handler (tab closed / unmounted). */
+  /** Unregisters a preview-only tab's save handler (tab closed / unmounted). */
   unregisterExcelSaveHandler: (tabId: string) => void;
 }
 
@@ -110,8 +112,8 @@ export function useEditorTabs(): UseEditorTabsResult {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
   const openFileIdsRef = useRef<Set<string>>(new Set());
-  /** Tab id → Excel save handler, for preview-only .xlsx tabs whose save goes
-   *  through the Univer grid handler rather than `api.saveFileContent`. */
+  /** Tab id → save handler, for preview-only tabs whose bytes are written by
+   *  their viewer (Univer grid, PDF, DOCX) rather than `api.saveFileContent`. */
   const excelSaveHandlers = useRef<Map<string, () => Promise<boolean>>>(new Map());
 
   // Refs so callbacks that fire on the typing hot path don't need to close
@@ -549,12 +551,17 @@ export function useEditorTabs(): UseEditorTabsResult {
       const tab = editorTabs.find((t) => t.id === id);
       if (!tab) return;
       try {
-        // Excel preview-only tabs (.xlsx) save through the Univer grid handler
-        // registered via registerExcelSaveHandler, not api.saveFileContent
-        // (tab.content is "" for preview-only tabs).
-        if (previewOnlyKindForPath(tab.path) === "excel" && /\.xlsx$/i.test(tab.path)) {
+        // Preview-only tabs (Excel, PDF, DOCX, and the other viewer-only kinds)
+        // save through the handler registered via registerExcelSaveHandler, never
+        // api.saveFileContent: tab.content is "" for them, so sending it would
+        // overwrite the file with zero bytes. A dirty tab with no handler fails
+        // loudly; a clean one has nothing to save, so it is a no-op.
+        if (isPreviewOnlyPath(tab.path)) {
           const handler = excelSaveHandlers.current.get(id);
-          if (!handler) throw new Error("Excel save handler not registered");
+          if (!handler) {
+            if (!tab.isDirty) return;
+            throw new Error(`No save handler is registered for ${tab.path}; refusing to overwrite it with an empty buffer`);
+          }
           const success = await handler();
           if (!success) throw new Error("Save failed or was cancelled");
           setEditorTabs((prev) =>

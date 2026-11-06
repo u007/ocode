@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type OfficeAddinPath } from "../../api/client";
+import { api, type OfficeAddinAccessResult, type OfficeAddinPath } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
@@ -19,12 +19,33 @@ function statusLabel(preset: OfficeAddinPath, selected: boolean): string {
   return "Folder found";
 }
 
+const ACCESS_LABEL: Record<OfficeAddinAccessResult["status"], string> = {
+  granted: "Access granted",
+  denied: "Access denied",
+  not_determined: "Folder not found",
+  missing: "Folder not created yet",
+  not_required: "Folder readable",
+  unknown: "Access not verifiable",
+};
+
+const ACCESS_CLASS: Record<OfficeAddinAccessResult["status"], string> = {
+  granted: "text-emerald-400",
+  denied: "text-red-400",
+  not_determined: "text-amber-400",
+  missing: "text-amber-400",
+  not_required: "text-muted-foreground",
+  unknown: "text-muted-foreground",
+};
+
 export default function PathsForm() {
   const [pathsText, setPathsText] = useState("");
   const [uploadDir, setUploadDir] = useState("");
   const [platform, setPlatform] = useState("");
   const [officePaths, setOfficePaths] = useState<OfficeAddinPath[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [access, setAccess] = useState<Record<string, OfficeAddinAccessResult>>({});
+  const [requestingApps, setRequestingApps] = useState<string[]>([]);
+  const [accessError, setAccessError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +68,10 @@ export default function PathsForm() {
       );
       setOfficePaths(office);
       setSelected(Object.fromEntries(office.map((o) => [o.app, o.allowed])));
+      // Access reports describe the folder as it was at the last save; a
+      // reload starts clean so a stale "granted" cannot outlive the page.
+      setAccess({});
+      setAccessError(null);
       setPathsText(
         (cfg.extra_allowed_paths ?? [])
           .filter((p) => !officeSet.has(canonicalPath(p)))
@@ -65,6 +90,27 @@ export default function PathsForm() {
     load();
   }, [load]);
 
+  // requestAccess asks the server to probe the named folders. It keeps its
+  // errors separate from `save`: the config write already succeeded, so a
+  // refused OS prompt is not a save failure.
+  const requestAccess = useCallback(async (apps: string[]) => {
+    if (apps.length === 0) return;
+    setRequestingApps(apps);
+    setAccessError(null);
+    try {
+      const res = await api.requestOfficeAddinAccess(apps);
+      setAccess((prev) => {
+        const next = { ...prev };
+        for (const r of res.results) next[r.app] = r;
+        return next;
+      });
+    } catch (err) {
+      setAccessError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRequestingApps([]);
+    }
+  }, []);
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -80,9 +126,19 @@ export default function PathsForm() {
         seen.add(key);
         merged.push(p);
       }
+      // Capture this BEFORE the save: the list below marks every ticked preset
+      // as allowed, which would hide which folders are newly granted.
+      const newlyGranted = officePaths
+        .filter((o) => selected[o.app] && !o.allowed)
+        .map((o) => o.app);
       await api.setPathsConfig(merged, uploadDir);
       // The server normalizes roots; reflect the grant state we just sent.
       setOfficePaths((prev) => prev.map((o) => ({ ...o, allowed: !!selected[o.app] })));
+      // Ask the OS for the folders that just became granted. The save already
+      // succeeded, so a refused prompt must not surface as a save failure.
+      if (newlyGranted.length > 0) {
+        await requestAccess(newlyGranted);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -111,9 +167,9 @@ export default function PathsForm() {
         </p>
         {platform === "darwin" && (
           <p className="text-[11px] leading-relaxed text-amber-500">
-            macOS still requires Full Disk Access for ocode (or the terminal running it) before a
-            write into another app's container can succeed. Grant it in System Settings → Privacy
-            &amp; Security → Full Disk Access, then restart ocode.
+            Saving asks macOS for access to the folders you tick. If macOS denies the prompt, grant
+            Full Disk Access to ocode (or the terminal running it) in System Settings → Privacy
+            &amp; Security, then restart ocode.
           </p>
         )}
         {officePaths.length === 0 ? (
@@ -126,6 +182,8 @@ export default function PathsForm() {
             {officePaths.map((preset) => {
               const checked = !!selected[preset.app];
               const disabled = !preset.available && !checked;
+              const report = access[preset.app];
+              const requesting = requestingApps.includes(preset.app);
               return (
                 <label
                   key={preset.app}
@@ -172,6 +230,38 @@ export default function PathsForm() {
                         {preset.note}
                       </span>
                     )}
+                    {requesting && (
+                      <span className="block text-[10px] text-muted-foreground">Requesting access…</span>
+                    )}
+                    {report && (
+                      <span className="block space-y-0.5">
+                        <span
+                          className={`block text-[10px] font-medium ${ACCESS_CLASS[report.status]}`}
+                        >
+                          {ACCESS_LABEL[report.status]}
+                        </span>
+                        {report.message && (
+                          <span className="block text-[10px] leading-relaxed text-muted-foreground">
+                            {report.message}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {checked && !requesting && report?.status !== "granted" && (
+                      <button
+                        type="button"
+                        className="w-fit text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                        onClick={(e) => {
+                          // The row is a <label>: keep the click from toggling
+                          // the checkbox while it re-requests access.
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void requestAccess([preset.app]);
+                        }}
+                      >
+                        {report ? "Retry access" : "Check access"}
+                      </button>
+                    )}
                   </span>
                 </label>
               );
@@ -179,6 +269,10 @@ export default function PathsForm() {
           </div>
         )}
       </div>
+
+      {accessError && (
+        <div className="text-xs text-red-400">Access request failed: {accessError}</div>
+      )}
 
       <div className="space-y-1.5">
         <label className="text-xs text-muted-foreground">Other extra allowed paths (comma-separated)</label>
@@ -188,7 +282,12 @@ export default function PathsForm() {
         <label className="text-xs text-muted-foreground">Upload directory</label>
         <Input value={uploadDir} onChange={(e) => setUploadDir(e.target.value)} className="h-8 text-xs" />
       </div>
-      <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">
+      <Button
+        size="sm"
+        onClick={save}
+        disabled={saving || requestingApps.length > 0}
+        className="h-8 text-xs"
+      >
         {saving && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
         Save
       </Button>

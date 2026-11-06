@@ -4,6 +4,7 @@ import PathsForm from "./PathsForm";
 
 const getPathsConfig = vi.fn();
 const setPathsConfig = vi.fn();
+const requestOfficeAddinAccess = vi.fn();
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
   return {
@@ -12,6 +13,7 @@ vi.mock("@/api/client", async () => {
       ...actual.api,
       getPathsConfig: (...args: unknown[]) => getPathsConfig(...args),
       setPathsConfig: (...args: unknown[]) => setPathsConfig(...args),
+      requestOfficeAddinAccess: (...args: unknown[]) => requestOfficeAddinAccess(...args),
     },
   };
 });
@@ -49,6 +51,7 @@ function mockConfig(over: Record<string, unknown> = {}) {
     extra_allowed_paths: paths,
     upload_dir: uploadDir,
   }));
+  requestOfficeAddinAccess.mockResolvedValue({ platform: "darwin", supported: true, results: [] });
 }
 
 const checkbox = (label: RegExp) => screen.findByLabelText(label) as Promise<HTMLInputElement>;
@@ -57,6 +60,7 @@ describe("PathsForm Office add-in presets", () => {
   beforeEach(() => {
     getPathsConfig.mockReset();
     setPathsConfig.mockReset();
+    requestOfficeAddinAccess.mockReset();
   });
 
   it("shows the platform presets and keeps Office paths out of the free-text field", async () => {
@@ -84,6 +88,110 @@ describe("PathsForm Office add-in presets", () => {
       expect(setPathsConfig).toHaveBeenCalledWith(["/tmp/scratch", EXCEL, WORD], "/tmp/uploads");
     });
     expect(word.checked).toBe(true);
+  });
+
+  it("asks the OS for access to a newly granted preset only", async () => {
+    mockConfig();
+    render(<PathsForm />);
+
+    fireEvent.click(await checkbox(/Grant Word add-in folder access/));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(requestOfficeAddinAccess).toHaveBeenCalledWith(["word"]);
+    });
+    // Excel was already allowed, so a save must not re-prompt it.
+    expect(requestOfficeAddinAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the per-folder access result after save", async () => {
+    mockConfig();
+    requestOfficeAddinAccess.mockResolvedValue({
+      platform: "darwin",
+      supported: true,
+      results: [{ app: "word", path: WORD, status: "granted", message: "Access granted." }],
+    });
+    render(<PathsForm />);
+
+    fireEvent.click(await checkbox(/Grant Word add-in folder access/));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByText("Access granted")).toBeTruthy();
+  });
+
+  it("surfaces a denied prompt without calling the save a failure", async () => {
+    mockConfig();
+    requestOfficeAddinAccess.mockResolvedValue({
+      platform: "darwin",
+      supported: true,
+      results: [
+        {
+          app: "word",
+          path: WORD,
+          status: "denied",
+          message: "Enable ocode under Full Disk Access.",
+          opened_settings: true,
+        },
+      ],
+    });
+    render(<PathsForm />);
+
+    fireEvent.click(await checkbox(/Grant Word add-in folder access/));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByText("Access denied")).toBeTruthy();
+    expect(screen.getByText(/Enable ocode under Full Disk Access/)).toBeTruthy();
+    expect(setPathsConfig).toHaveBeenCalled();
+  });
+
+  it("lets a denied folder be re-requested without saving", async () => {
+    mockConfig();
+    requestOfficeAddinAccess.mockResolvedValueOnce({
+      platform: "darwin",
+      supported: true,
+      results: [{ app: "word", path: WORD, status: "denied", message: "Denied." }],
+    });
+    render(<PathsForm />);
+
+    fireEvent.click(await checkbox(/Grant Word add-in folder access/));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    expect(await screen.findByText("Access denied")).toBeTruthy();
+
+    requestOfficeAddinAccess.mockResolvedValueOnce({
+      platform: "darwin",
+      supported: true,
+      results: [{ app: "word", path: WORD, status: "granted", message: "Access granted." }],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /retry access/i }));
+
+    expect(await screen.findByText("Access granted")).toBeTruthy();
+    expect(requestOfficeAddinAccess).toHaveBeenLastCalledWith(["word"]);
+    // The row is a <label>: the retry click must not toggle the checkbox.
+    expect((await checkbox(/Grant Word add-in folder access/)).checked).toBe(true);
+  });
+
+  it("shows an access request error without undoing the save", async () => {
+    mockConfig();
+    requestOfficeAddinAccess.mockRejectedValue(new Error("probe failed"));
+    render(<PathsForm />);
+
+    fireEvent.click(await checkbox(/Grant Word add-in folder access/));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByText(/Access request failed: probe failed/)).toBeTruthy();
+    expect(setPathsConfig).toHaveBeenCalled();
+  });
+
+  it("does not request access when no preset became newly granted", async () => {
+    mockConfig();
+    render(<PathsForm />);
+
+    await checkbox(/Grant Excel add-in folder access/);
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => {
+      expect(setPathsConfig).toHaveBeenCalled();
+    });
+    expect(requestOfficeAddinAccess).not.toHaveBeenCalled();
   });
 
   it("revokes a previously granted preset when unticked", async () => {

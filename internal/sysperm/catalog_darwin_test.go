@@ -81,6 +81,8 @@ func TestIsProtectedPath(t *testing.T) {
 		{filepath.Join(home, "Desktop"), true},
 		{filepath.Join(home, "Downloads"), true},
 		{filepath.Join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), true},
+		{filepath.Join(home, "Library", "Containers", "com.microsoft.Excel", "Data", "Documents", "wef"), true},
+		{filepath.Join(home, "Library", "Group Containers", "group.example.app"), true},
 		{filepath.Join("/Volumes", "External"), true},
 		{filepath.Join(home, "www", "ocode"), false},
 		{filepath.Join(home, "Projects"), false},
@@ -88,6 +90,42 @@ func TestIsProtectedPath(t *testing.T) {
 	for _, tc := range cases {
 		if got := isProtectedPath(tc.path); got != tc.want {
 			t.Errorf("isProtectedPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// A container path must never be probed before the user records a request:
+// the read itself raises the "access data from other apps" dialog.
+func TestAppDataPathNotProbedUntilRequested(t *testing.T) {
+	stubCommandRun(t, func(context.Context, string, ...string) (string, error) {
+		t.Fatal("a container path with no recorded request must not run a probe")
+		return "", nil
+	})
+	home, _ := os.UserHomeDir()
+	e := Entry{
+		ID:   PathID(filepath.Join(home, "Library", "Containers", "com.microsoft.Excel", "Data", "Documents", "wef")),
+		Kind: KindPath,
+		Path: filepath.Join(home, "Library", "Containers", "com.microsoft.Excel", "Data", "Documents", "wef", "definitely-not-here"),
+	}
+	if got := detectEntry(context.Background(), e); got != StatusNotDetermined {
+		t.Fatalf("status = %s, want not_determined", got)
+	}
+}
+
+func TestIsAppDataPath(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join(home, "Library", "Containers", "com.microsoft.Excel", "Data", "Documents", "wef"), true},
+		{filepath.Join(home, "Library", "Group Containers", "group.example.app"), true},
+		{filepath.Join(home, "Documents"), false},
+		{filepath.Join(home, "www", "ocode"), false},
+	}
+	for _, tc := range cases {
+		if got := isAppDataPath(tc.path); got != tc.want {
+			t.Errorf("isAppDataPath(%q) = %v, want %v", tc.path, got, tc.want)
 		}
 	}
 }

@@ -33,6 +33,11 @@ func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id 
 	if h.shellSessions != nil {
 		h.shellSessions.close(id)
 	}
+	// The preview open beside a closed tab is gone with it. Dropped here, not in
+	// the agent eviction hook: eviction is idle-timeout housekeeping, and the SPA
+	// pushes only on change, so an evicted record would read "no preview" while
+	// the preview is still on screen.
+	h.dropViewerState(id)
 
 	if _, err := h.sessions.Resolve(id); err != nil {
 		writeError(w, http.StatusNotFound, "session not found")

@@ -9,9 +9,9 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Context
 
-- App views: `activeView` union in `web/src/App.tsx:250`
+- App views: `activeView` union in `web/src/App.tsx:310`
   (`"files" | "git" | "cron" | "assets" | "sessions" | "settings"`),
-  persisted per project via `saveViewStateForProject` (:350).
+  persisted per project via `saveViewStateForProject` (:537).
 - Tab bar: `web/src/components/Layout/UnifiedTabBar.tsx`.
 - Shortcuts: `web/src/hooks/useKeyboard.ts` (Cmd+K/P/S/N/T/W; J unused).
 - Data: `usePulse()` from `web/src/stores/pulseStore.tsx` →

@@ -80,6 +80,11 @@ type Handler struct {
 	// before marking entries, so a shared stub slice is never mutated.
 	// nil falls back to paths.OfficeAddinPaths.
 	officeAddinPaths func() []paths.OfficeAddinPath
+	// officeAddinRequest probes one Office add-in folder for OS access after a
+	// save: on macOS the folder read is what raises the "access data from other
+	// apps" consent dialog. Overridable in tests so the suite never fires a real
+	// consent dialog; nil falls back to probeOfficeAddinAccess.
+	officeAddinRequest func(context.Context, paths.OfficeAddinPath) officeAddinAccessResult
 	// portMaps owns one remote.ForwardManager per remote project for the
 	// project-scoped /api/portmaps panel. nil for a bare NewHandler(); wired
 	// by server.New from procSup.
@@ -278,6 +283,11 @@ type Handler struct {
 	// in, keyed by frontend tab id. Lazy-created on first use; closed on tab
 	// close, moved on /reset-id, reaped when idle.
 	shellSessions *shellSessionRegistry
+	// viewerStates holds, per session id, the last file-preview snapshot the
+	// web SPA pushed (the viewer_state agent tool reads it). Guarded by
+	// viewerMu, never h.mu. Lazily initialised by HandlePutSessionViewer.
+	viewerMu     sync.Mutex
+	viewerStates map[string]viewerSnapshot
 	// remoteProjectMu serializes remote terminal admission with edits to the
 	// saved remote-project identity. This closes the check-then-reserve race
 	// where an old terminal could be published after an edit commits.

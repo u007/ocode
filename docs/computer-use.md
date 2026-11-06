@@ -9,9 +9,8 @@ tags:
   - permissions
   - platforms
   - settings
-timestamp: 2026-09-17T12:13:30Z
+timestamp: 2026-11-06T10:06:22Z
 ---
-
 # Computer use
 
 Computer use adds an opt-in `computer` tool that lets the agent see and operate the desktop running ocode, plus a companion `window` tool that lists and manipulates windows. Both are disabled by default and share one setting and one platform driver. When disabled, neither is advertised to the model.
@@ -129,6 +128,8 @@ The driver uses the built-in `screencapture` command for screenshots and a JXA h
 - **Automation → System Events** — macOS prompts for this the first time `type` is used; approve it once.
 
 Without Screen Recording, macOS returns a wallpaper-only screenshot without an error. Without Accessibility, input actions fail with a permission notice (the helper checks `AXIsProcessTrusted` before posting any event).
+
+**A hand-built `.app` must be signed for any of these grants to apply.** A linker-signed Go binary is treated as unsigned by TCC, so the toggle can read ON while the grant never matches. See [linker-signed Go .app can never hold a TCC grant](gotchas/macos-linker-signed-app-tcc-grant.md).
 
 Typing on macOS has two paths, because CoreGraphics unicode typing cannot be driven from the JXA bridge:
 

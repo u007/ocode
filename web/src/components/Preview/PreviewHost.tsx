@@ -18,6 +18,8 @@ import {
   mutatedPathsFromToolCall,
   previewPathMutated,
 } from "../../lib/previewLiveMutations";
+import { setViewerDoc, ViewerReportContext } from "../../lib/viewerContext";
+import { useViewerSync } from "../../hooks/useViewerSync";
 
 type Surface = "browser" | "preview";
 
@@ -271,6 +273,25 @@ export default function PreviewHost({
     setDoc((d) => (d && !d.projectHost && projectHost ? { ...d, projectHost } : d));
   }, [projectHost]);
 
+  // Report the open doc to the chat's viewer context, so the next message can
+  // say what the user is looking at. Only a verified doc on the Preview surface
+  // counts; a session-less panel (Files tab) reports nothing.
+  useEffect(() => {
+    if (!sessionId) return;
+    setViewerDoc(
+      sessionId,
+      surface === "preview" && doc && docVerified
+        ? { path: doc.path, kind: doc.kind, projectRoot: doc.projectRoot, projectHost: doc.projectHost ?? projectHost }
+        : null,
+    );
+  }, [sessionId, surface, doc, docVerified, projectHost]);
+  useEffect(() => {
+    if (!sessionId) return;
+    return () => setViewerDoc(sessionId, null);
+  }, [sessionId]);
+  // Mounted after the effect above so its unmount clear reaches the server sync.
+  useViewerSync(sessionId ?? null, doc?.projectHost ?? projectHost);
+
   // ── Live refresh: watch the active session's tool stream ──
   // When the AI mutates the previewed file mid-turn (tool_start carries the
   // tool name + raw argument JSON), bump `revision` so the viewers refetch,
@@ -432,19 +453,21 @@ export default function PreviewHost({
             </button>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
-          <PreviewSurface
-            path={doc.path}
-            kind={doc.kind}
-            projectRoot={doc.projectRoot}
-            projectHost={doc.projectHost ?? projectHost}
-            page={page}
-            onPageChange={setPage}
-            slide={page}
-            onSlideChange={setPage}
-            onOpenFile={openLinked}
-            revision={revision}
-            followTail={turnActive}
-          />
+          <ViewerReportContext.Provider value={sessionId ?? null}>
+            <PreviewSurface
+              path={doc.path}
+              kind={doc.kind}
+              projectRoot={doc.projectRoot}
+              projectHost={doc.projectHost ?? projectHost}
+              page={page}
+              onPageChange={setPage}
+              slide={page}
+              onSlideChange={setPage}
+              onOpenFile={openLinked}
+              revision={revision}
+              followTail={turnActive}
+            />
+          </ViewerReportContext.Provider>
           </div>
         </div>
       ) : (

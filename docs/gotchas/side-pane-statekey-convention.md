@@ -2,7 +2,7 @@
 type: Gotcha
 title: 'Side Pane StateKey Convention: Per-Session Scoping'
 description: '"The right-hand Browser/Preview side pane''s open state and previewed shell state are keyed per session surface (`side:chat:<id>` / `side:term:<id>`), not per project. Opening the pane in one chat never opens it in another; returning to a session restores its own pane state. When a session id changes (new chat → real ses_ id, or /reset-id), the pane state is rekeyed to follow it."'
-resource: web/src/lib/sidePaneState.ts; web/src/lib/browserStore.ts; web/src/components/Preview/sidebarPreviewState.ts; web/src/components/Preview/PreviewHost.tsx; web/src/components/Layout/UnifiedTabBar.tsx
+resource: web/src/lib/sidePaneState.ts; web/src/lib/browserStore.ts; web/src/lib/readerMode.ts; web/src/components/Preview/sidebarPreviewState.ts; web/src/components/Preview/PreviewHost.tsx; web/src/components/Layout/UnifiedTabBar.tsx
 tags:
   - gotcha
   - web
@@ -11,7 +11,7 @@ tags:
   - browser
   - preview
   - state-key
-timestamp: 2026-09-24T04:41:08Z
+timestamp: 2026-11-06T12:24:00Z
 ---
 ## StateKey naming
 
@@ -37,6 +37,13 @@ A never opens it in chat B. Switching away and back to the same session
 restores exactly what that session had. The old cross-session propagation
 effect and its `panelClosedByUser` workaround in `App.tsx` were removed
 because they were unnecessary: each session's state is already isolated.
+
+Reader mode is a second flag in the same record. `reader: boolean` on
+`BrowserTabState` sits beside `collapsed`, under the same `side:chat:<id>`
+key, and is in-memory only (a reload clears it). `shouldRenderReaderPreview`
+(`web/src/lib/readerMode.ts`) combines it with the pane gate. Reader mode is
+chat-only, so a `side:term:<id>` key never qualifies. Layout and remount
+rules: `docs/concepts/reader-mode-viewer-context.md`.
 
 `browserActions.rekey(oldKey, newKey)` (in `browserStore.ts`) moves a
 surface's live state to a new key; it is a no-op if the source is absent
@@ -75,7 +82,7 @@ lost on the session-id change.
 
 The side pane has two layers of state, each with its own scope:
 
-- **Open/collapsed + surface type** → per session, in `browserStore`
+- **Open/collapsed/reader + surface type** → per session, in `browserStore`
   (`side:chat:<id>` / `side:term:<id>`)
 - **Previewed file/page (shell)** → per session, localStorage v2
   (`side:chat:<id>` / `side:term:<id>`)
@@ -87,6 +94,7 @@ surface key is this state keyed under?*
 
 ## Tests
 
+- `web/src/lib/readerMode.test.ts` (reader gate)
 - `web/src/lib/sidePaneState.test.tsx` (stateKey helpers + rekey)
 - `web/src/lib/browserStore.test.tsx` (rekey move + no-op cases)
 - `web/src/components/Preview/sidebarPreviewState.test.tsx` (v2 key, load/save/rekey)

@@ -373,7 +373,7 @@ git commit -m "feat(browser): browser tab kind + add control in UnifiedTabBar"
 
 ## Task 10d: Render the full-width browser tab in `App.tsx`
 
-**Verified current state:** `App.tsx:158` derives `focusedKind` (default `"chat"`), `:173` `setFocusedKind`, `:713` renders `<UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />`. Center region uses CSS-visibility (`className={... ? "hidden" : ...}`) at :755, :839 to keep chat/terminal mounted-hidden. The terminal region is toggled at :729,:755.
+**Verified current state:** `App.tsx:306` derives `focusedKind` (default `"chat"`), `:306` `setFocusedKind`, `:1699` renders `<UnifiedTabBar focusedKind={focusedKind} onFocusKindChange={setFocusedKind} />`. Center region uses CSS-visibility (`className={... ? "hidden" : ...}`) at :755, :839 to keep chat/terminal mounted-hidden. The terminal region is toggled at :729,:755.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -410,7 +410,7 @@ In `App.tsx`:
 
 1. Import: `import BrowserPanel from "./components/Browser/BrowserPanel";` and `import { useBrowserTabs } from "./stores/browserTabsStore";`. Read the active browser tab: `const { activeId: activeBrowserId } = useBrowserTabs(activeProjectPath);` (use the same `activeProjectPath` the rest of App uses).
 
-2. In the center `<main>` region (the sessions/terminal container around :755–:870), add a sibling block for the browser view, mounted-hidden by CSS like the others:
+2. In the center `<main>` region (the sessions/terminal container around :1662–:2433), add a sibling block for the browser view, mounted-hidden by CSS like the others:
 
 ```tsx
 <div className={activeView === "sessions" && focusedKind === "browser" ? "flex flex-1 overflow-hidden" : "hidden"}>
@@ -446,7 +446,7 @@ git commit -m "feat(browser): render full-width browser tab in App center region
 
 ## Task 10e: Side panel (resizable, collapsible) beside chat/terminal
 
-**Verified current state:** `useResizableSidebar` is used at `App.tsx:117,117`; its resize handle pattern is at `:672-683` (`ref={sidebar.handleRef}`, `role="separator"`, `cursor-col-resize`, `onDoubleClick={sidebar.resetToDefault}`, `onKeyDown` for arrow/Home). The hook accepts `{ storageKey, defaultWidth, minWidth, maxWidth, collapsible }`.
+**Verified current state:** `useResizableSidebar` is used at `App.tsx:241,241`; its resize handle pattern is at `:1635-1644` (`ref={sidebar.handleRef}`, `role="separator"`, `cursor-col-resize`, `onDoubleClick={sidebar.resetToDefault}`, `onKeyDown` for arrow/Home). The hook accepts `{ storageKey, defaultWidth, minWidth, maxWidth, collapsible }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -473,7 +473,7 @@ Expected: FAIL — no toggle button / no side-mode panel.
 
 In `App.tsx`:
 
-1. Add the resize hook near the existing ones (:116):
+1. Add the resize hook near the existing ones (:241):
 
 ```ts
 const browserPane = useResizableSidebar({
@@ -533,7 +533,7 @@ const closeBrowser = useBrowserStore((s) => s.close);
       className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
       onDoubleClick={browserPane.resetToDefault}
       onKeyDown={(e) => {
-        // mirror the existing sidebar handle keyboard logic at App.tsx:684
+        // mirror the existing sidebar handle keyboard logic at App.tsx:1635
         if (e.key === "ArrowLeft") browserPane.nudge(-16);
         else if (e.key === "ArrowRight") browserPane.nudge(16);
         else if (e.key === "Home") browserPane.resetToDefault();

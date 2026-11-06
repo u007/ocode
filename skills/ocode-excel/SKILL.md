@@ -45,9 +45,13 @@ overwrites `manifest/manifest.xml` with a test key. The Windows branch is untest
 7. **Sideload (USER).**
    - **Grant ocode permission first (Settings → Paths & Uploads).** The "Microsoft Office add-in folders" list has a
      checkbox per app (Excel/Word/PowerPoint/Outlook/OneNote on macOS; classic Add-ins/Word startup on Windows). Tick
-     Excel and Save; that appends the folder to `extra_allowed_paths`, which is ocode's own write permission. It does
-     NOT bypass macOS TCC: the process still needs Full Disk Access (below). The list applies to the machine running
-     ocode only — for a remote project, open Settings on that host.
+     Excel and Save; that appends the folder to `extra_allowed_paths`, which is ocode's own write permission, and then
+     asks the OS for the folder. On macOS the save triggers the "access data from other apps" dialog; if it is denied,
+     the row offers Retry access and the server opens Full Disk Access, which is the only remedy. Windows and Linux have
+     no per-app consent gate, so the row only reports whether the folder is writable. A missing `wef` folder is reported
+     "Folder not created yet": open the app once, then press Retry access.
+     An ocode grant still does NOT bypass macOS TCC. The list applies to the machine running ocode only — for a remote
+     project, open Settings on that host.
    - **macOS:** copy `manifest/manifest.xml` to `~/Library/Containers/com.microsoft.Excel/Data/Documents/wef/ocode-excel.xml`.
      macOS blocks terminals (and Finder scripts) from writing into another app's container with
      "Operation not permitted". The user must grant the terminal app **Full Disk Access** (System Settings > Privacy &

@@ -46,6 +46,7 @@
     "lucide-react": "^1.17.0",
     "mermaid": "^11.17.2",
     "monaco-editor": "^0.53.0",
+    "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -685,3 +685,46 @@ func TestSaveFileRawRemoteBackupSymlinkRefused(t *testing.T) {
 		t.Fatalf("target must not be saved when the backup is refused, got %q", data)
 	}
 }
+
+func TestSaveFileRawAllowedExtGate(t *testing.T) {
+	h, tmpDir := newSaveHandler(t)
+	allowed := []string{"book.xlsx", "book.docx", "book.pdf", "book.XLSX", "book.DOCX", "book.PDF"}
+	for _, name := range allowed {
+		path := filepath.Join(tmpDir, name)
+		q := url.Values{"force": {"1"}}
+		r := newRawSaveRequest(t, path, []byte("data"), "application/octet-stream", q)
+		w := httptest.NewRecorder()
+		h.HandleSaveFileRaw(w, r)
+		if w.Code == http.StatusBadRequest {
+			t.Fatalf("%s: expected allowed, got 400: %s", name, w.Body.String())
+		}
+	}
+	disallowed := []string{"a.xls", "a.xlsm", "a.csv", "a.txt", "a.exe", "a", "a.doc", "a.pptx"}
+	for _, name := range disallowed {
+		path := filepath.Join(tmpDir, name)
+		r := newRawSaveRequest(t, path, []byte("x"), "application/octet-stream", nil)
+		w := httptest.NewRecorder()
+		h.HandleSaveFileRaw(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d: %s", name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestRawSaveAllowedExt(t *testing.T) {
+	cases := []struct {
+		ext  string
+		want bool
+	}{
+		{".xlsx", true}, {".docx", true}, {".pdf", true},
+		{".XLSX", true}, {".DOCX", true}, {".PDF", true},
+		{".xls", false}, {".xlsm", false}, {".csv", false},
+		{".txt", false}, {".exe", false}, {".doc", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := rawSaveAllowedExt(c.ext); got != c.want {
+			t.Errorf("rawSaveAllowedExt(%q) = %v, want %v", c.ext, got, c.want)
+		}
+	}
+}

@@ -127,6 +127,9 @@ export interface BrowserTabState {
   historyIndex: number;
   panelOpen: boolean;
   collapsed: boolean;
+  /** Reader mode: the preview fills the session area and the chat becomes a
+   *  narrow right-hand column (App's readerActive gate). In-memory only. */
+  reader: boolean;
   consoleEvents: ConsoleEvent[];
   networkEvents: NetworkEvent[];
   responseBodies: Record<string, ResponseBody>;
@@ -184,6 +187,7 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     historyIndex: persistedUrl ? 0 : -1,
     panelOpen: true,
     collapsed: false,
+    reader: false,
     consoleEvents: [],
     networkEvents: [],
     responseBodies: {},
@@ -373,6 +377,10 @@ export const browserActions = {
 
   setCollapsed(key: StateKey, collapsed: boolean) {
     mutate(key, (t) => ({ ...t, collapsed }));
+  },
+
+  setReader(key: StateKey, reader: boolean) {
+    mutate(key, (t) => ({ ...t, reader }));
   },
 
   setUserMode(key: StateKey, mode: BrowseMode | null) {

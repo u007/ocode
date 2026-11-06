@@ -533,15 +533,15 @@ describe("FileTabContent preview-only toolbar (t4)", () => {
     render(<FileTabContent path="docs/budget.xlsx" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /print/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /save spreadsheet/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /save document/i })).toBeDisabled();
   });
 
   it("enables Save once dirty and calls the registered save handler", async () => {
     render(<FileTabContent path="docs/budget.xlsx" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("excel-mark-dirty"));
-    expect(screen.getByRole("button", { name: /save spreadsheet/i })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: /save spreadsheet/i }));
+    expect(screen.getByRole("button", { name: /save document/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /save document/i }));
     await waitFor(() => expect(excelSaveMock).toHaveBeenCalledTimes(1));
   });
 
@@ -601,26 +601,33 @@ describe("FileTabContent preview-only toolbar (t4)", () => {
     expect(excelSaveMock).not.toHaveBeenCalled();
   });
 
-  it("shows Print only for pdf (no Save)", async () => {
+  it("shows no Print or Save toolbar for pdf (PdfViewer owns print; Cmd+S still saves)", async () => {
     render(<FileTabContent path="docs/report.pdf" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
     // PdfViewer owns its own print UI; FileTabContent does not add one.
     expect(screen.queryByRole("button", { name: /print/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save document/i })).toBeNull();
+  });
+
+  it("shows Print and disabled-until-dirty Save for .docx", async () => {
+    render(<FileTabContent path="docs/spec.docx" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-docx")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /print/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save document/i })).toBeDisabled();
   });
 
   it("shows neither Print nor Save for sqlite", async () => {
     render(<FileTabContent path="docs/data.sqlite" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-sqlite")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /print/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save document/i })).toBeNull();
   });
 
   it("shows Print but hides Save for .xlsm (non-editable ext)", async () => {
     render(<FileTabContent path="docs/book.xlsm" content="" />);
     await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /print/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /save spreadsheet/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save document/i })).toBeNull();
   });
 
   it("unregisters the Excel save handler on unmount (t5 lifecycle)", async () => {

@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, and the 2026-10-02 executed_scripts source disclosure.'
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, and the 2026-10-02 executed_scripts source disclosure, and the 2026-11-06 SQL-through-client rule.'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-11-01T04:27:06Z
+timestamp: 2026-11-06T12:23:13Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -197,6 +197,8 @@ Shell-variable expansion above resolves *names*. It never resolved a `cd`, and t
 **Quoted parens are data.** `stripSubstitutions` blanks all double-quoted literal text (substitutions inside are blanked separately) so a label like `echo "=== git status (short) ==="` is not mistaken for a bare subshell. Before this, such a label made the fold refuse and the judge saw the raw cross-project `cd` (allow@0.70 < 0.80 floor → `deferred_below_floor`). A real bare `( … )`/`{ … }` outside quotes still refuses.
 
 **Interpreter source is judged by a five-fact checklist.** The rubric bullet for `interpreter.source` (`typesafeJudgeInstructions`) is a decision procedure, not a list of denials: check truncated, subprocess/dynamic code, network, path outside the roots, credential printed or sent; all no means allow. Jev's confidence is high when each fact is checkable from the text and low when it has to weigh "ordinary vs risky" itself. Live Jev (2026-10-07, 8 runs per cell, 18 harmless scripts incl. real corpus ones and 20 must-ask/adversarial scripts): the old negative-framed rule allowed 13 of 50 harmless scripts, the checklist 132 of 144 (median confidence 0.91), with 0 of 160 must-ask grants. Full corpus eval 133 → 137 of 186, interpreter commands wrongly deferred 22 → 18 of 34, hand-written leaks 0. Wording lessons: name the dynamic-code vectors (`pickle`, unsafe `yaml.load`, `ctypes`, computed imports) or they leak; do NOT say "home-directory path" or "expanduser pointing outside" (Jev then distrusts `~/.config/opencode` and `/Users/james/www/...` reads that are inside the roots, m059 0.77 → 0.45); state that `~` resolves and that scratch deletes under a temp root are in scope; do NOT add "if you cannot tell, deny" (it pushed harmless `/tmp` writes and a project `package.json` read to 0/8). Four must-ask fixtures (`k-python-read-outside`, `k-python-sqlite-outside`, `k-python-read-then-post`, `k-python-print-env`) guard it. Neither `/tmp` nor the script language was the cause. Also found: `expanded_command` is only emitted when the line has a shell variable to expand (a heredoc scored ~0.1 above the identical `-c` string by accident); always emitting it did not move the eval, so it was not shipped.
+
+**SQL through a well-known client is judged by the statement (2026-11-06).** The rubric bullet after the `allow_destructive=false` bullet in `typesafeJudgeInstructions` judges SQL run through sqlite3, sqlite, duckdb, psql, mysql, mariadb, litecli or pgcli by the statement in its arguments. A project-local query helper (sqlite_query, db_query, run_sql) is not a known client: it is judged from its source in `executed_scripts` like any script, and a helper ocode cannot read is `truncated_or_unknown`. Reads allow with concern `none` inside the roots, under a temp root, or in the data store of the project under `$HOME`. That store is read-only: a write into it is outside the roots and is denied. Row-level writes allow inside the roots. Deletes, DROP, TRUNCATE, an UPDATE with no WHERE, and writes outside the roots are denied while `allow_destructive` is false. Client escapes to files, programs or the network (sqlite `.shell`, `ATTACH`, `load_extension`; psql `\copy`, `COPY ... TO PROGRAM`; mysql `INTO OUTFILE`) are denied whatever `allow_destructive` says. Personal data stores the project did not create stay `outside_allowed_roots`. `TestTypesafeJudgeInstructionsLocalSQLRule` pins the rule fragments.
 
 **Not fixed here.** `OutOfScopePath` is still never populated for compound commands, because `shellCompound` (`internal/agent/permissions.go`) makes `firstOutOfScopePath` bail, so `verifyAutoGrant`'s scope guard remains unreachable for them. Folding improves what the judge sees; it does not add a deterministic scope check. Tracked in `TODO.md`.
 

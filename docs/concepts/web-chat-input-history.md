@@ -2,7 +2,7 @@
 type: Concept
 title: Web Chat Composer Input History (↑/↓ Navigation)
 description: 'Per-tab ↑/↓ history navigation in the web/desktop chat composer, parity with the TUI''s Up/Down : Navigate input history. Local per-tab list, append-on-submit, caret-gated walk, queue precedence, rekey/clear lifecycle.'
-resource: web/src/lib/tabInputHistory.ts; web/src/components/Chat/ChatInput.tsx (handleKeyDown ~:738, handleSend ~:580); web/src/lib/sessionEvents.ts; web/src/App.tsx
+resource: web/src/lib/tabInputHistory.ts; web/src/components/Chat/ChatInput.tsx (handleKeyDown ~:1220, handleSend ~:1117); web/src/lib/sessionEvents.ts; web/src/App.tsx
 tags:
   - web
   - chat
@@ -26,7 +26,7 @@ The composer reads it imperatively on a key press and never renders from it, so 
 
 | Rule | Detail |
 |---|---|
-| **Source** | Local per-tab list appended at the single submit choke point `handleSend` (~:594). **Not** derived from the transcript. |
+| **Source** | Local per-tab list appended at the single submit choke point `handleSend` (~:1117). **Not** derived from the transcript. |
 | **Why local, not transcript** | A transcript walk would surface the `!shell` output wrapper the composer sends and huge server-assembled prompts (`/standup`-style), none of which is user-typed input. |
 | **Append rules** (TUI parity) | Empty text skipped; `!`-prefixed shell commands skipped; immediate repeat of the previous entry collapsed; per-tab cap `MAX_INPUT_HISTORY = 200` (oldest dropped). |
 | **Single recording** | Recorded once at `handleSend`, even for messages queued while busy (queueing happens inside `handleSend`); the later auto-drain sends without touching history. |
@@ -35,7 +35,7 @@ The composer reads it imperatively on a key press and never renders from it, so 
 | **Draft stash/restore** | Entering the walk stashes the in-progress draft (`historyDraftRef`); ↓ past the newest restores it and exits. |
 | **Clamping** | Clamped at oldest (can't walk past the first entry). |
 | **Queue precedence** | With an empty box, ↑ first recalls a still-queued item (`restoreLastQueued`), only then enters sent history. |
-| **Queued-item restore (button)** | The "N queued" strip (`ChatInput.tsx` ~:1372) renders each queued entry (`tabQueue.ts`) as a button. Clicking row N calls `restoreQueuedFrom(tabId, item, draft)`: it moves item N and every queued **message** after it back into the composer draft and removes them from the queue — suffix semantics that keep FIFO order (restoring a later item while an earlier one is still pending would send it after the skipped item). The user's own draft stays below the restored block (`mergeQueuedIntoDraft`), and the caret lands at `draftStart`. Commands (`kind: "command"`, e.g. `/compact`, `!ls`) are deliberately left queued (inlining them into prose would turn them into text that never executes); a command-only suffix is a no-op. Position is resolved by the item reference (`list.indexOf`), not a numeric index, since the queue may drain between render and click. |
+| **Queued-item restore (button)** | The "N queued" strip (`ChatInput.tsx` ~:1409) renders each queued entry (`tabQueue.ts`) as a button. Clicking row N calls `restoreQueuedFrom(tabId, item, draft)`: it moves item N and every queued **message** after it back into the composer draft and removes them from the queue — suffix semantics that keep FIFO order (restoring a later item while an earlier one is still pending would send it after the skipped item). The user's own draft stays below the restored block (`mergeQueuedIntoDraft`), and the caret lands at `draftStart`. Commands (`kind: "command"`, e.g. `/compact`, `!ls`) are deliberately left queued (inlining them into prose would turn them into text that never executes); a command-only suffix is a no-op. Position is resolved by the item reference (`list.indexOf`), not a numeric index, since the queue may drain between render and click. |
 | **Walk reset** | Any non-history input mutation (`updateDraft` — typing, slash selection, queued recall) resets the walk (`historyIndexRef = -1`). `applyHistoryValue` (setInput+setDraft) deliberately does **not** reset it. |
 | **State location** | Refs (`historyIndexRef`, `historyDraftRef`), not React state, so a key press does not re-render the memoized composer. |
 
@@ -43,9 +43,9 @@ The composer reads it imperatively on a key press and never renders from it, so 
 
 | Event | Action | Where |
 |---|---|---|
-| `new-*` → real session (first send) | `rekeyInputHistory(tempId, realId)` — old entries (chronologically older) are **prepended** | `sessionEvents.ts:226` (off `session_started`); `App.tsx:959-963` (`rekeySession`, first-send path) |
-| `/reset-id` | `rekeyInputHistory(oldId, newId)` — same prepend rule; re-key happens **before** return so the tab already points at the new id | `sessionEvents.ts:266` (off `session_rekeyed`); `App.tsx:1235` (reset-id caller of `rekeySession`) |
-| Tab close | `clearInputHistory(activeTabId)` | `App.tsx:943` (`onCloseSession` / Cmd+W teardown) |
+| `new-*` → real session (first send) | `rekeyInputHistory(tempId, realId)` — old entries (chronologically older) are **prepended** | `sessionEvents.ts:226` (off `session_started`); `App.tsx:1115-1119` (`rekeySession`, first-send path) |
+| `/reset-id` | `rekeyInputHistory(oldId, newId)` — same prepend rule; re-key happens **before** return so the tab already points at the new id | `sessionEvents.ts:266` (off `session_rekeyed`); `App.tsx:1408` (reset-id caller of `rekeySession`) |
+| Tab close | `clearInputHistory(activeTabId)` | `App.tsx:1099` (`onCloseSession` / Cmd+W teardown) |
 
 ## Tests
 

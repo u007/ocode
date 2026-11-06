@@ -104,6 +104,11 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 		h.shellSessions.rekey(id, newID)
 	}
 
+	// Move the preview snapshot too: the rebuilt agent's viewer_state tool reads
+	// it by the new id, and the SPA pushes only on change, so a record left under
+	// the old id would read "no preview open" until the user next scrolls.
+	h.rekeyViewerState(id, newID)
+
 	// Move the session's todo plan (<root>/.ocode/todo/<id>.md): the todo tools
 	// address it by session id, so a plan left under the deleted id would read
 	// as "No todo list found" on the next turn. No-op when none exists.

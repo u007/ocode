@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
 import { api } from "../../api/client";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
@@ -6,6 +6,8 @@ import { FindBar } from "./FindBar";
 import { FindHighlights } from "./FindHighlights";
 import { isEditableTarget, previewWantsFindShortcut } from "./findDom";
 import { useDomFind } from "./useDomFind";
+import { useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
+import { collectVisibleText, throttleTrailing } from "../../lib/viewerDom";
 
 /**
  * Word viewer (docx-preview — stable/maintained, higher fidelity than
@@ -22,8 +24,24 @@ export default function DocxViewer({ path, projectRoot, projectHost }: { path: s
   // text index on it, so the first find after a load sees the rendered body.
   const [docVersion, setDocVersion] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc");
+  const report = useViewerReport(path);
+  const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc", (text) => report({ selection: text }));
   const find = useDomFind({ containerRef: ref, textRootRef: bodyRef, version: docVersion, enabled: !loading && !error });
+
+  // What the reader sees. Reported after each render of the document (the body
+  // is empty while loading, so the version bump re-reports the real content)
+  // and throttled while scrolling.
+  const snapshot = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const view = collectVisibleText(el, VIEWER_VISIBLE_MAX);
+    report({ location: { heading: view.heading ?? undefined }, visibleText: view.text });
+  }, [ref, report]);
+  const throttledSnapshot = useMemo(() => throttleTrailing(snapshot, 250), [snapshot]);
+  useEffect(() => () => throttledSnapshot.cancel(), [throttledSnapshot]);
+  useEffect(() => {
+    snapshot();
+  }, [docVersion, snapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +112,7 @@ export default function DocxViewer({ path, projectRoot, projectHost }: { path: s
           onClose={find.hide}
         />
       )}
-      <div ref={ref} tabIndex={0} className="relative h-full min-h-0 flex-1 overflow-auto bg-muted/20 p-2 outline-none">
+      <div ref={ref} tabIndex={0} onScroll={() => throttledSnapshot()} className="relative h-full min-h-0 flex-1 overflow-auto bg-muted/20 p-2 outline-none">
         {loading && <div className="p-4 text-xs text-muted-foreground">Loading Word document…</div>}
         {error && <div className="p-4 text-xs text-red-400">Word preview failed: {error}</div>}
         <div ref={bodyRef} className="docx-body select-text" />

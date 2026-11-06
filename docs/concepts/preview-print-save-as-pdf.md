@@ -121,17 +121,17 @@ A ```mermaid fence in a Markdown preview is a diagram in place, both on screen
 and on paper. The viewer and the print builder each handle it independently,
 and neither prints the fence as code.
 
-**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:150`)
+**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:153`)
 overrides ReactMarkdown's `pre` component in one memoized `components` object,
 with `a: MarkdownLink` merged into the same object. `mermaidFenceSource`
-(`web/src/components/Preview/MarkdownViewer.tsx:26`) reads the
+(`web/src/components/Preview/MarkdownViewer.tsx:28`) reads the
 `language-mermaid` code child, so every fence renders as the interactive
 `MermaidViewer` where the author wrote it. A non-mermaid fenced block still
 renders as `<pre>{children}</pre>`. There is no longer an `extractMermaid`
 helper or a separate `diagram` memo hoisting the first fence into a strip above
 the prose: all fences render in document order, and a document with no fence
 renders no viewer. `components` is passed to `ReactMarkdown`
-(`web/src/components/Preview/MarkdownViewer.tsx:308`).
+(`web/src/components/Preview/MarkdownViewer.tsx:327`).
 
 **Print.** `buildPrintDocument`'s markdown branch renders the prose with
 `renderToStaticMarkup`, then calls

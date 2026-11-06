@@ -106,7 +106,7 @@ Rendered by **both** bars, because one suppresses the other:
 
 - `CompactionStatus` (`web/src/components/Chat/CompactionStatus.tsx:43`) carries Cancel for automatic passes and other clients' passes; it suppresses its own row while *this* client's `/compact` is already drawn by the command bar (`web/src/components/Chat/CompactionStatus.tsx:22-24`) to avoid two identical spinner rows.
 - `CommandActivityBar` (`web/src/components/Chat/CommandActivityBar.tsx:76-77`) carries Cancel for this client's own `/compact`, gated to compact commands only (other commands and skill loads have no cancel affordance).
-- `host` is threaded from `ChatInput`'s `projectHost` into both bars (`web/src/components/Chat/ChatInput.tsx:1384-1385`) so remote (SSH/WSL) projects POST through `/api/remote/{host}`.
+- `host` is threaded from `ChatInput`'s `projectHost` into both bars (`web/src/components/Chat/ChatInput.tsx:1407-1408`) so remote (SSH/WSL) projects POST through `/api/remote/{host}`.
 
 ## 9. Tests
 

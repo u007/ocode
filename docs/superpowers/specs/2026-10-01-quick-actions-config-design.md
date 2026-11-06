@@ -7,12 +7,12 @@ Status: approved in chat (design presented and accepted; cap set to 20). Awaitin
 
 The web/desktop composer has a hardcoded quick-action strip below the send row
 (`web/src/components/Chat/QuickActionsBar.tsx`, driven by
-`ChatInput.tsx:691`). Its three pills — Compact, Continue/Resume, Recap — are
+`ChatInput.tsx:719-738`). Its three pills — Compact, Continue/Resume, Recap — are
 baked into the component. Users cannot add their own one-click nudges, and the
 three that exist cannot be relabelled, reordered, or removed.
 
 Today the array is a literal and `runQuickAction` is a `switch` on three string
-ids (`ChatInput.tsx:669`). Anything user-configurable must replace both, and the
+ids (`ChatInput.tsx:762`). Anything user-configurable must replace both, and the
 three existing pills are the natural seed for that configuration rather than a
 parallel special case.
 
@@ -199,7 +199,7 @@ call; if the user prefers append or prepend, it is a one-line change in step 2.
 
 ### The visibility gate moves from the wrapper to the chip
 
-Today the whole strip is gated at the JSX level (`ChatInput.tsx:1358`):
+Today the whole strip is gated at the JSX level (`ChatInput.tsx:1765-1766`):
 
 ```tsx
 {hasConversation && (<QuickActionsBar actions={quickActions} onSelect={runQuickAction} />)}

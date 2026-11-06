@@ -1063,7 +1063,7 @@ describe("browse_nav routing (Part 07/08 contract)", () => {
       byKey: {
         "tab:x": {
           url: "", status: 0, loading: true, mode: null, userMode: null, error: null,
-          history: [], historyIndex: -1, panelOpen: true, collapsed: false,
+          history: [], historyIndex: -1, panelOpen: true, collapsed: false, reader: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
           perfMetrics: {}, perfRecording: true, zoom: 1,
         },
@@ -1092,7 +1092,7 @@ describe("browse_title routing", () => {
       byKey: {
         "tab:x": {
           url: "https://done.com/", status: 200, loading: false, mode: "chrome", userMode: null, error: null,
-          history: ["https://done.com/"], historyIndex: 0, panelOpen: true, collapsed: false,
+          history: ["https://done.com/"], historyIndex: 0, panelOpen: true, collapsed: false, reader: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
           perfMetrics: {}, perfRecording: true, zoom: 1,
         },

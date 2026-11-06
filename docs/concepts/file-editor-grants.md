@@ -10,9 +10,8 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-11-03T15:00:00Z
+timestamp: 2026-11-06T12:25:20Z
 ---
-
 # File Editor Grants — Editor-Only Out-of-Project Access
 
 The web/desktop **file editor** and **preview** can open a file at an absolute
@@ -28,7 +27,7 @@ different thing from every other allowlist this server keeps.
 | `cfg.Ocode.ExtraAllowedPaths` | the file surfaces **and the agent's tool scope** | global config, persistent |
 | **editor grants** (`fileGrantStore`) | the file editor/preview surfaces **only** | in-memory, per server process |
 
-`handler.go:302` carries the field; `handler_file_grants.go:44` defines the
+`handler.go:319` carries the field; `handler_file_grants.go:44` defines the
 store; `handler_file_grants.go:151` lazily creates it.
 
 ### Why grants are NOT `extra_allowed_paths`
@@ -53,7 +52,7 @@ question.
 
 ## Endpoints
 
-Registered in `Server.registerRoutes()` (`server.go:410-412`), all behind `authMiddleware`:
+Registered in `Server.registerRoutes()` (`server.go:419-421`), all behind `authMiddleware`:
 
 - `POST /api/files/grant` — body `{"path": "..."}` → `{"root","path","granted","roots"}`.
   `path` is the requested file spelled under the canonical `root` (symlinks resolved;
@@ -70,12 +69,12 @@ response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:23
 
 ### Access probe (`GET /api/files/access`)
 
-`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:404`;
-`Server.handleFileAccess` calls `Handler.HandleFileAccess`, `handler_files.go:1307`)
+`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:411`;
+`Server.handleFileAccess` calls `Handler.HandleFileAccess`, `handler_files.go:1333`)
 answers one question: would the editor serve this path? It is **containment
 only**. A local path runs the same resolver as the raw endpoint
-(`resolveEditorFilePath`, `handler_files.go:967`), so it honors the same grants. A
-remote path (`host=`) runs `remoteRawContainment` (`handler_remote_files.go:464`),
+(`resolveEditorFilePath`, `handler_files.go:992`), so it honors the same grants. A
+remote path (`host=`) runs `remoteRawContainment` (`handler_remote_files.go:466`),
 the helper `remoteFileRaw` also uses. The response is `200 {"ok":true}`, or `400`
 with the resolver's message. The probe never stats, reads or type-checks the file.
 
@@ -88,15 +87,15 @@ returns true only for an outside-root refusal.
 
 ## One resolver, two scopes
 
-`resolveProjectFilePath` (`handler_files.go:956`) delegates to
+`resolveProjectFilePath` (`handler_files.go:981`) delegates to
 `resolveProjectFilePathScoped` (`:971`) with a `filePathScope`
-(`handler_files.go:918`):
+(`handler_files.go:943`):
 
 - **`scopeProjectRoots`** — the SQLite browser. `resolveDBPath`
   (`handler_db.go:91`) keeps its OWN unconditional `pathWithinAllowedRoots`
   (`handler_db.go:50`) check and must **not** accept grants: the DB surface gains
   write capability later, so its blast radius is different.
-- **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:967`), used
+- **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:992`), used
   by `HandleFileContent` (`:1125`), `HandleFileRaw` (`:1240`),
   `HandleSaveFileContent` (via `writeScopeRoot`, `:1070`) and
   `HandleMediaToken` (`:1367`). `resolveOpenPath` shares the rules
@@ -117,7 +116,7 @@ verbatim with **no containment check at all** on `GET /api/files/content` and
 `GET /api/files/raw` — a file outside every root read back 200. The web always
 sent a `project_root`, so the UI never hit it, but the endpoint was reachable.
 `scopeEditorRoots` now confines that case
-(`handler_files.go:1016` → `pathWithinAnyFileRoot`). Do not restore the old
+(`handler_files.go:1041` → `pathWithinAnyFileRoot`). Do not restore the old
 early return.
 
 ## Read vs write asymmetry
@@ -133,7 +132,7 @@ every scope (`containsDotDot`, checked before `Join`/`Clean`, because
 
 ## Tree and search, but not the secret surface
 
-`fileTreeRootForEditor` (`handler_files.go:757`) = `fileTreeRootFor` + grants, used
+`fileTreeRootForEditor` (`handler_files.go:782`) = `fileTreeRootFor` + grants, used
 by `HandleFileTree` and `parseSearchParams`. `resolveSecretPath` deliberately
 keeps plain `fileTreeRootFor`: encrypting/decrypting a directory is a far
 stronger action than browsing it.
@@ -245,3 +244,9 @@ tree root, absolute-path-without-root scoping, agent-scope separation),
 `web/src/components/Files/OpenPathDialog.test.tsx`. Live-verified against a
 running server: refuse → grant → read → save → traversal still 400 → revoke →
 refuse.
+
+## See also
+
+- [Office add-in path presets](office-addin-path-presets.md) — the Settings-side
+  consumer of `extra_allowed_paths` (the list this page deliberately keeps
+  separate from editor grants), including the save-time macOS access request.

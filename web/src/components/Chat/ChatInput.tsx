@@ -13,6 +13,8 @@ import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact,
 import ConfirmDialog from "@/components/common/ConfirmDialog";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError, STTInstallRequiredError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
+import ViewerContextChip from "./ViewerContextChip";
+import { VIEWER_SELECTION_MAX, formatViewerContext, tidyViewerText, useViewerState } from "../../lib/viewerContext";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
 import {
   clearPendingRewind,
@@ -119,6 +121,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  // Preview viewer context for this session. X'ing its chip drops it from the
+  // current message only; it returns with the next message (reset on send and
+  // whenever the previewed file changes).
+  const viewer = useViewerState(sessionTabId);
+  const [viewerExcluded, setViewerExcluded] = useState(false);
+  useEffect(() => {
+    setViewerExcluded(false);
+  }, [viewer?.path]);
   // Paths the user has manually excluded via the X button on a context/editor
   // pill. This is STICKY for the session: X'ing a file off does NOT touch the
   // persisted loop inclusion (includeInContext) and the file stays excluded
@@ -1002,13 +1012,23 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
 
       // Sidebar preview highlight: file + page/slide/node label + excerpt so
       // the LLM knows exactly what was highlighted and where.
-      const previewRef = previewContext
+      // The viewer block carries the excerpt for the same file only when it
+      // is the fallback selection (no live selection) or the live selection
+      // itself. A different live selection is sent alongside it, so the
+      // preview ref is dropped only in those two cases.
+      const viewerRef = viewer && !viewerExcluded
+        ? formatViewerContext(viewer, previewContext && previewContext.path === viewer.path ? previewContext.excerpt : null)
+        : "";
+      const viewerCarriesPreview = !!previewContext && viewerRef !== "" && previewContext.path === viewer?.path
+        && (viewer?.selection == null || viewer.selection === tidyViewerText(previewContext.excerpt, VIEWER_SELECTION_MAX));
+      const previewRef = previewContext && !viewerCarriesPreview
         ? `@${previewContext.path} (${previewContext.label}): "${previewContext.excerpt.slice(0, 500)}"`
         : "";
 
-      const parts = [contextRef, contextRefs, previewRef, refs, trimmed].filter(Boolean);
+      const parts = [contextRef, contextRefs, viewerRef, previewRef, refs, trimmed].filter(Boolean);
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
+      setViewerExcluded(false);
 
       if (wasInterrupted) {
         // The user stopped the previous turn, and is now submitting a new
@@ -1345,6 +1365,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             selection={activeEditorContext.selection ?? null}
             onRemove={() => setExcludedPaths((prev) => new Set(prev).add(activeEditorContext.path))}
           />
+        )}
+        {viewer && !viewerExcluded && (
+          <ViewerContextChip state={viewer} onRemove={() => setViewerExcluded(true)} />
         )}
         {previewContext && (
           <span className="inline-flex items-center gap-1 text-xs bg-purple-900/50 text-purple-300 rounded px-2 py-0.5 font-mono max-w-[220px]">

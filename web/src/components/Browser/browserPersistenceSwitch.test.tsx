@@ -83,7 +83,7 @@ describe("useBrowserPersistence project switching", () => {
       byKey: {
         "tab:a1": {
           url: "https://a.com/", status: 200, loading: false, mode: "local", userMode: null, error: null,
-          history: ["https://a.com/"], historyIndex: 0, panelOpen: true, collapsed: false,
+          history: ["https://a.com/"], historyIndex: 0, panelOpen: true, collapsed: false, reader: false,
           consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: "A Site", scrollY: 0, scrollByUrl: {},
           perfMetrics: {}, perfRecording: true, zoom: 1,
         },

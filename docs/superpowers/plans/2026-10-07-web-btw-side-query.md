@@ -253,7 +253,7 @@ Expected: PASS.
 
 **Files:**
 - Create: `web/src/components/Chat/BtwPanel.tsx`
-- Modify: `web/src/App.tsx` (apply `result.btw` near ~:1171-1210; mount near ~:1774, between `AgentPreview` and `ChatInput`)
+- Modify: `web/src/App.tsx` (apply `result.btw` near ~:1413-1417; mount near ~:2131, between `AgentPreview` and `ChatInput`)
 - Test: `web/src/components/Chat/BtwPanel.test.tsx`, `web/src/App.btw.test.tsx`
 
 **Interfaces:**
@@ -267,7 +267,7 @@ Design decisions to honor:
 - Close (X, and Esc only when focus is within the panel) calls `api.cancelBtw(sessionId, host)` and `closeBtw`.
 - `App.handleCommand`: when `result.btw` is present, call `startBtw(result.btw.sessionId, result.btw.host, result.btw.question)`.
 - Mount only for the active session; per-session state persists across tab switches.
-- `App.rekeySession` (`App.tsx:937`) also calls `rekeyBtw(oldId, newId)`; the server cancels the old run on `/reset-id`, so the moved panel receives no further frames.
+- `App.rekeySession` (`App.tsx:1115`) also calls `rekeyBtw(oldId, newId)`; the server cancels the old run on `/reset-id`, so the moved panel receives no further frames.
 - Composer Stop/Esc cancels the main turn only — it must not call `api.cancelBtw` (the side query is independent).
 
 - [ ] **Step 1: Implement with tests**

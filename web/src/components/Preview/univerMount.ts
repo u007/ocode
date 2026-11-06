@@ -18,9 +18,19 @@ export interface MountUniverOpts {
   onDirty?: () => void;
 }
 
+/** Largest selection the viewer reports to the chat, in cells. */
+const MAX_SELECTION_ROWS = 20;
+const MAX_SELECTION_COLS = 10;
+
 export interface UniverSheetHandle {
   /** Shows the sheet with this id. Throws when the workbook has no such sheet. */
   activateSheet(sheetId: string): void;
+  /** Name of the active sheet. */
+  activeSheetName(): string;
+  /** Active selection: sheet name, A1 range and the cell values (strings, max 20 rows x 10 cols); null when nothing is selected. */
+  selection(): { sheet: string; range: string; values: string[][] } | null;
+  /** Subscribe to selection / active-sheet changes; returns an unsubscribe. */
+  onSelectionChange(cb: () => void): () => void;
   setDarkMode(darkMode: boolean): void;
   /** Current workbook snapshot, for serialization on save. */
   snapshot(): IWorkbookData;
@@ -69,6 +79,8 @@ export async function mountUniverSheet(
   const userEdits = editable && opts?.onDirty ? watchUserEdits(univerAPI, opts.onDirty) : [];
   const workbook = univerAPI.createWorkbook(data);
   workbook.setEditable(editable);
+  // Selection subscriptions still open. dispose() ends any the caller kept.
+  const selectionSubs = new Set<IDisposable>();
 
   return {
     activateSheet(sheetId) {
@@ -77,6 +89,38 @@ export async function mountUniverSheet(
       }
       workbook.setActiveSheet(sheetId);
     },
+    activeSheetName() {
+      return workbook.getActiveSheet().getSheetName();
+    },
+    selection() {
+      const sheet = workbook.getActiveSheet();
+      const range = sheet.getActiveRange();
+      if (range === null) return null;
+      // Read only the capped corner: a full-column selection would otherwise
+      // materialise every cell of the column before the slice.
+      const rows = Math.min(range.getHeight(), MAX_SELECTION_ROWS);
+      const cols = Math.min(range.getWidth(), MAX_SELECTION_COLS);
+      const visible = sheet.getRange(range.getRow(), range.getColumn(), rows, cols);
+      return {
+        sheet: sheet.getSheetName(),
+        range: range.getA1Notation(),
+        values: visible.getValues().map((row) => row.map(cellText)),
+      };
+    },
+    onSelectionChange(cb) {
+      const subs = [
+        univerAPI.addEvent(univerAPI.Event.SelectionChanged, cb),
+        univerAPI.addEvent(univerAPI.Event.SelectionMoveEnd, cb),
+        univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, cb),
+      ];
+      for (const sub of subs) selectionSubs.add(sub);
+      return () => {
+        for (const sub of subs) {
+          sub.dispose();
+          selectionSubs.delete(sub);
+        }
+      };
+    },
     setDarkMode(next) {
       univerAPI.toggleDarkMode(next);
     },
@@ -84,10 +128,16 @@ export async function mountUniverSheet(
       return workbook.save();
     },
     dispose() {
-      for (const sub of userEdits) sub.dispose();
+      for (const sub of [...userEdits, ...selectionSubs]) sub.dispose();
       univer.dispose();
     },
   };
+}
+
+/** A cell value as the text the chat shows: blank cells are "", objects are JSON. */
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 /**

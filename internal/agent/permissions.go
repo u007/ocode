@@ -1981,7 +1981,7 @@ func NewPermissionManager() *PermissionManager {
 	// even though tool registration is conditional on rg availability
 	// (see LoadBuiltins): harmless when rg is missing, and keeps the
 	// rule table total (mirrors the ast/ast_grep opt-ins).
-	readOnlyDefaults := []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron", "sqlite_schema", "sqlite_query"}
+	readOnlyDefaults := []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron", "sqlite_schema", "sqlite_query", "viewer_state"}
 	defaultRules := make(map[string]PermissionLevel, len(readOnlyDefaults))
 	for _, name := range readOnlyDefaults {
 		defaultRules[name] = PermissionAllow
@@ -5683,7 +5683,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite", "sqlite_schema", "sqlite_query":
+	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite", "sqlite_schema", "sqlite_query", "viewer_state":
 		return true
 	default:
 		return false

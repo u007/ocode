@@ -32,11 +32,11 @@ timestamp: 2026-09-25T14:06:25Z
   capture at `:186-203`); `retryLastTurn` (`:301-303`), `resolvePermission`
   (`:337-339`) and `submitQuestionAnswers` (`:377-380`) capture their continuation
   202s the same way; `App.sendCommandToSession` does the same for the
-  command/`/model`/Continue paths (`web/src/App.tsx:889-898`), rekeying first and
+  command/`/model`/Continue paths (`web/src/App.tsx:1163-1198`), rekeying first and
   keying the value to the post-rekey id.
 - **New-session keying:** the draft `new-*` 202 records the model **after** the
   `onNewSession`/rekey callback and **keyed to `res.sessionId`**
-  (`useChat.ts:188-199`; `App.tsx:888-891`). This is correct under both legal
+  (`useChat.ts:188-199`; `App.tsx:1173-1176`). This is correct under both legal
   rekey orders — response-first (the callback rekeys before the dispatch) and
   SSE-first (`session_started` already rekeyed; the later `REKEY_SESSION` no-ops,
   `chatStore.tsx:1013-1015`, and the dispatch lands on the existing real slice).
@@ -360,12 +360,12 @@ turn will use (`handler_permissions_resolve.go:371`,
 `handler_questions.go:342`); on failure they dispatch only `SET_ERROR` +
 re-hydration, no model.
 
-**`App.sendCommandToSession` (`web/src/App.tsx:878-907`)** — commands,
+**`App.sendCommandToSession` (`web/src/App.tsx:1163-1198`)** — commands,
 `/model`-argument sends, and the interrupted-turn Continue route here:
 
 - `new-*` branch: `rekeySession(sessionId, result.sessionId, …)` **first**
-  (`:886`), then dispatch keyed to `result.sessionId` (`:887-890`).
-- Real branch: dispatch keyed to `sessionId` (`:894-896`).
+  (`:1173`), then dispatch keyed to `result.sessionId` (`:1174-1177`).
+- Real branch: dispatch keyed to `sessionId` (`:1187-1189`).
 - `catch`: no model dispatch.
 
 **Out of scope:** `executeShell` (not a model turn); `cancelQuestion`
@@ -425,7 +425,7 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
    rekey no-ops. **Rule: always dispatch keyed to `res.sessionId`, after
    invoking `onNewSession` when present** (`useChat.ts:188-199`; the App
    command path mirrors it: rekey then dispatch to `result.sessionId`,
-   `App.tsx:888-891`). In (a) the rekey has just moved the slice under the
+   `App.tsx:1173-1176`). In (a) the rekey has just moved the slice under the
    real id, so the dispatch lands on it; in (b) the real slice already exists.
    Keying to the *temp* id after a rekey would resurrect a ghost slice
    (`updateSession` creates one from `emptySessionSlice`, `chatStore.tsx:588`)
@@ -550,7 +550,7 @@ any future change to these paths.
     `send_message_routing_test.go` still holds.
 
 **Coverage note (known gap):** the `App.sendCommandToSession` capture
-(`App.tsx:888-898`) and the `useChat` draft-tab `targetSessionId` keying have
+(`App.tsx:1173-1189`) and the `useChat` draft-tab `targetSessionId` keying have
 no dedicated App/hook test — the keying *rule* they follow is pinned
 reducer-level by cases 3–4, and the capture shape is identical to the
 hook-covered paths (cases 8–13). If either path diverges, add the missing
@@ -615,4 +615,4 @@ suite rather than relying on the reducer pins.
   and the `useChat` draft-tab keying are covered only indirectly (reducer
   rekey tests 3–4 + the shared capture shape, §8). If the rekey/capture
   ordering in either path changes, those reducer pins will not fail — add a
-  direct test when touching `App.tsx:878-907` or `useChat.ts:186-203`.
+  direct test when touching `App.tsx:1163-1198` or `useChat.ts:186-203`.
