@@ -1,13 +1,13 @@
 ---
 type: Concept
 title: Plugin System
-description: 'Overview of ocode''s plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, bundled plugins, and plugin lifecycle management.'
+description: 'Overview of ocode''s plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, bundled skill-only plugins (atlas, agent-desktop), and plugin lifecycle management.'
 tags:
   - plugins
   - extensibility
   - mcp
   - architecture
-timestamp: 2026-11-05T16:13:41Z
+timestamp: 2026-11-06T03:50:13Z
 ---
 # Plugin System
 
@@ -69,31 +69,94 @@ plugins/my-plugin/
   commands/          # Custom slash commands (optional)
 ```
 
-### Bundled Plugins That Ship a Skill (`atlas`)
+### Bundled Plugins That Ship a Skill
 
-A bundled plugin can contribute nothing but a skill. `atlas` (`.opencode/plugins/atlas/`)
-is the current example: its `plugin.json` declares empty `commands` and `tools`, and it
-ships `skills/atlas/SKILL.md`. The skill teaches the agent to drive the upstream `atlas`
-macOS CLI — a hidden second login for seeing and using GUI apps without disturbing the
-person's desktop. Atlas itself is not bundled and needs its own admin setup (a helper
-macOS account, a signed daemon); the skill tells the agent to ask the person to finish
-that setup and never run the installer or `sudo`.
+A bundled plugin can contribute nothing but a skill: its `plugin.json` declares empty
+`commands` and `tools`, and the directory ships `skills/<name>/SKILL.md`. Two plugins
+ship this way today, both under `.opencode/plugins/`:
 
-- **Actions are ordinary `bash` calls.** ocode has no Atlas tool, so every Atlas step runs
-  through the normal `bash` tool and ocode's permission rules. There is no embedded Atlas
-  view and no `show_screen`; screenshots are read from the returned `path`, and
-  `ATLAS_SESSION=ocode` supplies the session label ocode does not report.
-- **Namespaced as `<plugin>:<skill>`.** This plugin exposes `atlas:atlas`. A bare `atlas`
-  resolves to it only when no user/project skill has that name. Loaded plugin skill bodies
-  carry a `Plugin root:` header and have `${CLAUDE_PLUGIN_ROOT}` expanded.
+| Plugin | Directory | Upstream binary | Platforms | Namespace | Toggle |
+|---|---|---|---|---|---|
+| `atlas` | `.opencode/plugins/atlas/` | `atlas` CLI (helper macOS account + signed daemon) | macOS only | `atlas:atlas` | `/plugin enable\|disable atlas` |
+| `agent-desktop` | `.opencode/plugins/agent-desktop/` | `agent-desktop` CLI (`npm install -g agent-desktop`, or `brew install agent-desktop`) | macOS, Windows, Linux | `agent-desktop:agent-desktop` | `/plugin enable\|disable agent-desktop` |
+
+Neither plugin bundles its upstream binary. The skill teaches the agent to drive the
+CLI through ocode's `bash` tool, and the person installs the CLI once.
+
+- **Actions are ordinary `bash` calls.** ocode has no Atlas or agent-desktop tool, so
+  every step runs through the normal `bash` tool and ocode's permission rules. Neither
+  plugin has an embedded view; output (including a screenshot's returned `path`) is read
+  from the command result.
+- **Namespaced as `<plugin>:<skill>`.** The plugins expose `atlas:atlas` and
+  `agent-desktop:agent-desktop`. A bare name resolves to the plugin skill only when no
+  user/project skill has that name. Loaded plugin skill bodies carry a `Plugin root:`
+  header and have `${CLAUDE_PLUGIN_ROOT}` expanded.
 - **Enabled by default, and read-only.** Bundled plugins appear enabled with no config
-  entry. They cannot be removed, so the toggle is `/plugin disable atlas` /
-  `/plugin enable atlas`, which writes an `external_plugins` entry.
+  entry. They cannot be removed, so the toggle is `/plugin disable <name>` /
+  `/plugin enable <name>`, which writes an `external_plugins` entry.
 - **A bundled `mcp` block would never register.** `mcp.auto_register` runs only at install
-  time, and bundled plugins are never installed, so `atlas` (and any bundled plugin that
-  needs a server) ships no `mcp` block; the user must add the server themselves.
-- **macOS only, ungated at discovery.** Plugin discovery does not filter by platform, so
-  `atlas:atlas` is listed everywhere; the skill itself says to refuse off macOS.
+  time, and bundled plugins are never installed, so neither plugin ships an `mcp` block;
+  if the person wants the server, they add it to their own config (for agent-desktop,
+  `agent-desktop mcp`).
+- **Platform limits live in the skill, not in discovery.** Plugin discovery does not
+  filter by platform, so both skills are listed everywhere; `atlas` refuses off macOS,
+  and `agent-desktop` loads a per-OS skill from the installed binary.
+
+#### `atlas`
+
+`atlas` is the macOS example. It ships `skills/atlas/SKILL.md`, which teaches the agent
+to drive the upstream `atlas` macOS CLI — a hidden second login for seeing and using GUI
+apps without disturbing the person's desktop. Atlas itself is not bundled and needs its
+own admin setup (a helper macOS account, a signed daemon); the skill tells the agent to
+ask the person to finish that setup and never run the installer or `sudo`.
+
+- There is no embedded Atlas view and no `show_screen`; screenshots are read from the
+  returned `path`, and `ATLAS_SESSION=ocode` supplies the session label ocode does not
+  report.
+
+#### `agent-desktop`
+
+`agent-desktop` (`.opencode/plugins/agent-desktop/`) ships `skills/agent-desktop/SKILL.md`
+adapted from Vercel Labs (Apache-2.0, upstream commit `b43ac4f6e892ef608f8851428613c4009f0e84c7`,
+2026-11-05), plus `LICENSE` (Apache-2.0 full text) and `NOTICE.md` (upstream URL, commit
+and the list of deltas). It reads and operates desktop apps on macOS, Windows and Linux
+through the OS accessibility tree using semantic refs, with no pixel matching — the
+accessible-element counterpart to ocode's screenshot + coordinate `computer` tool.
+
+- **The person installs the binary; the agent never does.** The binary is not bundled.
+  The person installs it once (`npm install -g agent-desktop`, or
+  `brew install agent-desktop` on macOS/Linux). The skill forbids the agent from
+  installing it, running `sudo`, or answering the macOS Accessibility prompt on the
+  person's behalf; `agent-desktop permissions --guide` only prints guidance.
+- **Upstream reference docs are fetched, not vendored.** The plugin deliberately does
+  not ship upstream's `commands-observation`, `commands-interaction`, `commands-system`,
+  `workflows` references or the per-OS skills (`agent-desktop-macos`, `-windows`,
+  `-linux`). The skill loads them at runtime with
+  `agent-desktop skills get desktop <reference>` and `agent-desktop skills get platform`,
+  so the text always matches the installed binary's version and cannot drift.
+- **`## In ocode` is the host-adaptation block.** It is the only part that is not
+  upstream text: ocode permission rules apply to every command, the person installs the
+  binary, it drives the person's own desktop, `--headed` needs explicit permission, and
+  snapshots/clipboard/screenshots may carry private desktop content.
+- **Ref actions are headless; `--headed` is not.** Ref actions use semantic
+  accessibility calls, so they never take focus or move the pointer. `--headed` moves
+  the real pointer and types real keys, so it is used only when the person explicitly
+  allows physical input on their machine.
+- **Prefer it over `computer` for real accessible elements.** Reach for ocode's
+  `computer` tool only when the target is a pixel position no accessible element exposes.
+- **Several agents on one desktop use one session label.** Put the same
+  `--session NAME` on every command so traces stay separate.
+- **Different from `atlas`, not a replacement.** `atlas` is macOS-only and needs a
+  hidden helper login; `agent-desktop` runs on macOS/Windows/Linux and acts on the
+  CURRENT desktop with no helper account. They complement each other, and neither
+  replaces ocode's `computer` tool.
+- **Toggle and tests.** `/plugin disable agent-desktop` / `/plugin enable agent-desktop`.
+  `internal/plugins/agent_desktop_plugin_test.go` pins discovery (`TestAgentDesktopEmbeddedPluginDiscoverable`,
+  including the `## In ocode` markers) and the disable/enable toggle (`TestAgentDesktopPluginDisableToggle`).
+- **Validated, but not exercised live.** The vendored `SKILL.md` body is byte-identical
+  to `agent-desktop skills get desktop` (CLI 1.2.0, JSON envelope version 2.6) apart
+  from the inserted `## In ocode` block. `agent-desktop status` returns `ok` with
+  Accessibility still `denied` for the launching app, so no GUI action has been sent yet.
 
 ## The `plugin.json` Manifest
 

@@ -1,0 +1,7 @@
+{
+  "name": "agent-desktop",
+  "description": "See and operate macOS, Windows and Linux desktop apps through the OS accessibility tree (semantic refs, no pixel matching). Bundles the agent-desktop skill; toggle with /plugin enable|disable agent-desktop.",
+  "version": "0.1.0",
+  "commands": [],
+  "tools": []
+}
