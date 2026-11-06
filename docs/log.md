@@ -6,6 +6,15 @@
 
 ## 2026-11-06
 
+* **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: DB Connector (P1) — 2026-10-08, status 2026-10-09 ([concepts/db-connector.md](/concepts/db-connector.md))
+* **Update**: Preview Print / Save as PDF ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+* **Update**: Preview Print / Save as PDF ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+* **Update**: Preview Print / Save as PDF ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
+* **Update**: Plugin System ([plugins.md](/plugins.md))
+* **Update**: Excel preview and Save: Univer sheet over ExcelJS and SheetJS ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
 * **Update**: Plugin System ([plugins.md](/plugins.md))
 
 * **Update**: desktop print window ready check now polls for `window._wails.invoke` (every 30 ms, 15 s bound, sends ready once) instead of a one-shot check on `load`, which never found the Wails bridge on macOS and left the print panel unopened; added the gotcha note against reverting to a load check ([concepts/preview-print-save-as-pdf.md](/concepts/preview-print-save-as-pdf.md))
