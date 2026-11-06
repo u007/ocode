@@ -352,15 +352,20 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 	}
 	// Under the byte cap the OLDEST messages are dropped first: the end of a
 	// transcript is what the operator is asking about.
+	// Goal + todo plan for the target session (best-effort, non-blocking).
+	goal := h.pulseSessionGoal(args.SessionID, project)
+	todo := h.pulseSessionTodo(project, args.SessionID)
 	return pulseCapped(len(selected), func(n int, truncated bool) any {
 		return struct {
 			SessionID   string             `json:"session_id"`
 			Host        string             `json:"host,omitempty"`
 			ProjectPath string             `json:"project_path"`
 			Title       string             `json:"title"`
+			Goal        any                `json:"goal,omitempty"`
+			Todo        any                `json:"todo,omitempty"`
 			Messages    []pulseReadMessage `json:"messages"`
 			Truncated   bool               `json:"truncated,omitempty"`
-		}{args.SessionID, args.Host, project, title, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
+		}{args.SessionID, args.Host, project, title, goal, todo, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
 	})
 }
 
@@ -761,4 +766,69 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 		res.Questions = append(res.Questions, pa.Questions...)
 	}
 	return marshalPulseString(res)
+}
+
+// sessionCommTools returns the subset of pulse tools that are safe and useful
+// for a normal (non-Pulse) session to talk to other sessions: status board,
+// transcript reads, recap, pending-ask inspection, and the permission-gated
+// write tools (send, new, close, command, resolve). Terminal, memory and
+// activation tools stay Pulse-only by policy.
+func (h *Handler) sessionCommTools() []*pulseTool {
+	all := h.pulseTools()
+	out := make([]*pulseTool, 0, len(all))
+	for _, t := range all {
+		name := t.Name()
+		if strings.HasPrefix(name, "terminal_") {
+			continue
+		}
+		if name == "memory_read" || name == "memory_write" {
+			continue
+		}
+		if name == "activation_read" || name == "activation_write" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// pulseSessionGoal returns the target session's goal (live if resident, else
+// from persisted metadata), or nil when there is none.
+func (h *Handler) pulseSessionGoal(id, project string) any {
+	if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+		if g, ok := as.agent.Goal(); ok {
+			return map[string]any{
+				"active":      true,
+				"condition":   g.Condition,
+				"status":      g.Status,
+				"turns":       g.Turns,
+				"last_reason": g.LastReason,
+			}
+		}
+		return nil
+	}
+	s, err := session.LoadForDir(project, id)
+	if err != nil || s == nil {
+		return nil
+	}
+	gs, ok := agent.GoalStateFromMetadata(s.Metadata)
+	if !ok {
+		return nil
+	}
+	return map[string]any{
+		"active":      gs.Status == "" || gs.Status == "not_met",
+		"condition":   gs.Condition,
+		"status":      gs.Status,
+		"turns":       gs.Turns,
+		"last_reason": gs.LastReason,
+	}
+}
+
+// pulseSessionTodo returns the target session's todo plan (if any).
+func (h *Handler) pulseSessionTodo(project, id string) any {
+	ev, found, err := readTodoUpdatedEvent(project, id)
+	if err != nil || !found {
+		return nil
+	}
+	return ev
 }

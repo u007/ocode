@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 )
@@ -161,11 +163,12 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 	return []*pulseTool{
 		{
 			name: "session_send",
-			desc: "Send a message to another session, starting a turn on it. Refused when that session is mid-turn or paused on an ask. Needs the operator's approval. Use only when the operator's current message asks you to message that session.",
+			desc: "Send a message to another session, starting a turn on it. Refused when that session is mid-turn or paused on an ask unless queue=true, in which case the message is persisted and drained when the session goes idle. Needs the operator's approval.",
 			ask:  true,
 			props: map[string]any{
 				"session_id": str("Target session id"),
 				"content":    str("The message to send, as the operator would type it"),
+				"queue":      map[string]any{"type": "boolean", "description": "If true, queue the message for when the target is idle instead of refusing"},
 			},
 			run: h.pulseSessionSendTool,
 		},
@@ -258,6 +261,7 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
 		Content   string `json:"content"`
+		Queue     bool   `json:"queue,omitempty"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -269,7 +273,24 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	if err := h.pulseSessionBusy(args.SessionID); err != nil {
-		return "", err
+		if !args.Queue {
+			return "", err
+		}
+		// Queue path: persist the message and push it onto the target's pending
+		// queue; drain when the session goes idle.
+		if h.sessions.PendingCount(args.SessionID) >= 10 {
+			return "", errors.New("target session queue is full (10 pending)")
+		}
+		entry, rerr := h.sessions.Resolve(args.SessionID)
+		if rerr != nil {
+			return "", rerr
+		}
+		if perr := h.persistUserMessage(entry, args.Content); perr != nil {
+			return "", perr
+		}
+		h.sessions.PushPending(args.SessionID, args.Content)
+		h.scheduleQueueDrain(args.SessionID)
+		return marshalPulseString(map[string]any{"session_id": args.SessionID, "queued": true})
 	}
 	if _, err := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/message",
 		map[string]any{"content": args.Content, "async": true},
@@ -586,4 +607,24 @@ func (h *Handler) pulseQuestionDismissTool(raw json.RawMessage) (string, error) 
 		return "", fmt.Errorf("dismiss question %s on %s: %w", args.RequestID, args.SessionID, err)
 	}
 	return marshalPulseString(map[string]any{"session_id": args.SessionID, "request_id": args.RequestID, "dismissed": true})
+}
+
+// scheduleQueueDrain waits until the target session is idle, then dispatches a
+// retryLast turn so any messages queued via session_send (queue=true) run.
+func (h *Handler) scheduleQueueDrain(id string) {
+	crashguard.Go(func() {
+		for i := 0; i < 300; i++ { // up to ~60s
+			if !h.sessions.IsTurnActive(id) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if h.sessions.IsTurnActive(id) {
+			return
+		}
+		model := h.effectiveSessionModel(id)
+		if _, err := h.dispatchTurn(id, model, "", turnOptions{retryLast: true}); err != nil {
+			log.Printf("serve: queue drain dispatch for %s: %v", id, err)
+		}
+	})
 }

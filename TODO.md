@@ -7053,3 +7053,8 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - **Word editor (DocxEditor.tsx): plain paragraphs only** — docx importer/exporter (docxData.ts) handles paragraphs and run text; bold/italic/underline, tables, images, styles are dropped on round-trip. Univer Docs mount via univerDocMount.ts. First-save confirmation pending. Fidelity improvements are the follow-up.
 - **Backend**: `rawSaveAllowedExt` (.xlsx/.docx/.pdf) in `internal/server/raw_save_ext.go`, applied to both local and remote raw-save gates.
 - **Not yet integrated**: close-confirm/quit-guard for pdf/docx tabs (PdfEditor/DocxEditor own Save buttons work). Annotations for PDF TBD.
+
+## Inter-session communication (partial, 2026-11-07)
+- Server-side LLM tools (session_read incl. goal/todo, session_send with queue) generalized to all non-Pulse sessions.
+- NOT DONE: bare TUI session discovery/registry for external agents; CLI (`ocode session status|send|queue`); dedicated cross-session /btw-style side query (session_read + reasoning covers the non-interrupting case).
+- Queue drain is best-effort polling (60s cap) via crashguard.Go; consider event-driven drain later.

@@ -602,8 +602,22 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		// record without a lookup by any other id.
 		tools = append(tools, &viewerStateTool{h: h, sessionID: sessionID})
 	}
+	if !pulse {
+		for _, t := range h.sessionCommTools() {
+			tools = append(tools, t)
+		}
+	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)
+	if !pulse {
+		if pm := ag.Permissions(); pm != nil {
+			for _, t := range h.sessionCommTools() {
+				if !t.ask {
+					pm.SetRule(t.Name(), agent.PermissionAllow)
+				}
+			}
+		}
+	}
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
 	}
