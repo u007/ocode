@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../../api/client";
 import MermaidViewer from "./MermaidViewer";
@@ -18,15 +18,23 @@ import {
   usePreviewWidthPreset,
 } from "../../lib/previewWidth";
 
-function extractMermaid(md: string): string | null {
-  const m = md.match(/```mermaid\s+([\s\S]*?)```/);
-  return m ? m[1].trim() : null;
+/**
+ * The mermaid source a fenced block holds, or null for any other code block.
+ * react-markdown renders a fence as `<pre><code class="language-mermaid">`, so
+ * the `pre` override reaches the source through its code child.
+ */
+function mermaidFenceSource(children: ReactNode): string | null {
+  if (!isValidElement(children)) return null;
+  const props = children.props as { className?: string; children?: ReactNode };
+  if (!/\blanguage-mermaid\b/.test(props.className ?? "")) return null;
+  return String(props.children ?? "").replace(/\n$/, "");
 }
 
 /**
  * Markdown viewer: rendered prose (react-markdown + GFM — already a project
- * dep) with selectable text, plus an interactive diagram on top when the
- * file contains a ```mermaid fence (clickable nodes, zoom, branch Ask-AI).
+ * dep) with selectable text. A ```mermaid fence renders as an interactive
+ * diagram IN PLACE (clickable nodes, zoom, branch Ask-AI), where the author
+ * wrote it — never as a strip above the document and never as a code block.
  */
 export default function MarkdownViewer({
   path,
@@ -136,7 +144,31 @@ export default function MarkdownViewer({
     };
   }, [revision, controlled, path, projectRoot, projectHost]);
 
-  const diagram = useMemo(() => (md ? extractMermaid(md) : null), [md]);
+  // A ```mermaid fence renders its diagram where it sits in the document.
+  // Overriding `pre` (not `code`) lets the diagram replace the whole <pre>
+  // instead of nesting a block element inside it.
+  const components = useMemo<Components>(
+    () => ({
+      a: MarkdownLink,
+      pre: ({ children }) => {
+        const code = mermaidFenceSource(children);
+        if (code === null) return <pre>{children}</pre>;
+        return (
+          <div className="not-prose my-4 min-h-[220px] overflow-hidden rounded border border-border">
+            <MermaidViewer
+              path={path}
+              code={code}
+              projectRoot={projectRoot}
+              projectHost={projectHost}
+              onOpenFile={onOpenFile}
+              appearance={appearance}
+            />
+          </div>
+        );
+      },
+    }),
+    [path, projectRoot, projectHost, onOpenFile, appearance],
+  );
 
   // ── Tail-following (sidebar auto-scroll) ──
   // Mirrors ChatPanel's proven pattern: an atBottom lock maintained by the
@@ -266,11 +298,6 @@ export default function MarkdownViewer({
           onClose={find.hide}
         />
       )}
-      {diagram && (
-        <div className="min-h-[220px] shrink-0 border-b border-border">
-          <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} appearance={appearance} />
-        </div>
-      )}
       <div
         ref={ref}
         onScroll={handleScroll}
@@ -278,7 +305,7 @@ export default function MarkdownViewer({
         className={cn("relative prose prose-sm max-w-none min-h-0 flex-1 overflow-auto select-text outline-none", appearance !== "light" && "prose-invert")}
       >
         <div ref={columnRef} className={previewColumnClass(columnWidth)} data-preview-column={columnWidth}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{md}</ReactMarkdown>
         </div>
         <FindHighlights rects={find.rects} current={find.current} />
       </div>

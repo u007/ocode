@@ -145,6 +145,15 @@ async function imageSrc(source: PrintSource): Promise<string> {
 
 const MERMAID_PRINT_CSS = "svg { max-width: 100%; height: auto }";
 
+const MARKDOWN_PRINT_CSS =
+  ".print-mermaid { margin: 1em 0; break-inside: avoid } .print-mermaid svg { max-width: 100%; height: auto }";
+
+/** A fenced ```mermaid block in a Markdown file, with its source in group 1. */
+const MERMAID_FENCE = /^[ \t]*```mermaid[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*\r?$/gm;
+
+/** What react-markdown emits for a fenced block (no language plugin is installed). */
+const MERMAID_CODE_HTML = /<pre><code class="language-mermaid">[\s\S]*?<\/code><\/pre>/g;
+
 /**
  * The SVG the mermaid viewer draws, rendered again on the light theme for paper.
  * mermaid's config is one global, so the viewer's theme and security level are
@@ -166,6 +175,44 @@ async function mermaidSvg(code: string): Promise<string> {
     }
   });
   return DOMPurify.sanitize(svg, MERMAID_SVG_CONFIG);
+}
+
+/** Every fenced mermaid block in a Markdown file, in document order. */
+function mermaidSources(markdown: string): string[] {
+  return Array.from(markdown.matchAll(MERMAID_FENCE), (match) => match[1]!.trim());
+}
+
+/**
+ * Replaces each fenced mermaid block react-markdown emitted with the diagram it
+ * draws on the light theme, so the printed page shows the chart where the
+ * author wrote it instead of its source. A diagram that fails to render keeps
+ * its code block: one broken diagram must not block printing the whole
+ * document (the `.mmd` kind propagates instead, because there the diagram IS
+ * the document).
+ */
+async function inlineMermaid(markup: string, sources: string[]): Promise<string> {
+  const blocks = Array.from(markup.matchAll(MERMAID_CODE_HTML));
+  if (blocks.length === 0) return markup;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]!;
+    const at = block.index ?? cursor;
+    parts.push(markup.slice(cursor, at));
+    const code = sources[i];
+    let replacement = block[0];
+    if (code !== undefined) {
+      try {
+        replacement = `<div class="print-mermaid">${await mermaidSvg(code)}</div>`;
+      } catch (err) {
+        console.error("print preview: could not render a mermaid diagram, printing its source", err);
+      }
+    }
+    parts.push(replacement);
+    cursor = at + block[0].length;
+  }
+  parts.push(markup.slice(cursor));
+  return parts.join("");
 }
 
 const EXCEL_PRINT_CSS =
@@ -294,9 +341,15 @@ export async function buildPrintDocument(kind: PreviewKind, source: PrintSource,
         import("react-markdown"),
         import("remark-gfm"),
       ]);
-      const markup = renderToStaticMarkup(<ReactMarkdown remarkPlugins={[remarkGfm]}>{await textOf(source)}</ReactMarkdown>);
+      const markdown = await textOf(source);
+      const markup = renderToStaticMarkup(<ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>);
+      const body = await inlineMermaid(markup, mermaidSources(markdown));
       const styles = await collectAppStyles();
-      return documentShell(title, `${styles}\n<style>${PAGE_CSS}</style>`, `<article class="prose max-w-none">${markup}</article>`);
+      return documentShell(
+        title,
+        `${styles}\n<style>${PAGE_CSS}${MARKDOWN_PRINT_CSS}</style>`,
+        `<article class="prose max-w-none">${body}</article>`,
+      );
     }
     case "text":
     case "json":

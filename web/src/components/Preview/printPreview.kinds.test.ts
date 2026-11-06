@@ -121,6 +121,67 @@ describe("buildPrintDocument: mermaid", () => {
   });
 });
 
+describe("buildPrintDocument: markdown with mermaid fences", () => {
+  it("prints each diagram in place, in order, and leaves other code blocks alone", async () => {
+    mermaid.render
+      .mockResolvedValueOnce({ svg: "<svg><text>first</text></svg>" })
+      .mockResolvedValueOnce({ svg: "<svg><text>second</text></svg>" });
+    const markdown = [
+      "# Doc",
+      "",
+      "before",
+      "",
+      "```mermaid",
+      "graph TD; A-->B",
+      "```",
+      "",
+      "middle",
+      "",
+      "```js",
+      "const x = 1",
+      "```",
+      "",
+      "```mermaid",
+      "graph LR; C-->D",
+      "```",
+      "",
+      "end",
+      "",
+    ].join("\n");
+
+    const html = await buildPrintDocument("markdown", { origin: "editor", path: "d.md", content: markdown }, "d.md");
+
+    expect(mermaid.render).toHaveBeenCalledTimes(2);
+    expect(mermaid.render).toHaveBeenNthCalledWith(1, expect.stringMatching(/^mmd-print-/), "graph TD; A-->B");
+    expect(mermaid.render).toHaveBeenNthCalledWith(2, expect.stringMatching(/^mmd-print-/), "graph LR; C-->D");
+    expect(html).not.toContain('class="language-mermaid"');
+    expect(html).toContain('class="language-js"');
+    const first = html.indexOf("<text>first</text>");
+    const middle = html.indexOf("<p>middle</p>");
+    const second = html.indexOf("<text>second</text>");
+    expect(html.indexOf("<p>before</p>")).toBeLessThan(first);
+    expect(first).toBeLessThan(middle);
+    expect(middle).toBeLessThan(second);
+    expect(second).toBeLessThan(html.indexOf("<p>end</p>"));
+    expect(html).toContain(".print-mermaid { margin: 1em 0; break-inside: avoid }");
+  });
+
+  it("keeps a fence's source when that diagram fails to render", async () => {
+    mermaid.render.mockRejectedValueOnce(new Error("Parse error on line 1"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const html = await buildPrintDocument("markdown", { origin: "editor", path: "d.md", content: "```mermaid\nbad\n```\n" }, "d.md");
+
+      expect(html).toContain('class="language-mermaid"');
+      expect(html).toContain("bad");
+      expect(error).toHaveBeenCalledWith("print preview: could not render a mermaid diagram, printing its source", expect.any(Error));
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
 describe("buildPrintDocument: excel", () => {
   it("prints live CSV text as a table with every cell escaped", async () => {
     const csv = 'name,note\n"<img src=x onerror=alert(1)>",ok\n';

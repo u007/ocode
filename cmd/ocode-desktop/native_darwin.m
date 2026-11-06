@@ -63,8 +63,8 @@ static WKWebView *ocode_findWebView(NSView *view, WKWebView *best) {
 // given NSWindow, using the user's saved print settings. Wails' own windowPrint
 // hardcodes landscape and centring on the shared NSPrintInfo, so this path does
 // not use it. The copy of the shared NSPrintInfo only gets automatic pagination,
-// so long content spans pages; orientation, paper size and margins stay as the
-// user left them in the panel.
+// so long content spans pages; orientation, paper size and margins come from the
+// panel, whose paper-size and orientation controls this function re-enables.
 //
 // Returns 0 once the panel is running as a sheet, or 1 when the window has no
 // visible WKWebView (nothing is shown). The lookup touches AppKit views, so the
@@ -85,6 +85,11 @@ int ocode_printWindow(void *nativeWindow) {
 		NSPrintOperation *op = [webView printOperationWithPrintInfo:info];
 		op.showsPrintPanel = YES;
 		op.showsProgressPanel = YES;
+		// WKWebView's print operation ships a panel limited to copies, page range
+		// and preview (options 0x20003), which hides the paper size and orientation
+		// controls. Turn those two back on: WebKit lays the page out from the
+		// operation's NSPrintInfo, which the panel updates.
+		op.printPanel.options |= NSPrintPanelShowsPaperSize | NSPrintPanelShowsOrientation;
 		// WKWebView requires this or printOperationWithPrintInfo: raises, and the
 		// rect's values are ignored (scrolled-off content is still printed). This is
 		// the same workaround Wails' own windowPrint carries; do not "clean it up".

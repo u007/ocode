@@ -1,10 +1,10 @@
 ---
 type: Concept
 title: Preview Print / Save as PDF
-description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path."
-resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
+description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path. Markdown ```mermaid fences render in place in the viewer and as inline SVG (pre-rendered in the browser) in print."
+resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/MarkdownViewer.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-05T16:34:46Z
+timestamp: 2026-11-06T04:11:19Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -53,7 +53,9 @@ Per kind:
   wrapped in `<article class="prose max-w-none">`. The app CSS is inlined by
   `collectAppStyles`, see [Style collection](#style-collection). It is inlined,
   not linked, because the desktop print window has no origin to resolve a
-  relative `href` against. The `<html>` tag has no `dark` class.
+  relative `href` against. The `<html>` tag has no `dark` class. Embedded
+  ```mermaid fences are pre-rendered and inlined in place; see
+  [Markdown mermaid fences](#markdown-mermaid-fences).
 - **text / json:** the escaped content in a `<pre>`.
 - **html:** the untrusted file, sanitized with DOMPurify as a whole document
   (`WHOLE_DOCUMENT`), so `<head>` styles and `<link>` stylesheet references
@@ -68,7 +70,9 @@ Per kind:
   so no viewer render interleaves with them. The print render uses
   `securityLevel: "strict"`, and the viewer's theme and security level are
   restored in a `finally`. `MermaidViewer` takes the same queue, so any new
-  mermaid `initialize` or `render` must go through `runMermaid`. The SVG is sanitized with DOMPurify
+  mermaid `initialize` or `render` must go through `runMermaid`. Embedded fences
+  in a Markdown file use the same `mermaidSvg` on this light theme; see
+  [Markdown mermaid fences](#markdown-mermaid-fences). The SVG is sanitized with DOMPurify
   under `MERMAID_SVG_CONFIG`: DOMPurify drops HTML inside `foreignObject` unless
   `foreignObject` is an HTML integration point, and mermaid's flowchart labels
   are that HTML, so the config enables it along with the html profile.
@@ -110,6 +114,62 @@ Per kind:
 `react-dom/server`, `react-markdown`, `remark-gfm`, `mermaid`, `docx-preview`,
 `univerData` (with ExcelJS and SheetJS behind it) and `pptxDeck` are dynamic
 imports, so they stay out of the entry chunk.
+
+## Markdown mermaid fences
+
+A ```mermaid fence in a Markdown preview is a diagram in place, both on screen
+and on paper. The viewer and the print builder each handle it independently,
+and neither prints the fence as code.
+
+**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:150`)
+overrides ReactMarkdown's `pre` component in one memoized `components` object,
+with `a: MarkdownLink` merged into the same object. `mermaidFenceSource`
+(`web/src/components/Preview/MarkdownViewer.tsx:26`) reads the
+`language-mermaid` code child, so every fence renders as the interactive
+`MermaidViewer` where the author wrote it. A non-mermaid fenced block still
+renders as `<pre>{children}</pre>`. There is no longer an `extractMermaid`
+helper or a separate `diagram` memo hoisting the first fence into a strip above
+the prose: all fences render in document order, and a document with no fence
+renders no viewer. `components` is passed to `ReactMarkdown`
+(`web/src/components/Preview/MarkdownViewer.tsx:308`).
+
+**Print.** `buildPrintDocument`'s markdown branch renders the prose with
+`renderToStaticMarkup`, then calls
+`inlineMermaid(markup, mermaidSources(markdown))`
+(`web/src/components/Preview/printPreview.tsx:346`):
+
+- `mermaidSources` (`web/src/components/Preview/printPreview.tsx:181`) extracts
+  every fence in document order with `MERMAID_FENCE`
+  (`web/src/components/Preview/printPreview.tsx:152`).
+- `inlineMermaid` (`web/src/components/Preview/printPreview.tsx:193`) matches
+  the `<pre><code class="language-mermaid">…` blocks react-markdown emits
+  (`MERMAID_CODE_HTML`, `web/src/components/Preview/printPreview.tsx:155`) and
+  replaces only those with `<div class="print-mermaid">SVG</div>`. Other code
+  blocks are left untouched.
+- Each diagram is rendered by the existing `mermaidSvg`
+  (`web/src/components/Preview/printPreview.tsx:162`) on the light theme,
+  through `runMermaid`, and sanitized with DOMPurify under
+  `MERMAID_SVG_CONFIG`. `MARKDOWN_PRINT_CSS`
+  (`web/src/components/Preview/printPreview.tsx:148`) gives `.print-mermaid`
+  `margin: 1em 0; break-inside: avoid` and its `svg` `max-width: 100%;
+  height: auto`, so a diagram is not split across pages and is scaled to the
+  column.
+- A diagram that fails to render keeps its code block and logs
+  `"print preview: could not render a mermaid diagram, printing its source"`.
+  One broken fence does not abort the whole document. The `.mmd` preview kind
+  still propagates the render error
+  (`web/src/components/Preview/printPreview.tsx:366`), because there the diagram
+  IS the document.
+
+**No server-side PDF engine.** Mermaid is pre-rendered in the browser (the
+viewer draws it live; print runs `mermaid.render` in the SPA) and embedded as
+inline SVG markup in the document. A non-JS PDF engine such as WeasyPrint is
+never asked to lay out mermaid source, and this path does not involve one.
+
+Covered by `MarkdownViewer.mermaid.test.tsx` (two fences render in document
+order, a fence is not printed as code, other code blocks are untouched, and no
+fence means no viewer) and the `buildPrintDocument: markdown with mermaid
+fences` cases in `printPreview.kinds.test.ts`.
 
 ## Style collection
 
@@ -203,8 +263,16 @@ acknowledgement, so `true` only means the message was posted.
 
 On macOS, `printWindow` (`cmd/ocode-desktop/native_darwin.go`) calls
 `ocode_printWindow` in `cmd/ocode-desktop/native_darwin.m`, which opens the system
-print panel using the user's saved print settings on the largest visible WKWebView (error if none). It replaces Wails' `windowPrint`,
-which forced landscape and 30pt margins. Other platforms use Wails' `Print()`
+print panel on the largest visible WKWebView (error if none), starting from the
+user's saved `NSPrintInfo`. WKWebView's operation ships a panel limited to copies,
+page range and preview (`options` 0x20003), which hides the paper size and
+orientation controls, so `ocode_printWindow` ORs
+`NSPrintPanelShowsPaperSize | NSPrintPanelShowsOrientation` into
+`op.printPanel.options` (0x2000f) before running it. The operation's `NSPrintInfo`
+is what WebKit lays the page out from — setting it to landscape swaps the
+imageable bounds, A4 portrait 577x797 to 797x577 — so those panel controls drive
+real geometry. It replaces Wails' `windowPrint`, which forced landscape and 30pt
+margins. Other platforms use Wails' `Print()`
 (`cmd/ocode-desktop/native_stub.go`). The macOS panel is unverified live; see
 `TODO.md` ("Open: desktop print unverified live", 2026-11-02).
 
@@ -239,14 +307,16 @@ The desktop print window's bridge rules apply to the toolbar path:
 
 ## Known gaps
 
-- **macOS desktop print is unverified live.** The native panel uses the user's saved print settings
-  (`ocode_printWindow`), but it has not been checked in the running
+- **macOS desktop print is unverified live.** The native panel starts from the user's saved
+  `NSPrintInfo` (`ocode_printWindow`), but it has not been checked in the running
   app. See [Desktop route](#desktop-route) and `TODO.md`.
 - **`window.print()` cannot be suppressed.** A page cannot suppress the native
   print dialog that `window.print()` opens, so both routes always show it. There
   is no silent print path.
 - **Not verified live.** Coverage is unit tests only: `printPreview.test.tsx`,
-  `printPreview.kinds.test.ts` (one block per new kind), `printPreview.pptx.test.tsx`
+  `printPreview.kinds.test.ts` (one block per kind, plus the `buildPrintDocument:
+  markdown with mermaid fences` cases), `MarkdownViewer.mermaid.test.tsx` (fence
+  placement in the viewer), `printPreview.pptx.test.tsx`
   (a stand-in card that emits raw markup, since the real `SlideCard` escapes its
   text), `mermaidQueue.test.ts`, `PrintPreviewButton.test.tsx`,
   `PdfViewer.print.test.tsx` and `print_test.go`. The print routes are not yet
@@ -260,7 +330,8 @@ The desktop print window's bridge rules apply to the toolbar path:
   The docx hyperlinks are also filtered (see [Content, not DOM](#content-not-dom)).
 - **Mermaid and SVG print on a fixed theme.** Mermaid prints on the light theme
   whatever the app theme, and mermaid's own HTML labels are printed as the
-  library draws them. Not checked against a real diagram set.
+  library draws them. Embedded-fence diagrams in a Markdown file use that same
+  light theme. Not checked against a real diagram set.
 - **No Go-side size cap.** `print.go` accepts any length of document. The only
   bound is the SPA's `MAX_PRINT_DOCUMENT_BYTES` check in `wails.ts`.
 - **`@import` string form not rewritten.** `absolutizeCssUrls` rewrites
