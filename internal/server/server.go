@@ -192,7 +192,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		username:               username,
 		password:               password,
 		rl:                     newRateLimiter(),
-		artifactRL:             newRateLimiter(),
+		artifactRL:             h.artifactRL, // shared with Handler: gate and middleware count the same keys
 		mux:                    mux,
 		handler:                h,
 		frontendStats:          newFrontendStatsRing(),
@@ -850,15 +850,17 @@ func (s *Server) registerRoutes() {
 
 	// Mode A (self-hosted) tailscale exposure for published artifacts.
 	// Single global /p/* mount, dispatched by artifact id inside the server.
-	s.mux.HandleFunc("GET /api/artifact-tailscale-share", s.handleGetArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifact-tailscale-share/start", s.handleStartArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifact-tailscale-share/stop", s.handleStopArtifactTailscaleShare)
-	s.mux.HandleFunc("GET /api/artifacts/tailscale-share", s.handleGetArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/start", s.handleStartArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/stop", s.handleStopArtifactTailscaleShare)
-	s.mux.HandleFunc("GET /api/artifacts/expose", s.handleGetArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifacts/expose/start", s.handleStartArtifactTailscaleShare)
-	s.mux.HandleFunc("POST /api/artifacts/expose/stop", s.handleStopArtifactTailscaleShare)
+	// Every exposure route is owner-only (s.authMiddleware): a public Funnel
+	// must never be startable by an unauthenticated caller.
+	s.mux.HandleFunc("GET /api/artifact-tailscale-share", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifact-tailscale-share/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifact-tailscale-share/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
+	s.mux.HandleFunc("GET /api/artifacts/tailscale-share", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
+	s.mux.HandleFunc("GET /api/artifacts/expose", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/expose/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/expose/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
 
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))

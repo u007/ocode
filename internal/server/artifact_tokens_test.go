@@ -4,11 +4,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/artifacts"
+
 	"github.com/stretchr/testify/require"
 )
 
 func TestATS_IssueValidate(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, id, err := st.issue("art1", "link", time.Now().Add(time.Hour), "")
 	require.NoError(t, err)
 	require.NotEmpty(t, tok)
@@ -21,7 +25,9 @@ func TestATS_IssueValidate(t *testing.T) {
 }
 
 func TestATS_RevokedFails(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, id, err := st.issue("art1", "link", time.Now().Add(time.Hour), "")
 	require.NoError(t, err)
 	require.NoError(t, st.revoke(id))
@@ -30,7 +36,9 @@ func TestATS_RevokedFails(t *testing.T) {
 }
 
 func TestATS_ExpiredFails(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, _, err := st.issue("art1", "link", time.Now().Add(-time.Hour), "")
 	require.NoError(t, err)
 	_, _, err = st.validate(tok, "art1")
@@ -38,7 +46,9 @@ func TestATS_ExpiredFails(t *testing.T) {
 }
 
 func TestATS_PasswordGated(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, _, err := st.issue("art1", "link", time.Now().Add(time.Hour), "secret")
 	require.NoError(t, err)
 	at, _, err := st.validate(tok, "art1")
@@ -49,7 +59,9 @@ func TestATS_PasswordGated(t *testing.T) {
 }
 
 func TestATS_WrongArtifactFails(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, _, err := st.issue("art1", "link", time.Now().Add(time.Hour), "")
 	require.NoError(t, err)
 	_, _, err = st.validate(tok, "art2")
@@ -57,7 +69,9 @@ func TestATS_WrongArtifactFails(t *testing.T) {
 }
 
 func TestATS_ConstantTimeCompare(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
 	tok, _, err := st.issue("art1", "link", time.Now().Add(time.Hour), "")
 	require.NoError(t, err)
 	// tampered token should fail
@@ -67,8 +81,10 @@ func TestATS_ConstantTimeCompare(t *testing.T) {
 }
 
 func TestATS_PruneExpired(t *testing.T) {
-	st := newArtifactTokenStore(t.TempDir())
-	_, _, err := st.issue("art1", "link", time.Now().Add(-time.Hour), "")
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: "art1", Status: "active"})
+	_, _, err = st.issue("art1", "link", time.Now().Add(-time.Hour), "")
 	require.NoError(t, err)
 	st.pruneExpired()
 }

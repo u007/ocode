@@ -19,6 +19,13 @@ import (
 
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("artifacts: not found")
+// ErrInviteExpired is returned when an invitation is past its TTL.
+var ErrInviteExpired = errors.New("artifacts: invite expired")
+// ErrInviteAlreadyAccepted is returned when an invitation was already accepted.
+var ErrInviteAlreadyAccepted = errors.New("artifacts: invite already accepted")
+
+// InviteTTL is the default lifetime of an invitation from invited_at.
+const InviteTTL = 7 * 24 * time.Hour
 
 // ErrAlreadyRevoked is returned when revoking a token that is already revoked.
 var ErrAlreadyRevoked = errors.New("artifacts: token already revoked")
@@ -560,9 +567,12 @@ func (s *Store) AcceptInvite(inviteTokenHash string) (AllowEntry, error) {
 			return fmt.Errorf("artifacts: accept invite lookup: %w", err)
 		}
 		if !parseTime(accepted).IsZero() {
-			return errors.New("artifacts: invite already accepted")
+			return ErrInviteAlreadyAccepted
 		}
 		e.InvitedAt = parseTime(invited)
+		if !e.InvitedAt.IsZero() && time.Since(e.InvitedAt) > InviteTTL {
+			return ErrInviteExpired
+		}
 		now := time.Now().UTC()
 		_, err = s.db.Exec(`UPDATE allowlist SET accepted_at = ?, invite_token_hash = '' WHERE artifact_id = ? AND email = ?`, fmtTime(now), e.ArtifactID, e.Email)
 		if err != nil {
@@ -750,3 +760,226 @@ func (s *Store) GetBlob(hash string) ([]byte, error) {
 
 // DB exposes the underlying *sql.DB for handler-level queries.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// SetArtifactStatus sets an artifact's lifecycle status ("active" = live,
+// "unpublished" = not served). Returns ErrNotFound for an unknown id.
+func (s *Store) SetArtifactStatus(id, status string) error {
+	return s.withLock(func() error {
+		res, err := s.db.Exec(`UPDATE artifacts SET status = ? WHERE id = ?`, status, id)
+		if err != nil {
+			return fmt.Errorf("artifacts: set status: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// HasAllowlist reports whether the artifact has any allow-list entry. An
+// artifact with entries is email-gated; one without is not.
+func (s *Store) HasAllowlist(artifactID string) (bool, error) {
+	var n int
+	err := s.withLock(func() error {
+		return s.db.QueryRow(`SELECT COUNT(*) FROM allowlist WHERE artifact_id = ?`, artifactID).Scan(&n)
+	})
+	if err != nil {
+		return false, fmt.Errorf("artifacts: allowlist count: %w", err)
+	}
+	return n > 0, nil
+}
+
+// AcceptArtifactInvite accepts the single-use invite identified by its hash,
+// scoped to one artifact: an invite minted for artifact A never accepts on B.
+// The invite hash is KEPT after acceptance so GetAcceptedAllowEntryByInviteHash
+// can later verify the access cookie; removing the allow-list row revokes it.
+func (s *Store) AcceptArtifactInvite(artifactID, inviteTokenHash string) (AllowEntry, error) {
+	var e AllowEntry
+	if inviteTokenHash == "" {
+		return AllowEntry{}, ErrNotFound
+	}
+	err := s.withLock(func() error {
+		row := s.db.QueryRow(`SELECT artifact_id, email, invited_at, accepted_at, invite_token_hash FROM allowlist WHERE artifact_id = ? AND invite_token_hash = ? LIMIT 1`, artifactID, inviteTokenHash)
+		var invited, accepted string
+		if err := row.Scan(&e.ArtifactID, &e.Email, &invited, &accepted, &e.InviteTokenHash); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("artifacts: accept artifact invite lookup: %w", err)
+		}
+		if !parseTime(accepted).IsZero() {
+			return errors.New("artifacts: invite already accepted")
+		}
+		e.InvitedAt = parseTime(invited)
+		now := time.Now().UTC()
+		if !e.InvitedAt.IsZero() && now.Sub(e.InvitedAt) > InviteTTL {
+			return ErrInviteExpired
+		}
+		if _, err := s.db.Exec(`UPDATE allowlist SET accepted_at = ? WHERE artifact_id = ? AND email = ?`, fmtTime(now), e.ArtifactID, e.Email); err != nil {
+			return fmt.Errorf("artifacts: accept artifact invite update: %w", err)
+		}
+		e.AcceptedAt = now
+		return nil
+	})
+	if err != nil {
+		return AllowEntry{}, err
+	}
+	return e, nil
+}
+
+// GetAcceptedAllowEntryByInviteHash returns the accepted allow-list entry that
+// was invited with this hash for this artifact, or ErrNotFound. A pending
+// (never accepted) invite does not verify.
+func (s *Store) GetAcceptedAllowEntryByInviteHash(artifactID, inviteTokenHash string) (AllowEntry, error) {
+	var e AllowEntry
+	if inviteTokenHash == "" {
+		return AllowEntry{}, ErrNotFound
+	}
+	err := s.withLock(func() error {
+		row := s.db.QueryRow(`SELECT artifact_id, email, invited_at, accepted_at, invite_token_hash FROM allowlist WHERE artifact_id = ? AND invite_token_hash = ? AND accepted_at <> '' LIMIT 1`, artifactID, inviteTokenHash)
+		var invited, accepted string
+		if err := row.Scan(&e.ArtifactID, &e.Email, &invited, &accepted, &e.InviteTokenHash); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("artifacts: accepted invite lookup: %w", err)
+		}
+		e.InvitedAt = parseTime(invited)
+		e.AcceptedAt = parseTime(accepted)
+		return nil
+	})
+	if err != nil {
+		return AllowEntry{}, err
+	}
+	return e, nil
+}
+
+// ListTokensByArtifact returns all tokens for an artifact.
+func (s *Store) ListTokensByArtifact(artifactID string) ([]AccessToken, error) {
+	return s.ListTokens(artifactID)
+}
+
+// ListTokens returns all tokens for an artifact.
+func (s *Store) ListTokens(artifactID string) ([]AccessToken, error) {
+	var out []AccessToken
+	err := s.withLock(func() error {
+		rows, err := s.db.Query(`SELECT id, artifact_id, token_hash, kind, expires_at, created_at, revoked_at, password_hash, label FROM access_tokens WHERE artifact_id = ? ORDER BY created_at ASC, id ASC`, artifactID)
+		if err != nil {
+			return fmt.Errorf("artifacts: list tokens: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var t AccessToken
+			var expires, created, revoked string
+			if err := rows.Scan(&t.ID, &t.ArtifactID, &t.TokenHash, &t.Kind, &expires, &created, &revoked, &t.PasswordHash, &t.Label); err != nil {
+				return fmt.Errorf("artifacts: scan token: %w", err)
+			}
+			t.ExpiresAt = parseTime(expires)
+			t.CreatedAt = parseTime(created)
+			t.RevokedAt = parseTime(revoked)
+			out = append(out, t)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []AccessToken{}
+	}
+	return out, nil
+}
+
+// GetTokensByArtifact is an alias.
+func (s *Store) GetTokensByArtifact(artifactID string) ([]AccessToken, error) {
+	return s.ListTokens(artifactID)
+}
+
+// RemoveAllowEntry deletes an allow-list entry.
+func (s *Store) RemoveAllowEntry(artifactID, email string) error {
+	return s.DeleteAllowEntry(artifactID, email)
+}
+
+// DeleteAllowEntry deletes an allow-list entry.
+func (s *Store) DeleteAllowEntry(artifactID, email string) error {
+	return s.withLock(func() error {
+		_, err := s.db.Exec(`DELETE FROM allowlist WHERE artifact_id = ? AND email = ?`, artifactID, email)
+		if err != nil {
+			return fmt.Errorf("artifacts: delete allow entry: %w", err)
+		}
+		return nil
+	})
+}
+
+// ListAllowEntries returns all allow-list entries for an artifact.
+func (s *Store) ListAllowEntries(artifactID string) ([]AllowEntry, error) {
+	return s.ListAllowlist(artifactID)
+}
+
+// ListAllowlist returns all allow-list entries for an artifact.
+func (s *Store) ListAllowlist(artifactID string) ([]AllowEntry, error) {
+	var out []AllowEntry
+	err := s.withLock(func() error {
+		rows, err := s.db.Query(`SELECT artifact_id, email, invited_at, accepted_at, invite_token_hash FROM allowlist WHERE artifact_id = ? ORDER BY invited_at ASC, email ASC`, artifactID)
+		if err != nil {
+			return fmt.Errorf("artifacts: list allow entries: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e AllowEntry
+			var invited, accepted string
+			if err := rows.Scan(&e.ArtifactID, &e.Email, &invited, &accepted, &e.InviteTokenHash); err != nil {
+				return fmt.Errorf("artifacts: scan allow entry: %w", err)
+			}
+			e.InvitedAt = parseTime(invited)
+			e.AcceptedAt = parseTime(accepted)
+			out = append(out, e)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []AllowEntry{}
+	}
+	return out, nil
+}
+
+// ListAccessLog returns access log entries for an artifact.
+func (s *Store) ListAccessLog(artifactID string, limit, offset int) ([]AccessLogEntry, error) {
+	return s.GetAccessLog(artifactID, limit, offset)
+}
+
+// GetAccessLog returns access log entries for an artifact.
+func (s *Store) GetAccessLog(artifactID string, limit, offset int) ([]AccessLogEntry, error) {
+	var out []AccessLogEntry
+	err := s.withLock(func() error {
+		rows, err := s.db.Query(`SELECT artifact_id, token_id, ip, ua, path, status, ts FROM access_log WHERE artifact_id = ? ORDER BY ts DESC LIMIT ? OFFSET ?`, artifactID, limit, offset)
+		if err != nil {
+			return fmt.Errorf("artifacts: list access log: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e AccessLogEntry
+			var ts string
+			if err := rows.Scan(&e.ArtifactID, &e.TokenID, &e.IP, &e.UA, &e.Path, &e.Status, &ts); err != nil {
+				return fmt.Errorf("artifacts: scan access log: %w", err)
+			}
+			e.TS = parseTime(ts)
+			out = append(out, e)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []AccessLogEntry{}
+	}
+	return out, nil
+}

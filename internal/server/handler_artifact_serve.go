@@ -21,7 +21,9 @@ func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, err := st.GetArtifact(artifactID); err != nil {
+	// Only a live artifact is served. Unpublish sets a non-"active" status.
+	art, err := st.GetArtifact(artifactID)
+	if err != nil || art.Status != "active" {
 		http.NotFound(w, r)
 		return
 	}
@@ -38,21 +40,30 @@ func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
 	if relPath == "" {
 		relPath = "index.html"
 	}
+	// Reject any ".." path segment in the raw request path BEFORE cleaning.
+	// After path.Clean("/"+...) no ".." segment can remain, so checking later
+	// would be vacuous. Only whole segments are refused: "a..b.js" is a name.
+	for _, seg := range strings.Split(relPath, "/") {
+		if seg == ".." {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	relPath = path.Clean("/" + relPath)
 	relPath = strings.TrimPrefix(relPath, "/")
 	if relPath == "." || relPath == "" {
 		relPath = "index.html"
-	}
-	if strings.Contains(relPath, "..") {
-		http.NotFound(w, r)
-		return
 	}
 	versions, err := st.ListVersions(artifactID)
 	if err != nil || len(versions) == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	v := versions[len(versions)-1]
+	v, ok := latestArtifactVersion(versions)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
 	files, err := st.GetVersionFiles(v.ID)
 	if err != nil {
 		http.NotFound(w, r)
@@ -89,9 +100,34 @@ func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
 	_ = st.LogAccess(artifacts.AccessLogEntry{
 		ArtifactID: artifactID,
 		TokenID:    tokenID,
-		IP:         realIP(r),
+		IP:         artifactClientKey(r),
 		UA:         r.UserAgent(),
 		Path:       relPath,
 		Status:     http.StatusOK,
 	})
+}
+
+// latestArtifactVersion picks the newest version by an explicit sort key
+// (created_at, then version label, then id) instead of trusting the order
+// ListVersions returns. It reports false for an empty slice.
+func latestArtifactVersion(vs []artifacts.Version) (artifacts.Version, bool) {
+	if len(vs) == 0 {
+		return artifacts.Version{}, false
+	}
+	best := vs[0]
+	for _, v := range vs[1:] {
+		switch {
+		case !v.CreatedAt.Equal(best.CreatedAt):
+			if v.CreatedAt.After(best.CreatedAt) {
+				best = v
+			}
+		case v.Version != best.Version:
+			if v.Version > best.Version {
+				best = v
+			}
+		case v.ID > best.ID:
+			best = v
+		}
+	}
+	return best, true
 }

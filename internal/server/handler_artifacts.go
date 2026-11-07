@@ -297,7 +297,9 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	// is never trusted; the server performs the scan itself.
 	scanHit := getBool(body, "secret_scan_hit", "secretScanHit")
 	overrideReason := getString(body, "override_reason", "overrideReason", "reason")
-	hasSecret := scanHit
+	// Server runs its own secret scan; never trust the client flag.
+	_ = scanHit
+	hasSecret := false
 	scanRoot := projectPath
 	if resolved, err := h.resolveSecretPath(projectPath); err == nil {
 		scanRoot = resolved
@@ -346,7 +348,32 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	var files []artifacts.File
 	var totalSize int64
 	filepath.Walk(buildDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if info == nil {
+			return nil
+		}
+		// skip symlinks entirely
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if info.IsDir() {
+			relDir, _ := filepath.Rel(buildDir, p)
+			if relDir != "." {
+				for _, part := range strings.Split(filepath.ToSlash(relDir), "/") {
+					if part == "" {
+						continue
+					}
+					if strings.HasPrefix(part, ".") {
+						return filepath.SkipDir
+					}
+				}
+			}
+			base := filepath.Base(p)
+			if base == "node_modules" || base == "vendor" || base == ".git" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(buildDir, p)
@@ -354,12 +381,21 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 			return nil
 		}
 		// skip hidden/git/secret
-		if strings.HasPrefix(rel, ".git") || strings.Contains(rel, string(os.PathSeparator)+".") {
-			// skip dotfiles dirs
+		for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+			if part == "" {
+				continue
+			}
+			if strings.HasPrefix(part, ".") {
+				return nil
+			}
 		}
 		// skip .env
 		base := filepath.Base(p)
 		if base == ".env" || strings.HasPrefix(base, ".env.") {
+			return nil
+		}
+		// file-type allowlist
+		if !allowedArtifactExt(strings.ToLower(filepath.Ext(p))) {
 			return nil
 		}
 		data, err := os.ReadFile(p)
@@ -401,6 +437,11 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		totalSize += info.Size()
 		return nil
 	})
+	maxBytes := artifactMaxBytes()
+	if maxBytes > 0 && totalSize > maxBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "artifact exceeds maximum size")
+		return
+	}
 	// filter gitignored? skip for minimal
 	v, err := st.PublishVersion(artifacts.Version{
 		ArtifactID:       id,
@@ -416,15 +457,38 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("publish: %v", err))
 		return
 	}
+	// A new version makes the artifact live again after an unpublish.
+	if err := st.SetArtifactStatus(id, "active"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("publish: %v", err))
+		return
+	}
 	// mint tokens? skip
 	// notify email
 	if notify {
 		mailer := h.artifactMailerInstance()
-		// send to owner? no email address known; attempt allowlist members
-		// send to a default? We'll send to each allowlist? Need list not available easily.
-		// Just call sendEmail to a placeholder? Hidden test likely mocks mailer and checks called.
-		// We need trigger at least one send. Try to send to createdBy? 
-		_ = sendEmail(mailer, "owner", "new version live", "published")
+		recipients := []string{}
+		seen := map[string]bool{}
+		add := func(email string) {
+			email = strings.TrimSpace(email)
+			if email == "" || seen[email] {
+				return
+			}
+			seen[email] = true
+			recipients = append(recipients, email)
+		}
+		if strings.Contains(a.CreatedBy, "@") {
+			add(a.CreatedBy)
+		}
+		if st != nil {
+			if entries, err := st.ListAllowEntries(id); err == nil {
+				for _, e := range entries {
+					add(e.Email)
+				}
+			}
+		}
+		for _, to := range recipients {
+			_ = sendEmail(mailer, to, "new version live", "published")
+		}
 	}
 	// if notify false: no send
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -446,6 +510,11 @@ func (h *Handler) HandleUnpublish(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	if err := st.RevokeAllTokens(id); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unpublish: %v", err))
+		return
+	}
+	// Not live: the visitor path refuses every request until a new publish.
+	if err := st.SetArtifactStatus(id, "unpublished"); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unpublish: %v", err))
 		return
 	}
@@ -593,9 +662,7 @@ func (h *Handler) HandleAllowlistRemove(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	// delete allow entry
-	if st.DB() != nil {
-		_, _ = st.DB().Exec(`DELETE FROM allowlist WHERE artifact_id = ? AND email = ?`, id, email)
-	}
+	_ = st.RemoveAllowEntry(id, email)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -633,15 +700,18 @@ func (h *Handler) HandleAccessLog(w http.ResponseWriter, r *http.Request, id str
 		TS         string `json:"ts"`
 	}
 	var entries []entry
-	rows, err := st.DB().Query(`SELECT artifact_id, token_id, ip, ua, path, status, ts FROM access_log WHERE artifact_id = ? ORDER BY ts DESC LIMIT ? OFFSET ?`, id, limit, offset)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var e entry
-			var ts string
-			_ = rows.Scan(&e.ArtifactID, &e.TokenID, &e.IP, &e.UA, &e.Path, &e.Status, &ts)
-			e.TS = ts
-			entries = append(entries, e)
+	logEntries, lerr := st.ListAccessLog(id, limit, offset)
+	if lerr == nil {
+		for _, le := range logEntries {
+			entries = append(entries, entry{
+				ArtifactID: le.ArtifactID,
+				TokenID:    le.TokenID,
+				IP:         le.IP,
+				UA:         le.UA,
+				Path:       le.Path,
+				Status:     le.Status,
+				TS:         le.TS.Format(time.RFC3339),
+			})
 		}
 	}
 	if entries == nil {
@@ -759,4 +829,25 @@ func artifactRemoteHost(h *Handler, r *http.Request, id string) string {
 		}
 	}
 	return ""
+}
+
+func allowedArtifactExt(ext string) bool {
+	switch ext {
+	case ".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".json", ".map",
+		".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+		".woff", ".woff2", ".ttf", ".otf", ".eot", ".txt", ".xml", ".csv",
+		".pdf", ".mp4", ".webm", ".mp3", ".wav", ".ogg", ".wasm":
+		return true
+	}
+	return false
+}
+
+func artifactMaxBytes() int64 {
+	const defaultMax = 100 * 1024 * 1024
+	if v := os.Getenv("OCODE_ARTIFACT_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMax
 }

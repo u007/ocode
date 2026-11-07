@@ -782,7 +782,14 @@ func NewHandler() *Handler {
 			return shellpkg.NewSession(opts)
 		}, defaultSessionIdleTimeout, time.Now),
 		mediaTokens:                  newMediaTokenStore(),
-		artifactTokens:               newArtifactTokenStore(artifactStoreDir()),
+		artifactTokens:               func() *artifactTokenStore {
+			st, err := newArtifactTokenStore(artifactStoreDir())
+			if err != nil {
+				log.Printf("artifact token store init failed: %v", err)
+				return nil
+			}
+			return st
+		}(),
 		artifactRL:                   newRateLimiter(),
 		terminalProcsWake:            make(chan struct{}, 1),
 		secretJobs:                   secretjob.NewManager(),

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -9,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -99,21 +101,120 @@ func TokenIDFromContext(ctx context.Context) string {
 	return ""
 }
 
+// artifactArgon2Concurrency bounds how many Argon2id verifications the visitor
+// path runs at once. Each one allocates 64 MiB, so an unbounded burst of
+// password attempts is a memory and CPU amplifier.
+const artifactArgon2Concurrency = 4
+
 type artifactTokenStore struct {
 	store *artifacts.Store
 	mu    sync.Mutex
+	// pwSem is a non-blocking semaphore over Argon2 verifications. A nil
+	// channel (zero-value store) never acquires, so it fails closed.
+	pwSem chan struct{}
 }
 
-func newArtifactTokenStore(dir string) *artifactTokenStore {
+func newArtifactTokenStore(dir string) (*artifactTokenStore, error) {
 	s, err := artifacts.NewStore(dir)
 	if err != nil {
-		return &artifactTokenStore{}
+		return nil, err
 	}
 	if err := s.Migrate(); err != nil {
-		// keep store; methods may still work
+		s.Close()
+		return nil, err
 	}
 	// ensure prune of expired at startup is deferred; not blocking
-	return &artifactTokenStore{store: s}
+	return &artifactTokenStore{store: s, pwSem: make(chan struct{}, artifactArgon2Concurrency)}, nil
+}
+
+// checkPassword verifies a password for token at under the Argon2 semaphore.
+// The attempt is counted against key BEFORE the hash runs, and a success
+// clears that key. busy reports that every verification slot was taken: the
+// caller answers 429 and the attempt is not counted, since the server, not the
+// visitor, was the limit.
+func (st *artifactTokenStore) checkPassword(rl *rateLimiter, key string, at artifacts.AccessToken, password string) (ok bool, busy bool) {
+	select {
+	case st.pwSem <- struct{}{}:
+	default:
+		return false, true
+	}
+	defer func() { <-st.pwSem }()
+	if rl != nil {
+		rl.recordFailure(key)
+	}
+	ok = verifyPassword(password, at.PasswordHash)
+	if ok && rl != nil {
+		rl.reset(key)
+	}
+	return ok, false
+}
+
+// passwordCookieName is the per-artifact cookie that remembers a passed
+// password gate, so subresources (JS/CSS) load without ?password=.
+func passwordCookieName(artifactID string) string {
+	return "artifact_password_" + artifactID
+}
+
+// passwordCookieValue derives the cookie value from the token's stored
+// Argon2 hash: HMAC-SHA256(key=PasswordHash, msg=artifactID|tokenID), prefixed
+// by the token id. The raw password is never stored client-side, and the value
+// stops verifying as soon as the password (and so the hash) changes.
+func passwordCookieValue(artifactID string, at artifacts.AccessToken) string {
+	mac := hmac.New(sha256.New, []byte(at.PasswordHash))
+	mac.Write([]byte(artifactID + "|" + at.ID))
+	return at.ID + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
+// passwordCookieOK reports whether the request carries a valid password-gate
+// cookie for this token. It is cheap (no Argon2), so it is checked first.
+func passwordCookieOK(r *http.Request, artifactID string, at artifacts.AccessToken) bool {
+	if at.PasswordHash == "" || at.ID == "" {
+		return false
+	}
+	c, err := r.Cookie(passwordCookieName(artifactID))
+	if err != nil || len(c.Value) > 2*artifactTokenMaxLen {
+		return false
+	}
+	return hmac.Equal([]byte(c.Value), []byte(passwordCookieValue(artifactID, at)))
+}
+
+// inviteAccessOK reports whether the request carries the access cookie that
+// an accepted invite sets, and that cookie names an accepted allow-list entry
+// for this artifact. The cookie holds the raw invite token; only its hash is
+// stored, so the check is a hash lookup and survives restarts.
+func (st *artifactTokenStore) inviteAccessOK(r *http.Request, artifactID string) bool {
+	if st == nil || st.store == nil {
+		return false
+	}
+	c, err := r.Cookie("artifact_access_" + artifactID)
+	if err != nil || c.Value == "" || len(c.Value) > artifactTokenMaxLen {
+		return false
+	}
+	_, err = st.store.GetAcceptedAllowEntryByInviteHash(artifactID, sha256Sum(c.Value))
+	return err == nil
+}
+
+// artifactClientKey is the rate-limit and access-log key for a visitor. Behind
+// `tailscale serve`/`funnel` every request arrives from loopback, so the real
+// client is taken from X-Forwarded-For, right-most entry, which is the one the
+// local proxy appended or overwrote. A non-loopback peer is its own address and
+// its forwarding headers are ignored, so a remote caller cannot pick its key.
+func artifactClientKey(r *http.Request) string {
+	host := realIP(r)
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return host
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return host
+	}
+	hops := strings.Split(xff, ",")
+	last := strings.TrimSpace(hops[len(hops)-1])
+	if net.ParseIP(last) == nil {
+		return host
+	}
+	return last
 }
 
 func artifactStoreDir() string {
@@ -170,9 +271,6 @@ func (st *artifactTokenStore) issue(artifactID, kind string, expiresAt time.Time
 		return "", "", errors.New("artifact token store not initialized")
 	}
 	// ensure artifact row exists for FK
-	if _, err := st.store.GetArtifact(artifactID); err != nil {
-		_, _ = st.store.CreateArtifact(artifacts.Artifact{ID: artifactID, Status: "active"})
-	}
 	tok, err := newArtifactTokenValue()
 	if err != nil {
 		return "", "", err
@@ -253,7 +351,8 @@ func (st *artifactTokenStore) verifyTokenPassword(at artifacts.AccessToken, pass
 
 func artifactAuthMiddlewareImpl(store *artifactTokenStore, rl *rateLimiter, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip := realIP(r)
+		// Blocked-state is checked before any token or Argon2 work.
+		ip := artifactClientKey(r)
 		if rl != nil && rl.isBlocked(ip) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
@@ -296,34 +395,50 @@ func artifactAuthMiddlewareImpl(store *artifactTokenStore, rl *rateLimiter, next
 			return
 		}
 
-		if at.PasswordHash != "" {
+		// Password gate. The derived cookie is checked first (no Argon2). A
+		// presented ?password= / header is verified under the semaphore, and
+		// the attempt is counted inside checkPassword before the hash runs.
+		if at.PasswordHash != "" && !passwordCookieOK(r, artifactID, at) {
 			pw := r.URL.Query().Get("password")
 			if pw == "" {
 				pw = r.Header.Get("X-Artifact-Password")
 			}
 			if pw == "" {
-				if c, err := r.Cookie("artifact_password_" + artifactID); err == nil {
-					pw = c.Value
-				}
-			}
-			if !store.verifyTokenPassword(at, pw) {
 				if rl != nil {
 					rl.recordFailure(ip)
 				}
 				w.Header().Set("WWW-Authenticate", `Basic realm="artifact"`)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				http.NotFound(w, r)
+				return
+			}
+			ok, busy := store.checkPassword(rl, ip, at, pw)
+			if busy {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "too many password checks in progress", http.StatusTooManyRequests)
+				return
+			}
+			if !ok {
+				w.Header().Set("WWW-Authenticate", `Basic realm="artifact"`)
+				http.NotFound(w, r)
 				return
 			}
 		}
 
-		if email := artifactVisitorEmail(r); email != "" && store.store != nil {
-			if _, err := store.store.GetAllowEntry(artifactID, email); err != nil {
-				if rl != nil {
-					rl.recordFailure(ip)
-				}
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
+		// Email allow-list gate, fail closed. An artifact with any allow-list
+		// entry needs a server-verified invite cookie (an accepted invite for
+		// THIS artifact). A self-asserted email, with no verification, never
+		// passes, and a lookup error denies.
+		hasList, err := store.store.HasAllowlist(artifactID)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if hasList && !store.inviteAccessOK(r, artifactID) {
+			if rl != nil {
+				rl.recordFailure(ip)
 			}
+			http.NotFound(w, r)
+			return
 		}
 
 		if rl != nil {
@@ -356,14 +471,4 @@ func (h *Handler) artifactAuthMiddleware(next http.HandlerFunc) http.HandlerFunc
 		rl = h.artifactRL
 	}
 	return artifactAuthMiddlewareImpl(store, rl, next)
-}
-
-func artifactVisitorEmail(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if c, err := r.Cookie("artifact_email"); err == nil {
-		return c.Value
-	}
-	return r.URL.Query().Get("email")
 }

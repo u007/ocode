@@ -7058,3 +7058,7 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - Phase 2: server-side apps in Podman containers (per-app volume, DB creds, backup/restore).
 - Phase 3: production-ready DBs (Postgres/MySQL scoped write connections).
 - See docs/superpowers/specs/2026-11-07-publish-share-project-design.md
+
+## Open: publish/share artifact build command execution deferred (2026-11-07)
+
+- **Build command recorded but not executed.** `HandlePublish` stores `build_cmd` on the published version but does not run it; output is not captured to a build log. Implementing under permission+sandbox gates is deferred. Until then, `BuildLogPath` stays empty and publishers must run builds out-of-band.
