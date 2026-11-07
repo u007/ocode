@@ -2177,7 +2177,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// 2. Bootstrap once if needed. Failure surfaces as turn_error carrying the
 	// failing stage; the message stays pending (durable) for the next job.
 	as := h.lookupAgentSession(id)
-	if as == nil {
+	if as == nil || as.agent == nil {
 		var err error
 		var stage string
 		as, stage, err = h.bootstrapEntryAgent(entry, job.model)
@@ -2846,6 +2846,9 @@ func (h *Handler) saveSessionAsync(sessionID, title string, msgs []agent.Message
 // tool-dispatch goroutines inside Step, not just the calling goroutine. Only
 // the snapshot copy is taken under it; the enqueue itself runs outside.
 func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []agent.Message) {
+	if as == nil || as.agent == nil {
+		return
+	}
 	prev := as.agent.OnMessage
 	var mu sync.Mutex
 	live := append([]agent.Message(nil), base...)

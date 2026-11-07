@@ -624,7 +624,8 @@ func (h *Handler) scheduleQueueDrain(id string) {
 		}
 		// Only drain when a resident agent exists; otherwise the pending message
 		// stays durable and is picked up on the next real turn.
-		if h.lookupAgentSession(id) == nil {
+		as := h.lookupAgentSession(id)
+		if as == nil || as.agent == nil {
 			return
 		}
 		model := h.effectiveSessionModel(id)
