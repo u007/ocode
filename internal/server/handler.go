@@ -58,6 +58,9 @@ type Handler struct {
 	// (Handler.mu is a map lock, never a work lock). nil = no exposure
 	// subsystem, which the handlers treat as "nothing shared".
 	tailscaleShareSnapshot func() tailscaleShareStatus
+	// artifactTailscaleShareSnapshot reports the Mode A artifact exposure state
+	// without starting one.
+	artifactTailscaleShareSnapshot func() tailscaleShareStatus
 	// sysPermMu serializes read-modify-write of the system-permissions
 	// sub-tree (persisted + the in-memory h.cfg copy).
 	sysPermMu sync.Mutex

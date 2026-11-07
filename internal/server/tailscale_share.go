@@ -26,6 +26,11 @@ import (
 // assets and API calls under the mount instead of the tailnet root.
 const desktopTailscalePath = "desktop"
 
+// artifactTailscalePath is the single global mount for ALL published artifacts
+// in Mode A (self-hosted). One mount, dispatched by artifact id inside the
+// server's /p/{id}/... routes — never N mounts (one per artifact).
+const artifactTailscalePath = "p"
+
 // tailscaleShareStatus is the wire shape shared by the status endpoint and the
 // auto-share config response. `running` means an exposure is PROVEN live (a URL
 // came back from funnel or serve, not a bare DNS-name guess); `kind` says which
@@ -53,6 +58,12 @@ type tailscaleShare struct {
 	// overwrite the first's target. It is deliberately separate from mu so a
 	// status read (which takes only mu) never blocks behind a slow exposure.
 	opMu sync.Mutex
+
+	// mount is the raw --set-path prefix this instance exposes. Empty means
+	// desktopTailscalePath (the historical desktop share). The artifact
+	// exposure instantiates its own tailscaleShare with mount="p" so it gets
+	// a separate, single global /p/* mount that never clobbers /desktop.
+	mount string
 
 	mu      sync.Mutex
 	url     string
@@ -108,15 +119,16 @@ func (t *tailscaleShare) expose(kind, target string) (string, *exec.Cmd, string,
 		u, resolved := t.exposeFn(kind)
 		return u, nil, "", resolved
 	}
+	prefix := t.mountPath()
 	if kind == "serve" {
-		u, proc, hint := tailscale.StartServeExpose(target, desktopTailscalePath)
+		u, proc, hint := tailscale.StartServeExpose(target, prefix)
 		if u == "" {
 			return "", proc, hint, ""
 		}
 		// StartServeExpose only ever runs `serve`, so a URL proves tailnet-only.
 		return u, proc, hint, "serve"
 	}
-	return tailscale.StartExposeWithKind(target, desktopTailscalePath)
+	return tailscale.StartExposeWithKind(target, prefix)
 }
 
 // removeSetPath removes this instance's mount, or reports the removal to the
@@ -127,6 +139,14 @@ func (t *tailscaleShare) removeSetPath(pathPrefix string) {
 		return
 	}
 	tailscale.RemoveSetPath(pathPrefix)
+}
+
+// mountPath returns the raw --set-path prefix this instance exposes.
+func (t *tailscaleShare) mountPath() string {
+	if t.mount != "" {
+		return t.mount
+	}
+	return desktopTailscalePath
 }
 
 // statusLocked builds the status from cached state. Caller must hold t.mu.
@@ -212,7 +232,7 @@ func (t *tailscaleShare) start(kind string, port int) tailscaleShareStatus {
 	t.proc = proc
 	t.started = proven
 	if proven {
-		t.path = tailscale.SanitizePath(desktopTailscalePath)
+		t.path = tailscale.SanitizePath(t.mountPath())
 		// Expose the browse proxy on the second HTTPS port (best-effort).
 		// A failure here does not fail the main share.
 		if t.browseProxyPort != 0 {
@@ -454,4 +474,47 @@ func (t *tailscaleShare) browseRemove() {
 	}
 	cmd := exec.Command(tailscalePath, "serve", fmt.Sprintf("--https=%d", browseHTTPSProxyPort), "off")
 	_ = cmd.Run()
+}
+
+// artifactTailscaleShareStatus reports the Mode A artifact exposure without
+// starting one.
+func (s *Server) artifactTailscaleShareStatus() tailscaleShareStatus {
+	if s.artifactShare == nil {
+		return tailscaleShareStatus{Available: tailscale.Installed()}
+	}
+	return s.artifactShare.status()
+}
+
+// handleGetArtifactTailscaleShare reports the artifact exposure state.
+func (s *Server) handleGetArtifactTailscaleShare(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.artifactTailscaleShareStatus())
+}
+
+// handleStartArtifactTailscaleShare starts the (explicit, user-confirmed)
+// artifact exposure. Defaults to tailnet-only serve; a funnel (public) upgrade
+// happens only on an explicit request, never unattended.
+func (s *Server) handleStartArtifactTailscaleShare(w http.ResponseWriter, r *http.Request) {
+	if s.artifactShare == nil {
+		writeJSON(w, http.StatusOK, tailscaleShareStatus{Available: tailscale.Installed()})
+		return
+	}
+	port := serverPort(s.Addr())
+	if port == 0 {
+		writeError(w, http.StatusServiceUnavailable, "server port unavailable")
+		return
+	}
+	kind := "serve"
+	if r.URL.Query().Get("funnel") == "1" || r.URL.Query().Get("public") == "1" {
+		kind = "full"
+	}
+	s.artifactShare.start(kind, port)
+	writeJSON(w, http.StatusOK, s.artifactShare.status())
+}
+
+// handleStopArtifactTailscaleShare tears down the artifact exposure.
+func (s *Server) handleStopArtifactTailscaleShare(w http.ResponseWriter, r *http.Request) {
+	if s.artifactShare != nil {
+		s.artifactShare.stop()
+	}
+	writeJSON(w, http.StatusOK, s.artifactTailscaleShareStatus())
 }
