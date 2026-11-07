@@ -102,6 +102,8 @@ export interface PublishArtifactResponse {
   artifact?: Artifact;
   notify_sent?: boolean;
   email_sent?: boolean;
+  /** Present when the artifact was published to the hub (hosting_mode=hub). */
+  hub_url?: string;
 }
 
 export interface CreateArtifactRequest {

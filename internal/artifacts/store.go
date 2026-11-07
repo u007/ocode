@@ -119,7 +119,8 @@ func (s *Store) Migrate() error {
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT '',
-			hosting_mode TEXT NOT NULL DEFAULT ''
+			hosting_mode TEXT NOT NULL DEFAULT '',
+			hub_token TEXT NOT NULL DEFAULT ''
 		)`,
 			`CREATE TABLE IF NOT EXISTS artifact_versions (
 			id TEXT PRIMARY KEY,
@@ -178,6 +179,17 @@ func (s *Store) Migrate() error {
 		for _, st := range stmts {
 			if _, err := tx.Exec(st); err != nil {
 				return fmt.Errorf("artifacts: migrate exec: %w", err)
+			}
+		}
+		// Additive column for stores created before hub publishing existed.
+		// SQLite has no ADD COLUMN IF NOT EXISTS, so probe first.
+		var hasHubToken int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name = 'hub_token'`).Scan(&hasHubToken); err != nil {
+			return fmt.Errorf("artifacts: migrate probe hub_token: %w", err)
+		}
+		if hasHubToken == 0 {
+			if _, err := tx.Exec(`ALTER TABLE artifacts ADD COLUMN hub_token TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("artifacts: migrate add hub_token: %w", err)
 			}
 		}
 		return tx.Commit()
@@ -852,6 +864,41 @@ func (s *Store) SetArtifactStatus(id, status string) error {
 		}
 		return nil
 	})
+}
+
+// SetArtifactHubToken stores the public token the hub was given for this
+// artifact, so a re-publish reuses the same link. The hub stores only its
+// sha256; this local copy is the client's only way to rebuild the URL.
+func (s *Store) SetArtifactHubToken(id, token string) error {
+	return s.withLock(func() error {
+		res, err := s.db.Exec(`UPDATE artifacts SET hub_token = ? WHERE id = ?`, token, id)
+		if err != nil {
+			return fmt.Errorf("artifacts: set hub token: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// GetArtifactHubToken returns the stored hub public token (empty if none).
+func (s *Store) GetArtifactHubToken(id string) (string, error) {
+	var token string
+	err := s.withLock(func() error {
+		return s.db.QueryRow(`SELECT hub_token FROM artifacts WHERE id = ?`, id).Scan(&token)
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("artifacts: get hub token: %w", err)
+	}
+	return token, nil
 }
 
 // HasAllowlist reports whether the artifact has any allow-list entry. An

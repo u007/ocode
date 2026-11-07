@@ -184,3 +184,25 @@ func TestMaybePruneAccessLogThrottles(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }
+
+func TestStoreHubToken(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate())
+	a, err := s.CreateArtifact(Artifact{Name: "demo", Status: "active"})
+	require.NoError(t, err)
+
+	got, err := s.GetArtifactHubToken(a.ID)
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	require.NoError(t, s.SetArtifactHubToken(a.ID, "public-token"))
+	got, err = s.GetArtifactHubToken(a.ID)
+	require.NoError(t, err)
+	require.Equal(t, "public-token", got)
+
+	// Migrate is idempotent after the additive column.
+	require.NoError(t, s.Migrate())
+
+	require.ErrorIs(t, s.SetArtifactHubToken("missing", "x"), ErrNotFound)
+}

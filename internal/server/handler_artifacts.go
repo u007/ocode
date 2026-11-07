@@ -473,6 +473,18 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("publish: %v", err))
 		return
 	}
+	// Mode B: upload the version to the hub. There is deliberately no local
+	// fallback — a hub failure fails the publish (502) instead of silently
+	// shipping a link that dies with this machine.
+	var hubURL string
+	if strings.EqualFold(a.HostingMode, "hub") {
+		url, herr := h.publishArtifactToHub(r.Context(), a, entrypoint, buildCmd, files, st)
+		if herr != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("hub publish: %v", herr))
+			return
+		}
+		hubURL = url
+	}
 	// mint tokens? skip
 	// notify email
 	emailSent := false
@@ -512,6 +524,7 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		"artifact":    a,
 		"notify_sent": emailSent,
 		"email_sent":  emailSent,
+		"hub_url":     hubURL,
 	})
 }
 
