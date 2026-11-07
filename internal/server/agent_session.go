@@ -2438,6 +2438,9 @@ func nextUserSeq(messages []agent.Message) int {
 // Each stranded message is dispatched as an ordinary follow-up turn so
 // nothing submitted by the user is ever silently dropped.
 func (h *Handler) flushStrandedInjections(sessionID string, as *agentSession) {
+	if as == nil || as.agent == nil {
+		return
+	}
 	for _, m := range as.agent.DrainPendingInjections() {
 		if _, err := h.dispatchTurn(sessionID, "", m.Content, turnOptions{}); err != nil {
 			log.Printf("serve: flush stranded injection for %s: %v", sessionID, err)

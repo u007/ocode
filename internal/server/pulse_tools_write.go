@@ -622,6 +622,11 @@ func (h *Handler) scheduleQueueDrain(id string) {
 		if h.sessions.IsTurnActive(id) {
 			return
 		}
+		// Only drain when a resident agent exists; otherwise the pending message
+		// stays durable and is picked up on the next real turn.
+		if h.lookupAgentSession(id) == nil {
+			return
+		}
 		model := h.effectiveSessionModel(id)
 		if _, err := h.dispatchTurn(id, model, "", turnOptions{retryLast: true}); err != nil {
 			log.Printf("serve: queue drain dispatch for %s: %v", id, err)

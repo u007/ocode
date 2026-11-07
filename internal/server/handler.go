@@ -1008,6 +1008,9 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 // in headless mode), the tool branch emits a `permission` frame so a connected
 // browser can render the approve/deny dialog.
 func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) {
+	if ag == nil {
+		return
+	}
 	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
 	// "reasoning" → "thinking", "text" → "text".
 	ag.OnDelta = func(kind, text string) {

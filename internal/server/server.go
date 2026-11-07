@@ -290,6 +290,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
 	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
+	s.mux.HandleFunc("GET /api/sessions/{id}/comm-status", s.authMiddleware(s.handleSessionCommStatus))
+	s.mux.HandleFunc("POST /api/sessions/{id}/queue", s.authMiddleware(s.handleSessionQueue))
 	s.mux.HandleFunc("GET /api/sessions/{id}/search", s.authMiddleware(s.handleSearchSession))
 	// Backs the web/desktop alt+up/alt+down jump between the user's own
 	// messages; see handler_session_user_messages.go.
@@ -1848,6 +1850,16 @@ func (s *Server) handleSessionState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSessionStatus(w, r, id)
+}
+
+func (s *Server) handleSessionCommStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSessionCommStatus(w, r, id)
+}
+
+func (s *Server) handleSessionQueue(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSessionQueue(w, r, id)
 }
 
 func (s *Server) handleSearchSession(w http.ResponseWriter, r *http.Request) {
