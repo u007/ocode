@@ -77,7 +77,7 @@ mode, never an automatic fallback from a failed hub publish.
 | Q6 | Build step | **Optional**, arbitrary user build command, run under existing permission + sandbox gates, opt-in per publish. |
 | Q7 | Hosting location | **Hub-hosted (hub.mercstudio.com)** — stays up. (decided) |
 | Q8 | Domain | **Subdomain per artifact** (see §10). Subdirectory form documented as fallback with same-origin limitation. |
-| Q9 | Email | **Invitations to allow-list members via magic link** (confirmed). Whether to also **notify on publish** is still open (see §19). |
+| Q9 | Email | **Invitations to allow-list members via magic link** (confirmed). Notify-on-publish is an **opt-in checkbox, default unchecked** (see §12). |
 | Q10 | Build command allowlist | Arbitrary command, opt-in per publish (decided). |
 
 ## 5. References to existing ocode pieces (do not reinvent)
@@ -258,9 +258,8 @@ All long work outside `Handler.mu`, under per-artifact/per-project lock, through
   access gate for `allowlist` level).
 
 **Interpretation of "email also" (user answer Q9):** the confirmed use is
-invitation/access gating only. Whether the hub also **notifies** the owner or
-allow-list when a new version goes live is a separate, still-open product
-decision (see §19 item 1). This spec does not assume notify-on-publish.
+invitation/access gating only. Notify-on-publish is a separate, opt-in capability
+(checkbox, default unchecked; see §12) and is not assumed by default.
 - **Notify on publish (opt-in):** publish dialog offers a "Notify on publish"
   checkbox, **default unchecked**. When checked, the hub emails the owner (and for
   `allowlist` level, the allow-list members) that a new version is live. When
@@ -269,8 +268,10 @@ decision (see §19 item 1). This spec does not assume notify-on-publish.
   it (unchecked/omitted never sends). The UI initial state is unchecked and does not
   remember the last value unless explicitly specified. Invitation emails (§12) are
   separate and always sent for allow-list entries regardless of this checkbox.
-- v1: ocode emits the invite URL + copyable message (Mode A) OR hub sends email
-  (Mode B, preferred — server-side sending).
+**Assumption (hub email):** Mode B (hub-hosted) assumes the hub can send email
+(both invitation magic links and optional notify-on-publish). If the hub lacks this
+capability, ocode ships `internal/mailer` (SMTP/Resend) and calls it server-side.
+Discoverable at implementation time; not a product decision.
 - v1.1 (optional): SMTP/Resend provider config in new `internal/mailer`, API key
   stored encrypted (like dbconnect), never plaintext in ocodeconfig.
 - Invite token = 32 bytes, hashed, single-use, TTL (default 7 days).
