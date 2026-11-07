@@ -29,6 +29,7 @@ import (
 	"github.com/u007/ocode/internal/runcli"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretcli"
+	"github.com/u007/ocode/internal/sessioncli"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/skill"
@@ -215,6 +216,12 @@ func main() {
 			return
 		case "acp":
 			if err := acp.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "session":
+			if err := sessioncli.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

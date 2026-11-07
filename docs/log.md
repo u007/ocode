@@ -4,6 +4,11 @@
 
 
 
+## 2026-11-07
+
+* **Creation**: Inter-session communication — shared tools and HTTP surface for agents to inspect and drive other sessions ([concepts/inter-session-communication.md](/concepts/inter-session-communication.md))
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
+
 ## 2026-11-06
 
 * **Update**: Office Add-in Path Presets — Save-Time OS Access Request ([concepts/office-addin-path-presets.md](/concepts/office-addin-path-presets.md))

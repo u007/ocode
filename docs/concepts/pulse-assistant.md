@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)
-description: 'Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.'
+description: 'Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits. Also records that the session-communication subset is exposed to every non-Pulse session via sessionCommTools() and the two general endpoints GET /api/sessions/{id}/comm-status and POST /api/sessions/{id}/queue.'
 tags:
   - pulse
   - assistant
@@ -22,6 +22,12 @@ session did, what a terminal printed. It is ONE global chat that can read every
 local session and terminal of this server process. Its read tools run freely.
 Its write tools (message a session, run a slash command, answer an ask) go
 through the normal permission dialog, see "Permission design".
+
+The session-communication subset of these tools is no longer Pulse-only: every
+non-Pulse session gets it through `sessionCommTools()` (see
+[inter-session-communication.md](inter-session-communication.md)). Terminal,
+memory and activation tools remain Pulse-only. This page describes the full set;
+that page covers the shared subset, its wiring and the HTTP surface.
 
 ## Identity and root
 
@@ -72,6 +78,20 @@ All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 `HandlePulseAssistant`, `HandleGetPulseModel`, `HandleSetPulseModel`
 (`internal/server/pulse_assistant.go`).
 
+### Inter-session communication endpoints
+
+Two general session endpoints carry the same feature outside the assistant
+([inter-session-communication.md](inter-session-communication.md)):
+
+| Route | Response |
+|---|---|
+| `GET /api/sessions/{id}/comm-status` | `{session_id, project_path, title, turn_active, goal?, todo?, last_message, message_count}`. `404` for an unknown session. The live transcript is used when the session lock can be taken without blocking (`TryLock`), otherwise the persisted copy; `last_message` is the last non-empty assistant message; `goal` and `todo` are omitted when unset. |
+| `POST /api/sessions/{id}/queue` | Body `{"content": "..."}`. Persists the user message, appends it to the session pending queue and drains it when the session goes idle (`scheduleQueueDrain`). `202 {session_id, queued: true}`; `400` when content is empty; `404` for an unknown session; `429` when the queue already holds 10 messages. |
+
+Handlers: `HandleSessionCommStatus`, `HandleSessionQueue`
+(`internal/server/handler_session_comm.go`), registered in
+`Server.registerRoutes`.
+
 ## Config keys
 
 - `ocode.pulse_model` (string): model slot. Written only by
@@ -121,7 +141,9 @@ Built in `buildAgentSession` when `isPulseSession(id)`, via
 - **Tools**: no builtins, no plugin/MCP tools. `Agent.RestrictToTools` replaces the
   whole tool map (NewAgent registers bash/task/advisor itself) and turns discovery
   off. The read tools and `memory_write` get explicit `allow` permission rules; the
-  eight write tools get none (see "Permission design").
+  tools marked **asks** get none (see "Permission design"). Non-Pulse sessions do not
+  run `configurePulseAgent`; they get the shared subset via `sessionCommTools()`
+  instead (see [inter-session-communication.md](inter-session-communication.md)).
 - **System prompt**: `Agent.SetSystemPromptOverride` makes `BasePromptMessages`
   return one stable system message, replacing the env block, mode, recap and
   project context. Default text is `pulseBaseSystemPrompt` (built-in) with the
@@ -316,10 +338,19 @@ and appends `"truncated": true` as the trailing field. Errors are returned as
 errors, never as an empty result. Arguments decode strictly: an unknown field is an
 error.
 
+**Exposure.** The table below is the full set. Every non-Pulse session gets
+`sessionCommTools()` instead: `h.pulseTools()` minus every `terminal_*`,
+`memory_*` and `activation_*` tool. That leaves `pulse_board`, `session_read`,
+`session_recap`, `session_ask`, `project_list`, `agent_runs`, `session_send`,
+`session_new`, `session_close`, `session_command`, `permission_resolve`,
+`question_answer`, `question_dismiss` and `host_connect`. Read tools get an allow
+rule; the ask tools keep the normal permission dialog. See
+[inter-session-communication.md](inter-session-communication.md).
+
 | Tool | Args | Returns | Limits |
 |---|---|---|---|
 | `pulse_board` | `scope?` live (default) / all | `{items: [PulseRow], hosts_unavailable?: [{host, reason}]}`: this server's rows as `GET /api/pulse` plus the rows of every connected remote host, merged in board order; a remote row carries `host` | cap drops tail rows; a remote host that is not connected or does not answer contributes no rows and is named in `hosts_unavailable` (see "Remote hosts") |
-| `session_read` | `session_id`, `host?`, `last?` 1-200 (30), `search?` | `{session_id, host?, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
+| `session_read` | `session_id`, `host?`, `last?` 1-200 (30), `search?` | `{session_id, host?, project_path, title, goal?, todo?, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; `goal` is the live or persisted goal state and `todo` the persisted plan, both omitted when unset; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id`, `host?` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
 | `project_list` | none | `{projects: [{path, name, host?, kind?, group?, connected?}]}`: every project in the store, local and remote (SSH/WSL) | sorted by host then path (local first); `connected` appears on remote projects only and says whether this server holds a live connection to the host right now, without dialing |
 | `host_connect` | `host` | `{host, state: "connected"\|"connecting"\|"failed", error?, retry_after_seconds?}` | **allow rule, no per-call ask**; the host must be the host of a saved project, and the connect uses that project's path and port. Starts the connect in the background and returns after at most `remoteConnectWaitBound` (2 s); `connecting` means check `project_list` or the board later. Never reconnects a connected host, never forces or supersedes an attempt in flight, and leaves a host alone for 30 s after an attempt (`pulseHostConnectCooldown`), answering from the last result |
@@ -328,7 +359,7 @@ error.
 | `terminal_screen` | `terminal_id`, `host?` | `{terminal_id, host?, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
 | `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
-| `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
+| `session_send` | `session_id`, `content`, `queue?` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage`. With `queue: true` on a busy target: `{session_id, queued: true}` | **asks**; refuses the assistant's own id, child ids and unknown sessions. A target that is mid-turn, compacting or paused on an ask is refused unless `queue: true`, in which case the message is persisted, pushed onto its pending queue (cap 10) and drained when it goes idle (`scheduleQueueDrain`). On an idle target `queue` is ignored and the send starts immediately. The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
 | `session_command` | `session_id`, `command`, `args?` | `{session_id, command, result}` where `result` is the operation's own JSON | **asks**; fixed allowlist `/btw` `/cancel` `/compact` `/recap` `/title`, anything else is an error listing them, no send-as-text fallback |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
 | `session_ask` | `session_id`, `host?` | `{session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]}` (empty arrays when nothing is pending) | read; details of the pending permission/question ask(s) a session is paused on — tool for permissions, header/question/options/multiple for questions; use before resolving so the request_id and available options are known. Unless terminal access is enabled (the same gate as `pulseTerminalRows`), a permission keeps only `request_id`, `tool`, `scope` and `agent_name`; an unknown session is an error |
@@ -359,7 +390,9 @@ does not contain either name. The Pulse agent is restricted to the Pulse set wit
 (`internal/server/handler_pulse_terminal_scope_test.go`) pins both directions: an
 ordinary agent never lists them, and a Pulse agent lists only Pulse tools and includes
 them. Do not register a terminal tool anywhere else. Add it to `pulseTools()` and the
-scope test will say whether it leaked.
+scope test will say whether it leaked. The rest of `pulseTools()` is not Pulse-only:
+`sessionCommTools()` exposes the session-communication subset to every non-Pulse
+session (see [inter-session-communication.md](inter-session-communication.md)).
 
 **What the tools return**
 
@@ -501,7 +534,7 @@ serve the Processes tab and the terminal panel. All of these apply the same gate
 ## Permission design
 
 The read tools, `memory_write` and `activation_write` get explicit `allow` rules in
-`configurePulseAgent`. The eight tools marked **asks** (`pulseToolAsk`) get NO
+`configurePulseAgent`. The tools marked **asks** (`pulseToolAsk`) get NO
 rule, so the permission manager's default applies: every call becomes a normal
 permission ask that the assistant window renders as a dialog, and the operator can "always
 allow" from it like any tool. `memory_write` is exempt because it only replaces the
@@ -513,6 +546,12 @@ The write tools call the existing HTTP handlers in-process (`pulseCall`, a
 response recorder with no network), so the real rules (RC-bridge routing, profile
 reconcile, ask matching, always-allow guards) stay in one place. A handler status
 of 400 or above becomes a tool error carrying the handler's message.
+
+For a non-Pulse session, `buildAgentSession` appends `sessionCommTools()` and sets
+an allow rule for every tool with `ask == false` (board, transcript, recap, ask
+inspection, project list, run list, `host_connect`). The ask tools keep no rule, so
+each call raises the normal permission dialog for that session exactly as it does
+for the assistant. There is no separate comm permission mode.
 
 ## Memory layout
 
@@ -584,5 +623,7 @@ assistant never appears as a card, never counts as a child, and is absent from
 - `internal/server/pulse_remote.go`, `pulse_remote_terminal.go` (remote hosts: `project_list`, remote tabs, remote log reader)
 - `internal/server/pulse_activation.go`, `internal/agent/pulse_activation.go` (activation gate)
 - `internal/agent/pulse_assistant.go` (`SetSystemPromptOverride`, `SetPulseSnapshot`, `RestrictToTools`)
-- `internal/server/agent_session.go` (`buildAgentSession` pulse branch)
-- Tests: `handler_pulse_remote_test.go` (remote hosts), `pulse_activation_test.go` (server and agent), `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `internal/agent/pulse_assistant_test.go`
+- `internal/server/agent_session.go` (`buildAgentSession` pulse branch and the non-Pulse `sessionCommTools()` wiring)
+- `internal/server/handler_session_comm.go` (`comm-status`, queue)
+- [inter-session-communication.md](inter-session-communication.md) (shared subset and HTTP surface)
+- Tests: `handler_pulse_remote_test.go` (remote hosts), `pulse_activation_test.go` (server and agent), `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `session_comm_test.go`, `internal/agent/pulse_assistant_test.go`
