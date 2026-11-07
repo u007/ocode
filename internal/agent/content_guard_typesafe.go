@@ -434,7 +434,8 @@ func isContentGuardHostWrapper(line string) bool {
 }
 
 // contentGuardScanView returns the text the guardrail judges in place of content.
-// For a guarded browser action it drops the host's wrapper line. For a controls
+// For a guarded browser action it drops the host's wrapper line, and a result that is
+// the wrapper line alone (no body, no newline) yields an empty view. For a controls
 // read it also renders the JSON as plain lines: the title, url and visible text,
 // then one line per control, with no refs, operations, states, fingerprint or
 // JSON keys. For browser_run it drops the host's untrusted-content notice line,
@@ -476,6 +477,12 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 		return content
 	}
 	header, body, found := strings.Cut(content, "\n")
+	if !found && isContentGuardHostWrapper(content) {
+		// A guarded result with no body is the wrapper line alone (an empty
+		// console or network read). There is no page content to judge, so the
+		// view is empty and scanContentGuard returns no verdict for it.
+		return ""
+	}
 	if !found || !isContentGuardHostWrapper(header) {
 		// intentionally not logged: the host writes the wrapper on every guarded
 		// browser result, so a result without it is judged as it arrived.
