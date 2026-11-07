@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-11-06T12:23:13Z
+timestamp: 2026-11-06T17:11:08Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -123,7 +123,7 @@ Some requests are **opaque**: the command head is something the model cannot det
 - If `permissions.auto.min_confidence` is **unset**, the effective floor becomes the opaque default `0.75` (the normal default `0.80` is relaxed for opaque requests; the default was `0.85` until 2026-10-03).
 - If `min_confidence` is configured (any positive value — `0.70`, `0.85`, `0.95`), the configured value governs the opaque request too. A permissive configured value is never raised and a stricter configured value is never lowered: the opaque relaxation can never silently change the user's own bar.
 
-This is the **only** category that triggers the opaque relaxation. Every other concern (`outside_allowed_roots`, `destructive`, `secrets`, `banned_prefix`, `network`, `subprocess_or_dynamic_code`, `system_or_git_history`) keeps the normal `permissions.auto.min_confidence` floor (default `0.85`). The opaque relaxation does not apply when those categories are the concern, even if `truncated_or_unknown` is also present (the relaxation applies when `truncated_or_unknown` is the judge's concern answer, not when it merely appears elsewhere).
+This is the **only** category that triggers the opaque relaxation. Every other concern (`outside_allowed_roots`, `destructive`, `secrets`, `banned_prefix`, `network`, `subprocess_or_dynamic_code`, `system_or_git_history`) keeps the normal `permissions.auto.min_confidence` floor (default `0.80`). The opaque relaxation does not apply when those categories are the concern, even if `truncated_or_unknown` is also present (the relaxation applies when `truncated_or_unknown` is the judge's concern answer, not when it merely appears elsewhere).
 
 **What the opaque floor does and does not do:** it only lowers the threshold for an `allow` verdict — a `deny` from the judge still defers to the human in full. The concern answer `truncated_or_unknown` does **not** decide the verdict; it only selects which floor applies. Deterministic `verifyAutoGrant` still runs after the floor check, so a hard-blocked command, dangerous `rm`, or other Go guard refusal still wins regardless of the lower floor.
 
@@ -244,7 +244,7 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 
 ## Related
 
-- Judge contract: the TypeSafe/Jev concern answer does **not** decide the verdict — a `deny` still defers to the human. It only selects the confidence floor for an `allow` verdict: `truncated_or_unknown` → opaque floor `0.75` (`min(normal, 0.75)`), every other concern → `permissions.auto.min_confidence` (default `0.85`). Deterministic `verifyAutoGrant` runs after the floor check.
+- Judge contract: the TypeSafe/Jev concern answer does **not** decide the verdict — a `deny` still defers to the human. It only selects the confidence floor for an `allow` verdict: `truncated_or_unknown` → opaque floor `0.75` (`min(normal, 0.75)`), every other concern → `permissions.auto.min_confidence` (default `0.80`). Deterministic `verifyAutoGrant` runs after the floor check.
 - Design doc: `docs/superpowers/specs/2026-09-21-auto-permission-enforced-categories-design.md`.
 - Modes and how the auto-permission layer sits among them: [Sandbox Permission Mode](concepts/sandbox-permission-mode.md).
 - Shared Jev/TypeSafe vocabulary and confidence-floor conventions: [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md).

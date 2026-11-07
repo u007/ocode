@@ -14,7 +14,7 @@ tags:
   - pending-ask
   - async
   - turn_error
-timestamp: 2026-11-05T08:19:36Z
+timestamp: 2026-11-07T02:07:18Z
 status: active
 ---
 
@@ -80,8 +80,8 @@ exactly as long as the ask existed — the very window the dialog needs to be
 visible. The registry is therefore built to live outside `as.mu` (own mutex, no
 `as.mu` anywhere in it), which is also what makes it answerable while the parked
 turn holds the lock: `handleChildPermResolve` never takes `as.mu`, and a stale id
-404s instead of falling through to `findPendingSession`, which takes a BLOCKING
-`as.mu`. The park itself is bounded — `childPermAskTimeout` is 10 minutes, after
+404s instead of falling through to `findPendingSession`, which takes `as.mu` with a
+bounded wait (`pendingSessionLockWait`, then 503). The park itself is bounded — `childPermAskTimeout` is 10 minutes, after
 which the ask auto-denies and `permission_resolved` closes the dialog (parent
 cancel/stop auto-denies too).
 

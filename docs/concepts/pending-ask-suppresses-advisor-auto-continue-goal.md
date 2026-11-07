@@ -1,9 +1,9 @@
 ---
 type: Concept
 title: Pending ask suppresses advisor, auto-continue, and goal-resume
-description: A permission or question ask (local dialog, queued multi-ask round, parked sub-agent ask, or RC/Telegram remote approval) now suppresses the advisor checkpoints, the auto-continue resume judge, and the /goal resume judge. The suppression relies on an explicit host-declared flag (Agent.SetPendingAsk) OR'd with the transcript scan, and a server-side sessionHasOutstandingAsk() that checks both the transcript tail and the child-ask registry.
+description: A permission or question ask (local dialog, queued multi-ask round, parked sub-agent ask, or RC/Telegram remote approval) now suppresses the advisor checkpoints, the auto-continue resume judge, and the /goal resume judge, except that the auto-continue question judge may answer a structured question ask first (see the Exception section). The suppression relies on an explicit host-declared flag (Agent.SetPendingAsk) OR'd with the transcript scan, and a server-side sessionHasOutstandingAsk() that checks both the transcript tail and the child-ask registry.
 tags: [permissions, asks, agent-loop, advisor, auto-continue, goal, server, tui, gotcha]
-timestamp: 2026-10-20T23:10:22Z
+timestamp: 2026-11-06T17:21:36Z
 ---
 
 # Pending ask suppresses advisor, auto-continue, and goal-resume
@@ -31,6 +31,12 @@ The gap was wider for queued asks and sub-agent asks: a queued ask (not yet show
 
 - `queueDrainBlocked()` was widened from a slot-only check to `anyAskPending()` (slot + queued asks + sub-agent ask + RC/Telegram). This blocks queued-input drain and background-job resume too.
 - The server introduces `Handler.sessionHasOutstandingAsk()`, which checks both the transcript tail (`tailIsPermissionAsk` / `tailIsQuestionAsk`, the main agent's own ask) and the child-ask registry (`as.childAsks.list()`, a parked sub-agent ask). It is used by `autoContinueShouldResume` and `goalShouldResume`, so neither resumes behind the user's back.
+
+## Exception: the auto-continue question judge (2026-11-07)
+
+When the main agent's trailing message is a structured `question` ask, not a permission ask, a child ask or an RC-owned prompt, the auto-continue question judge runs before this suppression applies. It runs when auto-continue is enabled or a goal is evaluable. The server calls `autoContinueAnswerQuestion` at the top of `autoContinueShouldResume`, ahead of the `sessionHasOutstandingAsk` gate. The TUI dispatches `maybeDispatchQuestionJudge` from the `streamDoneMsg` branch where `queueDrainBlocked()` is true.
+
+The judge never resumes past the ask. If it answers, the answer goes through the same path as a human answer (`applyQuestionAnswer` on the server, `submitQuestionAnswers` in the TUI), and the loop then steps on an answered transcript. If it defers, the ask stays pending and the suppression in this document applies unchanged. A deferral appends no transcript row on the server, because a row after the open ask would move it off the tail. The resume judge, the goal judge and the advisor remain suppressed while the ask is pending.
 
 ## Related mechanism
 

@@ -4,6 +4,21 @@
 
 
 
+## 2026-11-07
+
+* **Creation**: Alien Discovery Skill — Coherent-but-Unavailable Combinations (skills/alien-discovery: Jev pair/coherence stats, IPv6 TypeSafe stall gotcha, 2026-11-07 holdout result) ([concepts/alien-discovery-skill.md](/concepts/alien-discovery-skill.md))
+* **Update**: Reader Mode and Viewer Context: the preview record is pushed to the server, read mid-turn by the new `viewer_state` tool, and driven by the new `viewer_control` tool; support matrix per viewer ([concepts/reader-mode-viewer-context.md](/concepts/reader-mode-viewer-context.md))
+* **Creation**: useViewerControl seeding, live buffer and one-directive-per-tick rules ([gotchas/viewer-control-directive-seeding-live-buffer.md](/gotchas/viewer-control-directive-seeding-live-buffer.md))
+* **Update**: Auto-continue question judge: structured question asks are answered from the transcript only when it determines the answer; `answer_question` chain key; Action Set and Design Constraints updated ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-permission default floor corrected from 0.85 to 0.80 to match `autoJudgeMinConfidenceDefault` ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Pending-ask suppression now documents the auto-continue question judge exception: the judge may answer a structured question ask before the suppression applies, and defers leave it pending ([concepts/pending-ask-suppresses-advisor-auto-continue-goal.md](/concepts/pending-ask-suppresses-advisor-auto-continue-goal.md))
+* **Update**: Auto-continue question judge: choice keys are `opt0`, `opt1`, … with the label mapped back by `questionChoiceLabel` (previously raw label text, so a backend could reject every prompt); `questionAlreadyAsked` only reads answers to `question` tool calls; `tool.QuestionOptionIsCustom` is the one custom-option definition; runTurn broadcasts `messages` after an auto-answer; the answered-path failure branches are log-only; anchors re-derived ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Web/desktop locking: `findPendingSession` waits a bounded 3 s on `TryLock` and returns busy, so question answer, question dismiss and permission resolve answer 503 + Retry-After instead of 404/409 while the question judge holds `as.mu` ([concepts/web-server-locking-and-liveness-rules.md](/concepts/web-server-locking-and-liveness-rules.md))
+* **Update**: Pending-ask answer lock wait is bounded (3 s, then 503), and the child-permission gotcha no longer calls the wait blocking ([concepts/question-dismiss-reopen-answer.md](/concepts/question-dismiss-reopen-answer.md), [gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Update**: useViewerControl anchors by server index (`windowStartServerIndex` plus local index) instead of Message identity, so a scroll-back prepend after a turn-end commit no longer re-applies old directives; section 3 rewritten, including the adoptTranscript rule for an unknown window position ([gotchas/viewer-control-directive-seeding-live-buffer.md](/gotchas/viewer-control-directive-seeding-live-buffer.md))
+* **Update**: Viewer controller registry is a per-key stack (top active, unregister restores the one beneath); `useViewerControllerWhen` is gone; Monaco stacks on top only while Edit as text is on ([concepts/reader-mode-viewer-context.md](/concepts/reader-mode-viewer-context.md))
+* **Update**: Excel viewer: `activateRange` now validates the range before switching sheets (`invalid range`), `watchUserEdits`, save and raw-save anchors re-derived, and the raw-save extension list now includes `.docx` and `.pdf` ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
+
 ## 2026-11-06
 
 * **Update**: Office Add-in Path Presets — Save-Time OS Access Request ([concepts/office-addin-path-presets.md](/concepts/office-addin-path-presets.md))

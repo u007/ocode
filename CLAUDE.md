@@ -398,16 +398,36 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1614`, the `GoalEvaluable`
-  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5635`, the
-  `goalEvaluable` branch; the RC branches at `:5402` and `:5476` use the same gate).
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1648`, the `GoalEvaluable`
+  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5641`, the
+  `goalEvaluable` branch; the RC branches at `:5406` and `:5482` use the same gate).
 - **A pending permission or question ask never auto-resumes a goal.** Server
-  `agent_session.go:1442` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
-  decisions sit behind `queueDrainBlocked()`.
+  `agent_session.go:1473` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
+  decisions sit behind `queueDrainBlocked()`. The one thing that may run on a pending
+  `question` ask is the auto-continue QUESTION judge (below), and it runs under a goal
+  too: it either rewrites the ask into an answered tool result (after which the loop
+  steps on an answered transcript) or leaves it pending; it never resumes past it.
+- **The auto-continue question judge answers a structured `question` ask on the user's
+  behalf only when the transcript already determines the answer**
+  (`internal/agent/autocontinue_question_typesafe.go`; hosts: server
+  `autoContinueAnswerQuestion`, TUI `maybeDispatchQuestionJudge`). Jev only: the chat
+  judge is never offered it. One `choice` per single-select prompt (labels plus a
+  mandatory `defer_to_user`), one `noul` per option for multi-select (combinations are
+  never enumerated), plus an owner `choice` (`determined_by_transcript` vs
+  `user_preference`) per prompt. All-or-nothing across prompts; every consumed answer
+  passes `validateAnswer` and a rejection DEFERS (the judge acts for the user, so this
+  path fails closed, unlike the relevance judges). Floors are its own constants, never the
+  permission floor. The answer is applied through the same path as a human answer
+  (`applyQuestionAnswer` / `submitQuestionAnswers`), so the model sees a plain user answer;
+  only a transcript notice says the judge answered. A deferral appends NO transcript row:
+  a row after the open ask moves it off the tail and breaks `applyQuestionAnswer` and the
+  pending-ask scan. Prose options in a reply ("1. / A)") are NOT handled and stay
+  `await_user`; RC-bridged TUI prompts are never auto-answered.
+  Spec: `docs/concepts/server-auto-continue.md`.
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.
-- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12227`).
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12151`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
   a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
   `capped`, but `met` and `impossible` still close the goal.
@@ -417,7 +437,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21835`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21900`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## browser_run step loop (`browser_run`)
 `browser_run` (`internal/agent/browser_run.go`) lets Jev pick each click of a browser task.

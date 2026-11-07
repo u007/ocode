@@ -1,9 +1,9 @@
 ---
 type: Concept
 title: "Server-Side Auto-Continue Loop"
-description: 'Server-side auto-continue loop pattern: per-session on/off gate, bounded chain with step-limit cutoff, typesafe/chat judge dispatch over a closed next-action set, the awaiting_confirmation/awaiting_decision split, and visible end-of-turn status.'
-tags: [server, auto-continue, agent-loop, architecture, typesafe, scheduled-jobs, session]
-timestamp: 2026-11-03T02:20:24Z
+description: 'Server-side auto-continue loop pattern: per-session on/off gate, bounded chain with step-limit cutoff, typesafe/chat judge dispatch over a closed next-action set, the awaiting_confirmation/awaiting_decision split, the question judge that answers structured question asks only when the transcript determines the answer, and visible end-of-turn status.'
+tags: [server, auto-continue, agent-loop, architecture, typesafe, scheduled-jobs, session, question-judge]
+timestamp: 2026-11-07T02:07:18Z
 ---
 # Server-Side Auto-Continue Loop
 
@@ -53,6 +53,8 @@ The judge does not answer "continue or end". It picks one key from a closed set 
 
 **Once-per-chain** actions are dropped from the offered set when their key is already in the chain history (`chain_actions_fired` in the state). The history has the same lifetime as the chain counter: the server keeps it in `runTurn` alongside `autoContinueCount`, the TUI in `m.autoContinueActions` (reset by `settleAutoContinueChain` and on new session). Each fired action counts toward `AutoContinueChainCap`.
 
+`answer_question` (`AutoContinueAnswerQuestionAction`) is the chain-history key the host records when the question judge answers a structured `question` ask (see "Question Judge" below). It is not a row of `autoContinueActions`, so the triage judge is never offered it. It counts toward `AutoContinueChainCap` like any other fired step, and it has its own per-chain limit.
+
 ### Todo-specific actions and item prioritisation
 
 Three resume-class actions operate on the open todo plan (`continue_todo`,
@@ -101,6 +103,7 @@ agent, so no host change is required.
 | `autoContinueSelectMaxBatches` | (constant, 8) | Selection batches one turn end may cost; the oldest unpinned messages beyond 8 × 20 are left out unscored and counted in `transcript_selection.dropped`. `internal/agent/autocontinue_select_typesafe.go` |
 | `autoContinueSelectCacheCap` | (constant, 2000) | Entries in the in-memory selection score cache; overflow empties it. `internal/agent/autocontinue_select_typesafe.go` |
 | `AutoContinueChainCap` | 4 (constant) | Maximum consecutive auto-fired resumes per turn — not a config key; defined in code |
+| `autoContinueQuestion*` (constants) | see "Question Judge" | Caps, probability floors and noul floors of the question judge. Each is its own constant, never the permission floor. `internal/agent/autocontinue_question_typesafe.go` |
 
 ### Per-Session Gate
 
@@ -163,6 +166,26 @@ When `auto_continue_model` is anything other than a decision-backend route, the 
 
 The chat judge is **never offered the answer class**: it returns no typed reason, so there is nothing to gate an auto-answer with. Its prompt tells it to answer `await_user` when the reply is waiting on the user — "if it ends by asking a question, or requests clarification, confirmation, feedback, approval, or a decision, answer await_user — the user must respond first. A reply that ends in a question is not a cut-off mid-task reply." Once-per-chain filtering applies the same way, and the prompt names the actions already fired.
 
+### Question Judge (structured `question` asks)
+
+When the main agent pauses on a structured `question` tool call (`QuestionPrompt`, `internal/tool/misc.go`), a separate question judge may answer it on the user's behalf. It answers only when the transcript already determines the answer. Prose options in a reply ("1. … 2. …", "A) B)") are not handled: they stay `awaiting_decision` and end the turn as before.
+
+- **Server gate.** `autoContinueAnswerQuestion` (`internal/server/agent_session.go`) runs at the top of `autoContinueShouldResume`, before the outstanding-ask gate. It needs auto-continue on or an evaluable `/goal`, a chain below `autoContinueChainCap`, no child asks, no permission ask at the tail, and the question ask as the last message. No earlier question in the same tool round may be unresolved, because only the tail can be rewritten.
+- **TUI gate.** `maybeDispatchQuestionJudge` runs from the `streamDoneMsg` branch when the turn ended paused on the dialog. `questionJudgeEligible` (`internal/tui/question_prompt.go`) also requires no RC-owned prompt, no permission dialog, an empty ask queue, and a dialog the user has not touched.
+- **Entry points.** `AutoContinueQuestionJudgeSync` serves the server. `AutoContinueQuestionJudgeAsync` serves the TUI and reports through `Agent.OnAutoContinueQuestionJudge`. The async path takes `autoContinueJudgeMu` with `TryLock`, shared with the triage judge. The judge uses the auto-continue decision backend (`autoContinueJudgeClientTyped`). A chat model in `auto_continue_model` makes no call, because the chat path has no typed probabilities.
+- **One call, one mapping.** Each prompt gets an owner choice, `determined_by_transcript` or `user_preference`. A single-select prompt gets an answer choice over its answerable options plus `defer_to_user`. Choice keys are identifiers, `opt0`, `opt1`, … in prompt order (`questionAnswerableChoices`), never label text. The label reaches Jev in the criteria description (`<label>: <description>`, or the label alone), and `questionChoiceLabel` maps the picked key back to the label the answer carries. `defer_to_user` is reserved, so a prompt that uses it is vetoed. A multi-select prompt gets one noul per option plus a defer noul; option combinations are never enumerated. Custom "other" options are never offered. `tool.QuestionOptionIsCustom` (`internal/tool/misc.go`) is the one definition of that detection, shared with the TUI.
+- **Floors.** Each is its own constant. Single-select answer probability and owner probability use `autoContinueQuestionMinProbability` and `autoContinueQuestionOwnerMinProbability` (both 0.80). Multi-select options use `autoContinueQuestionSelectNoul` (0.85) and `autoContinueQuestionRejectNoul` (0.15), and an option between those two is deferred. The defer noul uses `autoContinueQuestionDeferNoul` (0.50).
+- **Caps.** `autoContinueQuestionMaxPrompts` (3) and `autoContinueQuestionMaxOptions` (6) bound the request size. `autoContinueQuestionMaxPerChain` (2) bounds the `answer_question` entries in one chain.
+- **Pre-call vetoes.** No decision call is made when the ask has zero or too many prompts, a prompt has zero or too many answerable options, a label is empty, duplicated or reserved, the chain is at its per-chain limit, or the reply proposes a harmful command. The same veto applies when any header, question, label or description contains a risk word (`autoContinueQuestionRiskWords`) or quotes a command `IsHarmfulBashCommand` flags. A repeat of an earlier question in the transcript is vetoed too, even when a human answered it. Only a tool row that answers a `question` tool call counts (`questionAlreadyAsked`, `internal/agent/autocontinue_question_typesafe.go`), so another tool's JSON that carries a question field never vetoes.
+- **Post-call checks.** Every consumed answer must pass `validateAnswer`, and a rejection is a deferral. The owner must be `determined_by_transcript` at its floor. A single-select answer must clear its floor and must not be `defer_to_user`. A multi-select answer is accepted only when the defer noul is below its floor, every option is decisively in or out, and at least one option is in.
+- **All or nothing.** If any prompt defers, nothing is answered, so the user never sees a partial dialog.
+- **Server application.** `applyQuestionAnswer` (`internal/server/handler_questions.go:93`) rewrites the tail tool result in both `messages` and `as.messages`, called from `runTurn` (`internal/server/agent_session.go:1490`). The model therefore reads the same shape a human answer produces. The host broadcasts `question_resolved`, then a `messages` frame with the rewritten rows, as `HandleAnswerQuestion` does, so the web transcript drops the question card at once and a mid-turn reload does not reopen the dialog. It then appends a `↩ auto-continue` notice, counts the step, and continues with no user-role prompt. A deferral appends no notice, and neither does an answer that fails to apply: a `json.Marshal` error or an `applyQuestionAnswer` mismatch is logged only, because a row after the open ask would move the ask off the tail.
+- **Answers during the judge call.** `runTurn` holds `as.mu` across the synchronous judge call, while the dialog is already on screen. The question answer, question dismiss and permission resolve handlers find the session through `findPendingSession`, which waits up to `pendingSessionLockWait` (3 s) for the lock. A session still busy at that bound gets HTTP 503 with `Retry-After: 1` (`writeSessionBusy`), never 404 or 409: the web dialog dismisses itself on 404 and 409, but keeps itself open with an error on 503 so the user can retry. Lock rules: `docs/concepts/web-server-locking-and-liveness-rules.md`.
+- **TUI application.** The matched option labels go through the normal `submitQuestionAnswers()` path, after `questionJudgeStillApplies` (`internal/tui/model.go:5885`) and label mapping in `questionJudgeSelections` (`internal/tui/question_prompt.go`). The tool result is byte-identical to a human answer. RC-owned prompts are never answered.
+- **Goal interaction.** The judge resolves the ask before the goal loop steps again, so the pending-ask rule for goals holds. A deferred ask keeps the goal paused on the dialog.
+- **Known limits.** Prose options are not handled. RC-bridged TUI prompts are not auto-answered. The defer reason reaches only the server log and the TUI hint, not the web dialog.
+- **Tests.** `internal/agent/autocontinue_question_typesafe_test.go` covers the mapping, vetoes, floors and the request-size bound. `internal/server/agent_session_autocontinue_test.go` covers `TestRunTurnAutoContinueAnswersDeterminedQuestion`, `TestRunTurnAutoContinueDefersPreferenceQuestion` and `TestRunTurnAutoContinueQuestionJudgeRunsUnderGoal`. `internal/tui/autocontinue_test.go` covers `TestQuestionJudgeFinishedSubmitsMatchedLabels` and `TestQuestionJudgeEligibleGuards`. `internal/agent/autocontinue_question_typesafe_test.go` also covers `TestAutoContinueQuestionForeignFAQJSONDoesNotVeto`, and `internal/server/agent_session_autocontinue_test.go` covers `TestRunTurnAutoContinueAnswerBroadcastsRewrittenRow`. `internal/server/handler_questions_test.go` covers `TestFindPendingSessionReportsBusyWithinBound` and `TestHandleAnswerQuestionBusySessionIs503`. The fixture `questionDeterminedVerdictJSON` answers with the `opt0` key, not the label.
+
 ### Awaiting-User Stop Coverage
 
 The decisive stop is pinned by mutation-verified tests (each fails against the pre-fix code):
@@ -201,7 +224,8 @@ A judge verdict line is rendered inline by the judge's `Detail` string, not as a
 - **Bounded chain only** — no unbounded loops; `AutoContinueChainCap` is enforced server-side.
 - **Judge is advisory, with two decisive reasons** — a low-confidence or error result always stops the loop, and the verdict decides for every triage reason except the awaiting pair: `awaiting_decision` vetoes every non-end action at any confidence, and `awaiting_confirmation` admits only an explicit typed answer (`proceed`/`skip`/`reject`) at the permission-grade floor.
 - **Every resume prompt is fixed text keyed by action** — no judge composes prose; a new action is a new row in `autoContinueActions`, never a per-turn string.
-- **Naturally-ended turns only** — both judges are consulted only for a turn that ended on its own. A step-limit cutoff resumes deterministically without triage, and a pending permission/question sentinel blocks resume at the dispatcher (`autoContinueShouldResume` in `internal/server/agent_session.go`).
-- **Permission-aware** — auto-continue refuses to resume past an unresolved permission or question ask; the agent can raise asks mid-chain, but the loop stops until they are resolved.
+- **Naturally-ended turns only** — both judges are consulted only for a turn that ended on its own. A step-limit cutoff resumes deterministically without triage, and a pending permission sentinel blocks resume at the dispatcher (`autoContinueShouldResume` in `internal/server/agent_session.go`). The question judge is the one exception: it runs on a turn paused on a structured question ask and only answers that ask (see "Question Judge").
+- **Permission-aware** — auto-continue refuses to resume past an unresolved permission ask, or a question ask the question judge has not answered. The agent can raise asks mid-chain, but the loop stops until they are resolved.
+- **Question answers only from transcript-determined choices** — the question judge never picks from prose options, never uses the chat judge, and never answers without a decision backend. A deferred prompt leaves the whole ask to the user.
 - **Per-session gate** — the on/off switch belongs to one chat session: each session's override lives in its transcript metadata, and the process-wide config is only the default for sessions that never toggled.
 - **Surfaced in transcript** — auto-continue outcomes are rendered as a transient TUI hint or a server transcript notice, not as an agent-status field.

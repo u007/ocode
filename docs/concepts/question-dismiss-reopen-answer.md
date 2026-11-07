@@ -9,7 +9,7 @@ tags:
   - questions
   - server
   - web
-timestamp: 2026-11-05T08:42:21Z
+timestamp: 2026-11-07T02:07:18Z
 status: active
 ---
 A `question` prompt has three states, and the server stores each one in the same tool-result row. A user can dismiss a pending prompt, and since 2026-11-02 can reopen the dismissal from its transcript card and answer it. Reopening is a client-only step. The server only needs to accept the answer.
@@ -32,7 +32,7 @@ A second dismissal and an answer to an already answered row both return 404, bec
 
 ## Gates on both sides
 
-- **Server.** `findPendingSession` scans the trailing tool round, found with `trailingToolRunStart`, and returns the session with `as.mu` held. There is no explicit `turnActive` check on the answer path. A running turn holds `as.mu`, so the answer waits for the turn and then re-checks the tail under the lock. A user message or any later row ends the tool round, which ends the window in which a dismissal can be answered.
+- **Server.** `findPendingSession` scans the trailing tool round, found with `trailingToolRunStart`, and returns the session with `as.mu` held. There is no explicit `turnActive` check on the answer path. A running turn holds `as.mu`, so the answer waits for it: `findPendingSession` polls for up to `pendingSessionLockWait` (3 s), then re-checks the tail under the lock. A lock still held at that bound, for example during the auto-continue question judge, gets 503 with `Retry-After`, never 404, so a live prompt is not treated as superseded. A user message or any later row ends the tool round, which ends the window in which a dismissal can be answered.
 - **Client.** `dismissedQuestionFor` in `ChatPanel` attaches a reopen only when the dismissal sits at or after the index from `trailingToolRunStart` in `chatStore`. The `Answer question` button is hidden while `turnActive` is set.
 
 ## Why reopening is client-local

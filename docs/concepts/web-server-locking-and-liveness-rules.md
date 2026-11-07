@@ -8,7 +8,7 @@ tags:
   - concurrency
   - web
   - desktop
-timestamp: 2026-09-30T07:37:09Z
+timestamp: 2026-11-07T02:07:18Z
 ---
 # Web/Desktop Server Locking and Liveness Rules
 
@@ -36,7 +36,7 @@ Rules for anything in `internal/server`:
   the session lock and then takes `h.mu` (via the title generator), so taking a
   session lock while holding `h.mu` deadlocks. To scan sessions for a pending
   ask, snapshot the candidates under `h.mu`, release it, then inspect each
-  candidate under its own lock — that is what `findPendingSession` does. Reading
+  candidate under its own lock — that is what `findPendingSession` does. It polls `TryLock` every `pendingSessionLockPoll` (25 ms) until one deadline, `pendingSessionLockWait` (3 s), shared by all candidates, and returns `(session, id, busy)`. A candidate still locked at the deadline sets `busy`; not-found means every candidate was free and none matched. Reading
   `as.messages` under `h.mu` alone is a data race against a running turn. The
   same order applies to `SessionManager.mu` vs `agentSession.mu` (e.g.
   `EvictIdle` checking for a pending ask before releasing an agent).
@@ -73,6 +73,7 @@ Rules for anything in `internal/server`:
   applies each session in a background goroutine. A blocking `as.mu.Lock()` in
   any of these froze the desktop UI and the Settings save until the running
   turn finished (2026-09-30).
+- **A pending-ask answer against a busy session is 503, never 404 or 409.** `runTurn` holds `as.mu` across the auto-continue question judge (a decision-backend round trip) while the question dialog is already on screen. The question answer, question dismiss and permission resolve handlers therefore wait inside `findPendingSession` up to its bound, then answer `writeSessionBusy` (503, `Retry-After: 1`). The web dialog self-dismisses on 404 and 409 because the ask is gone, but keeps itself open with an error on 503 so the user can retry. Tests: `TestFindPendingSessionReportsBusyWithinBound`, `TestHandleAnswerQuestionBusySessionIs503`. Judge detail: `docs/concepts/server-auto-continue.md`.
 - **Do not pin an HTTP connection for the length of a turn.** A browser allows
   six concurrent connections per origin over HTTP/1.1 (`ocode serve` and share
   URLs are plain HTTP; only the desktop webview gets HTTP/2 — see
