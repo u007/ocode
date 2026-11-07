@@ -245,6 +245,13 @@ All registered in `Server.registerRoutes()`.
 All long work outside `Handler.mu`, under per-artifact/per-project lock, through
 `crashguard.Go` for any goroutine. No fallbacks, no upsert-on-conflict.
 
+**Tests (spec-level expectations):**
+- Unchecked (default/omitted) `notify_on_publish` → no notification email sent
+  (narrow share).
+- Checked `notify_on_publish` → owner (and allow-list members for `allowlist`
+  level) receive a "new version live" email.
+- Invitation emails are sent for allow-list entries regardless of the checkbox.
+
 ## 12. Email invitations
 
 - **Confirmed use:** invitations to allow-list members via magic link (email is the
@@ -254,8 +261,14 @@ All long work outside `Handler.mu`, under per-artifact/per-project lock, through
 invitation/access gating only. Whether the hub also **notifies** the owner or
 allow-list when a new version goes live is a separate, still-open product
 decision (see §19 item 1). This spec does not assume notify-on-publish.
-- **Open:** whether to also **notify on publish** (email the owner/allow-list that
-  a new version is live). Decide in §19.
+- **Notify on publish (opt-in):** publish dialog offers a "Notify on publish"
+  checkbox, **default unchecked**. When checked, the hub emails the owner (and for
+  `allowlist` level, the allow-list members) that a new version is live. When
+  unchecked, no notification email is sent. The checkbox value is an API field
+  `notify_on_publish bool` (Go zero value false = unchecked); the server enforces
+  it (unchecked/omitted never sends). The UI initial state is unchecked and does not
+  remember the last value unless explicitly specified. Invitation emails (§12) are
+  separate and always sent for allow-list entries regardless of this checkbox.
 - v1: ocode emits the invite URL + copyable message (Mode A) OR hub sends email
   (Mode B, preferred — server-side sending).
 - v1.1 (optional): SMTP/Resend provider config in new `internal/mailer`, API key
@@ -331,7 +344,8 @@ Server:
 Hub-side (Mode B): equivalent endpoints on hub under `sync_url` base.
 
 Web:
-- `web/src/components/Artifacts/ArtifactPublishDialog.tsx`
+- `web/src/components/Artifacts/ArtifactPublishDialog.tsx` (includes "Notify on
+  publish" checkbox, default unchecked).
 - `web/src/components/Artifacts/ArtifactList.tsx`
 - `web/src/api/artifacts.ts`
 
@@ -368,9 +382,8 @@ Config/env (add to `.env.example`):
 Q7–Q9 hosting/domain/email choices are now **decided** (see §3.5, §10, §12).
 Remaining open:
 
-1. **Notify on publish (email)** — should the hub email the owner/allow-list when a
-   new version goes live, or is invitation-only enough? (Invitations themselves are
-   confirmed.)
+1. **Notify on publish (email)** — decided: opt-in checkbox, default unchecked
+   (see §12). No longer open.
 2. **Hub-side email sender** — no mail-sending code exists in this repo (grep found no
    SMTP/Resend/SendGrid/Mailgun). Mode B therefore requires either the hub to provide
    email sending, or ocode to ship an `internal/mailer`. Discoverable at implementation
