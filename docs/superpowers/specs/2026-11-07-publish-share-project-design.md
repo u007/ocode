@@ -61,6 +61,10 @@ Routing rule: publishing goes through `sync_url` (the production hub), **never**
 `docs/concepts/backend-sync-url-split.md`). The hub today is config/auth sync only,
 so Phase 1 requires new hub endpoints for artifact storage/serving (hub-side work).
 
+**No silent fallback:** if the hub is unreachable, publish fails loudly (502
+`remote-connect`-style error). Mode A (self-hosted) is an explicit, user-chosen
+mode, never an automatic fallback from a failed hub publish.
+
 ## 4. Decisions captured from user answers
 
 | # | Question | Decision |
@@ -206,6 +210,14 @@ All registered in `Server.registerRoutes()`.
 - **Fallback: subdirectory** `hub.mercstudio.com/p/{id}/{token}/...` — shares origin
   with the hub; documented same-origin cookie limitation (published content could
   read hub cookies). Only if subdomain provisioning is unavailable.
+
+**Subdomain isolation requirements (must be specified in implementation):**
+- Wildcard TLS cert for `*.hub.mercstudio.com` plus a reserved-slug list so a
+  published artifact cannot claim `api`, `www`, `hub`, `auth`, `admin`, etc.
+- Cookie scope: hub session cookies must NOT be sent to artifact subdomains
+  (host-only or parent domain with explicit exclusion); artifact cookies scoped to
+  the artifact subdomain only.
+- CORS: hub API does not accept origins from artifact subdomains.
 - Artifact id = 12-char base36 (not guessable alone; token is the real secret).
 - Mode A (self-hosted): `https://<host>/p/{id}/{token}/...` via tailscale.
 
@@ -237,6 +249,11 @@ All long work outside `Handler.mu`, under per-artifact/per-project lock, through
 
 - **Confirmed use:** invitations to allow-list members via magic link (email is the
   access gate for `allowlist` level).
+
+**Interpretation of "email also" (user answer Q9):** the confirmed use is
+invitation/access gating only. Whether the hub also **notifies** the owner or
+allow-list when a new version goes live is a separate, still-open product
+decision (see §19 item 1). This spec does not assume notify-on-publish.
 - **Open:** whether to also **notify on publish** (email the owner/allow-list that
   a new version is live). Decide in §19.
 - v1: ocode emits the invite URL + copyable message (Mode A) OR hub sends email
@@ -263,6 +280,14 @@ All long work outside `Handler.mu`, under per-artifact/per-project lock, through
 - No directory listing; entrypoint resolution only.
 - **Abuse of always-up host**: per-artifact rate limits, size quotas, expiry defaults,
   and unpublish/delete by owner. Hub enforces quotas.
+
+**Build command (arbitrary, opt-in per publish):**
+- Executed through the shared shell spawn path under the existing permission +
+  sandbox gates (not a direct `exec.Command`).
+- Sandbox is write-integrity only and does NOT prevent exfiltration; the build
+  command can read `.env`/secrets and network. Mitigations: secret scan before
+  publish (§11), file allowlist, and an explicit per-publish opt-in with a recorded
+  reason. Publishing untrusted build output is the user's responsibility.
 - **Who can publish/unpublish**: owner (master auth) only; allow-list members can
   view only.
 - Remote: host serves; local never fetches artifact bytes for remote project.
@@ -346,12 +371,16 @@ Remaining open:
 1. **Notify on publish (email)** — should the hub email the owner/allow-list when a
    new version goes live, or is invitation-only enough? (Invitations themselves are
    confirmed.)
-2. **Hub-side email sender** — does the hub already have an email-sending capability,
-   or must ocode ship an SMTP/Resend client (Mode B would call it server-side)?
+2. **Hub-side email sender** — no mail-sending code exists in this repo (grep found no
+   SMTP/Resend/SendGrid/Mailgun). Mode B therefore requires either the hub to provide
+   email sending, or ocode to ship an `internal/mailer`. Discoverable at implementation
+   time; not a product decision.
 3. **Quota / max artifact size defaults** — propose `OCODE_ARTIFACT_MAX_BYTES`
    default (e.g. 100 MB) and per-user artifact count cap.
-4. **Subdomain provisioning** — who creates `<slug>.hub.mercstudio.com` DNS records
-   (hub automates vs. manual)? Affects whether subdirectory fallback is needed in v1.
+4. **Subdomain provisioning** — no DNS automation exists in this repo; whether the hub
+   (Cloudflare or other) provisions `*.hub.mercstudio.com` records is a hub-side
+   capability. If unavailable, v1 uses the subdirectory fallback with the documented
+   same-origin limitation. Discoverable at implementation time.
 
 ## 20. Next step
 

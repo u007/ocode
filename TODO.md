@@ -7053,3 +7053,8 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - **Word editor (DocxEditor.tsx): plain paragraphs only** — docx importer/exporter (docxData.ts) handles paragraphs and run text; bold/italic/underline, tables, images, styles are dropped on round-trip. Univer Docs mount via univerDocMount.ts. First-save confirmation pending. Fidelity improvements are the follow-up.
 - **Backend**: `rawSaveAllowedExt` (.xlsx/.docx/.pdf) in `internal/server/raw_save_ext.go`, applied to both local and remote raw-save gates.
 - **Not yet integrated**: close-confirm/quit-guard for pdf/docx tabs (PdfEditor/DocxEditor own Save buttons work). Annotations for PDF TBD.
+
+## Deferred: publish/share project artifact (Phase 2/3)
+- Phase 2: server-side apps in Podman containers (per-app volume, DB creds, backup/restore).
+- Phase 3: production-ready DBs (Postgres/MySQL scoped write connections).
+- See docs/superpowers/specs/2026-11-07-publish-share-project-design.md
