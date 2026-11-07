@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -1148,11 +1150,27 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	return as, err
 }
 
+// pendingSessionLockWait bounds how long findPendingSession waits for a
+// session's as.mu. runTurn holds as.mu across the auto-continue question judge
+// (a network round trip to the decision backend) while the question dialog is
+// already on screen, so a user's answer can arrive inside that window. Waiting
+// a few seconds lets that answer land; past it the request gets 503 with
+// Retry-After instead of pinning an HTTP connection.
+const pendingSessionLockWait = 3 * time.Second
+
+// pendingSessionLockPoll is the TryLock retry interval inside that wait.
+const pendingSessionLockPoll = 25 * time.Millisecond
+
 // findPendingSession locates the session whose most recent tool-call round
 // contains a pending ask (permission or question) whose tool-call id is
 // requestID. It returns that session **with its lock already held** — the
 // caller must unlock it — so the matched message cannot change before the
 // caller acts on it.
+//
+// busy reports that a candidate session's lock stayed held for the whole
+// pendingSessionLockWait without a match being ruled out. A busy result is
+// not "not found": the ask may still be pending, so callers must answer 503
+// and let the client retry, never 404 or 409.
 //
 // isPendingAsk tests one message, not the whole transcript: a round can pause
 // on more than one unresolved ask at once (see trailingToolRunStart), so the
@@ -1164,7 +1182,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 // race against a running turn, and taking as.mu while holding h.mu would invert
 // the lock order (a turn holds as.mu and then takes h.mu via the title
 // generator) and deadlock.
-func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk func(agent.Message) bool) (*agentSession, string) {
+func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk func(agent.Message) bool) (*agentSession, string, bool) {
 	type candidate struct {
 		id string
 		as *agentSession
@@ -1183,8 +1201,16 @@ func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk f
 	}
 	h.mu.Unlock()
 
+	// One deadline covers every candidate, so the total wait stays bounded
+	// however many sessions are scanned. Past the deadline each candidate gets
+	// a single TryLock attempt.
+	deadline := time.Now().Add(pendingSessionLockWait)
+	busy := false
 	for _, c := range candidates {
-		c.as.mu.Lock()
+		if !tryLockUntil(&c.as.mu, deadline) {
+			busy = true
+			continue
+		}
 		matched := false
 		for i := trailingToolRunStart(c.as.messages); i < len(c.as.messages); i++ {
 			m := c.as.messages[i]
@@ -1194,11 +1220,34 @@ func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk f
 			}
 		}
 		if matched {
-			return c.as, c.id
+			return c.as, c.id, false
 		}
 		c.as.mu.Unlock()
 	}
-	return nil, ""
+	return nil, "", busy
+}
+
+// tryLockUntil acquires mu, polling TryLock every pendingSessionLockPoll until
+// deadline. It reports false when the lock is still held at the deadline.
+func tryLockUntil(mu *sync.Mutex, deadline time.Time) bool {
+	for {
+		if mu.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(pendingSessionLockPoll)
+	}
+}
+
+// writeSessionBusy answers a pending-ask request whose session stayed locked
+// past pendingSessionLockWait. The ask may still be pending, so this is a
+// retry signal (503 + Retry-After), not a not-found: the web dialog treats
+// 404/409 as "the question is gone" and dismisses itself.
+func writeSessionBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "session is busy; retry")
 }
 
 // turnOptions carries the per-call variations of a turn.
@@ -1434,6 +1483,34 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// an unresolved permission/question ask never auto-continues — the
 		// turn is over until the dialog is answered.
 		fire, triageDetail := h.autoContinueShouldResume(sessionID, as, autoContinueCount, autoContinueActions)
+		if fire.AnswerJSON != "" {
+			// The judge answered the open question ask on the user's behalf. Both
+			// slices must carry the answer before the re-Step, and a half-applied
+			// answer must not resume.
+			if !applyQuestionAnswer(messages, fire.RequestID, fire.AnswerJSON) || !applyQuestionAnswer(as.messages, fire.RequestID, fire.AnswerJSON) {
+				// Logged only: a notice row after the open ask breaks the pending-ask
+				// scan, so the dialog would be lost (see the no-row-after-ask rule).
+				log.Printf("serve: auto-continue answer for %s: question row %s did not match", sessionID, fire.RequestID)
+				break
+			}
+			// Mirror the answered row to disk before anything else persists this
+			// transcript (see rewriteAskResult), then restart the live-persist view
+			// from it so it stops carrying the unanswered sentinel row.
+			h.rewriteAskResult(sessionID, as.messages, len(as.messages)-1)
+			if as.liveReset != nil {
+				as.liveReset(as.messages)
+			}
+			h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "question_resolved", Data: map[string]string{"request_id": fire.RequestID}})
+			// Mirror the rewritten tool row to watchers, as HandleAnswerQuestion
+			// does. Without it the transcript keeps the unanswered question card
+			// until turn end, and a reload mid-turn reopens the dialog.
+			h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "messages", Data: as.messages})
+			h.appendTranscriptNotice(as, headless, "↩ auto-continue — "+fire.Reason+": "+triageDetail)
+			autoContinueCount++
+			autoContinueActions = append(autoContinueActions, fire.Action)
+			messages, turnBaseLen = h.compactBeforeResume(sessionID, as, headless, messages, turnBaseLen)
+			continue
+		}
 		if fire.Prompt != "" {
 			if hint, ok := h.fireAutoContinue(sessionID, as, headless, fire); ok {
 				autoContinueCount++
@@ -1587,6 +1664,9 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	if as == nil || as.agent == nil {
 		return autoContinueFire{}, ""
 	}
+	if fire, answerDetail, handled := h.autoContinueAnswerQuestion(sessionID, as, chainCount, prior); handled {
+		return fire, answerDetail
+	}
 	// A turn paused on a pending permission/question sentinel must not be
 	// resumed behind the user's back — the dialog owns the next move.
 	//
@@ -1635,6 +1715,73 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	return autoContinueFire{Action: dec.Action, Prompt: dec.Prompt, Reason: "the auto-continue judge chose " + dec.Action}, detail
 }
 
+// autoContinueAnswerQuestion lets the auto-continue question judge answer the
+// structured question the assistant paused on, but only when the transcript
+// already determines the answer. handled=false means the gates did not hold,
+// and the caller falls through to the outstanding-ask gate, which keeps the
+// turn paused. handled=true with a zero fire means the judge deferred, so the
+// turn stays on the dialog and detail says why.
+func (h *Handler) autoContinueAnswerQuestion(sessionID string, as *agentSession, chainCount int, prior []string) (fire autoContinueFire, detail string, handled bool) {
+	if !as.agent.AutoContinueEnabled() && !as.agent.GoalEvaluable() {
+		return autoContinueFire{}, "", false
+	}
+	if chainCount >= autoContinueChainCap {
+		return autoContinueFire{}, "", false
+	}
+	if as.childAsks != nil && len(as.childAsks.list()) > 0 {
+		return autoContinueFire{}, "", false
+	}
+	if tailIsPermissionAsk(as.messages) {
+		return autoContinueFire{}, "", false
+	}
+	n := len(as.messages)
+	if n == 0 {
+		return autoContinueFire{}, "", false
+	}
+	last := as.messages[n-1]
+	if last.Role != "tool" || !isQuestionAsk(last.Content) {
+		return autoContinueFire{}, "", false
+	}
+	// applyQuestionAnswer rewrites only the tail. An earlier unresolved question
+	// in the same tool round would stay open behind the answer, so the answer
+	// is refused there and the dialog keeps the turn.
+	if tailIsQuestionAsk(as.messages[:n-1]) {
+		return autoContinueFire{}, "", false
+	}
+	prompts, ok := parseQuestionAsk(last.Content)
+	if !ok {
+		return autoContinueFire{}, "", false
+	}
+	dec, err := as.agent.AutoContinueQuestionJudgeSync(as.messages, prompts, prior)
+	if err != nil {
+		log.Printf("serve: auto-continue question judge for %s: %v", sessionID, err)
+	}
+	if !dec.Answered {
+		// Logged, not returned as a notice: a transcript row appended after the
+		// open ask would move it off the tail, and applyQuestionAnswer and the
+		// pending-ask scan both need the ask as the last row. The dialog is the
+		// user's surface for this question, as it is for every pending ask.
+		if dec.Detail != "" {
+			log.Printf("serve: auto-continue question judge for %s left the question to the user: %s", sessionID, dec.Detail)
+		}
+		return autoContinueFire{}, "", true
+	}
+	answerJSON, err := json.Marshal(dec.Answers)
+	if err != nil {
+		// Logged, not returned as a notice, for the same reason as the deferral
+		// branch above: a row after the open ask breaks applyQuestionAnswer.
+		log.Printf("serve: auto-continue question answer for %s: %v", sessionID, err)
+		return autoContinueFire{}, "", true
+	}
+	detail = fmt.Sprintf("%s (chain %d/%d)", dec.Detail, chainCount+1, autoContinueChainCap)
+	return autoContinueFire{
+		Action:     agent.AutoContinueAnswerQuestionAction,
+		Reason:     "the auto-continue judge answered the question on your behalf",
+		AnswerJSON: string(answerJSON),
+		RequestID:  last.ToolID,
+	}, detail, true
+}
+
 // autoContinueFire is one resume the chain is about to fire: the judge's
 // action key (or "continue" for the step-limit signal), the fixed user-role
 // prompt to send, and the short reason for the transcript hint. A zero value
@@ -1643,6 +1790,10 @@ type autoContinueFire struct {
 	Action string
 	Prompt string
 	Reason string
+	// AnswerJSON and RequestID are set for an answered question ask. Prompt
+	// stays empty: the answered tool result itself is the continuation.
+	AnswerJSON string
+	RequestID  string
 }
 
 // fireAutoContinue appends the auto-continue hint plus the explicit resume

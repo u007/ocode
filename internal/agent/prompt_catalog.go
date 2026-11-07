@@ -55,6 +55,13 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     typesafeAutoContinueInstructions,
 		},
 		{
+			Key:         "auto_continue_question_judge",
+			Label:       "Auto-continue question judge",
+			Description: "Rubric the auto-continue question judge uses to answer a structured question prompt on the user's behalf only when the transcript already determines the answer.",
+			Kind:        PromptKindJudge,
+			Builtin:     typesafeAutoContinueQuestionInstructions,
+		},
+		{
 			Key:         "communication_style",
 			Label:       "Communication style",
 			Description: "ASD-STE100 sentence limits, active voice, consistent naming, and code-first output for primary-agent replies.",

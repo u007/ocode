@@ -1136,3 +1136,80 @@ func TestHandleAnswerQuestionAfterDismissLoadsSessionFromDisk(t *testing.T) {
 		t.Fatal("answer path did not load the persisted session into h.agents")
 	}
 }
+
+// newBusyQuestionSession registers one session whose tail is an open question
+// ask, the shape a dialog answer or dismiss looks up.
+func newBusyQuestionSession(t *testing.T, h *Handler) *agentSession {
+	t.Helper()
+	as := &agentSession{
+		agent: agent.NewAgent(gatedQuestionClient{release: make(chan struct{})}, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-busy"] = as
+	return as
+}
+
+// A session whose as.mu stays held (runTurn holds it across the question
+// judge) must report busy, not not-found: the question may still be pending.
+// The wait is bounded by pendingSessionLockWait.
+func TestFindPendingSessionReportsBusyWithinBound(t *testing.T) {
+	h := NewHandler()
+	as := newBusyQuestionSession(t, h)
+	isAsk := func(m agent.Message) bool { return m.Role == "tool" && isQuestionAsk(m.Content) }
+
+	as.mu.Lock()
+	start := time.Now()
+	got, _, busy := h.findPendingSession("sess-busy", "call-1", isAsk)
+	elapsed := time.Since(start)
+	as.mu.Unlock()
+
+	if got != nil || !busy {
+		t.Fatalf("held lock: session found=%v busy=%v, want busy and no session", got != nil, busy)
+	}
+	if elapsed < pendingSessionLockWait || elapsed > pendingSessionLockWait+2*time.Second {
+		t.Fatalf("lookup took %s with the lock held, want about %s", elapsed, pendingSessionLockWait)
+	}
+
+	// Once the lock is free the ask is found, and the lock comes back held.
+	got, _, busy = h.findPendingSession("sess-busy", "call-1", isAsk)
+	if got == nil || busy {
+		t.Fatalf("free lock: session found=%v busy=%v, want the session", got != nil, busy)
+	}
+	got.mu.Unlock()
+
+	// An id that is not pending on a free session is a real not-found.
+	got, _, busy = h.findPendingSession("sess-busy", "call-x", isAsk)
+	if got != nil || busy {
+		t.Fatalf("unknown request id: session found=%v busy=%v, want neither", got != nil, busy)
+	}
+}
+
+// HandleAnswerQuestion must answer 503 with Retry-After while the session is
+// busy. A 404 or 409 would make the web dialog dismiss a question that is
+// still pending.
+func TestHandleAnswerQuestionBusySessionIs503(t *testing.T) {
+	h := NewHandler()
+	as := newBusyQuestionSession(t, h)
+
+	body := `{"session_id":"sess-busy","request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	as.mu.Lock()
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	as.mu.Unlock()
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	if !strings.Contains(rec.Body.String(), "session is busy; retry") {
+		t.Fatalf("body = %s, want the busy error", rec.Body.String())
+	}
+}

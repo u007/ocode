@@ -254,7 +254,11 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// than one unresolved sentinel at once. On success the lock is handed to the
 	// background continuation (dispatchAskContinuation); every error path below
 	// must therefore unlock as.mu explicitly.
-	as, sessID := h.findPendingSession(bodyReq.SessionID, bodyReq.RequestID, isPermissionAskMsg)
+	as, sessID, busy := h.findPendingSession(bodyReq.SessionID, bodyReq.RequestID, isPermissionAskMsg)
+	if busy {
+		writeSessionBusy(w)
+		return
+	}
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending permission found for request_id")
 		return

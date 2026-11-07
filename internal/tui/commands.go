@@ -2059,7 +2059,8 @@ func autoContinueStatusText(m *model) string {
 	}
 	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s%s\n\n"+
 		"When enabled, any turn cut off by the /max-step cap — not just /orchestrate — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+
-		"If a judge model is set (see /autocontinue model), it's also asked to check replies that did NOT hit /max-step but might still look interrupted. Capped at %d consecutive auto-fires and reset whenever you send a new message, so a stuck local model can't loop forever.",
+		"If a judge model is set (see /autocontinue model), it's also asked to check replies that did NOT hit /max-step but might still look interrupted. Capped at %d consecutive auto-fires and reset whenever you send a new message, so a stuck local model can't loop forever. "+
+		"Structured question prompts (the question tool) can be answered on your behalf when the transcript already settles the answer; anything the user has not stated, or anything destructive, is left to you.",
 		state, m.autoContinueCount, autoContinueMaxChain, judgeModel, judgeKind, autoContinueMaxChain)
 }
 

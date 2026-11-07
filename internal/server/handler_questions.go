@@ -157,9 +157,13 @@ func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) 
 	// explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be dismissed
 	// out from under us by a racing answer.
-	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
+	as, sessID, busy := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
 		return m.Role == "tool" && isQuestionAsk(m.Content)
 	})
+	if busy {
+		writeSessionBusy(w)
+		return
+	}
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")
 		return
@@ -275,9 +279,13 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// from under us by a racing request. On success the lock is handed to the
 	// background continuation (dispatchAskContinuation); every error path below
 	// must therefore unlock as.mu explicitly.
-	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
+	as, sessID, busy := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
 		return m.Role == "tool" && (isQuestionAsk(m.Content) || tool.QuestionDismissed(m.Content))
 	})
+	if busy {
+		writeSessionBusy(w)
+		return
+	}
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")
 		return

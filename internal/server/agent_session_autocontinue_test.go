@@ -13,6 +13,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // stepLimitClient forces the agent's stepLimitHit flag on its first N Chat
@@ -468,5 +469,264 @@ func TestRunTurnAutoContinueConfirmationProceeds(t *testing.T) {
 	fired, _ := state["chain_actions_fired"].([]any)
 	if len(bodies()) > 1 && len(fired) == 0 {
 		t.Fatalf("state.chain_actions_fired should list the earlier proceed, got %v", state["chain_actions_fired"])
+	}
+}
+
+// questionAskThenReplyClient raises one structured question (Postgres or SQLite)
+// on its first round and replies in plain text after that. The question tool
+// result it leaves behind is the ask the auto-continue question judge answers.
+type questionAskThenReplyClient struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *questionAskThenReplyClient) Chat(_ []agent.Message, tools []map[string]interface{}) (*agent.Message, error) {
+	if len(tools) == 0 {
+		// The session title generator calls the same client without a tool list.
+		// Only the turn's own calls carry the tools, so these are not counted.
+		return &agent.Message{Role: "assistant", Content: "Database for the store"}, nil
+	}
+	c.mu.Lock()
+	c.calls++
+	n := c.calls
+	c.mu.Unlock()
+	if n == 1 {
+		tc := agent.ToolCall{ID: "q-call-db", Type: "function"}
+		tc.Function.Name = "question"
+		tc.Function.Arguments = `{"questions":[{"header":"Database","question":"Which database?","options":[{"label":"Postgres","description":"Postgres server"},{"label":"SQLite","description":"Embedded file"}]}]}`
+		return &agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{tc}}, nil
+	}
+	return &agent.Message{Role: "assistant", Content: "Using Postgres for the store."}, nil
+}
+func (c *questionAskThenReplyClient) GetProvider() string { return "fake" }
+func (c *questionAskThenReplyClient) GetModel() string    { return "fake-model" }
+
+func (c *questionAskThenReplyClient) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// questionDeterminedVerdictJSON is Jev's reply when the transcript settles the
+// database choice. The same reply carries a triage verdict of end, which the
+// triage judge reads after the answered question resumes the turn.
+const questionDeterminedVerdictJSON = `{"model":"jev-latest","answers":{"q0_owner":{"type":"choice","choice":"determined_by_transcript","probabilities":{"determined_by_transcript":0.95,"user_preference":0.05},"confidence":0.95},"q0_answer":{"type":"choice","choice":"opt0","probabilities":{"opt0":0.92,"opt1":0.05,"defer_to_user":0.03},"confidence":0.92},"verdict":{"type":"choice","choice":"end","probabilities":{"continue":0.1,"end":0.9},"confidence":0.95},"reason":{"type":"choice","choice":"finished","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":5,"output_tokens":1}}`
+
+// questionPreferenceVerdictJSON is Jev's reply when the database choice is a
+// preference the user never stated, so the question must go back to the user.
+const questionPreferenceVerdictJSON = `{"model":"jev-latest","answers":{"q0_owner":{"type":"choice","choice":"user_preference","probabilities":{"determined_by_transcript":0.05,"user_preference":0.95},"confidence":0.95},"q0_answer":{"type":"choice","choice":"defer_to_user","probabilities":{"postgres":0.04,"sqlite":0.04,"defer_to_user":0.92},"confidence":0.92},"verdict":{"type":"choice","choice":"end","probabilities":{"continue":0.1,"end":0.9},"confidence":0.95},"reason":{"type":"choice","choice":"finished","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":5,"output_tokens":1}}`
+
+// swapToQuestionAgent replaces the agent autoContinueTestServer built with one
+// whose client can raise a question tool call. It keeps the judge config and
+// the session's project root, and sets the auto-continue switch explicitly.
+func swapToQuestionAgent(t *testing.T, h *Handler, id string, client agent.LLMClient, autoContinue bool) *agentSession {
+	t.Helper()
+	entry, ok := h.sessions.SnapshotEntry(id)
+	if !ok {
+		t.Fatalf("session %s is not registered", id)
+	}
+	h.mu.Lock()
+	cfg := h.cfg
+	cfg.Ocode.MaxSteps = 0
+	h.mu.Unlock()
+	ag := agent.NewAgent(client, []tool.Tool{&tool.QuestionTool{}}, cfg, nil)
+	t.Cleanup(func() { ag.Shutdown() })
+	ag.SetWorkDir(entry.ProjectRoot)
+	ag.SetMaxSteps(0)
+	ag.SetAutoContinueEnabled(autoContinue)
+	as := h.lookupAgentSession(id)
+	as.agent = ag
+	return as
+}
+
+// questionToolRow returns the tool row that answers toolID, or nil.
+func questionToolRow(msgs []agent.Message, toolID string) *agent.Message {
+	for i := range msgs {
+		if msgs[i].Role == "tool" && msgs[i].ToolID == toolID {
+			return &msgs[i]
+		}
+	}
+	return nil
+}
+
+// The transcript settles the database choice, so the question judge answers the
+// pending question, the turn resumes from the answered tool result, and the
+// answer is mirrored to disk.
+func TestRunTurnAutoContinueAnswersDeterminedQuestion(t *testing.T) {
+	url, bodies := newSystemoneStub(t, questionDeterminedVerdictJSON)
+	h, id, _ := autoContinueTestServer(t, url)
+	qc := &questionAskThenReplyClient{}
+	as := swapToQuestionAgent(t, h, id, qc, true)
+	entry, _ := h.sessions.SnapshotEntry(id)
+
+	if _, err := h.runTurn(id, as, "use Postgres for the store", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	row := questionToolRow(as.messages, "q-call-db")
+	if row == nil {
+		t.Fatalf("question tool row missing from transcript: %+v", as.messages)
+	}
+	var sets []tool.QuestionAnswerSet
+	if err := json.Unmarshal([]byte(row.Content), &sets); err != nil {
+		t.Fatalf("question row is not an answer set: %v (content %q)", err, row.Content)
+	}
+	if len(sets) != 1 || len(sets[0].Answers) != 1 || sets[0].Answers[0].Label != "Postgres" {
+		t.Fatalf("answer = %+v, want one answer labelled Postgres", sets)
+	}
+	if tailIsQuestionAsk(as.messages) {
+		t.Fatal("question is still pending after the auto-answer")
+	}
+	announced := false
+	for _, m := range as.messages {
+		if strings.Contains(m.Notice, "answered on your behalf") {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Fatalf("no answered-on-your-behalf notice in transcript: %+v", as.messages)
+	}
+	if got := qc.callCount(); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (the ask, then the resumed step)", got)
+	}
+
+	if err := session.FlushForDir(entry.ProjectRoot, id, 10*time.Second); err != nil {
+		t.Fatalf("flush session: %v", err)
+	}
+	saved, err := session.LoadForDir(entry.ProjectRoot, id)
+	if err != nil {
+		t.Fatalf("load persisted session: %v", err)
+	}
+	savedRow := questionToolRow(saved.Messages, "q-call-db")
+	if savedRow == nil || savedRow.Content != row.Content {
+		t.Fatalf("persisted question row = %+v, want the answer %q", savedRow, row.Content)
+	}
+
+	// The question judge was the first Jev call; the triage judge that followed
+	// the resume is the second and must see the answer in the chain history.
+	bs := bodies()
+	if len(bs) < 2 {
+		t.Fatalf("expected the question judge then the triage judge, got %d Jev calls", len(bs))
+	}
+	state, _ := bs[1]["state"].(map[string]any)
+	fired, _ := state["chain_actions_fired"].([]any)
+	if len(fired) != 1 || fired[0] != agent.AutoContinueAnswerQuestionAction {
+		t.Fatalf("state.chain_actions_fired = %v, want [%s]", state["chain_actions_fired"], agent.AutoContinueAnswerQuestionAction)
+	}
+}
+
+// A preference the user never stated goes back to the user. The turn stays on
+// the open dialog: no second model call, and no transcript row appended after
+// the ask, because the answer endpoint needs the ask as the last row.
+func TestRunTurnAutoContinueDefersPreferenceQuestion(t *testing.T) {
+	url, bodies := newSystemoneStub(t, questionPreferenceVerdictJSON)
+	h, id, _ := autoContinueTestServer(t, url)
+	qc := &questionAskThenReplyClient{}
+	as := swapToQuestionAgent(t, h, id, qc, true)
+
+	if _, err := h.runTurn(id, as, "pick a database for the store", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if got := qc.callCount(); got != 1 {
+		t.Fatalf("model calls = %d, want 1: a deferred question must not resume", got)
+	}
+	if got := len(bodies()); got != 1 {
+		t.Fatalf("Jev calls = %d, want 1 (the question judge only)", got)
+	}
+	last := as.messages[len(as.messages)-1]
+	if !isQuestionAsk(last.Content) || last.ToolID != "q-call-db" {
+		t.Fatalf("the open ask must stay the last row, got role=%s notice=%q content=%q", last.Role, last.Notice, last.Content)
+	}
+	if !tailIsQuestionAsk(as.messages) {
+		t.Fatalf("deferred question should stay open for the user: %+v", as.messages)
+	}
+}
+
+// With auto-continue off but a /goal active, the question judge still runs: a
+// goal loop stuck on a question is the case it exists for.
+func TestRunTurnAutoContinueQuestionJudgeRunsUnderGoal(t *testing.T) {
+	url, bodies := newSystemoneStub(t, questionPreferenceVerdictJSON)
+	h, id, _ := autoContinueTestServer(t, url)
+	qc := &questionAskThenReplyClient{}
+	as := swapToQuestionAgent(t, h, id, qc, false)
+	if err := as.agent.SetGoal("the store uses the chosen database"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+
+	if _, err := h.runTurn(id, as, "pick a database for the store", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	bs := bodies()
+	if len(bs) != 1 {
+		t.Fatalf("Jev calls = %d, want 1 (the question judge under the goal)", len(bs))
+	}
+	questions, _ := bs[0]["questions"].(map[string]any)
+	if _, ok := questions["q0_owner"]; !ok {
+		t.Fatalf("the Jev call is not the question judge: questions = %v", bs[0]["questions"])
+	}
+	if !tailIsQuestionAsk(as.messages) {
+		t.Fatal("deferred question should stay open under the goal too")
+	}
+}
+
+// An auto-answered question must reach watchers as a messages frame carrying
+// the rewritten tool row, sent right after question_resolved. Without it the
+// web transcript keeps the unanswered question card until turn end.
+func TestRunTurnAutoContinueAnswerBroadcastsRewrittenRow(t *testing.T) {
+	url, _ := newSystemoneStub(t, questionDeterminedVerdictJSON)
+	h, id, _ := autoContinueTestServer(t, url)
+	qc := &questionAskThenReplyClient{}
+	as := swapToQuestionAgent(t, h, id, qc, true)
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	if _, err := h.runTurn(id, as, "use Postgres for the store", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	var events []SSEEvent
+	for drained := false; !drained; {
+		select {
+		case ev := <-sub:
+			events = append(events, ev)
+		default:
+			drained = true
+		}
+	}
+	resolved := -1
+	for i, ev := range events {
+		if ev.Event == "question_resolved" {
+			resolved = i
+			break
+		}
+	}
+	if resolved < 0 {
+		t.Fatalf("no question_resolved event; events = %+v", events)
+	}
+	var frame []agent.Message
+	for _, ev := range events[resolved+1:] {
+		if ev.Event != "messages" {
+			continue
+		}
+		msgs, ok := ev.Data.([]agent.Message)
+		if !ok {
+			t.Fatalf("messages event data is %T, want []agent.Message", ev.Data)
+		}
+		frame = msgs
+		break
+	}
+	if len(frame) == 0 {
+		t.Fatalf("no messages event after question_resolved; events = %+v", events)
+	}
+	tail := frame[len(frame)-1]
+	if tail.Role != "tool" || tail.ToolID != "q-call-db" {
+		t.Fatalf("messages frame tail = role %s tool id %s, want the question tool row", tail.Role, tail.ToolID)
+	}
+	if isQuestionAsk(tail.Content) {
+		t.Fatalf("messages frame tail still carries the unanswered question: %q", tail.Content)
+	}
+	if tail.Content != questionToolRow(as.messages, "q-call-db").Content {
+		t.Fatalf("messages frame tail = %q, want the answered row", tail.Content)
 	}
 }

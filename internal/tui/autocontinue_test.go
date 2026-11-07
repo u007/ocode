@@ -10,6 +10,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/server"
+	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -648,5 +649,198 @@ func (m *model) restoreGoalTurns(t *testing.T, condition string, status agent.Go
 	m.agent.RestoreGoal(agent.GoalState{Condition: condition, Status: status, Turns: turns, SetAt: time.Now()})
 	if _, ok := m.agent.Goal(); !ok {
 		t.Fatal("RestoreGoal did not install the goal")
+	}
+}
+
+// questionJudgeTestModel opens a one-prompt question dialog (call_1) on a test
+// model with auto-continue armed: the state the question judge runs from.
+func questionJudgeTestModel(t *testing.T, prompts []tool.QuestionPrompt) model {
+	t.Helper()
+	m := newGoalCommandTestModel()
+	m.questionInput = newTestTextarea()
+	m.autoContinueEnabled = true
+	m.startQuestionPrompt("call_1", prompts)
+	if !m.showQuestionDialog {
+		t.Fatal("expected question dialog to open")
+	}
+	return *m
+}
+
+func questionJudgeDatabasePrompt() []tool.QuestionPrompt {
+	return []tool.QuestionPrompt{{
+		Header:   "Database",
+		Question: "Which database?",
+		Options:  []tool.QuestionOption{{Label: "Postgres"}, {Label: "SQLite"}},
+	}}
+}
+
+func answeredQuestionVerdict(toolCallID string, labels ...string) autoContinueQuestionJudgeFinishedMsg {
+	answers := make([]tool.QuestionAnswer, 0, len(labels))
+	for _, l := range labels {
+		answers = append(answers, tool.QuestionAnswer{Label: l})
+	}
+	return autoContinueQuestionJudgeFinishedMsg{
+		toolCallID: toolCallID,
+		answered:   true,
+		answers:    []tool.QuestionAnswerSet{{Header: "Database", Question: "Which database?", Answers: answers}},
+		detail:     "jev answered on your behalf: Database → " + strings.Join(labels, ", "),
+	}
+}
+
+func TestQuestionJudgeFinishedSubmitsMatchedLabels(t *testing.T) {
+	m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+
+	updated, cmd := m.Update(answeredQuestionVerdict("call_1", "postgres"))
+	got := derefTestModel(t, updated)
+	if got.showQuestionDialog {
+		t.Fatal("expected dialog to close once the judge answered")
+	}
+	var row *agent.Message
+	for i := len(got.messages) - 1; i >= 0; i-- {
+		if raw := got.messages[i].raw; raw != nil && raw.Role == "tool" && raw.ToolID == "call_1" {
+			row = raw
+			break
+		}
+	}
+	if row == nil {
+		t.Fatal("expected an answered tool row for call_1 in the transcript")
+	}
+	var sets []questionAnswerPayload
+	if err := json.Unmarshal([]byte(row.Content), &sets); err != nil {
+		t.Fatalf("answered row is not a payload: %v (%q)", err, row.Content)
+	}
+	if len(sets) != 1 || len(sets[0].Answers) != 1 || sets[0].Answers[0].Label != "Postgres" {
+		t.Fatalf("expected the payload to select the original label Postgres, got %#v", sets)
+	}
+	if len(got.autoContinueActions) != 1 || got.autoContinueActions[0] != agent.AutoContinueAnswerQuestionAction || got.autoContinueCount != 1 {
+		t.Fatalf("chain state = %v/%d, want [answer_question]/1", got.autoContinueActions, got.autoContinueCount)
+	}
+	if !got.lastTurnWasAutoContinue {
+		t.Fatal("expected the answer turn to be marked as an auto-continue step")
+	}
+	if cmd == nil {
+		t.Fatal("expected a turn-start command")
+	}
+}
+
+func TestQuestionJudgeFinishedIgnoresTouchedDialog(t *testing.T) {
+	m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+	m.questionSelected[0][1] = true
+
+	updated, _ := m.Update(answeredQuestionVerdict("call_1", "Postgres"))
+	got := derefTestModel(t, updated)
+	if !got.showQuestionDialog || got.questionToolCallID != "call_1" {
+		t.Fatal("expected the touched dialog to stay open")
+	}
+	if got.autoContinueCount != 0 || len(got.autoContinueActions) != 0 {
+		t.Fatalf("touched dialog must not advance the chain, got %v/%d", got.autoContinueActions, got.autoContinueCount)
+	}
+	if !got.questionSelected[0][1] || got.questionSelected[0][0] {
+		t.Fatalf("user selection must be unchanged, got %v", got.questionSelected[0])
+	}
+}
+
+func TestQuestionJudgeFinishedStaleToolCallIgnored(t *testing.T) {
+	m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+
+	updated, _ := m.Update(answeredQuestionVerdict("call_other", "Postgres"))
+	got := derefTestModel(t, updated)
+	if !got.showQuestionDialog || got.questionToolCallID != "call_1" {
+		t.Fatal("a verdict for another tool call must not touch the open dialog")
+	}
+	if got.autoContinueCount != 0 || len(got.questionSelected[0]) != 0 {
+		t.Fatalf("stale verdict changed state: count=%d selected=%v", got.autoContinueCount, got.questionSelected[0])
+	}
+}
+
+func TestQuestionJudgeFinishedUnmatchedLabelKeepsDialog(t *testing.T) {
+	m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+
+	updated, _ := m.Update(answeredQuestionVerdict("call_1", "MySQL"))
+	got := derefTestModel(t, updated)
+	if !got.showQuestionDialog {
+		t.Fatal("expected dialog to stay open when the judge label matches no option")
+	}
+	if len(got.questionSelected[0]) != 0 || got.autoContinueCount != 0 {
+		t.Fatalf("unmatched label must not select or advance, selected=%v count=%d", got.questionSelected[0], got.autoContinueCount)
+	}
+	last := got.messages[len(got.messages)-1]
+	if !strings.Contains(last.text, "did not match") {
+		t.Fatalf("expected a hint that the auto-answer did not match, got %q", last.text)
+	}
+}
+
+func TestQuestionJudgeFinishedPartialMatchSelectsNothing(t *testing.T) {
+	prompts := []tool.QuestionPrompt{
+		{Header: "Database", Question: "Which database?", Options: []tool.QuestionOption{{Label: "Postgres"}, {Label: "SQLite"}}},
+		{Header: "Hosting", Question: "Where?", Options: []tool.QuestionOption{{Label: "Yes"}, {Label: "No"}}},
+	}
+	m := questionJudgeTestModel(t, prompts)
+	verdict := autoContinueQuestionJudgeFinishedMsg{
+		toolCallID: "call_1",
+		answered:   true,
+		answers: []tool.QuestionAnswerSet{
+			{Header: "Database", Question: "Which database?", Answers: []tool.QuestionAnswer{{Label: "Postgres"}}},
+			{Header: "Hosting", Question: "Where?", Answers: []tool.QuestionAnswer{{Label: "Maybe"}}},
+		},
+	}
+
+	updated, _ := m.Update(verdict)
+	got := derefTestModel(t, updated)
+	if !got.showQuestionDialog {
+		t.Fatal("expected dialog to stay open when any prompt fails to match")
+	}
+	if len(got.questionSelected[0]) != 0 || len(got.questionSelected[1]) != 0 {
+		t.Fatalf("a rejected verdict must leave every prompt unanswered, got %v / %v", got.questionSelected[0], got.questionSelected[1])
+	}
+	if got.autoContinueCount != 0 {
+		t.Fatalf("a rejected verdict must not advance the chain, count=%d", got.autoContinueCount)
+	}
+}
+
+func TestQuestionJudgeFinishedDroppedWhenAutoContinueOff(t *testing.T) {
+	m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+	m.autoContinueEnabled = false
+
+	updated, _ := m.Update(answeredQuestionVerdict("call_1", "Postgres"))
+	got := derefTestModel(t, updated)
+	if !got.showQuestionDialog || got.autoContinueCount != 0 {
+		t.Fatalf("auto-continue turned off mid-flight must not answer, dialog=%v count=%d", got.showQuestionDialog, got.autoContinueCount)
+	}
+}
+
+func TestQuestionJudgeEligibleGuards(t *testing.T) {
+	cases := []struct {
+		name     string
+		mutate   func(m *model)
+		eligible bool
+	}{
+		{name: "open untouched dialog", mutate: func(m *model) {}, eligible: true},
+		{name: "goal evaluable without auto-continue", mutate: func(m *model) {
+			m.autoContinueEnabled = false
+			if err := m.agent.SetGoal("all tests pass"); err != nil {
+				t.Fatalf("SetGoal: %v", err)
+			}
+		}, eligible: true},
+		{name: "auto-continue off and no goal", mutate: func(m *model) { m.autoContinueEnabled = false }},
+		{name: "no dialog open", mutate: func(m *model) { m.showQuestionDialog = false }},
+		{name: "rc-owned prompt", mutate: func(m *model) { m.rcPendingQuestion = &rcPendingQuestion{} }},
+		{name: "permission dialog up", mutate: func(m *model) { m.showPermDialog = true }},
+		{name: "chain at cap", mutate: func(m *model) { m.autoContinueCount = autoContinueMaxChain }},
+		{name: "second question queued", mutate: func(m *model) {
+			m.questionAskQueue = []queuedQuestionAsk{{toolCallID: "call_2", prompts: questionJudgeDatabasePrompt()}}
+		}},
+		{name: "permission ask queued", mutate: func(m *model) { m.permAskQueue = []queuedPermAsk{{}} }},
+		{name: "user already selected", mutate: func(m *model) { m.questionSelected[0][0] = true }},
+		{name: "user typed custom text", mutate: func(m *model) { m.questionCustom[0] = "MySQL" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := questionJudgeTestModel(t, questionJudgeDatabasePrompt())
+			tc.mutate(&m)
+			if got := m.questionJudgeEligible(); got != tc.eligible {
+				t.Fatalf("questionJudgeEligible() = %v, want %v", got, tc.eligible)
+			}
+		})
 	}
 }

@@ -544,14 +544,14 @@ func questionOtherIndex(q tool.QuestionPrompt) int {
 func questionOption(q tool.QuestionPrompt, idx int) (label, desc string, custom bool) {
 	if idx >= 0 && idx < len(q.Options) {
 		opt := q.Options[idx]
-		return opt.Label, opt.Description, isQuestionOtherLabel(opt.Label)
+		return opt.Label, opt.Description, tool.QuestionOptionIsCustom(opt.Label)
 	}
 	return questionOtherLabel, "Type your own answer", true
 }
 
 func questionExistingOtherIndex(q tool.QuestionPrompt) int {
 	for i, opt := range q.Options {
-		if isQuestionOtherLabel(opt.Label) {
+		if tool.QuestionOptionIsCustom(opt.Label) {
 			return i
 		}
 	}
@@ -562,7 +562,98 @@ func questionSubmitIndex(q tool.QuestionPrompt) int {
 	return questionOptionCount(q)
 }
 
-func isQuestionOtherLabel(label string) bool {
-	lower := strings.ToLower(strings.TrimSpace(label))
-	return strings.Contains(lower, "something else") || strings.Contains(lower, "other") || strings.Contains(lower, "own answer") || strings.Contains(lower, "custom")
+// maybeDispatchQuestionJudge asks the question judge to answer the open dialog on
+// the user's behalf. Callers invoke it only when a turn ended without error. RC
+// prompts are excluded because the remote client owns that dialog. Returns false
+// when no call was made, including when a judge call is already in flight.
+func (m *model) maybeDispatchQuestionJudge() bool {
+	if !m.questionJudgeEligible() {
+		return false
+	}
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	return m.agent.AutoContinueQuestionJudgeAsync(agentMsgs, m.questionToolCallID, m.questionPrompts, m.autoContinueActions)
+}
+
+// questionJudgeEligible reports whether the open question dialog may be judged.
+// It is the dispatch gate. A verdict re-checks it when it lands, so a dialog the
+// user has touched, a chain at its cap, or a second ask waiting never gets an
+// answer on the user's behalf.
+func (m *model) questionJudgeEligible() bool {
+	return m.agent != nil && m.showQuestionDialog && m.questionToolCallID != "" && len(m.questionPrompts) > 0 &&
+		m.rcPendingQuestion == nil && !m.showPermDialog && (m.autoContinueEnabled || m.goalEvaluable()) &&
+		m.autoContinueCount < autoContinueMaxChain && len(m.questionAskQueue) == 0 && len(m.permAskQueue) == 0 &&
+		m.questionDialogUntouched()
+}
+
+// questionJudgeStillApplies is the verdict-time gate. A verdict may act only on
+// the dialog it judged, while the session is idle and still eligible.
+func (m *model) questionJudgeStillApplies(toolCallID string) bool {
+	return m.questionToolCallID == toolCallID && !m.streaming && !m.questionTextActive &&
+		len(m.pendingCompactUIIdx) == 0 && m.questionJudgeEligible()
+}
+
+// questionDialogUntouched reports whether the user has made no selection and
+// typed no custom answer in the open dialog.
+func (m *model) questionDialogUntouched() bool {
+	for _, picked := range m.questionSelected {
+		for _, on := range picked {
+			if on {
+				return false
+			}
+		}
+	}
+	for _, text := range m.questionCustom {
+		if strings.TrimSpace(text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// questionJudgeSelections maps the judge's answers onto the open dialog's option
+// indexes without changing model state. It fails closed: every prompt needs an
+// answer set, a single-select prompt takes exactly one option, and one label that
+// matches no non-custom option rejects the whole verdict. No prompt is left
+// partly answered.
+func (m *model) questionJudgeSelections(answers []tool.QuestionAnswerSet) ([]map[int]bool, bool) {
+	if len(answers) != len(m.questionPrompts) {
+		return nil, false
+	}
+	selections := make([]map[int]bool, len(m.questionPrompts))
+	for i, q := range m.questionPrompts {
+		set := answers[i]
+		if len(set.Answers) == 0 || (!q.Multiple && len(set.Answers) != 1) {
+			return nil, false
+		}
+		picked := make(map[int]bool, len(set.Answers))
+		for _, ans := range set.Answers {
+			idx, found := questionOptionIndexByLabel(q, ans.Label)
+			if !found {
+				return nil, false
+			}
+			picked[idx] = true
+		}
+		selections[i] = picked
+	}
+	return selections, true
+}
+
+// questionOptionIndexByLabel finds the non-custom option of q whose label matches
+// label, ignoring case and surrounding space. It reports false for an empty label,
+// a label matching no option, and a custom option.
+func questionOptionIndexByLabel(q tool.QuestionPrompt, label string) (int, bool) {
+	want := strings.TrimSpace(label)
+	if want == "" {
+		return 0, false
+	}
+	for idx := 0; idx < questionOptionCount(q); idx++ {
+		optLabel, _, custom := questionOption(q, idx)
+		if custom {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(optLabel), want) {
+			return idx, true
+		}
+	}
+	return 0, false
 }

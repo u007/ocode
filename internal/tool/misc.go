@@ -121,6 +121,15 @@ type QuestionPrompt struct {
 	Multiple bool             `json:"multiple"`
 }
 
+// QuestionOptionIsCustom reports whether a question option is the free-text
+// escape hatch: "something else", "other", "own answer" or "custom". Such an
+// option is answered by typing, so the TUI renders it as the text row and the
+// auto-continue judge never offers it. This is the one definition both use.
+func QuestionOptionIsCustom(label string) bool {
+	lower := strings.ToLower(strings.TrimSpace(label))
+	return strings.Contains(lower, "something else") || strings.Contains(lower, "other") || strings.Contains(lower, "own answer") || strings.Contains(lower, "custom")
+}
+
 // QuestionAnswer is a single selected answer to a QuestionPrompt. It is the
 // shared wire type between the agent, the TUI, the web UI, and external clients
 // (e.g. the Telegram bot) so every surface submits answers identically.

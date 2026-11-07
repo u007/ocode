@@ -1265,7 +1265,6 @@ var mainAgentOnlyTools = map[string]bool{
 	"todowrite":      true,
 	"todo_update":    true,
 	"viewer_control": true,
-	"viewer_state":   true,
 }
 
 // agentOwnTools gives the named agent its own instance of every AgentScopedTool,

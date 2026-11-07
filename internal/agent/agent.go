@@ -691,6 +691,10 @@ type Agent struct {
 	// OnAutoContinueJudge, if set, is invoked when an async auto-continue
 	// judge call finishes (see AutoContinueJudgeAsync).
 	OnAutoContinueJudge func(AutoContinueJudgeResult)
+	// OnAutoContinueQuestionJudge, if set, is invoked when an async question
+	// judge call finishes (see AutoContinueQuestionJudgeAsync). Answered=false
+	// means the question stays with the user.
+	OnAutoContinueQuestionJudge func(AutoContinueQuestionJudgeResult)
 	// OnGoalJudge, if set, is invoked when an async goal judge call finishes
 	// (see GoalJudgeAsync).
 	OnGoalJudge func(GoalJudgeResult)

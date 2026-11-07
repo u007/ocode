@@ -1766,28 +1766,29 @@ type model struct {
 	// advisorCkptIdx is the transcript index of the "advisor reviewing…" line
 	// so the finish event can rewrite it in place instead of adding a second
 	// line. -1 when no checkpoint is in flight.
-	advisorCkptIdx           int
-	advisorCkptStart         time.Time
-	recapCh                  chan recapFinishedMsg
-	autoContinueJudgeCh      chan autoContinueJudgeFinishedMsg
-	goalJudgeCh              chan goalJudgeFinishedMsg
-	btwCh                    chan btwResultMsg
-	recapText                string // held until recap finishes, then cleared; recap result goes to m.messages
-	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
-	titleCh                  chan titleResult
-	deltaDrops               uint64 // bumped each time the delta select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
-	usageCh                  chan usageEvent
-	sideUsageCh              chan sideUsageData
-	streamFinalOutputTokens  int64 // exact output tokens from streaming usage event (0 = not yet received)
-	lastInputTokens          int64 // provider-reported input (prompt) tokens of the most recent completed LLM call; ≈ current context-window occupancy for the status snapshot's ContextCurrentTokens
-	streamingThinkingIdx     int   // index into m.messages of the in-flight roleThinking message; -1 when none
-	streamAssistantFinalized bool  // true once the current stream has emitted its final assistant message
-	pendingStreamDeltas      []deltaEvent
-	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
-	titleRequested           bool
-	titleAttempts            int    // failed generation attempts this session; capped at maxTitleAttempts
-	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
-	compacting               bool
+	advisorCkptIdx              int
+	advisorCkptStart            time.Time
+	recapCh                     chan recapFinishedMsg
+	autoContinueJudgeCh         chan autoContinueJudgeFinishedMsg
+	autoContinueQuestionJudgeCh chan autoContinueQuestionJudgeFinishedMsg
+	goalJudgeCh                 chan goalJudgeFinishedMsg
+	btwCh                       chan btwResultMsg
+	recapText                   string // held until recap finishes, then cleared; recap result goes to m.messages
+	recapGen                    uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
+	titleCh                     chan titleResult
+	deltaDrops                  uint64 // bumped each time the delta select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	usageCh                     chan usageEvent
+	sideUsageCh                 chan sideUsageData
+	streamFinalOutputTokens     int64 // exact output tokens from streaming usage event (0 = not yet received)
+	lastInputTokens             int64 // provider-reported input (prompt) tokens of the most recent completed LLM call; ≈ current context-window occupancy for the status snapshot's ContextCurrentTokens
+	streamingThinkingIdx        int   // index into m.messages of the in-flight roleThinking message; -1 when none
+	streamAssistantFinalized    bool  // true once the current stream has emitted its final assistant message
+	pendingStreamDeltas         []deltaEvent
+	lastDeltaRender             time.Time // throttles renderTranscript to ≥50ms cadence during streams
+	titleRequested              bool
+	titleAttempts               int    // failed generation attempts this session; capped at maxTitleAttempts
+	titleGen                    uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
+	compacting                  bool
 	// queuedCompactInputs removed: unified queuedItems now handles all queue types
 	cmdRunningCount      int
 	shellCmdStart        time.Time // non-zero = a !shell command is running; used for elapsed timer
@@ -2867,36 +2868,37 @@ func newModel(opts ...RunOptions) model {
 			d, _ := os.Getwd()
 			return d
 		}(),
-		permViewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
-		compactCh:            make(chan agent.CompactResult, 4),
-		compactStartCh:       make(chan struct{}, 4),
-		advisorCkptCh:        make(chan advisorCheckpointMsg, 4),
-		advisorCkptIdx:       -1,
-		recapCh:              make(chan recapFinishedMsg, 4),
-		autoContinueJudgeCh:  make(chan autoContinueJudgeFinishedMsg, 4),
-		goalJudgeCh:          make(chan goalJudgeFinishedMsg, 4),
-		btwCh:                make(chan btwResultMsg, 64),
-		btwViewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(8)),
-		titleCh:              make(chan titleResult, 4),
-		usageCh:              make(chan usageEvent, 16),
-		sideUsageCh:          make(chan sideUsageData, 16),
-		streamingThinkingIdx: -1,
-		questionInput:        questionInput,
-		chatSearchInput:      chatSearchInput,
-		chatSearchCursor:     -1,
-		chatSearchFlashMsg:   -1,
-		permissionGrantCh:    make(chan permissionGrantRequest),
-		subAgentPermCh:       make(chan subAgentPermRequest),
-		subAgentPermMu:       &sync.Mutex{},
-		cleanupState:         newModelCleanupState(),
-		hoverPickerIdx:       -1,
-		hoverSlashIdx:        -1,
-		hoverTabIdx:          -1,
-		supervisor:           sup,
-		secretSession:        secretfile.NewSession(),
-		hookPipeline:         hp,
-		webFS:                o.WebFS,
-		modalStack:           NewModalStack(),
+		permViewport:                viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		compactCh:                   make(chan agent.CompactResult, 4),
+		compactStartCh:              make(chan struct{}, 4),
+		advisorCkptCh:               make(chan advisorCheckpointMsg, 4),
+		advisorCkptIdx:              -1,
+		recapCh:                     make(chan recapFinishedMsg, 4),
+		autoContinueJudgeCh:         make(chan autoContinueJudgeFinishedMsg, 4),
+		autoContinueQuestionJudgeCh: make(chan autoContinueQuestionJudgeFinishedMsg, 4),
+		goalJudgeCh:                 make(chan goalJudgeFinishedMsg, 4),
+		btwCh:                       make(chan btwResultMsg, 64),
+		btwViewport:                 viewport.New(viewport.WithWidth(80), viewport.WithHeight(8)),
+		titleCh:                     make(chan titleResult, 4),
+		usageCh:                     make(chan usageEvent, 16),
+		sideUsageCh:                 make(chan sideUsageData, 16),
+		streamingThinkingIdx:        -1,
+		questionInput:               questionInput,
+		chatSearchInput:             chatSearchInput,
+		chatSearchCursor:            -1,
+		chatSearchFlashMsg:          -1,
+		permissionGrantCh:           make(chan permissionGrantRequest),
+		subAgentPermCh:              make(chan subAgentPermRequest),
+		subAgentPermMu:              &sync.Mutex{},
+		cleanupState:                newModelCleanupState(),
+		hoverPickerIdx:              -1,
+		hoverSlashIdx:               -1,
+		hoverTabIdx:                 -1,
+		supervisor:                  sup,
+		secretSession:               secretfile.NewSession(),
+		hookPipeline:                hp,
+		webFS:                       o.WebFS,
+		modalStack:                  NewModalStack(),
 	}
 
 	if resolvedSmallModel != "" {
@@ -3064,7 +3066,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitAdvisorCheckpointEvent(m.advisorCkptCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitGoalJudgeEvent(m.goalJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitAdvisorCheckpointEvent(m.advisorCkptCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitAutoContinueQuestionJudgeEvent(m.autoContinueQuestionJudgeCh), waitGoalJudgeEvent(m.goalJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
 	if m.permissionGrantCh != nil {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
@@ -5387,6 +5389,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TUI-only, matching this file's existing RC-minimalism, and the /rc
 		// listener must stay un-armed until the chain actually settles (see
 		// pendingRCAutoContinue's doc comment for why).
+		// An RC-owned turn never runs the question judge: a question it ends on
+		// stays with the remote client or the TUI dialog, not the judge.
 		if m.pendingRC == nil && m.pendingRCAutoContinue {
 			m.settleAutoContinueChain()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
@@ -5460,6 +5464,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.broadcastRCSnapshot()
 			m.settleAutoContinueChain()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
+			// RC-owned turn: the question judge never runs here (see the
+			// RC-chain continuation branch above).
 			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 				// Do NOT also re-arm waitForRCRequest here: rcRequestMsg's
 				// handler unconditionally clobbers m.pendingRC and calls
@@ -5637,6 +5643,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if msg.err == nil && !stepLimitHit {
 					m.maybeDispatchAutoContinueJudge(false)
 				}
+			} else if msg.err == nil {
+				// The turn ended paused on the question dialog: the question judge
+				// may answer it on the user's behalf.
+				m.maybeDispatchQuestionJudge()
 			}
 			// Auto-recap when stream completes successfully and recap is enabled.
 			// Require at least 4 messages so trivial single-turn exchanges don't trigger a recap call.
@@ -5865,6 +5875,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, waitAutoContinueJudgeEvent(m.autoContinueJudgeCh)
+	case autoContinueQuestionJudgeFinishedMsg:
+		rearm := waitAutoContinueQuestionJudgeEvent(m.autoContinueQuestionJudgeCh)
+		if msg.err != nil {
+			agent.DebugAppendf("AUTOCONTINUE", "question judge failed for tool_call_id=%s: %v", msg.toolCallID, msg.err)
+		}
+		// The user may have moved on while the judge ran. Act only on the same
+		// untouched dialog; any other verdict is dropped without a transcript line.
+		if !m.questionJudgeStillApplies(msg.toolCallID) {
+			agent.DebugAppendf("AUTOCONTINUE", "question judge verdict for tool_call_id=%s dropped: dialog changed or no longer eligible", msg.toolCallID)
+			return m, rearm
+		}
+		if msg.err != nil || !msg.answered {
+			if msg.detail != "" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("~ " + msg.detail), transient: true})
+				m.rerenderTranscriptAndMaybeScroll()
+			}
+			return m, rearm
+		}
+		selections, ok := m.questionJudgeSelections(msg.answers)
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("~ auto-answer did not match the dialog; waiting for you"), transient: true})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, rearm
+		}
+		m.questionSelected = selections
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("↩ auto-continue — " + msg.detail), transient: true})
+		m.autoContinueCount++
+		m.autoContinueActions = append(m.autoContinueActions, agent.AutoContinueAnswerQuestionAction)
+		m.lastTurnWasAutoContinue = true
+		answered, cmd := m.submitQuestionAnswers()
+		return answered, tea.Batch(cmd, rearm)
 	case goalJudgeFinishedMsg:
 		// The dispatch mode is consumed on every arrival, stale included, so an
 		// /rc listener left un-armed by the dispatch is always re-armed. A stale
@@ -19659,6 +19700,13 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	autoContinueQuestionJudgeDoneCh := m.autoContinueQuestionJudgeCh
+	m.agent.OnAutoContinueQuestionJudge = func(result agent.AutoContinueQuestionJudgeResult) {
+		select {
+		case autoContinueQuestionJudgeDoneCh <- autoContinueQuestionJudgeFinishedMsg{toolCallID: result.ToolCallID, answered: result.Answered, answers: result.Answers, detail: result.Detail, err: result.Err}:
+		default:
+		}
+	}
 	goalJudgeDoneCh := m.goalJudgeCh
 	m.agent.OnGoalJudge = func(result agent.GoalJudgeResult) {
 		select {
@@ -19842,6 +19890,23 @@ func waitAutoContinueJudgeEvent(doneCh chan autoContinueJudgeFinishedMsg) tea.Cm
 	return func() tea.Msg {
 		return <-doneCh
 	}
+}
+
+func waitAutoContinueQuestionJudgeEvent(doneCh chan autoContinueQuestionJudgeFinishedMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-doneCh
+	}
+}
+
+// autoContinueQuestionJudgeFinishedMsg carries one question judge verdict. Its
+// toolCallID names the question tool call the verdict answers, so a verdict for
+// a dialog that has since changed is recognised and dropped.
+type autoContinueQuestionJudgeFinishedMsg struct {
+	toolCallID string
+	answered   bool
+	answers    []tool.QuestionAnswerSet
+	detail     string
+	err        error
 }
 
 type autoContinueJudgeFinishedMsg struct {
