@@ -101,6 +101,7 @@ export interface PublishArtifactResponse {
   version?: ArtifactVersion;
   artifact?: Artifact;
   notify_sent?: boolean;
+  email_sent?: boolean;
 }
 
 export interface CreateArtifactRequest {

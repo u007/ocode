@@ -57,9 +57,9 @@ Machine-global store, **not** per project: `artifactStoreDir()` is
 spec's per-project layout was not adopted.
 
 SQLite (`artifacts.db`) opens with WAL, `busy_timeout=5000`, and
-**`foreign_keys(ON)`** (`internal/artifacts/store.go:49`); the FK clauses in the schema
+**`foreign_keys(ON)`** (`internal/artifacts/store.go:67`); the FK clauses in the schema
 are vacuous without that pragma, so do not remove it. Tables
-(`internal/artifacts/store.go:88-150`):
+(`internal/artifacts/store.go:98-177`):
 
 - `artifacts(id PK, project_host, project_path, name, created_at, created_by, status, hosting_mode)`
 - `artifact_versions(id PK, artifact_id FK, version, entrypoint, blob_manifest_hash, size_bytes, created_at, build_cmd, build_log_path, schema_version)`
@@ -70,7 +70,7 @@ are vacuous without that pragma, so do not remove it. Tables
 
 Every store mutation runs under `withLock` — an in-process mutex plus a **cross-process
 file flock** (`artifacts.lock`, 5s timeout), and contention is surfaced as `ErrLocked`
-rather than silently running unlocked (`internal/artifacts/store.go:191-204`). Keep that
+rather than silently running unlocked (`internal/artifacts/store.go:211-224`). Keep that
 contract: a new write path that skips `withLock` reintroduces last-writer-wins.
 
 Blobs are content-addressed: `Put` hashes with sha256 and stores at
@@ -78,41 +78,41 @@ Blobs are content-addressed: `Put` hashes with sha256 and stores at
 `validateHash` rejects empty, separator-bearing and `..` hashes, and `pathFor`
 re-checks containment (`:28-60`). `GCUnreferenced` deletes blobs not named by
 `artifact_files` (`:121`); `Store.GC()` computes the referenced set and is invoked
-after `DeleteArtifact` (`internal/server/handler_artifacts.go:539`).
+after `DeleteArtifact` (`internal/server/handler_artifacts.go:550`).
 
 Versions are immutable. `PublishVersion` inserts the version + its file rows in one
 transaction and refuses an artifact that does not exist
-(`internal/artifacts/store.go:312-341`). The serve path picks the newest version by an
+(`internal/artifacts/store.go:330-381`). The serve path picks the newest version by an
 **explicit sort key** (created_at, then version label, then id), never by trusting
 `ListVersions` order (`latestArtifactVersion`, `internal/server/handler_artifact_serve.go:113-132`;
 pinned by `TestLatestArtifactVersionPicksNewestExplicitly`).
 
 ## Publish pipeline (what `POST /api/artifacts/{id}/publish` actually does)
 
-`HandlePublish` (`internal/server/handler_artifacts.go:266`):
+`HandlePublish` (`internal/server/handler_artifacts.go:271`):
 
 1. Remote project → the request is proxied to the owning host's
-   `/api/artifacts/{id}/publish`; there is **no local fallback** (`:266-283`,
+   `/api/artifacts/{id}/publish`; there is **no local fallback** (`:271-283`,
    `proxyArtifactToRemote`).
 2. **Server-side secret scan** — the client flag is ignored (`_ = scanHit`); the
    handler walks the project for `.env`/`.env.*`, `*.pem`, `*.key`, `credentials`,
    `secrets.{json,yaml,yml}`. A hit returns 409 unless an `override_reason` is supplied,
-   which is logged (`:286-329`).
-3. `build_cmd` is **parsed and stored, never executed** (`:330`, and the `buildDir`
+   which is logged (`:300-332`).
+3. `build_cmd` is **parsed and stored, never executed** (`:335`, and the `buildDir`
    block's "no run" comment). See deferrals.
-4. `notify_on_publish` is read per request (`:331`); see below.
+4. `notify_on_publish` is read per request (`:336`); see below.
 5. Walk the project, skipping: symlinks, any dot-prefixed path segment,
    `node_modules`/`vendor`/`.git`, `.env*`, and any extension outside
-   `allowedArtifactExt` (`:398`, helper at `:834-843`: html/htm/css/js/mjs/cjs/json/map,
+   `allowedArtifactExt` (`:403`, helper at `:849-858`: html/htm/css/js/mjs/cjs/json/map,
    images, fonts, txt/xml/csv/pdf, audio/video, wasm). Files that fail the allowlist are
    silently omitted — a publisher asking "why is my file missing" is usually here.
 6. Enforce `artifactMaxBytes()` — default 100 MiB, overridable by
-   `OCODE_ARTIFACT_MAX_BYTES` (`:440`, handler at `:845-853`) — then
-   `PublishVersion` and `SetArtifactStatus("active")` (`:446-462`). A new publish
+   `OCODE_ARTIFACT_MAX_BYTES` (`:445`, handler at `:860-868`) — then
+   `PublishVersion` and `SetArtifactStatus("active")` (`:451-466`). A new publish
    therefore **re-livens an unpublished artifact**.
 7. If `notify`, email recipients are resolved **server-side**: the owner if
    `CreatedBy` looks like an email, plus every allowlist entry, deduped
-   (`:466-491`). The flag is not persisted on the artifact, so "remember last value" is
+   (`:472-497`). The flag is not persisted on the artifact, so "remember last value" is
    never true server-side.
 
 ## Serving path and access enforcement (`/p/...`)
@@ -191,7 +191,7 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
   only its sha256; the serve path re-hashes the cookie and looks up an **accepted** row
   (`inviteAccessOK`, `artifact_tokens.go:185-195`). Invites are single-use at accept
   time but the hash is deliberately retained so the cookie keeps working; removing the
-  allowlist row revokes it (`internal/artifacts/store.go:816-859`).
+  allowlist row revokes it (`internal/artifacts/store.go:818-853`).
 - **Invite TTL defaults to 7 days** (`const InviteTTL = 7 * 24 * time.Hour`,
   `internal/artifacts/store.go:31`) and `OCODE_ARTIFACT_INVITE_TTL_DAYS` overrides it
   through `inviteTTL()` (`store.go:36-45`); a missing, non-numeric or non-positive
@@ -199,11 +199,12 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
   Enforced on accept and on lookup (`store.go:591`, `store.go:837`).
 - **Tokens are never logged** — there is no `log`/`emitDebug` call anywhere in
   `artifact_tokens.go`, `handler_artifact_serve.go`, `handler_artifact_invite.go` or
-  `internal/artifacts/*.go` (verified by grep). The only artifact log line records a
-  secret-scan override reason (`handler_artifacts.go:327`). Keep it that way: never log
-  a token, password, invite hash or password cookie.
+  `internal/artifacts/*.go` (verified by grep). The artifact log lines record a
+  secret-scan override reason (`handler_artifacts.go:332`) and mail-delivery failures
+  (`handler_artifacts.go` publish/invite branches); none includes a token, password,
+  invite hash or password cookie. Keep it that way.
 - `PruneExpiredTokens` deletes rows whose non-empty `expires_at` is past
-  (`internal/artifacts/store.go:638-650`); `artifactTokenStore.pruneExpired` is the
+  (`internal/artifacts/store.go:657-667`); `artifactTokenStore.pruneExpired` is the
   caller (`internal/server/artifact_tokens.go:339-344`).
 
 ## Mode A vs Mode B
@@ -214,7 +215,7 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
   artifacts stay up when the machine sleeps. Use **`sync_url`, never `backend_url`**
   (`backend_url` is local-dev-only; `concepts/backend-sync-url-split.md`). The spec
   states Phase 1 needs new hub-side storage/serving endpoints, and none exist in this
-  tree. `Artifact.HostingMode` is accepted on create (`handler_artifacts.go:162-184`),
+  tree. `Artifact.HostingMode` is accepted on create (`handler_artifacts.go:167-184`),
   persisted, and then **never consulted** — create defaults it to `"self"`. Treat
   `hosting_mode` as metadata-only until routing exists.
 - The remote path in `handler_artifacts.go` proxies artifact requests to a **saved
@@ -276,7 +277,7 @@ cannot start one (`TestArtifactTailscaleRoutesRequireAuth`).
 
 | Var | Status |
 |---|---|
-| `OCODE_ARTIFACT_MAX_BYTES` | Wired. Default 100 MiB (`handler_artifacts.go:845-853`). |
+| `OCODE_ARTIFACT_MAX_BYTES` | Wired. Default 100 MiB (`handler_artifacts.go:860-868`). |
 | `OCODE_ARTIFACT_INVITE_TTL_DAYS` | Wired. Default 7 days; invalid or `<=0` falls back (`store.go:36-45`). |
 | `OCODE_ARTIFACT_LOG_RETENTION_DAYS` | **Declared only.** No access-log pruning exists. |
 | `OCODE_ARTIFACT_ORIGIN` | **Declared only.** No artifact-origin plumbing. |
@@ -302,7 +303,7 @@ Verified absences in this tree (do not describe these as shipped):
 - **Per-artifact subdomain / origin isolation.** Mode A is same-origin `/p/...`; the
   opaque-origin protection is the CSP `sandbox` directive, not a separate host.
 - **`artifact_versions.blob_manifest_hash`** is written as `""` by the publish handler
-  (`handler_artifacts.go:450`) and is not computed.
+  (`handler_artifacts.go:455`) and is not computed.
 - **Access-log retention/rotation** — the table grows unbounded.
 
 ## Invariants to preserve (checklist before touching the feature)

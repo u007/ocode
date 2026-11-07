@@ -34,21 +34,32 @@ type Mailer interface {
 	SendMail(to, subject, body string) error
 }
 
+// errNoMailer is returned when an artifact email cannot be delivered because no
+// mailer is configured. Callers log it and surface a false email flag; the
+// invite token is always returned to the owner as the fallback.
+var errNoMailer = errors.New("no artifact mailer configured")
+
 func sendEmail(m any, to, subject, body string) error {
 	if m == nil {
-		return nil
+		return errNoMailer
 	}
 	switch v := m.(type) {
 	case func(string, string, string) error:
 		return v(to, subject, body)
-	case interface{ Send(string, string, string) error }:
+	case interface {
+		Send(string, string, string) error
+	}:
 		return v.Send(to, subject, body)
-	case interface{ SendEmail(string, string, string) error }:
+	case interface {
+		SendEmail(string, string, string) error
+	}:
 		return v.SendEmail(to, subject, body)
-	case interface{ SendMail(string, string, string) error }:
+	case interface {
+		SendMail(string, string, string) error
+	}:
 		return v.SendMail(to, subject, body)
 	}
-	return nil
+	return fmt.Errorf("artifact mailer has unsupported type %T", m)
 }
 
 func (h *Handler) artifactMailerInstance() any {
@@ -67,10 +78,10 @@ func (h *Handler) artifactMailerInstance() any {
 
 // expose fields via any
 type _handlerMailerFields struct {
-	Mailer        any
+	Mailer         any
 	ArtifactMailer any
-	EmailSender   any
-	EmailFunc     any
+	EmailSender    any
+	EmailFunc      any
 }
 
 // Handler mailer fields are added through embedding? We'll store as actual fields
@@ -257,9 +268,9 @@ func (h *Handler) HandleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	}
 	versions, _ := st.ListVersions(id)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"artifact":  a,
-		"id":        a.ID,
-		"versions":  versions,
+		"artifact": a,
+		"id":       a.ID,
+		"versions": versions,
 	})
 }
 
@@ -464,6 +475,7 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	}
 	// mint tokens? skip
 	// notify email
+	emailSent := false
 	if notify {
 		mailer := h.artifactMailerInstance()
 		recipients := []string{}
@@ -487,14 +499,19 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 			}
 		}
 		for _, to := range recipients {
-			_ = sendEmail(mailer, to, "new version live", "published")
+			if err := sendEmail(mailer, to, "new version live", "published"); err != nil {
+				log.Printf("artifact publish: notify %s for %s: %v", to, id, err)
+				continue
+			}
+			emailSent = true
 		}
 	}
 	// if notify false: no send
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version": v,
-		"artifact": a,
-		"notify_sent": notify,
+		"version":     v,
+		"artifact":    a,
+		"notify_sent": emailSent,
+		"email_sent":  emailSent,
 	})
 }
 
@@ -641,12 +658,16 @@ func (h *Handler) HandleAllowlistAdd(w http.ResponseWriter, r *http.Request, id 
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("allowlist add: %v", err))
 		return
 	}
-	// send invite email
+	// send invite email (best effort; the token below is the fallback)
 	mailer := h.artifactMailerInstance()
-	_ = sendEmail(mailer, email, "invitation", inviteTok)
+	emailErr := sendEmail(mailer, email, "invitation", inviteTok)
+	if emailErr != nil {
+		log.Printf("artifact invite: email to %s for %s: %v", email, id, emailErr)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":       "ok",
 		"invite_token": inviteTok,
+		"email_sent":   emailErr == nil,
 	})
 }
 
