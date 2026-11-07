@@ -411,6 +411,13 @@ type Handler struct {
 	// single-file, short-lived token it can put in the URL.
 	mediaTokens *mediaTokenStore
 
+	// artifactTokens holds durable per-artifact capability tokens (hashed on
+	// disk) and is consulted by artifactAuthMiddleware.
+	artifactTokens *artifactTokenStore
+	// artifactRL is the separate rate limiter for anonymous artifact visitors,
+	// distinct from the owner API limiter (s.rl).
+	artifactRL *rateLimiter
+
 	// remoteSyncMu guards the single-flight state of SyncConnectedRemoteHosts.
 	remoteSyncMu      sync.Mutex
 	remoteSyncRunning bool
@@ -763,6 +770,8 @@ func NewHandler() *Handler {
 			return shellpkg.NewSession(opts)
 		}, defaultSessionIdleTimeout, time.Now),
 		mediaTokens:                  newMediaTokenStore(),
+		artifactTokens:               newArtifactTokenStore(artifactStoreDir()),
+		artifactRL:                   newRateLimiter(),
 		terminalProcsWake:            make(chan struct{}, 1),
 		secretJobs:                   secretjob.NewManager(),
 		cliToolJobs:                  newCLIToolJobManager(),

@@ -624,3 +624,15 @@ func (s *Store) GC() error {
 		return s.blobs.GCUnreferenced(ref)
 	})
 }
+
+// PruneExpiredTokens deletes access tokens whose expires_at is in the past.
+func (s *Store) PruneExpiredTokens() error {
+	return s.withLock(func() error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, err := s.db.Exec(`DELETE FROM access_tokens WHERE expires_at != '' AND expires_at < ?`, now)
+		if err != nil {
+			return fmt.Errorf("artifacts: prune expired tokens: %w", err)
+		}
+		return nil
+	})
+}

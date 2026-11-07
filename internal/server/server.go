@@ -96,6 +96,7 @@ type Server struct {
 	username         string
 	password         string
 	rl               *rateLimiter
+	artifactRL       *rateLimiter
 	removeSyncHooks  []func() // unregister the config/auth save hooks on Shutdown
 	mux              *http.ServeMux
 	handler          *Handler
@@ -187,6 +188,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		username:      username,
 		password:      password,
 		rl:            newRateLimiter(),
+		artifactRL:    newRateLimiter(),
 		mux:           mux,
 		handler:       h,
 		frontendStats: newFrontendStatsRing(),
