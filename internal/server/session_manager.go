@@ -845,6 +845,40 @@ func (m *SessionManager) PushPending(sessionID, content string) {
 	}
 }
 
+// TryPushPending appends content only while the queue holds fewer than limit
+// messages. The length check and the append share one lock, so concurrent queue
+// requests cannot overshoot the cap. It reports whether the message was queued.
+func (m *SessionManager) TryPushPending(sessionID, content string, limit int) bool {
+	sessionID = session.CanonicalID(sessionID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil || len(e.pending) >= limit {
+		return false
+	}
+	e.pending = append(e.pending, content)
+	return true
+}
+
+// RemovePendingLast rolls back a TryPushPending whose persist failed. It drops
+// the newest queued entry equal to content, so a push that landed after it keeps
+// its place and the queue stays one-to-one with the persisted rows.
+func (m *SessionManager) RemovePendingLast(sessionID, content string) {
+	sessionID = session.CanonicalID(sessionID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		return
+	}
+	for i := len(e.pending) - 1; i >= 0; i-- {
+		if e.pending[i] == content {
+			e.pending = append(e.pending[:i], e.pending[i+1:]...)
+			return
+		}
+	}
+}
+
 // ReplacePending atomically replaces the persisted-but-unturned queue for a
 // session. Rewind uses it to discard any stale queue left by an earlier turn
 // and retain exactly the newly committed user content, in order.

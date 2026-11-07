@@ -295,6 +295,7 @@ func (m *model) rcGoalJudge(err error) bool {
 	}
 	m.streaming = false
 	m.cancelStream = nil
+	m.syncTurnStatusFile()
 	m.broadcastTUIStatus()
 	return true
 }
@@ -1231,6 +1232,9 @@ func (m *model) invalidateAgentEvents() {
 		m.pendingStreamDeltas = nil
 		m.streamingThinkingIdx = -1
 		m.streamAssistantFinalized = false
+		// Cancel, /new and session switch all land here before the session id
+		// changes, so the old session is marked idle while its id is still set.
+		m.syncTurnStatusFile()
 	}
 	if m.agent != nil {
 		m.agent.Cancel()
@@ -1660,6 +1664,7 @@ type model struct {
 	styles                   Styles
 	modalStack               *ModalStack
 	streaming                bool
+	statusFile               turnStatusMemo
 	ctrlCPressed             bool
 	exitPending              bool
 	cancelStream             chan struct{}
@@ -4765,6 +4770,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
 	case autoRefreshTickMsg:
+		// Heartbeat: a live turn rewrites its status file every tick, so a reader
+		// can tell a running TUI from one that crashed mid-turn (updated_at ages out).
+		if m.streaming {
+			writeSessionStatusFile(m.sessionID, true)
+		}
 		// Quiet background refresh for git and files tabs.
 		// Only refreshes when the user is not busy (not streaming, no active tool,
 		// no modals open). Preserves cursor position and selection.
@@ -4877,6 +4887,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streaming = true
+		m.syncTurnStatusFile()
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
 		m.streamStartedAt = time.Now()
@@ -5376,6 +5387,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.currentStreamEpoch(msg.epoch) {
 			return m, nil
 		}
+		writeSessionStatusFile(m.sessionID, false)
 		if msg.err != nil {
 			// An errored or cancelled turn has no judge behind it, so a resume
 			// deferred from a verdict that landed mid-turn must not fire later.
@@ -5428,6 +5440,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// that reads m.streaming as "is a turn in flight").
 			m.streaming = false
 			m.cancelStream = nil
+			m.syncTurnStatusFile()
 			m.broadcastTUIStatus()
 			m.broadcastRCSnapshot()
 			if m.rcCh != nil {
@@ -5497,6 +5510,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// above for why this can't just fall through to the code below).
 			m.streaming = false
 			m.cancelStream = nil
+			m.syncTurnStatusFile()
 			m.broadcastTUIStatus()
 			// Resume listening for next RC request
 			if m.rcCh != nil {
@@ -5517,6 +5531,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// having actually completed.
 		m.settleAutoContinueChain()
 		m.streaming = false
+		m.syncTurnStatusFile()
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
 		m.streamEndedAt = time.Now()

@@ -25,6 +25,9 @@
 * **Update**: Viewer controller registry is a per-key stack (top active, unregister restores the one beneath); `useViewerControllerWhen` is gone; Monaco stacks on top only while Edit as text is on ([concepts/reader-mode-viewer-context.md](/concepts/reader-mode-viewer-context.md))
 * **Update**: Excel viewer: `activateRange` now validates the range before switching sheets (`invalid range`), `watchUserEdits`, save and raw-save anchors re-derived, and the raw-save extension list now includes `.docx` and `.pdf` ([concepts/excel-preview-univer-sheet.md](/concepts/excel-preview-univer-sheet.md))
 
+* **Creation**: Inter-session communication — shared tools and HTTP surface for agents to inspect and drive other sessions ([concepts/inter-session-communication.md](/concepts/inter-session-communication.md))
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
+
 ## 2026-11-06
 
 * **Update**: Office Add-in Path Presets — Save-Time OS Access Request ([concepts/office-addin-path-presets.md](/concepts/office-addin-path-presets.md))

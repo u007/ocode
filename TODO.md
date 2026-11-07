@@ -7080,3 +7080,8 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 ## Open: publish/share artifact build command execution deferred (2026-11-07)
 
 - **Build command recorded but not executed.** `HandlePublish` stores `build_cmd` on the published version but does not run it; output is not captured to a build log. Implementing under permission+sandbox gates is deferred. Until then, `BuildLogPath` stays empty and publishers must run builds out-of-band.
+
+## Inter-session communication (partial, 2026-11-07)
+- Server-side LLM tools (session_read incl. goal/todo, session_send with queue) generalized to all non-Pulse sessions.
+- NOT DONE: bare TUI session discovery/registry for external agents; CLI (`ocode session status|send|queue`); dedicated cross-session /btw-style side query (session_read + reasoning covers the non-interrupting case).
+- Queue drain is best-effort polling (60s cap) via crashguard.Go; consider event-driven drain later.

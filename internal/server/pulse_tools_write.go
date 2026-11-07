@@ -161,11 +161,12 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 	return []*pulseTool{
 		{
 			name: "session_send",
-			desc: "Send a message to another session, starting a turn on it. Refused when that session is mid-turn or paused on an ask. Needs the operator's approval. Use only when the operator's current message asks you to message that session.",
+			desc: "Send a message to another session, starting a turn on it. Refused when that session is mid-turn or paused on an ask unless queue=true, in which case the message is persisted and drained when the session goes idle. Needs the operator's approval.",
 			ask:  true,
 			props: map[string]any{
 				"session_id": str("Target session id"),
 				"content":    str("The message to send, as the operator would type it"),
+				"queue":      map[string]any{"type": "boolean", "description": "If true, queue the message for when the target is idle instead of refusing"},
 			},
 			run: h.pulseSessionSendTool,
 		},
@@ -258,6 +259,7 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
 		Content   string `json:"content"`
+		Queue     bool   `json:"queue,omitempty"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -269,7 +271,17 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	if err := h.pulseSessionBusy(args.SessionID); err != nil {
-		return "", err
+		if !args.Queue {
+			return "", err
+		}
+		// Queue path: the same handler the web client uses, in-process. It owns
+		// the resident-agent refusal, the cap and the drain start.
+		if _, qerr := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/queue",
+			map[string]any{"content": args.Content},
+			func(w http.ResponseWriter, r *http.Request) { h.HandleSessionQueue(w, r, args.SessionID) }); qerr != nil {
+			return "", fmt.Errorf("queue on %s: %w", args.SessionID, qerr)
+		}
+		return marshalPulseString(map[string]any{"session_id": args.SessionID, "queued": true})
 	}
 	if _, err := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/message",
 		map[string]any{"content": args.Content, "async": true},

@@ -352,15 +352,20 @@ func (h *Handler) pulseSessionReadTool(raw json.RawMessage) (string, error) {
 	}
 	// Under the byte cap the OLDEST messages are dropped first: the end of a
 	// transcript is what the operator is asking about.
+	// Goal + todo plan for the target session (best-effort, non-blocking).
+	goal := h.pulseSessionGoal(args.SessionID, project)
+	todo := h.pulseSessionTodo(project, args.SessionID)
 	return pulseCapped(len(selected), func(n int, truncated bool) any {
 		return struct {
 			SessionID   string             `json:"session_id"`
 			Host        string             `json:"host,omitempty"`
 			ProjectPath string             `json:"project_path"`
 			Title       string             `json:"title"`
+			Goal        any                `json:"goal,omitempty"`
+			Todo        any                `json:"todo,omitempty"`
 			Messages    []pulseReadMessage `json:"messages"`
 			Truncated   bool               `json:"truncated,omitempty"`
-		}{args.SessionID, args.Host, project, title, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
+		}{args.SessionID, args.Host, project, title, goal, todo, append([]pulseReadMessage{}, selected[len(selected)-n:]...), truncated}
 	})
 }
 
@@ -761,4 +766,129 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 		res.Questions = append(res.Questions, pa.Questions...)
 	}
 	return marshalPulseString(res)
+}
+
+// sessionCommToolNames is the ENTIRE peer-communication surface a normal
+// (non-Pulse) session gets, sorted so the tools array is deterministic. It is
+// an allowlist on purpose: a new Pulse tool must not reach ordinary sessions by
+// default. Cross-project enumerations (pulse_board, project_list, agent_runs),
+// remote-side (host_connect) and lifecycle tools (session_new, session_close)
+// stay Pulse-only. No name here gets an Allow rule: every call asks.
+var sessionCommToolNames = []string{
+	"permission_resolve",
+	"question_answer",
+	"question_dismiss",
+	"session_ask",
+	"session_command",
+	"session_read",
+	"session_recap",
+	"session_send",
+}
+
+// sessionCommTools returns the peer-communication tools for a normal session.
+// Each copy's run is wrapped by sessionCommScope, so its target must resolve
+// to a registered project root and no remote host can be named. The pulse
+// tools themselves are untouched.
+func (h *Handler) sessionCommTools() []*pulseTool {
+	byName := make(map[string]*pulseTool)
+	for _, t := range h.pulseTools() {
+		byName[t.Name()] = t
+	}
+	out := make([]*pulseTool, 0, len(sessionCommToolNames))
+	for _, name := range sessionCommToolNames {
+		t := byName[name]
+		if t == nil {
+			continue
+		}
+		scoped := *t
+		scoped.run = h.sessionCommScope(t.run)
+		out = append(out, &scoped)
+	}
+	return out
+}
+
+// sessionCommScope confines a peer-communication tool call to registered
+// projects. The guard decodes session_id and host leniently; the wrapped run
+// keeps its own strict decode, so argument typos are still reported there.
+func (h *Handler) sessionCommScope(run func(json.RawMessage) (string, error)) func(json.RawMessage) (string, error) {
+	return func(raw json.RawMessage) (string, error) {
+		var target struct {
+			SessionID string `json:"session_id"`
+			Host      string `json:"host"`
+		}
+		_ = json.Unmarshal(raw, &target)
+		if strings.TrimSpace(target.Host) != "" {
+			return "", errors.New("remote-host sessions are not reachable from a normal session; use the Pulse assistant or the host itself")
+		}
+		if id := strings.TrimSpace(target.SessionID); id != "" {
+			if err := h.sessionCommTargetAllowed(id); err != nil {
+				return "", err
+			}
+		}
+		return run(raw)
+	}
+}
+
+// sessionCommTargetAllowed reports whether a normal session may act on id: it
+// must not be the Pulse assistant, it must resolve locally, and its project
+// root must be one of allowedProjectRoots (the security boundary).
+func (h *Handler) sessionCommTargetAllowed(id string) error {
+	if isPulseSession(id) {
+		return fmt.Errorf("session %q is the Pulse assistant's own session", id)
+	}
+	entry, err := h.sessions.Resolve(id)
+	if err != nil || entry == nil {
+		return fmt.Errorf("session %q not found", id)
+	}
+	root := entry.ProjectRoot
+	if root == "" {
+		root = h.workDir
+	}
+	for _, allowed := range h.allowedProjectRoots() {
+		if root == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("session %q belongs to project %q, which is not a registered project root", id, root)
+}
+
+// pulseSessionGoal returns the target session's goal (live if resident, else
+// from persisted metadata), or nil when there is none.
+func (h *Handler) pulseSessionGoal(id, project string) any {
+	if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+		if g, ok := as.agent.Goal(); ok {
+			return map[string]any{
+				"active":      true,
+				"condition":   g.Condition,
+				"status":      g.Status,
+				"turns":       g.Turns,
+				"last_reason": g.LastReason,
+			}
+		}
+		return nil
+	}
+	s, err := session.LoadForDir(project, id)
+	if err != nil || s == nil {
+		return nil
+	}
+	gs, ok := agent.GoalStateFromMetadata(s.Metadata)
+	if !ok {
+		return nil
+	}
+	return map[string]any{
+		"active":      gs.Status == "" || gs.Status == "not_met",
+		"condition":   gs.Condition,
+		"status":      gs.Status,
+		"turns":       gs.Turns,
+		"last_reason": gs.LastReason,
+	}
+}
+
+// pulseSessionTodo returns the target session's todo plan (if any).
+func (h *Handler) pulseSessionTodo(project, id string) any {
+	ev, found, err := readTodoUpdatedEvent(project, id)
+	if err != nil || !found {
+		return nil
+	}
+	return ev
 }

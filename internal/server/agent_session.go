@@ -604,6 +604,15 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		// record without a lookup by any other id.
 		tools = append(tools, &viewerStateTool{h: h, sessionID: sessionID})
 	}
+	if !pulse {
+		// Peer-communication tools for other sessions. They get NO Allow rule:
+		// with no rule the permission default is ask, so every call raises a
+		// normal permission dialog. sessionCommTools also confines each target
+		// to allowedProjectRoots.
+		for _, t := range h.sessionCommTools() {
+			tools = append(tools, t)
+		}
+	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)
 	if pulse {
@@ -1270,6 +1279,13 @@ type turnOptions struct {
 	// a turn, when another async turn is already registered on the session. The
 	// check and the registration share one cancelMu section.
 	refuseIfBusy bool
+
+	// drainPending runs the session's already-persisted pending queue (see
+	// scheduleQueueDrain) without persisting or pushing anything. The job
+	// skips the persist step and goes straight to the pending loop, which turns
+	// each queued message in order. A retryLast turn does not drain: it runs
+	// the transcript tail once and never shifts the queue.
+	drainPending bool
 }
 
 // runTurn executes one agent turn: appends the user message (unless
@@ -2290,7 +2306,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		if !h.commitPendingRewindTurn(id, entry, job) {
 			return
 		}
-	} else if job.opts.retryLast {
+	} else if job.opts.retryLast || job.opts.drainPending {
 		close(job.persistAck)
 	} else {
 		if err := h.persistUserMessage(entry, job.content); err != nil {
@@ -2314,7 +2330,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// 2. Bootstrap once if needed. Failure surfaces as turn_error carrying the
 	// failing stage; the message stays pending (durable) for the next job.
 	as := h.lookupAgentSession(id)
-	if as == nil {
+	if as == nil || as.agent == nil {
 		var err error
 		var stage string
 		as, stage, err = h.bootstrapEntryAgent(entry, job.model)
@@ -2575,6 +2591,9 @@ func nextUserSeq(messages []agent.Message) int {
 // Each stranded message is dispatched as an ordinary follow-up turn so
 // nothing submitted by the user is ever silently dropped.
 func (h *Handler) flushStrandedInjections(sessionID string, as *agentSession) {
+	if as == nil || as.agent == nil {
+		return
+	}
 	for _, m := range as.agent.DrainPendingInjections() {
 		if _, err := h.dispatchTurn(sessionID, "", m.Content, turnOptions{}); err != nil {
 			log.Printf("serve: flush stranded injection for %s: %v", sessionID, err)
@@ -2980,6 +2999,9 @@ func (h *Handler) saveSessionAsync(sessionID, title string, msgs []agent.Message
 // tool-dispatch goroutines inside Step, not just the calling goroutine. Only
 // the snapshot copy is taken under it; the enqueue itself runs outside.
 func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []agent.Message) {
+	if as == nil || as.agent == nil {
+		return
+	}
 	prev := as.agent.OnMessage
 	var mu sync.Mutex
 	live := append([]agent.Message(nil), base...)

@@ -359,6 +359,13 @@ type Handler struct {
 	shutdownStarted bool
 	turnJobsWG      sync.WaitGroup
 
+	// drainMu guards queueDrainers: one drainer goroutine per session with a
+	// persisted pending queue (scheduleQueueDrain). The entry is removed under
+	// drainMu after a re-check of the queue, so a push cannot be left behind by
+	// an exiting drainer.
+	drainMu       sync.Mutex
+	queueDrainers map[string]*queueDrainState
+
 	// closePending marks sessions whose HandleCloseSession release could not
 	// run immediately (an active turn held the agent). executeTurnJob drains
 	// the marker after the turn (or bootstrap) finishes and releases the
@@ -1036,6 +1043,9 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 // in headless mode), the tool branch emits a `permission` frame so a connected
 // browser can render the approve/deny dialog.
 func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) {
+	if ag == nil {
+		return
+	}
 	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
 	// "reasoning" → "thinking", "text" → "text".
 	ag.OnDelta = func(kind, text string) {

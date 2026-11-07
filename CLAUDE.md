@@ -722,7 +722,14 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
 - **Terminal tools are Pulse-only.** `terminal_tabs`, `terminal_read` and `terminal_screen` live in
   `pulseTools()` and reach an agent only through `configurePulseAgent` (gated on
   `isPulseSession`). Never add them to the builtin toolset. `TestTerminalToolsAreOnlyForThePulseAssistant`
-  enforces it. Command lines go to the model only through `pulseTerminalRows`, which checks
+  enforces it.
+- **Session-communication tools are a narrow allowlist.** `sessionCommToolNames` (in
+  `pulse_tools.go`) is the only Pulse-tool subset a non-Pulse session gets: `session_read`,
+  `session_recap`, `session_ask`, `session_send` (with `queue`), `session_command`, and the ask
+  resolvers. They carry NO Allow rule, so every call asks, and `sessionCommScope` confines each
+  target to `allowedProjectRoots()` and refuses `host`. `pulse_board`, `project_list`, `agent_runs`,
+  `host_connect`, `session_new` and `session_close` stay Pulse-only. A denylist would leak new
+  Pulse tools, so keep it an allowlist. Command lines go to the model only through `pulseTerminalRows`, which checks
   `terminalAccessAllowed`.
 - **It is never on the board.** `buildPulseRows` skips every `pulse_` id; any new
   surface listing sessions (board text, `agent_runs`, search) must exclude it too.
