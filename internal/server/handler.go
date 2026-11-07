@@ -414,6 +414,15 @@ type Handler struct {
 	// artifactTokens holds durable per-artifact capability tokens (hashed on
 	// disk) and is consulted by artifactAuthMiddleware.
 	artifactTokens *artifactTokenStore
+	// mailer hooks for artifact publish/invite notifications (tests inject mocks)
+	Mailer         any
+	ArtifactMailer any
+	EmailSender    any
+	EmailFunc      any
+	SendMailFunc   any
+	SendEmailFunc  any
+	NotifyMailer   any
+	MailerFunc     any
 	// artifactRL is the separate rate limiter for anonymous artifact visitors,
 	// distinct from the owner API limiter (s.rl).
 	artifactRL *rateLimiter

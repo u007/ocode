@@ -820,6 +820,19 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/debug/pprof/symbol", s.authMiddleware(pprof.Symbol))
 	s.mux.HandleFunc("/debug/pprof/trace", s.authMiddleware(pprof.Trace))
 
+	// Artifacts (publish/share project)
+	s.mux.HandleFunc("POST /api/artifacts", s.authMiddleware(s.handleCreateArtifact))
+	s.mux.HandleFunc("GET /api/artifacts", s.authMiddleware(s.handleListArtifacts))
+	s.mux.HandleFunc("GET /api/artifacts/{id}", s.authMiddleware(s.handleGetArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/publish", s.authMiddleware(s.handlePublishArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/unpublish", s.authMiddleware(s.handleUnpublishArtifact))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}", s.authMiddleware(s.handleDeleteArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/tokens", s.authMiddleware(s.handleMintArtifactToken))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}/tokens/{tid}", s.authMiddleware(s.handleRevokeArtifactToken))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/allowlist", s.authMiddleware(s.handleAllowlistAddArtifact))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}/allowlist/{email}", s.authMiddleware(s.handleAllowlistRemoveArtifact))
+	s.mux.HandleFunc("GET /api/artifacts/{id}/access-log", s.authMiddleware(s.handleAccessLogArtifact))
+
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
 }

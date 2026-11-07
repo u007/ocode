@@ -636,3 +636,117 @@ func (s *Store) PruneExpiredTokens() error {
 		return nil
 	})
 }
+
+// DeleteArtifact removes an artifact and all its versions/files/tokens/allowlist/logs.
+func (s *Store) DeleteArtifact(id string) error {
+	return s.withLock(func() error {
+		ok, err := s.artifactExists(id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("artifacts: begin delete: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, q := range []string{
+			`DELETE FROM access_log WHERE artifact_id = ?`,
+			`DELETE FROM allowlist WHERE artifact_id = ?`,
+			`DELETE FROM access_tokens WHERE artifact_id = ?`,
+		} {
+			if _, err := tx.Exec(q, id); err != nil {
+				return fmt.Errorf("artifacts: delete child rows: %w", err)
+			}
+		}
+		// delete files for versions of this artifact
+		rows, err := tx.Query(`SELECT id FROM artifact_versions WHERE artifact_id = ?`, id)
+		if err != nil {
+			return err
+		}
+		var vids []string
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				rows.Close()
+				return err
+			}
+			vids = append(vids, v)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, v := range vids {
+			if _, err := tx.Exec(`DELETE FROM artifact_files WHERE version_id = ?`, v); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM artifact_versions WHERE artifact_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM artifacts WHERE id = ?`, id); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// RevokeAllTokens marks every token for an artifact as revoked.
+func (s *Store) RevokeAllTokens(artifactID string) error {
+	return s.withLock(func() error {
+		_, err := s.db.Exec(`UPDATE access_tokens SET revoked_at = ? WHERE artifact_id = ? AND (revoked_at IS NULL OR revoked_at = '')`, fmtTime(time.Now().UTC()), artifactID)
+		if err != nil {
+			return fmt.Errorf("artifacts: revoke all tokens: %w", err)
+		}
+		return nil
+	})
+}
+
+// GetVersionFiles returns files for a version.
+func (s *Store) GetVersionFiles(versionID string) ([]File, error) {
+	var out []File
+	err := s.withLock(func() error {
+		rows, err := s.db.Query(`SELECT version_id, path, blob_hash, size, mode, mime FROM artifact_files WHERE version_id = ?`, versionID)
+		if err != nil {
+			return fmt.Errorf("artifacts: get version files: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var f File
+			if err := rows.Scan(&f.VersionID, &f.Path, &f.BlobHash, &f.Size, &f.Mode, &f.Mime); err != nil {
+				return err
+			}
+			out = append(out, f)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if out == nil {
+			out = []File{}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PutBlob stores data in the blob store and returns its hash.
+func (s *Store) PutBlob(data []byte) (string, error) {
+	return s.blobs.Put(data)
+}
+
+// GetBlob reads a blob by hash.
+func (s *Store) GetBlob(hash string) ([]byte, error) {
+	return s.blobs.Get(hash)
+}
+
+// DB exposes the underlying *sql.DB for handler-level queries.
+func (s *Store) DB() *sql.DB { return s.db }
