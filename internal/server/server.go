@@ -201,10 +201,10 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		procSup:                tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
 		startedAt:              time.Now(),
 		tsShare:                &tailscaleShare{},
-		artifactShare:          &tailscaleShare{mount: artifactTailscalePath},
-		artifactTailscaleShare: &tailscaleShare{mount: artifactTailscalePath},
-		tsArtifactShare:        &tailscaleShare{mount: artifactTailscalePath},
-		artifactsShare:         &tailscaleShare{mount: artifactTailscalePath},
+		artifactShare:          newArtifactTailscaleShare(),
+		artifactTailscaleShare: newArtifactTailscaleShare(),
+		tsArtifactShare:        newArtifactTailscaleShare(),
+		artifactsShare:         newArtifactTailscaleShare(),
 	}
 	h.computerSup = s.procSup
 	h.procSup = s.procSup
@@ -968,7 +968,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// New(), before Run's caller has a chance to call SetRemoteMode, so a
 		// wrap-time check would permanently bake in remoteMode==false for
 		// every route.
-		if !s.remoteMode && s.username == "" && s.password == "" {
+		if !s.authConfigured() {
 			next(w, r)
 			return
 		}
@@ -1005,7 +1005,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) mediaAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// No auth configured (default local desktop/TUI): unchanged bypass.
-		if !s.remoteMode && s.username == "" && s.password == "" {
+		if !s.authConfigured() {
 			next(w, r)
 			return
 		}

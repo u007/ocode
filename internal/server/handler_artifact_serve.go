@@ -95,7 +95,7 @@ func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", target.Mime)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'self'; script-src 'self'; frame-ancestors 'none'")
 	_, _ = w.Write(data)
 	_ = st.LogAccess(artifacts.AccessLogEntry{
 		ArtifactID: artifactID,

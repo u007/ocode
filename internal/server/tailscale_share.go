@@ -65,6 +65,15 @@ type tailscaleShare struct {
 	// a separate, single global /p/* mount that never clobbers /desktop.
 	mount string
 
+	// upstreamPath is appended to the local target (localhost:<port>) that
+	// tailscale proxies to. It is set ONLY on the artifact instances, to
+	// "/p" (see newArtifactTailscaleShare). Without it, `--set-path /p` strips
+	// the mount prefix and forwards to the server ROOT, so a public request for
+	// /p/api/... reaches the owner's authenticated API. With it the upstream is
+	// localhost:<port>/p, so only /p/* artifact routes are reachable. Empty for
+	// the desktop share, whose target is unchanged.
+	upstreamPath string
+
 	mu      sync.Mutex
 	url     string
 	hint    string
@@ -93,6 +102,10 @@ type tailscaleShare struct {
 	// unproven DNS-name fallback). removeFn replaces RemoveSetPath.
 	exposeFn func(kind string) (url, resolvedKind string)
 	removeFn func(pathPrefix string)
+	// exposeTargetFn observes the final upstream target expose hands to
+	// tailscale (after upstreamTarget). Nil in production; tests use it to pin
+	// the target string for each instance without a CLI.
+	exposeTargetFn func(target string)
 
 	// Browse-proxy test seams (nil in production). browseExposeFn returns the
 	// shared browse URL (or "" on failure); browseRemoveFn tears the mount down.
@@ -108,6 +121,25 @@ func (t *tailscaleShare) setBrowseProxyPort(port int) {
 	t.browseProxyPort = port
 }
 
+// newArtifactTailscaleShare builds an artifact exposure instance. Every artifact
+// instance MUST be built here: it is the only place upstreamPath is set. A bare
+// &tailscaleShare{mount: artifactTailscalePath} would proxy the public /p mount
+// to the server root (see upstreamPath).
+func newArtifactTailscaleShare() *tailscaleShare {
+	return &tailscaleShare{mount: artifactTailscalePath, upstreamPath: "/" + artifactTailscalePath}
+}
+
+// upstreamTarget returns the local target tailscale proxies to. For the
+// artifact instances this appends upstreamPath, so `--set-path /p` keeps the
+// /p prefix upstream (localhost:<port>/p). Instances without an upstreamPath
+// get target back unchanged.
+func (t *tailscaleShare) upstreamTarget(target string) string {
+	if t.upstreamPath == "" {
+		return target
+	}
+	return strings.TrimRight(target, "/") + t.upstreamPath
+}
+
 // expose runs the tailscale exposure for the given kind and returns the URL,
 // the background process for cleanup, any one-time setup hint, and the PROVEN
 // exposure kind. kind "serve" is tailnet-only; "full" tries funnel (public)
@@ -115,6 +147,10 @@ func (t *tailscaleShare) setBrowseProxyPort(port int) {
 // proved an exposure (a bare DNSName guess), which the caller treats as "not
 // running".
 func (t *tailscaleShare) expose(kind, target string) (string, *exec.Cmd, string, string) {
+	target = t.upstreamTarget(target)
+	if t.exposeTargetFn != nil {
+		t.exposeTargetFn(target)
+	}
 	if t.exposeFn != nil {
 		u, resolved := t.exposeFn(kind)
 		return u, nil, "", resolved
@@ -490,9 +526,18 @@ func (s *Server) handleGetArtifactTailscaleShare(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, s.artifactTailscaleShareStatus())
 }
 
+// authConfigured reports whether the server requires credentials, i.e. whether
+// authMiddleware actually checks them. It is the single definition: authMiddleware
+// and the public-exposure gate both call it, so they cannot disagree.
+func (s *Server) authConfigured() bool {
+	return s.remoteMode || s.username != "" || s.password != ""
+}
+
 // handleStartArtifactTailscaleShare starts the (explicit, user-confirmed)
 // artifact exposure. Defaults to tailnet-only serve; a funnel (public) upgrade
-// happens only on an explicit request, never unattended.
+// happens only on an explicit request, never unattended. A funnel is refused
+// with 403 when the server has no authentication: a public mount onto an
+// unauthenticated server would publish the whole API to the internet.
 func (s *Server) handleStartArtifactTailscaleShare(w http.ResponseWriter, r *http.Request) {
 	if s.artifactShare == nil {
 		writeJSON(w, http.StatusOK, tailscaleShareStatus{Available: tailscale.Installed()})
@@ -506,6 +551,10 @@ func (s *Server) handleStartArtifactTailscaleShare(w http.ResponseWriter, r *htt
 	kind := "serve"
 	if r.URL.Query().Get("funnel") == "1" || r.URL.Query().Get("public") == "1" {
 		kind = "full"
+	}
+	if kind == "full" && !s.authConfigured() {
+		writeError(w, http.StatusForbidden, "public (funnel) artifact sharing is refused: the server has no authentication configured; set a username and password, or share tailnet-only")
+		return
 	}
 	s.artifactShare.start(kind, port)
 	writeJSON(w, http.StatusOK, s.artifactShare.status())
