@@ -6,7 +6,13 @@ import { mountUniverSheet } from "./univerMount";
 import { MAX_COLS, MAX_FILE_BYTES, MAX_ROWS } from "./univerData";
 import { rawContentHash } from "./univerSerialize";
 import ExcelViewer from "./ExcelViewer";
-import { ViewerReportContext, readViewerState, resetViewerStates, setViewerDoc } from "../../lib/viewerContext";
+import {
+  ViewerReportContext,
+  readViewerController,
+  readViewerState,
+  resetViewerStates,
+  setViewerDoc,
+} from "../../lib/viewerContext";
 
 vi.mock("../../api/client", () => ({ api: { fetchFileRaw: vi.fn(), saveFileRaw: vi.fn() } }));
 // Univer draws to canvas, which jsdom does not have. The converter is covered
@@ -33,6 +39,8 @@ let handle: {
   activeSheetName: Mock;
   selection: Mock;
   onSelectionChange: Mock;
+  activateRange: Mock;
+  sheetNames: Mock;
 };
 let dirtyCb: (() => void) | null;
 
@@ -49,6 +57,8 @@ beforeEach(() => {
     activeSheetName: vi.fn(() => "Stock"),
     selection: vi.fn(() => null),
     onSelectionChange: vi.fn(() => () => {}),
+    activateRange: vi.fn(),
+    sheetNames: vi.fn(() => ["Stock", "Cities"]),
   };
   vi.mocked(mountUniverSheet).mockReset();
   vi.mocked(mountUniverSheet).mockImplementation(async (_c, _d, _dark, opts) => {
@@ -602,5 +612,52 @@ describe("ExcelViewer lifecycle and appearance", () => {
     rerender(<ExcelViewer path="budget.xlsx" />);
     await waitFor(() => expect(handle.setDarkMode).toHaveBeenLastCalledWith(true));
     expect(mountUniverSheet).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ExcelViewer agent control", () => {
+  beforeEach(() => resetViewerStates());
+
+  /** Renders the viewer under session s1 and waits until the grid is mounted. */
+  async function mountControlled() {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    setViewerDoc("s1", { path: "budget.xlsx", kind: "excel" });
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="budget.xlsx" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(readViewerState("s1")?.location.sheet).toBe("Stock"));
+    const controller = readViewerController("s1");
+    if (controller === null) throw new Error("no controller registered");
+    return controller;
+  }
+
+  it("activates a sheet-qualified range and moves the tab bar to that sheet", async () => {
+    const controller = await mountControlled();
+    expect(controller.select?.({ range: "Cities!A1:B2" })).toBe(true);
+    expect(handle.activateRange).toHaveBeenCalledWith("Cities", "A1:B2");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Cities" }).getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("activates a bare A1 range on the active sheet and keeps the tab", async () => {
+    const controller = await mountControlled();
+    expect(controller.select?.({ range: "B2" })).toBe(true);
+    expect(handle.activateRange).toHaveBeenCalledWith(null, "B2");
+    expect(screen.getByRole("tab", { name: "Stock" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("throws sheet not found for an unknown sheet and changes nothing", async () => {
+    const controller = await mountControlled();
+    expect(() => controller.select?.({ range: "Nope!A1" })).toThrow("sheet not found");
+    expect(handle.activateRange).not.toHaveBeenCalled();
+  });
+
+  it("returns false for a target this viewer does not understand", async () => {
+    const controller = await mountControlled();
+    expect(controller.select?.({ lines: { start: 1, end: 2 } })).toBe(false);
+    expect(controller.scroll?.({ line: 1 })).toBe(false);
+    expect(handle.activateRange).not.toHaveBeenCalled();
   });
 });

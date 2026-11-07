@@ -33,18 +33,55 @@ const fake = vi.hoisted(() => {
   const grid = (rows: number, cols: number) =>
     Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => cell(r, c)));
   const activeRange: { current: Record<string, unknown> | null } = { current: null };
+  // Univer does not throw on malformed A1: it returns NaN coordinates. Each
+  // entry is [row, column, height, width], zero-based, for the A1 strings the tests use.
+  const NOT_A_RANGE = [NaN, NaN, NaN, NaN];
+  const A1_GEOMETRY: Record<string, number[]> = {
+    B2: [1, 1, 1, 1],
+    "A1:B2": [0, 0, 2, 2],
+    A101: [100, 0, 1, 1],
+  };
+  const MAX_ROWS = 100;
+  const MAX_COLUMNS = 26;
+  const rangeActivate = vi.fn();
+  const a1Range = (a1: string) => {
+    const [row, col, height, width] = a1 in A1_GEOMETRY ? A1_GEOMETRY[a1] : NOT_A_RANGE;
+    return {
+      getRow: () => row,
+      getColumn: () => col,
+      getHeight: () => height,
+      getWidth: () => width,
+      activate: rangeActivate,
+    };
+  };
   const sheet = {
     getSheetName: vi.fn(() => "Stock"),
+    getSheetId: vi.fn(() => "sheet-1"),
     getActiveRange: vi.fn(() => activeRange.current),
-    getRange: vi.fn((_row: number, _col: number, rows: number, cols: number) => ({
-      getValues: () => grid(rows, cols),
-    })),
+    getMaxRows: vi.fn(() => MAX_ROWS),
+    getMaxColumns: vi.fn(() => MAX_COLUMNS),
+    getRange: vi.fn((rowOrA1: number | string, _col?: number, rows?: number, cols?: number) => {
+      if (typeof rowOrA1 === "string") return a1Range(rowOrA1);
+      return { getValues: () => grid(rows ?? 0, cols ?? 0) };
+    }),
   };
+  const other = {
+    getSheetName: vi.fn(() => "Cities"),
+    getSheetId: vi.fn(() => "sheet-2"),
+    getMaxRows: vi.fn(() => MAX_ROWS),
+    getMaxColumns: vi.fn(() => MAX_COLUMNS),
+    getRange: vi.fn((a1: string) => a1Range(a1)),
+  };
+  const active = { id: "sheet-1" };
   const workbook = {
     setEditable: vi.fn(),
-    setActiveSheet: vi.fn(),
+    setActiveSheet: vi.fn((id: string) => {
+      active.id = id;
+    }),
     getSheetBySheetId: vi.fn(() => ({})),
-    getActiveSheet: vi.fn(() => sheet),
+    getActiveSheet: vi.fn(() => (active.id === "sheet-2" ? other : sheet)),
+    getSheetByName: vi.fn((name: string) => [sheet, other].find((s) => s.getSheetName() === name) ?? null),
+    getSheets: vi.fn(() => [sheet, other]),
     save: vi.fn(() => ({}) as IWorkbookData),
   };
   const univerAPI = {
@@ -52,8 +89,6 @@ const fake = vi.hoisted(() => {
       LifeCycleChanged: "LifeCycleChanged",
       BeforeCommandExecute: "BeforeCommandExecute",
       CommandExecuted: "CommandExecuted",
-      SelectionChanged: "SelectionChanged",
-      SelectionMoveEnd: "SelectionMoveEnd",
       ActiveSheetChanged: "ActiveSheetChanged",
     },
     addEvent: vi.fn(addEvent),
@@ -61,7 +96,7 @@ const fake = vi.hoisted(() => {
     toggleDarkMode: vi.fn(),
   };
   const univer = { dispose: vi.fn() };
-  return { listeners, state, fire, sheet, activeRange, workbook, univerAPI, univer };
+  return { listeners, state, fire, sheet, activeRange, active, rangeActivate, workbook, univerAPI, univer };
 });
 
 vi.mock("@univerjs/presets", () => ({
@@ -102,6 +137,9 @@ beforeEach(() => {
   fake.workbook.setEditable.mockClear();
   fake.sheet.getRange.mockClear();
   fake.activeRange.current = null;
+  fake.active.id = "sheet-1";
+  fake.rangeActivate.mockClear();
+  fake.workbook.setActiveSheet.mockClear();
 });
 
 /** A selection starting at `row`/`col` of the given size, in the fake sheet. */
@@ -253,19 +291,27 @@ describe("mountUniverSheet selection report", () => {
     expect(sel?.values.every((row) => row.length === 10)).toBe(true);
   });
 
-  it("calls back on selection and active-sheet changes until unsubscribed", async () => {
+  it("calls back on set-selections commands and active-sheet changes until unsubscribed", async () => {
     const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
     const cb = vi.fn();
     const unsubscribe = handle.onSelectionChange(cb);
 
-    fake.fire("SelectionChanged", {});
-    fake.fire("SelectionMoveEnd", {});
+    fake.fire("CommandExecuted", { id: "sheet.operation.set-selections", type: CommandType.OPERATION, options: undefined });
     fake.fire("ActiveSheetChanged", {});
-    expect(cb).toHaveBeenCalledTimes(3);
+    expect(cb).toHaveBeenCalledTimes(2);
 
     unsubscribe();
-    fake.fire("SelectionChanged", {});
-    expect(cb).toHaveBeenCalledTimes(3);
+    fake.fire("CommandExecuted", { id: "sheet.operation.set-selections", type: CommandType.OPERATION, options: undefined });
+    expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores other commands for selection", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    const cb = vi.fn();
+    handle.onSelectionChange(cb);
+
+    fake.fire("CommandExecuted", { id: "sheet.mutation.set-range-values", type: CommandType.MUTATION, options: undefined });
+    expect(cb).not.toHaveBeenCalled();
   });
 
   it("stops selection callbacks on dispose", async () => {
@@ -274,7 +320,50 @@ describe("mountUniverSheet selection report", () => {
     handle.onSelectionChange(cb);
 
     handle.dispose();
-    fake.fire("SelectionChanged", {});
+    fake.fire("CommandExecuted", { id: "sheet.operation.set-selections", type: CommandType.OPERATION, options: undefined });
     expect(cb).not.toHaveBeenCalled();
+  });
+});
+
+describe("mountUniverSheet range control", () => {
+  it("activates a range on the active sheet without switching sheets", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    handle.activateRange(null, "B2");
+    expect(fake.sheet.getRange).toHaveBeenCalledWith("B2");
+    expect(fake.rangeActivate).toHaveBeenCalledTimes(1);
+    expect(fake.workbook.setActiveSheet).not.toHaveBeenCalled();
+  });
+
+  it("switches to the named sheet and activates the range there", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    handle.activateRange("Cities", "A1:B2");
+    expect(fake.workbook.setActiveSheet).toHaveBeenCalledWith("sheet-2");
+    expect(fake.rangeActivate).toHaveBeenCalledTimes(1);
+    expect(handle.activeSheetName()).toBe("Cities");
+  });
+
+  it("throws for an unknown sheet and leaves the active sheet alone", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(() => handle.activateRange("Nope", "A1")).toThrow('Univer has no sheet "Nope"');
+    expect(fake.workbook.setActiveSheet).not.toHaveBeenCalled();
+  });
+
+  it("throws for malformed A1 before switching sheets, even though Univer returns NaN coordinates", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(() => handle.activateRange("Cities", "garbage")).toThrow(/^invalid range: garbage$/);
+    expect(fake.workbook.setActiveSheet).not.toHaveBeenCalled();
+    expect(fake.rangeActivate).not.toHaveBeenCalled();
+  });
+
+  it("throws for a range outside the sheet bounds and leaves the view alone", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(() => handle.activateRange("Cities", "A101")).toThrow(/^invalid range: A101$/);
+    expect(fake.workbook.setActiveSheet).not.toHaveBeenCalled();
+    expect(fake.rangeActivate).not.toHaveBeenCalled();
+  });
+
+  it("lists the sheet names in workbook order", async () => {
+    const handle = await mountUniverSheet(document.createElement("div"), DATA, false);
+    expect(handle.sheetNames()).toEqual(["Stock", "Cities"]);
   });
 });

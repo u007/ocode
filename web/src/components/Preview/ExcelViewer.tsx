@@ -12,7 +12,7 @@ import {
 } from "./univerData";
 import { rawContentHash, serializeWorkbookBytes } from "./univerSerialize";
 import type { UniverSheetHandle } from "./univerMount";
-import { useViewerReport } from "../../lib/viewerContext";
+import { useViewerController, useViewerReport } from "../../lib/viewerContext";
 
 /** Files whose first Save the user has confirmed this session, keyed by host,
  *  root and path. Module scope so a remount (tab switch, split toggle) does not
@@ -111,6 +111,23 @@ export default function ExcelViewer({
   useEffect(() => {
     reportRef.current = report;
   }, [report]);
+  // Agent control: "Sheet!A1:B2", or "A1:B2" on the active sheet. The selection
+  // listener publishes the new range once Univer has moved to it.
+  useViewerController(path, {
+    select: ({ range }) => {
+      if (range === undefined) return false;
+      if (host === null || book === null) throw new Error("spreadsheet not ready");
+      const bang = range.lastIndexOf("!");
+      const sheetName = bang < 0 ? null : range.slice(0, bang);
+      const a1 = range.slice(bang + 1);
+      const index = sheetName === null ? active : book.sheets.findIndex((s) => s.name === sheetName);
+      if (index < 0) throw new Error("sheet not found");
+      host.activateRange(sheetName, a1);
+      // Keeps the tab bar on the sheet Univer just moved to.
+      setActive(index);
+      return true;
+    },
+  });
 
   // Editable only for uncontrolled .xlsx with no truncation in any sheet.
   const editable =

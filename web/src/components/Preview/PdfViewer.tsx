@@ -9,8 +9,9 @@ import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import { FindBar } from "./FindBar";
 import { isEditableTarget } from "./findDom";
 import { usePdfFind } from "./usePdfFind";
+import { runFindCommand, useFindStateReport } from "./viewerControlDom";
 import { loadPreviewViewState, savePreviewViewState, previewViewKey } from "../../lib/previewViewState";
-import { useViewerReport } from "../../lib/viewerContext";
+import { useViewerController, useViewerReport } from "../../lib/viewerContext";
 import { throttleTrailing } from "../../lib/viewerDom";
 import { isDesktopShell } from "../../lib/desktopShell";
 import { documentShell, printDocument } from "./printDocument";
@@ -553,6 +554,39 @@ export default function PdfViewer({
     },
     [clampPage, ensureWindow, onPageChange, schedulePersist, scrollToPage],
   );
+
+  // Agent control. Page and direction go through `gotoPage` (scroll, page label
+  // and host callback together; the page prop effect then skips, since the
+  // page already matches). Text opens the find bar on that text: pdf.js spans
+  // are not a DOM range the viewer can select, so the find highlight is the
+  // visible result. Heading and line targets are not this viewer's.
+  useViewerController(path, {
+    scroll(target) {
+      const total = totalRef.current;
+      if (target.page !== undefined) {
+        if (!total) throw new Error("document not loaded");
+        if (!Number.isInteger(target.page) || target.page < 1 || target.page > total) {
+          throw new Error(`page ${target.page} out of range 1-${total}`);
+        }
+        gotoPage(target.page);
+        return true;
+      }
+      if (target.direction !== undefined) {
+        if (!total) throw new Error("document not loaded");
+        gotoPage(visibleRef.current + (target.direction === "down" ? 1 : -1));
+        return true;
+      }
+      return false;
+    },
+    select(target) {
+      if (target.text === undefined) return false;
+      return runFindCommand(find, { op: "open", query: target.text });
+    },
+    find(cmd) {
+      return runFindCommand(find, cmd);
+    },
+  });
+  useFindStateReport(report, { active: find.active, query: find.query, count: find.count, current: find.current, searching: find.searching });
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;

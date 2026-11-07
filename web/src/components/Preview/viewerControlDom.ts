@@ -38,6 +38,18 @@ export function firstMatchRange(root: HTMLElement, query: string): Range | null 
   return rangeForMatch(index, first);
 }
 
+/**
+ * Selects the first match of `text` under `root` and returns the selected
+ * text. Throws when the root is not rendered or the text is absent.
+ */
+export function selectText(root: HTMLElement | null, text: string): string {
+  if (!root) throw new Error("document is not rendered");
+  const range = firstMatchRange(root, text);
+  if (!range) throw new Error("text not found");
+  selectRange(range);
+  return range.toString();
+}
+
 /** Makes `range` the browser selection and scrolls its start into view. */
 export function selectRange(range: Range): void {
   const sel = window.getSelection();
@@ -144,12 +156,7 @@ export function domViewerController(deps: DomViewerControlDeps): ViewerControlle
     },
     select(target) {
       if (target.text === undefined) return false;
-      const root = deps.textRoot.current;
-      if (!root) throw new Error("document is not rendered");
-      const range = firstMatchRange(root, target.text);
-      if (!range) throw new Error("text not found");
-      selectRange(range);
-      deps.report({ selection: range.toString() });
+      deps.report({ selection: selectText(deps.textRoot.current, target.text) });
       return true;
     },
     find(cmd) {

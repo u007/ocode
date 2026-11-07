@@ -8,6 +8,7 @@ import {
   registerViewerController,
   resetViewerStates,
   setViewerDoc,
+  type ViewerFindCommand,
 } from "./viewerContext";
 import { applyViewerControl, parseViewerControls, useViewerControl } from "./viewerControl";
 
@@ -221,6 +222,241 @@ describe("useViewerControl", () => {
     // Back to s1: its old directive is seeded again, not replayed.
     rerender({ sessionId: "s1" });
     expect(scroll1).not.toHaveBeenCalled();
+  });
+
+  it("does not replay history that loads after the session is activated", () => {
+    const scroll = vi.fn(() => true);
+    registerViewerController("s1", { scroll });
+    const { result } = mount("s1");
+    // The chat is active before its transcript arrives, as on a reload.
+    expect(scroll).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current({
+        type: "SET_MESSAGES",
+        sessionId: "s1",
+        messages: [toolMessage(directive({ id: "vc_old", action: "scroll", page: 1 }))],
+      });
+    });
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("applies a live tool result mid-turn, once, and does not re-apply it when the turn commits", () => {
+    const scroll = vi.fn(() => true);
+    registerViewerController("s1", { scroll });
+    const { result } = mount("s1");
+
+    act(() => {
+      result.current({ type: "LIVE_TOOL_START", sessionId: "s1", tool: "viewer_scroll", callId: "c1" });
+      result.current({
+        type: "LIVE_TOOL_RESULT",
+        sessionId: "s1",
+        callId: "c1",
+        output: directive({ id: "vc_live", action: "scroll", page: 4 }),
+      });
+    });
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).toHaveBeenCalledWith({ page: 4 });
+
+    // The turn-end snapshot carries the same directive; it clears the live buffer.
+    act(() => {
+      result.current({
+        type: "SET_MESSAGES",
+        sessionId: "s1",
+        messages: [toolMessage(directive({ id: "vc_live", action: "scroll", page: 4 }))],
+      });
+    });
+    expect(scroll).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps older messages prepended by scrolling back silent, and applies new ones", () => {
+    const scroll = vi.fn(() => true);
+    registerViewerController("s1", { scroll });
+    const { result } = mount("s1");
+    const recent: Message = { role: "assistant", content: "recent reply" };
+
+    // The last page of a two-message transcript: `recent` is server index 1.
+    act(() => {
+      result.current({ type: "MERGE_SNAPSHOT", sessionId: "s1", messages: [recent], total: 2 });
+    });
+    act(() => {
+      result.current({
+        type: "PREPEND_MESSAGES",
+        sessionId: "s1",
+        messages: [toolMessage(directive({ id: "vc_older", action: "scroll", page: 2 }))],
+        total: 2,
+      });
+    });
+    expect(scroll).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current({
+        type: "ADD_MESSAGE",
+        sessionId: "s1",
+        message: toolMessage(directive({ id: "vc_fresh", action: "scroll", page: 9 })),
+      });
+    });
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).toHaveBeenCalledWith({ page: 9 });
+  });
+
+  it("applies a batch one directive per tick, so find_next runs after the find it follows", () => {
+    vi.useFakeTimers();
+    try {
+      let open = false;
+      let settled = false;
+      const find = vi.fn((cmd: ViewerFindCommand) => {
+        if (cmd.op === "open") {
+          open = true;
+          settled = false;
+          // The viewer's find engine exists only after a render, so it settles on a later macrotask.
+          setTimeout(() => {
+            settled = true;
+          }, 0);
+          return true;
+        }
+        if (cmd.op === "next") {
+          if (!open || !settled) throw new Error("find is not open");
+          return true;
+        }
+        return true;
+      });
+      registerViewerController("s1", { find });
+      const { result } = mount("s1");
+
+      act(() => {
+        result.current({ type: "LIVE_TOOL_START", sessionId: "s1", tool: "viewer_find", callId: "c1" });
+        result.current({
+          type: "LIVE_TOOL_RESULT",
+          sessionId: "s1",
+          callId: "c1",
+          output: directive({ id: "vc_find", action: "find", query: "install" }),
+        });
+        result.current({ type: "LIVE_TOOL_START", sessionId: "s1", tool: "viewer_find", callId: "c2" });
+        result.current({
+          type: "LIVE_TOOL_RESULT",
+          sessionId: "s1",
+          callId: "c2",
+          output: directive({ id: "vc_next", action: "find_next" }),
+        });
+      });
+      act(() => {
+        vi.advanceTimersByTime(10);
+      });
+
+      expect(find.mock.calls).toEqual([[{ op: "open", query: "install" }], [{ op: "next" }]]);
+      expect(readViewerState("s1")?.control).toEqual({ id: "vc_next", status: "applied" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not apply an unloaded older directive that a turn-end commit brings in, but applies a new one", () => {
+    const scroll = vi.fn(() => true);
+    registerViewerController("s1", { scroll });
+    const { result } = mount("s1");
+
+    // The chat opens on the last page of a two-message transcript; row 0 is never loaded.
+    act(() => {
+      result.current({
+        type: "MERGE_SNAPSHOT",
+        sessionId: "s1",
+        messages: [{ role: "assistant", content: "recent reply" }],
+        total: 2,
+      });
+    });
+    // Turn end: the store commits the full transcript, replacing every message object.
+    act(() => {
+      result.current({
+        type: "SET_MESSAGES",
+        sessionId: "s1",
+        messages: [
+          toolMessage(directive({ id: "vc_old", action: "scroll", page: 1 })),
+          { role: "assistant", content: "recent reply" },
+          toolMessage(directive({ id: "vc_new", action: "scroll", page: 9 })),
+        ],
+      });
+    });
+    expect(scroll.mock.calls).toEqual([[{ page: 9 }]]);
+    expect(readViewerState("s1")?.control).toEqual({ id: "vc_new", status: "applied" });
+  });
+
+  it("keeps an older page prepended in the same render as a turn-end commit silent", () => {
+    vi.useFakeTimers();
+    try {
+      const scroll = vi.fn(() => true);
+      registerViewerController("s1", { scroll });
+      const { result } = mount("s1");
+
+      act(() => {
+        result.current({
+          type: "MERGE_SNAPSHOT",
+          sessionId: "s1",
+          messages: [{ role: "assistant", content: "recent reply" }],
+          total: 2,
+        });
+      });
+      // One render carries the turn-end commit and the scroll-back prepend.
+      act(() => {
+        result.current({
+          type: "MERGE_SNAPSHOT",
+          sessionId: "s1",
+          messages: [
+            { role: "assistant", content: "recent reply" },
+            toolMessage(directive({ id: "vc_turn", action: "scroll", page: 5 })),
+          ],
+          total: 3,
+        });
+        result.current({
+          type: "PREPEND_MESSAGES",
+          sessionId: "s1",
+          messages: [toolMessage(directive({ id: "vc_old", action: "scroll", page: 1 }))],
+          total: 3,
+        });
+      });
+      act(() => {
+        vi.advanceTimersByTime(10);
+      });
+
+      expect(scroll.mock.calls).toEqual([[{ page: 5 }]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a transcript loaded before its window position is known as seen", () => {
+    const scroll = vi.fn(() => true);
+    registerViewerController("s1", { scroll });
+    const { result } = mount("s1");
+
+    // A live-populated slice: no window position yet, and the history has not landed.
+    act(() => {
+      result.current({ type: "ADD_MESSAGE", sessionId: "s1", message: toolMessage(directive({ id: "vc_mirror", action: "scroll", page: 2 })) });
+    });
+    act(() => {
+      result.current({ type: "MARK_INITIALIZED", sessionId: "s1" });
+    });
+    expect(scroll).not.toHaveBeenCalled();
+
+    // Scrolling back reveals the position: the prepended row is history, so it stays silent too.
+    act(() => {
+      result.current({
+        type: "PREPEND_MESSAGES",
+        sessionId: "s1",
+        messages: [toolMessage(directive({ id: "vc_older", action: "scroll", page: 1 }))],
+        total: 2,
+      });
+    });
+    expect(scroll).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current({
+        type: "ADD_MESSAGE",
+        sessionId: "s1",
+        message: toolMessage(directive({ id: "vc_new", action: "scroll", page: 9 })),
+      });
+    });
+    expect(scroll.mock.calls).toEqual([[{ page: 9 }]]);
   });
 
   it("does nothing without a session", () => {

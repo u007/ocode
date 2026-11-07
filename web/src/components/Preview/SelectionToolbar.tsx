@@ -7,6 +7,21 @@ export interface TextSelection {
 }
 
 /**
+ * Reads the live window selection when it is a non-collapsed highlight
+ * anchored inside `el`. Returns the full trimmed text (callers clamp it for
+ * the toolbar) and the rect's top/center-left, or null when there is none.
+ */
+function readContainerSelection(el: HTMLElement | null): TextSelection | null {
+  const s = window.getSelection();
+  if (!s || s.isCollapsed || !el || !s.toString().trim()) return null;
+  const anchor = s.anchorNode ? (s.anchorNode instanceof Element ? s.anchorNode : s.anchorNode.parentElement) : null;
+  if (!anchor || !el.contains(anchor)) return null;
+  const text = s.toString().trim();
+  const r = s.getRangeAt(0).getBoundingClientRect();
+  return { text, rect: { top: r.top, left: r.left + r.width / 2 } };
+}
+
+/**
  * Shared highlight → toolbar flow for every PreviewHost renderer.
  * Listens for mouseup inside the container, keeps the selection only when
  * it is non-collapsed and anchored in the container, and exposes a floating
@@ -29,23 +44,14 @@ export function usePreviewSelection<T extends HTMLElement>(label: () => string, 
   const onMouseUp = useCallback(() => {
     // Let the browser finish the selection before reading it.
     requestAnimationFrame(() => {
-      const s = window.getSelection();
-      const el = ref.current;
-      if (!s || s.isCollapsed || !el || !s.toString().trim()) {
+      const found = readContainerSelection(ref.current);
+      if (!found) {
         setSel(null);
         onSelectionRef.current?.(null);
         return;
       }
-      const anchor = s.anchorNode ? (s.anchorNode instanceof Element ? s.anchorNode : s.anchorNode.parentElement) : null;
-      if (!anchor || !el.contains(anchor)) {
-        setSel(null);
-        onSelectionRef.current?.(null);
-        return;
-      }
-      const text = s.toString().trim();
-      const r = s.getRangeAt(0).getBoundingClientRect();
-      setSel({ text: text.slice(0, 2000), rect: { top: r.top, left: r.left + r.width / 2 } });
-      onSelectionRef.current?.(text);
+      setSel({ text: found.text.slice(0, 2000), rect: found.rect });
+      onSelectionRef.current?.(found.text);
     });
   }, []);
 
@@ -59,6 +65,43 @@ export function usePreviewSelection<T extends HTMLElement>(label: () => string, 
     el.addEventListener("mouseup", onMouseUp);
     return () => el.removeEventListener("mouseup", onMouseUp);
   });
+
+  // The toolbar position is a snapshot taken on mouseup. Re-read the live
+  // selection when the layout under it moves: a viewport resize, a container
+  // relayout (reader mode), or any scroll. One frame is pending at a time.
+  const frameRef = useRef<number | null>(null);
+  const reanchor = useCallback(() => {
+    if (frameRef.current !== null) return;
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null;
+      const found = readContainerSelection(ref.current);
+      if (!found) {
+        setSel(null);
+        return;
+      }
+      setSel({ text: found.text.slice(0, 2000), rect: found.rect });
+    });
+  }, []);
+
+  // Bound only while a highlight is showing, so an idle viewer pays nothing.
+  const hasSel = sel !== null;
+  useEffect(() => {
+    if (!hasSel) return;
+    const el = ref.current;
+    window.addEventListener("resize", reanchor);
+    window.addEventListener("scroll", reanchor, true);
+    const ro = el && typeof ResizeObserver !== "undefined" ? new ResizeObserver(reanchor) : null;
+    if (ro && el) ro.observe(el);
+    return () => {
+      window.removeEventListener("resize", reanchor);
+      window.removeEventListener("scroll", reanchor, true);
+      ro?.disconnect();
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+  }, [hasSel, reanchor]);
 
   const clear = useCallback(() => {
     setSel(null);

@@ -21,15 +21,29 @@ export interface MountUniverOpts {
 /** Largest selection the viewer reports to the chat, in cells. */
 const MAX_SELECTION_ROWS = 20;
 const MAX_SELECTION_COLS = 10;
+/**
+ * Id of the operation every selection change runs (mouse, keyboard, programmatic
+ * activate). Defined locally because `@univerjs/sheets` is only a transitive dependency.
+ */
+const SET_SELECTIONS_OPERATION = "sheet.operation.set-selections";
 
 export interface UniverSheetHandle {
   /** Shows the sheet with this id. Throws when the workbook has no such sheet. */
   activateSheet(sheetId: string): void;
+  /** Activates `a1` on the named sheet, or on the active sheet when `sheet` is null. Throws on an unknown sheet or a bad range. */
+  activateRange(sheet: string | null, a1: string): void;
+  /** Names of every sheet, in workbook order. */
+  sheetNames(): string[];
   /** Name of the active sheet. */
   activeSheetName(): string;
   /** Active selection: sheet name, A1 range and the cell values (strings, max 20 rows x 10 cols); null when nothing is selected. */
   selection(): { sheet: string; range: string; values: string[][] } | null;
-  /** Subscribe to selection / active-sheet changes; returns an unsubscribe. */
+  /**
+   * Subscribe to selection / active-sheet changes; returns an unsubscribe.
+   * Selection is observed through the set-selections command, not the facade's
+   * Selection* events: in this mount the facade never registers those, because
+   * its render-unit lookup of the selections service returns null.
+   */
   onSelectionChange(cb: () => void): () => void;
   setDarkMode(darkMode: boolean): void;
   /** Current workbook snapshot, for serialization on save. */
@@ -89,6 +103,18 @@ export async function mountUniverSheet(
       }
       workbook.setActiveSheet(sheetId);
     },
+    activateRange(sheetName, a1) {
+      const target = sheetName === null ? workbook.getActiveSheet() : workbook.getSheetByName(sheetName);
+      if (target === null) throw new Error(`Univer has no sheet "${sheetName}"`);
+      // Resolve and check the range before switching sheets, so a bad A1 leaves the view alone.
+      const range = target.getRange(a1);
+      assertRangeInSheet(target, range, a1);
+      if (sheetName !== null) workbook.setActiveSheet(target.getSheetId());
+      range.activate();
+    },
+    sheetNames() {
+      return workbook.getSheets().map((s) => s.getSheetName());
+    },
     activeSheetName() {
       return workbook.getActiveSheet().getSheetName();
     },
@@ -109,8 +135,9 @@ export async function mountUniverSheet(
     },
     onSelectionChange(cb) {
       const subs = [
-        univerAPI.addEvent(univerAPI.Event.SelectionChanged, cb),
-        univerAPI.addEvent(univerAPI.Event.SelectionMoveEnd, cb),
+        univerAPI.addEvent(univerAPI.Event.CommandExecuted, ({ id }) => {
+          if (id === SET_SELECTIONS_OPERATION) cb();
+        }),
         univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, cb),
       ];
       for (const sub of subs) selectionSubs.add(sub);
@@ -132,6 +159,32 @@ export async function mountUniverSheet(
       univer.dispose();
     },
   };
+}
+
+/**
+ * Throws unless `range` is a non-empty rectangle inside `sheet`. Univer does not
+ * throw on malformed A1: it returns NaN coordinates, so the check has to run on
+ * the range itself.
+ */
+function assertRangeInSheet(
+  sheet: { getMaxRows(): number; getMaxColumns(): number },
+  range: { getRow(): number; getColumn(): number; getHeight(): number; getWidth(): number },
+  a1: string,
+): void {
+  const row = range.getRow();
+  const col = range.getColumn();
+  const height = range.getHeight();
+  const width = range.getWidth();
+  const integers = [row, col, height, width].every((n) => Number.isInteger(n));
+  const fits =
+    integers &&
+    row >= 0 &&
+    col >= 0 &&
+    height >= 1 &&
+    width >= 1 &&
+    row + height <= sheet.getMaxRows() &&
+    col + width <= sheet.getMaxColumns();
+  if (!fits) throw new Error(`invalid range: ${a1}`);
 }
 
 /** A cell value as the text the chat shows: blank cells are "", objects are JSON. */

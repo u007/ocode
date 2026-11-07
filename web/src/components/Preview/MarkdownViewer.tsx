@@ -10,6 +10,7 @@ import { FindBar } from "./FindBar";
 import { FindHighlights } from "./FindHighlights";
 import { isEditableTarget, previewWantsFindShortcut } from "./findDom";
 import { useDomFind } from "./useDomFind";
+import { domViewerController, useFindStateReport } from "./viewerControlDom";
 import { cn } from "../../lib/utils";
 import type { EditorAppearance } from "../../lib/editorAppearance";
 import {
@@ -17,8 +18,9 @@ import {
   resolvePreviewWidth,
   usePreviewWidthPreset,
 } from "../../lib/previewWidth";
-import { useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
+import { useViewerController, useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
 import { collectVisibleText, throttleTrailing } from "../../lib/viewerDom";
+import { useMonacoViewerReport } from "./useMonacoViewerReport";
 
 /**
  * The mermaid source a fenced block holds, or null for any other code block.
@@ -84,6 +86,19 @@ export default function MarkdownViewer({
   // scroll container whose geometry the highlight layer uses.
   const columnRef = useRef<HTMLDivElement | null>(null);
   const find = useDomFind({ containerRef: ref, textRootRef: columnRef, version: md, enabled: !forceEdit && !isBinary });
+  // Agent control. Raw-source editing and binary files have no rendered prose
+  // to scroll or select, so they register an empty controller (every action
+  // reports "not supported by this viewer").
+  const rendered = !forceEdit && !isBinary;
+  // Registered once per path. The registry stacks controllers per key and
+  // `useViewerController` reads its controller through a ref, so flipping to
+  // edit mode needs no re-registration: Monaco registers on top while it is on,
+  // and this controller is active again once it unregisters.
+  useViewerController(path, rendered ? domViewerController({ scroller: ref, textRoot: columnRef, find, report }) : {});
+  useFindStateReport(report, { active: find.active, query: find.query, count: find.count, current: find.current, searching: false });
+  // Declared after the DOM controller above: the registry is a per-key stack,
+  // so this one sits on top while on. Only "Edit as text" (forceEdit) enables it.
+  const monaco = useMonacoViewerReport(path, forceEdit);
   // Reading column. `auto` resolves per locale (Letter for US customary-paper
   // locales, A4 elsewhere); the resolved width is applied to an inner wrapper
   // so `.prose`/`max-w-none` on the scroller still cannot cap the measure, and
@@ -292,7 +307,16 @@ export default function MarkdownViewer({
   if (forceEdit) {
     return (
       <div className="min-h-0 flex-1 overflow-hidden">
-        <FileEditor path={path} projectRoot={projectRoot} projectHost={projectHost} content={md || ""} language="plaintext" />
+        <FileEditor
+          path={path}
+          projectRoot={projectRoot}
+          projectHost={projectHost}
+          content={md || ""}
+          language="plaintext"
+          onEditorMount={monaco.onEditorMount}
+          onSelectionChange={monaco.onSelectionChange}
+          onViewportChange={monaco.onViewportChange}
+        />
       </div>
     );
   }

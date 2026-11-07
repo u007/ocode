@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
-import { useViewerReport } from "../../lib/viewerContext";
+import { useViewerController, useViewerReport } from "../../lib/viewerContext";
+import { selectText } from "./viewerControlDom";
 import { parsePptx, type DeckBlock } from "./pptxDeck";
 
 /** A slide ready to draw: its images are URLs the page can load. */
@@ -162,6 +163,34 @@ export default function PptxViewer({
     if (revealed > 0) setRevealed(revealed - 1);
     else if (safe > 1) onSlideChange(safe - 1);
   }, [revealed, safe, onSlideChange]);
+
+  // Agent control. Scroll moves between slides through `onSlideChange` (the
+  // same path the buttons use). Text selects within the rendered slide. The
+  // deck has no find engine, so find is left unsupported.
+  useViewerController(path, {
+    scroll(target) {
+      if (target.slide !== undefined) {
+        if (total === 0) throw new Error("deck not loaded");
+        if (!Number.isInteger(target.slide) || target.slide < 1 || target.slide > total) {
+          throw new Error(`slide ${target.slide} out of range 1-${total}`);
+        }
+        onSlideChange(target.slide);
+        return true;
+      }
+      if (target.direction !== undefined) {
+        if (total === 0) throw new Error("deck not loaded");
+        const next = safe + (target.direction === "down" ? 1 : -1);
+        onSlideChange(Math.min(total, Math.max(1, next)));
+        return true;
+      }
+      return false;
+    },
+    select(target) {
+      if (target.text === undefined) return false;
+      report({ selection: selectText(ref.current, target.text) });
+      return true;
+    },
+  });
 
   if (loading) return <div className="p-4 text-xs text-muted-foreground">Loading deck…</div>;
   if (error) return <div className="p-4 text-xs text-red-400">Deck failed: {error}</div>;

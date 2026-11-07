@@ -260,16 +260,29 @@ export function useViewerReport(path: string): (patch: Omit<ViewerPatch, "path">
   );
 }
 
-const controllers = new Map<string, ViewerController>();
+interface ControllerEntry {
+  c: ViewerController;
+}
+
+/** Per key, a stack of registrations: the top one is the active controller. */
+const controllers = new Map<string, ControllerEntry[]>();
 
 /**
- * Register the agent-control controller for a session key. Only one controller
- * per key: the last registration wins, and its unregister removes only itself.
+ * Register an agent-control controller for a session key. Registrations stack:
+ * the last one is active, and its unregister removes exactly that registration
+ * wherever it sits, so a viewer mounted over another one restores it on exit.
+ * Unregistering twice is a no-op.
  */
 export function registerViewerController(key: string, c: ViewerController): () => void {
-  controllers.set(key, c);
+  const entry: ControllerEntry = { c };
+  controllers.set(key, [...(controllers.get(key) ?? []), entry]);
   return () => {
-    if (controllers.get(key) === c) controllers.delete(key);
+    const stack = controllers.get(key);
+    if (!stack) return;
+    const rest = stack.filter((e) => e !== entry);
+    if (rest.length === stack.length) return;
+    if (rest.length === 0) controllers.delete(key);
+    else controllers.set(key, rest);
   };
 }
 
@@ -303,7 +316,9 @@ export function useViewerController(path: string, controller: ViewerController):
 
 /** The controller for a session key, or null when no viewer registered one. */
 export function readViewerController(key: string): ViewerController | null {
-  return controllers.get(key) ?? null;
+  const stack = controllers.get(key);
+  if (!stack || stack.length === 0) return null;
+  return stack[stack.length - 1].c;
 }
 
 /** Short human location: "p.3/12", "slide 2/8", "Sheet1!B2:D9", "§ Install", "L10-L24". */

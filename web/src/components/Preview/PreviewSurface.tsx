@@ -124,7 +124,7 @@ export default function PreviewSurface({
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}
         {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
-        {kind === "html" && <HtmlViewer content={content ?? ""} />}
+        {kind === "html" && <HtmlViewer path={path} content={content ?? ""} />}
         {kind === "json" && <JsonViewer content={content ?? ""} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
         {kind === "sqlite" && <SQLiteViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}

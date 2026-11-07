@@ -50,7 +50,7 @@ interface Props {
 
 const OTHER_LABEL = "Something else";
 
-// Mirrors the TUI's isQuestionOtherLabel so a question that already carries an
+// Mirrors tool.QuestionOptionIsCustom (Go) so a question that already carries an
 // "other/custom" option reuses it as the free-text row rather than getting a
 // duplicate appended one.
 function isOtherLabel(label: string): boolean {

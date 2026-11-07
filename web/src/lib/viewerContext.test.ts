@@ -141,16 +141,40 @@ describe("viewerContext store", () => {
 describe("viewer controller registry", () => {
   beforeEach(() => resetViewerStates());
 
-  it("last registration wins and unregister removes only its own controller", () => {
+  it("the last registration is active, and unregistering it restores the one beneath", () => {
     const a: ViewerController = { scroll: () => true };
     const b: ViewerController = { find: () => true };
     const unA = registerViewerController("s1", a);
     const unB = registerViewerController("s1", b);
     expect(readViewerController("s1")).toBe(b);
 
+    unB();
+    expect(readViewerController("s1")).toBe(a);
+    unA();
+    expect(readViewerController("s1")).toBeNull();
+  });
+
+  it("unregistering a buried registration leaves the top one active", () => {
+    const a: ViewerController = { scroll: () => true };
+    const b: ViewerController = { find: () => true };
+    const unA = registerViewerController("s1", a);
+    const unB = registerViewerController("s1", b);
+
     unA();
     expect(readViewerController("s1")).toBe(b);
     unB();
+  });
+
+  it("unregistering twice is a no-op", () => {
+    const a: ViewerController = { scroll: () => true };
+    const b: ViewerController = { find: () => true };
+    const unA = registerViewerController("s1", a);
+    const unB = registerViewerController("s1", b);
+    unB();
+    unB();
+    expect(readViewerController("s1")).toBe(a);
+    unA();
+    unA();
     expect(readViewerController("s1")).toBeNull();
   });
 

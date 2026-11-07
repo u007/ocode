@@ -33,6 +33,8 @@ import {
   ensureEditorLinks,
   setEditorModelInfo,
 } from "../../lib/editorLinks";
+import { VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
+import { throttleTrailing } from "../../lib/viewerDom";
 
 export interface FileEditorProps {
   path: string;
@@ -80,6 +82,11 @@ export interface FileEditorProps {
    *  the editor header is visible at the same time) — without it a split tab
    *  would show two identical toggles. */
   hideAppearanceToggle?: boolean;
+  /** Called once the Monaco instance has mounted, with the live editor. */
+  onEditorMount?: (ed: editor.IStandaloneCodeEditor) => void;
+  /** Called (throttled) with the 1-based line span in the viewport and its text,
+   *  on scroll and on content change. Only wired when provided. */
+  onViewportChange?: (view: { start: number; end: number; text: string }) => void;
 }
 
 import { memo } from "react";
@@ -175,6 +182,8 @@ function FileEditorImpl({
   dirty = false,
   initialHighlight,
   hideAppearanceToggle = false,
+  onEditorMount,
+  onViewportChange,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Store the Monaco API object so it's available in effects that can't reach
@@ -226,6 +235,10 @@ function FileEditorImpl({
   const diffLayoutDisposablesRef = useRef<{ dispose: () => void }[]>([]);
   const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  // Viewport listeners, kept apart from scrollDisposableRef (the persisted
+  // scroll saver), so each can be disposed without touching the other.
+  const viewportScrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const viewportContentDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const [activeHighlight, setActiveHighlight] = useState<{ query: string; path: string } | null>(null);
 
   // Resize deleted-block view zones when the editor geometry or typography
@@ -275,6 +288,37 @@ function FileEditorImpl({
   useEffect(() => {
     onSaveRef.current = onSave;
   }, [onSave]);
+  const onEditorMountRef = useRef(onEditorMount);
+  const onViewportChangeRef = useRef(onViewportChange);
+  useEffect(() => {
+    onEditorMountRef.current = onEditorMount;
+  }, [onEditorMount]);
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange;
+  }, [onViewportChange]);
+  // Reads the visible span from the live editor and reports it. Throttled so a
+  // burst of scroll or typing events reports once per 250 ms, trailing.
+  const reportViewport = useMemo(
+    () =>
+      throttleTrailing(() => {
+        const ed = editorRef.current;
+        const cb = onViewportChangeRef.current;
+        const model = ed?.getModel();
+        if (!ed || !cb || !model) return;
+        const ranges = ed.getVisibleRanges();
+        if (ranges.length === 0) return;
+        const start = ranges[0].startLineNumber;
+        const end = ranges[ranges.length - 1].endLineNumber;
+        const text = model.getValueInRange({
+          startLineNumber: start,
+          startColumn: 1,
+          endLineNumber: end,
+          endColumn: model.getLineMaxColumn(end),
+        });
+        cb({ start, end, text: text.slice(0, VIEWER_VISIBLE_MAX) });
+      }, 250),
+    [],
+  );
 
   const stableOnChange = useCallback((val: string | undefined) => {
     // Remember what WE emitted so the external-content sync effect can tell
@@ -402,8 +446,13 @@ function FileEditorImpl({
       scrollDisposableRef.current?.dispose();
       selectionDisposableRef.current = null;
       scrollDisposableRef.current = null;
+      reportViewport.cancel();
+      viewportScrollDisposableRef.current?.dispose();
+      viewportContentDisposableRef.current?.dispose();
+      viewportScrollDisposableRef.current = null;
+      viewportContentDisposableRef.current = null;
     };
-  }, []);
+  }, [reportViewport]);
 
   // ── Selection tracking ──
   // Wired inside handleEditorMount (where the editor instance is guaranteed
@@ -455,6 +504,16 @@ function FileEditorImpl({
 
     // Selection tracking (see wireSelectionTracking above).
     wireSelectionTracking(ed);
+
+    // Viewport tracking, wired only when the parent asks for it. Content
+    // changes cover the initial set, external syncs and typing.
+    if (onViewportChangeRef.current) {
+      viewportScrollDisposableRef.current?.dispose();
+      viewportContentDisposableRef.current?.dispose();
+      viewportScrollDisposableRef.current = ed.onDidScrollChange(() => reportViewport());
+      viewportContentDisposableRef.current = ed.onDidChangeModelContent(() => reportViewport());
+      reportViewport();
+    }
 
     // Content may have arrived between the first render and this async mount
     // (loader resolution). Reconcile once so the model never starts stale.
@@ -572,7 +631,8 @@ function FileEditorImpl({
       document.head.appendChild(style);
     }
     setEditorMountVersion((v) => v + 1);
-  }, [persistKey, wireSelectionTracking]);
+    onEditorMountRef.current?.(ed);
+  }, [persistKey, wireSelectionTracking, reportViewport]);
 
 // ── Inline diff decorations ──
   // Fetch the diffs whenever path/session/diffVersion changes, pick the source

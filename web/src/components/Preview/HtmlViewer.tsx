@@ -3,6 +3,8 @@ import { FindBar } from "./FindBar";
 import { isEditableTarget, previewWantsFindShortcut } from "./findDom";
 import { buildHtmlFindSrcDoc } from "./htmlFindAgent";
 import { useIframeFind } from "./useIframeFind";
+import { runFindCommand, useFindStateReport } from "./viewerControlDom";
+import { useViewerController, useViewerReport } from "../../lib/viewerContext";
 
 /**
  * HTML preview renderer for the Files-tab Split view.
@@ -22,7 +24,7 @@ import { useIframeFind } from "./useIframeFind";
  * do not resolve because `srcDoc` has no base URL. Absolute URLs and
  * inline styles work correctly.
  */
-export default function HtmlViewer({ content }: { content: string }) {
+export default function HtmlViewer({ path, content }: { path: string; content: string }) {
   // Debounce the srcDoc update to ~300ms to avoid reloading the iframe on
   // every keystroke. The parent (FileTabContent) already debounces at 200ms,
   // but this adds a second layer so the iframe reload is further coalesced.
@@ -30,6 +32,11 @@ export default function HtmlViewer({ content }: { content: string }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const find = useIframeFind({ iframeRef });
+  const report = useViewerReport(path);
+  // The sandboxed frame is opaque to the parent: find runs inside it, while
+  // scroll and select have no reachable DOM and stay unsupported.
+  useViewerController(path, { find: (cmd) => runFindCommand(find, cmd) });
+  useFindStateReport(report, { active: find.active, query: find.query, count: find.count, current: find.current, searching: find.searching });
 
   // Same shortcuts as the other preview surfaces, claimed only while the
   // reader is in this preview (focused iframe / hovered / selected).

@@ -4,7 +4,7 @@ import HtmlViewer from "./HtmlViewer";
 
 describe("HtmlViewer", () => {
   it("renders an iframe with srcDoc", () => {
-    render(<HtmlViewer content="<h1>Hello</h1>" />);
+    render(<HtmlViewer path="doc.html" content="<h1>Hello</h1>" />);
     const iframe = screen.getByTitle("HTML preview");
     expect(iframe.tagName).toBe("IFRAME");
     expect(iframe.getAttribute("srcDoc")).toContain("<h1>Hello</h1>");
@@ -13,16 +13,16 @@ describe("HtmlViewer", () => {
   });
 
   it("uses sandbox=allow-scripts (no allow-same-origin)", () => {
-    render(<HtmlViewer content="<p>safe</p>" />);
+    render(<HtmlViewer path="doc.html" content="<p>safe</p>" />);
     const iframe = screen.getByTitle("HTML preview");
     expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
     expect(iframe.getAttribute("sandbox")).not.toContain("allow-same-origin");
   });
 
   it("updates srcDoc when content changes", () => {
-    const { rerender } = render(<HtmlViewer content="<p>one</p>" />);
+    const { rerender } = render(<HtmlViewer path="doc.html" content="<p>one</p>" />);
     expect(screen.getByTitle("HTML preview").getAttribute("srcDoc")).toContain("<p>one</p>");
-    rerender(<HtmlViewer content="<p>two</p>" />);
+    rerender(<HtmlViewer path="doc.html" content="<p>two</p>" />);
     const srcDoc = screen.getByTitle("HTML preview").getAttribute("srcDoc") ?? "";
     expect(srcDoc).toContain("<p>two</p>");
     expect(srcDoc).not.toContain("<p>one</p>");

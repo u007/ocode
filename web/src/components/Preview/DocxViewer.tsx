@@ -6,7 +6,8 @@ import { FindBar } from "./FindBar";
 import { FindHighlights } from "./FindHighlights";
 import { isEditableTarget, previewWantsFindShortcut } from "./findDom";
 import { useDomFind } from "./useDomFind";
-import { useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
+import { domViewerController, useFindStateReport } from "./viewerControlDom";
+import { useViewerController, useViewerReport, VIEWER_VISIBLE_MAX } from "../../lib/viewerContext";
 import { collectVisibleText, throttleTrailing } from "../../lib/viewerDom";
 
 /**
@@ -27,6 +28,8 @@ export default function DocxViewer({ path, projectRoot, projectHost }: { path: s
   const report = useViewerReport(path);
   const { ref, sel, clear } = usePreviewSelection<HTMLDivElement>(() => "doc", (text) => report({ selection: text }));
   const find = useDomFind({ containerRef: ref, textRootRef: bodyRef, version: docVersion, enabled: !loading && !error });
+  useViewerController(path, domViewerController({ scroller: ref, textRoot: bodyRef, find, report }));
+  useFindStateReport(report, { active: find.active, query: find.query, count: find.count, current: find.current, searching: false });
 
   // What the reader sees. Reported after each render of the document (the body
   // is empty while loading, so the version bump re-reports the real content)

@@ -58,7 +58,7 @@ function dispatchResult(win: { postMessage: unknown }, count: number, current: n
 
 describe("HtmlViewer find", () => {
   it("drives the in-frame agent over postMessage", async () => {
-    const view = render(<HtmlViewer content="<h1>Alpha beta gamma</h1>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<h1>Alpha beta gamma</h1>" />);
     const { win } = await installFrame(view);
 
     fireEvent.click(view.getByLabelText("Find in document"));
@@ -79,7 +79,7 @@ describe("HtmlViewer find", () => {
   });
 
   it("shows the frame's match count and steps matches", async () => {
-    const view = render(<HtmlViewer content="<p>one two two three</p>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<p>one two two three</p>" />);
     const { win } = await installFrame(view);
 
     fireEvent.click(view.getByLabelText("Find in document"));
@@ -94,7 +94,7 @@ describe("HtmlViewer find", () => {
   });
 
   it("closes the bar and tells the frame to drop highlights", async () => {
-    const view = render(<HtmlViewer content="<p>text</p>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<p>text</p>" />);
     const { win } = await installFrame(view);
 
     fireEvent.click(view.getByLabelText("Find in document"));
@@ -104,7 +104,7 @@ describe("HtmlViewer find", () => {
   });
 
   it("re-searches after the frame reloads", async () => {
-    const view = render(<HtmlViewer content="<p>text</p>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<p>text</p>" />);
     const { iframe, win } = await installFrame(view);
 
     fireEvent.click(view.getByLabelText("Find in document"));
@@ -119,7 +119,7 @@ describe("HtmlViewer find", () => {
   });
 
   it("claims Ctrl/⌘F only while the reader is inside the preview", async () => {
-    const view = render(<HtmlViewer content="<p>text</p>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<p>text</p>" />);
     await installFrame(view);
 
     window.getSelection()?.removeAllRanges();
@@ -136,7 +136,7 @@ describe("HtmlViewer find", () => {
   });
 
   it("appends the find agent to the rendered document", () => {
-    const view = render(<HtmlViewer content="<html><body><p>hello</p></body></html>" />);
+    const view = render(<HtmlViewer path="doc.html" content="<html><body><p>hello</p></body></html>" />);
     const iframe = view.getByTitle("HTML preview");
     const srcDoc = iframe.getAttribute("srcDoc") ?? "";
     expect(srcDoc).toContain("<p>hello</p>");
