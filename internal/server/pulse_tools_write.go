@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 )
@@ -276,20 +274,13 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 		if !args.Queue {
 			return "", err
 		}
-		// Queue path: persist the message and push it onto the target's pending
-		// queue; drain when the session goes idle.
-		if h.sessions.PendingCount(args.SessionID) >= 10 {
-			return "", errors.New("target session queue is full (10 pending)")
+		// Queue path: the same handler the web client uses, in-process. It owns
+		// the resident-agent refusal, the cap and the drain start.
+		if _, qerr := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/queue",
+			map[string]any{"content": args.Content},
+			func(w http.ResponseWriter, r *http.Request) { h.HandleSessionQueue(w, r, args.SessionID) }); qerr != nil {
+			return "", fmt.Errorf("queue on %s: %w", args.SessionID, qerr)
 		}
-		entry, rerr := h.sessions.Resolve(args.SessionID)
-		if rerr != nil {
-			return "", rerr
-		}
-		if perr := h.persistUserMessage(entry, args.Content); perr != nil {
-			return "", perr
-		}
-		h.sessions.PushPending(args.SessionID, args.Content)
-		h.scheduleQueueDrain(args.SessionID)
 		return marshalPulseString(map[string]any{"session_id": args.SessionID, "queued": true})
 	}
 	if _, err := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/message",
@@ -607,30 +598,4 @@ func (h *Handler) pulseQuestionDismissTool(raw json.RawMessage) (string, error) 
 		return "", fmt.Errorf("dismiss question %s on %s: %w", args.RequestID, args.SessionID, err)
 	}
 	return marshalPulseString(map[string]any{"session_id": args.SessionID, "request_id": args.RequestID, "dismissed": true})
-}
-
-// scheduleQueueDrain waits until the target session is idle, then dispatches a
-// retryLast turn so any messages queued via session_send (queue=true) run.
-func (h *Handler) scheduleQueueDrain(id string) {
-	crashguard.Go(func() {
-		for i := 0; i < 300; i++ { // up to ~60s
-			if !h.sessions.IsTurnActive(id) {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		if h.sessions.IsTurnActive(id) {
-			return
-		}
-		// Only drain when a resident agent exists; otherwise the pending message
-		// stays durable and is picked up on the next real turn.
-		as := h.lookupAgentSession(id)
-		if as == nil || as.agent == nil {
-			return
-		}
-		model := h.effectiveSessionModel(id)
-		if _, err := h.dispatchTurn(id, model, "", turnOptions{retryLast: true}); err != nil {
-			log.Printf("serve: queue drain dispatch for %s: %v", id, err)
-		}
-	})
 }

@@ -768,28 +768,88 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 	return marshalPulseString(res)
 }
 
-// sessionCommTools returns the subset of pulse tools that are safe and useful
-// for a normal (non-Pulse) session to talk to other sessions: status board,
-// transcript reads, recap, pending-ask inspection, and the permission-gated
-// write tools (send, new, close, command, resolve). Terminal, memory and
-// activation tools stay Pulse-only by policy.
+// sessionCommToolNames is the ENTIRE peer-communication surface a normal
+// (non-Pulse) session gets, sorted so the tools array is deterministic. It is
+// an allowlist on purpose: a new Pulse tool must not reach ordinary sessions by
+// default. Cross-project enumerations (pulse_board, project_list, agent_runs),
+// remote-side (host_connect) and lifecycle tools (session_new, session_close)
+// stay Pulse-only. No name here gets an Allow rule: every call asks.
+var sessionCommToolNames = []string{
+	"permission_resolve",
+	"question_answer",
+	"question_dismiss",
+	"session_ask",
+	"session_command",
+	"session_read",
+	"session_recap",
+	"session_send",
+}
+
+// sessionCommTools returns the peer-communication tools for a normal session.
+// Each copy's run is wrapped by sessionCommScope, so its target must resolve
+// to a registered project root and no remote host can be named. The pulse
+// tools themselves are untouched.
 func (h *Handler) sessionCommTools() []*pulseTool {
-	all := h.pulseTools()
-	out := make([]*pulseTool, 0, len(all))
-	for _, t := range all {
-		name := t.Name()
-		if strings.HasPrefix(name, "terminal_") {
+	byName := make(map[string]*pulseTool)
+	for _, t := range h.pulseTools() {
+		byName[t.Name()] = t
+	}
+	out := make([]*pulseTool, 0, len(sessionCommToolNames))
+	for _, name := range sessionCommToolNames {
+		t := byName[name]
+		if t == nil {
 			continue
 		}
-		if name == "memory_read" || name == "memory_write" {
-			continue
-		}
-		if name == "activation_read" || name == "activation_write" {
-			continue
-		}
-		out = append(out, t)
+		scoped := *t
+		scoped.run = h.sessionCommScope(t.run)
+		out = append(out, &scoped)
 	}
 	return out
+}
+
+// sessionCommScope confines a peer-communication tool call to registered
+// projects. The guard decodes session_id and host leniently; the wrapped run
+// keeps its own strict decode, so argument typos are still reported there.
+func (h *Handler) sessionCommScope(run func(json.RawMessage) (string, error)) func(json.RawMessage) (string, error) {
+	return func(raw json.RawMessage) (string, error) {
+		var target struct {
+			SessionID string `json:"session_id"`
+			Host      string `json:"host"`
+		}
+		_ = json.Unmarshal(raw, &target)
+		if strings.TrimSpace(target.Host) != "" {
+			return "", errors.New("remote-host sessions are not reachable from a normal session; use the Pulse assistant or the host itself")
+		}
+		if id := strings.TrimSpace(target.SessionID); id != "" {
+			if err := h.sessionCommTargetAllowed(id); err != nil {
+				return "", err
+			}
+		}
+		return run(raw)
+	}
+}
+
+// sessionCommTargetAllowed reports whether a normal session may act on id: it
+// must not be the Pulse assistant, it must resolve locally, and its project
+// root must be one of allowedProjectRoots (the security boundary).
+func (h *Handler) sessionCommTargetAllowed(id string) error {
+	if isPulseSession(id) {
+		return fmt.Errorf("session %q is the Pulse assistant's own session", id)
+	}
+	entry, err := h.sessions.Resolve(id)
+	if err != nil || entry == nil {
+		return fmt.Errorf("session %q not found", id)
+	}
+	root := entry.ProjectRoot
+	if root == "" {
+		root = h.workDir
+	}
+	for _, allowed := range h.allowedProjectRoots() {
+		if root == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("session %q belongs to project %q, which is not a registered project root", id, root)
 }
 
 // pulseSessionGoal returns the target session's goal (live if resident, else

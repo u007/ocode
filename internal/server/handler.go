@@ -356,6 +356,13 @@ type Handler struct {
 	shutdownStarted bool
 	turnJobsWG      sync.WaitGroup
 
+	// drainMu guards queueDrainers: one drainer goroutine per session with a
+	// persisted pending queue (scheduleQueueDrain). The entry is removed under
+	// drainMu after a re-check of the queue, so a push cannot be left behind by
+	// an exiting drainer.
+	drainMu       sync.Mutex
+	queueDrainers map[string]*queueDrainState
+
 	// closePending marks sessions whose HandleCloseSession release could not
 	// run immediately (an active turn held the agent). executeTurnJob drains
 	// the marker after the turn (or bootstrap) finishes and releases the

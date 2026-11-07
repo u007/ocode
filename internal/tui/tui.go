@@ -131,9 +131,12 @@ func watchProgramSignals(p *tea.Program, logf func(string, ...interface{})) func
 func cleanupProgramModel(m tea.Model) {
 	switch m := m.(type) {
 	case model:
+		// Synchronous: the process is about to exit, so the idle state must land.
+		writeSessionStatusNow(m.sessionID, false)
 		m.cleanupCurrentSession()
 		m.abortVoice()
 	case *model:
+		writeSessionStatusNow(m.sessionID, false)
 		m.cleanupCurrentSession()
 		m.abortVoice()
 	}

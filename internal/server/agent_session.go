@@ -603,21 +603,16 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		tools = append(tools, &viewerStateTool{h: h, sessionID: sessionID})
 	}
 	if !pulse {
+		// Peer-communication tools for other sessions. They get NO Allow rule:
+		// with no rule the permission default is ask, so every call raises a
+		// normal permission dialog. sessionCommTools also confines each target
+		// to allowedProjectRoots.
 		for _, t := range h.sessionCommTools() {
 			tools = append(tools, t)
 		}
 	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)
-	if !pulse {
-		if pm := ag.Permissions(); pm != nil {
-			for _, t := range h.sessionCommTools() {
-				if !t.ask {
-					pm.SetRule(t.Name(), agent.PermissionAllow)
-				}
-			}
-		}
-	}
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
 	}
@@ -1235,6 +1230,13 @@ type turnOptions struct {
 	// a turn, when another async turn is already registered on the session. The
 	// check and the registration share one cancelMu section.
 	refuseIfBusy bool
+
+	// drainPending runs the session's already-persisted pending queue (see
+	// scheduleQueueDrain) without persisting or pushing anything. The job
+	// skips the persist step and goes straight to the pending loop, which turns
+	// each queued message in order. A retryLast turn does not drain: it runs
+	// the transcript tail once and never shifts the queue.
+	drainPending bool
 }
 
 // runTurn executes one agent turn: appends the user message (unless
@@ -2153,7 +2155,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		if !h.commitPendingRewindTurn(id, entry, job) {
 			return
 		}
-	} else if job.opts.retryLast {
+	} else if job.opts.retryLast || job.opts.drainPending {
 		close(job.persistAck)
 	} else {
 		if err := h.persistUserMessage(entry, job.content); err != nil {
