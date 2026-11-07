@@ -5011,6 +5011,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify(opts),
     }),
+  listArtifacts: (opts: any, host: any) => {
+    const params = new URLSearchParams();
+    if (opts && opts.limit) params.set("limit", String(opts.limit));
+    if (opts && opts.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    return fetchJSON<any>(`/api/artifacts${qs ? `?${qs}` : ""}`, undefined, host);
+  },
+  createArtifact: (body: any, host: any) =>
+    fetchJSON<any>("/api/artifacts", { method: "POST", body: JSON.stringify(body || {}) }, host),
+  getArtifact: (id: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}`, undefined, host),
+  publishArtifact: (id: any, body: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/publish`, { method: "POST", body: JSON.stringify(body || {}) }, host),
+  unpublishArtifact: (id: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/unpublish`, { method: "POST" }, host),
+  deleteArtifact: (id: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}`, { method: "DELETE" }, host),
+  mintArtifactToken: (id: any, body: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/tokens`, { method: "POST", body: JSON.stringify(body || {}) }, host),
+  revokeArtifactToken: (id: any, tid: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/tokens/${encodeURIComponent(tid)}`, { method: "DELETE" }, host),
+  addArtifactAllowlist: (id: any, email: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/allowlist`, { method: "POST", body: JSON.stringify({ email }) }, host),
+  removeArtifactAllowlist: (id: any, email: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/allowlist/${encodeURIComponent(email)}`, { method: "DELETE" }, host),
+  getArtifactAccessLog: (id: any, host: any) =>
+    fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/access-log`, undefined, host),
 };
 
 /** Port-forwards route for a target: the project-scoped family when a remote
