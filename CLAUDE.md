@@ -685,6 +685,22 @@ session's working directory. Details, endpoint params and remote-project routing
   browser's tab strip and per-tab navigation are server state the same way (`GET/PUT
   /api/browser-tabs`, `internal/browsertabs`); only scroll offsets stay per viewer.
 
+## Public artifact sharing (Tailscale funnel): `/p` only, auth required
+Public artifact links expose the local server through `tailscale serve`/`funnel`. The first two
+invariants are pinned by `internal/server/tailscale_artifact_upstream_test.go`:
+
+- **Every artifact `tailscaleShare` MUST come from `newArtifactTailscaleShare()`.** It is the only
+  place `upstreamPath` (`/p`) is set. A bare `&tailscaleShare{mount: artifactTailscalePath}` makes
+  `--set-path /p` strip the prefix and forward to the server ROOT, so a public `/p/api/...` request
+  reaches the owner's authenticated API.
+- **A funnel (public) start is refused with 403 unless `authConfigured()` is true.** Use that one
+  predicate for both the funnel gate and `authMiddleware`/`mediaAuthMiddleware`; never re-derive
+  `remoteMode || username || password` inline, or the two can disagree.
+
+Artifact responses carry `Content-Security-Policy: sandbox allow-scripts; ...` (`handler_artifact_serve.go`):
+the `sandbox` directive gives published pages an opaque origin, so they cannot read the owner's
+storage or same-origin API even if a page is served through the share.
+
 ## Web/Desktop Context gauge: provider-reported first, estimate as fallback
 The gauge (`TUIStatus.context_current_tokens`) and `/context` (`current_tokens`) use
 the provider-reported occupancy whenever one exists; a chars/4 transcript estimate is
@@ -725,11 +741,13 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
   enforces it.
 - **Session-communication tools are a narrow allowlist.** `sessionCommToolNames` (in
   `pulse_tools.go`) is the only Pulse-tool subset a non-Pulse session gets: `session_read`,
-  `session_recap`, `session_ask`, `session_send` (with `queue`), `session_command`, and the ask
-  resolvers. They carry NO Allow rule, so every call asks, and `sessionCommScope` confines each
-  target to `allowedProjectRoots()` and refuses `host`. `pulse_board`, `project_list`, `agent_runs`,
-  `host_connect`, `session_new` and `session_close` stay Pulse-only. A denylist would leak new
-  Pulse tools, so keep it an allowlist. Command lines go to the model only through `pulseTerminalRows`, which checks
+  `session_recap`, `session_ask`, `session_send` (with `queue`), `session_command`. They carry NO
+  Allow rule, so every call asks. `sessionCommScope` confines each target to `allowedProjectRoots()`,
+  refuses `host`, and refuses the caller's own id (canonical compare, `sessionCommTargetAllowed`).
+  The ask resolvers `permission_resolve`, `question_answer` and `question_dismiss` are **Pulse-only**:
+  a session that could resolve its own or a sibling's permission ask is self-escalation.
+  `pulse_board`, `project_list`, `agent_runs`, `host_connect`, `session_new` and `session_close` also
+  stay Pulse-only. A denylist would leak new Pulse tools, so keep it an allowlist. Command lines go to the model only through `pulseTerminalRows`, which checks
   `terminalAccessAllowed`.
 - **It is never on the board.** `buildPulseRows` skips every `pulse_` id; any new
   surface listing sessions (board text, `agent_runs`, search) must exclude it too.

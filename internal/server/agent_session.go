@@ -608,8 +608,8 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		// Peer-communication tools for other sessions. They get NO Allow rule:
 		// with no rule the permission default is ask, so every call raises a
 		// normal permission dialog. sessionCommTools also confines each target
-		// to allowedProjectRoots.
-		for _, t := range h.sessionCommTools() {
+		// to allowedProjectRoots and refuses this session's own id.
+		for _, t := range h.sessionCommTools(sessionID) {
 			tools = append(tools, t)
 		}
 	}

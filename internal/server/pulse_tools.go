@@ -773,11 +773,11 @@ func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
 // an allowlist on purpose: a new Pulse tool must not reach ordinary sessions by
 // default. Cross-project enumerations (pulse_board, project_list, agent_runs),
 // remote-side (host_connect) and lifecycle tools (session_new, session_close)
-// stay Pulse-only. No name here gets an Allow rule: every call asks.
+// stay Pulse-only. The ask resolvers (permission_resolve, question_answer,
+// question_dismiss) are Pulse-only too: a session that could approve its own or
+// a sibling's permission ask would be permission self-escalation. No name here
+// gets an Allow rule: every call asks.
 var sessionCommToolNames = []string{
-	"permission_resolve",
-	"question_answer",
-	"question_dismiss",
 	"session_ask",
 	"session_command",
 	"session_read",
@@ -785,11 +785,15 @@ var sessionCommToolNames = []string{
 	"session_send",
 }
 
-// sessionCommTools returns the peer-communication tools for a normal session.
-// Each copy's run is wrapped by sessionCommScope, so its target must resolve
-// to a registered project root and no remote host can be named. The pulse
-// tools themselves are untouched.
-func (h *Handler) sessionCommTools() []*pulseTool {
+// sessionCommTools returns the peer-communication tools for the normal session
+// callerID. Each copy's run is wrapped by sessionCommScope, so its target must
+// resolve to a registered project root, must not be the caller itself, and no
+// remote host can be named. The pulse tools themselves are untouched.
+//
+// callerID is captured at build time, like viewerStateTool's session id. A
+// /reset-id releases the agent and rebuilds it under the new id, and the old id
+// is deleted from the registry, so a stale callerID cannot outlive its session.
+func (h *Handler) sessionCommTools(callerID string) []*pulseTool {
 	byName := make(map[string]*pulseTool)
 	for _, t := range h.pulseTools() {
 		byName[t.Name()] = t
@@ -801,16 +805,17 @@ func (h *Handler) sessionCommTools() []*pulseTool {
 			continue
 		}
 		scoped := *t
-		scoped.run = h.sessionCommScope(t.run)
+		scoped.run = h.sessionCommScope(callerID, t.run)
 		out = append(out, &scoped)
 	}
 	return out
 }
 
 // sessionCommScope confines a peer-communication tool call to registered
-// projects. The guard decodes session_id and host leniently; the wrapped run
-// keeps its own strict decode, so argument typos are still reported there.
-func (h *Handler) sessionCommScope(run func(json.RawMessage) (string, error)) func(json.RawMessage) (string, error) {
+// projects and to sessions other than the caller. The guard decodes session_id
+// and host leniently; the wrapped run keeps its own strict decode, so argument
+// typos are still reported there.
+func (h *Handler) sessionCommScope(callerID string, run func(json.RawMessage) (string, error)) func(json.RawMessage) (string, error) {
 	return func(raw json.RawMessage) (string, error) {
 		var target struct {
 			SessionID string `json:"session_id"`
@@ -821,7 +826,7 @@ func (h *Handler) sessionCommScope(run func(json.RawMessage) (string, error)) fu
 			return "", errors.New("remote-host sessions are not reachable from a normal session; use the Pulse assistant or the host itself")
 		}
 		if id := strings.TrimSpace(target.SessionID); id != "" {
-			if err := h.sessionCommTargetAllowed(id); err != nil {
+			if err := h.sessionCommTargetAllowed(callerID, id); err != nil {
 				return "", err
 			}
 		}
@@ -829,10 +834,16 @@ func (h *Handler) sessionCommScope(run func(json.RawMessage) (string, error)) fu
 	}
 }
 
-// sessionCommTargetAllowed reports whether a normal session may act on id: it
-// must not be the Pulse assistant, it must resolve locally, and its project
-// root must be one of allowedProjectRoots (the security boundary).
-func (h *Handler) sessionCommTargetAllowed(id string) error {
+// sessionCommTargetAllowed reports whether the normal session callerID may act
+// on id: it must not be the caller itself, must not be the Pulse assistant, must
+// resolve locally, and its project root must be one of allowedProjectRoots (the
+// security boundary). The self check runs first and compares canonical ids, so
+// a "claude:<id>" alias of the caller's own "claude-<id>" is refused too. An
+// empty callerID skips the self check; it is never a session that can match.
+func (h *Handler) sessionCommTargetAllowed(callerID, id string) error {
+	if callerID != "" && session.CanonicalID(id) == session.CanonicalID(callerID) {
+		return fmt.Errorf("session %q is this session's own id; peer tools cannot target the calling session", id)
+	}
 	if isPulseSession(id) {
 		return fmt.Errorf("session %q is the Pulse assistant's own session", id)
 	}

@@ -88,33 +88,25 @@ func TestSessionSendQueueCap(t *testing.T) {
 	}
 }
 
-func TestSessionSendSelfTargetNotGuarded(t *testing.T) {
-	// Documented limitation: tools lack caller context, so self-target is not
-	// refused here. This test just ensures no panic.
-	h := pulseTestHandler(t)
-	msgs := []agent.Message{{Role: "user", Content: "hi"}}
-	registerLiveSession(t, h, "ses_self", "/work/self", false, msgs)
-	out, err := runPulseTool(t, h, "session_send", `{"session_id":"ses_self","content":"self","queue":false}`)
-	t.Logf("self send: %v %s", err, out)
-}
-
 // TestSessionCommToolSetIsExactAllowlist pins the peer-communication set a
 // normal session gets. A denylist once leaked host_connect and the cross-project
 // readers into every session; the allowlist must stay exact.
 func TestSessionCommToolSetIsExactAllowlist(t *testing.T) {
 	h := pulseTestHandler(t)
 	want := []string{
-		"permission_resolve", "question_answer", "question_dismiss",
 		"session_ask", "session_command", "session_read", "session_recap", "session_send",
 	}
 	var got []string
-	for _, tl := range h.sessionCommTools() {
+	for _, tl := range h.sessionCommTools("ses_caller") {
 		got = append(got, tl.Name())
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("session comm tools = %v, want %v", got, want)
 	}
-	for _, forbidden := range []string{"host_connect", "pulse_board", "project_list", "agent_runs", "session_new", "session_close",
+	// The ask resolvers are Pulse-only: a normal session approving its own or a
+	// sibling's permission/question ask is self-escalation.
+	for _, forbidden := range []string{"permission_resolve", "question_answer", "question_dismiss",
+		"host_connect", "pulse_board", "project_list", "agent_runs", "session_new", "session_close",
 		"memory_read", "memory_write", "activation_read", "activation_write", "terminal_read", "terminal_tabs", "terminal_screen", "terminal_new", "terminal_kill"} {
 		for _, g := range got {
 			if g == forbidden {
@@ -129,7 +121,7 @@ func TestSessionCommToolSetIsExactAllowlist(t *testing.T) {
 func TestSessionCommToolsHaveNoAllowRule(t *testing.T) {
 	h := pulseTestHandler(t)
 	ag := agent.NewAgent(nil, nil, &config.Config{}, nil)
-	for _, tl := range h.sessionCommTools() {
+	for _, tl := range h.sessionCommTools("ses_caller") {
 		if lvl := ag.Permissions().Check(tl.Name()); lvl != agent.PermissionAsk {
 			t.Fatalf("%s permission = %v, want ask (no unconditional allow)", tl.Name(), lvl)
 		}
@@ -147,7 +139,7 @@ func TestSessionCommScopeConfinesTargets(t *testing.T) {
 	registerLiveSession(t, h, "ses_out", "/elsewhere/x", false, msgs)
 
 	read := func(args string) (string, error) {
-		for _, tl := range h.sessionCommTools() {
+		for _, tl := range h.sessionCommTools("ses_caller") {
 			if tl.Name() == "session_read" {
 				return tl.Execute(json.RawMessage(args))
 			}
@@ -166,6 +158,61 @@ func TestSessionCommScopeConfinesTargets(t *testing.T) {
 	}
 	if _, err := read(`{"session_id":"pulse_abc"}`); err == nil {
 		t.Fatal("pulse assistant session readable from a normal session; want refusal")
+	}
+}
+
+// commToolByName returns the named peer tool as built for callerID.
+func commToolByName(t *testing.T, h *Handler, callerID, name string) *pulseTool {
+	t.Helper()
+	for _, tl := range h.sessionCommTools(callerID) {
+		if tl.Name() == name {
+			return tl
+		}
+	}
+	t.Fatalf("%s missing from sessionCommTools(%q)", name, callerID)
+	return nil
+}
+
+// TestSessionCommRefusesSelfTarget: a normal session's peer tools refuse every
+// target equal to the caller's own id, in any spelling, before any work runs.
+// A sibling in the same root stays readable, so the refusal is not over-broad.
+func TestSessionCommRefusesSelfTarget(t *testing.T) {
+	h := pulseTestHandler(t)
+	h.workDir = "/work/allowed"
+	msgs := []agent.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}
+	registerLiveSession(t, h, "ses_me", "/work/allowed", false, msgs)
+	registerLiveSession(t, h, "ses_sib", "/work/allowed", false, msgs)
+
+	self := []struct{ tool, args string }{
+		{"session_read", `{"session_id":"ses_me"}`},
+		{"session_recap", `{"session_id":"ses_me"}`},
+		{"session_ask", `{"session_id":"ses_me"}`},
+		{"session_send", `{"session_id":"ses_me","content":"self"}`},
+		{"session_command", `{"session_id":"ses_me","command":"/title","args":"x"}`},
+	}
+	for _, c := range self {
+		tl := commToolByName(t, h, "ses_me", c.tool)
+		_, err := tl.Execute(json.RawMessage(c.args))
+		if err == nil || !strings.Contains(err.Error(), "own id") {
+			t.Fatalf("%s on own id: err = %v, want self-target refusal", c.tool, err)
+		}
+	}
+
+	if _, err := commToolByName(t, h, "ses_me", "session_read").Execute(json.RawMessage(`{"session_id":"ses_sib"}`)); err != nil {
+		t.Fatalf("sibling read refused: %v", err)
+	}
+}
+
+// TestSessionCommSelfTargetCanonicalAlias: the caller's own id is refused in its
+// "claude:<id>" spelling too, since the registry stores it as "claude-<id>".
+func TestSessionCommSelfTargetCanonicalAlias(t *testing.T) {
+	h := pulseTestHandler(t)
+	h.workDir = "/work/allowed"
+	registerLiveSession(t, h, "claude-abc", "/work/allowed", false, []agent.Message{{Role: "user", Content: "hi"}})
+	tl := commToolByName(t, h, "claude-abc", "session_read")
+	_, err := tl.Execute(json.RawMessage(`{"session_id":"claude:abc"}`))
+	if err == nil || !strings.Contains(err.Error(), "own id") {
+		t.Fatalf("claude: alias of own id: err = %v, want self-target refusal", err)
 	}
 }
 

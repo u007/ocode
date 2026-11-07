@@ -49,14 +49,14 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
     defaultNotify = false,
   } = props;
 
-  const [notifyOnPublish, setNotifyOnPublish] = useState<boolean>(false);
+  const [notifyOnPublish, setNotifyOnPublish] = useState<boolean>(defaultNotify);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Reset component-local state on each open; never persisted across opens.
   useEffect(() => {
     if (open) {
-      setNotifyOnPublish(false);
+      setNotifyOnPublish(defaultNotify);
       setError(null);
       setPending(false);
     }
