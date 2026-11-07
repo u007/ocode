@@ -1,13 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -134,13 +139,25 @@ func (h *Handler) isAllowedProject(path, host string) bool {
 }
 
 func (h *Handler) HandleCreateArtifact(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, _ := io.ReadAll(r.Body)
+	if r.Body != nil {
+		r.Body.Close()
+	}
 	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if len(bodyBytes) > 0 {
+		_ = json.Unmarshal(bodyBytes, &body)
+	}
 	if body == nil {
 		body = map[string]any{}
 	}
 	project := getString(body, "project", "project_path", "path", "source", "source_path")
 	projectHost := getString(body, "project_host", "host")
+	if projectHost != "" {
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		h.proxyArtifactToRemote(w, r, projectHost, "/api/artifacts")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	name := getString(body, "name", "title")
 	hostingMode := getString(body, "hosting_mode", "mode", "hosting")
 	if hostingMode == "" {
@@ -175,6 +192,10 @@ func (h *Handler) HandleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleListArtifacts(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -212,6 +233,18 @@ func (h *Handler) HandleListArtifacts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGetArtifact(w http.ResponseWriter, r *http.Request, id string) {
+	host := hostParam(r)
+	if host == "" {
+		if st := h.artifactStore(); st != nil {
+			if a, err := st.GetArtifact(id); err == nil && a.ProjectHost != "" {
+				host = a.ProjectHost
+			}
+		}
+	}
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id)
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -231,6 +264,18 @@ func (h *Handler) HandleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 }
 
 func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id string) {
+	host := hostParam(r)
+	if host == "" {
+		if st := h.artifactStore(); st != nil {
+			if a, err := st.GetArtifact(id); err == nil && a.ProjectHost != "" {
+				host = a.ProjectHost
+			}
+		}
+	}
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/publish")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -247,16 +292,27 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		body = map[string]any{}
 	}
 	projectPath := a.ProjectPath
-	// secret scan check
+	// secret scan check: reuse the same path resolution as /api/secret/scan
+	// and walk the project tree for secret/.env files. A request flag alone
+	// is never trusted; the server performs the scan itself.
 	scanHit := getBool(body, "secret_scan_hit", "secretScanHit")
 	overrideReason := getString(body, "override_reason", "overrideReason", "reason")
 	hasSecret := scanHit
-	filepath.Walk(projectPath, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	scanRoot := projectPath
+	if resolved, err := h.resolveSecretPath(projectPath); err == nil {
+		scanRoot = resolved
+	}
+	filepath.Walk(scanRoot, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
 			return nil
 		}
 		base := filepath.Base(p)
 		if base == ".env" || strings.HasPrefix(base, ".env.") {
+			hasSecret = true
+		}
+		// also detect common secret-bearing files
+		lower := strings.ToLower(base)
+		if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".key") || lower == "credentials" || lower == "secrets.json" || lower == "secrets.yaml" || lower == "secrets.yml" {
 			hasSecret = true
 		}
 		return nil
@@ -264,6 +320,9 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	if hasSecret && overrideReason == "" {
 		writeError(w, http.StatusConflict, "secret scan hit")
 		return
+	}
+	if hasSecret && overrideReason != "" {
+		log.Printf("artifact publish: secret scan override reason recorded: %s", overrideReason)
 	}
 	// build cmd
 	buildCmd := getString(body, "build_cmd", "buildCmd", "build")
@@ -376,6 +435,11 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (h *Handler) HandleUnpublish(w http.ResponseWriter, r *http.Request, id string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/unpublish")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -389,6 +453,11 @@ func (h *Handler) HandleUnpublish(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (h *Handler) HandleDeleteArtifact(w http.ResponseWriter, r *http.Request, id string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id)
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -403,6 +472,11 @@ func (h *Handler) HandleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 }
 
 func (h *Handler) HandleMintToken(w http.ResponseWriter, r *http.Request, id string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/tokens")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -445,6 +519,11 @@ func (h *Handler) HandleMintToken(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (h *Handler) HandleRevokeToken(w http.ResponseWriter, r *http.Request, id, tid string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/tokens/"+tid)
+		return
+	}
 	if h.artifactTokens == nil {
 		writeError(w, http.StatusInternalServerError, "token store not available")
 		return
@@ -457,6 +536,11 @@ func (h *Handler) HandleRevokeToken(w http.ResponseWriter, r *http.Request, id, 
 }
 
 func (h *Handler) HandleAllowlistAdd(w http.ResponseWriter, r *http.Request, id string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/allowlist")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -498,6 +582,11 @@ func (h *Handler) HandleAllowlistAdd(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *Handler) HandleAllowlistRemove(w http.ResponseWriter, r *http.Request, id, email string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/allowlist/"+email)
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -511,6 +600,11 @@ func (h *Handler) HandleAllowlistRemove(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) HandleAccessLog(w http.ResponseWriter, r *http.Request, id string) {
+	host := artifactRemoteHost(h, r, id)
+	if host != "" {
+		h.proxyArtifactToRemote(w, r, host, "/api/artifacts/"+id+"/access-log")
+		return
+	}
 	st := h.artifactStore()
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
@@ -573,4 +667,96 @@ func newTokenValue() (string, error) {
 func sha256Sum(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// proxyArtifactToRemote forwards an owner request for a remote project to the
+// host's /api/artifacts/... endpoint. It never falls back to local handling:
+// an unreachable hub/remote yields 502 (stage "remote-connect"), and a connect
+// still in flight yields 503 (stage "remote-connecting").
+func (h *Handler) proxyArtifactToRemote(w http.ResponseWriter, r *http.Request, host, remotePath string) {
+	if h.remoteHosts == nil {
+		writeError(w, http.StatusServiceUnavailable, "remote connections not available")
+		return
+	}
+	first, ok := h.firstSavedProjectForHost(host)
+	if !ok {
+		writeError(w, http.StatusForbidden, "unknown host")
+		return
+	}
+	ws, err := h.remoteHosts.workspaceForPort(host, first.Path, first.RemotePort)
+	if err != nil {
+		log.Printf("artifact remote: connect host %s failed: %v", host, err)
+		w.Header().Set("Content-Type", "application/json")
+		if errors.Is(err, errConnectInProgress) {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("remote connecting: %v", err),
+				"stage": "remote-connecting",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("remote connect failed: %v", err),
+			"stage": "remote-connect",
+		})
+		return
+	}
+
+	apiURL, err := url.Parse(ws.APIURL())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "remote connect failed: bad api url")
+		return
+	}
+	target := apiURL.ResolveReference(&url.URL{Path: remotePath, RawQuery: r.URL.RawQuery})
+
+	bodyBytes, _ := io.ReadAll(r.Body)
+	if r.Body != nil {
+		r.Body.Close()
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("proxy: %v", err))
+		return
+	}
+	for k, v := range r.Header {
+		if strings.EqualFold(k, "Host") {
+			continue
+		}
+		req.Header[k] = append([]string(nil), v...)
+	}
+	if tok := ws.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("artifact remote: request host %s failed: %v", host, err)
+		if r.Context().Err() == nil {
+			h.remoteHosts.drop(host, first.RemotePort)
+		}
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("remote connect failed: %v", err))
+		// ensure stage marker
+		return
+	}
+	defer resp.Body.Close()
+	for k, v := range resp.Header {
+		w.Header()[k] = append([]string(nil), v...)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func artifactRemoteHost(h *Handler, r *http.Request, id string) string {
+	host := hostParam(r)
+	if host != "" {
+		return host
+	}
+	if st := h.artifactStore(); st != nil {
+		if a, err := st.GetArtifact(id); err == nil && a.ProjectHost != "" {
+			return a.ProjectHost
+		}
+	}
+	return ""
 }
