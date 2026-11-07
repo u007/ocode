@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/artifacts"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/paths"
 	"golang.org/x/crypto/argon2"
 )
@@ -123,7 +124,11 @@ func newArtifactTokenStore(dir string) (*artifactTokenStore, error) {
 		s.Close()
 		return nil, err
 	}
-	// ensure prune of expired at startup is deferred; not blocking
+	// Retention prune at startup, off the construction path; the serve path
+	// throttles subsequent runs to once per hour.
+	crashguard.Go(func() {
+		s.MaybePruneAccessLog(artifactLogRetention())
+	})
 	return &artifactTokenStore{store: s, pwSem: make(chan struct{}, artifactArgon2Concurrency)}, nil
 }
 

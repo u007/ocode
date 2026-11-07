@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/artifacts"
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +105,10 @@ func (h *Handler) handleServeArtifact(w http.ResponseWriter, r *http.Request) {
 		UA:         r.UserAgent(),
 		Path:       relPath,
 		Status:     http.StatusOK,
+	})
+	// Retention prune runs off the request path and at most once per hour.
+	crashguard.Go(func() {
+		st.MaybePruneAccessLog(artifactLogRetention())
 	})
 }
 

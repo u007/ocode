@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/filelock"
@@ -58,6 +60,12 @@ type Store struct {
 	dir   string
 	db    *sql.DB
 	blobs *BlobStore
+
+	// lastAccessPrune is the unix-nano timestamp of the last access-log prune
+	// ATTEMPT (success or failure). Atomic so the serve path can throttle
+	// without taking a lock; a failing prune retries after the interval, not
+	// on every request.
+	lastAccessPrune atomic.Int64
 }
 
 func openDB(path string) (*sql.DB, error) {
@@ -628,6 +636,54 @@ func (s *Store) LogAccess(e AccessLogEntry) error {
 		}
 		return nil
 	})
+}
+
+// accessLogPruneInterval bounds how often the serve path triggers a retention
+// prune. The timestamp is the last ATTEMPT (success or failure), so a failing
+// prune retries after this interval rather than on every request.
+const accessLogPruneInterval = time.Hour
+
+// PruneAccessLogOlderThan deletes access-log rows older than maxAge and returns
+// the number removed. maxAge <= 0 keeps rows forever and is a no-op.
+func (s *Store) PruneAccessLogOlderThan(maxAge time.Duration) (int64, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	cutoff := fmtTime(time.Now().UTC().Add(-maxAge))
+	var n int64
+	err := s.withLock(func() error {
+		res, err := s.db.Exec(`DELETE FROM access_log WHERE ts < ?`, cutoff)
+		if err != nil {
+			return fmt.Errorf("artifacts: prune access log: %w", err)
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// MaybePruneAccessLog runs PruneAccessLogOlderThan at most once per
+// accessLogPruneInterval. It records the attempt BEFORE running so concurrent
+// callers do not stampede; a failed prune is retried on the next interval. A
+// prune failure is logged and never fails the caller (it is best-effort).
+func (s *Store) MaybePruneAccessLog(maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+	now := time.Now().UTC()
+	prev := s.lastAccessPrune.Load()
+	if prev != 0 && now.Sub(time.Unix(0, prev)) < accessLogPruneInterval {
+		return
+	}
+	if !s.lastAccessPrune.CompareAndSwap(prev, now.UnixNano()) {
+		return
+	}
+	if _, err := s.PruneAccessLogOlderThan(maxAge); err != nil {
+		log.Printf("artifacts: access-log prune: %v", err)
+	}
 }
 
 // GC removes unreferenced blobs.

@@ -458,7 +458,7 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		ArtifactID:       id,
 		Version:          time.Now().UTC().Format("20060102150405"),
 		Entrypoint:       entrypoint,
-		BlobManifestHash: "",
+		BlobManifestHash: artifacts.ManifestHash(files),
 		SizeBytes:        totalSize,
 		BuildCmd:         buildCmd,
 		BuildLogPath:     "",
@@ -871,4 +871,23 @@ func artifactMaxBytes() int64 {
 		}
 	}
 	return defaultMax
+}
+
+// artifactLogRetention returns the access-log retention window.
+// OCODE_ARTIFACT_LOG_RETENTION_DAYS=0 keeps rows forever; a missing, invalid,
+// or negative value falls back to 30 days.
+func artifactLogRetention() time.Duration {
+	const defaultDays = 30
+	v := strings.TrimSpace(os.Getenv("OCODE_ARTIFACT_LOG_RETENTION_DAYS"))
+	if v == "" {
+		return defaultDays * 24 * time.Hour
+	}
+	days, err := strconv.Atoi(v)
+	if err != nil || days < 0 {
+		return defaultDays * 24 * time.Hour
+	}
+	if days == 0 {
+		return 0
+	}
+	return time.Duration(days) * 24 * time.Hour
 }

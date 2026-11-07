@@ -117,3 +117,70 @@ func TestInviteTTLOverride(t *testing.T) {
 		require.Equal(t, InviteTTL, inviteTTL(), "bad value %q must fall back", bad)
 	}
 }
+
+func TestPruneAccessLogOlderThan(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate())
+	a, err := s.CreateArtifact(Artifact{Name: "demo", Status: "active"})
+	require.NoError(t, err)
+
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	recent := time.Now().UTC().Add(-1 * time.Hour)
+	require.NoError(t, s.LogAccess(AccessLogEntry{ArtifactID: a.ID, TS: old, Status: 200}))
+	require.NoError(t, s.LogAccess(AccessLogEntry{ArtifactID: a.ID, TS: recent, Status: 200}))
+
+	n, err := s.PruneAccessLogOlderThan(30 * 24 * time.Hour)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+
+	rows, err := s.ListAccessLog(a.ID, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, 200, rows[0].Status)
+}
+
+func TestPruneAccessLogDisabled(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate())
+	a, err := s.CreateArtifact(Artifact{Name: "demo", Status: "active"})
+	require.NoError(t, err)
+	require.NoError(t, s.LogAccess(AccessLogEntry{ArtifactID: a.ID, TS: time.Now().UTC().Add(-40 * 24 * time.Hour)}))
+
+	n, err := s.PruneAccessLogOlderThan(0)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, n)
+	rows, err := s.ListAccessLog(a.ID, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+}
+
+func TestMaybePruneAccessLogThrottles(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate())
+	a, err := s.CreateArtifact(Artifact{Name: "demo", Status: "active"})
+	require.NoError(t, err)
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+
+	require.NoError(t, s.LogAccess(AccessLogEntry{ArtifactID: a.ID, TS: old}))
+	s.MaybePruneAccessLog(24 * time.Hour)
+	rows, err := s.ListAccessLog(a.ID, 10, 0)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+
+	// A second old row inside the throttle window must survive.
+	require.NoError(t, s.LogAccess(AccessLogEntry{ArtifactID: a.ID, TS: old}))
+	s.MaybePruneAccessLog(24 * time.Hour)
+	rows, err = s.ListAccessLog(a.ID, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	// Clearing the attempt timestamp lets the next call prune again.
+	s.lastAccessPrune.Store(0)
+	s.MaybePruneAccessLog(24 * time.Hour)
+	rows, err = s.ListAccessLog(a.ID, 10, 0)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
