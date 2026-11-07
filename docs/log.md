@@ -6,6 +6,12 @@
 
 ## 2026-11-07
 
+* **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
+* **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
+* **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
+* **Creation**: In-app Word (.docx) and PDF editors ([docs/concepts/in-app-docx-pdf-editors.md](/docs/concepts/in-app-docx-pdf-editors.md))
+* **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
+* **Creation**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
 * **Creation**: Alien Discovery Skill — Coherent-but-Unavailable Combinations (skills/alien-discovery: Jev pair/coherence stats, IPv6 TypeSafe stall gotcha, 2026-11-07 holdout result) ([concepts/alien-discovery-skill.md](/concepts/alien-discovery-skill.md))
 * **Update**: Reader Mode and Viewer Context: the preview record is pushed to the server, read mid-turn by the new `viewer_state` tool, and driven by the new `viewer_control` tool; support matrix per viewer ([concepts/reader-mode-viewer-context.md](/concepts/reader-mode-viewer-context.md))
 * **Creation**: useViewerControl seeding, live buffer and one-directive-per-tick rules ([gotchas/viewer-control-directive-seeding-live-buffer.md](/gotchas/viewer-control-directive-seeding-live-buffer.md))
