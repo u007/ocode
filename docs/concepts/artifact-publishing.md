@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-07T19:12:32Z
+timestamp: 2026-11-07T19:20:19Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -406,12 +406,15 @@ Verified absences in this tree (do not describe these as shipped):
   build log is captured. `BuildLogPath` stays empty. Implementing it must go through the
   shared shell spawn path under permission + sandbox gates, never a direct
   `exec.Command` (`TODO.md`, spec §13).
-- **The hub itself, and end-to-end Mode B coverage.** The **client upload path is
-  implemented here** (`hosting_mode=hub` → `publishArtifactToHub` → `HubClient`), but
-  the hub-side API it calls lives in the separate **`kakiit` repo** and is not in this
-  tree. Nothing here proves the hub is deployed, and there is **no server-level test**
-  of `publishArtifactToHub`: `hubclient_test.go` exercises the client against an
-  `httptest` stub, not a real hub. Do not describe Mode B as shipped end to end.
+- **The hub itself, real end-to-end Mode B coverage, and hub deployment.** The
+  **client upload path is implemented here and both halves are tested here**
+  (`hosting_mode=hub` → `publishArtifactToHub` → `HubClient`):
+  `internal/artifacts/hubclient_test.go` tests the client and
+  `internal/server/artifact_hub_test.go` tests the server-level hand-off, both against
+  a local `httptest` **hub stub**. What is **not** proven is the **real hub + S3** path
+  end to end, or that the hub is deployed at all — the hub API it calls lives in the
+  separate **`kakiit` repo** and is not in this tree. Do not describe Mode B as shipped
+  end to end.
 - **Explicit access-level field.** There is no `access_level` column and no
   private/allowlist/public enum on the artifact. What exists: a visitor always needs a
   capability token; allowlist *presence* forces a verified invite regardless of token
@@ -478,6 +481,16 @@ Mode B:
   carries the bytes, the version payload, and the `PublicURL` shape),
   `TestHubClientSurfacesHubError` (a 502 becomes an error naming the status), and
   `TestNewHubPublicToken` (32-byte base64url, two calls differ).
+- `internal/server/artifact_hub_test.go` pins the **server-level** hand-off against a
+  local `httptest` hub stub — `TestPublishArtifactToHubReusesTokenOnRepublish` (first
+  publish generates and persists `hub_token`; the re-publish reuses the same token and
+  returns the same URL), `TestPublishArtifactToHubSurfacesErrorWithoutFallback` (a hub
+  502 surfaces as an error carrying the status, and no version is accepted),
+  `TestPublishArtifactToHubRequiresSyncToken` (no stored sync token fails with "not
+  connected"), `TestHandlePublishHubSuccessReturnsURL` (full `HandlePublish` with
+  `hosting_mode=hub` returns 200 and a `hub_url` containing `/p/art_test/`), and
+  `TestHandlePublishHubFailureReturns502` (full `HandlePublish` against a failing hub
+  returns **502** and no version is accepted).
 - `TestStoreHubToken` (`internal/artifacts/store_test.go:188`) pins `hub_token` end to
   end: empty before the first publish, set/get round-trip, idempotent `Migrate` after
   the additive column, and `ErrNotFound` for an unknown id.
