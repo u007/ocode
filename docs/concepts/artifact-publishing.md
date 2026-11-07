@@ -114,6 +114,11 @@ pinned by `TestLatestArtifactVersionPicksNewestExplicitly`).
    `CreatedBy` looks like an email, plus every allowlist entry, deduped
    (`:472-497`). The flag is not persisted on the artifact, so "remember last value" is
    never true server-side.
+8. **Mail delivery is best-effort and reported.** With no mailer configured
+   `sendEmail` returns `errNoMailer`; the publish response carries
+   `email_sent`/`notify_sent` reflecting actual delivery, the invite response carries
+   `email_sent`, and failures are logged. The invite token is always returned, so a
+   failed email degrades to manual link sharing, never to a lost invite.
 
 ## Serving path and access enforcement (`/p/...`)
 
