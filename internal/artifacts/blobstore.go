@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // BlobStore is a content-addressed blob store rooted at dir/blobs.
 type BlobStore struct {
+	mu   sync.Mutex
 	root string // blobs root directory
 }
 
@@ -23,18 +25,50 @@ func NewBlobStore(dir string) (*BlobStore, error) {
 	return &BlobStore{root: root}, nil
 }
 
-func (b *BlobStore) pathFor(hash string) string {
-	if len(hash) < 2 {
-		return filepath.Join(b.root, hash)
+// validateHash rejects empty, path-separator-containing, or traversal hashes.
+func (b *BlobStore) validateHash(hash string) error {
+	if hash == "" {
+		return fmt.Errorf("artifacts: empty hash")
 	}
-	return filepath.Join(b.root, hash[:2], hash)
+	if strings.ContainsAny(hash, `/\`) {
+		return fmt.Errorf("artifacts: invalid hash (path separator)")
+	}
+	if strings.Contains(hash, "..") {
+		return fmt.Errorf("artifacts: invalid hash (traversal)")
+	}
+	return nil
+}
+
+func (b *BlobStore) pathFor(hash string) (string, error) {
+	if err := b.validateHash(hash); err != nil {
+		return "", err
+	}
+	var p string
+	if len(hash) < 2 {
+		p = filepath.Join(b.root, hash)
+	} else {
+		p = filepath.Join(b.root, hash[:2], hash)
+	}
+	rel, err := filepath.Rel(b.root, p)
+	if err != nil {
+		return "", fmt.Errorf("artifacts: hash escapes blob root: %w", err)
+	}
+	if strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("artifacts: hash escapes blob root")
+	}
+	return p, nil
 }
 
 // Put stores data content-addressed and returns its sha256 hex hash.
 func (b *BlobStore) Put(data []byte) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
-	p := b.pathFor(hash)
+	p, err := b.pathFor(hash)
+	if err != nil {
+		return "", err
+	}
 	if _, err := os.Stat(p); err == nil {
 		return hash, nil
 	}
@@ -49,7 +83,13 @@ func (b *BlobStore) Put(data []byte) (string, error) {
 
 // Get reads a blob by hash.
 func (b *BlobStore) Get(hash string) ([]byte, error) {
-	data, err := os.ReadFile(b.pathFor(hash))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, err := b.pathFor(hash)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("artifacts: blob not found: %s", hash)
@@ -61,7 +101,13 @@ func (b *BlobStore) Get(hash string) ([]byte, error) {
 
 // Has reports whether a blob exists.
 func (b *BlobStore) Has(hash string) (bool, error) {
-	_, err := os.Stat(b.pathFor(hash))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, err := b.pathFor(hash)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(p)
 	if err == nil {
 		return true, nil
 	}
@@ -73,14 +119,15 @@ func (b *BlobStore) Has(hash string) (bool, error) {
 
 // GCUnreferenced deletes blobs whose hash is not in referenced.
 func (b *BlobStore) GCUnreferenced(referenced map[string]bool) error {
-	return filepath.Walk(b.root, func(path string, info os.FileInfo, err error) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	err := filepath.Walk(b.root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
-		// Only files two levels deep (blobs/<xx>/<hash>).
 		rel, err := filepath.Rel(b.root, path)
 		if err != nil {
 			return err
@@ -93,6 +140,26 @@ func (b *BlobStore) GCUnreferenced(referenced map[string]bool) error {
 		if referenced[hash] {
 			return nil
 		}
-		return os.Remove(path)
+		if rmErr := os.Remove(path); rmErr != nil {
+			return rmErr
+		}
+		// attempt to remove now-empty parent subdir
+		_ = os.Remove(filepath.Dir(path))
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// clean any remaining empty subdirectories
+	entries, err := os.ReadDir(b.root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		_ = os.Remove(filepath.Join(b.root, e.Name()))
+	}
+	return nil
 }
