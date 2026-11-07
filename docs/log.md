@@ -6,6 +6,9 @@
 
 ## 2026-11-07
 
+* **Update**: Artifact publishing / sharing (static snapshots, Mode A) ([concepts/artifact-publishing.md](/concepts/artifact-publishing.md))
+* **Creation**: Artifact publishing / sharing (static snapshots, Mode A) ([concepts/artifact-publishing.md](/concepts/artifact-publishing.md))
+* **Creation**: Artifact publishing / sharing (static snapshots, Mode A) ([docs/concepts/artifact-publishing.md](/docs/concepts/artifact-publishing.md))
 * **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
 * **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
 * **Update**: In-app Word (.docx) and PDF editors ([concepts/in-app-docx-pdf-editors.md](/concepts/in-app-docx-pdf-editors.md))
