@@ -7071,3 +7071,12 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 ## alien-discovery skill: deferred pieces (2026-11-07)
 - **Trained coherence and availability models are not ported.** `skills/alien-discovery` approximates the paper's coherence LM with a pairwise Jev `noul` matrix plus a set-level Jev `score`, and the trained two-tower availability model with an untrained mean-of-embeddings two-tower (`scripts/alien_score.py availability`). A port of the real models (`generation/model.py`, `generation/two_tower_model.py` in alejandrohdez00/alien-space-of-science) needs a GPU and a corpus of thousands of artifacts; not planned until a run shows the approximation is the bottleneck.
 - **Low-coherence clusters are kept in the vocabulary.** `cluster_names.jsonl.coherence == "low"` (grab-bag clusters) is recorded but `finalize`/`select` do not filter on it. Decide after the first few runs whether to drop or down-weight them.
+
+## Deferred: publish/share project artifact (Phase 2/3)
+- Phase 2: server-side apps in Podman containers (per-app volume, DB creds, backup/restore).
+- Phase 3: production-ready DBs (Postgres/MySQL scoped write connections).
+- See docs/superpowers/specs/2026-11-07-publish-share-project-design.md
+
+## Open: publish/share artifact build command execution deferred (2026-11-07)
+
+- **Build command recorded but not executed.** `HandlePublish` stores `build_cmd` on the published version but does not run it; output is not captured to a build log. Implementing under permission+sandbox gates is deferred. Until then, `BuildLogPath` stays empty and publishers must run builds out-of-band.

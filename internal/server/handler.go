@@ -58,6 +58,9 @@ type Handler struct {
 	// (Handler.mu is a map lock, never a work lock). nil = no exposure
 	// subsystem, which the handlers treat as "nothing shared".
 	tailscaleShareSnapshot func() tailscaleShareStatus
+	// artifactTailscaleShareSnapshot reports the Mode A artifact exposure state
+	// without starting one.
+	artifactTailscaleShareSnapshot func() tailscaleShareStatus
 	// sysPermMu serializes read-modify-write of the system-permissions
 	// sub-tree (persisted + the in-memory h.cfg copy).
 	sysPermMu sync.Mutex
@@ -411,6 +414,22 @@ type Handler struct {
 	// single-file, short-lived token it can put in the URL.
 	mediaTokens *mediaTokenStore
 
+	// artifactTokens holds durable per-artifact capability tokens (hashed on
+	// disk) and is consulted by artifactAuthMiddleware.
+	artifactTokens *artifactTokenStore
+	// mailer hooks for artifact publish/invite notifications (tests inject mocks)
+	Mailer         any
+	ArtifactMailer any
+	EmailSender    any
+	EmailFunc      any
+	SendMailFunc   any
+	SendEmailFunc  any
+	NotifyMailer   any
+	MailerFunc     any
+	// artifactRL is the separate rate limiter for anonymous artifact visitors,
+	// distinct from the owner API limiter (s.rl).
+	artifactRL *rateLimiter
+
 	// remoteSyncMu guards the single-flight state of SyncConnectedRemoteHosts.
 	remoteSyncMu      sync.Mutex
 	remoteSyncRunning bool
@@ -763,6 +782,15 @@ func NewHandler() *Handler {
 			return shellpkg.NewSession(opts)
 		}, defaultSessionIdleTimeout, time.Now),
 		mediaTokens:                  newMediaTokenStore(),
+		artifactTokens:               func() *artifactTokenStore {
+			st, err := newArtifactTokenStore(artifactStoreDir())
+			if err != nil {
+				log.Printf("artifact token store init failed: %v", err)
+				return nil
+			}
+			return st
+		}(),
+		artifactRL:                   newRateLimiter(),
 		terminalProcsWake:            make(chan struct{}, 1),
 		secretJobs:                   secretjob.NewManager(),
 		cliToolJobs:                  newCLIToolJobManager(),

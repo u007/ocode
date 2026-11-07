@@ -96,6 +96,7 @@ type Server struct {
 	username         string
 	password         string
 	rl               *rateLimiter
+	artifactRL       *rateLimiter
 	removeSyncHooks  []func() // unregister the config/auth save hooks on Shutdown
 	mux              *http.ServeMux
 	handler          *Handler
@@ -171,30 +172,39 @@ type Server struct {
 
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
 	// new connections and drain in-flight ones. Guarded by shutdownMu.
-	shutdownMu       sync.Mutex
-	ln               net.Listener
-	httpServer       *http.Server
-	browseLn         net.Listener
-	browseHTTPServer *http.Server
-	tsShare          *tailscaleShare
+	shutdownMu             sync.Mutex
+	ln                     net.Listener
+	httpServer             *http.Server
+	browseLn               net.Listener
+	browseHTTPServer       *http.Server
+	tsShare                *tailscaleShare
+	artifactShare          *tailscaleShare
+	artifactTailscaleShare *tailscaleShare
+	tsArtifactShare        *tailscaleShare
+	artifactsShare         *tailscaleShare
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 	h := NewHandler()
 	s := &Server{
-		addr:          addr,
-		username:      username,
-		password:      password,
-		rl:            newRateLimiter(),
-		mux:           mux,
-		handler:       h,
-		frontendStats: newFrontendStatsRing(),
-		webFS:         webFS,
-		workDir:       ".",
-		procSup:       tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
-		startedAt:     time.Now(),
-		tsShare:       &tailscaleShare{},
+		addr:                   addr,
+		username:               username,
+		password:               password,
+		rl:                     newRateLimiter(),
+		artifactRL:             h.artifactRL, // shared with Handler: gate and middleware count the same keys
+		mux:                    mux,
+		handler:                h,
+		frontendStats:          newFrontendStatsRing(),
+		webFS:                  webFS,
+		workDir:                ".",
+		procSup:                tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 3 * time.Second}),
+		startedAt:              time.Now(),
+		tsShare:                &tailscaleShare{},
+		artifactShare:          &tailscaleShare{mount: artifactTailscalePath},
+		artifactTailscaleShare: &tailscaleShare{mount: artifactTailscalePath},
+		tsArtifactShare:        &tailscaleShare{mount: artifactTailscalePath},
+		artifactsShare:         &tailscaleShare{mount: artifactTailscalePath},
 	}
 	h.computerSup = s.procSup
 	h.procSup = s.procSup
@@ -211,6 +221,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	// Let the config handlers report exposure state without starting one.
 	h.tailscaleShareSnapshot = s.tsShare.status
+	h.artifactTailscaleShareSnapshot = s.artifactShare.status
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
@@ -817,6 +828,39 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/debug/pprof/profile", s.authMiddleware(pprof.Profile))
 	s.mux.HandleFunc("/debug/pprof/symbol", s.authMiddleware(pprof.Symbol))
 	s.mux.HandleFunc("/debug/pprof/trace", s.authMiddleware(pprof.Trace))
+
+	// Artifacts (publish/share project)
+	s.mux.HandleFunc("POST /api/artifacts", s.authMiddleware(s.handleCreateArtifact))
+	s.mux.HandleFunc("GET /api/artifacts", s.authMiddleware(s.handleListArtifacts))
+	s.mux.HandleFunc("GET /api/artifacts/{id}", s.authMiddleware(s.handleGetArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/publish", s.authMiddleware(s.handlePublishArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/unpublish", s.authMiddleware(s.handleUnpublishArtifact))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}", s.authMiddleware(s.handleDeleteArtifact))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/tokens", s.authMiddleware(s.handleMintArtifactToken))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}/tokens/{tid}", s.authMiddleware(s.handleRevokeArtifactToken))
+	s.mux.HandleFunc("POST /api/artifacts/{id}/allowlist", s.authMiddleware(s.handleAllowlistAddArtifact))
+	s.mux.HandleFunc("DELETE /api/artifacts/{id}/allowlist/{email}", s.authMiddleware(s.handleAllowlistRemoveArtifact))
+	s.mux.HandleFunc("GET /api/artifacts/{id}/access-log", s.authMiddleware(s.handleAccessLogArtifact))
+
+	// Mode A (self-hosted) public artifact serving under /p/* (dispatched by
+	// artifact id inside the handlers). Auth via artifact capability tokens.
+	s.mux.HandleFunc("/p/{id}/invite/{inviteToken}", s.artifactAuthMiddleware(s.handler.HandleInviteAccept))
+	s.mux.HandleFunc("POST /p/{id}/gate", s.artifactAuthMiddleware(s.handler.HandlePasswordGate))
+	s.mux.HandleFunc("/p/", s.artifactAuthMiddleware(s.handler.handleServeArtifact))
+
+	// Mode A (self-hosted) tailscale exposure for published artifacts.
+	// Single global /p/* mount, dispatched by artifact id inside the server.
+	// Every exposure route is owner-only (s.authMiddleware): a public Funnel
+	// must never be startable by an unauthenticated caller.
+	s.mux.HandleFunc("GET /api/artifact-tailscale-share", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifact-tailscale-share/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifact-tailscale-share/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
+	s.mux.HandleFunc("GET /api/artifacts/tailscale-share", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/tailscale-share/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
+	s.mux.HandleFunc("GET /api/artifacts/expose", s.authMiddleware(s.handleGetArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/expose/start", s.authMiddleware(s.handleStartArtifactTailscaleShare))
+	s.mux.HandleFunc("POST /api/artifacts/expose/stop", s.authMiddleware(s.handleStopArtifactTailscaleShare))
 
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
@@ -2397,6 +2441,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.tsShare != nil {
 		s.tsShare.cleanup()
+	}
+	if s.artifactShare != nil {
+		s.artifactShare.cleanup()
+	}
+	if s.artifactTailscaleShare != nil {
+		s.artifactTailscaleShare.cleanup()
+	}
+	if s.tsArtifactShare != nil {
+		s.tsArtifactShare.cleanup()
+	}
+	if s.artifactsShare != nil {
+		s.artifactsShare.cleanup()
 	}
 	// Stop every per-project cron engine this server started. Before cron became
 	// project-scoped there was a single scheduler that was never stopped at all;

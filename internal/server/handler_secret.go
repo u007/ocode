@@ -78,6 +78,22 @@ func (h *Handler) HandleSecretInit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"key_path": keyPath})
 }
 
+
+// secretScanPath resolves and stats a path using the same rules as
+// /api/secret/scan, so other handlers (e.g. artifact publish) can reuse the
+// secret-scan path resolution instead of re-implementing it.
+func (h *Handler) secretScanPath(path string) (string, os.FileInfo, error) {
+	abs, err := h.resolveSecretPath(path)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", nil, err
+	}
+	return abs, info, nil
+}
+
 // HandleSecretScan handles GET /api/secret/scan?path=&mode=encrypt|decrypt:
 // reports whether path is a file or directory and, for a directory, how
 // many files an encrypt/decrypt of it would touch, so the web UI can show an
@@ -89,14 +105,13 @@ func (h *Handler) HandleSecretScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, err := h.resolveSecretPath(r.URL.Query().Get("path"))
+	abs, info, err := h.secretScanPath(r.URL.Query().Get("path"))
 	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "path not found")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "path not found")
 		return
 	}
 
