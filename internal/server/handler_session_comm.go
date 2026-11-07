@@ -1,14 +1,26 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/session"
 )
 
-// HandleSessionCommStatus returns a compact inter-session communication snapshot:
-// running state, title, goal, todo plan, and the last assistant message.
+// tuiSessionStatusPath is where the TUI writes live turn state.
+func tuiSessionStatusPath(id string) string {
+	gd, err := paths.GlobalDataDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(gd, "session-status", id+".json")
+}
+
+// HandleSessionCommStatus returns a compact inter-session communication snapshot.
 func (h *Handler) HandleSessionCommStatus(w http.ResponseWriter, r *http.Request, id string) {
 	entry, err := h.sessions.Resolve(id)
 	if err != nil {
@@ -20,9 +32,21 @@ func (h *Handler) HandleSessionCommStatus(w http.ResponseWriter, r *http.Request
 		project = h.workDir
 	}
 	var msgs []agent.Message
+	turnActive := h.sessions.IsTurnActive(id)
 	if as := h.lookupAgentSession(id); as != nil && as.agent != nil && as.mu.TryLock() {
 		msgs = append([]agent.Message(nil), as.messages...)
 		as.mu.Unlock()
+	} else {
+		if p := tuiSessionStatusPath(id); p != "" {
+			if b, err := os.ReadFile(p); err == nil {
+				var st struct {
+					TurnActive bool `json:"turn_active"`
+				}
+				if json.Unmarshal(b, &st) == nil {
+					turnActive = st.TurnActive
+				}
+			}
+		}
 	}
 	if msgs == nil {
 		if s, lerr := session.LoadForDir(project, id); lerr == nil && s != nil {
@@ -44,7 +68,7 @@ func (h *Handler) HandleSessionCommStatus(w http.ResponseWriter, r *http.Request
 		"session_id":    id,
 		"project_path":  project,
 		"title":         title,
-		"turn_active":   h.sessions.IsTurnActive(id),
+		"turn_active":   turnActive,
 		"goal":          h.pulseSessionGoal(id, project),
 		"todo":          h.pulseSessionTodo(project, id),
 		"last_message":  lastAssistant,
@@ -52,8 +76,7 @@ func (h *Handler) HandleSessionCommStatus(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// HandleSessionQueue persists a message onto a session's pending queue and drains
-// it when the session goes idle, so an external agent can resume a session.
+// HandleSessionQueue persists a message onto a session's pending queue.
 func (h *Handler) HandleSessionQueue(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
 		Content string `json:"content"`
@@ -83,4 +106,3 @@ func (h *Handler) HandleSessionQueue(w http.ResponseWriter, r *http.Request, id 
 	h.scheduleQueueDrain(id)
 	writeJSON(w, http.StatusAccepted, map[string]any{"session_id": id, "queued": true})
 }
-

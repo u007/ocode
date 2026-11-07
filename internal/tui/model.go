@@ -4875,6 +4875,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streaming = true
+		writeSessionStatusFile(m.sessionID, true)
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
 		m.streamStartedAt = time.Now()
@@ -5374,6 +5375,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.currentStreamEpoch(msg.epoch) {
 			return m, nil
 		}
+		writeSessionStatusFile(m.sessionID, false)
 		if msg.err != nil {
 			// An errored or cancelled turn has no judge behind it, so a resume
 			// deferred from a verdict that landed mid-turn must not fire later.
