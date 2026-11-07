@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -102,4 +103,17 @@ func TestStoreGCRemovesUnreferencedBlob(t *testing.T) {
 	require.True(t, ok)
 	ok, _ = bs.Has(h2)
 	require.False(t, ok)
+}
+
+func TestInviteTTLOverride(t *testing.T) {
+	t.Setenv("OCODE_ARTIFACT_INVITE_TTL_DAYS", "")
+	require.Equal(t, InviteTTL, inviteTTL())
+
+	t.Setenv("OCODE_ARTIFACT_INVITE_TTL_DAYS", "3")
+	require.Equal(t, 3*24*time.Hour, inviteTTL())
+
+	for _, bad := range []string{"0", "-2", "abc", "  "} {
+		t.Setenv("OCODE_ARTIFACT_INVITE_TTL_DAYS", bad)
+		require.Equal(t, InviteTTL, inviteTTL(), "bad value %q must fall back", bad)
+	}
 }

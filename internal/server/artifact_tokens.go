@@ -270,7 +270,6 @@ func (st *artifactTokenStore) issue(artifactID, kind string, expiresAt time.Time
 	if st.store == nil {
 		return "", "", errors.New("artifact token store not initialized")
 	}
-	// ensure artifact row exists for FK
 	tok, err := newArtifactTokenValue()
 	if err != nil {
 		return "", "", err

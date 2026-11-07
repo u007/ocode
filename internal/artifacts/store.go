@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,13 +20,30 @@ import (
 
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("artifacts: not found")
+
 // ErrInviteExpired is returned when an invitation is past its TTL.
 var ErrInviteExpired = errors.New("artifacts: invite expired")
+
 // ErrInviteAlreadyAccepted is returned when an invitation was already accepted.
 var ErrInviteAlreadyAccepted = errors.New("artifacts: invite already accepted")
 
 // InviteTTL is the default lifetime of an invitation from invited_at.
 const InviteTTL = 7 * 24 * time.Hour
+
+// inviteTTL returns the effective invitation lifetime. OCODE_ARTIFACT_INVITE_TTL_DAYS
+// overrides the default; a missing, non-numeric, or non-positive value falls
+// back to InviteTTL so a bad env var can never make invites permanent.
+func inviteTTL() time.Duration {
+	v := strings.TrimSpace(os.Getenv("OCODE_ARTIFACT_INVITE_TTL_DAYS"))
+	if v == "" {
+		return InviteTTL
+	}
+	days, err := strconv.Atoi(v)
+	if err != nil || days <= 0 {
+		return InviteTTL
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
 
 // ErrAlreadyRevoked is returned when revoking a token that is already revoked.
 var ErrAlreadyRevoked = errors.New("artifacts: token already revoked")
@@ -570,7 +588,7 @@ func (s *Store) AcceptInvite(inviteTokenHash string) (AllowEntry, error) {
 			return ErrInviteAlreadyAccepted
 		}
 		e.InvitedAt = parseTime(invited)
-		if !e.InvitedAt.IsZero() && time.Since(e.InvitedAt) > InviteTTL {
+		if !e.InvitedAt.IsZero() && time.Since(e.InvitedAt) > inviteTTL() {
 			return ErrInviteExpired
 		}
 		now := time.Now().UTC()
@@ -816,7 +834,7 @@ func (s *Store) AcceptArtifactInvite(artifactID, inviteTokenHash string) (AllowE
 		}
 		e.InvitedAt = parseTime(invited)
 		now := time.Now().UTC()
-		if !e.InvitedAt.IsZero() && now.Sub(e.InvitedAt) > InviteTTL {
+		if !e.InvitedAt.IsZero() && now.Sub(e.InvitedAt) > inviteTTL() {
 			return ErrInviteExpired
 		}
 		if _, err := s.db.Exec(`UPDATE allowlist SET accepted_at = ? WHERE artifact_id = ? AND email = ?`, fmtTime(now), e.ArtifactID, e.Email); err != nil {
