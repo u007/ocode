@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Artifact publishing / sharing (static snapshots, Mode A)
-description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Covers the data model, publish pipeline, access enforcement, and what is still deferred (Mode B hub, build execution, TTL/retention env vars).'
+description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Covers the data model, publish pipeline, access enforcement, env-var wiring, and what is still deferred (Mode B hub, build execution, access-log retention).'
 resource: docs/superpowers/specs/2026-11-07-publish-share-project-design.md
 tags:
   - artifacts
