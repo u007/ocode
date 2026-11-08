@@ -42,6 +42,11 @@ type Skill struct {
 	// "<Plugin>:<skill>", Claude Code's namespacing, so it never collides
 	// with (or shadows) a same-named user or project skill.
 	Plugin string
+	// SkipAdvisor, when true, marks this skill as one that must run without
+	// ocode's advisor plan/done checkpoints (and without the model invoking
+	// the advisor tool). Parsed from frontmatter `skip_advisor: true` or
+	// `advisor: false`.
+	SkipAdvisor bool
 	// PluginDir is the shipping plugin's root directory; empty for ordinary
 	// skills.
 	PluginDir string
@@ -561,6 +566,10 @@ func parseSkillMetadata(content string) Skill {
 			cleanMetadataValue(frontmatter["tuned-for"]),
 		)
 		skill.Stack = cleanMetadataValue(frontmatter["stack"])
+		// Advisor checkpoint opt-out. A skill that declares skip_advisor: true
+		// (or advisor: false) runs without the loop's plan/done advisor
+		// checkpoints.
+		skill.SkipAdvisor = parseSkipAdvisor(frontmatter)
 	}
 	skill.Digest = extractDigest(content)
 
@@ -785,4 +794,19 @@ func clampSentence(value string, max int) string {
 	}
 	trimmed := strings.TrimSpace(value[:max-3])
 	return fmt.Sprintf("%s...", trimmed)
+}
+
+// parseSkipAdvisor interprets the skill frontmatter's advisor opt-out. Truthy
+// values for skip_advisor (true/yes/1/on) or falsy values for advisor
+// (false/no/0/off) both mean "skip advisor".
+func parseSkipAdvisor(fm map[string]string) bool {
+	if v, ok := fm["skip_advisor"]; ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		return v == "true" || v == "yes" || v == "1" || v == "on"
+	}
+	if v, ok := fm["advisor"]; ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		return v == "false" || v == "no" || v == "0" || v == "off"
+	}
+	return false
 }

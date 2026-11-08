@@ -8,7 +8,7 @@ tags:
   - discovery
   - config
   - web
-timestamp: 2026-10-20T05:56:00Z
+timestamp: 2026-11-08T12:48:17Z
 ---
 # Per-Project Skill Enable/Disable
 
@@ -114,3 +114,7 @@ The slash list is one module-global registry (`COMMANDS`), not per tab: it is sc
 ## Design note (deliberate split)
 
 `LoadSkills()` / `LoadSkillsForModel()` are filtered; `LoadSkillsForRoot()` stays raw. `skill.LoadSkillForRoot` must NOT be gated.
+
+## Related
+
+- [SKILL.md Frontmatter Fields](skill-frontmatter.md) — the frontmatter keys the loader parses (including the advisor opt-out `skip_advisor` / `advisor: false` and Kaizen `tuned_for` / `stack`). Enable/disable is a discoverability gate only; it does not change a skill's frontmatter or its advisor behavior.

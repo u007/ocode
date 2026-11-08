@@ -216,3 +216,41 @@ func TestSymlinkedSkillDirIsDiscovered(t *testing.T) {
 		t.Fatalf("Source = %q, want %q", got.Source, filepath.Join(link, "SKILL.md"))
 	}
 }
+
+func TestParseSkillMetadataSkipAdvisor(t *testing.T) {
+	cases := []struct {
+		content string
+		want    bool
+	}{
+		{`---
+name: x
+skip_advisor: true
+---
+body`, true},
+		{`---
+name: x
+advisor: false
+---
+body`, true},
+		{`---
+name: x
+skip_advisor: false
+---
+body`, false},
+		{`---
+name: x
+advisor: true
+---
+body`, false},
+		{`---
+name: x
+---
+body`, false},
+	}
+	for _, c := range cases {
+		s := parseSkillMetadata(c.content)
+		if s.SkipAdvisor != c.want {
+			t.Fatalf("content %q: SkipAdvisor = %v, want %v", c.content, s.SkipAdvisor, c.want)
+		}
+	}
+}

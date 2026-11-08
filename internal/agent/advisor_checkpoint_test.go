@@ -3,12 +3,15 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/skill"
 )
 
 // checkpointFakeAdvisor is a stub advisor tool that records the prompt it was
@@ -476,5 +479,220 @@ func TestAdvisorToggleKeepsToolListStable(t *testing.T) {
 	}
 	if !strings.Contains(out, "disabled") {
 		t.Fatalf("expected disabled notice, got %q", out)
+	}
+}
+
+func TestAdvisorPlanCheckpoint_SkillSuppressedStandsDown(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	st := &advisorCheckpointState{skillSuppressed: true}
+
+	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
+	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+		t.Fatal("plan checkpoint must stand down when skillSuppressed")
+	}
+	if fake.calls != 0 {
+		t.Fatal("advisor must not be called when skillSuppressed")
+	}
+	if st.planChecked {
+		t.Fatal("suppressed checkpoint must not consume planChecked")
+	}
+
+	// Without suppression it fires.
+	st2 := &advisorCheckpointState{}
+	if d := a.advisorPlanCheckpoint(st2, resp); d == nil {
+		t.Fatal("plan checkpoint should fire when not suppressed")
+	}
+}
+
+func TestAdvisorDoneCheckpoint_SkillSuppressedStandsDown(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"done"})
+	fake.advice = "gap"
+	st := &advisorCheckpointState{userGoal: "fix", skillSuppressed: true}
+	st.countBatch([]ToolCall{writeToolCall("tc1", "a.go")})
+
+	resp := &Message{Role: "assistant", Content: "Done."}
+	if d := a.advisorDoneCheckpoint(st, resp); d != nil {
+		t.Fatal("done checkpoint must stand down when skillSuppressed")
+	}
+	if fake.calls != 0 {
+		t.Fatal("advisor must not be called when skillSuppressed")
+	}
+
+	st2 := &advisorCheckpointState{userGoal: "fix"}
+	st2.countBatch([]ToolCall{writeToolCall("tc1", "a.go")})
+	if d := a.advisorDoneCheckpoint(st2, resp); d == nil {
+		t.Fatal("done checkpoint should fire when not suppressed")
+	}
+}
+
+func TestTurnDisablesAdvisor_Detection(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".claude", "skills", "commit-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: commit-skill\nskip_advisor: true\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	a := newTestAgent(nil, nil, cfg, nil)
+	a.SetWorkDir(root)
+	st := a.newAdvisorCheckpointState("", false, false)
+
+	// skill tool call
+	tc := ToolCall{}
+	tc.Function.Name = "skill"
+	tc.Function.Arguments = `{"name":"commit-skill"}`
+	msgs := []Message{{Role: "assistant", ToolCalls: []ToolCall{tc}}}
+	if !a.turnDisablesAdvisor(st, msgs) {
+		t.Fatal("expected detection via skill tool call")
+	}
+
+	// auto-inject marker
+	msgs2 := []Message{{Role: "user", Content: "auto-loaded skill \"commit-skill\" (Jev relevance 0.90)"}}
+	if !a.turnDisablesAdvisor(st, msgs2) {
+		t.Fatal("expected detection via auto-inject marker")
+	}
+
+	// slash command prompt
+	msgs3 := []Message{{Role: "user", Content: "Run the **commit-skill** skill."}}
+	if !a.turnDisablesAdvisor(st, msgs3) {
+		t.Fatal("expected detection via slash prompt")
+	}
+
+	// unrelated skill (no flag) → false
+	otherDir := filepath.Join(root, ".claude", "skills", "other-skill")
+	os.MkdirAll(otherDir, 0o755)
+	os.WriteFile(filepath.Join(otherDir, "SKILL.md"), []byte("---\nname: other-skill\n---\nbody\n"), 0o644)
+	msgs4 := []Message{{Role: "user", Content: "Run the **other-skill** skill."}}
+	if a.turnDisablesAdvisor(st, msgs4) {
+		t.Fatal("skill without flag must not suppress")
+	}
+
+	// missing skill fails open → false
+	msgs5 := []Message{{Role: "user", Content: "Run the **nope** skill."}}
+	if a.turnDisablesAdvisor(st, msgs5) {
+		t.Fatal("missing skill must fail open (not suppress)")
+	}
+
+	// turn boundary: a suppressed skill in an earlier turn must not suppress a later turn
+	msgs6 := []Message{
+		{Role: "user", Content: "Run the **commit-skill** skill."},
+		{Role: "assistant", Content: "done"},
+		{Role: "user", Content: "now do unrelated work"},
+	}
+	if a.turnDisablesAdvisor(st, msgs6) {
+		t.Fatal("suppression must not leak across turns")
+	}
+}
+
+// writeSkipAdvisorSkill writes <root>/.claude/skills/<name>/SKILL.md with the
+// given extra frontmatter lines and returns the SKILL.md path.
+func writeSkipAdvisorSkill(t *testing.T, root, name, extraFrontmatter string) string {
+	t.Helper()
+	dir := filepath.Join(root, ".claude", "skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "SKILL.md")
+	content := "---\nname: " + name + "\n" + extraFrontmatter + "---\nbody\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The skill prompt is the human's message, but the tail injectors append
+// user-role blocks after it. The pre-injection snapshot must still see it.
+func TestTurnDisablesAdvisor_PreInjectionSnapshotSeesSkillPrompt(t *testing.T) {
+	root := t.TempDir()
+	writeSkipAdvisorSkill(t, root, "commit-skill", "skip_advisor: true\n")
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.SetWorkDir(root)
+
+	input := []Message{{Role: "user", Content: "Run the **commit-skill** skill."}}
+	injected := append(append([]Message(nil), input...), Message{Role: "user", Content: "[ocode:plan]\n- step one"})
+
+	// Precondition: scanned AFTER injection, the current-turn boundary lands on
+	// the injected block, so the skill prompt is out of view.
+	if a.turnDisablesAdvisor(a.newAdvisorCheckpointState("", false, false), injected) {
+		t.Fatal("precondition failed: the post-injection slice should hide the skill prompt")
+	}
+	// Step scans the snapshot taken before injection, which still holds it.
+	if !a.turnDisablesAdvisor(a.newAdvisorCheckpointState("", false, false), input) {
+		t.Fatal("pre-injection snapshot must detect the human's skill prompt")
+	}
+}
+
+func TestToolCallsDisableAdvisor_SkillCallNamingSkipAdvisorSkill(t *testing.T) {
+	root := t.TempDir()
+	writeSkipAdvisorSkill(t, root, "commit-skill", "skip_advisor: true\n")
+	writeSkipAdvisorSkill(t, root, "other-skill", "")
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.SetWorkDir(root)
+
+	if !a.toolCallsDisableAdvisor(a.newAdvisorCheckpointState("", false, false),
+		[]ToolCall{namedToolCall("tc1", "skill", `{"name":"commit-skill"}`)}) {
+		t.Fatal("a skill tool call naming a SkipAdvisor skill must disable the advisor")
+	}
+	if !a.toolCallsDisableAdvisor(a.newAdvisorCheckpointState("", false, false),
+		[]ToolCall{namedToolCall("tc2", "load_skill", `{"name":"commit-skill"}`)}) {
+		t.Fatal("load_skill must be honoured the same as skill")
+	}
+	if a.toolCallsDisableAdvisor(a.newAdvisorCheckpointState("", false, false),
+		[]ToolCall{namedToolCall("tc3", "skill", `{"name":"other-skill"}`), writeToolCall("tc4", "a.go")}) {
+		t.Fatal("a skill without skip_advisor, or a non-skill call, must not disable the advisor")
+	}
+}
+
+// A skill loaded by the response in round N is not in the pre-loop transcript.
+// The per-response check must still stand the plan checkpoint down for that batch.
+func TestAdvisorPlanCheckpoint_SkillLoadedInResponseStandsDown(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	root := t.TempDir()
+	writeSkipAdvisorSkill(t, root, "commit-skill", "skip_advisor: true\n")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	a.SetWorkDir(root)
+
+	st := a.newAdvisorCheckpointState("commit it", false, false)
+	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{
+		namedToolCall("tc1", "skill", `{"name":"commit-skill"}`),
+		writeToolCall("tc2", "a.go"),
+	}}
+	st.skillSuppressed = st.skillSuppressed || a.toolCallsDisableAdvisor(st, resp.ToolCalls)
+	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+		t.Fatal("plan checkpoint must stand down for a batch whose response loads a SkipAdvisor skill")
+	}
+	if fake.calls != 0 {
+		t.Fatal("advisor must not be called when the response loads a SkipAdvisor skill")
+	}
+}
+
+// Each skill name is resolved from disk at most once per Step. Removing the
+// file mid-Step must not change the memoized verdict; a new Step re-resolves.
+func TestSkillDisablesAdvisor_ResolvesEachNameOncePerStep(t *testing.T) {
+	root := t.TempDir()
+	path := writeSkipAdvisorSkill(t, root, "commit-skill", "skip_advisor: true\n")
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.SetWorkDir(root)
+
+	st := a.newAdvisorCheckpointState("", false, false)
+	if !a.skillDisablesAdvisor(st, "commit-skill") {
+		t.Fatal("first resolution should see skip_advisor")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	// The loader caches its scan for a few seconds; drop it so the removal is
+	// visible to a fresh lookup.
+	skill.InvalidateSkillCache()
+	if !a.skillDisablesAdvisor(st, "commit-skill") {
+		t.Fatal("second lookup in the same Step must reuse the memoized verdict, not rescan disk")
+	}
+	if a.skillDisablesAdvisor(a.newAdvisorCheckpointState("", false, false), "commit-skill") {
+		t.Fatal("a new Step must re-resolve, and the removed skill must now fail open")
 	}
 }

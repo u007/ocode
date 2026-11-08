@@ -4,7 +4,7 @@ title: "Discoverable Command & Skills Catalog (JEV reference)"
 description: Structured reference list of all available ocode slash commands, built-in skills, and plugin capabilities intended for JEV (TypeSafe/relevance judge) discovery and doc-search indexing.
 okf_version: "0.1"
 tags: [jev, discovery, skills, commands, reference, catalog]
-timestamp: 2026-10-19T00:00:00Z
+timestamp: 2026-11-08T12:49:58Z
 resource: internal/commands/loader.go, skills/
 ---
 # Discoverable Command & Skills Catalog
@@ -50,6 +50,8 @@ Installed skills count (as of this reference): ~174 (`skills/*/SKILL.md`). Key b
 - `agents-sdk`, `cf-cli`, `cloudflare-one` — platform/operator tools
 - `gws-*` — Google Workspace automation suite
 - `kaizen/*` — tuning skills per model/task
+
+Each skill's `SKILL.md` frontmatter supplies `name`, `description` and `when_to_use` (plus Kaizen `tuned_for` / `stack`, and the advisor opt-out `skip_advisor` / `advisor: false`). Parsing and field semantics: [SKILL.md Frontmatter Fields](skill-frontmatter.md).
 
 ## Plugin capabilities
 

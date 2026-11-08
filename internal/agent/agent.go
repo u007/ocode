@@ -1651,6 +1651,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// (discovery context, attached markdown) append user-role messages that
 	// would mask the real goal if derived from the final message list.
 	userGoal := lastUserContent(messages)
+	// Snapshot the pre-injection transcript for the skill scan below. The tail
+	// injectors append user-role messages, which would become the scan's
+	// "current turn" boundary and hide a "Run the **name** skill." prompt.
+	// A copy, so no injector can rewrite the elements this snapshot reads.
+	preInjectMessages := append([]Message(nil), messages...)
 	a.RunDiscoveryForMessages(messages)
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
@@ -1707,6 +1712,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// the flag the scan sees nothing and the advisor starts underneath an
 	// open permission dialog).
 	ckpt := a.newAdvisorCheckpointState(userGoal, a.pendingAskSignal.pending.Load(), messagesHavePendingAsk(messages))
+	ckpt.skillSuppressed = a.turnDisablesAdvisor(ckpt, preInjectMessages)
 
 	for i := 0; ; i++ {
 		if isCancelled() {
@@ -1919,6 +1925,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			break
 		}
 
+		// A skill this response itself loads (skill/load_skill) opts the turn out
+		// the same way a pre-loaded one does. Its tool call lives in resp, not in
+		// the transcript the pre-loop scan read, so it is checked here: before the
+		// plan checkpoint consults the flag for this same batch. Sticky once set.
+		ckpt.skillSuppressed = ckpt.skillSuppressed || a.toolCallsDisableAdvisor(ckpt, resp.ToolCalls)
 		ckpt.countBatch(resp.ToolCalls)
 
 		// Batch surfaced above via OnMessage; no tool in it runs before this

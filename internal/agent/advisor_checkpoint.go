@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -42,6 +43,13 @@ type advisorCheckpointState struct {
 	// in the slice the agent was handed) and the host-declared flag (the host
 	// strips the sentinel before Step — see SetPendingAsk).
 	pendingAsk bool
+	// skillSuppressed is true when a skill loaded during this turn opts out of
+	// the advisor checkpoints (Skill.SkipAdvisor).
+	skillSuppressed bool
+	// skipAdvisorByName memoizes the SkipAdvisor verdict per skill name for this
+	// Step, so each name is resolved from disk at most once. Allocated lazily by
+	// skillDisablesAdvisor; see there.
+	skipAdvisorByName map[string]bool
 }
 
 // newAdvisorCheckpointState builds the per-Step checkpoint bookkeeping.
@@ -189,6 +197,9 @@ func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message)
 	if a.blockedByPendingAsk(st, checkpointPlan) {
 		return nil
 	}
+	if st.skillSuppressed {
+		return nil
+	}
 	hasWrite := false
 	for _, tc := range resp.ToolCalls {
 		if isWriteTool(tc.Function.Name) {
@@ -242,6 +253,9 @@ func (a *Agent) advisorDoneCheckpoint(st *advisorCheckpointState, resp *Message)
 	if a.blockedByPendingAsk(st, checkpointDone) {
 		return nil
 	}
+	if st.skillSuppressed {
+		return nil
+	}
 	if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls {
 		return nil
 	}
@@ -292,4 +306,115 @@ func formatChangedFiles(files []string) string {
 		return "(none tracked)"
 	}
 	return strings.Join(files, "\n")
+}
+
+// turnDisablesAdvisor reports whether any skill loaded during this turn opts out
+// of the advisor checkpoints (Skill.SkipAdvisor). It scans the transcript for
+// skill names carried by skill/load_skill tool calls, auto-inject markers and
+// "Run the **name** skill" slash-command prompts, resolving each against the
+// session root. st memoizes the verdicts for this Step (see skillDisablesAdvisor).
+//
+// Pass the transcript as it stood BEFORE the tail injectors ran. They append
+// user-role messages, which would move the "current turn" boundary below and
+// hide the human's skill prompt.
+func (a *Agent) turnDisablesAdvisor(st *advisorCheckpointState, messages []Message) bool {
+	// Limit the scan to the current user turn: only messages after the last
+	// human message can carry a skill loaded for this request. Scanning the
+	// whole transcript would make a one-off commit skill suppress advisor
+	// checkpoints for every later, unrelated turn in the session.
+	start := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			start = i
+			break
+		}
+	}
+	messages = messages[start:]
+	for _, m := range messages {
+		if a.toolCallsDisableAdvisor(st, m.ToolCalls) {
+			return true
+		}
+		if strings.Contains(m.Content, autoInjectMarker) {
+			idx := strings.Index(m.Content, autoInjectMarker)
+			if idx >= 0 {
+				rest := strings.TrimLeft(m.Content[idx+len(autoInjectMarker):], " ")
+				if strings.HasPrefix(rest, "\"") {
+					end := strings.Index(rest[1:], "\"")
+					if end >= 0 {
+						if a.skillDisablesAdvisor(st, rest[1:1+end]) {
+							return true
+						}
+					}
+				}
+			}
+		}
+		// Slash-command prompt: "Run the **name** skill."
+		i := 0
+		for {
+			start := strings.Index(m.Content[i:], "Run the **")
+			if start < 0 {
+				break
+			}
+			start += i
+			rest := m.Content[start+len("Run the **"):]
+			end := strings.Index(rest, "** skill")
+			if end >= 0 {
+				name := strings.TrimSpace(rest[:end])
+				if a.skillDisablesAdvisor(st, name) {
+					return true
+				}
+				i = start + len("Run the **") + end + len("** skill")
+				continue
+			}
+			break
+		}
+	}
+	return false
+}
+
+// toolCallsDisableAdvisor reports whether any skill/load_skill call in calls names
+// a skill that opts out of the advisor checkpoints. It is the per-response half
+// of turnDisablesAdvisor: a skill the response itself loads is not yet in the
+// transcript that the pre-loop scan read.
+func (a *Agent) toolCallsDisableAdvisor(st *advisorCheckpointState, calls []ToolCall) bool {
+	for _, tc := range calls {
+		if tc.Function.Name != "skill" && tc.Function.Name != "load_skill" {
+			continue
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &p); err != nil {
+			continue
+		}
+		if a.skillDisablesAdvisor(st, p.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// skillDisablesAdvisor reports whether the named skill opts out of the advisor
+// checkpoints (Skill.SkipAdvisor), resolved against the session root. The verdict
+// is memoized on st, so a name mentioned by several tool calls or prompts in one
+// Step costs one skill-directory scan. A name that does not resolve is false:
+// the advisor is never suppressed on a guess, and the load error is logged.
+func (a *Agent) skillDisablesAdvisor(st *advisorCheckpointState, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if v, ok := st.skipAdvisorByName[name]; ok {
+		return v
+	}
+	if st.skipAdvisorByName == nil {
+		st.skipAdvisorByName = map[string]bool{}
+	}
+	s, err := skill.LoadSkillForRoot(name, a.WorkDir())
+	if err != nil {
+		a.emitDebug("ADVISOR", fmt.Sprintf("skill %q did not resolve for the advisor opt-out check: %v", name, err))
+	}
+	v := err == nil && s != nil && s.SkipAdvisor
+	st.skipAdvisorByName[name] = v
+	return v
 }
