@@ -230,7 +230,7 @@ exfiltration. The live mode is per chat session on the web/desktop server.
 - Wrappers are peeled before those checks (`effectiveCommandWords`); a command whose
   binary is a shell expansion → Ask (`sandbox.opaque_command`).
 - Explicit `/ban` deny rules are a hard Deny, never re-considered by the judge.
-- Writes to permission-defining files and loopback `/api/permissions*` → Ask in all
+- Writes to permission-defining files and loopback `/api/permissions*` and `/api/config/*` → Ask in all
   modes (self-escalation guard).
 - Fail-closed on macOS/Linux: sandbox mode with no backend → the command errors
   before starting.

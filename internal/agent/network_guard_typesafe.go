@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -373,6 +374,16 @@ func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bo
 		}
 	}
 	for _, t := range targets {
+		if t.Kind != egressKindCommand {
+			continue
+		}
+		// A connection redirected by a proxy, a resolver override or a socket
+		// does not go where the URL says, whatever host the URL names.
+		if flag := waiverDestinationFlag(t.Value); flag != "" {
+			return true, "a bash target redirects its connection with " + flag + ", so the destination is not what the URL says"
+		}
+	}
+	for _, t := range targets {
 		if t.Kind == egressKindCommand && isExfiltrationRiskCommand(t.Value) {
 			return true, "a bash target uploads or expands local content the judge cannot read"
 		}
@@ -380,6 +391,17 @@ func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bo
 	for _, t := range targets {
 		if t.Loopback || isInternalWaiverHost(t.Host) {
 			return true, "a target goes to an internal address (" + t.Host + ")"
+		}
+		if t.Kind != egressKindCommand {
+			continue
+		}
+		// t.Host is one host per command (bashEgressHost picks the first). A
+		// second URL on the same line, a proxy or a referer flag is not in it,
+		// so every host the line names is checked.
+		for _, h := range bashCommandWaiverHosts(t.Value) {
+			if isInternalWaiverHost(h) {
+				return true, "a target goes to an internal address (" + h + ")"
+			}
 		}
 	}
 	return false, ""
@@ -389,16 +411,231 @@ func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bo
 // on the local network: loopback, RFC 1918 or unique-local, link-local (which
 // holds the cloud metadata endpoint), or unspecified. It over-matches on
 // purpose: a waiver that is blocked by mistake only escalates to a human.
+//
+// The host is read the way the resolver reads it. A port, brackets and userinfo
+// are stripped first. The inet_aton shorthands ("127.1", "0x7f000001",
+// "2130706433") go through parseLooseInetAton, and an IPv4-mapped IPv6 address
+// is unmapped so "::ffff:10.0.0.5" is judged as 10.0.0.5. A host that is
+// numeric-looking but parses as neither form fails closed.
 func isInternalWaiverHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	h := strings.Trim(strings.ToLower(host), "[]")
-	if isLoopbackHostForPermissionGuard(h) || isPrivateLANHost(h) {
+	// A glob or an expansion in the host ("10.0.0.{5}", "$H", a backtick) names
+	// a host that is not known until the shell runs, so it fails closed before
+	// any address reading. One literal IPv6 bracket pair is not a glob.
+	if urlMetacharIn(host) {
 		return true
 	}
-	addr, err := netip.ParseAddr(h)
-	return err == nil && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified())
+	h := waiverHostName(host)
+	if h == "" {
+		return false
+	}
+	if h == "localhost" {
+		return true
+	}
+	addr, ok := parseLooseInetAton(h)
+	if !ok {
+		parsed, err := netip.ParseAddr(h)
+		addr, ok = parsed, err == nil
+	}
+	if !ok {
+		return waiverHostLooksNumeric(h)
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() || addr.IsUnspecified()
+}
+
+// waiverHostName reduces a host, a host:port, a bracketed IPv6 literal or a
+// URL to the bare lowercase name the address tests read. It reuses the same
+// reduction the egress host reporting uses (normalizeNetworkEffectHost).
+func waiverHostName(host string) string {
+	h := normalizeNetworkEffectHost(strings.TrimSpace(host))
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	return strings.TrimSuffix(h, ".")
+}
+
+// waiverHostLooksNumeric reports whether an unparseable host still reads as an
+// IP address to a resolver, so the waiver must fail closed. That is any host
+// with a colon, or a host made only of hex digits, dots and "x" whose last
+// label starts with a digit or 0x ("999.1.1.1", "0x7f.1.1.z" is not). A plain
+// hostname such as "cafe.be" or "example.com" does not match.
+func waiverHostLooksNumeric(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.Contains(h, ":") {
+		return true
+	}
+	for _, r := range h {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x' || r == '.') {
+			return false
+		}
+	}
+	if !strings.ContainsAny(h, "0123456789") {
+		return false
+	}
+	last := h[strings.LastIndexByte(h, '.')+1:]
+	return last != "" && (last[0] >= '0' && last[0] <= '9' || strings.HasPrefix(last, "0x"))
+}
+
+// waiverDestinationLongFlags are the options that send a connection somewhere
+// other than the URL's host: a proxy, a resolver or connect override, a local
+// socket or an interface. A command that uses one does not reach the host its
+// URL names, so the waiver cannot be judged from the URL alone.
+var waiverDestinationLongFlags = map[string]bool{
+	"--resolve": true, "--connect-to": true, "--proxy": true, "--preproxy": true,
+	"--socks4": true, "--socks4a": true, "--socks5": true, "--socks5-hostname": true,
+	"--interface": true, "--dns-servers": true, "--dns-ipv4-addr": true, "--dns-ipv6-addr": true,
+	"--unix-socket": true, "--abstract-unix-socket": true, "--haproxy-protocol": true,
+}
+
+// waiverNonDestinationFlags take a value that lists hosts without sending
+// anything to them. --noproxy names the hosts a proxy is skipped for.
+var waiverNonDestinationFlags = map[string]bool{"--noproxy": true}
+
+// waiverValueShortOptions are curl's short options that take a value. In a
+// bundle such as -sLx or -skH, the rest of the token after one of them is that
+// option's value, and an empty rest means the next token is the value.
+const waiverValueShortOptions = "xeHduoTAbcEFKmrUwXyzCY"
+
+// waiverDestinationShortFlag is curl's short proxy option, which can sit in a
+// bundle ("-sx", "-sxhttp://...") before any value-taking letter.
+const waiverDestinationShortFlag = 'x'
+
+var (
+	// waiverURLPattern matches a scheme-qualified URL inside a value, so
+	// "--data-urlencode=url=http://10.0.0.5/x" yields the URL and not the "=".
+	waiverURLPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^"'&,;\s]*`)
+)
+
+// waiverDestinationFlag returns the first option on a bash command line that
+// redirects its connection, in any spelling, or "" when there is none. A long
+// option matches by name, with or without "=value". A short option matches when
+// its bundle holds x before any value-taking letter.
+func waiverDestinationFlag(line string) string {
+	for _, tok := range splitShellFields(line) {
+		t := strings.Trim(tok, `"'<>`)
+		switch {
+		case strings.HasPrefix(t, "--"):
+			name, _, _ := strings.Cut(t, "=")
+			if waiverDestinationLongFlags[name] {
+				return name
+			}
+		case strings.HasPrefix(t, "-"):
+			for i := 1; i < len(t); i++ {
+				if t[i] == waiverDestinationShortFlag {
+					return "-x"
+				}
+				if strings.IndexByte(waiverValueShortOptions, t[i]) >= 0 {
+					break
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// waiverShortOptionValue returns the first value-taking letter in a short-option
+// bundle and the text after it. ok is false when the bundle takes no value.
+func waiverShortOptionValue(t string) (letter byte, rest string, ok bool) {
+	for i := 1; i < len(t); i++ {
+		if strings.IndexByte(waiverValueShortOptions, t[i]) >= 0 {
+			return t[i], t[i+1:], true
+		}
+	}
+	return 0, "", false
+}
+
+// bashCommandWaiverHosts returns every host a bash command line can name: each
+// URL, each scheme-less host and each bare numeric address, in plain tokens and
+// in option values. Long options are read as --flag=value or as a bare flag
+// whose value is the next token. Short options are read as curl reads them, so
+// the value of a bundle is the rest of its token or else the next token. A
+// pure-data value (a header, a body, a user) names no destination, except a
+// URL in it or a Host: header. A bare decimal is an address only from 2^24 up.
+func bashCommandWaiverHosts(line string) []string {
+	fields := splitShellFields(line)
+	var hosts []string
+	for i := 0; i < len(fields); i++ {
+		t := strings.Trim(fields[i], `"'<>`)
+		switch {
+		case t == "":
+		case strings.HasPrefix(t, "--"):
+			if flag, value, ok := strings.Cut(t, "="); ok && !waiverNonDestinationFlags[flag] {
+				hosts = append(hosts, waiverValueHosts(flag, value)...)
+			}
+		case strings.HasPrefix(t, "-"):
+			letter, rest, ok := waiverShortOptionValue(t)
+			if !ok {
+				continue
+			}
+			value := rest
+			if value == "" && i+1 < len(fields) {
+				i++
+				value = strings.Trim(fields[i], `"'<>`)
+			}
+			hosts = append(hosts, waiverValueHosts("-"+string(letter), value)...)
+		case i > 0 && waiverNonDestinationFlags[fields[i-1]]:
+			// The hosts a proxy is skipped for name no destination.
+		case i > 0 && loopbackDataValueFlags[fields[i-1]]:
+			hosts = append(hosts, waiverValueHosts(fields[i-1], t)...)
+		default:
+			hosts = append(hosts, waiverValueHosts("", t)...)
+		}
+	}
+	return hosts
+}
+
+// waiverValueHosts returns the candidate hosts in one value of flag. A Host:
+// header names a virtual host, so its value is judged as a host. Every URL in
+// the value is a destination. A data flag (loopbackDataValueFlags) is pure data
+// beyond those, so it yields no more. Any other value is split on the separators
+// of key=value, user@host and item lists, and each part is kept only when it
+// looks like an address or a host.
+func waiverValueHosts(flag, value string) []string {
+	v := strings.Trim(value, `"'<>`)
+	if v == "" {
+		return nil
+	}
+	var hosts []string
+	if (flag == "-H" || flag == "--header") && len(v) >= 5 && strings.EqualFold(v[:5], "host:") {
+		hosts = append(hosts, waiverValueHosts("", strings.TrimSpace(v[5:]))...)
+	}
+	for _, u := range waiverURLPattern.FindAllString(v, -1) {
+		// A host with a glob or an expansion is kept raw: normalizing would cut
+		// a port or userinfo that carries the expansion ("10.0.0.5:$p").
+		if auth, _ := splitRawURLToken(u); urlMetacharIn(auth) {
+			hosts = append(hosts, auth)
+			continue
+		}
+		hosts = append(hosts, normalizeNetworkEffectHost(u))
+	}
+	if loopbackDataValueFlags[flag] {
+		return hosts
+	}
+	rest := waiverURLPattern.ReplaceAllString(v, " ")
+	for _, part := range strings.FieldsFunc(rest, func(r rune) bool { return strings.ContainsRune("=&@,;", r) }) {
+		p := strings.Trim(part, `"'<>`)
+		if p == "" || strings.HasPrefix(p, "-") {
+			continue
+		}
+		if urlMetacharIn(p) {
+			// A glob or an expansion is judged fail-closed, kept raw.
+			hosts = append(hosts, p)
+			continue
+		}
+		if !strings.ContainsAny(p, ".:/[") && !strings.HasPrefix(strings.ToLower(p), "0x") && !bareDecimalAddress(p) {
+			continue
+		}
+		hosts = append(hosts, normalizeNetworkEffectHost(p))
+	}
+	return hosts
+}
+
+// bareDecimalAddress reports whether a token is a bare decimal integer large
+// enough to be a full 32-bit IPv4 address (2^24 or more), such as "2130706433".
+func bareDecimalAddress(t string) bool {
+	v, err := strconv.ParseUint(t, 10, 32)
+	return err == nil && v >= 1<<24
 }
 
 // networkGuardBlockedWaiverReason is the reason attached to an escalation whose

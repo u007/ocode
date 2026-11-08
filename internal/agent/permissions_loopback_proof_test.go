@@ -302,13 +302,108 @@ func TestPermissionApiLoopbackCoversConfigPermissionRoutes(t *testing.T) {
 			want:    false,
 		},
 		{
-			name:    "loopback other config route does not ask",
+			name:    "loopback other config route asks (every /api/config route is judge-relevant)",
 			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/other`,
+			want:    true,
+		},
+		{
+			name:    "loopback tui config route asks",
+			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/tui`,
+			want:    true,
+		},
+		{
+			name:    "loopback permission-model config route asks",
+			command: `curl -X PUT -d '{"model":"x"}' http://127.0.0.1:4096/api/config/permission-model`,
+			want:    true,
+		},
+		{
+			name:    "loopback judge rubric prompt route asks",
+			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/prompts/network_guard`,
+			want:    true,
+		},
+		{
+			name:    "loopback writable roots route asks",
+			command: `curl -X POST -d '{}' http://127.0.0.1:4096/api/config/ocode/paths/request`,
+			want:    true,
+		},
+		{
+			name:    "loopback sessions route does not ask",
+			command: `curl http://127.0.0.1:4096/api/sessions`,
 			want:    false,
 		},
 		{
-			name:    "loopback tui config route does not ask",
-			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/tui`,
+			name:    "remote host config route does not ask",
+			command: `curl -X PUT -d '{}' https://hub.example.com/api/config/model`,
+			want:    false,
+		},
+		{
+			name:    "compound command with a loopback permissions request asks",
+			command: `cd /tmp && curl -X PUT http://127.0.0.1:4096/api/permissions/mode`,
+			want:    true,
+		},
+		{
+			name:    "env-wrapped loopback permissions request asks",
+			command: `env FOO=1 curl -X PUT http://127.0.0.1:4096/api/permissions/mode`,
+			want:    true,
+		},
+		{
+			name:    "sudo-wrapped loopback permissions request asks",
+			command: `sudo curl http://127.0.0.1:4096/api/permissions/mode`,
+			want:    true,
+		},
+		{
+			name:    "absolute-path curl binary asks",
+			command: `/usr/bin/curl -X PUT http://127.0.0.1:4096/api/permissions/mode`,
+			want:    true,
+		},
+		{
+			name:    "percent-encoded permissions path asks",
+			command: `curl http://127.0.0.1:4096/api/%70ermissions`,
+			want:    true,
+		},
+		{
+			name:    "upper-case permissions path asks",
+			command: `curl http://127.0.0.1:4096/API/Permissions`,
+			want:    true,
+		},
+		{
+			name:    "doubled slash and dot segment config path asks",
+			command: `curl -X PUT http://127.0.0.1:4096/api//config/./model`,
+			want:    true,
+		},
+		{
+			name:    "dot-dot segment into permissions asks",
+			command: `curl http://127.0.0.1:4096/api/sessions/../permissions`,
+			want:    true,
+		},
+		{
+			name:    "loopback config path PUT to paths asks",
+			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/paths`,
+			want:    true,
+		},
+		{
+			name:    "bad percent escape on a loopback permissions path asks",
+			command: `curl http://127.0.0.1:4096/api/%zz`,
+			want:    true,
+		},
+		{
+			name:    "percent in a loopback non-api path asks (fail closed on encoded paths)",
+			command: `curl http://127.0.0.1:4096/json%2Fversion`,
+			want:    true,
+		},
+		{
+			name:    "percent in the query alone does not ask",
+			command: `curl "http://127.0.0.1:4096/api/sessions?q=a%20b"`,
+			want:    false,
+		},
+		{
+			name:    "remote host percent-encoded config path does not ask",
+			command: `curl https://hub.example.com/api/%70ermissions`,
+			want:    false,
+		},
+		{
+			name:    "loopback curl write-out format string does not ask",
+			command: `curl -s -o /tmp/.v -w "%{http_code}" "http://127.0.0.1:4096/json/version"`,
 			want:    false,
 		},
 	}
@@ -322,7 +417,7 @@ func TestPermissionApiLoopbackCoversConfigPermissionRoutes(t *testing.T) {
 }
 
 // isPermissionAPIPath is the path test the loopback guard uses; pin both
-// prefixes and a neighbour that must stay outside the guard.
+// prefixes, every config route, and a neighbour that must stay outside the guard.
 func TestIsPermissionAPIPath(t *testing.T) {
 	for _, p := range []string{
 		"http://127.0.0.1:4096/api/permissions",
@@ -330,18 +425,114 @@ func TestIsPermissionAPIPath(t *testing.T) {
 		"http://127.0.0.1:4096/api/config/ocode/permissions-hosts",
 		"http://127.0.0.1:4096/api/config/ocode/permissions-auto",
 		"http://127.0.0.1:4096/api/config/ocode/permissions-mode",
+		"http://127.0.0.1:4096/api/config/ocode/tui",
+		"http://127.0.0.1:4096/api/config/ocode/git",
+		"http://127.0.0.1:4096/api/config/model",
+		"http://127.0.0.1:4096/api/config",
+		"http://127.0.0.1:4096/api/config/",
+		"http://127.0.0.1:4096/api/config/prompts/network_guard",
+		"http://127.0.0.1:4096/API/CONFIG/model",
+		"http://127.0.0.1:4096/api/%70ermissions",
+		"http://127.0.0.1:4096/api/%zz",
+		"http://127.0.0.1:4096//api/config/./model",
 	} {
 		if !isPermissionAPIPath(p) {
 			t.Errorf("isPermissionAPIPath(%q) = false, want true", p)
 		}
 	}
 	for _, p := range []string{
-		"http://127.0.0.1:4096/api/config/ocode/tui",
-		"http://127.0.0.1:4096/api/config/ocode/git",
 		"http://127.0.0.1:4096/api/sessions",
+		"http://127.0.0.1:4096/api/configs",
+		"http://127.0.0.1:4096/json/version",
+		"http://127.0.0.1:4096/json/version?x=/api/permissions",
+		"http://127.0.0.1:4096",
 	} {
 		if isPermissionAPIPath(p) {
 			t.Errorf("isPermissionAPIPath(%q) = true, want false", p)
 		}
+	}
+}
+
+// The path check must refuse a route the server would route to a permission
+// surface, however the token is spelled. A spelling the guard cannot reduce to
+// a plain path is judged as a hit.
+func TestPermissionApiLoopbackParserDifferentials(t *testing.T) {
+	asks := []string{
+		`curl http://localhost:4096/api/%70ermissions`,
+		`curl http://[::1]:4096/api/%2570ermissions`,
+		`curl http://127.1:4096/api/config/%6dodel`,
+		`curl http://127.0.0.1:4096/api/config/model#frag%20`,
+		`curl http://127.0.0.1:4096/%2e%2e/api/permissions`,
+		`curl http://127.0.0.1:4096/api/%zz`,
+	}
+	for _, c := range asks {
+		if !permissionApiLoopback(c) {
+			t.Errorf("permissionApiLoopback(%q) = false, want true", c)
+		}
+	}
+	// A remote host carrying the same spelling is not our server.
+	if permissionApiLoopback(`curl https://hub.example.com/api/%70ermissions`) {
+		t.Error("remote host with an encoded permissions path asked, want no ask")
+	}
+}
+
+// The self-escalation guard fails closed on a URL whose route cannot be read off
+// the text: a glob (curl expands {} and []), a shell expansion ($, backtick), or
+// an expansion in the host. A literal remote host with the same path is not our
+// server and never asks.
+func TestPermissionApiLoopbackFailsClosedOnGlobsAndExpansions(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"loopback brace glob on permissions asks", `curl http://127.0.0.1:4096/api/{permissions}`, true},
+		{"loopback bracket glob on permissions asks", `curl http://127.0.0.1:4096/api/[p]ermissions`, true},
+		{"loopback variable in path asks", `curl http://127.0.0.1:4096/api/$P`, true},
+		{"loopback command substitution in path asks", `curl http://127.0.0.1:4096/$(cat x)`, true},
+		{"loopback variable in port asks (the port can inject a path)", `curl "http://127.0.0.1:$p/json/version"`, true},
+		{"loopback port proven numeric by assignment does not ask", `p=8080; curl "http://127.0.0.1:$p/json/version"`, false},
+		{"loopback port assigned a non-numeric value asks", `p=8080/x; curl "http://127.0.0.1:$p/json/version"`, true},
+		{"expansion host with a permissions path asks", `curl https://$HOST/api/permissions`, true},
+		{"bracketed IPv6 loopback without a glob does not ask", `curl http://[::1]:4096/json/version`, false},
+		{"variable as a header value does not ask", `curl -H "$AUTH" https://api.example.com/x`, false},
+		{"variable in a data flag does not ask", `curl -d "$BODY" https://api.example.com/x`, false},
+		{"bare variable holding a loopback permissions URL, as the first argument, asks", `U=http://127.0.0.1:4096/api/permissions; curl "$U"`, true},
+		{"command substitution as the first argument asks", `curl "$(cat u)"`, true},
+		{"unquoted variable as the first argument asks", `curl $U -o x`, true},
+		{"bare variable after a silent flag asks", `curl -s "$U"`, true},
+		{"bare variable after silent flags asks", `curl -s -L "$U" -o out`, true},
+		{"bare variable as a data value beside a positional bare variable asks", `curl -d "$BODY" "$U"`, true},
+		{"curl positional variable beside a literal URL asks", `curl "$U" https://example.com/`, true},
+		{"curl silent flag then positional variable asks", `curl -s "$U" -o out.json`, true},
+		{"curl output variable does not ask", `curl -o "$OUT" https://example.com/`, false},
+		{"curl bundled output variable does not ask", `curl -sLo "$OUT" https://example.com/`, false},
+		{"wget output variable does not ask", `wget -O "$OUT" https://example.com/`, false},
+		{"wget positional variable asks", `wget "$U"`, true},
+		{"long option with an attached value does not swallow the positional", `curl --max-time=5 "$U"`, true},
+		{"httpie body flag does not take the next word, so the variable asks", `http -b "$U"`, true},
+		{"httpie auth value is skipped, the positional variable asks", `http -a user:pass "$U"`, true},
+		{"httpie output value is skipped, a literal URL decides", `http -o "$OUT" https://example.com/`, false},
+		{"httpie long print value is self-contained, the variable asks", `http --print=b "$U"`, true},
+		{"httpie long json flag does not take the next word", `http --json "$U"`, true},
+		{"httpie stream flag does not take the next word, the variable asks", `http -S "$U" https://example.com/`, true},
+		{"httpie history-print value is skipped, the variable asks", `http -P Hh "$U"`, true},
+		{"header variable beside a literal host does not ask", `curl -H "$HDR" https://example.com/`, false},
+		{"positional variable beside a literal host asks (curl fetches every positional URL)", `curl -s $A https://example.com/`, true},
+		{"positional variable beside a literal URL asks", `curl "$U" https://example.com/`, true},
+		{"header variable and a bare positional variable ask", `curl -H "$HDR" "$U"`, true},
+		{"variable as a data-flag value with a literal URL does not ask", `curl -d "$BODY" https://example.com/x`, false},
+		{"variable as a data-flag value does not ask", `curl -d "$BODY" https://example.com/x`, false},
+		{"positional variable after a silent flag asks", `curl -s $A https://example.com/x`, true},
+		{"remote host brace glob does not ask", `curl https://example.com/api/{a,b}`, false},
+		{"remote host variable in query does not ask", `curl https://example.com/x?y=$Z`, false},
+		{"remote JSON body with a URL inside does not ask", `curl -d '{"u":"https://x.example/a"}' https://example.com/x`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := permissionApiLoopback(tc.command); got != tc.want {
+				t.Errorf("permissionApiLoopback(%q) = %v, want %v", tc.command, got, tc.want)
+			}
+		})
 	}
 }

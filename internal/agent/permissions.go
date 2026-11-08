@@ -3982,8 +3982,8 @@ func sandboxSensitivePathRelaxed(resolved string, write, secretsRelaxed bool) bo
 // (project/.ocode/settings.json, .claude/settings.json, ocode global config
 // permissions, allowlist/config files feeding extra_allowed_paths / allow-
 // deny rules) or makes a loopback request to the local /api/permissions* API or
-// the /api/config/ocode/permissions-* config routes (which would flip the
-// mode, rules or allowed hosts directly).
+// any /api/config/* route (which would flip the mode, rules, judge models,
+// judge rubrics or writable roots directly).
 //
 // Static only: a write hidden inside an interpreter (`python -c`) is a
 // documented residual (Part 04) — the OS write-wall can't stop it either since
@@ -4062,39 +4062,360 @@ func isPermissionConfigTarget(resolved string) bool {
 	return false
 }
 
-// isPermissionAPIPath reports whether a URL token names a permission-defining
-// route on the local server: the /api/permissions* family, or the
-// /api/config/ocode/permissions-* config routes (permissions-hosts,
-// permissions-auto, permissions-mode), which write the same allowlists and mode.
-// It matches the path only; the caller still proves the host is loopback. The
-// config prefix is broader than the three known routes on purpose: an over-ask
-// on a read of permissions-concerns costs one prompt, an under-ask lets the
-// agent widen its own allowlist.
+// isPermissionAPIPath reports whether a URL token's path names a route the
+// agent must not drive on the local server: anything under /api/permissions,
+// or anything under /api/config/ (the model, judge rubrics, prompts, writable
+// roots, discovery and every other config route). Those routes decide the
+// agent's own guards, so the config prefix is broad on purpose: an over-ask on
+// a loopback GET of /api/config/model costs one prompt, an under-ask lets the
+// agent rewrite its own rubric.
+//
+// The path is read from the raw token, not from a decoded parse, and cleaned
+// the way the server's router would see it: percent-encoding is refused
+// outright (a loopback path with '%' has no legitimate agent use, and a route
+// spelled "/api/%70ermissions" cannot be proven to be a different route),
+// dot-segments and doubled slashes are collapsed, and the match is
+// case-folded. It matches the path only; the caller still proves the host is
+// loopback.
 func isPermissionAPIPath(t string) bool {
-	return strings.Contains(t, "/api/permissions") || strings.Contains(t, "/api/config/ocode/permissions")
-}
-
-// permissionApiLoopback reports whether a network command targets the local
-// /api/permissions* API or the /api/config/ocode/permissions-* config routes —
-// the agent could flip its own mode, rules or allowed hosts here.
-func permissionApiLoopback(command string) bool {
-	fields := splitShellFields(command)
-	if len(fields) < 2 {
+	raw := rawURLPathToken(strings.Trim(t, `'"`))
+	if raw == "" {
 		return false
 	}
-	switch fields[0] {
-	case "curl", "wget", "http", "https":
+	if strings.Contains(raw, "%") {
+		return true
+	}
+	clean := path.Clean(strings.ToLower(raw))
+	return strings.HasPrefix(clean, "/api/permissions") ||
+		clean == "/api/config" ||
+		strings.HasPrefix(clean, "/api/config/")
+}
+
+// rawURLPathToken returns the undecoded path of a URL-like token: the text
+// after the scheme and authority, cut at the first '?' or '#'. It returns ""
+// when the token has no path. It does not use net/url, which rejects inputs
+// this guard must still judge (a bad percent escape, a shell-expanded port).
+func rawURLPathToken(t string) string {
+	_, p := splitRawURLToken(t)
+	return p
+}
+
+// splitRawURLToken splits a URL-like token into its raw authority and its raw
+// path, both undecoded and cut before any query or fragment. The path is ""
+// when the token has none. The authority is everything between the scheme and
+// the first '/', '?' or '#', so it keeps userinfo and a bracketed IPv6 literal.
+func splitRawURLToken(t string) (authority, rawPath string) {
+	s := t
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	i := strings.IndexAny(s, "/?#")
+	if i < 0 {
+		return s, ""
+	}
+	authority = s[:i]
+	if s[i] != '/' {
+		return authority, ""
+	}
+	rawPath = s[i:]
+	if j := strings.IndexAny(rawPath, "?#"); j >= 0 {
+		rawPath = rawPath[:j]
+	}
+	return authority, rawPath
+}
+
+// stripOneBracketPair removes the one matching pair of brackets around a
+// bracketed IPv6 literal at the start of s, so "[::1]:4096/x" reads as
+// "::1:4096/x". Brackets anywhere else are left in place, because they are
+// glob characters.
+func stripOneBracketPair(s string) string {
+	if !strings.HasPrefix(s, "[") {
+		return s
+	}
+	j := strings.IndexByte(s, ']')
+	if j < 1 {
+		return s
+	}
+	return s[1:j] + s[j+1:]
+}
+
+// urlMetacharSet holds the characters that a shell or curl can expand or glob
+// before the request is sent. curl expands {} and [] itself. The shell expands
+// $ and backticks, and * and ? by filename globbing. A backslash can escape a
+// delimiter. Any of them in a URL can change the host or the path the request
+// reaches, so the URL cannot be judged as written.
+const urlMetacharSet = "{}[]$`*?\\"
+
+// urlMetacharIn reports whether a URL part, after its one literal IPv6 bracket
+// pair is removed, holds a character that can change where the request goes.
+func urlMetacharIn(s string) bool {
+	return strings.ContainsAny(stripOneBracketPair(s), urlMetacharSet)
+}
+
+// isWholeWordExpansion reports whether a word is a bare shell expansion ("$U",
+// "${U}", "$(cmd)" or a backtick command). Its value is unknown until the shell
+// runs, so as the URL argument it may be the whole request.
+func isWholeWordExpansion(word string) bool {
+	t := strings.Trim(word, `"'`)
+	return strings.HasPrefix(t, "$") || strings.HasPrefix(t, "`")
+}
+
+// curlValueOptions are curl's options that take a value in the next word, the
+// long spellings. Each value is data or a destination, never a URL position.
+// httpie (http, https) reads the same flags.
+var curlValueOptions = map[string]bool{
+	"--output": true, "--header": true, "--data": true, "--data-raw": true,
+	"--data-binary": true, "--data-urlencode": true, "--json": true, "--user": true,
+	"--user-agent": true, "--referer": true, "--config": true, "--write-out": true,
+	"--upload-file": true, "--cookie": true, "--cookie-jar": true, "--request": true,
+	"--proxy": true, "--preproxy": true, "--resolve": true, "--connect-to": true,
+	"--max-time": true, "--retry": true, "--retry-delay": true, "--interface": true,
+	"--dns-servers": true, "--cert": true, "--key": true, "--cacert": true,
+	"--form": true, "--range": true, "--limit-rate": true, "--proxy-user": true,
+	"--data-ascii": true, "--oauth2-bearer": true,
+}
+
+// curlValueShortOptions are curl's single-letter options that take a value. In
+// a bundle, the value is the next word when the letter is the bundle's last.
+const curlValueShortOptions = "oHxuAeKdXwTbcmEFrUyz"
+
+// wgetValueOptions are wget's options that take a value, in both spellings.
+var wgetValueOptions = map[string]bool{
+	"--output-document": true, "--output-file": true, "--append-output": true,
+	"--user-agent": true, "--referer": true, "--header": true, "--post-data": true,
+	"--post-file": true, "--directory-prefix": true, "--tries": true, "--timeout": true,
+	"--wait": true, "--execute": true, "--input-file": true, "--user": true,
+	"--password": true, "--limit-rate": true, "--load-cookies": true,
+	"--save-cookies": true, "--certificate": true, "--private-key": true,
+	"--ca-certificate": true, "--proxy-user": true, "--proxy-password": true,
+}
+
+// wgetValueShortOptions are wget's single-letter options that take a value.
+const wgetValueShortOptions = "OoeUPtTwiaARXlQBD"
+
+// httpieValueOptions are httpie's options that take a value in the next word.
+// httpie reads -b and --json as flags, so they are not in this table.
+var httpieValueOptions = map[string]bool{
+	"--auth": true, "--auth-type": true, "--output": true, "--print": true,
+	"--style": true, "--session": true, "--session-read-only": true, "--timeout": true,
+	"--proxy": true, "--verify": true, "--cert": true, "--cert-key": true,
+	"--pretty": true, "--format-options": true, "--response-charset": true,
+	"--response-mime": true, "--max-redirects": true, "--max-headers": true,
+	"--ssl": true, "--ciphers": true,
+}
+
+// httpieValueShortOptions: a --auth, A --auth-type, o --output, p --print, s --style, P --history-print take a value; S --stream and b --body are flags (httpie docs confirm a, A, p, S; o, s, P are from httpie's option list).
+const httpieValueShortOptions = "aAopsP"
+
+// optionTakesNextWord reports whether an option word consumes the next word as
+// its value, for the client's own option table. A long option with "=value"
+// carries its value itself. A bundle takes the next word only when a
+// value-taking letter is its last letter, and otherwise the rest of the bundle
+// is that letter's value. An unknown client takes no value, so it never skips a
+// following expansion.
+func optionTakesNextWord(client, opt string) bool {
+	var longSet map[string]bool
+	var shortSet string
+	switch client {
+	case "curl":
+		longSet, shortSet = curlValueOptions, curlValueShortOptions
+	case "wget":
+		longSet, shortSet = wgetValueOptions, wgetValueShortOptions
+	case "http", "https":
+		longSet, shortSet = httpieValueOptions, httpieValueShortOptions
 	default:
 		return false
 	}
-	for _, tok := range fields[1:] {
-		t := strings.Trim(tok, `'"`)
-		if !isPermissionAPIPath(t) {
+	if strings.HasPrefix(opt, "--") {
+		return !strings.Contains(opt, "=") && longSet[opt]
+	}
+	for j := 1; j < len(opt); j++ {
+		if strings.IndexByte(shortSet, opt[j]) >= 0 {
+			return j == len(opt)-1
+		}
+	}
+	return false
+}
+
+// bareExpansionTarget reports whether one network command (words[0] is the
+// client) has a positional argument that is a bare shell expansion. curl and
+// wget fetch every positional URL, so one expansion among them can be the
+// request target, whatever the other positionals are. The value word of every
+// value-taking option is skipped, so the output of "-o $OUT" is not a positional.
+// Literal positionals are judged separately by tokenMayReachPermissionRoute.
+func bareExpansionTarget(words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	client := path.Base(strings.ToLower(words[0]))
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		if strings.HasPrefix(w, "-") {
+			if optionTakesNextWord(client, w) && i+1 < len(words) {
+				i++
+			}
 			continue
 		}
-		// Loopback host requirement: the URL's host must be localhost/127.x.
-		if isLocalhostURL(t) {
+		if isWholeWordExpansion(w) {
 			return true
+		}
+	}
+	return false
+}
+
+// rawCommandSegments splits the raw fields of a command line at its shell
+// separators and returns the segments that start with a network client. Each
+// segment is returned from that client on, the form bareExpansionTarget reads.
+func rawCommandSegments(fields []string) [][]string {
+	var out [][]string
+	start := 0
+	flush := func(end int) {
+		for j := start; j < end; j++ {
+			if isNetworkAPIClient(fields[j]) {
+				out = append(out, fields[j:end])
+				return
+			}
+		}
+	}
+	for i, f := range fields {
+		if f == "&&" || f == "||" || f == "|" || f == ";" || strings.HasSuffix(f, ";") {
+			flush(i)
+			start = i + 1
+		}
+	}
+	flush(len(fields))
+	return out
+}
+
+// loopbackAuthoritySafe reports whether a loopback URL's authority is literal
+// apart from a port the shell proves numeric. The userinfo and the host must be
+// free of metacharacters. A port with one must be a provably numeric shell
+// variable (the same proof the loopback carve-out uses), since a number cannot
+// carry a "/" that would move the path.
+func loopbackAuthoritySafe(authority string, numericVars map[string]bool) bool {
+	hostport := authority
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		if urlMetacharIn(authority[:at]) {
+			return false
+		}
+		hostport = authority[at+1:]
+	}
+	host, port := hostport, ""
+	if strings.HasPrefix(hostport, "[") {
+		if j := strings.IndexByte(hostport, ']'); j > 0 {
+			host = hostport[:j+1]
+			port = strings.TrimPrefix(hostport[j+1:], ":")
+		}
+	} else if i := strings.IndexByte(hostport, ':'); i >= 0 {
+		host, port = hostport[:i], hostport[i+1:]
+	}
+	if urlMetacharIn(host) {
+		return false
+	}
+	if !strings.ContainsAny(port, urlMetacharSet) {
+		return true
+	}
+	return shellPortIsNumeric(port, numericVars)
+}
+
+// tokenMayReachPermissionRoute reports whether one word of a network command
+// may reach a permission or config route on the local server. It fails closed:
+// a loopback URL whose glob or expansion could move the host or the path asks,
+// and so does a URL whose host is an expansion, since that host could resolve
+// to loopback. A literal remote host never asks, whatever its path.
+func tokenMayReachPermissionRoute(tok string, numericVars map[string]bool) bool {
+	t := strings.Trim(tok, `'"`)
+	authority, rawPath := splitRawURLToken(t)
+	if isLocalhostURL(t) {
+		// A glob or expansion in the path can name any route, and one in the
+		// host or userinfo can move the request off loopback, so both ask. A
+		// port expansion is allowed only when the shell proves it numeric (see
+		// loopbackAuthoritySafe), because a number cannot inject a path.
+		if urlMetacharIn(rawPath) || !loopbackAuthoritySafe(authority, numericVars) {
+			return true
+		}
+		return isPermissionAPIPath(t)
+	}
+	// A word with whitespace or quotes is a body or a header, not a URL. A host
+	// expansion in a real URL could be 127.0.0.1 with any path.
+	if strings.ContainsAny(t, " \t\"") {
+		return false
+	}
+	return urlMetacharIn(authority) && (strings.Contains(t, "://") || rawPath != "")
+}
+
+// isNetworkAPIClient reports whether a command word is a client that can send
+// a request to the local server. The base name is compared, so
+// "/usr/bin/curl" is the same client, and the comparison is case-folded.
+func isNetworkAPIClient(word string) bool {
+	switch path.Base(strings.ToLower(word)) {
+	case "curl", "wget", "http", "https":
+		return true
+	}
+	return false
+}
+
+// permissionApiLoopback reports whether a network command on the line targets
+// the local /api/permissions* API or the /api/config/* routes. The agent could
+// flip its own mode, rules, judge or allowed hosts there.
+//
+// Every command on the line is checked, not only the first word: a request
+// after "cd /tmp &&", "env", "sudo" or a $(...) substitution is the same
+// request. The line is parsed the way the egress judge parses it, so the
+// command words are peeled the same way. A line that does not parse is
+// checked from every word position, which fails closed. A URL that a glob or a
+// shell expansion could rewrite is asked too, because the route it reaches
+// cannot be read off the text.
+func permissionApiLoopback(command string) bool {
+	var fragments [][]string
+	if parsed, err := parseShellCommandLine(command); err == nil {
+		for _, cmd := range parsed {
+			fragments = append(fragments, cmd.cmdWords)
+		}
+	} else {
+		fields := splitShellFields(command)
+		for i := range fields {
+			fragments = append(fragments, fields[i:])
+		}
+	}
+	numericVars := numericAssignedVars(command)
+	for _, fragment := range fragments {
+		for _, words := range effectiveCommandWords(fragment) {
+			if len(words) < 2 || !isNetworkAPIClient(words[0]) {
+				continue
+			}
+			for i := 1; i < len(words); i++ {
+				if tokenMayReachPermissionRoute(words[i], numericVars) {
+					return true
+				}
+			}
+			if bareExpansionTarget(words) {
+				return true
+			}
+		}
+	}
+	// The parser cuts a $(...) out of a word, so a URL such as
+	// http://127.0.0.1:4096/$(cat x) reaches the words above as a shorter URL
+	// with the expansion lost. The raw fields keep the word whole. When a network
+	// client appears anywhere on the line, every raw field is judged as well.
+	fields := splitShellFields(command)
+	networkOnLine := false
+	for _, f := range fields {
+		if isNetworkAPIClient(f) {
+			networkOnLine = true
+			break
+		}
+	}
+	if networkOnLine {
+		for _, seg := range rawCommandSegments(fields) {
+			if bareExpansionTarget(seg) {
+				return true
+			}
+		}
+		for _, f := range fields {
+			if tokenMayReachPermissionRoute(f, numericVars) {
+				return true
+			}
 		}
 	}
 	return false
