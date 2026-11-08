@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Artifact publishing / sharing (static snapshots, Mode A + Mode B client)
-description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, hub_token persistence, presigned per-blob upload, and the 502 no-fallback rule; the hub-side API itself lives in the separate kakiit repo and is not in this tree.'
+description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, per-publish visitor access (public/password/allowlist) applied through the hub, hub_token persistence, presigned per-blob upload, and the 502 no-fallback rule; the hub-side API itself lives in the separate kakiit repo and is not in this tree.'
 resource: docs/superpowers/specs/2026-11-07-publish-share-project-design.md
 tags:
   - artifacts
@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-07T19:20:19Z
+timestamp: 2026-11-08T04:32:53Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -50,9 +50,10 @@ repo and is not in this tree**, and nothing in this repo proves a hub is deploye
 | `internal/artifacts/blobstore.go` | Content-addressed blob store under `<dir>/blobs/<xx>/<sha256>`. |
 | `internal/artifacts/manifest.go` | `ManifestHash(files []File)` — deterministic version manifest hash written to `artifact_versions.blob_manifest_hash`. |
 | `internal/artifacts/hubclient.go` | Mode B HTTP client: `HubClient`, `EnsureArtifact`, `UploadBlob` (presigned PUT + dedupe), `PublishVersion`, `PublicURL`, `NewHubPublicToken`. |
-| `internal/server/artifact_hub.go` | Mode B upload orchestration: `publishArtifactToHub` — resolves the bearer and base URL, persists `hub_token`, then runs EnsureArtifact → UploadBlob (per file) → PublishVersion. |
+| `internal/artifacts/hubclient_access.go` | Mode B visitor access + invites: `SetArtifactAccess`, `AddArtifactInvite`, `HubInvite`. |
+| `internal/server/artifact_hub.go` | Mode B upload orchestration: `publishArtifactToHub` — resolves the bearer and base URL, persists `hub_token`, then runs EnsureArtifact → SetArtifactAccess → UploadBlob (per file) → PublishVersion → AddArtifactInvite. |
 | `internal/server/artifact_tokens.go` | Durable hashed capability tokens, `artifactAuthMiddleware(Impl)`, password cookies, invite cookies, per-visitor rate limiting, startup retention prune. |
-| `internal/server/handler_artifacts.go` | Owner CRUD, publish (incl. the Mode B hand-off), unpublish, delete, token mint/revoke, allowlist add/remove, access log, `artifactLogRetention()`. |
+| `internal/server/handler_artifacts.go` | Owner CRUD, publish (incl. the Mode B hand-off and `parseArtifactAccess`), unpublish, delete, token mint/revoke, allowlist add/remove, access log, `artifactLogRetention()`. |
 | `internal/server/handler_artifact_invite.go` | Invite accept (magic link) + password gate. |
 | `internal/server/handler_artifact_serve.go` | Static serve from the blob store (Mode A public path), access-log write + throttled retention prune. |
 | `internal/server/tailscale_share.go` | Tailscale `serve`/`funnel` exposure, `newArtifactTailscaleShare`, `authConfigured`. |
@@ -96,7 +97,7 @@ Blobs are content-addressed: `Put` hashes with sha256 and stores at
 `validateHash` rejects empty, separator-bearing and `..` hashes, and `pathFor`
 re-checks containment (`:28-60`). `GCUnreferenced` deletes blobs not named by
 `artifact_files` (`:121`); `Store.GC()` computes the referenced set and is invoked
-after `DeleteArtifact` (`internal/server/handler_artifacts.go:569`).
+after `DeleteArtifact` (`internal/server/handler_artifacts.go:671`).
 
 Versions are immutable. `PublishVersion` inserts the version + its file rows in one
 transaction and refuses an artifact that does not exist
@@ -108,7 +109,7 @@ pinned by `TestLatestArtifactVersionPicksNewestExplicitly`).
 **`blob_manifest_hash` is computed at publish time.** `ManifestHash`
 (`internal/artifacts/manifest.go:14`) hashes the sorted `path + "\x00" + blob_hash`
 pairs, newline-joined, and the publish handler writes the result
-(`internal/server/handler_artifacts.go:457-475`). Size, mode and MIME are deliberately
+(`internal/server/handler_artifacts.go:552-570`). Size, mode and MIME are deliberately
 excluded from the input, so a chmod or MIME re-detection alone does not change the
 hash, and walk order is irrelevant.
 
@@ -125,29 +126,29 @@ store construction in `newArtifactTokenStore` (`internal/server/artifact_tokens.
 
 ## Publish pipeline (what `POST /api/artifacts/{id}/publish` actually does)
 
-`HandlePublish` (`internal/server/handler_artifacts.go:277`):
+`HandlePublish` (`internal/server/handler_artifacts.go:360`):
 
 1. Remote project → the request is proxied to the owning host's
-   `/api/artifacts/{id}/publish`; there is **no local fallback** (`:277-289`,
+   `/api/artifacts/{id}/publish`; there is **no local fallback** (`:360-372`,
    `proxyArtifactToRemote`).
 2. **Server-side secret scan** — the client flag is ignored (`_ = scanHit`); the
    handler walks the project for `.env`/`.env.*`, `*.pem`, `*.key`, `credentials`,
    `secrets.{json,yaml,yml}`. A hit returns 409 unless an `override_reason` is supplied,
-   which is logged (`:305-339`).
-3. `build_cmd` is **parsed and stored, never executed** (`:341`, and the `buildDir`
+   which is logged (`:401-434`).
+3. `build_cmd` is **parsed and stored, never executed** (`:436`, and the `buildDir`
    block's "no run" comment). See deferrals.
-4. `notify_on_publish` is read per request (`:342`); see below.
+4. `notify_on_publish` is read per request (`:437`); see below.
 5. Walk the project, skipping: symlinks, any dot-prefixed path segment,
    `node_modules`/`vendor`/`.git`, `.env*`, and any extension outside
-   `allowedArtifactExt` (`:361-411`, helper at `:868-877`: html/htm/css/js/mjs/cjs/json/map,
+   `allowedArtifactExt` (`:456-545`, helper at `:970-979`: html/htm/css/js/mjs/cjs/json/map,
    images, fonts, txt/xml/csv/pdf, audio/video, wasm). Files that fail the allowlist are
    silently omitted — a publisher asking "why is my file missing" is usually here.
 6. Enforce `artifactMaxBytes()` — default 100 MiB, overridable by
-   `OCODE_ARTIFACT_MAX_BYTES` (`:451-455`, handler at `:879-887`) — then
-   `PublishVersion` and `SetArtifactStatus("active")` (`:457-475`). A new publish
+   `OCODE_ARTIFACT_MAX_BYTES` (`:546-550`, handler at `:981-989`) — then
+   `PublishVersion` and `SetArtifactStatus("active")` (`:552-570`). A new publish
    therefore **re-livens an unpublished artifact**.
 7. **Mode B hand-off.** If `strings.EqualFold(a.HostingMode, "hub")`, the handler calls
-   `publishArtifactToHub` (`:479-487`). Success sets `hub_url` to the hub share URL; a
+   `publishArtifactToHub` (`:577-586`). Success sets `hub_url` to the hub share URL; a
    failure writes **HTTP 502** with body `hub publish: <err>` and **nothing is uploaded
    to the hub**. There is deliberately **no local fallback**: a publish requested as
    hub-hosted never silently degrades to a self-hosted link that dies with this
@@ -156,7 +157,7 @@ store construction in `newArtifactTokenStore` (`internal/server/artifact_tokens.
    not"; it does not roll the local publish back.
 8. If `notify`, email recipients are resolved **server-side**: the owner if
    `CreatedBy` looks like an email, plus every allowlist entry, deduped
-   (`:491-512`). The flag is not persisted on the artifact, so "remember last value" is
+   (`:590-619`). The flag is not persisted on the artifact, so "remember last value" is
    never true server-side.
 9. **Mail delivery is best-effort and reported.** With no mailer configured
    `sendEmail` returns `errNoMailer`; the publish response carries
@@ -165,13 +166,51 @@ store construction in `newArtifactTokenStore` (`internal/server/artifact_tokens.
    failed email degrades to manual link sharing, never to a lost invite.
 
 The JSON response carries `version`, `artifact`, `notify_sent`, `email_sent` and
-`hub_url` (`:527`). `hub_url` is `""` for a Mode A publish and the
+`hub_url` (`:621`). `hub_url` is `""` for a Mode A publish and the
 `<hub>/p/<id>/<token>/` URL for a successful Mode B publish. The SPA type mirrors this
 as an optional field (`web/src/api/artifacts.ts`, `PublishArtifactResponse.hub_url`).
 
+## Visitor access on publish (`access_mode`)
+
+A publish body may carry a visitor access mode. `parseArtifactAccess`
+(`internal/server/handler_artifacts.go:171`) validates it **before** the snapshot walk, so
+a bad request costs no blob work:
+
+- `""` (absent) → leave the hub's current setting alone; `public` → no password;
+  `password` → 8..200 chars; `allowlist` → 1..50 valid emails (`invite_emails`, a JSON
+  array or a comma-separated string via `getStringSlice`, `:122`); anything else → 400.
+  `normalizeInviteEmails` (`:147`) trims, lowercases, requires `@` and no whitespace, and
+  dedupes.
+- **Mode A never carries an access mode.** `password`/`allowlist` on a non-hub artifact is
+  a 400 (`:393-397`) — local access is capability tokens plus the allowlist, and a request
+  that cannot take effect is refused rather than silently ignored.
+- **Mode B ordering:** `SetArtifactAccess` runs after `EnsureArtifact` and *before* any
+  blob upload or version publish (`internal/server/artifact_hub.go:63-67`), so an access
+  failure leaves **no live version** behind (the artifact row alone serves nothing).
+  Invites are created only after the version is live (`:81-88`); a per-email failure is
+  collected in `InviteErrors` and does not undo the publish.
+
+Hub calls live in `internal/artifacts/hubclient_access.go`: `SetArtifactAccess` (`:14`,
+`PUT /access`) and `AddArtifactInvite` (`:40`, `POST /invites`). The invite carries the
+same public token the client already persists for the share link; the hub stores only its
+sha256 and returns `inviteUrl` even with no mail provider. Neither the password nor the
+token is logged or put in error text.
+
+The publish response reports `access_mode`, `hub_invites` and `invite_errors`
+(`handler_artifacts.go:621-630`). The SPA maps the access fields explicitly
+(`web/src/api/artifacts.ts:258`, invites at `:261`) — **the existing `mode` field is a
+legacy alias for `hosting_mode`, so the access mode must never travel as `mode`**
+(`:253-257`). The dialog adds the select (`ArtifactPublishDialog.tsx:211`), the password
+field (`:221`, client-side 8-char check at `:91`) and the invite textarea (`:236`, split
+on commas/spaces/newlines, `:95`).
+
+Pinned by `TestParseArtifactAccess`,
+`TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors`, the handler 400 case, and
+`TestHubClientSetArtifactAccess`/`TestHubClientAddArtifactInvite` plus the dialog tests.
+
 ## Mode B client upload path (`hosting_mode=hub`)
 
-`publishArtifactToHub` (`internal/server/artifact_hub.go:15`) runs **after** the local
+`publishArtifactToHub` (`internal/server/artifact_hub.go:32`) runs **after** the local
 publish succeeds, and only for a hub-hosted artifact. It is the only place that talks
 to the hub:
 
@@ -307,7 +346,7 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
 - **No secret is ever logged.** `store.go` contains exactly one `log.Printf` — the
   startup access-log prune failure at `internal/artifacts/store.go:697` — and it
   carries only the error. The pre-existing artifact log lines record a secret-scan
-  override reason (`handler_artifacts.go:338`) and mail-delivery failures
+  override reason (`handler_artifacts.go:433`) and mail-delivery failures
   (`handler_artifacts.go` publish/invite branches); none includes a token, password,
   invite hash, password cookie or the sync bearer. Keep it that way: a new log line
   must not print any of those values.
@@ -319,12 +358,13 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
 
 - **Mode A (default, implemented): self-hosted.** Local ocode serves `/p/...`;
   optional tailscale `serve` (tailnet-only, default) or `funnel` (public, explicit
-  confirmation).
+  confirmation). Visitor access there is capability tokens plus the allowlist; a
+  publish-time `password`/`allowlist` is refused (see "Visitor access on publish").
 - **Mode B (client implemented; hub-side API out of tree): hub-hosted** at the
   `sync_url` hub so artifacts stay up when the machine sleeps. A create request may
-  pass `hosting_mode` (`handler_artifacts.go:173-176`, default `"self"`); the value is
+  pass `hosting_mode` (`handler_artifacts.go:256-259`, default `"self"`); the value is
   persisted and **is consulted at publish time** — only a case-insensitive `"hub"`
-  takes the Mode B path (`handler_artifacts.go:480`), everything else is Mode A. The
+  takes the Mode B path (`handler_artifacts.go:577`), everything else is Mode A. The
   upload itself is described above; `hosting_mode=hub` with no sync login fails the
   publish with 502 rather than falling back to Mode A. Use **`sync_url`, never
   `backend_url`** (`backend_url` is local-dev-only;
@@ -332,7 +372,7 @@ Serving itself (`internal/server/handler_artifact_serve.go`):
 - The remote path in `handler_artifacts.go` proxies artifact requests to a **saved
   remote ocode host** (by `project_host`), not to the hub. Unreachable → 502
   (`stage "remote-connect"`), still connecting → 503 (`stage "remote-connecting"`);
-  never a local fallback (`proxyArtifactToRemote`, `:780+`).
+  never a local fallback (`proxyArtifactToRemote`, `:882+`).
 
 ## DANGER: the tailscale upstream path must stay `/p`
 
@@ -388,9 +428,9 @@ cannot start one (`TestArtifactTailscaleRoutesRequireAuth`).
 
 | Var | Status |
 |---|---|
-| `OCODE_ARTIFACT_MAX_BYTES` | Wired. Default 100 MiB (`handler_artifacts.go:879-887`). |
+| `OCODE_ARTIFACT_MAX_BYTES` | Wired. Default 100 MiB (`handler_artifacts.go:981-989`). |
 | `OCODE_ARTIFACT_INVITE_TTL_DAYS` | Wired. Default 7 days; invalid or `<=0` falls back (`store.go:38-48`). |
-| `OCODE_ARTIFACT_LOG_RETENTION_DAYS` | Wired. Read by `artifactLogRetention()` (`handler_artifacts.go:889-906`) and applied by the store's throttled prune. Unset/invalid/negative → 30 days; `0` → keep forever. |
+| `OCODE_ARTIFACT_LOG_RETENTION_DAYS` | Wired. Read by `artifactLogRetention()` (`handler_artifacts.go:994-1008`) and applied by the store's throttled prune. Unset/invalid/negative → 30 days; `0` → keep forever. |
 | `OCODE_ARTIFACT_ORIGIN` | **Declared only.** No artifact-origin plumbing. |
 | `OCODE_ARTIFACT_HUB_URL` | **Declared only.** The hub client ignores it: the base URL is the resolved `sync_url` (`h.syncClient().BaseURL`), and `.env.example` says so ("defaults to sync_url; NOT read yet"). |
 
@@ -421,7 +461,8 @@ Verified absences in this tree (do not describe these as shipped):
   kind; token `kind` maps to an `accessLevel` int (`public*` → 2, else 1) that is put in
   the request context (`artifact_tokens.go:451-453`) but **never read by the serve
   path** (`AccessLevelFromContext` has no non-test consumer). Model "private" as "no
-  token shared", "public" as "token, no allowlist".
+  token shared", "public" as "token, no allowlist". On Mode B the visitor mode is a
+  hub-side setting applied per publish (`access_mode`), not a local column.
 - **Per-artifact subdomain / origin isolation.** Mode A is same-origin `/p/...`; the
   opaque-origin protection is the CSP `sandbox` directive, not a separate host. A Mode B
   link is on the hub's own origin, which is the hub's concern, not configured here.
@@ -453,6 +494,10 @@ Verified absences in this tree (do not describe these as shipped):
     `Authorization` header and is never logged.
 13. The hub upload runs after the local publish and never rolls it back; a 502 means
     "local snapshot exists, hub copy does not".
+14. `SetArtifactAccess` runs after `EnsureArtifact` and before any version publish, and
+    invites run after the version is live; a per-email invite failure never undoes the
+    publish. Mode A access stays capability tokens + allowlist — never silently accept a
+    mode it cannot apply.
 
 ## Tests that pin this behaviour
 
@@ -479,8 +524,10 @@ Mode B:
   `TestHubClientPublishFlow` (bearer on every request, create body
   `{id,name,token}`, dedupe skips the PUT for an existing blob, the presigned PUT
   carries the bytes, the version payload, and the `PublicURL` shape),
-  `TestHubClientSurfacesHubError` (a 502 becomes an error naming the status), and
-  `TestNewHubPublicToken` (32-byte base64url, two calls differ).
+  `TestHubClientSurfacesHubError` (a 502 becomes an error naming the status),
+  `TestNewHubPublicToken` (32-byte base64url, two calls differ), and
+  `TestHubClientSetArtifactAccess`/`TestHubClientAddArtifactInvite` (with/without
+  password; invite success and error).
 - `internal/server/artifact_hub_test.go` pins the **server-level** hand-off against a
   local `httptest` hub stub — `TestPublishArtifactToHubReusesTokenOnRepublish` (first
   publish generates and persists `hub_token`; the re-publish reuses the same token and
@@ -490,10 +537,16 @@ Mode B:
   connected"), `TestHandlePublishHubSuccessReturnsURL` (full `HandlePublish` with
   `hosting_mode=hub` returns 200 and a `hub_url` containing `/p/art_test/`), and
   `TestHandlePublishHubFailureReturns502` (full `HandlePublish` against a failing hub
-  returns **502** and no version is accepted).
+  returns **502** and no version is accepted). Access: `TestParseArtifactAccess`,
+  `TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors` (access applied before
+  publish; an invite failure is collected), `TestHandlePublishSendsAccessFieldsToHub`,
+  and `TestHandlePublishRejectsAccessFieldsForLocalArtifact` (the 400).
 - `TestStoreHubToken` (`internal/artifacts/store_test.go:188`) pins `hub_token` end to
   end: empty before the first publish, set/get round-trip, idempotent `Migrate` after
   the additive column, and `ErrNotFound` for an unknown id.
+- Web: `web/src/api/artifacts.publish.test.ts` pins the request-body mapping (access
+  fields never sent as `mode`), and `ArtifactPublishDialog.test.tsx` pins the select,
+  password floor and invite parsing.
 
 ## Related
 
