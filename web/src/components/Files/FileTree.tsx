@@ -48,6 +48,7 @@ import {
   RefreshCw,
   Scissors,
   Search,
+  Terminal,
   Trash2,
   Unlock,
   X,
@@ -118,6 +119,8 @@ interface FileMenuActions {
   copyPath: (p: string) => void;
   /** Reveal a path in the OS-native file manager (server host). */
   reveal: (p: string) => void;
+  /** Open a terminal rooted at this path. */
+  startTerminalHere?: (p: string) => void;
   /** Human name of the server OS's file manager ("Finder"/"Explorer"/…),
    *  used to label the reveal menu item. */
   fileManager: string;
@@ -154,6 +157,7 @@ interface FileTreeProps {
    *  work to the remote host (same ?host= contract as the terminal). */
   projectHost?: string;
   /** Paths currently included in the chat/LLM context (opened editor tabs with includeInContext). Shown as a subtle indicator, separate from the bulk-selection checkbox. */
+  onStartTerminalHere?: (path: string) => void;
   includedPaths?: string[];
   /** Stable host/project/tab key used by the shared tab loading store. */
   loadingKey?: string;
@@ -800,6 +804,11 @@ function TreeNode({
       <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
         <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
       </ContextMenuItem>
+      {isDir && menu.startTerminalHere && (
+        <ContextMenuItem onSelect={() => menu.startTerminalHere?.(requestPath)}>
+          <Terminal className="w-3.5 h-3.5 mr-2" /> Start terminal here
+        </ContextMenuItem>
+      )}
       {menu.canReveal && (
         <ContextMenuItem onSelect={() => menu.reveal(requestPath)}>
           <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}
@@ -1035,6 +1044,7 @@ export default function FileTree({
   projectPath,
   projectHost,
   includedPaths,
+  onStartTerminalHere,
   loadingKey,
   onLoadingEvent,
   revealRequest = null,
@@ -2022,6 +2032,7 @@ export default function FileTree({
     },
     fileManager: fileManagerLabel(serverPlatform),
     canReveal: !projectHost,
+    startTerminalHere: (p) => onStartTerminalHere?.(p),
     copyPath: async (p) => {
       try {
         if (navigator.clipboard?.writeText) {
@@ -2868,6 +2879,11 @@ export default function FileTree({
                                           <ContextMenuItem onSelect={() => menu.copyPath(requestPath)}>
                                             <Link2 className="w-3.5 h-3.5 mr-2" /> Copy path
                                           </ContextMenuItem>
+                                          {isDir && menu.startTerminalHere && (
+                                            <ContextMenuItem onSelect={() => menu.startTerminalHere?.(requestPath)}>
+                                              <Terminal className="w-3.5 h-3.5 mr-2" /> Start terminal here
+                                            </ContextMenuItem>
+                                          )}
                                           {menu.canReveal && (
                                             <ContextMenuItem onSelect={() => menu.reveal(requestPath)}>
                                               <FolderSearch className="w-3.5 h-3.5 mr-2" /> {revealMenuLabel(isDir, menu.fileManager)}

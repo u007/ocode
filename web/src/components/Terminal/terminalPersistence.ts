@@ -24,6 +24,7 @@ export interface PersistedTerminal {
   title: string;
   renamed?: boolean;
   oscTitle?: string;
+  cwd?: string;
 }
 
 interface PersistedSessionTerminals {

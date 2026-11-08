@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -156,6 +157,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// from, or mistaken for, a same-path local project.
 	requestedPath := r.URL.Query().Get("project_path")
 	host := r.URL.Query().Get("host")
+	requestedCwd := r.URL.Query().Get("cwd")
 	// terminal_id (the frontend's TerminalPanel `id`) is the reattach key: a
 	// reload or socket drop detaches the shell, and the next socket carrying
 	// the same id resumes it. It also lets the terminal-processes emitter
@@ -193,7 +195,22 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		if terminalID != "" {
 			muxName = remote.TerminalMuxName(host, requestedPath, terminalID)
 		}
-		cmd = remote.ShellCommand(target, requestedPath, muxName)
+		remoteShellPath := requestedPath
+		if requestedCwd != "" {
+			cleanCwd := filepath.Clean(requestedCwd)
+			if cleanCwd != requestedCwd || strings.Contains(cleanCwd, "..") {
+				writeError(w, http.StatusBadRequest, "invalid cwd")
+				return
+			}
+			if cleanCwd != requestedPath {
+				if !(len(cleanCwd) > len(requestedPath) && cleanCwd[:len(requestedPath)] == requestedPath && (cleanCwd[len(requestedPath)] == '/' || cleanCwd[len(requestedPath)] == '\\')) {
+					writeError(w, http.StatusForbidden, "cwd is not within the registered project root")
+					return
+				}
+			}
+			remoteShellPath = cleanCwd
+		}
+		cmd = remote.ShellCommand(target, remoteShellPath, muxName)
 		if cmd == nil {
 			log.Printf("terminal: rejected remote %s:%s: empty host/path", host, requestedPath)
 			writeError(w, http.StatusForbidden, "host/project_path is not a remote project registered with this server")
@@ -262,6 +279,49 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		// `fork/exec <shell>: no such file or directory`.
 		cmd = terminalShellCommand(config.ResolveTerminalShell(shellOverride))
 		cmd.Dir = workDir
+		if requestedCwd != "" {
+			// A relative cwd is relative to the session's project root, never to
+			// the process cwd: filepath.Abs would resolve it via os.Getwd, and a
+			// desktop app launched from Finder runs with cwd "/".
+			cwdPath := requestedCwd
+			if !filepath.IsAbs(cwdPath) {
+				if !filepath.IsAbs(project) {
+					writeError(w, http.StatusBadRequest, "invalid cwd")
+					return
+				}
+				cwdPath = filepath.Join(project, cwdPath)
+			}
+			absCwd := filepath.Clean(cwdPath)
+			info, err := os.Stat(absCwd)
+			if err != nil || !info.IsDir() {
+				writeError(w, http.StatusBadRequest, "cwd is not an existing directory")
+				return
+			}
+			resolvedCwd, err := filepath.EvalSymlinks(absCwd)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid cwd")
+				return
+			}
+			allowed := false
+			for _, root := range h.allowedProjectRoots() {
+				rc := filepath.Clean(root)
+				if r, err := filepath.EvalSymlinks(rc); err == nil {
+					rc = r
+				}
+				if a, err := filepath.Abs(rc); err == nil {
+					rc = a
+				}
+				if resolvedCwd == rc || strings.HasPrefix(resolvedCwd, rc+string(filepath.Separator)) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				writeError(w, http.StatusForbidden, "cwd is not within a registered project root")
+				return
+			}
+			cmd.Dir = resolvedCwd
+		}
 	}
 
 	historyOffset, hasHistoryOffset, err := terminalHistoryCursor(r)

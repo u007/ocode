@@ -8,7 +8,7 @@ tags:
   - project
   - remote
   - terminal
-timestamp: 2026-10-18T00:41:42Z
+timestamp: 2026-11-08T13:00:00Z
 ---
 # Web/Desktop Server Project Scoping
 
@@ -45,6 +45,9 @@ the working directory of a session's work. The rules:
   trivially when the working dir is `/`). Always resolve against `h.workDir`
   (falling back to `os.Getwd()` only if `h.workDir` is itself empty, which in
   practice it never is once `NewHandler`/`SetWorkDir` have run).
+  The same applies to a local terminal's relative `cwd` query parameter: it is joined onto the
+  project root (`internal/server/handler_terminal.go:282-292`), never passed to
+  `filepath.Abs`, which would resolve it through `os.Getwd`.
 - The TUI itself is unaffected by any of this: it drives `internal/agent`
   directly with `m.workDir` and only touches `internal/server` for RC bridge
   types.

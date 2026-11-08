@@ -131,6 +131,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
               keybinds={ghostty?.keybinds}
               projectPath={projectPath}
               host={host}
+              cwd={t.cwd}
             />
           </div>
         ))}

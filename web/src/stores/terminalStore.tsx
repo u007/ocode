@@ -20,6 +20,9 @@ export interface TerminalInstance {
   /** Last title the running program set via OSC 0/2 (e.g. claude code or the
    *  ocode TUI). Shown instead of `title` unless the tab was renamed. */
   oscTitle?: string;
+  /** Working directory the shell should start in (e.g. a folder chosen from
+   *  the file tree). When absent the project root is used. */
+  cwd?: string;
 }
 
 /** Max length kept for an OSC-set title so a runaway program can't bloat the
@@ -133,9 +136,9 @@ function removeTerminalLocally(
   return true;
 }
 
-function newTerminal(): TerminalInstance {
+function newTerminal(cwd?: string): TerminalInstance {
   const n = nextTerminalSeq++;
-  return { id: `term-${n}-${Date.now()}`, title: `Terminal ${n}` };
+  return { id: `term-${n}-${Date.now()}`, title: `Terminal ${n}`, ...(cwd ? { cwd } : {}) };
 }
 
 /** Keeps the module-level title counter ahead of any restored terminal
@@ -291,7 +294,7 @@ interface TerminalContextType {
   activate: (projectPath: string, host?: string) => void;
   /** Ensures the project is live (seeding from disk first if it wasn't yet
    *  live), then appends and activates one new terminal. */
-  openTerminal: (projectPath: string, host?: string) => void;
+  openTerminal: (projectPath: string, host?: string, cwd?: string) => void;
   /** Closes the given terminal for a project. Returns `null` (and is a no-op)
    *  when that terminal is not currently open in this window's live state, so a
    *  repeated close of an already-removed terminal does not fall through;
@@ -368,11 +371,11 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   );
 
   const openTerminal = useCallback(
-    (projectPath: string, host?: string) => {
+    (projectPath: string, host?: string, cwd?: string) => {
       const cur = store.state.byProject[projectTerminalsKey(projectPath, host)];
       const baseTerminals = cur?.live ? cur.terminals : loadProjectTerminals(projectPath, host)?.terminals ?? [];
       bumpSeqPast(baseTerminals.map((t) => t.title));
-      const term = newTerminal();
+      const term = newTerminal(cwd);
       dispatch({
         type: "SET_PROJECT_TERMINALS",
         projectPath,
@@ -545,14 +548,17 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         cur.activeId && (cur.activeId === PROCESSES_TAB_ID || incoming.some((t) => t.id === cur.activeId))
           ? cur.activeId
           : incoming[incoming.length - 1]?.id ?? "";
+      const byId = new Map(cur.terminals.map((t) => [t.id, t.cwd]));
+      const withCwd = incoming.map((t) => ({ ...t, ...(byId.get(t.id) ? { cwd: byId.get(t.id) } : {}) }));
       bumpSeqPast(incoming.map((t) => t.title));
       dispatch({
         type: "SET_PROJECT_TERMINALS",
         projectPath: cur.path,
         host: cur.host,
-        terminals: incoming,
+        terminals: withCwd,
         activeId,
       });
+
     },
     [store, dispatch],
   );

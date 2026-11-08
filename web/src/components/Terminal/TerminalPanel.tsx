@@ -74,13 +74,14 @@ import { useTerminalVoice, voiceUnavailableMessage } from "./useTerminalVoice";
 export function buildTerminalWsConnection(opts: {
   token: string;
   projectPath: string | undefined;
+  cwd?: string;
   /** Remote project host (`[user@]host` or `wsl:<distro>`); undefined for local. */
   host?: string;
   terminalId: string;
   isRemote: boolean;
   historyOffset?: number;
 }): { url: string; protocols: string[] | undefined } {
-  const { token, projectPath, host, terminalId, isRemote, historyOffset } = opts;
+  const { token, projectPath, cwd, host, terminalId, isRemote, historyOffset } = opts;
   const params = new URLSearchParams();
   let protocols: string[] | undefined;
   if (token) {
@@ -95,6 +96,7 @@ export function buildTerminalWsConnection(opts: {
   // local proxy uses to register the project on the host for a remote socket
   // (a WebSocket handshake cannot set the X-Ocode-Project header).
   if (projectPath) params.set("project_path", projectPath);
+  if (cwd) params.set("cwd", cwd);
   params.set("terminal_id", terminalId);
   if (historyOffset !== undefined) params.set("history_offset", String(historyOffset));
   const query = params.toString();
@@ -379,6 +381,7 @@ export default function TerminalPanel({
   keybinds,
   projectPath,
   host,
+  cwd,
 }: {
   id: string;
   active: boolean;
@@ -397,6 +400,7 @@ export default function TerminalPanel({
   keybinds?: GhosttyKeybind[];
   projectPath: string;
   host?: string;
+  cwd?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // The element ghostty-web opens into. It must be a DEDICATED inner div, never
@@ -1624,6 +1628,7 @@ export default function TerminalPanel({
       const { url, protocols } = buildTerminalWsConnection({
         token: authToken(),
         projectPath,
+        cwd,
         host,
         terminalId: id,
         isRemote: isRemoteSession(),
