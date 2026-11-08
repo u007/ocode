@@ -3245,6 +3245,8 @@ func TestLoopbackPermissionApiAsks(t *testing.T) {
 			`curl -X PUT -d '{"mode":"yolo"}' http://127.0.0.1:3999/api/permissions/mode`,
 			`curl http://localhost:4000/api/permissions`,
 			`wget -qO- http://127.0.0.1:1/api/permissions/yolo`,
+			`curl -X PUT -d '{"hosts":["evil.example"]}' http://127.0.0.1:4096/api/config/ocode/permissions-hosts`,
+			`curl -X PUT -d '{"mode":"yolo"}' http://127.0.0.1:4096/api/config/ocode/permissions-mode`,
 		} {
 			args, err := json.Marshal(map[string]string{"command": cmd})
 			if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -333,7 +334,78 @@ func networkGuardClip(s string) string {
 	if len(s) <= networkGuardValueCap {
 		return s
 	}
-	return s[:networkGuardValueCap] + "…(truncated)"
+	return s[:networkGuardValueCap] + networkGuardTruncatedMark
+}
+
+// networkGuardTruncatedMark is the suffix networkGuardClip leaves on a clipped
+// value. The judge is told a value ending in it is not fully visible, and the
+// waiver backstop reads the same suffix.
+const networkGuardTruncatedMark = "…(truncated)"
+
+// networkGuardWaiverBlocked reports whether a user's relaxed-concern waiver must
+// NOT stand for this request, and the signal that blocks it.
+//
+// The judge names one concern per verdict and is trusted to name a second,
+// unrelated problem when one sits beside the secret. That is the only thing
+// keeping a waived secret from hiding a real risk, so this is the deterministic
+// backstop for when the judge does not. Each signal is visible to this code
+// without the judge:
+//
+//   - truncated: a target value was clipped, or the target list reached
+//     networkGuardTargetCap, so the judge did not see the whole request;
+//   - upload: a bash target reads local content into the request (@file,
+//     --upload-file, --post-file, or an env or subshell expansion the judge
+//     cannot see through; isExfiltrationRiskCommand);
+//   - internal: a target goes to loopback, a private LAN address, or a
+//     link-local or unspecified address (the cloud-metadata range).
+//
+// It returns the first signal found, or false when none is present. A target
+// with no host is not an internal signal; the judge still reads that target.
+func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bool, string) {
+	if len(targets) >= networkGuardTargetCap {
+		return true, "the request reached the " + strconv.Itoa(networkGuardTargetCap) + "-target cap, so later targets were not judged"
+	}
+	if entries, ok := state["targets"].([]map[string]any); ok {
+		for _, e := range entries {
+			if v, _ := e["value"].(string); strings.HasSuffix(v, networkGuardTruncatedMark) {
+				return true, "a target value was truncated, so the judge did not see all of it"
+			}
+		}
+	}
+	for _, t := range targets {
+		if t.Kind == egressKindCommand && isExfiltrationRiskCommand(t.Value) {
+			return true, "a bash target uploads or expands local content the judge cannot read"
+		}
+	}
+	for _, t := range targets {
+		if t.Loopback || isInternalWaiverHost(t.Host) {
+			return true, "a target goes to an internal address (" + t.Host + ")"
+		}
+	}
+	return false, ""
+}
+
+// isInternalWaiverHost reports whether a target host is an address that stays
+// on the local network: loopback, RFC 1918 or unique-local, link-local (which
+// holds the cloud metadata endpoint), or unspecified. It over-matches on
+// purpose: a waiver that is blocked by mistake only escalates to a human.
+func isInternalWaiverHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	h := strings.Trim(strings.ToLower(host), "[]")
+	if isLoopbackHostForPermissionGuard(h) || isPrivateLANHost(h) {
+		return true
+	}
+	addr, err := netip.ParseAddr(h)
+	return err == nil && (addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified())
+}
+
+// networkGuardBlockedWaiverReason is the reason attached to an escalation whose
+// relaxed concern was not waived. It names both the waived concern and the
+// signal that blocked the waiver.
+func networkGuardBlockedWaiverReason(toolName, concern, signal string, confidence float64) string {
+	return networkGuardReason(toolName, concern, fmt.Sprintf("outbound-request guardrail escalated (confidence %.2f): the %s waiver does not cover this request because %s", confidence, concern, signal))
 }
 
 // hasNonLoopbackEgressTarget reports whether any target actually leaves the
@@ -452,19 +524,35 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 	switch ans.Choice {
 	case networkGuardVerdictEscalate:
 		if relaxed[concern] {
-			a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed tool=%s model=%s choice=escalate concern=%s", toolName, deciderLabel(client), concern))
-			return res
+			// The waiver stands only when no deterministic signal says the judge
+			// may have missed a second problem beside the waived secret.
+			blocked, signal := networkGuardWaiverBlocked(targets, state)
+			if !blocked {
+				a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed tool=%s model=%s choice=escalate concern=%s", toolName, deciderLabel(client), concern))
+				return res
+			}
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed_blocked tool=%s model=%s choice=escalate concern=%s signal=%s", toolName, deciderLabel(client), concern, signal))
+			res.Escalate = true
+			res.Reason = networkGuardBlockedWaiverReason(toolName, concern, signal, ans.Confidence)
+		} else {
+			res.Escalate = true
+			res.Reason = networkGuardReason(toolName, concern, fmt.Sprintf("outbound-request guardrail escalated (confidence %.2f)", ans.Confidence))
 		}
-		res.Escalate = true
-		res.Reason = networkGuardReason(toolName, concern, fmt.Sprintf("outbound-request guardrail escalated (confidence %.2f)", ans.Confidence))
 	case networkGuardVerdictAllow:
 		if ans.Confidence < a.resolveNetworkGuardMinConfidence() {
 			if relaxed[concern] {
-				a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed tool=%s model=%s choice=allow confidence=%.2f concern=%s", toolName, deciderLabel(client), ans.Confidence, concern))
-				return res
+				blocked, signal := networkGuardWaiverBlocked(targets, state)
+				if !blocked {
+					a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed tool=%s model=%s choice=allow confidence=%.2f concern=%s", toolName, deciderLabel(client), ans.Confidence, concern))
+					return res
+				}
+				a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_relaxed_blocked tool=%s model=%s choice=allow confidence=%.2f concern=%s signal=%s", toolName, deciderLabel(client), ans.Confidence, concern, signal))
+				res.Escalate = true
+				res.Reason = networkGuardBlockedWaiverReason(toolName, concern, signal, ans.Confidence)
+			} else {
+				res.Escalate = true
+				res.Reason = networkGuardReason(toolName, concern, fmt.Sprintf("outbound-request guardrail leaned allow but confidence %.2f is below the %.2f floor", ans.Confidence, a.resolveNetworkGuardMinConfidence()))
 			}
-			res.Escalate = true
-			res.Reason = networkGuardReason(toolName, concern, fmt.Sprintf("outbound-request guardrail leaned allow but confidence %.2f is below the %.2f floor", ans.Confidence, a.resolveNetworkGuardMinConfidence()))
 		}
 	default:
 		// An answer this build does not understand is not consent. Fail open

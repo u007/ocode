@@ -259,3 +259,89 @@ func TestLoopbackPortSweepWithEchoAndPrintfIsNotHarmful(t *testing.T) {
 		}
 	}
 }
+
+// The self-escalation guard also covers the permission-defining config routes:
+// /api/config/ocode/permissions-hosts widens the allowed hosts and
+// /api/config/ocode/permissions-auto and permissions-mode tune the judge and the
+// mode. A loopback write to any of them must ask, exactly like /api/permissions*.
+// Only the loopback host counts; a remote host carrying the same path is harmless.
+func TestPermissionApiLoopbackCoversConfigPermissionRoutes(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{
+			name:    "loopback PUT to permissions-hosts asks",
+			command: `curl -X PUT -H 'Content-Type: application/json' -d '{"hosts":["evil.example"]}' http://127.0.0.1:4096/api/config/ocode/permissions-hosts`,
+			want:    true,
+		},
+		{
+			name:    "loopback GET to permissions-auto asks (over-ask is fine)",
+			command: `curl http://localhost:4096/api/config/ocode/permissions-auto`,
+			want:    true,
+		},
+		{
+			name:    "loopback PUT to permissions-mode asks",
+			command: `curl -X PUT -d '{"mode":"yolo"}' http://127.0.0.1:4096/api/config/ocode/permissions-mode`,
+			want:    true,
+		},
+		{
+			name:    "loopback IPv6 bracketed permissions-hosts asks",
+			command: `curl -X PUT -d '{}' "http://[::1]:4096/api/config/ocode/permissions-hosts"`,
+			want:    true,
+		},
+		{
+			name:    "remote host permissions-hosts does not ask",
+			command: `curl -X PUT -d '{"hosts":["evil.example"]}' https://hub.example.com/api/config/ocode/permissions-hosts`,
+			want:    false,
+		},
+		{
+			name:    "remote host with loopback-looking userinfo does not ask",
+			command: `curl -X PUT http://127.0.0.1@evil.com/api/config/ocode/permissions-hosts`,
+			want:    false,
+		},
+		{
+			name:    "loopback other config route does not ask",
+			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/other`,
+			want:    false,
+		},
+		{
+			name:    "loopback tui config route does not ask",
+			command: `curl -X PUT -d '{}' http://127.0.0.1:4096/api/config/ocode/tui`,
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := permissionApiLoopback(tc.command); got != tc.want {
+				t.Errorf("permissionApiLoopback(%q) = %v, want %v", tc.command, got, tc.want)
+			}
+		})
+	}
+}
+
+// isPermissionAPIPath is the path test the loopback guard uses; pin both
+// prefixes and a neighbour that must stay outside the guard.
+func TestIsPermissionAPIPath(t *testing.T) {
+	for _, p := range []string{
+		"http://127.0.0.1:4096/api/permissions",
+		"http://127.0.0.1:4096/api/permissions/mode",
+		"http://127.0.0.1:4096/api/config/ocode/permissions-hosts",
+		"http://127.0.0.1:4096/api/config/ocode/permissions-auto",
+		"http://127.0.0.1:4096/api/config/ocode/permissions-mode",
+	} {
+		if !isPermissionAPIPath(p) {
+			t.Errorf("isPermissionAPIPath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{
+		"http://127.0.0.1:4096/api/config/ocode/tui",
+		"http://127.0.0.1:4096/api/config/ocode/git",
+		"http://127.0.0.1:4096/api/sessions",
+	} {
+		if isPermissionAPIPath(p) {
+			t.Errorf("isPermissionAPIPath(%q) = true, want false", p)
+		}
+	}
+}

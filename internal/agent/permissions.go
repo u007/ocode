@@ -3981,8 +3981,9 @@ func sandboxSensitivePathRelaxed(resolved string, write, secretsRelaxed bool) bo
 // returns true when the command WRITES to a permission-defining target
 // (project/.ocode/settings.json, .claude/settings.json, ocode global config
 // permissions, allowlist/config files feeding extra_allowed_paths / allow-
-// deny rules) or makes a loopback request to the local /api/permissions* API
-// (which would flip the mode/rules directly).
+// deny rules) or makes a loopback request to the local /api/permissions* API or
+// the /api/config/ocode/permissions-* config routes (which would flip the
+// mode, rules or allowed hosts directly).
 //
 // Static only: a write hidden inside an interpreter (`python -c`) is a
 // documented residual (Part 04) — the OS write-wall can't stop it either since
@@ -4061,8 +4062,21 @@ func isPermissionConfigTarget(resolved string) bool {
 	return false
 }
 
+// isPermissionAPIPath reports whether a URL token names a permission-defining
+// route on the local server: the /api/permissions* family, or the
+// /api/config/ocode/permissions-* config routes (permissions-hosts,
+// permissions-auto, permissions-mode), which write the same allowlists and mode.
+// It matches the path only; the caller still proves the host is loopback. The
+// config prefix is broader than the three known routes on purpose: an over-ask
+// on a read of permissions-concerns costs one prompt, an under-ask lets the
+// agent widen its own allowlist.
+func isPermissionAPIPath(t string) bool {
+	return strings.Contains(t, "/api/permissions") || strings.Contains(t, "/api/config/ocode/permissions")
+}
+
 // permissionApiLoopback reports whether a network command targets the local
-// /api/permissions* API — the agent could flip its own mode or rules here.
+// /api/permissions* API or the /api/config/ocode/permissions-* config routes —
+// the agent could flip its own mode, rules or allowed hosts here.
 func permissionApiLoopback(command string) bool {
 	fields := splitShellFields(command)
 	if len(fields) < 2 {
@@ -4075,7 +4089,7 @@ func permissionApiLoopback(command string) bool {
 	}
 	for _, tok := range fields[1:] {
 		t := strings.Trim(tok, `'"`)
-		if !strings.Contains(t, "/api/permissions") {
+		if !isPermissionAPIPath(t) {
 			continue
 		}
 		// Loopback host requirement: the URL's host must be localhost/127.x.
