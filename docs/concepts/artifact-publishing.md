@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T05:36:01Z
+timestamp: 2026-11-08T05:51:06Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -468,7 +468,7 @@ cannot start one (`TestArtifactTailscaleRoutesRequireAuth`).
 
 ## Environment variables (verified status)
 
-`.env.example:13-22` declares five `OCODE_ARTIFACT_*` vars, and **three are wired**:
+`.env.example:15-24` declares five `OCODE_ARTIFACT_*` vars, and **three are wired**:
 
 | Var | Status |
 |---|---|
@@ -476,7 +476,7 @@ cannot start one (`TestArtifactTailscaleRoutesRequireAuth`).
 | `OCODE_ARTIFACT_INVITE_TTL_DAYS` | Wired. Default 7 days; invalid or `<=0` falls back (`store.go:38-48`). |
 | `OCODE_ARTIFACT_LOG_RETENTION_DAYS` | Wired. Read by `artifactLogRetention()` (`handler_artifacts.go:1002-1016`) and applied by the store's throttled prune. Unset/invalid/negative → 30 days; `0` → keep forever. |
 | `OCODE_ARTIFACT_ORIGIN` | **Declared only.** No artifact-origin plumbing. |
-| `OCODE_ARTIFACT_HUB_URL` | **Declared only.** The hub client ignores it: the base URL is the resolved `sync_url` (`h.syncClient().BaseURL`), and `.env.example` says so ("defaults to sync_url; NOT read yet"). |
+| `OCODE_ARTIFACT_HUB_URL` | **Declared only.** The hub client ignores it: the base URL is the resolved `sync_url` (`h.syncClient().BaseURL`), and `.env.example` marks it reserved ("hub base URL override; NOT read yet — Mode B uses sync_url"). |
 
 Do not set the last two expecting an effect. Note that `.env.example`'s header comment
 still introduces the whole block as "Mode B (hub-hosted) is not implemented yet"; that
