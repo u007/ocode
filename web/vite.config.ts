@@ -1,17 +1,38 @@
 import path from "path";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  // Relative asset URLs so the bundle works when /rc is served behind a
-  // tailscale path prefix that is stripped before reaching the local server.
-  // index.html injects a matching <base href> at runtime (see web/index.html).
   base: "./",
   plugins: [
     react(),
-    // web/embed.go's //go:embed all:dist needs this committed placeholder, and
-    // emptyOutDir deletes it on every build. Re-create it after each build.
+    {
+      name: "sw-precache-manifest",
+      apply: "build",
+      closeBundle() {
+        const dist = path.resolve(__dirname, "dist");
+        const swPath = path.resolve(dist, "sw.js");
+        if (!existsSync(swPath)) return;
+        const assets = [];
+        function walk(dir) {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else {
+              const rel = "/" + path.relative(dist, full).replace(/\\/g, "/");
+              if (rel === "/index.html" || rel.startsWith("/assets/")) assets.push(rel);
+            }
+          }
+        }
+        walk(dist);
+        if (!assets.includes("/index.html")) assets.unshift("/index.html");
+        const manifest = JSON.stringify(assets);
+        const src = readFileSync(swPath, "utf8");
+        const out = src.replace("self.__PRECACHE_MANIFEST__ || ['/index.html']", manifest);
+        writeFileSync(swPath, out);
+      },
+    },
     {
       name: "keep-embed-placeholder",
       apply: "build",
