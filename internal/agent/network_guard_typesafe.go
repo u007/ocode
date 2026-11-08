@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -155,6 +156,59 @@ type egressTarget struct {
 	Host string `json:"host"`
 	// Loopback is true only when the target provably stays on this machine.
 	Loopback bool `json:"loopback"`
+	// Env holds the environment assignments on the command that redirect its
+	// connection or point it at a config file (redirectEnvNames). It is not part
+	// of the judge state, so it is left out of the JSON form.
+	Env []string `json:"-"`
+}
+
+// redirectEnvNames are the environment assignments that redirect a network
+// client's connection through a proxy, or point it at a config file: the proxy
+// variables of curl and wget, $CURL_HOME and $WGETRC, and $XDG_CONFIG_HOME and
+// $HOME, which curl and wget read their config from. NO_PROXY does not redirect.
+var redirectEnvNames = []string{
+	"http_proxy=", "https_proxy=", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "all_proxy=",
+	"CURL_HOME=", "WGETRC=", "XDG_CONFIG_HOME=", "HOME=",
+}
+
+// waiverSourceMarker is the Env entry for a source, dot or eval command earlier
+// on the line. It is not an assignment, so it is kept out of redirectEnvNames.
+const waiverSourceMarker = "source"
+
+// redirectEnvAssignments returns the words that assign one of redirectEnvNames.
+func redirectEnvAssignments(words []string) []string {
+	var out []string
+	for _, w := range words {
+		if t := strings.Trim(w, `"'`); isRedirectEnvAssignment(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// isRedirectEnvAssignment reports whether a word assigns one of redirectEnvNames.
+func isRedirectEnvAssignment(t string) bool {
+	for _, name := range redirectEnvNames {
+		if strings.HasPrefix(t, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// shellDeclaresVars reports whether a word is a shell builtin whose assignment
+// arguments persist for the rest of the shell, not just for one command.
+func shellDeclaresVars(word string) bool {
+	switch word {
+	case "export", "declare", "typeset", "readonly", "set":
+		return true
+	}
+	return false
+}
+
+// isSeparatorWord reports whether a word is a shell command separator.
+func isSeparatorWord(t string) bool {
+	return t == "&&" || t == "||" || t == "|" || t == ";"
 }
 
 // webSearchEndpoint is the fixed host WebSearchTool queries. The destination is
@@ -277,15 +331,31 @@ func bashEgressTargets(command string) []egressTarget {
 	}
 	// An unparseable line keeps the single-line split, so it does not lose the coverage it had before.
 	var fragments [][]string
+	var fragEnv [][]string
+	// sticky holds what persists for the rest of the line: standalone and
+	// declared redirecting assignments, and a source or dot command, which can
+	// set anything. A prefix assignment applies only to its own command.
+	var sticky []string
 	if parsed, err := parseShellCommandLine(command); err == nil {
 		for _, cmd := range parsed {
+			own := redirectEnvAssignments(append(append([]string{}, cmd.envVars...), cmd.cmdWords...))
+			head := effectiveHead(cmd.cmdWords)
+			if len(cmd.cmdWords) == 0 || shellDeclaresVars(head) {
+				sticky = append(sticky, own...)
+			}
+			if isSourcingWord(head) || stateSetterSticky(cmd.cmdWords) {
+				sticky = append(sticky, waiverSourceMarker)
+			}
 			fragments = append(fragments, cmd.cmdWords)
+			fragEnv = append(fragEnv, append(append([]string{}, sticky...), own...))
 		}
 	} else {
-		fragments = [][]string{splitShellFields(command)}
+		fields := splitShellFields(command)
+		fragments = [][]string{fields}
+		fragEnv = [][]string{redirectEnvAssignments(fields)}
 	}
 	var out []egressTarget
-	for _, fragment := range fragments {
+	for fi, fragment := range fragments {
 		for _, words := range effectiveCommandWords(fragment) {
 			if len(words) == 0 {
 				continue
@@ -300,6 +370,7 @@ func bashEgressTargets(command string) []egressTarget {
 				Kind:  egressKindCommand,
 				Value: line,
 				Host:  host,
+				Env:   fragEnv[fi],
 				// The shared proofs, not a host comparison. Loopback here means "local
 				// network", not strictly this machine: a LAN host additionally needs a
 				// plain request, but a literal query or path on it can still carry data.
@@ -379,8 +450,18 @@ func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bo
 		}
 		// A connection redirected by a proxy, a resolver override or a socket
 		// does not go where the URL says, whatever host the URL names.
+		if len(t.Env) > 0 {
+			if t.Env[0] == waiverSourceMarker {
+				return true, "a bash target sources, evaluates or assigns a variable the connection may read (a proxy or a config file)"
+			}
+			name, _, _ := strings.Cut(t.Env[0], "=")
+			return true, "a bash target sets " + name + ", which redirects its connection or reads a config file, so the destination is not what the command line says"
+		}
 		if flag := waiverDestinationFlag(t.Value); flag != "" {
 			return true, "a bash target redirects its connection with " + flag + ", so the destination is not what the URL says"
+		}
+		if flag := configSourceFlag(splitShellFields(t.Value)); flag != "" {
+			return true, "a bash target reads its options or URLs from a file with " + flag + ", so the destination is not what the command line says"
 		}
 	}
 	for _, t := range targets {
@@ -428,7 +509,7 @@ func isInternalWaiverHost(host string) bool {
 	if h == "" {
 		return false
 	}
-	if h == "localhost" {
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
 	}
 	addr, ok := parseLooseInetAton(h)
@@ -507,6 +588,74 @@ var (
 	waiverURLPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^"'&,;\s]*`)
 )
 
+// waiverCurlConfigLongFlags and waiverWgetConfigLongFlags are the long options
+// that read options or URLs from a file or another command, per client.
+var waiverCurlConfigLongFlags = map[string]bool{"--config": true}
+var waiverWgetConfigLongFlags = map[string]bool{"--config": true, "--input-file": true, "--execute": true}
+
+// longOptionMatch reports whether a long option token names an entry of table.
+// It matches the full name, or a prefix of at least four characters including
+// the dashes, the way getopt_long accepts an abbreviated option. A prefix is
+// matched against the table, not against the client's full option list, so an
+// abbreviation that is ambiguous in the table still counts: the guards over-ask.
+func longOptionMatch(name string, table map[string]bool) bool {
+	if table[name] {
+		return true
+	}
+	if len(name) < 4 || !strings.HasPrefix(name, "--") {
+		return false
+	}
+	for opt := range table {
+		if strings.HasPrefix(opt, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// configSourceFlag returns the option that makes a network client read its
+// options or its URLs from a file, or from another command: curl -K and
+// --config, and wget -i, --input-file, -e and --execute, in any spelling. It
+// returns "" when there is none. A short option is matched in a bundle before
+// any value-taking letter, the same walk waiverDestinationFlag uses.
+func configSourceFlag(words []string) string {
+	if len(words) == 0 {
+		return ""
+	}
+	client := path.Base(strings.ToLower(words[0]))
+	for _, tok := range words[1:] {
+		t := strings.Trim(tok, `"'<>`)
+		switch {
+		case strings.HasPrefix(t, "--"):
+			name, _, _ := strings.Cut(t, "=")
+			table := waiverCurlConfigLongFlags
+			if client == "wget" {
+				table = waiverWgetConfigLongFlags
+			}
+			if longOptionMatch(name, table) {
+				return name
+			}
+		case strings.HasPrefix(t, "-"):
+			for i := 1; i < len(t); i++ {
+				c := t[i]
+				if client == "curl" && c == 'K' {
+					return "-K"
+				}
+				if client == "wget" && (c == 'i' || c == 'e') {
+					return "-" + string(c)
+				}
+				if client == "curl" && strings.IndexByte(curlValueShortOptions, c) >= 0 {
+					break
+				}
+				if client == "wget" && strings.IndexByte(wgetValueShortOptions, c) >= 0 {
+					break
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // waiverDestinationFlag returns the first option on a bash command line that
 // redirects its connection, in any spelling, or "" when there is none. A long
 // option matches by name, with or without "=value". A short option matches when
@@ -517,7 +666,7 @@ func waiverDestinationFlag(line string) string {
 		switch {
 		case strings.HasPrefix(t, "--"):
 			name, _, _ := strings.Cut(t, "=")
-			if waiverDestinationLongFlags[name] {
+			if longOptionMatch(name, waiverDestinationLongFlags) {
 				return name
 			}
 		case strings.HasPrefix(t, "-"):

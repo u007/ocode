@@ -536,3 +536,82 @@ func TestPermissionApiLoopbackFailsClosedOnGlobsAndExpansions(t *testing.T) {
 		})
 	}
 }
+
+// A connection-redirecting or config-sourcing option can send a remote-looking
+// URL to the local server, so every URL on that segment is judged by its path
+// whatever its host. A proxy alone, with no permission path, does not ask.
+func TestPermissionApiLoopbackRedirectedRoutes(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"connect-to redirect to a permission route asks", `curl --connect-to example.com::127.0.0.1:4096 https://example.com/api/permissions`, true},
+		{"proxy to loopback with a permission route asks", `curl -x http://127.0.0.1:4096 https://x/api/permissions`, true},
+		{"curl config file with a config route asks", `curl -K cfg https://example.com/api/config/model`, true},
+		{"wget execute with a config route asks", `wget -e use_proxy=yes -e http_proxy=http://127.0.0.1:4096 https://x/api/config/model`, true},
+		{"wget config long option with a value asks", `wget --config=w.rc https://example.com/`, true},
+		{"wget abbreviated execute option asks", `wget --exec robots=off https://example.com/`, true},
+		{"env assignment sourcing a config file before curl asks", `HOME=/tmp/h curl https://example.com/`, true},
+		{"env assignment before wget through env wrapper asks", `env WGETRC=w.rc wget https://example.com/`, true},
+		{"assignment in an earlier command does not source for the next", `HOME=/tmp/h true; curl https://example.com/`, false},
+		{"curl max-redirs option does not ask", `curl --max-redirs 3 https://example.com/`, false},
+		{"proxy env assignment before curl to a permission route asks", `env http_proxy=http://127.0.0.1:4096 curl https://example.com/api/permissions`, true},
+		{"sudo-wrapped curl with a config file asks", `sudo -E curl -K cfg https://example.com/`, true},
+		{"env -i clears the environment and does not ask", `env -i curl https://example.com/`, false},
+		{"standalone config assignment persists to the next command, asks", `HOME=/tmp/h; curl https://example.com/`, true},
+		{"exported config assignment persists across &&, asks", `export WGETRC=/tmp/w && wget https://example.com/`, true},
+		{"prefix assignment ends at the separator, does not ask", `HOME=/tmp/h ls; curl https://example.com/`, false},
+		{"two standalone assignments persist to the next command, asks", `HOME=/tmp/h FOO=bar; curl https://example.com/`, true},
+		{"two assignments in the other order persist, asks", `FOO=bar HOME=/tmp/h; curl https://example.com/`, true},
+		{"source before a client asks", `source ./env.sh && curl https://example.com/`, true},
+		{"dot command before a client asks", `. ./env.sh; wget https://example.com/`, true},
+		{"prefix assignments on a command with a word do not persist", `HOME=/tmp/h FOO=bar ls; curl https://example.com/`, false},
+		{"eval earlier on the line asks", `eval "$CFG"; curl https://example.com/`, true},
+		{"command-wrapped source before a client asks", `command source ./env.sh && curl https://example.com/`, true},
+		{"builtin-wrapped dot command before a client asks", `builtin . ./env.sh; wget https://example.com/`, true},
+		{"command -p with a plain client does not ask", `command -p curl https://example.com/`, false},
+		{"read into a redirecting variable asks", `read HOME; curl https://example.com/`, true},
+		{"read into an unrelated variable does not ask", `read -r line; curl https://example.com/`, false},
+		{"printf -v with an attached name into a redirecting variable asks", `printf -vHOME x; curl https://example.com/`, true},
+		{"read -a into a redirecting array name asks", `read -a HOME; curl https://example.com/`, true},
+		{"read clustered -ra into a redirecting array name asks", `read -ra HOME; curl https://example.com/`, true},
+		{"mapfile with a -C callback asks", `mapfile -C cb arr; curl https://example.com/`, true},
+		{"read with a prompt option and an unrelated name does not ask", `read -r -p "x: " line; curl https://example.com/`, false},
+		{"getopts into a redirecting variable asks", `getopts "a:" HOME; curl https://example.com/`, true},
+		{"declare nameref to a redirecting variable asks", `declare -n ref=HOME; curl https://example.com/`, true},
+		{"getopts into an unrelated variable does not ask", `getopts "a:" opt; curl https://example.com/`, false},
+		{"proxy to a remote host with no permission path does not ask", `curl -x http://proxy.corp:3128 https://example.com/`, false},
+		{"wget input file hides the destination, asks", `wget -i urls.txt`, true},
+		{"curl config file hides the destination, asks", `curl -K cfg`, true},
+		{"curl config file asks even beside a visible URL (the file can add its own)", `curl -K cfg https://example.com/`, true},
+		{"wget execute asks even beside a visible URL", `wget -e robots=off https://example.com/`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := permissionApiLoopback(tc.command); got != tc.want {
+				t.Errorf("permissionApiLoopback(%q) = %v, want %v", tc.command, got, tc.want)
+			}
+		})
+	}
+}
+
+// The guard counts the unspecified address, localhost with a trailing dot, and
+// any *.localhost name as loopback, since each reaches the local server.
+func TestPermissionApiLoopbackUnspecifiedAndLocalhostNames(t *testing.T) {
+	asks := []string{
+		`curl http://0.0.0.0:4096/api/permissions`,
+		`curl http://0:4096/api/permissions`,
+		`curl http://[::]:4096/api/config/model`,
+		`curl http://api.localhost:4096/api/permissions`,
+		`curl http://localhost./api/permissions`,
+	}
+	for _, c := range asks {
+		if !permissionApiLoopback(c) {
+			t.Errorf("permissionApiLoopback(%q) = false, want true", c)
+		}
+	}
+	if permissionApiLoopback(`curl http://example.com/api/permissions`) {
+		t.Error("remote host with a permission path asked, want no ask")
+	}
+}

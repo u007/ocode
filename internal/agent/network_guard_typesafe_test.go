@@ -1801,6 +1801,96 @@ func TestNetworkGuardWaiverBlocksFlagValueHosts(t *testing.T) {
 	}
 }
 
+// TestNetworkGuardWaiverBlocksConfigSourcedOptions pins that an option which
+// reads options or URLs from a file, or runs another command, blocks the
+// waiver. A localhost name is internal, and a plain public host is not.
+func TestNetworkGuardWaiverBlocksConfigSourcedOptions(t *testing.T) {
+	for _, line := range []string{
+		"curl -K cfg https://example.com/",
+		"curl --config cfg https://example.com/",
+		"wget -i list https://example.com/",
+		"wget -e use_proxy=yes https://example.com/",
+	} {
+		targets := []egressTarget{{Tool: "bash", Kind: egressKindCommand, Value: line, Host: "example.com"}}
+		if got, signal := networkGuardWaiverBlocked(targets, map[string]any{}); !got {
+			t.Errorf("networkGuardWaiverBlocked(%q) = false, want true (the waiver must not stand)", line)
+		} else if signal == "" {
+			t.Errorf("networkGuardWaiverBlocked(%q) blocked without a reason", line)
+		}
+	}
+	for _, line := range []string{"curl -i https://example.com/", "curl -sS https://example.com/x"} {
+		targets := []egressTarget{{Tool: "bash", Kind: egressKindCommand, Value: line, Host: "example.com"}}
+		if got, signal := networkGuardWaiverBlocked(targets, map[string]any{}); got {
+			t.Errorf("networkGuardWaiverBlocked(%q) = true (%q), want the waiver to stand", line, signal)
+		}
+	}
+	for _, host := range []string{"app.localhost", "api.localhost."} {
+		if !isInternalWaiverHost(host) {
+			t.Errorf("isInternalWaiverHost(%q) = false, want true", host)
+		}
+	}
+	if isInternalWaiverHost("example.com") {
+		t.Error(`isInternalWaiverHost("example.com") = true, want false`)
+	}
+}
+
+// TestNetworkGuardWaiverBlocksRedirectingEnvironment pins that a proxy or
+// config-file assignment on the command blocks the waiver, and that a wrapper
+// which clears the environment does not. The targets come from bashEgressTargets,
+// the production path, so the wrappers and assignments are read as they run.
+func TestNetworkGuardWaiverBlocksRedirectingEnvironment(t *testing.T) {
+	for _, line := range []string{
+		"HTTPS_PROXY=http://10.0.0.5:3128 curl https://example.com/x",
+		"sudo -E curl -K cfg https://example.com/",
+	} {
+		blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{})
+		if !blocked {
+			t.Errorf("networkGuardWaiverBlocked(%q) = false, want true (the waiver must not stand)", line)
+		} else if signal == "" {
+			t.Errorf("networkGuardWaiverBlocked(%q) blocked without a reason", line)
+		}
+	}
+	for _, line := range []string{
+		"http_proxy=http://10.0.0.5:3128; curl https://example.com/",
+		"export WGETRC=/tmp/w && wget https://example.com/",
+		"http_proxy=http://10.0.0.5:3128 FOO=bar; curl https://example.com/",
+		"FOO=bar http_proxy=http://10.0.0.5:3128; curl https://example.com/",
+		"source ./env.sh && curl https://example.com/",
+		". ./env.sh; wget https://example.com/",
+		"eval \"$CFG\"; curl https://example.com/",
+		"command source ./env.sh && curl https://example.com/",
+		"builtin . ./env.sh; wget https://example.com/",
+		"printf -v http_proxy http://10.0.0.5:3128; curl https://example.com/x",
+		"declare -n ref=HOME; curl https://example.com/",
+	} {
+		if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{}); !blocked {
+			t.Errorf("networkGuardWaiverBlocked(%q) = false, want true (a standalone assignment persists)", line)
+		} else if signal == "" {
+			t.Errorf("networkGuardWaiverBlocked(%q) blocked without a reason", line)
+		}
+	}
+	// A read into an unrelated name does not set the environment, so the waiver stands.
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("read -r line; curl https://example.com/"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(read -r line) = true (%q), want the waiver to stand", signal)
+	}
+	// A plain command behind command -p keeps its waiver.
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("command -p curl https://example.com/"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(command -p curl) = true (%q), want the waiver to stand", signal)
+	}
+	// A prefix assignment ends at its own command, so the next command's waiver stands.
+	for _, line := range []string{
+		"HOME=/tmp/h ls; curl https://example.com/",
+		"HOME=/tmp/h FOO=bar ls; curl https://example.com/",
+	} {
+		if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{}); blocked {
+			t.Errorf("networkGuardWaiverBlocked(%q) = true (%q), want the waiver to stand", line, signal)
+		}
+	}
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("env -i curl https://example.com/"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(env -i curl) = true (%q), want the waiver to stand", signal)
+	}
+}
+
 // repeatTargets returns n copies of one target, for the target-cap case.
 func repeatTargets(t egressTarget, n int) []egressTarget {
 	out := make([]egressTarget, n)

@@ -1338,9 +1338,15 @@ func isLocalNetworkHost(host string) bool {
 // netip cannot parse still resolve to loopback, so failing to recognise one would
 // let the agent rewrite its own permission rules un-gated.
 func isLoopbackHostForPermissionGuard(host string) bool {
-	h := strings.Trim(host, "[]")
-	if isLoopbackHost(h) {
+	h := strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	// localhost and every *.localhost name resolve to loopback, and the
+	// unspecified address (0.0.0.0, ::) reaches the local server on most stacks.
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return true
+	}
+	if addr, err := netip.ParseAddr(h); err == nil {
+		addr = addr.Unmap()
+		return addr.IsLoopback() || addr.IsUnspecified()
 	}
 	// Strip userinfo and port before the address test.
 	if at := strings.LastIndex(h, "@"); at >= 0 {
@@ -1350,7 +1356,7 @@ func isLoopbackHostForPermissionGuard(host string) bool {
 		h = h[:colon]
 	}
 	if addr, ok := parseLooseInetAton(h); ok {
-		return addr.IsLoopback()
+		return addr.IsLoopback() || addr.IsUnspecified()
 	}
 	// No prefix fallback: parseLooseInetAton covers every loopback form a
 	// resolver honours, and a prefix test would also match registrable names
@@ -4263,6 +4269,256 @@ func bareExpansionTarget(words []string) bool {
 	return false
 }
 
+// segmentRedirectsURLs reports whether a network command sends its URLs
+// somewhere other than their host, or reads them from a file. Such an option
+// (a proxy, a connect or resolve override, curl -K, wget -i or -e) can route a
+// remote-looking URL to the local server, so every URL on the segment is judged
+// by its path regardless of host. A path that names a permission or config
+// route, or one a glob or expansion could rewrite, asks. A config or input
+// source asks regardless of the visible URLs, because the file it names can add
+// its own URL next to them.
+func segmentRedirectsURLs(words []string) bool {
+	config := configSourceFlag(words) != ""
+	if !config && waiverDestinationFlag(rebuildCommandLine(words)) == "" {
+		return false
+	}
+	for _, w := range words[1:] {
+		t := strings.Trim(w, `'"`)
+		authority, rawPath := splitRawURLToken(t)
+		if !strings.Contains(t, "://") && rawPath == "" {
+			continue
+		}
+		if urlMetacharIn(authority+rawPath) || isPermissionAPIPath(t) {
+			return true
+		}
+	}
+	return config
+}
+
+// configEnvBeforeClient reports whether a redirecting or config-sourcing
+// assignment (redirectEnvNames) reaches a network client, or a source or dot
+// command ran earlier on the line. Each simple command is judged on its own
+// state: a redirecting assignment with a command word after it is a prefix and
+// ends with its command ("HOME=/tmp/h ls; curl" does not ask). A command made of
+// assignments alone, or one whose assignments follow export, declare, typeset,
+// readonly or set, sets a sticky flag that no later separator clears. That
+// covers "HOME=/tmp/h FOO=bar;" and "export WGETRC=w && wget".
+func configEnvBeforeClient(fields []string) bool {
+	sticky := false      // a standalone or declaring assignment, or source or eval, earlier on the line
+	segRedirect := false // a redirecting assignment in the current simple command
+	cmdHasWord := false  // a command word, not only assignments, in the current simple command
+	inDecl := false      // a declaring builtin in the current simple command
+	wrapped := false     // a command, builtin or exec wrapper precedes the command word
+	var cur []string     // the words of the current simple command
+	for _, f := range fields {
+		t := strings.Trim(f, `"'`)
+		tt := strings.TrimSuffix(t, ";")
+		sep := isSeparatorWord(t) || strings.HasSuffix(t, ";")
+		switch {
+		case isShellAssignment(t):
+			if isRedirectEnvAssignment(t) {
+				segRedirect = true
+			}
+		case isSeparatorWord(t) || tt == "":
+			// A separator carries no command word; it is handled below.
+		default:
+			switch {
+			case !cmdHasWord && isCommandWrapperWord(tt):
+				wrapped = true
+			case wrapped && !cmdHasWord && strings.HasPrefix(tt, "-"):
+				// An option of command, builtin or exec.
+			default:
+				if isNetworkAPIClient(tt) && (segRedirect || sticky) {
+					return true
+				}
+				if !cmdHasWord && isSourcingWord(tt) {
+					sticky = true
+				}
+				if shellDeclaresVars(tt) {
+					inDecl = true
+				}
+				cmdHasWord = true
+			}
+		}
+		if tt != "" && !isSeparatorWord(t) {
+			cur = append(cur, tt)
+		}
+		if sep {
+			if stateSetterSticky(cur) {
+				sticky = true
+			}
+			cur = nil
+			sticky = sticky || (segRedirect && !cmdHasWord) || (inDecl && segRedirect)
+			segRedirect, cmdHasWord, inDecl, wrapped = false, false, false, false
+		}
+	}
+	return false
+}
+
+// isCommandWrapperWord reports whether a word is a builtin that runs the command
+// after it: command, builtin or exec.
+func isCommandWrapperWord(w string) bool {
+	switch path.Base(w) {
+	case "command", "builtin", "exec":
+		return true
+	}
+	return false
+}
+
+// isSourcingWord reports whether a command word can run another file or string
+// and so set any variable: source, the dot command, or eval.
+func isSourcingWord(w string) bool {
+	return w == "source" || w == "." || w == "eval"
+}
+
+// commandHeadIndex returns the index of the command word of a simple command,
+// skipping leading NAME=value assignments and the command, builtin and exec
+// wrappers with their option words. It returns -1 when no command word remains.
+func commandHeadIndex(words []string) int {
+	wrapped := false
+	for i, w := range words {
+		switch {
+		case isShellAssignment(w):
+		case isCommandWrapperWord(w):
+			wrapped = true
+		case wrapped && strings.HasPrefix(w, "-") && w != "-":
+			// An option of command, builtin or exec.
+		default:
+			return i
+		}
+	}
+	return -1
+}
+
+// effectiveHead returns the command word of a simple command once the leading
+// command, builtin and exec wrappers and their option words are skipped, so
+// "command -p source ./env.sh" gives "source". It returns "" when no command word
+// remains.
+func effectiveHead(words []string) string {
+	i := commandHeadIndex(words)
+	if i < 0 {
+		return ""
+	}
+	return path.Base(words[i])
+}
+
+// stateSetterSticky reports whether a builtin that sets a variable by name, read,
+// printf -v, mapfile, readarray or let, targets one of the redirecting variables
+// or a name the shell cannot resolve (an expansion). Such a builtin can change
+// the proxy or config variable a later client reads. A read into an unrelated
+// name does not.
+func stateSetterSticky(words []string) bool {
+	i := commandHeadIndex(words)
+	if i < 0 {
+		return false
+	}
+	args := words[i+1:]
+	switch path.Base(words[i]) {
+	case "read", "mapfile", "readarray":
+		// Value-taking letters: read -a NAME is a target and the rest are data,
+		// mapfile takes -C callbacks, which run code, so any -C is sticky.
+		valueLetters, isRead := "CcdnOsu", path.Base(words[i]) == "read"
+		if isRead {
+			valueLetters = "adinNptu"
+		}
+		for j := 0; j < len(args); j++ {
+			a := args[j]
+			if !strings.HasPrefix(a, "-") || a == "-" {
+				if stateTargetSticky(a) {
+					return true
+				}
+				continue
+			}
+			for k := 1; k < len(a); k++ {
+				c := a[k]
+				if !isRead && c == 'C' {
+					return true
+				}
+				if !strings.ContainsRune(valueLetters, rune(c)) {
+					continue
+				}
+				value := a[k+1:]
+				if value == "" {
+					if j+1 >= len(args) {
+						return true
+					}
+					j++
+					value = args[j]
+				}
+				if isRead && c == 'a' && stateTargetSticky(value) {
+					return true
+				}
+				break
+			}
+		}
+	case "printf":
+		for j, a := range args {
+			if a == "-v" {
+				return j+1 >= len(args) || stateTargetSticky(args[j+1])
+			}
+			if strings.HasPrefix(a, "-v") {
+				return stateTargetSticky(a[2:])
+			}
+		}
+	case "getopts":
+		// getopts OPTSTRING NAME: the second word receives the option letter.
+		if len(args) >= 2 && stateTargetSticky(args[1]) {
+			return true
+		}
+	case "declare", "typeset", "local":
+		// A nameref (-n) can alias any variable, so every -n is sticky.
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") {
+				break
+			}
+			if strings.ContainsRune(a[1:], 'n') {
+				return true
+			}
+		}
+	case "let":
+		for _, a := range args {
+			if name, _, ok := strings.Cut(a, "="); ok && isShellAssignment(a) && stateTargetSticky(name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stateTargetSticky reports whether the name a state-setting builtin writes to
+// is a redirecting variable, or cannot be determined because it is an expansion.
+func stateTargetSticky(name string) bool {
+	n := strings.Trim(name, `"'`)
+	if n == "" {
+		return false
+	}
+	if strings.ContainsAny(n, "$`") {
+		return true
+	}
+	for _, entry := range redirectEnvNames {
+		if strings.TrimSuffix(entry, "=") == n {
+			return true
+		}
+	}
+	return false
+}
+
+// isShellAssignment reports whether a word has the NAME=value shape of a shell
+// variable assignment.
+func isShellAssignment(t string) bool {
+	i := strings.IndexByte(t, '=')
+	if i <= 0 {
+		return false
+	}
+	for j, c := range t[:i] {
+		isLetter := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		if !isLetter && !(j > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // rawCommandSegments splits the raw fields of a command line at its shell
 // separators and returns the segments that start with a network client. Each
 // segment is returned from that client on, the form bareExpansionTarget reads.
@@ -4367,6 +4623,9 @@ func isNetworkAPIClient(word string) bool {
 // shell expansion could rewrite is asked too, because the route it reaches
 // cannot be read off the text.
 func permissionApiLoopback(command string) bool {
+	if configEnvBeforeClient(splitShellFields(command)) {
+		return true
+	}
 	var fragments [][]string
 	if parsed, err := parseShellCommandLine(command); err == nil {
 		for _, cmd := range parsed {
@@ -4389,7 +4648,7 @@ func permissionApiLoopback(command string) bool {
 					return true
 				}
 			}
-			if bareExpansionTarget(words) {
+			if segmentRedirectsURLs(words) || bareExpansionTarget(words) {
 				return true
 			}
 		}
@@ -4408,7 +4667,7 @@ func permissionApiLoopback(command string) bool {
 	}
 	if networkOnLine {
 		for _, seg := range rawCommandSegments(fields) {
-			if bareExpansionTarget(seg) {
+			if segmentRedirectsURLs(seg) || bareExpansionTarget(seg) {
 				return true
 			}
 		}
