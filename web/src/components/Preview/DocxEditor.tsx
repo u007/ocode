@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api as apiClient } from "../../api/client";
+import { api as apiClient, authHeaders } from "../../api/client";
 import ConfirmDialog from "../common/ConfirmDialog";
 import { mountUniverDoc } from "./univerDocMount";
-import { docxToUniver, univerToDocx } from "./docxData";
+import { docxToUniver, univerToDocx, externalImageHosts, imageRequestHeaders } from "./docxData";
 import type { UniverDocHandle } from "./univerDocMount";
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -30,9 +30,16 @@ export default function DocxEditor({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<UniverDocHandle | null>(null);
   const originalHashRef = useRef<string>("");
+  const originalBytesRef = useRef<Uint8Array | null>(null);
+  const rawBlocksRef = useRef<{ startIndex: number; xml: string }[]>([]);
+  const tableStylesRef = useRef<Record<string, any>>({});
+  const imageMetaRef = useRef<Record<string, { xml: string; width?: number; height?: number }>>({});
   const saveKey = `${projectHost ?? ""}::${projectRoot ?? ""}::${path}`;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [imageCount, setImageCount] = useState(0);
+  const [externalHosts, setExternalHosts] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -52,6 +59,10 @@ export default function DocxEditor({
         const bytes = new Uint8Array(buf);
         if (cancelled) return;
         const data = await docxToUniver(bytes);
+        originalBytesRef.current = bytes;
+        rawBlocksRef.current = data.body?.docxRawBlocks ?? [];
+        tableStylesRef.current = (data as { __tableStyles?: Record<string, any> }).__tableStyles ?? {};
+        imageMetaRef.current = (data as { __imageMeta?: Record<string, { xml: string }> }).__imageMeta ?? {};
         originalHashRef.current = await sha256Hex(bytes);
         if (cancelled) return;
         const container = containerRef.current;
@@ -60,6 +71,8 @@ export default function DocxEditor({
           editable: true,
           onDirty: () => { setDirty(true); onDirtyChange?.(true); },
         });
+        const snap = handle.snapshot() as { drawingsOrder?: unknown[] };
+        setImageCount(Array.isArray(snap.drawingsOrder) ? snap.drawingsOrder.length : 0);
         if (cancelled) { handle.dispose(); return; }
         handleRef.current = handle;
         setLoading(false);
@@ -81,7 +94,23 @@ export default function DocxEditor({
     setSaving(true);
     try {
       const data = handle.snapshot();
-      const bytes = await univerToDocx(data);
+      const imageErrors: string[] = [];
+      const embeddedImageMeta: Record<string, { xml: string; width: number; height: number }> = {};
+      const bytes = await univerToDocx(data, {
+        originalBytes: originalBytesRef.current ?? undefined,
+        rawBlocks: rawBlocksRef.current,
+        tableStyles: tableStylesRef.current,
+        imageMeta: imageMetaRef.current,
+        resolveImage: (source, sourceType) => handle.resolveImage(source, sourceType),
+        // Same-origin fetches carry the bearer token; external hosts never do.
+        imageFetch: (url, init) =>
+          fetch(url, {
+            ...init,
+            headers: imageRequestHeaders(url, window.location.origin, init.headers as Record<string, string> | undefined, authHeaders()),
+          }),
+        onImageError: (message) => imageErrors.push(message),
+        imageMetaOut: embeddedImageMeta,
+      });
       const hash = await sha256Hex(bytes);
       const res = await apiClient.saveFileRaw(path, bytes.buffer as ArrayBuffer, {
         projectRoot,
@@ -90,6 +119,12 @@ export default function DocxEditor({
       });
       if (!res) { setSaving(false); return false; }
       originalHashRef.current = hash;
+      originalBytesRef.current = bytes;
+      // The saved package now holds the parts these images point at; keep their
+      // meta so the next save reuses them instead of embedding them again.
+      imageMetaRef.current = { ...imageMetaRef.current, ...embeddedImageMeta };
+      setError(null);
+      setNotice(imageErrors.length ? `Saved, but could not embed ${imageErrors.length} image(s): ${imageErrors.join(" ")}` : null);
       setDirty(false);
       onDirtyChange?.(false);
       setSaving(false);
@@ -108,6 +143,8 @@ export default function DocxEditor({
     let settle!: (ok: boolean) => void;
     const answer = new Promise<boolean>((resolve) => { settle = resolve; });
     confirmRef.current = { answer, settle };
+    const snapshot = handleRef.current?.snapshot();
+    setExternalHosts(snapshot ? externalImageHosts(snapshot, imageMetaRef.current) : []);
     setConfirmOpen(true);
     return answer;
   }, [doSave, saveKey]);
@@ -118,8 +155,6 @@ export default function DocxEditor({
     return () => { if (onSaveRef) onSaveRef.current = null; };
   }, [requestSave, onSaveRef, onSaveHandlerRegistered]);
 
-  if (error) return <div className="p-4 text-sm text-destructive">{error}</div>;
-
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b p-2 text-xs">
@@ -128,12 +163,23 @@ export default function DocxEditor({
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
+      {error && (
+        <div className="border-b border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">{error}</div>
+      )}
+      {notice && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">{notice}</div>
+      )}
+      {imageCount > 0 && !notice && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+          This document contains {imageCount} image{imageCount === 1 ? "" : "s"}. They are preserved and saved, but the editor cannot display them yet.
+        </div>
+      )}
       <div ref={containerRef} className="flex-1 overflow-auto" />
       {loading && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Loading…</div>}
       <ConfirmDialog
         open={confirmOpen}
         title="Save document?"
-        description="Saving rewrites this .docx from the edited text. Formatting, tables, images and styles are not preserved — only paragraphs are kept. The original is backed up as .bak on first save."
+        description={`Saving rewrites the document text. Paragraphs, alignment, inline formatting and simple tables are editable; table/cell borders and shading are kept, but formatting inside edited table cells is simplified. Inline images are editable (move/resize); anchored or complex images are preserved unchanged. Images pasted or inserted in the editor are embedded in the file from base64, http(s)/blob URLs, or a resolvable UUID; SVG is not embedded. ${externalHosts.length > 0 ? `Saving will download ${externalHosts.length > 1 ? "images" : "an image"} from ${externalHosts.join(", ")}. ` : ""}Other parts (styles, headers, media) are copied verbatim. The original is backed up as .bak on first save.`}
         confirmLabel="Save"
         confirmVariant="default"
         onConfirm={async () => {

@@ -3,6 +3,7 @@ import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsync
 import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { PDFDocument, degrees } from "pdf-lib";
+import { addHighlight, addTextNote, canvasToPdfRect } from "./pdfAnnotate";
 import { api as apiClient } from "../../api/client";
 
 ensureReadableStreamAsyncIterator();
@@ -38,6 +39,11 @@ export default function PdfEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
+  const [sel, setSel] = useState<{ page: number; x: number; y: number; width: number; height: number } | null>(null);
+  const dragRef = useRef<{ page: number; startX: number; startY: number } | null>(null);
+  const viewportRefs = useRef<any[]>([]);
+  const renderedBytesRef = useRef<Uint8Array | null>(null);
+  const [rendering, setRendering] = useState(true);
   const canvasRefs = useRef<HTMLCanvasElement[]>([]);
   const originalHashRef = useRef<string>("");
 
@@ -70,20 +76,27 @@ export default function PdfEditor({
   useEffect(() => {
     if (!pdfBytes || !doc) return;
     let cancelled = false;
+    setRendering(true);
     (async () => {
-      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
-      const pdf = await loadingTask.promise;
-      for (let i = 0; i < pdf.numPages; i++) {
-        if (cancelled) return;
-        const page = await pdf.getPage(i + 1);
-        const vp = page.getViewport({ scale: 0.3 });
-        const canvas = canvasRefs.current[i];
-        if (!canvas) continue;
-        canvas.width = vp.width;
-        canvas.height = vp.height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) continue;
-        await page.render({ canvas, canvasContext: ctx, viewport: vp } as any).promise;
+      try {
+        const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+        const pdf = await loadingTask.promise;
+        for (let i = 0; i < pdf.numPages; i++) {
+          if (cancelled) return;
+          const page = await pdf.getPage(i + 1);
+          const vp = page.getViewport({ scale: 0.3 });
+          viewportRefs.current[i] = vp;
+          const canvas = canvasRefs.current[i];
+          if (!canvas) continue;
+          canvas.width = vp.width;
+          canvas.height = vp.height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) continue;
+          await page.render({ canvas, canvasContext: ctx, viewport: vp } as any).promise;
+        }
+        if (!cancelled) renderedBytesRef.current = pdfBytes;
+      } finally {
+        if (!cancelled) setRendering(false);
       }
     })();
     return () => { cancelled = true; };
@@ -148,6 +161,89 @@ export default function PdfEditor({
     input.click();
   }, [doc, markDirty]);
 
+  const relPoint = (e: React.MouseEvent, canvas: HTMLCanvasElement) => {
+    const r = canvas.getBoundingClientRect();
+    const sx = canvas.width / r.width;
+    const sy = canvas.height / r.height;
+    return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+  };
+  const onPageMouseDown = (page: number, e: React.MouseEvent) => {
+    setSelected(page);
+    const canvas = canvasRefs.current[page];
+    if (!canvas) return;
+    const p = relPoint(e, canvas);
+    dragRef.current = { page, startX: p.x, startY: p.y };
+    setSel({ page, x: p.x, y: p.y, width: 0, height: 0 });
+  };
+  const onPageMouseMove = (e: React.MouseEvent) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const canvas = canvasRefs.current[drag.page];
+    if (!canvas) return;
+    const p = relPoint(e, canvas);
+    setSel({
+      page: drag.page,
+      x: Math.min(drag.startX, p.x),
+      y: Math.min(drag.startY, p.y),
+      width: Math.abs(p.x - drag.startX),
+      height: Math.abs(p.y - drag.startY),
+    });
+  };
+  const onPageMouseUp = () => {
+    dragRef.current = null;
+  };
+
+  const applyHighlight = useCallback(async () => {
+    if (!doc) return;
+    if (renderedBytesRef.current !== pdfBytes) return;
+    try {
+      const pageSize = doc.getPage(selected).getSize();
+      const rect =
+        sel && sel.page === selected && sel.width > 1 && sel.height > 1
+          ? canvasToPdfRect(sel, {
+              scale: 0.3,
+              pageHeight: pageSize.height,
+              transform: viewportRefs.current[selected]?.transform,
+            })
+          : { x: 40, y: 40, width: 300, height: 24 };
+      const bytes = await addHighlight(await doc.save(), selected, rect);
+      const next = await PDFDocument.load(bytes);
+      setPdfBytes(bytes);
+      setDoc(next);
+      markDirty();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [doc, selected, sel, pdfBytes, markDirty]);
+
+  const applyNote = useCallback(async () => {
+    if (!doc) return;
+    if (renderedBytesRef.current !== pdfBytes) return;
+    const text = window.prompt("Note text");
+    if (!text) return;
+    try {
+      const pageSize = doc.getPage(selected).getSize();
+      const pos =
+        sel && sel.page === selected
+          ? canvasToPdfRect(
+              { ...sel, height: 0 },
+              {
+                scale: 0.3,
+                pageHeight: pageSize.height,
+                transform: viewportRefs.current[selected]?.transform,
+              },
+            )
+          : { x: 40, y: 80 };
+      const bytes = await addTextNote(await doc.save(), selected, pos.x, pos.y, text);
+      const next = await PDFDocument.load(bytes);
+      setPdfBytes(bytes);
+      setDoc(next);
+      markDirty();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [doc, selected, sel, pdfBytes, markDirty]);
+
   const save = useCallback(async (): Promise<boolean> => {
     if (!doc) return false;
     setSaving(true);
@@ -190,6 +286,8 @@ export default function PdfEditor({
         <button onClick={() => movePage(selected, -1)} className="rounded border px-2 py-1">Move up</button>
         <button onClick={() => movePage(selected, 1)} className="rounded border px-2 py-1">Move down</button>
         <button onClick={mergePdf} className="rounded border px-2 py-1">Merge PDF…</button>
+        <button onClick={() => void applyHighlight()} disabled={rendering} className="rounded border px-2 py-1 disabled:opacity-50">Highlight</button>
+        <button onClick={() => void applyNote()} disabled={rendering} className="rounded border px-2 py-1 disabled:opacity-50">Add note…</button>
         <span className="ml-auto">{dirty ? "Unsaved changes" : "Saved"}</span>
         <button onClick={save} disabled={!dirty || saving} className="rounded border px-2 py-1 disabled:opacity-50">
           {saving ? "Saving…" : "Save"}
@@ -200,8 +298,11 @@ export default function PdfEditor({
           {Array.from({ length: pageCount }).map((_, i) => (
             <div
               key={i}
-              onClick={() => setSelected(i)}
-              className={`cursor-pointer rounded border p-1 ${selected === i ? "ring-2 ring-primary" : ""}`}
+              onMouseDown={(e) => onPageMouseDown(i, e)}
+              onMouseMove={onPageMouseMove}
+              onMouseUp={onPageMouseUp}
+              onMouseLeave={onPageMouseUp}
+              className={`cursor-crosshair rounded border p-1 ${selected === i ? "ring-2 ring-primary" : ""}`}
             >
               <canvas ref={(el) => { if (el) canvasRefs.current[i] = el; }} />
               <div className="text-center text-xs">{i + 1}</div>

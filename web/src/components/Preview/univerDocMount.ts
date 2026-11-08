@@ -16,6 +16,13 @@ export interface MountUniverDocOpts {
 export interface UniverDocHandle {
   /** Current document snapshot, for serialization on save. */
   snapshot(): IDocumentData;
+  /**
+   * Resolve a UUID image source through the mounted document's image host.
+   * Univer's default host returns the id unchanged; a registered host returns
+   * a loadable src. Returns null when the image cannot be resolved so the
+   * exporter can report it instead of writing a broken reference.
+   */
+  resolveImage(source: string, imageSourceType?: string): Promise<string | null>;
   setDarkMode(darkMode: boolean): void;
   /** Tears down every Univer instance this handle created. */
   dispose(): void;
@@ -27,8 +34,9 @@ export async function mountUniverDoc(
   darkMode: boolean,
   opts?: MountUniverDocOpts,
 ): Promise<UniverDocHandle> {
-  const [presets, sheetsCore, enUS, uiEnUS, docsEnUS] = await Promise.all([
+  const [presets, corePkg, sheetsCore, enUS, uiEnUS, docsEnUS] = await Promise.all([
     import("@univerjs/presets"),
+    import("@univerjs/core"),
     import("@univerjs/preset-sheets-core"),
     import("@univerjs/preset-sheets-core/locales/en-US"),
     import("@univerjs/ui/locale/en-US"),
@@ -70,6 +78,20 @@ export async function mountUniverDoc(
   return {
     snapshot() {
       return (doc as any).save?.() ?? data;
+    },
+    async resolveImage(source: string, imageSourceType?: string) {
+      if ((imageSourceType ?? "").toUpperCase() !== "UUID") return null;
+      try {
+        const injector = (univer as any).__getInjector?.();
+        const io = injector?.get?.(corePkg.IImageIoService);
+        if (!io?.getImage) return null;
+        const resolved = await io.getImage(source);
+        // The default host is an identity function; treat that as unresolved.
+        return typeof resolved === "string" && resolved !== source ? resolved : null;
+      } catch (e) {
+        console.warn("[docx] image host lookup failed for", source, e);
+        return null;
+      }
     },
     setDarkMode(_dm: boolean) {
       // Dark mode is fixed at mount; Univer FUniver has no setter in this version.
