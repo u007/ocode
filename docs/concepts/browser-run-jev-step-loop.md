@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-08T16:45:00Z
+timestamp: 2026-11-08T17:15:00Z
 status: active
 ---
 
@@ -240,7 +240,7 @@ backend or to the main model.
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
   `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
   `internal/agent/agent.go:6835`). The dialog then reads like
-  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6543`),
+  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6671`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.
 - **Agent types.** The built-in `scout`, `debug` and `docs` definitions list
@@ -330,7 +330,7 @@ non-model seconds in its runs went to waits on class names. Waiting for the docu
 quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
-(`internal/agent/permissions.go:6428`), so it is allowed on an agent-opened tab. A user tab
+(`internal/agent/permissions.go:6556`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:531`). Read-only
 agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:218`).
 
@@ -404,7 +404,7 @@ re-tuned on that corpus.
 - `internal/agent/agent.go`: `handleToolCallWithContext` (3973), the context asker
   (4215), `attributePermAsker` (6811), `withPermissionAsker` (6832).
 - `internal/agent/permissions.go`: `browser_run` allow default (2001-2002), the observe set
-  (6428), `browserAction` (6471) and its `run_step` summary (6543).
+  (6556), `browserAction` (6599) and its `run_step` summary (6671).
 - `internal/agent/decider.go`: `slotBrowserRun` (29). `internal/config/ocodeconfig.go`:
   `BrowserRun` config key `browser_run.judge_model` (1041).
 - `internal/agent/content_guard_typesafe.go`: `browserGuardedOutputs` (266), the

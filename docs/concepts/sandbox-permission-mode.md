@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-08T16:45:00Z
+timestamp: 2026-11-08T17:15:00Z
 ---
 ## Decision
 
@@ -204,7 +204,7 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   `/api/permissions*` or to any `/api/config/*` path → Ask (self-escalation guard, all modes).
   The path is taken from the raw request token, cleaned and lowercased before matching, and
   the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
-  on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4625`),
+  on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4753`),
   and a line that does not parse is checked from every word position. This is the escalation
   rule (`isPermissionEscalation`, `internal/agent/permissions.go:3997`), and two more cases feed it.
   A network client (curl, wget, http, https) asks when a positional argument is a whole-word
@@ -218,8 +218,8 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   so it never skips a following expansion. A
   loopback URL whose path, host or userinfo holds a glob or expansion character (`*`, `?`, `[`,
   `{`, `$`, a backtick or a backslash) also asks. A port expansion is exempt only when the shell
-  proves it numeric (`tokenMayReachPermissionRoute`, `permissions.go:4582`, and
-  `loopbackAuthoritySafe`, `permissions.go:4551`). The loopback test behind this guard also reads
+  proves it numeric (`tokenMayReachPermissionRoute`, `permissions.go:4710`, and
+  `loopbackAuthoritySafe`, `permissions.go:4679`). The loopback test behind this guard also reads
   the unspecified addresses (`0.0.0.0`, `::`, and the inet_aton zero forms), `localhost.` and any
   `*.localhost` name as loopback (`isLoopbackHostForPermissionGuard`,
   `internal/agent/permissions.go:1340`). Four more rules apply to a network segment. (b) A segment
@@ -229,22 +229,32 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   whatever its host. (c) A config or input-source option asks unconditionally: curl `-K` and
   `--config`, and wget `-i`, `--input-file`, `-e`, `--execute` and `--config`, in any spelling,
   including getopt-style abbreviations of four or more characters with the dashes
-  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:621` and
-  `:601`). (d) A proxy or config environment assignment (`http_proxy`, `HTTPS_PROXY`, `ALL_PROXY`,
-  `CURL_HOME`, `WGETRC`, `XDG_CONFIG_HOME` or `HOME`) asks when it reaches a client. As a prefix
-  (`HOME=/tmp/h curl`) it applies to that one command. As a standalone or exported assignment it is
-  sticky for the rest of the line (`configEnvBeforeClient`, `permissions.go:4306`; the names are in
-  `redirectEnvNames`, `internal/agent/network_guard_typesafe.go:169`). (e) Wrappers (`env`, `sudo`,
+  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:636` and
+  `:616`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
+  and anywhere on it (any segment, loop, function or group) there is a redirecting environment
+  assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration
+  aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` (or `set -o allexport`),
+  which makes every assignment count, the guard asks. Order does not matter, and `FOO=bar curl …`
+  with an unrelated name is not affected. An `export`, `declare`, `typeset`, `local` or `readonly`
+  of a redirect name asks whether or not it has a value. The check is the union `lineRedirectSignalAll`
+  (`internal/agent/permissions.go:4429`) of a parsed-command view and a raw-word view with unquoted
+  operators spaced out (`spaceOutOperators`, `permissions.go:4386`), so an unspaced `;&|(){}` cannot
+  hide an assignment. It is called from `permissionApiLoopback` (`permissions.go:4753`), and
+  `lineRedirectSignal` (`permissions.go:4452`) is the scan of each view. Assignment names are
+  normalised through `assignmentBaseName` (`internal/agent/network_guard_typesafe.go:197`), so `+=`
+  and `[subscript]=` forms resolve to their base variable; the subscript is bracket-aware, and an
+  unclosed subscript fails closed. The names are one shared predicate, `isRedirectEnvName`
+  (`internal/agent/network_guard_typesafe.go:169`): every `*_proxy` name in either case except
+  `NO_PROXY`, plus `ALL_PROXY`, `HTTPIE_CONFIG_DIR`, `SYSTEM_WGETRC`, `WGETRC`, `CURL_HOME`,
+  `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `XDG_CONFIG_HOME` and
+  `HOME`. (e) Wrappers (`env`, `sudo`,
   `command`, `exec`, `nohup`, `nice`, `timeout` and leading assignments) are peeled per segment by
   `effectiveCommandWords`, so the real client is judged. `command`, `builtin` and `exec` are
-  transparent before the head word, which `effectiveHead` (`internal/agent/permissions.go:4397`)
-  returns. (f) A standalone or exported redirecting assignment, a `source` or `.` of a file, an
-  `eval`, and a state-setting builtin (`read`, `printf -v`, `mapfile` or `readarray`, `let`) whose
-  target is a redirect or config variable make the rest of the line sticky, so a later client
-  reads the value they set (`stateSetterSticky`, `permissions.go:4410`). State setters are parsed the
-  way the shell parses them: attached and clustered options (`read -rp`, `printf -vX`) are read, `getopts`
-  sets its NAME argument, and any `-n` nameref on `declare`, `typeset` or `local` counts, because a
-  nameref can alias a redirecting variable.
+  transparent before the head word, which `effectiveHead` (`internal/agent/permissions.go:4533`)
+  returns. (f) State setters are parsed the way the shell parses them: attached and clustered options
+  (`read -rp`, `printf -vX`) are read, `getopts` sets its NAME argument, any `-n` nameref counts
+  because it can alias a redirecting variable, and a name that is an expansion counts because it
+  cannot be resolved (`stateSetterSticky`, `internal/agent/permissions.go:4546`).
 
 Ask routes to the auto-permission LLM judge when `auto` is on, else a human
 prompt. These static checks catch direct commands (`cat auth.json`), but NOT a
