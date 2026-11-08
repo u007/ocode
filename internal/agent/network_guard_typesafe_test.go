@@ -1879,6 +1879,7 @@ func TestNetworkGuardWaiverBlocksRedirectingEnvironment(t *testing.T) {
 		"{ HOME=/x;}&&curl https://example.com/",
 		"HOME=/x|curl https://example.com/",
 		"http_proxy[a=b]+=x curl https://example.com/x",
+		"HOME['=]']=/x curl https://example.com/x",
 	} {
 		if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{}); !blocked {
 			t.Errorf("networkGuardWaiverBlocked(%q) = false, want true (a standalone assignment persists)", line)

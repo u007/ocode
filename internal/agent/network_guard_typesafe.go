@@ -195,29 +195,11 @@ func isRedirectEnvAssignment(w string) bool {
 // append (HOME+=/x) or a subscript (HOME[0]=x). It returns "" when what is left is
 // not a shell identifier.
 func assignmentBaseName(w string) string {
-	// A subscript may hold '=' itself (HOME[i=0]=x), so an identifier followed by
-	// '[' is read to its matching ']' before the first '=' is looked for. An
-	// unclosed subscript that holds '=' is taken as an assignment to the identifier.
-	if k := identPrefix(w); k != "" && len(w) > len(k) && w[len(k)] == '[' {
-		depth, end := 0, -1
-		for j := len(k); j < len(w); j++ {
-			if w[j] == '[' {
-				depth++
-			} else if w[j] == ']' {
-				depth--
-				if depth == 0 {
-					end = j
-					break
-				}
-			}
-		}
-		if end < 0 {
-			if strings.Contains(w, "=") {
-				return k
-			}
-		} else if rest := w[end+1:]; rest == "" || strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, "+=") {
-			return k
-		}
+	// An identifier followed by '[' with an '=' anywhere after it is an assignment to
+	// that identifier. The subscript is not parsed: quotes and ${...} or $(...) can
+	// hide a ']' or a '=' inside it, so the identifier is the only safe reading.
+	if k := identPrefix(w); k != "" && len(w) > len(k) && w[len(k)] == '[' && strings.Contains(w, "=") {
+		return k
 	}
 	name := w
 	if i := strings.IndexByte(w, '='); i >= 0 {

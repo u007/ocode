@@ -604,6 +604,7 @@ func TestPermissionApiLoopbackRedirectedRoutes(t *testing.T) {
 		{"quoted semicolon does not split the line", `echo "a;b"; curl https://example.com/`, false},
 		{"subscript holding '=' on a redirect name asks", `HOME[i=0]=/x; curl https://example.com/`, true},
 		{"subscript holding a redirect name does not ask (base is arr)", `arr[HOME=1]=x; curl https://example.com/`, false},
+		{"subscript with an expansion holding '=' and ']' asks", `HOME[${a:+=]}0]=/x; curl https://example.com/`, true},
 		{"proxy to a remote host with no permission path does not ask", `curl -x http://proxy.corp:3128 https://example.com/`, false},
 		{"wget input file hides the destination, asks", `wget -i urls.txt`, true},
 		{"curl config file hides the destination, asks", `curl -K cfg`, true},
