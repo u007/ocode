@@ -64,7 +64,7 @@ func (t FormatTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		return "", err
 	}
 
-	return fmt.Sprintf("Successfully formatted %s", params.Path), nil
+	return fmt.Sprintf("formatted %s", params.Path), nil
 }
 
 // builtinFormatter returns the zero-config default formatter for an

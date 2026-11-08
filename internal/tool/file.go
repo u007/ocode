@@ -1218,7 +1218,7 @@ func (t DeleteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		store.RegisterWrite(safe, tcID)
 	}
 
-	return undoHint(fmt.Sprintf("Successfully deleted %s", params.Path), tcID), nil
+	return undoHint(fmt.Sprintf("deleted %s", params.Path), tcID), nil
 }
 
 type EditTool struct {
@@ -1591,7 +1591,7 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 		FormatAfterWrite(ctx, safe, formatters)
 	}
 
-	return undoHint(fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), tcID), nil
+	return undoHint(fmt.Sprintf("%d edits across %d file(s)", len(params.Edits), len(fileOrder)), tcID), nil
 }
 
 func ExtraAllowedRoots() []string {

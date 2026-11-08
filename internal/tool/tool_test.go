@@ -627,7 +627,7 @@ func TestMultiFileEditToolAcrossFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MultiFileEditTool failed: %v", err)
 	}
-	if !strings.Contains(res, "Successfully performed 2 edits across 2 file(s)") {
+	if !strings.Contains(res, "2 edits across 2 file(s)") {
 		t.Fatalf("unexpected result: %q", res)
 	}
 

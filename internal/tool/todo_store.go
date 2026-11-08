@@ -697,7 +697,7 @@ func todoWrite(scope TodoScope, citedRevision int, todoText string, store *snaps
 			revision: newRev,
 			content:  serializeTodo(newRev, newItems),
 		}
-		out = fmt.Sprintf("Successfully updated todo list (revision %d)", newRev)
+		out = fmt.Sprintf("updated rev=%d", newRev)
 		wrote = true
 		return nil
 	})
@@ -797,7 +797,7 @@ func todoUpdate(scope TodoScope, citedRevision int, args todoOpArgs, store *snap
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Successfully updated todo list (revision %d)", newRev), nil
+	return fmt.Sprintf("updated rev=%d", newRev), nil
 }
 
 // applyTodoOp applies one targeted mutation to items and returns the new
