@@ -95,6 +95,15 @@ export interface PublishArtifactRequest {
   hosting_mode?: string;
   mode?: string;
   hosting?: string;
+  /** Visitor access: public, password, or allowlist (hub artifacts only). */
+  access_mode?: string;
+  accessMode?: string;
+  /** Required when access_mode is "password" (minimum 8 characters). */
+  password?: string;
+  /** Required when access_mode is "allowlist"; the hub emails each invite. */
+  invite_emails?: string[];
+  inviteEmails?: string[];
+  emails?: string[];
 }
 
 export interface PublishArtifactResponse {
@@ -104,6 +113,9 @@ export interface PublishArtifactResponse {
   email_sent?: boolean;
   /** Present when the artifact was published to the hub (hosting_mode=hub). */
   hub_url?: string;
+  access_mode?: string;
+  hub_invites?: { email?: string; inviteUrl?: string; emailSent?: boolean }[];
+  invite_errors?: string[];
 }
 
 export interface CreateArtifactRequest {
@@ -121,17 +133,28 @@ export interface CreateArtifactRequest {
   hosting?: string;
 }
 
-function normalizeList(res: ArtifactListResponse | Artifact[] | any): Artifact[] {
+function normalizeList(
+  res: ArtifactListResponse | Artifact[] | any,
+): Artifact[] {
   if (Array.isArray(res)) return res;
   if (!res) return [];
-  return (res.artifacts || res.items || res.data || res.results || []) as Artifact[];
+  return (res.artifacts ||
+    res.items ||
+    res.data ||
+    res.results ||
+    []) as Artifact[];
 }
 
 export async function listArtifacts(
   opts?: { limit?: number; offset?: number },
   host?: string,
   projectPath?: string,
-): Promise<{ artifacts: Artifact[]; total: number; limit: number; offset: number }> {
+): Promise<{
+  artifacts: Artifact[];
+  total: number;
+  limit: number;
+  offset: number;
+}> {
   const params = new URLSearchParams();
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
@@ -145,9 +168,13 @@ export async function listArtifacts(
   const artifacts = normalizeList(res);
   return {
     artifacts,
-    total: (res && typeof res.total === "number") ? res.total : artifacts.length,
-    limit: (res && typeof res.limit === "number") ? res.limit : (opts?.limit ?? artifacts.length),
-    offset: (res && typeof res.offset === "number") ? res.offset : (opts?.offset ?? 0),
+    total: res && typeof res.total === "number" ? res.total : artifacts.length,
+    limit:
+      res && typeof res.limit === "number"
+        ? res.limit
+        : (opts?.limit ?? artifacts.length),
+    offset:
+      res && typeof res.offset === "number" ? res.offset : (opts?.offset ?? 0),
   };
 }
 
@@ -184,7 +211,12 @@ export async function getArtifact(
   host?: string,
   projectPath?: string,
 ): Promise<Artifact> {
-  return fetchJSON<Artifact>(`/api/artifacts/${encodeURIComponent(id)}`, undefined, host, projectPath);
+  return fetchJSON<Artifact>(
+    `/api/artifacts/${encodeURIComponent(id)}`,
+    undefined,
+    host,
+    projectPath,
+  );
 }
 
 export async function publishArtifact(
@@ -195,16 +227,20 @@ export async function publishArtifact(
 ): Promise<PublishArtifactResponse> {
   const body: Record<string, any> = {};
   // notify
-  if (typeof req.notify_on_publish === "boolean") body.notify_on_publish = req.notify_on_publish;
-  else if (typeof req.notifyOnPublish === "boolean") body.notify_on_publish = req.notifyOnPublish;
+  if (typeof req.notify_on_publish === "boolean")
+    body.notify_on_publish = req.notify_on_publish;
+  else if (typeof req.notifyOnPublish === "boolean")
+    body.notify_on_publish = req.notifyOnPublish;
   else if (typeof req.notify === "boolean") body.notify_on_publish = req.notify;
   else body.notify_on_publish = false;
   if (req.build_cmd) body.build_cmd = req.build_cmd;
   if (req.buildCmd) body.build_cmd = req.buildCmd;
   if (req.build) body.build_cmd = req.build;
   if (req.entrypoint) body.entrypoint = req.entrypoint;
-  if (typeof req.secret_scan_hit === "boolean") body.secret_scan_hit = req.secret_scan_hit;
-  if (typeof req.secretScanHit === "boolean") body.secret_scan_hit = req.secretScanHit;
+  if (typeof req.secret_scan_hit === "boolean")
+    body.secret_scan_hit = req.secret_scan_hit;
+  if (typeof req.secretScanHit === "boolean")
+    body.secret_scan_hit = req.secretScanHit;
   if (req.override_reason) body.override_reason = req.override_reason;
   if (req.overrideReason) body.override_reason = req.overrideReason;
   if (req.reason) body.override_reason = req.reason;
@@ -217,6 +253,14 @@ export async function publishArtifact(
   if (req.hosting_mode) body.hosting_mode = req.hosting_mode;
   if (req.mode) body.hosting_mode = req.mode;
   if (req.hosting) body.hosting_mode = req.hosting;
+  // Access fields are deliberately separate from hosting_mode: `mode` above is
+  // an alias for hosting_mode, so it must never carry the access mode.
+  const accessMode = req.access_mode ?? req.accessMode;
+  if (accessMode) body.access_mode = accessMode;
+  if (req.password) body.password = req.password;
+  const inviteEmails = req.invite_emails ?? req.inviteEmails ?? req.emails;
+  if (inviteEmails && inviteEmails.length > 0)
+    body.invite_emails = inviteEmails;
   return fetchJSON<PublishArtifactResponse>(
     `/api/artifacts/${encodeURIComponent(id)}/publish`,
     { method: "POST", body: JSON.stringify(body) },
@@ -230,7 +274,12 @@ export async function unpublishArtifact(
   host?: string,
   projectPath?: string,
 ): Promise<any> {
-  return fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/unpublish`, { method: "POST" }, host, projectPath);
+  return fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}/unpublish`,
+    { method: "POST" },
+    host,
+    projectPath,
+  );
 }
 
 export async function deleteArtifact(
@@ -238,7 +287,12 @@ export async function deleteArtifact(
   host?: string,
   projectPath?: string,
 ): Promise<void> {
-  await fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}`, { method: "DELETE" }, host, projectPath);
+  await fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+    host,
+    projectPath,
+  );
 }
 
 export async function mintArtifactToken(
@@ -247,7 +301,12 @@ export async function mintArtifactToken(
   host?: string,
   projectPath?: string,
 ): Promise<ArtifactToken> {
-  return fetchJSON<ArtifactToken>(`/api/artifacts/${encodeURIComponent(id)}/tokens`, { method: "POST", body: JSON.stringify(body || {}) }, host, projectPath);
+  return fetchJSON<ArtifactToken>(
+    `/api/artifacts/${encodeURIComponent(id)}/tokens`,
+    { method: "POST", body: JSON.stringify(body || {}) },
+    host,
+    projectPath,
+  );
 }
 
 export async function revokeArtifactToken(
@@ -256,7 +315,12 @@ export async function revokeArtifactToken(
   host?: string,
   projectPath?: string,
 ): Promise<void> {
-  await fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/tokens/${encodeURIComponent(tid)}`, { method: "DELETE" }, host, projectPath);
+  await fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}/tokens/${encodeURIComponent(tid)}`,
+    { method: "DELETE" },
+    host,
+    projectPath,
+  );
 }
 
 export async function addArtifactAllowlist(
@@ -265,7 +329,12 @@ export async function addArtifactAllowlist(
   host?: string,
   projectPath?: string,
 ): Promise<any> {
-  return fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/allowlist`, { method: "POST", body: JSON.stringify({ email }) }, host, projectPath);
+  return fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}/allowlist`,
+    { method: "POST", body: JSON.stringify({ email }) },
+    host,
+    projectPath,
+  );
 }
 
 export async function removeArtifactAllowlist(
@@ -274,7 +343,12 @@ export async function removeArtifactAllowlist(
   host?: string,
   projectPath?: string,
 ): Promise<void> {
-  await fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/allowlist/${encodeURIComponent(email)}`, { method: "DELETE" }, host, projectPath);
+  await fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}/allowlist/${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+    host,
+    projectPath,
+  );
 }
 
 export async function getArtifactAccessLog(
@@ -282,8 +356,18 @@ export async function getArtifactAccessLog(
   host?: string,
   projectPath?: string,
 ): Promise<ArtifactAccessLogEntry[]> {
-  const res = await fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/access-log`, undefined, host, projectPath);
-  return (res && (res.entries || res.items || res.data || res.results || res)) as ArtifactAccessLogEntry[];
+  const res = await fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}/access-log`,
+    undefined,
+    host,
+    projectPath,
+  );
+  return (res &&
+    (res.entries ||
+      res.items ||
+      res.data ||
+      res.results ||
+      res)) as ArtifactAccessLogEntry[];
 }
 
 // Convenience default object + named aliases for various import styles.

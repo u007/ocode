@@ -120,6 +120,92 @@ func TestNewHubPublicToken(t *testing.T) {
 	}
 }
 
+func TestHubClientSetArtifactAccess(t *testing.T) {
+	var method, path string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"mode":"password"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	if err := c.SetArtifactAccess(context.Background(), "art_1", "password", "hunter2hunter2"); err != nil {
+		t.Fatalf("SetArtifactAccess: %v", err)
+	}
+	if method != http.MethodPut || path != "/api/ocode/artifacts/art_1/access" {
+		t.Fatalf("request = %s %s", method, path)
+	}
+	if body["mode"] != "password" || body["password"] != "hunter2hunter2" {
+		t.Fatalf("body = %#v", body)
+	}
+
+	// Public mode carries no password field at all.
+	body = nil
+	if err := c.SetArtifactAccess(context.Background(), "art_1", "public", ""); err != nil {
+		t.Fatalf("SetArtifactAccess public: %v", err)
+	}
+	if _, ok := body["password"]; ok {
+		t.Fatalf("public body must omit the password: %#v", body)
+	}
+}
+
+func TestHubClientSetArtifactAccessError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid access mode"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	err := c.SetArtifactAccess(context.Background(), "art_1", "friends", "")
+	if err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("error = %v, want status 400", err)
+	}
+}
+
+func TestHubClientAddArtifactInvite(t *testing.T) {
+	var path string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"email":"a@b.com","inviteUrl":"https://hub.test/i","emailSent":true}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	invite, err := c.AddArtifactInvite(context.Background(), "art_1", "a@b.com", "public-token")
+	if err != nil {
+		t.Fatalf("AddArtifactInvite: %v", err)
+	}
+	if path != "/api/ocode/artifacts/art_1/invites" {
+		t.Fatalf("path = %s", path)
+	}
+	if body["email"] != "a@b.com" || body["publicToken"] != "public-token" {
+		t.Fatalf("body = %#v", body)
+	}
+	if invite.Email != "a@b.com" || invite.InviteURL != "https://hub.test/i" || !invite.EmailSent {
+		t.Fatalf("invite = %#v", invite)
+	}
+}
+
+func TestHubClientAddArtifactInviteError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"public token does not match"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	if _, err := c.AddArtifactInvite(context.Background(), "art_1", "a@b.com", "wrong"); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("error = %v, want status 400", err)
+	}
+}
+
 // serverURL reconstructs the test server base URL from a request, since the
 // handler does not otherwise know it.
 func serverURL(r *http.Request) string {

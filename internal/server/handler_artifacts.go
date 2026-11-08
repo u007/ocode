@@ -118,6 +118,89 @@ func getBool(m map[string]any, keys ...string) bool {
 	return false
 }
 
+// getStringSlice reads a JSON array of strings or a comma-separated string.
+func getStringSlice(m map[string]any, keys ...string) []string {
+	for _, k := range keys {
+		v, ok := m[k]
+		if !ok || v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case []string:
+			return t
+		case []any:
+			out := make([]string, 0, len(t))
+			for _, item := range t {
+				if s, ok := item.(string); ok {
+					out = append(out, s)
+				}
+			}
+			return out
+		case string:
+			return strings.Split(t, ",")
+		}
+	}
+	return nil
+}
+
+// normalizeInviteEmails trims, lowercases, validates and dedupes addresses.
+func normalizeInviteEmails(raw []string) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, item := range raw {
+		email := strings.ToLower(strings.TrimSpace(item))
+		if email == "" {
+			continue
+		}
+		if strings.ContainsAny(email, " \t\r\n") || !strings.Contains(email, "@") || len(email) > 320 {
+			return nil, fmt.Errorf("invalid invite email %q", email)
+		}
+		if seen[email] {
+			continue
+		}
+		seen[email] = true
+		out = append(out, email)
+	}
+	return out, nil
+}
+
+// parseArtifactAccess parses the optional access configuration from a publish
+// body. No access_mode (or "public") keeps the previous behaviour; password
+// and allowlist modes are validated here so a bad request fails before the
+// snapshot walk.
+func parseArtifactAccess(body map[string]any) (artifactHubAccess, error) {
+	mode := strings.ToLower(strings.TrimSpace(getString(body, "access_mode", "accessMode")))
+	switch mode {
+	case "":
+		return artifactHubAccess{}, nil
+	case "public":
+		return artifactHubAccess{Mode: "public"}, nil
+	case "password":
+		password := getString(body, "password")
+		if len(password) < 8 {
+			return artifactHubAccess{}, errors.New("password mode requires at least 8 characters")
+		}
+		if len(password) > 200 {
+			return artifactHubAccess{}, errors.New("password must be at most 200 characters")
+		}
+		return artifactHubAccess{Mode: "password", Password: password}, nil
+	case "allowlist":
+		emails, err := normalizeInviteEmails(getStringSlice(body, "invite_emails", "inviteEmails", "emails"))
+		if err != nil {
+			return artifactHubAccess{}, err
+		}
+		if len(emails) == 0 {
+			return artifactHubAccess{}, errors.New("allowlist mode requires at least one invite email")
+		}
+		if len(emails) > 50 {
+			return artifactHubAccess{}, errors.New("at most 50 invite emails per publish")
+		}
+		return artifactHubAccess{Mode: "allowlist", Emails: emails}, nil
+	default:
+		return artifactHubAccess{}, fmt.Errorf("invalid access_mode %q", mode)
+	}
+}
+
 func (h *Handler) artifactStore() *artifacts.Store {
 	if h.artifactTokens != nil {
 		return h.artifactTokens.store
@@ -302,6 +385,18 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	if body == nil {
 		body = map[string]any{}
 	}
+	access, err := parseArtifactAccess(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Local (Mode A) artifacts do not carry an access mode: their access is
+	// capability tokens plus an allowlist. Refuse rather than silently ignoring
+	// a password/allowlist request that would not take effect.
+	if !strings.EqualFold(a.HostingMode, "hub") && access.Mode != "" && access.Mode != "public" {
+		writeError(w, http.StatusBadRequest, "password and allowlist access are applied by the hub; local artifacts use capability tokens")
+		return
+	}
 	projectPath := a.ProjectPath
 	// secret scan check: reuse the same path resolution as /api/secret/scan
 	// and walk the project tree for secret/.env files. A request flag alone
@@ -477,13 +572,17 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	// fallback — a hub failure fails the publish (502) instead of silently
 	// shipping a link that dies with this machine.
 	var hubURL string
+	var hubInvites []artifacts.HubInvite
+	var hubInviteErrors []string
 	if strings.EqualFold(a.HostingMode, "hub") {
-		url, herr := h.publishArtifactToHub(r.Context(), a, entrypoint, buildCmd, files, st)
+		outcome, herr := h.publishArtifactToHub(r.Context(), a, entrypoint, buildCmd, files, st, access)
 		if herr != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("hub publish: %v", herr))
 			return
 		}
-		hubURL = url
+		hubURL = outcome.PublicURL
+		hubInvites = outcome.Invites
+		hubInviteErrors = outcome.InviteErrors
 	}
 	// mint tokens? skip
 	// notify email
@@ -520,11 +619,14 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	}
 	// if notify false: no send
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":     v,
-		"artifact":    a,
-		"notify_sent": emailSent,
-		"email_sent":  emailSent,
-		"hub_url":     hubURL,
+		"version":       v,
+		"artifact":      a,
+		"notify_sent":   emailSent,
+		"email_sent":    emailSent,
+		"hub_url":       hubURL,
+		"access_mode":   access.Mode,
+		"hub_invites":   hubInvites,
+		"invite_errors": hubInviteErrors,
 	})
 }
 
