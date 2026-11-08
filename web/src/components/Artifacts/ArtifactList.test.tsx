@@ -97,4 +97,61 @@ describe("ArtifactList", () => {
     rerender(<ArtifactList projectPath="/p" active />);
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(1));
   });
+
+  it("fires the row unpublish and delete handlers", async () => {
+    const onUnpublish = vi.fn();
+    const onDelete = vi.fn();
+    render(
+      <ArtifactList
+        projectPath="/p"
+        onUnpublish={onUnpublish}
+        onDelete={onDelete}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("unpublish-artifact").length).toBe(2),
+    );
+    fireEvent.click(screen.getAllByTestId("unpublish-artifact")[0]);
+    expect(onUnpublish).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a1" }),
+    );
+    fireEvent.click(screen.getAllByTestId("delete-artifact")[0]);
+    expect(onDelete).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a1" }),
+    );
+  });
+
+  it("hides Unpublish for an already-unpublished artifact", async () => {
+    const { listArtifacts } = await import("../../api/artifacts");
+    vi.mocked(listArtifacts).mockResolvedValueOnce({
+      artifacts: [
+        { id: "u1", name: "U1", project_path: "/p", status: "unpublished" },
+        { id: "u2", name: "U2", project_path: "/p", status: "active" },
+      ],
+      total: 2,
+      limit: 10,
+      offset: 0,
+    });
+    render(
+      <ArtifactList
+        projectPath="/p"
+        onUnpublish={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("U1")).toBeInTheDocument());
+    expect(screen.getAllByTestId("unpublish-artifact")).toHaveLength(1);
+    expect(screen.getAllByTestId("delete-artifact")).toHaveLength(2);
+  });
+
+  it("reloads when refreshKey changes", async () => {
+    const { listArtifacts } = await import("../../api/artifacts");
+    vi.mocked(listArtifacts).mockClear();
+    const { rerender } = render(
+      <ArtifactList projectPath="/p" refreshKey={0} />,
+    );
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(1));
+    rerender(<ArtifactList projectPath="/p" refreshKey={1} />);
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+  });
 });

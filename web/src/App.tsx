@@ -72,7 +72,8 @@ import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import ArtifactPublishDialog from "./components/Artifacts/ArtifactPublishDialog";
 import ArtifactList from "./components/Artifacts/ArtifactList";
-import { ensureArtifact, publishArtifact } from "./api/artifacts";
+import { ensureArtifact, publishArtifact, unpublishArtifact, deleteArtifact } from "./api/artifacts";
+import ConfirmDialog from "./components/common/ConfirmDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import QuestionDialog from "./components/Chat/QuestionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
@@ -246,6 +247,12 @@ function HomeApp() {
     projectPath: string;
     host?: string;
   } | null>(null);
+  // Unpublish/delete confirm target; the list reloads after either succeeds.
+  const [artifactAction, setArtifactAction] = useState<{
+    kind: "unpublish" | "delete";
+    artifact: any;
+  } | null>(null);
+  const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [intentSkillsOpen, setIntentSkillsOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
@@ -1220,6 +1227,23 @@ function HomeApp() {
     [sendCommandToSession],
   );
 
+  // ConfirmDialog drives this; a rejected promise keeps the dialog open and
+  // shows the error, so a failed unpublish/delete is never reported as done.
+  const runArtifactAction = async () => {
+    const target = artifactAction;
+    const id = target?.artifact?.id;
+    if (!target || !id) return;
+    const host = target.artifact?.project_host || undefined;
+    const path = target.artifact?.project_path || undefined;
+    if (target.kind === "delete") {
+      await deleteArtifact(id, host, path);
+    } else {
+      await unpublishArtifact(id, host, path);
+    }
+    setArtifactAction(null);
+    setArtifactRefreshKey((k) => k + 1);
+  };
+
   const handleCommand = async (cmd: string, targetSessionId: string | null = activeTabId): Promise<SlashCommandResult> => {
     const baseCmd = cmd.split(" ")[0];
     const targetProjectPath = targetSessionId
@@ -2066,6 +2090,13 @@ function HomeApp() {
                     host={projectState.activeProject?.host}
                     limit={50}
                     active={activeView === "artifacts"}
+                    refreshKey={artifactRefreshKey}
+                    onUnpublish={(a) =>
+                      setArtifactAction({ kind: "unpublish", artifact: a })
+                    }
+                    onDelete={(a) =>
+                      setArtifactAction({ kind: "delete", artifact: a })
+                    }
                     onPublish={(a) =>
                       setPublishTarget({
                         artifactId: a?.id,
@@ -2562,6 +2593,27 @@ function HomeApp() {
           }
         />
       )}
+      <ConfirmDialog
+        open={artifactAction !== null}
+        title={
+          artifactAction?.kind === "delete"
+            ? "Delete artifact?"
+            : "Unpublish artifact?"
+        }
+        description={
+          artifactAction?.kind === "delete"
+            ? `Delete ${artifactAction?.artifact?.name || artifactAction?.artifact?.id} permanently? Its files are removed and the link stops working.`
+            : `Unpublish ${artifactAction?.artifact?.name || artifactAction?.artifact?.id}? The link stops working until you publish again.`
+        }
+        confirmLabel={
+          artifactAction?.kind === "delete" ? "Delete artifact" : "Unpublish"
+        }
+        pendingLabel={
+          artifactAction?.kind === "delete" ? "Deleting…" : "Unpublishing…"
+        }
+        onConfirm={runArtifactAction}
+        onCancel={() => setArtifactAction(null)}
+      />
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}

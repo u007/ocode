@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Artifact publishing / sharing (static snapshots, Mode A + Mode B client)
-description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, per-publish visitor access (public/password/allowlist) applied through the hub, hub_token persistence, presigned per-blob upload, and the 409-not-connected / 502 no-fallback rules; the hub-side API itself lives in the separate kakiit repo and is not in this tree. Also covers the owner API''s computed share_url and the project-level Artifacts top tab (client-side project scoping + reload-on-activation).'
+description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, per-publish visitor access (public/password/allowlist) applied through the hub, hub_token persistence, presigned per-blob upload, and the 409-not-connected / 502 no-fallback rules; the hub-side API itself lives in the separate kakiit repo and is not in this tree. Also covers the owner API''s computed share_url and the project-level Artifacts top tab (client-side project scoping, reload-on-activation, and per-row publish/unpublish/copy/delete behind a confirm guard).'
 resource: docs/superpowers/specs/2026-11-07-publish-share-project-design.md
 tags:
   - artifacts
@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T08:37:29Z
+timestamp: 2026-11-08T10:10:48Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -212,9 +212,9 @@ Pinned by `TestParseArtifactAccess`,
 
 ## Publish entry point in the SPA (`/publish`)
 
-The SPA mounts the publish dialog. `handleCommand` (`web/src/App.tsx:1242`) intercepts
-`/publish [hub|local]` before the shared `dispatchCommand`, resolves the active project's
-path/host, calls `ensureArtifact` (`web/src/api/artifacts.ts:156`) and stores
+The SPA mounts the publish dialog. `handleCommand` (`web/src/App.tsx:1247`) intercepts
+`/publish [hub|local]` (`:1266`) before the shared `dispatchCommand`, resolves the active
+project's path/host, calls `ensureArtifact` (`web/src/api/artifacts.ts:156`) and stores
 `{artifactId, projectPath, host}` in `publishTarget`. `ensureArtifact` lists the project's
 artifacts (limit 100) and **reuses** the one whose `project_path` matches (preferring a
 matching `project_host`) **and whose `hosting_mode` matches the requested mode** — hub
@@ -222,7 +222,7 @@ takes `hub`, local takes anything that is not `hub`, because the mode is fixed o
 and one project can hold both; it creates one with `hosting_mode: mode` only when none
 exists, and throws on an empty path.
 
-`App.tsx:2547` mounts `<ArtifactPublishDialog>` beside `<ShareDialog>`, wiring `onPublish`
+`App.tsx:2578` mounts `<ArtifactPublishDialog>` beside `<ShareDialog>`, wiring `onPublish`
 → `publishArtifact(id, payload, host, projectPath)`. The default hosting mode is **`hub`**;
 `/publish local` is the escape hatch, because a `hub` publish from a server with no sync
 login is refused (409 `hub_not_connected`) and never falls back (see "Mode B client
@@ -235,7 +235,7 @@ whole snapshot walk. `/publish` pre-checks it for a hub publish on a local proje
 (`hostingMode === "hub" && !targetHost` — a remote project's token lives on its own
 server, so the local check is skipped): when `api.getSyncStatus()` reports
 `loggedIn === false` it reports the message and returns **without creating an artifact
-or opening the dialog** (`App.tsx:1256`); a failed status probe is advisory
+or opening the dialog** (`App.tsx:1280`); a failed status probe is advisory
 (`console.warn`) and does not block. `publishArtifactToHub` wraps `errHubNotConnected`
 (`artifact_hub.go:43`) and `HandlePublish` maps that sentinel with
 `writeErrorCode(…, http.StatusConflict, "hub_not_connected", …)`
@@ -270,7 +270,7 @@ turn: it writes nothing to the transcript, the same rationale as `/btw`.
 ## Artifacts tab in the SPA (published-snapshot list)
 
 A project-level **Artifacts** top tab (`web/src/components/Layout/TopTabs.tsx:41`,
-after DB so DB stays beside Assets) renders `<ArtifactList>` (`App.tsx:2062`); `"artifacts"` is part of
+after DB so DB stays beside Assets) renders `<ArtifactList>` (`App.tsx:2086`); `"artifacts"` is part of
 `ActiveView` (`web/src/lib/viewPersistence.ts:1`), so the selected tab survives a reload.
 
 - **`share_url` is computed, never stored.** `Artifact.ShareURL`
@@ -281,18 +281,37 @@ after DB so DB stays beside Assets) renders `<ArtifactList>` (`App.tsx:2062`); `
   canonical link). `HandleListArtifacts`/`HandleGetArtifact` fill it (`:336-338`, `:374`);
   both routes sit behind `authMiddleware`, and the URL carries the same public token the
   owner already distributes. **Copy link** is disabled when it is empty
-  (`ArtifactList.tsx:185`); the old "Copy invite" that synthesized `/p/{id}` with no token
+  (`ArtifactList.tsx:202`); the old "Copy invite" that synthesized `/p/{id}` with no token
   is gone.
 - **Scoping is client-side.** The owner list endpoint is global (`ListArtifacts(limit,
   offset)` is not project-filtered), so the panel keeps only rows whose `project_path`
-  equals the active project's path (`ArtifactList.tsx:102-107`).
-- **Reload on activation.** The tab is `forceMount`ed from boot, so a mount-only load
-  showed stale data (a publish from the chat tab did not appear); the panel takes
-  `active` and reloads when it becomes true (`ArtifactList.tsx:127-134`, pinned by
-  `loads only when the tab becomes active`).
+  equals the active project's path (`ArtifactList.tsx:109`).
+- **Four per-row lifecycle actions.** Each handler prop is optional: Publish
+  (`ArtifactList.tsx:184`, only when `onPublish` is given — `App.tsx` gives it), Unpublish
+  (`:194`, hidden when `status === "unpublished"`), Copy link (`:202`, disabled without a
+  `share_url`) and Delete (`:217`, red via `text-destructive`). Delete is destructive and
+  removes the artifact's files; Unpublish only stops it serving and is reversible by
+  publishing the same row again.
+- **Confirm-guarded, and a failure keeps the dialog open.** `App.tsx` holds
+  `artifactAction {kind, artifact}` (`:251`) and `artifactRefreshKey` (`:255`);
+  `<ConfirmDialog>` (`:2596`) guards both actions, and its `onConfirm` is
+  `runArtifactAction` (`:1232`) → `unpublishArtifact(id, host, projectPath)`
+  (`web/src/api/artifacts.ts:304`; revokes the tokens, so the artifact stops serving) or
+  `deleteArtifact(...)` (`:317`; removes the artifact and the store GCs unreferenced
+  blobs). A rejected promise renders the error inline and keeps the dialog open
+  (`web/src/components/common/ConfirmDialog.tsx`), so a failed write is never reported as
+  done; only success clears the target and bumps the refresh key.
+- **Reload on activation and after an action.** The tab is `forceMount`ed from boot, so a
+  mount-only load showed stale data (a publish from the chat tab did not appear); the
+  panel takes `active` and reloads when it becomes true, and its load effect depends on
+  `[active, refreshKey]` (`ArtifactList.tsx:134-141`), so the owner never mutates the list
+  in place (pinned by `loads only when the tab becomes active` and
+  `reloads when refreshKey changes`).
 
 Verified live: the tab renders, a publish made from the chat tab appears on activation,
-and Copy link is disabled for a local artifact.
+publish → Unpublish flips the row to `unpublished` and hides the button → Delete (after
+the confirm) returns the empty "No artifacts yet" state, and Copy link is disabled for a
+local artifact.
 
 ## Mode B client upload path (`hosting_mode=hub`)
 
@@ -652,7 +671,9 @@ Mode B:
   `ArtifactPublishDialog.test.tsx` pins the select, password floor and invite parsing.
   `ArtifactList.test.tsx` pins project scoping (another project's row is hidden),
   copying the server `share_url` instead of a synthesized path, Copy link disabled
-  without one, per-row Publish only when a handler is given, and load-on-activate.
+  without one, per-row Publish only when a handler is given, load-on-activate, the
+  unpublish/delete row handlers, Unpublish hidden for an already-unpublished artifact,
+  and the `refreshKey` reload.
 
 ## Related
 

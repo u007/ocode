@@ -9,9 +9,13 @@ type ArtifactListProps = {
   project?: string;
   onSelect?: (artifact: any) => void;
   onPublish?: (artifact: any) => void;
+  onUnpublish?: (artifact: any) => void;
+  onDelete?: (artifact: any) => void;
   /** forceMount keeps this panel mounted from boot, so reload when it becomes
    *  visible instead of only on mount (a publish from another tab must show). */
   active?: boolean;
+  /** Bumped by the owner after an unpublish/delete so the list reloads. */
+  refreshKey?: number;
   artifacts?: any[];
   limit?: number;
 };
@@ -34,7 +38,10 @@ function ArtifactList(props: ArtifactListProps) {
     project,
     onSelect,
     onPublish,
+    onUnpublish,
+    onDelete,
     active,
+    refreshKey,
     artifacts: initial,
     limit = 10,
   } = props;
@@ -131,7 +138,7 @@ function ArtifactList(props: ArtifactListProps) {
     if (active === false) return;
     load(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
+  }, [active, refreshKey]);
 
   const copyShareLink = async (a: any) => {
     const url = typeof a?.share_url === "string" ? a.share_url : "";
@@ -179,6 +186,16 @@ function ArtifactList(props: ArtifactListProps) {
                   Publish
                 </Button>
               )}
+              {onUnpublish && a?.status !== "unpublished" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onUnpublish(a)}
+                  data-testid="unpublish-artifact"
+                >
+                  Unpublish
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"
@@ -191,6 +208,17 @@ function ArtifactList(props: ArtifactListProps) {
                   ? "Copied"
                   : "Copy link"}
               </Button>
+              {onDelete && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive"
+                  onClick={() => onDelete(a)}
+                  data-testid="delete-artifact"
+                >
+                  Delete
+                </Button>
+              )}
             </div>
           </li>
         ))}
