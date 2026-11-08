@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ArtifactList from "./ArtifactList";
 
 const artifacts = [
@@ -202,5 +202,55 @@ describe("ArtifactList", () => {
     expect(await screen.findByTestId("version-list")).toHaveTextContent(
       /versions unavailable/i,
     );
+  });
+
+  it("reloads for the new project when the active project changes", async () => {
+    const { listArtifacts } = await import("../../api/artifacts");
+    vi.mocked(listArtifacts).mockClear();
+    const { rerender } = render(<ArtifactList projectPath="/p" />);
+    await waitFor(() => expect(screen.getByText("One")).toBeInTheDocument());
+
+    rerender(<ArtifactList projectPath="/other" />);
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+    expect(listArtifacts).toHaveBeenLastCalledWith(
+      expect.anything(),
+      undefined,
+      "/other",
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Other project")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("One")).toBeNull();
+  });
+
+  it("drops a late response from the previous project", async () => {
+    const { listArtifacts } = await import("../../api/artifacts");
+    vi.mocked(listArtifacts).mockClear();
+    let resolveOld: (value: unknown) => void = () => {};
+    vi.mocked(listArtifacts).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }) as any,
+    );
+    const { rerender } = render(<ArtifactList projectPath="/p" />);
+    await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(1));
+
+    rerender(<ArtifactList projectPath="/other" />);
+    await waitFor(() =>
+      expect(screen.getByText("Other project")).toBeInTheDocument(),
+    );
+
+    await act(async () => {
+      resolveOld({
+        artifacts,
+        total: artifacts.length,
+        limit: 10,
+        offset: 0,
+      });
+    });
+    expect(screen.getByText("Other project")).toBeInTheDocument();
+    expect(screen.queryByText("One")).toBeNull();
+    expect(screen.queryByText("Two")).toBeNull();
   });
 });

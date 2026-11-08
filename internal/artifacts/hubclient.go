@@ -83,12 +83,22 @@ func (c *HubClient) do(ctx context.Context, method, path string, body any) (*htt
 	return c.HTTP.Do(req)
 }
 
+// hubErrorBodyLimit bounds how much of a hub error body is read, so a hub
+// failure is actionable without dumping an arbitrary response into the log.
+const hubErrorBodyLimit = 4096
+
+// readHubErrorBody reads a bounded error body and closes the response.
+func readHubErrorBody(resp *http.Response) string {
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, hubErrorBodyLimit))
+	return strings.TrimSpace(string(body))
+}
+
 // statusError reads a bounded error body so a hub failure is actionable
 // without dumping an arbitrary response into the log.
 func statusError(op string, resp *http.Response) error {
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("artifacts: hub %s: status %d: %s", op, resp.StatusCode, strings.TrimSpace(string(body)))
+	body := readHubErrorBody(resp)
+	return fmt.Errorf("artifacts: hub %s: status %d: %s", op, resp.StatusCode, body)
 }
 
 // EnsureArtifact creates the hub artifact, or returns the existing one when
@@ -197,4 +207,54 @@ func (c *HubClient) PublishVersion(ctx context.Context, artifactID, entrypoint, 
 		return HubPublishResult{}, fmt.Errorf("artifacts: hub decode publish: %w", err)
 	}
 	return HubPublishResult{VersionID: out.Version.ID, Token: out.Token}, nil
+}
+
+// UnpublishArtifact takes the hub artifact offline, so its public link stops
+// serving until a new version is published. A hub 404 wraps ErrNotFound only
+// when the hub says the artifact is missing (code "not_found"). Any other 404
+// means the route itself is missing on an older hub.
+func (c *HubClient) UnpublishArtifact(ctx context.Context, artifactID string) error {
+	return c.artifactOp(ctx, http.MethodPost, "/api/ocode/artifacts/"+url.PathEscape(artifactID)+"/unpublish", "unpublish artifact")
+}
+
+// DeleteArtifact removes the hub artifact, its versions and its public link.
+// A hub 404 wraps ErrNotFound under the same rule as UnpublishArtifact.
+func (c *HubClient) DeleteArtifact(ctx context.Context, artifactID string) error {
+	return c.artifactOp(ctx, http.MethodDelete, "/api/ocode/artifacts/"+url.PathEscape(artifactID), "delete artifact")
+}
+
+// hubNotFoundCode is the error code the hub sends with a 404 for a missing
+// artifact. A 404 without it comes from a route the hub does not serve.
+const hubNotFoundCode = "not_found"
+
+// artifactOp sends a body-less request that the hub acknowledges with {"ok": true}.
+func (c *HubClient) artifactOp(ctx context.Context, method, path, op string) error {
+	resp, err := c.do(ctx, method, path, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		body := readHubErrorBody(resp)
+		var hubErr struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal([]byte(body), &hubErr) == nil && hubErr.Code == hubNotFoundCode {
+			return fmt.Errorf("artifacts: hub %s: %w", op, ErrNotFound)
+		}
+		return fmt.Errorf("artifacts: hub %s: status 404 (hub does not support this operation): %s", op, body)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return statusError(op, resp)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("artifacts: hub decode %s: %w", op, err)
+	}
+	if !out.OK {
+		return fmt.Errorf("artifacts: hub %s: not acknowledged", op)
+	}
+	return nil
 }

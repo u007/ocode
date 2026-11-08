@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { copyTextToClipboard } from "../../lib/clipboard";
 
@@ -60,8 +60,16 @@ function ArtifactList(props: ArtifactListProps) {
   const [loading, setLoading] = useState(!initial);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Sequence of the newest load. A response whose sequence is no longer current
+  // (a newer load started, or the effect cleanup invalidated it on a project
+  // switch) is dropped, so a slow response for the previous project cannot
+  // overwrite the list of the current one.
+  const loadSeq = useRef(0);
+  // The project/host the rows on screen belong to; a change clears them.
+  const scopeRef = useRef<string | null>(null);
 
   const load = async (nextOffset: number) => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
@@ -118,6 +126,7 @@ function ArtifactList(props: ArtifactListProps) {
             (a: any) => (a?.project_path ?? "") === resolvedProjectPath,
           )
         : list;
+      if (seq !== loadSeq.current) return;
       setItems(Array.isArray(scoped) ? scoped : []);
       setTotal(
         resolvedProjectPath
@@ -132,9 +141,9 @@ function ArtifactList(props: ArtifactListProps) {
       );
       setOffset(nextOffset);
     } catch (e: any) {
-      setError(e?.message || String(e));
+      if (seq === loadSeq.current) setError(e?.message || String(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   };
 
@@ -143,9 +152,23 @@ function ArtifactList(props: ArtifactListProps) {
     // forceMount keeps this panel mounted from boot; reload whenever it becomes
     // visible so a publish from the chat tab shows up without a page reload.
     if (active === false) return;
+    // Rows from another project stay actionable (Publish/Unpublish/Delete) until
+    // the reload lands, so drop them as soon as the scope changes.
+    const scope = `${host ?? ""}\n${resolvedProjectPath ?? ""}`;
+    if (scopeRef.current !== null && scopeRef.current !== scope) {
+      setItems([]);
+      setTotal(0);
+      setOffset(0);
+    }
+    scopeRef.current = scope;
     load(0);
+    return () => {
+      // Invalidate this load when the project, host, refreshKey or visibility
+      // changes, or on unmount, so its late response is ignored.
+      loadSeq.current += 1;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, refreshKey]);
+  }, [active, refreshKey, host, resolvedProjectPath]);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [details, setDetails] = useState<

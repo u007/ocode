@@ -216,11 +216,17 @@ func (h *Handler) artifactShareURL(a artifacts.Artifact, st *artifacts.Store) st
 		return ""
 	}
 	token, err := st.GetArtifactHubToken(a.ID)
-	if err != nil || token == "" {
+	if err != nil {
 		return ""
 	}
-	base := strings.TrimRight(h.syncClient().BaseURL, "/")
-	if base == "" {
+	return artifactShareLink(a, strings.TrimRight(h.syncClient().BaseURL, "/"), token)
+}
+
+// artifactShareLink builds the share link from an already-resolved hub base
+// (no trailing slash) and public token. It is pure, so a list can resolve the
+// base once and reuse it for every row.
+func artifactShareLink(a artifacts.Artifact, base, token string) string {
+	if !strings.EqualFold(a.HostingMode, "hub") || base == "" || token == "" {
 		return ""
 	}
 	return base + "/p/" + url.PathEscape(a.ID) + "/" + url.PathEscape(token) + "/"
@@ -333,8 +339,24 @@ func (h *Handler) HandleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []artifacts.Artifact{}
 	}
+	// Resolve the hub base once and read every hub public token in one batch
+	// query, instead of a sync-client lookup and a token query per row.
+	base := strings.TrimRight(h.syncClient().BaseURL, "/")
+	hubIDs := make([]string, 0, len(list))
+	for _, a := range list {
+		if strings.EqualFold(a.HostingMode, "hub") {
+			hubIDs = append(hubIDs, a.ID)
+		}
+	}
+	tokens, err := st.GetArtifactHubTokens(hubIDs)
+	if err != nil {
+		// Share links are a convenience: a token read failure leaves them blank
+		// rather than failing the whole list.
+		log.Printf("artifact list: read hub tokens: %v", err)
+		tokens = map[string]string{}
+	}
 	for i := range list {
-		list[i].ShareURL = h.artifactShareURL(list[i], st)
+		list[i].ShareURL = artifactShareLink(list[i], base, tokens[list[i].ID])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artifacts": list,
@@ -571,31 +593,17 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	// filter gitignored? skip for minimal
-	v, err := st.PublishVersion(artifacts.Version{
-		ArtifactID:       id,
-		Version:          time.Now().UTC().Format("20060102150405"),
-		Entrypoint:       entrypoint,
-		BlobManifestHash: artifacts.ManifestHash(files),
-		SizeBytes:        totalSize,
-		BuildCmd:         buildCmd,
-		BuildLogPath:     "",
-		SchemaVersion:    1,
-	}, files)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("publish: %v", err))
-		return
-	}
-	// A new version makes the artifact live again after an unpublish.
-	if err := st.SetArtifactStatus(id, "active"); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("publish: %v", err))
-		return
-	}
-	// Mode B: upload the version to the hub. There is deliberately no local
-	// fallback — a hub failure fails the publish (502) instead of silently
-	// shipping a link that dies with this machine.
+	// Mode B: upload the version to the hub before the local version is
+	// committed. There is deliberately no local fallback — a hub failure fails
+	// the publish (502) instead of silently shipping a link that dies with this
+	// machine. The blobs the hub reads were already written to the store by the
+	// walk above, so the upload does not need the local version row.
 	var hubURL string
 	var hubInvites []artifacts.HubInvite
 	var hubInviteErrors []string
+	// hubPublish is set once the hub accepted the version. A local commit
+	// failure after that point must be answered through answerLocalCommitFailure.
+	var hubPublish *artifactHubOutcome
 	if strings.EqualFold(a.HostingMode, "hub") {
 		outcome, herr := h.publishArtifactToHub(r.Context(), a, entrypoint, buildCmd, files, st, access)
 		if herr != nil {
@@ -613,6 +621,26 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		hubURL = outcome.PublicURL
 		hubInvites = outcome.Invites
 		hubInviteErrors = outcome.InviteErrors
+		hubPublish = &outcome
+	}
+	v, err := st.PublishVersion(artifacts.Version{
+		ArtifactID:       id,
+		Version:          time.Now().UTC().Format("20060102150405"),
+		Entrypoint:       entrypoint,
+		BlobManifestHash: artifacts.ManifestHash(files),
+		SizeBytes:        totalSize,
+		BuildCmd:         buildCmd,
+		BuildLogPath:     "",
+		SchemaVersion:    1,
+	}, files)
+	if err != nil {
+		answerLocalCommitFailure(r.Context(), w, id, hubPublish, st, err)
+		return
+	}
+	// A new version makes the artifact live again after an unpublish.
+	if err := st.SetArtifactStatus(id, "active"); err != nil {
+		answerLocalCommitFailure(r.Context(), w, id, hubPublish, st, err)
+		return
 	}
 	// mint tokens? skip
 	// notify email
@@ -671,6 +699,22 @@ func (h *Handler) HandleUnpublish(w http.ResponseWriter, r *http.Request, id str
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
 		return
 	}
+	// A hub-hosted artifact is served by the hub, so the hub goes first: if it
+	// fails, the local row keeps its status and the public link keeps working
+	// in a state the owner can see and retry.
+	a, err := st.GetArtifact(id)
+	if err != nil && !errors.Is(err, artifacts.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unpublish: %v", err))
+		return
+	}
+	if err == nil && strings.EqualFold(a.HostingMode, "hub") {
+		if herr := h.removeArtifactFromHub(r.Context(), a, st, func(c *artifacts.HubClient) error {
+			return c.UnpublishArtifact(r.Context(), a.ID)
+		}); herr != nil {
+			writeHubRemovalError(w, "unpublish", herr)
+			return
+		}
+	}
 	if err := st.RevokeAllTokens(id); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unpublish: %v", err))
 		return
@@ -693,6 +737,20 @@ func (h *Handler) HandleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 	if st == nil {
 		writeError(w, http.StatusInternalServerError, "artifact store not available")
 		return
+	}
+	// Hub first, as for unpublish: a hub failure leaves the local row in place.
+	a, err := st.GetArtifact(id)
+	if err != nil && !errors.Is(err, artifacts.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("delete: %v", err))
+		return
+	}
+	if err == nil && strings.EqualFold(a.HostingMode, "hub") {
+		if herr := h.removeArtifactFromHub(r.Context(), a, st, func(c *artifacts.HubClient) error {
+			return c.DeleteArtifact(r.Context(), a.ID)
+		}); herr != nil {
+			writeHubRemovalError(w, "delete", herr)
+			return
+		}
 	}
 	if err := st.DeleteArtifact(id); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("delete: %v", err))

@@ -901,6 +901,56 @@ func (s *Store) GetArtifactHubToken(id string) (string, error) {
 	return token, nil
 }
 
+// artifactHubTokenChunk bounds the IN (...) list of GetArtifactHubTokens so a
+// large page of artifacts stays under SQLite's bound-parameter limit.
+const artifactHubTokenChunk = 500
+
+// GetArtifactHubTokens returns the stored hub public token for each id that
+// has one, using one query per chunk of ids. Ids with no token (or no row)
+// are absent from the map, so a missing key means "no share link".
+func (s *Store) GetArtifactHubTokens(ids []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	err := s.withLock(func() error {
+		for start := 0; start < len(ids); start += artifactHubTokenChunk {
+			end := start + artifactHubTokenChunk
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[start:end]
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				args[i] = id
+			}
+			rows, err := s.db.Query(`SELECT id, hub_token FROM artifacts WHERE hub_token <> '' AND id IN (`+placeholders+`)`, args...)
+			if err != nil {
+				return fmt.Errorf("artifacts: get hub tokens: %w", err)
+			}
+			for rows.Next() {
+				var id, token string
+				if err := rows.Scan(&id, &token); err != nil {
+					rows.Close()
+					return fmt.Errorf("artifacts: scan hub token: %w", err)
+				}
+				out[id] = token
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return fmt.Errorf("artifacts: iterate hub tokens: %w", err)
+			}
+			rows.Close()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HasAllowlist reports whether the artifact has any allow-list entry. An
 // artifact with entries is email-gated; one without is not.
 func (s *Store) HasAllowlist(artifactID string) (bool, error) {

@@ -3,6 +3,7 @@ package artifacts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -211,4 +212,114 @@ func TestHubClientAddArtifactInviteError(t *testing.T) {
 func serverURL(r *http.Request) string {
 	scheme := "http"
 	return scheme + "://" + r.Host
+}
+
+func TestHubClientUnpublishAndDeleteArtifact(t *testing.T) {
+	var method, path, auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, auth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "sync-bearer")
+	c.HTTP = srv.Client()
+	ctx := context.Background()
+
+	if err := c.UnpublishArtifact(ctx, "art_1"); err != nil {
+		t.Fatalf("UnpublishArtifact: %v", err)
+	}
+	if method != http.MethodPost || path != "/api/ocode/artifacts/art_1/unpublish" {
+		t.Fatalf("unpublish request = %s %s", method, path)
+	}
+	if auth != "Bearer sync-bearer" {
+		t.Fatalf("Authorization = %q", auth)
+	}
+
+	if err := c.DeleteArtifact(ctx, "art_1"); err != nil {
+		t.Fatalf("DeleteArtifact: %v", err)
+	}
+	if method != http.MethodDelete || path != "/api/ocode/artifacts/art_1" {
+		t.Fatalf("delete request = %s %s", method, path)
+	}
+	if auth != "Bearer sync-bearer" {
+		t.Fatalf("Authorization = %q", auth)
+	}
+}
+
+func TestHubClientArtifactOpNotFoundWrapsErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"artifact not found","code":"not_found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	ctx := context.Background()
+	if err := c.UnpublishArtifact(ctx, "art_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unpublish 404 error = %v, want ErrNotFound", err)
+	}
+	if err := c.DeleteArtifact(ctx, "art_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete 404 error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestHubClientArtifactOpPlainNotFoundIsRouteMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hono's default answer for a route the hub does not serve.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 Not Found"))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	ctx := context.Background()
+	for name, err := range map[string]error{
+		"unpublish": c.UnpublishArtifact(ctx, "art_1"),
+		"delete":    c.DeleteArtifact(ctx, "art_1"),
+	} {
+		if err == nil {
+			t.Fatalf("%s: plain 404 must be an error", name)
+		}
+		if errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s: plain 404 must not read as already gone: %v", name, err)
+		}
+		if !strings.Contains(err.Error(), "status 404") || !strings.Contains(err.Error(), "does not support") {
+			t.Fatalf("%s: error = %v, want status 404 naming the unsupported route", name, err)
+		}
+	}
+}
+
+func TestHubClientArtifactOpSurfacesHubError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"hub down"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	err := c.DeleteArtifact(context.Background(), "art_1")
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error = %v, want status 502", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("a 502 must not read as not-found: %v", err)
+	}
+}
+
+func TestHubClientArtifactOpRequiresAck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	defer srv.Close()
+
+	c := NewHubClient(srv.URL, "tok")
+	c.HTTP = srv.Client()
+	if err := c.UnpublishArtifact(context.Background(), "art_1"); err == nil {
+		t.Fatal("ok=false must be an error")
+	}
 }

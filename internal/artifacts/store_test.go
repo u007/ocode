@@ -1,6 +1,7 @@
 package artifacts
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -205,4 +206,38 @@ func TestStoreHubToken(t *testing.T) {
 	require.NoError(t, s.Migrate())
 
 	require.ErrorIs(t, s.SetArtifactHubToken("missing", "x"), ErrNotFound)
+}
+
+func TestStoreGetArtifactHubTokensBatch(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate())
+
+	hubA, err := s.CreateArtifact(Artifact{Name: "a", Status: "active", HostingMode: "hub"})
+	require.NoError(t, err)
+	hubB, err := s.CreateArtifact(Artifact{Name: "b", Status: "active", HostingMode: "hub"})
+	require.NoError(t, err)
+	local, err := s.CreateArtifact(Artifact{Name: "c", Status: "active", HostingMode: "self"})
+	require.NoError(t, err)
+	require.NoError(t, s.SetArtifactHubToken(hubA.ID, "tok-a"))
+	require.NoError(t, s.SetArtifactHubToken(hubB.ID, "tok-b"))
+
+	got, err := s.GetArtifactHubTokens([]string{hubA.ID, local.ID, "missing", hubB.ID})
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{hubA.ID: "tok-a", hubB.ID: "tok-b"}, got)
+
+	empty, err := s.GetArtifactHubTokens(nil)
+	require.NoError(t, err)
+	require.NotNil(t, empty)
+	require.Empty(t, empty)
+
+	// More ids than one chunk: the only token sits past the first chunk.
+	ids := make([]string, 0, artifactHubTokenChunk+2)
+	for i := 0; i < artifactHubTokenChunk+1; i++ {
+		ids = append(ids, "missing-"+strconv.Itoa(i))
+	}
+	ids = append(ids, hubA.ID)
+	got, err = s.GetArtifactHubTokens(ids)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{hubA.ID: "tok-a"}, got)
 }
