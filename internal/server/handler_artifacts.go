@@ -208,6 +208,24 @@ func (h *Handler) artifactStore() *artifacts.Store {
 	return nil
 }
 
+// artifactShareURL is the owner-visible share link for a hub-hosted artifact.
+// Local artifacts return "" — their access is per capability token, so there is
+// no single canonical link to show.
+func (h *Handler) artifactShareURL(a artifacts.Artifact, st *artifacts.Store) string {
+	if st == nil || !strings.EqualFold(a.HostingMode, "hub") {
+		return ""
+	}
+	token, err := st.GetArtifactHubToken(a.ID)
+	if err != nil || token == "" {
+		return ""
+	}
+	base := strings.TrimRight(h.syncClient().BaseURL, "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/p/" + url.PathEscape(a.ID) + "/" + url.PathEscape(token) + "/"
+}
+
 func (h *Handler) isAllowedProject(path, host string) bool {
 	if host != "" {
 		// remote: allow if saved project
@@ -315,6 +333,9 @@ func (h *Handler) HandleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []artifacts.Artifact{}
 	}
+	for i := range list {
+		list[i].ShareURL = h.artifactShareURL(list[i], st)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artifacts": list,
 		"items":     list,
@@ -350,6 +371,7 @@ func (h *Handler) HandleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	versions, _ := st.ListVersions(id)
+	a.ShareURL = h.artifactShareURL(a, st)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artifact": a,
 		"id":       a.ID,

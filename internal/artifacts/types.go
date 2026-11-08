@@ -12,6 +12,10 @@ type Artifact struct {
 	CreatedBy   string    `json:"created_by"`
 	Status      string    `json:"status"`
 	HostingMode string    `json:"hosting_mode"`
+	// ShareURL is computed per request for the owner API (hub artifacts with a
+	// persisted public token). It is never stored and is empty for local
+	// artifacts, whose access is per capability token.
+	ShareURL string `json:"share_url,omitempty"`
 }
 
 // Version is an immutable published version of an artifact.

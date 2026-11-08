@@ -71,6 +71,7 @@ import ModelDialog from "./components/Layout/ModelDialog";
 import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import ArtifactPublishDialog from "./components/Artifacts/ArtifactPublishDialog";
+import ArtifactList from "./components/Artifacts/ArtifactList";
 import { ensureArtifact, publishArtifact } from "./api/artifacts";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import QuestionDialog from "./components/Chat/QuestionDialog";
@@ -562,7 +563,7 @@ function HomeApp() {
   //    project while the switch lands. The sidebar selects the project and
   //    binds the tab to it as part of the same click.
   const pendingTabFocus = useTabFocusRequest();
-  const { setActiveId: setActiveTerminalId } = useTerminalState();
+  const { setActiveId: setActiveTerminalId, openTerminal } = useTerminalState();
   useEffect(() => {
     if (!pendingTabFocus) return;
     if (pendingTabFocus.projectPath !== (projectState.activeProject?.path ?? "")) return;
@@ -1888,6 +1889,12 @@ function HomeApp() {
                       loadingKey={filesLoadingKey}
                       onLoadingEvent={handleTabLoadingEvent}
                       revealRequest={treeRevealRequest}
+                      onStartTerminalHere={(folderPath) => {
+                        const proj = projectState.activeProject;
+                        if (!proj) return;
+                        setFocusedKind("terminal");
+                        openTerminal(proj.path, proj.host, folderPath);
+                      }}
                     />
                   </div>
                   <TabLoadingOverlay
@@ -2046,6 +2053,26 @@ function HomeApp() {
                     label="Loading Assets"
                     error={assetsLoading?.phase === "error" ? assetsLoading.error : undefined}
                     onRetry={assetsLoading?.retry}
+                  />
+                </div>
+              </TabsContent>
+              {/* Project-level published artifacts. The list is scoped to the
+                  active project client-side (the owner endpoint is not
+                  project-filtered); Publish opens the same dialog as /publish. */}
+              <TabsContent value="artifacts" forceMount className="flex-1 overflow-hidden m-0">
+                <div className="h-full overflow-auto p-3">
+                  <ArtifactList
+                    projectPath={projectState.activeProject?.path}
+                    host={projectState.activeProject?.host}
+                    limit={50}
+                    active={activeView === "artifacts"}
+                    onPublish={(a) =>
+                      setPublishTarget({
+                        artifactId: a?.id,
+                        projectPath: a?.project_path || projectState.activeProject?.path || "",
+                        host: a?.project_host || projectState.activeProject?.host,
+                      })
+                    }
                   />
                 </div>
               </TabsContent>

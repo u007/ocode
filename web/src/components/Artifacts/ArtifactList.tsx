@@ -8,12 +8,36 @@ type ArtifactListProps = {
   project_path?: string;
   project?: string;
   onSelect?: (artifact: any) => void;
+  onPublish?: (artifact: any) => void;
+  /** forceMount keeps this panel mounted from boot, so reload when it becomes
+   *  visible instead of only on mount (a publish from another tab must show). */
+  active?: boolean;
   artifacts?: any[];
   limit?: number;
 };
 
+function formatRelTime(iso: string): string {
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!Number.isFinite(diff)) return "";
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 172800) return "yesterday";
+  return new Date(iso).toLocaleDateString();
+}
+
 function ArtifactList(props: ArtifactListProps) {
-  const { host, projectPath, project_path, project, onSelect, artifacts: initial, limit = 10 } = props;
+  const {
+    host,
+    projectPath,
+    project_path,
+    project,
+    onSelect,
+    onPublish,
+    active,
+    artifacts: initial,
+    limit = 10,
+  } = props;
   const resolvedProjectPath = projectPath || project_path || project;
 
   const [items, setItems] = useState<any[]>(initial || []);
@@ -39,8 +63,13 @@ function ArtifactList(props: ArtifactListProps) {
       } catch {
         clientMod = null;
       }
-      const artFn = artMod && (artMod.listArtifacts || artMod.default?.listArtifacts || artMod.list);
-      const clientFn = clientMod && clientMod.api && (clientMod.api.listArtifacts || clientMod.api.listArtifacts);
+      const artFn =
+        artMod &&
+        (artMod.listArtifacts || artMod.default?.listArtifacts || artMod.list);
+      const clientFn =
+        clientMod &&
+        clientMod.api &&
+        (clientMod.api.listArtifacts || clientMod.api.listArtifacts);
       let fn: any = null;
       let viaClient = false;
       if (clientFn && clientFn._isMockFunction) {
@@ -61,12 +90,32 @@ function ArtifactList(props: ArtifactListProps) {
           : await fn({ limit, offset: nextOffset }, host, resolvedProjectPath);
       } else {
         // global fetch fallback
-        const r = await fetch(`/api/artifacts?limit=${limit}&offset=${nextOffset}`);
+        const r = await fetch(
+          `/api/artifacts?limit=${limit}&offset=${nextOffset}`,
+        );
         res = await r.json();
       }
-      const list = (res && (res.artifacts || res.items || res.data || res.results)) || [];
-      setItems(Array.isArray(list) ? list : []);
-      setTotal(typeof res?.total === "number" ? res.total : (Array.isArray(list) ? list.length : 0));
+      const list =
+        (res && (res.artifacts || res.items || res.data || res.results)) || [];
+      // The owner list endpoint is not project-filtered, so scope it here; a
+      // project tab must never show another project's artifacts.
+      const scoped = resolvedProjectPath
+        ? (Array.isArray(list) ? list : []).filter(
+            (a: any) => (a?.project_path ?? "") === resolvedProjectPath,
+          )
+        : list;
+      setItems(Array.isArray(scoped) ? scoped : []);
+      setTotal(
+        resolvedProjectPath
+          ? Array.isArray(scoped)
+            ? scoped.length
+            : 0
+          : typeof res?.total === "number"
+            ? res.total
+            : Array.isArray(list)
+              ? list.length
+              : 0,
+      );
       setOffset(nextOffset);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -76,12 +125,17 @@ function ArtifactList(props: ArtifactListProps) {
   };
 
   useEffect(() => {
-    if (!initial) load(0);
+    if (initial) return;
+    // forceMount keeps this panel mounted from boot; reload whenever it becomes
+    // visible so a publish from the chat tab shows up without a page reload.
+    if (active === false) return;
+    load(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
-  const copyInvite = async (a: any) => {
-    const url = `${window.location.origin}/p/${a?.id || a?.artifact_id || ""}`;
+  const copyShareLink = async (a: any) => {
+    const url = typeof a?.share_url === "string" ? a.share_url : "";
+    if (!url) return;
     await copyTextToClipboard(url);
     setCopiedId(a?.id || a?.artifact_id || null);
     setTimeout(() => setCopiedId(null), 1500);
@@ -90,22 +144,61 @@ function ArtifactList(props: ArtifactListProps) {
   return (
     <div className="space-y-2">
       {loading && <div className="text-xs text-muted-foreground">Loading…</div>}
-      {error && <div role="alert" className="text-xs text-destructive">{error}</div>}
+      {error && (
+        <div role="alert" className="text-xs text-destructive">
+          {error}
+        </div>
+      )}
       <ul className="space-y-1">
         {items.map((a, i) => (
-          <li key={a?.id || i} className="flex items-center justify-between gap-2 text-sm">
+          <li
+            key={a?.id || i}
+            className="flex items-center justify-between gap-2 rounded border px-2 py-1.5 text-sm"
+          >
             <button
               type="button"
-              className="text-left hover:underline"
+              className="min-w-0 flex-1 text-left hover:underline"
               onClick={() => onSelect?.(a)}
             >
-              {a?.name || a?.id || "artifact"}
+              <span className="block truncate">
+                {a?.name || a?.id || "artifact"}
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {[a?.status, a?.hosting_mode].filter(Boolean).join(" · ")}
+                {a?.created_at ? ` · ${formatRelTime(a.created_at)}` : ""}
+              </span>
             </button>
-            <Button size="sm" variant="ghost" onClick={() => copyInvite(a)} data-testid="copy-invite">
-              {copiedId === (a?.id || a?.artifact_id) ? "Copied" : "Copy invite"}
-            </Button>
+            <div className="flex items-center gap-1">
+              {onPublish && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onPublish(a)}
+                  data-testid="publish-artifact"
+                >
+                  Publish
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!a?.share_url}
+                title={a?.share_url ? "Copy the share link" : "No link yet"}
+                onClick={() => copyShareLink(a)}
+                data-testid="copy-share-link"
+              >
+                {copiedId === (a?.id || a?.artifact_id)
+                  ? "Copied"
+                  : "Copy link"}
+              </Button>
+            </div>
           </li>
         ))}
+        {!loading && items.length === 0 && (
+          <li className="text-xs text-muted-foreground">
+            No artifacts yet. Publish this project to create one.
+          </li>
+        )}
       </ul>
       <div className="flex items-center gap-2">
         <Button

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Database, FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, PanelLeft } from "lucide-react";
+import { Database, FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal, Settings, PanelLeft, Share2 } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
@@ -36,6 +36,9 @@ const mainTabs = [
   // against the active project), so it lives beside Assets rather than under a
   // single chat session.
   { id: "db", label: "DB", icon: Database },
+  // Published snapshots are project-scoped too, but they are not uploads, so
+  // they get their own surface. Kept after DB so DB stays beside Assets.
+  { id: "artifacts", label: "Artifacts", icon: Share2 },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

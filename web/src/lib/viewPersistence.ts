@@ -1,4 +1,4 @@
-export type ActiveView = "files" | "git" | "cron" | "assets" | "db" | "sessions" | "settings";
+export type ActiveView = "files" | "git" | "cron" | "assets" | "artifacts" | "db" | "sessions" | "settings";
 export type FocusedKind = "chat" | "terminal" | "browser";
 
 const STORAGE_KEY = "ocode.ui.view-state.v1";

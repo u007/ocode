@@ -9,6 +9,8 @@ export interface Artifact {
   created_by?: string;
   status?: string;
   hosting_mode?: string;
+  /** Owner-visible share link (hub artifacts only; empty for local ones). */
+  share_url?: string;
 }
 
 export interface ArtifactVersion {

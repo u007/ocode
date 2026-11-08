@@ -290,6 +290,37 @@ func TestHandlePublishSecretScanRefusalAndOverride(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"hub_url":""`)
 }
 
+func TestHandleListArtifactsIncludesShareURL(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	t.Setenv("OCODE_SYNC_URL", "https://hub.test")
+
+	h, store := newHubHandlerTestStore(t)
+	hubArtifact, err := store.CreateArtifact(artifacts.Artifact{
+		ID: "art_hub", Name: "demo", ProjectPath: "/p", HostingMode: "hub",
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SetArtifactHubToken(hubArtifact.ID, "pub-token"))
+	_, err = store.CreateArtifact(artifacts.Artifact{
+		ID: "art_local", Name: "local", ProjectPath: "/p", HostingMode: "self",
+	})
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	h.HandleListArtifacts(w, httptest.NewRequest(http.MethodGet, "/api/artifacts", nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var body struct {
+		Artifacts []artifacts.Artifact `json:"artifacts"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	urls := map[string]string{}
+	for _, a := range body.Artifacts {
+		urls[a.ID] = a.ShareURL
+	}
+	require.Equal(t, "https://hub.test/p/art_hub/pub-token/", urls["art_hub"])
+	require.Empty(t, urls["art_local"], "local artifacts have no canonical share link")
+}
+
 func TestParseArtifactAccess(t *testing.T) {
 	t.Run("absent mode leaves the hub setting alone", func(t *testing.T) {
 		access, err := parseArtifactAccess(map[string]any{})
