@@ -14,7 +14,8 @@
     "/Applications/Google Chrome.app/Contents/MacOS",
     "/home",
     "/Users/james/Downloads",
-    "/Users/james/go"
+    "/Users/james/go",
+    "/Applications/Godot.app/Contents/MacOS"
   ],
   "skills": {
     "disabled": [
