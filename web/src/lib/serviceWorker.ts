@@ -13,8 +13,19 @@ export async function registerServiceWorker(
 ): Promise<ServiceWorkerRegistration | undefined> {
   if (!('serviceWorker' in navigator)) return undefined;
 
+  // The service worker itself is root-oriented (absolute '/sw.js', '/assets/*',
+  // '/api/*', scope '/'). Under a non-root base (e.g. a tailscale path prefix)
+  // we scope registration to the base path as a partial mitigation, but the SW
+  // still only controls root-origin paths — full relative support is not
+  // implemented. See web/public/sw.js.
+  const rawBase = (import.meta.env.BASE_URL as string) || '/';
+  const normalizedBase = rawBase.endsWith('/') ? rawBase : rawBase + '/';
+  const isRoot = normalizedBase === '/';
+  const swUrl = isRoot ? '/sw.js' : `${normalizedBase}sw.js`;
+  const scope = isRoot ? '/' : normalizedBase;
+
   try {
-    const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    const registration = await navigator.serviceWorker.register(swUrl, { scope });
 
     const handleUpdate = () => {
       const installing = registration.installing;

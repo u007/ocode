@@ -1,5 +1,10 @@
 /* eslint-disable no-restricted-globals */
-const CACHE_VERSION = 'ocode-shell-v1';
+// NOTE: This service worker assumes a ROOT deployment (origin '/'). Paths below
+// are absolute ('/sw.js', '/assets/*', '/api/*', '/'). Under a prefixed
+// deployment (Vite base !== '/'), registration is scoped to the base path but
+// the SW still only controls root-origin paths; full relative support is not
+// implemented. See web/src/lib/serviceWorker.ts.
+const CACHE_VERSION = 'ocode-shell-__BUILD_HASH__';
 const PRECACHE_URLS = self.__PRECACHE_MANIFEST__ || ['/index.html'];
 
 // Strategies
@@ -33,12 +38,38 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k))),
-      )
-      .then(() => self.clients.claim()),
+    (async () => {
+      // Drop caches from previous builds (cache name includes the build hash).
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
+
+      // Prune stale entries within the current cache that are no longer precached.
+      try {
+        const cache = await caches.open(CACHE_VERSION);
+        const requests = await cache.keys();
+        const allowed = new Set(PRECACHE_URLS);
+        await Promise.all(
+          requests.map((req) => {
+            let pathname = '/';
+            try {
+              pathname = new URL(req.url).pathname;
+            } catch {
+              return undefined;
+            }
+            // Always keep the app shell; prune only stale hashed assets.
+            if (pathname === '/' || pathname === '/index.html') return undefined;
+            if (pathname.startsWith('/assets/') && !allowed.has(pathname)) {
+              return cache.delete(req);
+            }
+            return undefined;
+          }),
+        );
+      } catch {
+        /* ignore */
+      }
+
+      await self.clients.claim();
+    })(),
   );
 });
 
@@ -58,6 +89,9 @@ self.addEventListener('fetch', (event) => {
   // Default for cross-origin or unknown: network pass-through.
   if (url.origin !== self.location.origin) return;
 
+  // Never serve the service worker script itself from cache.
+  if (url.pathname === '/sw.js') return;
+
   // Cache-first for hashed assets.
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(cacheFirst(request));
@@ -65,6 +99,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Other static assets (images, fonts): cache-first.
+  // /sw.js is excluded above so it never matches this branch.
   if (/\.(png|jpg|jpeg|gif|svg|webp|ico|woff2?|ttf|eot|css|js)$/i.test(url.pathname)) {
     event.respondWith(cacheFirst(request));
     return;

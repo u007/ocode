@@ -1,4 +1,5 @@
 import path from "path";
+import { createHash } from "node:crypto";
 import { writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
@@ -28,8 +29,11 @@ export default defineConfig({
         walk(dist);
         if (!assets.includes("/index.html")) assets.unshift("/index.html");
         const manifest = JSON.stringify(assets);
+        const buildHash = createHash("sha256").update(manifest).digest("hex").slice(0, 10);
         const src = readFileSync(swPath, "utf8");
-        const out = src.replace("self.__PRECACHE_MANIFEST__ || ['/index.html']", manifest);
+        const out = src
+          .replace("self.__PRECACHE_MANIFEST__ || ['/index.html']", manifest)
+          .replace("__BUILD_HASH__", buildHash);
         writeFileSync(swPath, out);
       },
     },
