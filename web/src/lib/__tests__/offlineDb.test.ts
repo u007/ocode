@@ -27,6 +27,16 @@ describe('OfflineDB', () => {
     expect(result).toBeUndefined();
   });
 
+  it('clearAll purges sessions and terminals too', async () => {
+    await db.putProject({ id: '/p', name: 'p', lastSynced: Date.now(), data: {} });
+    await db.putSession({ id: 's1', projectId: '/p', lastSynced: Date.now(), messages: [], metadata: {} });
+    await db.putTerminal({ id: 't1', projectId: '/p', lastSynced: Date.now(), scrollback: 'x', tabs: [] });
+    await db.clearAll();
+    expect(await db.getProject('/p')).toBeUndefined();
+    expect(await db.getSession('s1')).toBeUndefined();
+    expect(await db.getTerminal('t1')).toBeUndefined();
+  });
+
   it('stores and retrieves a session', async () => {
     await db.putSession({ id: 's1', projectId: '/p', lastSynced: Date.now(), messages: [{ role: 'user', content: 'hi' }], metadata: {} });
     const result = await db.getSession('s1');
