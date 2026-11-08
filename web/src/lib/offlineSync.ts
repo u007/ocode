@@ -5,6 +5,13 @@ import type { CachedProject, CachedSession, CachedTerminal } from './offlineDb';
 
 let dbPromise: Promise<import('./offlineDb').OfflineDB> | null = null;
 
+// Track the most recent sync timestamp across all cache writes.
+let lastSyncTimestamp: number | null = null;
+
+export function getLastSynced(): number | null {
+  return lastSyncTimestamp;
+}
+
 async function getDB(): Promise<import('./offlineDb').OfflineDB> {
   if (!dbPromise) {
     dbPromise = import('./offlineDb').then((m) => new m.OfflineDB());
@@ -22,6 +29,7 @@ export async function syncProjectToCache(project: any): Promise<void> {
       data: project,
     };
     await db.putProject(cached);
+    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncProjectToCache failed:', err);
   }
@@ -44,6 +52,7 @@ export async function syncSessionToCache(session: {
       metadata: session,
     };
     await db.putSession(cached);
+    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncSessionToCache failed:', err);
   }
@@ -67,6 +76,7 @@ export async function syncTerminalToCache(terminal: {
       tabs: terminal.tabs ?? [],
     };
     await db.putTerminal(cached);
+    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncTerminalToCache failed:', err);
   }
