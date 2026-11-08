@@ -1274,6 +1274,12 @@ export const api = {
       if (opts?.noteRevision !== false) {
         noteSessionRevision(id, host, detail.revision);
       }
+      // Write-through cache for offline read access (best-effort).
+      import("../lib/offlineSync")
+        .then(({ syncSessionToCache }) => {
+          void syncSessionToCache(detail as any);
+        })
+        .catch(() => {});
       return detail;
     });
   },
@@ -3309,7 +3315,15 @@ export const api = {
         body: JSON.stringify({ command, workDir, host, session }),
       },
     ),
-  listProjects: () => fetchJSON<Project[]>("/api/projects"),
+  listProjects: () => fetchJSON<Project[]>("/api/projects").then((projects) => {
+    // Write-through cache for offline read access (best-effort, non-blocking).
+    import("../lib/offlineSync")
+      .then(({ syncProjectToCache }) => {
+        projects.forEach((p) => void syncProjectToCache(p));
+      })
+      .catch(() => {});
+    return projects;
+  }),
   /** The saved project root matching the server's working directory (auto-added
    *  when the cwd is a real project root), or null. Used to auto-select the
    *  sidebar project on startup. */
