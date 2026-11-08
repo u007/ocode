@@ -65,6 +65,10 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [published, setPublished] = useState<any>(null);
+  // A secret-scan 409 is the one refusal the user can override: the server
+  // demands a reason, so surface the field only after that specific refusal.
+  const [secretScanBlocked, setSecretScanBlocked] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
 
   // Reset component-local state on each open; never persisted across opens.
   useEffect(() => {
@@ -76,6 +80,8 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
       setError(null);
       setPending(false);
       setPublished(null);
+      setSecretScanBlocked(false);
+      setOverrideReason("");
     }
   }, [open]);
 
@@ -99,6 +105,10 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
       setError("Add at least one email address.");
       return;
     }
+    if (secretScanBlocked && overrideReason.trim() === "") {
+      setError("Say why it is safe to publish this project anyway.");
+      return;
+    }
     setPending(true);
     setError(null);
     const payload: Record<string, unknown> = {
@@ -107,6 +117,8 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
     };
     if (accessMode === "password") payload.password = password;
     if (accessMode === "allowlist") payload.invite_emails = inviteEmails;
+    if (overrideReason.trim() !== "")
+      payload.override_reason = overrideReason.trim();
     try {
       let result: any = undefined;
       if (typeof onPublish === "function") {
@@ -180,7 +192,18 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
       // links are the useful output, and closing first would discard them.
       setPublished(result ?? {});
     } catch (e: any) {
-      setError(e?.message || String(e));
+      const status = typeof e?.status === "number" ? e.status : 0;
+      const message = e?.message || String(e);
+      // 409 is also used for hub_not_connected, which is NOT overridable. Only
+      // the secret-scan refusal ("secret scan hit") opens the reason field.
+      if (status === 409 && /secret scan/i.test(message)) {
+        setSecretScanBlocked(true);
+        setError(
+          "This project contains .env or key files. Give a reason to publish anyway.",
+        );
+      } else {
+        setError(message);
+      }
     } finally {
       setPending(false);
     }
@@ -306,6 +329,21 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
                 />
               </label>
             )}
+            {secretScanBlocked && (
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs text-muted-foreground">
+                  Reason to publish anyway
+                </span>
+                <textarea
+                  data-testid="override-reason"
+                  rows={2}
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="Why is it safe to publish these files?"
+                  className="w-full rounded border bg-background px-2 py-1 text-sm"
+                />
+              </label>
+            )}
             {error && (
               <div role="alert" className="text-xs text-destructive">
                 {error}
@@ -337,7 +375,11 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
                 disabled={pending}
                 data-testid="publish-submit"
               >
-                {pending ? "Publishing…" : "Publish"}
+                {pending
+                  ? "Publishing…"
+                  : secretScanBlocked
+                    ? "Publish anyway"
+                    : "Publish"}
               </Button>
             </>
           )}

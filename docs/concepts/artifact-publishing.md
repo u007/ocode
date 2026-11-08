@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T05:51:06Z
+timestamp: 2026-11-08T07:51:29Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -201,9 +201,9 @@ The publish response reports `access_mode`, `hub_invites` and `invite_errors`
 (`handler_artifacts.go:629-638`). The SPA maps the access fields explicitly
 (`web/src/api/artifacts.ts:288`, invites at `:291`) — **the existing `mode` field is a
 legacy alias for `hosting_mode`, so the access mode must never travel as `mode`**
-(`:283-287`). The dialog adds the select (`ArtifactPublishDialog.tsx:269`), the password
-field (`:286`, client-side 8-char check at `:94`) and the invite textarea (`:300`, split
-on commas/spaces/newlines, `:98`).
+(`:283-287`). The dialog adds the select (`ArtifactPublishDialog.tsx:292`), the password
+field (`:309`, client-side 8-char check at `:100`) and the invite textarea (`:323`, split
+on commas/spaces/newlines, `:104`).
 
 Pinned by `TestParseArtifactAccess`,
 `TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors`, the handler 400 case, and
@@ -245,6 +245,19 @@ rather than on text. `/publish local` now uses **its own artifact row**: `ensure
 local accepts anything else (existing rows may say `"self"`) — since the mode is fixed
 on the row and one project can hold both. Before it, a local publish after a failed hub
 publish reused the hub artifact and hit the same failure again.
+
+A `409` from publish is not one behaviour: the **secret-scan refusal is the only
+overridable one**, and the dialog — not the `/publish` command — owns the override. The
+`catch` opens the reason field only for `status === 409 && /secret scan/i.test(message)`
+(`ArtifactPublishDialog.tsx:199`), i.e. exactly the server's `secret scan hit`
+(`handler_artifacts.go:429`); it then renders a required override-reason textarea
+(`:338`), relabels the button **Publish anyway**, and refuses an empty reason
+client-side before sending (`:108`). A non-empty retry adds `override_reason` to the
+payload, which `artifacts.ts:274-276` already maps
+(`override_reason`/`overrideReason`/`reason`), so no API change was needed. **A
+`hub_not_connected` 409 is deliberately NOT overridable** — it stays a plain error and
+never opens the field, so a secret-scan override cannot double as a way past a missing
+hub login.
 
 `/publish` is registered in the command picker (`web/src/components/Chat/commands.ts:105`)
 and marked **instant** (`web/src/lib/instantCommands.ts:27`), so it runs during a live

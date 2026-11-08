@@ -142,9 +142,7 @@ describe("ArtifactPublishDialog", () => {
       target: { value: "a@example.com,b@example.com" },
     });
     fireEvent.click(screen.getByRole("button", { name: /publish/i }));
-    expect(
-      await screen.findByText("https://hub.test/i/a"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("https://hub.test/i/a")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(/b@example.com/);
   });
 
@@ -155,5 +153,73 @@ describe("ArtifactPublishDialog", () => {
     expect(await screen.findByTestId("publish-result")).toHaveTextContent(
       /served by this machine/i,
     );
+  });
+
+  it("reveals the override field on a secret-scan 409", async () => {
+    const onPublish = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("secret scan hit"), { status: 409 }),
+      );
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(await screen.findByTestId("override-reason")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/reason to publish/i);
+    expect(
+      screen.getByRole("button", { name: /publish anyway/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("requires a reason before retrying an overridden publish", async () => {
+    const onPublish = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("secret scan hit"), { status: 409 }),
+      );
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    await screen.findByTestId("override-reason");
+    fireEvent.click(screen.getByRole("button", { name: /publish anyway/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /why it is safe/i,
+    );
+    expect(onPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it("resubmits with override_reason after a secret-scan 409", async () => {
+    const onPublish = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("secret scan hit"), { status: 409 }),
+      )
+      .mockResolvedValueOnce({ hub_url: "https://hub.test/p/art/tok/" });
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    fireEvent.change(await screen.findByTestId("override-reason"), {
+      target: { value: "no real secrets, rotated" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /publish anyway/i }));
+    await waitFor(() => expect(onPublish).toHaveBeenCalledTimes(2));
+    expect(onPublish.mock.calls[1][0]).toMatchObject({
+      override_reason: "no real secrets, rotated",
+    });
+    expect(await screen.findByTestId("publish-result-url")).toHaveValue(
+      "https://hub.test/p/art/tok/",
+    );
+  });
+
+  it("does not offer an override for a hub_not_connected 409", async () => {
+    const onPublish = vi.fn().mockRejectedValue(
+      Object.assign(new Error("sync is not connected; run /sync"), {
+        status: 409,
+        body: { code: "hub_not_connected" },
+      }),
+    );
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /sync is not connected/i,
+    );
+    expect(screen.queryByTestId("override-reason")).toBeNull();
   });
 });
