@@ -1,16 +1,9 @@
 // Write-through cache: syncs API responses to IndexedDB for offline read access.
 // All functions are best-effort: failures are logged but never thrown.
 
-import type { CachedProject, CachedSession, CachedTerminal } from './offlineDb';
+import type { CacheSummary, CachedProject, CachedSession, CachedTerminal } from './offlineDb';
 
 let dbPromise: Promise<import('./offlineDb').OfflineDB> | null = null;
-
-// Track the most recent sync timestamp across all cache writes.
-let lastSyncTimestamp: number | null = null;
-
-export function getLastSynced(): number | null {
-  return lastSyncTimestamp;
-}
 
 async function getDB(): Promise<import('./offlineDb').OfflineDB> {
   if (!dbPromise) {
@@ -29,7 +22,6 @@ export async function syncProjectToCache(project: any): Promise<void> {
       data: project,
     };
     await db.putProject(cached);
-    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncProjectToCache failed:', err);
   }
@@ -43,16 +35,19 @@ export async function syncSessionToCache(session: {
 }): Promise<void> {
   try {
     const db = await getDB();
-    const messages = (session.messages ?? []).slice(-200);
+    const { messages: transcript, ...rest } = session;
     const cached: CachedSession = {
       id: session.id,
-      projectId: session.projectId ?? '',
+      // Left undefined when the caller does not know the project: an empty
+      // string would read as a real project id.
+      projectId: session.projectId,
       lastSynced: Date.now(),
-      messages,
-      metadata: session,
+      messages: (transcript ?? []).slice(-200),
+      // Metadata carries everything except the transcript, which lives in
+      // `messages`. Keeping both would store the transcript twice.
+      metadata: rest,
     };
     await db.putSession(cached);
-    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncSessionToCache failed:', err);
   }
@@ -76,7 +71,6 @@ export async function syncTerminalToCache(terminal: {
       tabs: terminal.tabs ?? [],
     };
     await db.putTerminal(cached);
-    lastSyncTimestamp = Date.now();
   } catch (err) {
     console.debug('[offlineSync] syncTerminalToCache failed:', err);
   }
@@ -95,4 +89,19 @@ export async function loadFromCache(
     console.debug('[offlineSync] loadFromCache failed:', err);
   }
   return undefined;
+}
+
+/**
+ * Reads the cache's own state for the offline banner. Derived from the stored
+ * records, not from a value kept in memory, so it survives a reload and agrees
+ * with the data after a purge or eviction. Returns undefined when the read fails.
+ */
+export async function loadCacheSummary(): Promise<CacheSummary | undefined> {
+  try {
+    const db = await getDB();
+    return await db.summarize();
+  } catch (err) {
+    console.warn('[offlineSync] loadCacheSummary failed:', err);
+    return undefined;
+  }
 }

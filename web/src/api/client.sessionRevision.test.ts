@@ -1,5 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
+
+// getSession writes the transcript through to the offline cache. The write is
+// a dynamic import that is not awaited, so the tests flush it before asserting.
+const offline = vi.hoisted(() => ({
+  syncSessionToCache: vi.fn(async (_detail: unknown) => {}),
+}));
+vi.mock("../lib/offlineSync", () => ({
+  syncSessionToCache: offline.syncSessionToCache,
+}));
 import {
   noteSessionRevision,
   sessionRevisionMoved,
@@ -77,5 +86,60 @@ describe("api.getSession opt-out from the revision baseline", () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(detailBody("rev-1"))));
     await api.getSession("s1");
     expect(sessionRevisionMoved("s1", undefined, "rev-2")).toBe(true);
+  });
+});
+
+describe("api.getSession offline write-through only caches a whole transcript", () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+  function transcriptBody(messageCount: number, total: number): string {
+    return JSON.stringify({
+      id: "s1",
+      title: "",
+      created_at: "",
+      updated_at: "",
+      messages: Array.from({ length: messageCount }, (_, i) => ({ role: "user", content: `m${i}` })),
+      total,
+      revision: "rev",
+    });
+  }
+
+  function serve(body: string) {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+  }
+
+  beforeEach(() => {
+    offline.syncSessionToCache.mockClear();
+  });
+
+  it("caches a full read with no window options", async () => {
+    serve(transcriptBody(3, 3));
+    await api.getSession("s1");
+    await flush();
+    expect(offline.syncSessionToCache).toHaveBeenCalledTimes(1);
+    expect(offline.syncSessionToCache.mock.calls[0][0]).toMatchObject({ id: "s1", total: 3 });
+  });
+
+  it("caches a head window that already holds the whole transcript", async () => {
+    // The normal open path passes a limit. When the limit reaches the end,
+    // the read is still the whole transcript and must stay cached.
+    serve(transcriptBody(3, 3));
+    await api.getSession("s1", { limit: 100 });
+    await flush();
+    expect(offline.syncSessionToCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips a window that starts past the head (offset > 0)", async () => {
+    serve(transcriptBody(2, 5));
+    await api.getSession("s1", { limit: 2, offset: 2 });
+    await flush();
+    expect(offline.syncSessionToCache).not.toHaveBeenCalled();
+  });
+
+  it("skips a head window that stops short of the total", async () => {
+    serve(transcriptBody(20, 200));
+    await api.getSession("s1", { limit: 20 });
+    await flush();
+    expect(offline.syncSessionToCache).not.toHaveBeenCalled();
   });
 });

@@ -1278,12 +1278,28 @@ export const api = {
       if (opts?.noteRevision !== false) {
         noteSessionRevision(id, host, detail.revision);
       }
-      // Write-through cache for offline read access (best-effort).
-      import("../lib/offlineSync")
-        .then(({ syncSessionToCache }) => {
-          void syncSessionToCache(detail as any);
-        })
-        .catch(() => {});
+      // Write-through cache for offline read access (best-effort). Only a read
+      // that holds the whole transcript is cached: it starts at the head
+      // (offset 0) and `messages` covers `total`. A window that starts past the
+      // head, or stops short of `total`, is a fragment, and caching it would
+      // overwrite a fuller cached copy. A limited read that reaches the whole
+      // transcript still counts, so the normal open path (which passes a limit)
+      // stays cached.
+      // The check must never throw: it runs inside the read, so a response
+      // without a message array or a numeric total is skipped, not fatal.
+      const holdsWholeTranscript =
+        Array.isArray(detail.messages) &&
+        typeof detail.total === "number" &&
+        detail.messages.length >= detail.total;
+      if ((opts?.offset ?? 0) === 0 && holdsWholeTranscript) {
+        import("../lib/offlineSync")
+          .then(({ syncSessionToCache }) => {
+            void syncSessionToCache(detail as any);
+          })
+          .catch((err: unknown) => {
+            console.warn("client: offline cache write-through failed to load:", err);
+          });
+      }
       return detail;
     });
   },

@@ -926,6 +926,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
 
   // Shared send path for the Enter key and the Send button.
   const submitComposer = async () => {
+    // Offline gate, the same predicate that disables the Send button. Enter
+    // reaches this function directly, so the gate lives here too. Refusing
+    // before anything else keeps the composer's text and nothing is recorded.
+    if (isOffline) return;
     // In-flight guard — must run before any async gap and before reading
     // `input`, so a duplicate physical submit (same tick) is dropped instead of
     // sending the same text twice. Distinct later submits (different tick, after

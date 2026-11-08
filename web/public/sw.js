@@ -1,11 +1,26 @@
 /* eslint-disable no-restricted-globals */
-// NOTE: This service worker assumes a ROOT deployment (origin '/'). Paths below
-// are absolute ('/sw.js', '/assets/*', '/api/*', '/'). Under a prefixed
-// deployment (Vite base !== '/'), registration is scoped to the base path but
-// the SW still only controls root-origin paths; full relative support is not
-// implemented. See web/src/lib/serviceWorker.ts.
+// Fetch routing is scope-relative: every path check compares against SCOPE_PATH,
+// the directory this script is served from ('/' for a plain mount, or a mount
+// prefix such as '/rc/'). The precache list (PRECACHE_URLS) and the activate-time
+// prune still use root-absolute manifest paths ('/index.html', '/assets/*'), so
+// under a prefixed mount they do not match the URLs the page requests. See
+// web/src/lib/serviceWorker.ts.
 const CACHE_VERSION = 'ocode-shell-__BUILD_HASH__';
 const PRECACHE_URLS = self.__PRECACHE_MANIFEST__ || ['/index.html'];
+
+// The directory this script is served from: '/' for a plain mount, or the mount
+// prefix (e.g. '/rc/'). Cache-first matching is relative to it.
+const SCOPE_PATH = new URL('./', self.location.href).pathname;
+
+// Cache-first is limited to the SPA's own hashed build output under <scope>assets/.
+// Published artifacts (<scope>p/...) are served through artifact auth and change
+// whenever they are republished, so they must never be served from this cache.
+function isCacheFirstAsset(pathname) {
+  if (!pathname.startsWith(SCOPE_PATH)) return false;
+  const rel = pathname.slice(SCOPE_PATH.length);
+  if (rel === 'p' || rel.startsWith('p/')) return false;
+  return rel.startsWith('assets/');
+}
 
 // Strategies
 async function cacheFirst(request) {
@@ -85,28 +100,23 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Network-only for everything else, including /api/*.
-  if (url.pathname.startsWith('/api/')) return;
+  if (url.pathname.startsWith(SCOPE_PATH + 'api/')) return;
   // Default for cross-origin or unknown: network pass-through.
   if (url.origin !== self.location.origin) return;
 
   // Never serve the service worker script itself from cache.
-  if (url.pathname === '/sw.js') return;
+  if (url.pathname === SCOPE_PATH + 'sw.js') return;
 
-  // Cache-first for hashed assets.
-  if (url.pathname.startsWith('/assets/')) {
-    event.respondWith(cacheFirst(request));
-    return;
-  }
-
-  // Other static assets (images, fonts): cache-first.
-  // /sw.js is excluded above so it never matches this branch.
-  if (/\.(png|jpg|jpeg|gif|svg|webp|ico|woff2?|ttf|eot|css|js)$/i.test(url.pathname)) {
+  // Cache-first for the SPA's hashed build output only. Anything else under the
+  // scope (artifact pages under p/, other static-looking paths) passes through to
+  // the network below.
+  if (isCacheFirstAsset(url.pathname)) {
     event.respondWith(cacheFirst(request));
     return;
   }
 
   // Stale-while-revalidate for the app shell (index.html / root).
-  if (url.pathname === '/' || url.pathname === '/index.html') {
+  if (url.pathname === SCOPE_PATH || url.pathname === SCOPE_PATH + 'index.html') {
     event.respondWith(staleWhileRevalidate(request));
     return;
   }
