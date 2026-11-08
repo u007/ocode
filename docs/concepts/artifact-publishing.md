@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T04:32:53Z
+timestamp: 2026-11-08T04:57:33Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -198,15 +198,36 @@ token is logged or put in error text.
 
 The publish response reports `access_mode`, `hub_invites` and `invite_errors`
 (`handler_artifacts.go:621-630`). The SPA maps the access fields explicitly
-(`web/src/api/artifacts.ts:258`, invites at `:261`) — **the existing `mode` field is a
+(`web/src/api/artifacts.ts:279`, invites at `:282`) — **the existing `mode` field is a
 legacy alias for `hosting_mode`, so the access mode must never travel as `mode`**
-(`:253-257`). The dialog adds the select (`ArtifactPublishDialog.tsx:211`), the password
-field (`:221`, client-side 8-char check at `:91`) and the invite textarea (`:236`, split
-on commas/spaces/newlines, `:95`).
+(`:274-278`). The dialog adds the select (`ArtifactPublishDialog.tsx:269`), the password
+field (`:286`, client-side 8-char check at `:94`) and the invite textarea (`:300`, split
+on commas/spaces/newlines, `:98`).
 
 Pinned by `TestParseArtifactAccess`,
 `TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors`, the handler 400 case, and
 `TestHubClientSetArtifactAccess`/`TestHubClientAddArtifactInvite` plus the dialog tests.
+
+## Publish entry point in the SPA (`/publish`)
+
+The SPA mounts the publish dialog. `handleCommand` (`web/src/App.tsx:1241`) intercepts
+`/publish [hub|local]` before the shared `dispatchCommand`, resolves the active project's
+path/host, calls `ensureArtifact` (`web/src/api/artifacts.ts:154`) and stores
+`{artifactId, projectPath, host}` in `publishTarget`. `ensureArtifact` lists the project's
+artifacts (limit 100) and **reuses** the one whose `project_path` matches (preferring a
+matching `project_host`); it creates one with `hosting_mode: mode` only when none exists,
+and throws on an empty path.
+
+`App.tsx:2501` mounts `<ArtifactPublishDialog>` beside `<ShareDialog>`, wiring `onPublish`
+→ `publishArtifact(id, payload, host, projectPath)`. The default hosting mode is **`hub`**;
+`/publish local` is the escape hatch, because a `hub` publish from a server with no sync
+login returns **502** and never falls back (see "Mode B client upload path"). On success
+the dialog stays open on a **result step** — share link with a copy button, invite links,
+and `invite_errors` — instead of closing and discarding `hub_url`; Done closes.
+
+`/publish` is registered in the command picker (`web/src/components/Chat/commands.ts:105`)
+and marked **instant** (`web/src/lib/instantCommands.ts:27`), so it runs during a live
+turn: it writes nothing to the transcript, the same rationale as `/btw`.
 
 ## Mode B client upload path (`hosting_mode=hub`)
 
