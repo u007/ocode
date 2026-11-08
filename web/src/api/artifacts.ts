@@ -159,7 +159,16 @@ export async function ensureArtifact(
   const path = (projectPath || "").trim();
   if (!path) throw new Error("publish: no project path");
   const { artifacts } = await listArtifacts({ limit: 100 }, host, path);
-  const matches = artifacts.filter((a) => (a.project_path ?? "") === path);
+  // Hosting mode is fixed on the artifact row, so a project can have one hub
+  // artifact and one local artifact. Matching only on the path would make
+  // `/publish local` reuse the hub artifact and hit the same hub failure again.
+  const sameMode = (a: Artifact) =>
+    mode === "hub"
+      ? (a.hosting_mode ?? "").toLowerCase() === "hub"
+      : (a.hosting_mode ?? "").toLowerCase() !== "hub";
+  const matches = artifacts.filter(
+    (a) => (a.project_path ?? "") === path && sameMode(a),
+  );
   const match =
     matches.find((a) => !host || (a.project_host ?? "") === host) ?? matches[0];
   if (match) return match;

@@ -1245,6 +1245,25 @@ function HomeApp() {
         reportActionErrorMessage("/publish needs an active project.");
         return { handled: true, accepted: false };
       }
+      // Hub publish needs a sync token on the machine that owns the project.
+      // Check before creating an artifact, so a missing login is an actionable
+      // message instead of a 502 after the snapshot walk. A remote project's
+      // token lives on its own server, so the local check does not apply.
+      if (hostingMode === "hub" && !targetHost) {
+        try {
+          const sync = await api.getSyncStatus();
+          if (!sync?.loggedIn) {
+            reportActionErrorMessage(
+              "Sync is not connected. Connect the hub with /sync, or publish locally with /publish local.",
+            );
+            return { handled: true, accepted: false };
+          }
+        } catch (e) {
+          // The status read is advisory; the publish itself reports the real
+          // hub error, so a failed probe must not block it.
+          console.warn("publish: sync status check failed", e);
+        }
+      }
       try {
         const artifact = await ensureArtifact(
           targetProjectPath,

@@ -9,6 +9,11 @@ import (
 	ocodesync "github.com/u007/ocode/internal/sync"
 )
 
+// errHubNotConnected marks a publish attempted on a machine with no sync
+// token. It is a client-actionable condition (connect the hub, or publish
+// locally), not a hub failure, so HandlePublish answers 409 instead of 502.
+var errHubNotConnected = errors.New("hub: not connected")
+
 // artifactHubAccess is the visitor access configuration carried by a publish
 // request. Mode "" means "leave the hub's current setting alone".
 type artifactHubAccess struct {
@@ -35,7 +40,7 @@ func (h *Handler) publishArtifactToHub(ctx context.Context, a artifacts.Artifact
 		return artifactHubOutcome{}, fmt.Errorf("hub: load sync token: %w", err)
 	}
 	if !ok || token == "" {
-		return artifactHubOutcome{}, errors.New("hub: not connected; run the sync login flow first")
+		return artifactHubOutcome{}, fmt.Errorf("%w; run the sync login flow first, or publish locally", errHubNotConnected)
 	}
 	client := artifacts.NewHubClient(h.syncClient().BaseURL, token)
 

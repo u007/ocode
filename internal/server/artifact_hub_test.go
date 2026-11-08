@@ -242,6 +242,25 @@ func TestHandlePublishHubFailureReturns502(t *testing.T) {
 	require.Equal(t, 0, stub.published)
 }
 
+func TestHandlePublishHubNotConnectedReturns409(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	require.NoError(t, ocodesync.ClearToken())
+
+	h, store := newHubHandlerTestStore(t)
+	req, dir := newHubPublishRequest(t)
+	h.workDir = dir
+	_, err := store.CreateArtifact(artifacts.Artifact{
+		ID: "art_test", Name: "demo", ProjectPath: dir, HostingMode: "hub", Status: "active",
+	})
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	h.HandlePublish(w, req, "art_test")
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), `"code":"hub_not_connected"`)
+	require.Contains(t, w.Body.String(), "/publish local")
+}
+
 func TestParseArtifactAccess(t *testing.T) {
 	t.Run("absent mode leaves the hub setting alone", func(t *testing.T) {
 		access, err := parseArtifactAccess(map[string]any{})

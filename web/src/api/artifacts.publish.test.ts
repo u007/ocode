@@ -90,7 +90,7 @@ describe("ensureArtifact", () => {
 
   it("reuses the existing artifact for the project", async () => {
     fetchSpy.mockResolvedValueOnce(
-      listResponse([{ id: "art_1", project_path: "/p" }]),
+      listResponse([{ id: "art_1", project_path: "/p", hosting_mode: "hub" }]),
     );
     const { ensureArtifact } = await import("./artifacts");
     const artifact = await ensureArtifact("/p");
@@ -116,12 +116,41 @@ describe("ensureArtifact", () => {
   it("prefers the artifact bound to the given host", async () => {
     fetchSpy.mockResolvedValueOnce(
       listResponse([
-        { id: "art_local", project_path: "/p", project_host: "" },
-        { id: "art_remote", project_path: "/p", project_host: "box" },
+        { id: "art_local", project_path: "/p", project_host: "", hosting_mode: "hub" },
+        { id: "art_remote", project_path: "/p", project_host: "box", hosting_mode: "hub" },
       ]),
     );
     const { ensureArtifact } = await import("./artifacts");
     expect((await ensureArtifact("/p", "box")).id).toBe("art_remote");
+  });
+
+  it("does not reuse a hub artifact for a local publish", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      listResponse([{ id: "art_hub", project_path: "/p", hosting_mode: "hub" }]),
+    );
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse({ id: "art_local", project_path: "/p", hosting_mode: "local" }),
+    );
+    const { ensureArtifact } = await import("./artifacts");
+    const artifact = await ensureArtifact("/p", undefined, "local");
+    expect(artifact.id).toBe("art_local");
+    const createInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    expect(JSON.parse(createInit.body as string)).toMatchObject({
+      project: "/p",
+      hosting_mode: "local",
+    });
+  });
+
+  it("reuses the hub artifact for a hub publish", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      listResponse([
+        { id: "art_local", project_path: "/p", hosting_mode: "self" },
+        { id: "art_hub", project_path: "/p", hosting_mode: "hub" },
+      ]),
+    );
+    const { ensureArtifact } = await import("./artifacts");
+    expect((await ensureArtifact("/p")).id).toBe("art_hub");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("refuses an empty project path", async () => {

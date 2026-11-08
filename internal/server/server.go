@@ -2759,6 +2759,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeErrorCode is writeError with a machine-readable code so a client can
+// branch on the condition (e.g. hub_not_connected) instead of matching text.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	log.Printf("serve error: %s (%s)", msg, code)
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
 func readBodyJSON(r *http.Request, v interface{}) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }

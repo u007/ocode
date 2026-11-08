@@ -577,6 +577,14 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 	if strings.EqualFold(a.HostingMode, "hub") {
 		outcome, herr := h.publishArtifactToHub(r.Context(), a, entrypoint, buildCmd, files, st, access)
 		if herr != nil {
+			// A machine with no sync token cannot reach the hub at all: that is
+			// a client-actionable state, not a hub failure. 409 tells the SPA to
+			// offer "connect" or "publish locally" instead of retrying a 502.
+			if errors.Is(herr, errHubNotConnected) {
+				writeErrorCode(w, http.StatusConflict, "hub_not_connected",
+					"sync is not connected; run /sync to connect the hub, or publish locally with /publish local")
+				return
+			}
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("hub publish: %v", herr))
 			return
 		}
