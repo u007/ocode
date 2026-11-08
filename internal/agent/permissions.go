@@ -4295,64 +4295,200 @@ func segmentRedirectsURLs(words []string) bool {
 	return config
 }
 
-// configEnvBeforeClient reports whether a redirecting or config-sourcing
-// assignment (redirectEnvNames) reaches a network client, or a source or dot
-// command ran earlier on the line. Each simple command is judged on its own
-// state: a redirecting assignment with a command word after it is a prefix and
-// ends with its command ("HOME=/tmp/h ls; curl" does not ask). A command made of
-// assignments alone, or one whose assignments follow export, declare, typeset,
-// readonly or set, sets a sticky flag that no later separator clears. That
-// covers "HOME=/tmp/h FOO=bar;" and "export WGETRC=w && wget".
-func configEnvBeforeClient(fields []string) bool {
-	sticky := false      // a standalone or declaring assignment, or source or eval, earlier on the line
-	segRedirect := false // a redirecting assignment in the current simple command
-	cmdHasWord := false  // a command word, not only assignments, in the current simple command
-	inDecl := false      // a declaring builtin in the current simple command
-	wrapped := false     // a command, builtin or exec wrapper precedes the command word
-	var cur []string     // the words of the current simple command
+// commandWord returns a word with the quotes, and the command punctuation that
+// can touch it, trimmed from both ends.
+func commandWord(f string) string {
+	return strings.Trim(strings.Trim(f, `"'`), ";(){}&|")
+}
+
+// isBlockWord reports whether a word opens or closes the body of a compound
+// command.
+func isBlockWord(w string) bool {
+	switch w {
+	case "do", "done", "then", "else", "elif", "fi", "esac":
+		return true
+	}
+	return false
+}
+
+// splitCommandSegments splits the fields of a command line into simple commands,
+// at separators and at the punctuation and keywords that end a command. Each
+// command comes back as its words, with quotes and punctuation removed.
+func splitCommandSegments(fields []string) [][]string {
+	var out [][]string
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, cur)
+		}
+		cur = nil
+	}
 	for _, f := range fields {
 		t := strings.Trim(f, `"'`)
-		tt := strings.TrimSuffix(t, ";")
-		sep := isSeparatorWord(t) || strings.HasSuffix(t, ";")
-		switch {
-		case isShellAssignment(t):
-			if isRedirectEnvAssignment(t) {
-				segRedirect = true
-			}
-		case isSeparatorWord(t) || tt == "":
-			// A separator carries no command word; it is handled below.
-		default:
-			switch {
-			case !cmdHasWord && isCommandWrapperWord(tt):
-				wrapped = true
-			case wrapped && !cmdHasWord && strings.HasPrefix(tt, "-"):
-				// An option of command, builtin or exec.
-			default:
-				if isNetworkAPIClient(tt) && (segRedirect || sticky) {
-					return true
-				}
-				if !cmdHasWord && isSourcingWord(tt) {
-					sticky = true
-				}
-				if shellDeclaresVars(tt) {
-					inDecl = true
-				}
-				cmdHasWord = true
-			}
+		body := strings.TrimRight(t, ";{()}")
+		if body != "" && !isSeparatorWord(body) && !isBlockWord(body) {
+			cur = append(cur, body)
 		}
-		if tt != "" && !isSeparatorWord(t) {
-			cur = append(cur, tt)
+		if body != t || body == "" || isSeparatorWord(body) || isBlockWord(body) {
+			flush()
 		}
-		if sep {
-			if stateSetterSticky(cur) {
-				sticky = true
-			}
-			cur = nil
-			sticky = sticky || (segRedirect && !cmdHasWord) || (inDecl && segRedirect)
-			segRedirect, cmdHasWord, inDecl, wrapped = false, false, false, false
+	}
+	flush()
+	return out
+}
+
+// lineHasNetworkClient reports whether any word on the line is a network client.
+func lineHasNetworkClient(fields []string) bool {
+	for _, f := range fields {
+		if isNetworkAPIClient(commandWord(f)) {
+			return true
 		}
 	}
 	return false
+}
+
+// identPrefix returns the leading shell identifier characters of s.
+func identPrefix(s string) string {
+	n := 0
+	for n < len(s) {
+		c := s[n]
+		if c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (n > 0 && c >= '0' && c <= '9') {
+			n++
+			continue
+		}
+		break
+	}
+	return s[:n]
+}
+
+// expansionAssignName returns the redirecting variable a ${NAME:=…} or
+// ${NAME=…} expansion in f assigns, or "".
+func expansionAssignName(f string) string {
+	s := f
+	for {
+		i := strings.Index(s, "${")
+		if i < 0 {
+			return ""
+		}
+		rest := s[i+2:]
+		name := identPrefix(rest)
+		after := rest[len(name):]
+		if name != "" && (strings.HasPrefix(after, ":=") || strings.HasPrefix(after, "=")) && isRedirectEnvName(name) {
+			return name
+		}
+		s = rest
+	}
+}
+
+// spaceOutOperators puts a space around each unquoted command operator (; & |
+// ( ) { }) and keeps a doubled && or || as one operator, so that "HOME=/x;curl"
+// reads as three words. Quoted text is left as written, so "a;b" stays one word.
+func spaceOutOperators(command string) string {
+	var b strings.Builder
+	inSingle, inDouble := false, false
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+			b.WriteByte(c)
+		case c == '\\' && i+1 < len(command):
+			b.WriteByte(c)
+			b.WriteByte(command[i+1])
+			i++
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+			b.WriteByte(c)
+		case c == '\'':
+			inSingle = true
+			b.WriteByte(c)
+		case c == '"':
+			inDouble = true
+			b.WriteByte(c)
+		case strings.IndexByte(";&|(){}", c) >= 0:
+			op := string(c)
+			if (c == '&' || c == '|' || c == ';') && i+1 < len(command) && command[i+1] == c {
+				op = string([]byte{c, c})
+				i++
+			}
+			b.WriteString(" " + op + " ")
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// lineRedirectSignalAll is the union of two views of a command line: the raw
+// words with the operators spaced out, and each parsed command on its own. Either
+// view can hide a signal the other shows, so a signal from either one counts.
+func lineRedirectSignalAll(command string) string {
+	if sig := lineRedirectSignal(splitShellFields(spaceOutOperators(command))); sig != "" {
+		return sig
+	}
+	if parsed, err := parseShellCommandLine(command); err == nil {
+		for _, cmd := range parsed {
+			fields := append(append([]string{}, cmd.envVars...), cmd.cmdWords...)
+			if sig := lineRedirectSignal(fields); sig != "" {
+				return sig
+			}
+		}
+	}
+	return ""
+}
+
+// lineRedirectSignal names the first thing on a command line that can point a
+// network client at another connection or another config: a redirecting
+// environment assignment (prefix or standalone, exported or not), a source, dot
+// or eval, a state-setting builtin or declaration aimed at one of those
+// variables, a ${NAME:=…} expansion aimed at one, or any assignment after
+// set -a. The check is line-wide and ignores order, because a loop, a function
+// or a brace group can run any of these before a client. It returns "" when
+// none is present, and it names the variable or the builtin, never a value.
+func lineRedirectSignal(fields []string) string {
+	allexport := false
+	for i := range fields {
+		if commandWord(fields[i]) != "set" {
+			continue
+		}
+		for j := i + 1; j < len(fields); j++ {
+			a := commandWord(fields[j])
+			if a == "-o" && j+1 < len(fields) && commandWord(fields[j+1]) == "allexport" {
+				allexport = true
+				break
+			}
+			if !strings.HasPrefix(a, "-") {
+				break
+			}
+			if strings.ContainsRune(a, 'a') {
+				allexport = true
+			}
+		}
+	}
+	for _, f := range fields {
+		w := commandWord(f)
+		switch {
+		case isRedirectEnvAssignment(w):
+			return w[:strings.IndexByte(w, '=')]
+		case allexport && isShellAssignment(w):
+			return "set -a"
+		case isSourcingWord(w):
+			return w
+		}
+		if name := expansionAssignName(f); name != "" {
+			return name
+		}
+	}
+	for _, seg := range splitCommandSegments(fields) {
+		if stateSetterSticky(seg) {
+			return effectiveHead(seg)
+		}
+	}
+	return ""
 }
 
 // isCommandWrapperWord reports whether a word is a builtin that runs the command
@@ -4465,11 +4601,17 @@ func stateSetterSticky(words []string) bool {
 		if len(args) >= 2 && stateTargetSticky(args[1]) {
 			return true
 		}
-	case "declare", "typeset", "local":
-		// A nameref (-n) can alias any variable, so every -n is sticky.
+	case "declare", "typeset", "local", "export", "readonly":
+		// A nameref (-n) can alias any variable, so every -n is sticky. A name
+		// that is an expansion, or a redirecting variable with or without a
+		// value, is sticky too.
 		for _, a := range args {
 			if !strings.HasPrefix(a, "-") {
-				break
+				name, _, _ := strings.Cut(a, "=")
+				if stateTargetSticky(name) {
+					return true
+				}
+				continue
 			}
 			if strings.ContainsRune(a[1:], 'n') {
 				return true
@@ -4495,28 +4637,14 @@ func stateTargetSticky(name string) bool {
 	if strings.ContainsAny(n, "$`") {
 		return true
 	}
-	for _, entry := range redirectEnvNames {
-		if strings.TrimSuffix(entry, "=") == n {
-			return true
-		}
-	}
-	return false
+	base := assignmentBaseName(n)
+	return base != "" && isRedirectEnvName(base)
 }
 
 // isShellAssignment reports whether a word has the NAME=value shape of a shell
 // variable assignment.
 func isShellAssignment(t string) bool {
-	i := strings.IndexByte(t, '=')
-	if i <= 0 {
-		return false
-	}
-	for j, c := range t[:i] {
-		isLetter := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-		if !isLetter && !(j > 0 && c >= '0' && c <= '9') {
-			return false
-		}
-	}
-	return true
+	return strings.Contains(t, "=") && assignmentBaseName(t) != ""
 }
 
 // rawCommandSegments splits the raw fields of a command line at its shell
@@ -4623,7 +4751,7 @@ func isNetworkAPIClient(word string) bool {
 // shell expansion could rewrite is asked too, because the route it reaches
 // cannot be read off the text.
 func permissionApiLoopback(command string) bool {
-	if configEnvBeforeClient(splitShellFields(command)) {
+	if fields := splitShellFields(spaceOutOperators(command)); lineRedirectSignalAll(command) != "" && lineHasNetworkClient(fields) {
 		return true
 	}
 	var fragments [][]string

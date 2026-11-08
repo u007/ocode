@@ -157,58 +157,85 @@ type egressTarget struct {
 	// Loopback is true only when the target provably stays on this machine.
 	Loopback bool `json:"loopback"`
 	// Env holds the environment assignments on the command that redirect its
-	// connection or point it at a config file (redirectEnvNames). It is not part
+	// connection or point it at a config file (isRedirectEnvName). It is not part
 	// of the judge state, so it is left out of the JSON form.
 	Env []string `json:"-"`
 }
 
-// redirectEnvNames are the environment assignments that redirect a network
-// client's connection through a proxy, or point it at a config file: the proxy
-// variables of curl and wget, $CURL_HOME and $WGETRC, and $XDG_CONFIG_HOME and
-// $HOME, which curl and wget read their config from. NO_PROXY does not redirect.
-var redirectEnvNames = []string{
-	"http_proxy=", "https_proxy=", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "all_proxy=",
-	"CURL_HOME=", "WGETRC=", "XDG_CONFIG_HOME=", "HOME=",
-}
-
-// waiverSourceMarker is the Env entry for a source, dot or eval command earlier
-// on the line. It is not an assignment, so it is kept out of redirectEnvNames.
-const waiverSourceMarker = "source"
-
-// redirectEnvAssignments returns the words that assign one of redirectEnvNames.
-func redirectEnvAssignments(words []string) []string {
-	var out []string
-	for _, w := range words {
-		if t := strings.Trim(w, `"'`); isRedirectEnvAssignment(t) {
-			out = append(out, t)
-		}
+// isRedirectEnvName reports whether an environment variable redirects a network
+// client's connection, through a proxy, or points it at a config or CA file. Every
+// proxy variable counts, matched by its _proxy suffix in either case, except
+// NO_PROXY, which only lists the hosts that skip a proxy.
+func isRedirectEnvName(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "no_proxy" {
+		return false
 	}
-	return out
-}
-
-// isRedirectEnvAssignment reports whether a word assigns one of redirectEnvNames.
-func isRedirectEnvAssignment(t string) bool {
-	for _, name := range redirectEnvNames {
-		if strings.HasPrefix(t, name) {
-			return true
-		}
+	if strings.HasSuffix(lower, "_proxy") {
+		return true
 	}
-	return false
-}
-
-// shellDeclaresVars reports whether a word is a shell builtin whose assignment
-// arguments persist for the rest of the shell, not just for one command.
-func shellDeclaresVars(word string) bool {
-	switch word {
-	case "export", "declare", "typeset", "readonly", "set":
+	switch name {
+	case "ALL_PROXY", "HTTPIE_CONFIG_DIR", "SYSTEM_WGETRC", "WGETRC", "CURL_HOME",
+		"CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+		"XDG_CONFIG_HOME", "HOME":
 		return true
 	}
 	return false
 }
 
+// isRedirectEnvAssignment reports whether a word assigns a redirecting variable
+// (isRedirectEnvName), as NAME=value.
+func isRedirectEnvAssignment(w string) bool {
+	base := assignmentBaseName(w)
+	return strings.Contains(w, "=") && base != "" && isRedirectEnvName(base)
+}
+
+// assignmentBaseName returns the variable a word names: the text before the
+// first '=' (or the whole word when there is none), without a trailing '+' of an
+// append (HOME+=/x) or a subscript (HOME[0]=x). It returns "" when what is left is
+// not a shell identifier.
+func assignmentBaseName(w string) string {
+	// A subscript may hold '=' itself (HOME[i=0]=x), so an identifier followed by
+	// '[' is read to its matching ']' before the first '=' is looked for. An
+	// unclosed subscript that holds '=' is taken as an assignment to the identifier.
+	if k := identPrefix(w); k != "" && len(w) > len(k) && w[len(k)] == '[' {
+		depth, end := 0, -1
+		for j := len(k); j < len(w); j++ {
+			if w[j] == '[' {
+				depth++
+			} else if w[j] == ']' {
+				depth--
+				if depth == 0 {
+					end = j
+					break
+				}
+			}
+		}
+		if end < 0 {
+			if strings.Contains(w, "=") {
+				return k
+			}
+		} else if rest := w[end+1:]; rest == "" || strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, "+=") {
+			return k
+		}
+	}
+	name := w
+	if i := strings.IndexByte(w, '='); i >= 0 {
+		name = w[:i]
+	}
+	name = strings.TrimSuffix(name, "+")
+	if j := strings.IndexByte(name, '['); j >= 0 && strings.HasSuffix(name, "]") {
+		name = name[:j]
+	}
+	if name == "" || identPrefix(name) != name {
+		return ""
+	}
+	return name
+}
+
 // isSeparatorWord reports whether a word is a shell command separator.
 func isSeparatorWord(t string) bool {
-	return t == "&&" || t == "||" || t == "|" || t == ";"
+	return t == "&&" || t == "||" || t == "|" || t == ";" || t == "&"
 }
 
 // webSearchEndpoint is the fixed host WebSearchTool queries. The destination is
@@ -330,32 +357,24 @@ func bashEgressTargets(command string) []egressTarget {
 		return nil
 	}
 	// An unparseable line keeps the single-line split, so it does not lose the coverage it had before.
+	// The redirect signal is line-wide: a loop, a function or a brace group can
+	// run a redirecting assignment, a source or an eval before a client, so every
+	// target on the line shares the signal, whatever its position.
+	fields := splitShellFields(command)
+	var lineEnv []string
+	if signal := lineRedirectSignalAll(command); signal != "" {
+		lineEnv = []string{signal}
+	}
 	var fragments [][]string
-	var fragEnv [][]string
-	// sticky holds what persists for the rest of the line: standalone and
-	// declared redirecting assignments, and a source or dot command, which can
-	// set anything. A prefix assignment applies only to its own command.
-	var sticky []string
 	if parsed, err := parseShellCommandLine(command); err == nil {
 		for _, cmd := range parsed {
-			own := redirectEnvAssignments(append(append([]string{}, cmd.envVars...), cmd.cmdWords...))
-			head := effectiveHead(cmd.cmdWords)
-			if len(cmd.cmdWords) == 0 || shellDeclaresVars(head) {
-				sticky = append(sticky, own...)
-			}
-			if isSourcingWord(head) || stateSetterSticky(cmd.cmdWords) {
-				sticky = append(sticky, waiverSourceMarker)
-			}
 			fragments = append(fragments, cmd.cmdWords)
-			fragEnv = append(fragEnv, append(append([]string{}, sticky...), own...))
 		}
 	} else {
-		fields := splitShellFields(command)
 		fragments = [][]string{fields}
-		fragEnv = [][]string{redirectEnvAssignments(fields)}
 	}
 	var out []egressTarget
-	for fi, fragment := range fragments {
+	for _, fragment := range fragments {
 		for _, words := range effectiveCommandWords(fragment) {
 			if len(words) == 0 {
 				continue
@@ -370,7 +389,7 @@ func bashEgressTargets(command string) []egressTarget {
 				Kind:  egressKindCommand,
 				Value: line,
 				Host:  host,
-				Env:   fragEnv[fi],
+				Env:   lineEnv,
 				// The shared proofs, not a host comparison. Loopback here means "local
 				// network", not strictly this machine: a LAN host additionally needs a
 				// plain request, but a literal query or path on it can still carry data.
@@ -451,11 +470,7 @@ func networkGuardWaiverBlocked(targets []egressTarget, state map[string]any) (bo
 		// A connection redirected by a proxy, a resolver override or a socket
 		// does not go where the URL says, whatever host the URL names.
 		if len(t.Env) > 0 {
-			if t.Env[0] == waiverSourceMarker {
-				return true, "a bash target sources, evaluates or assigns a variable the connection may read (a proxy or a config file)"
-			}
-			name, _, _ := strings.Cut(t.Env[0], "=")
-			return true, "a bash target sets " + name + ", which redirects its connection or reads a config file, so the destination is not what the command line says"
+			return true, "a bash target shares its command line with " + t.Env[0] + ", which can redirect its connection or change the config it reads, so the destination is not what the command line says"
 		}
 		if flag := waiverDestinationFlag(t.Value); flag != "" {
 			return true, "a bash target redirects its connection with " + flag + ", so the destination is not what the URL says"

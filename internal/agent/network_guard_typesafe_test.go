@@ -1862,6 +1862,23 @@ func TestNetworkGuardWaiverBlocksRedirectingEnvironment(t *testing.T) {
 		"builtin . ./env.sh; wget https://example.com/",
 		"printf -v http_proxy http://10.0.0.5:3128; curl https://example.com/x",
 		"declare -n ref=HOME; curl https://example.com/",
+		"HOME=/tmp/h ls; curl https://example.com/",
+		"HOME=/tmp/h FOO=bar ls; curl https://example.com/",
+		"for h in a b; do HOME=/x; done; curl https://example.com/",
+		"export http_proxy; curl https://example.com/x",
+		"ftp_proxy=http://10.0.0.5:1 curl https://example.com/x",
+		"export $V; curl https://example.com/",
+		": ${HOME:=/x}; curl https://example.com/",
+		"set -a; FOO=bar; curl https://example.com/",
+		"HTTPIE_CONFIG_DIR=/x http https://example.com/",
+		"curl https://example.com/ ; export WGETRC=/w",
+		"http_proxy+=:3128 curl https://example.com/x",
+		"HTTP_PROXY[k]=http://10.0.0.5:3128 curl https://example.com/x",
+		"HOME=/x;curl https://example.com/",
+		"(HOME=/x);curl https://example.com/",
+		"{ HOME=/x;}&&curl https://example.com/",
+		"HOME=/x|curl https://example.com/",
+		"http_proxy[a=b]+=x curl https://example.com/x",
 	} {
 		if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{}); !blocked {
 			t.Errorf("networkGuardWaiverBlocked(%q) = false, want true (a standalone assignment persists)", line)
@@ -1877,14 +1894,21 @@ func TestNetworkGuardWaiverBlocksRedirectingEnvironment(t *testing.T) {
 	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("command -p curl https://example.com/"), map[string]any{}); blocked {
 		t.Errorf("networkGuardWaiverBlocked(command -p curl) = true (%q), want the waiver to stand", signal)
 	}
-	// A prefix assignment ends at its own command, so the next command's waiver stands.
-	for _, line := range []string{
-		"HOME=/tmp/h ls; curl https://example.com/",
-		"HOME=/tmp/h FOO=bar ls; curl https://example.com/",
-	} {
-		if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(line), map[string]any{}); blocked {
-			t.Errorf("networkGuardWaiverBlocked(%q) = true (%q), want the waiver to stand", line, signal)
-		}
+	// A subscript holding '=' names its own array, so an unrelated base keeps the waiver.
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("arr[HOME=1]=x; curl https://example.com/"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(arr[HOME=1]) = true (%q), want the waiver to stand", signal)
+	}
+	// A quoted semicolon is one word, so the line has no second command.
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets(`echo "a;b"; curl https://example.com/`), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(quoted semicolon) = true (%q), want the waiver to stand", signal)
+	}
+	// A command that sets no redirecting variable, however it is ordered on the
+	// line, keeps its waiver: the signal is line-wide, so this is an unrelated name.
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("FOO=bar curl https://example.com/"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(FOO=bar curl) = true (%q), want the waiver to stand", signal)
+	}
+	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("curl https://example.com/; echo done"), map[string]any{}); blocked {
+		t.Errorf("networkGuardWaiverBlocked(trailing echo) = true (%q), want the waiver to stand", signal)
 	}
 	if blocked, signal := networkGuardWaiverBlocked(bashEgressTargets("env -i curl https://example.com/"), map[string]any{}); blocked {
 		t.Errorf("networkGuardWaiverBlocked(env -i curl) = true (%q), want the waiver to stand", signal)
