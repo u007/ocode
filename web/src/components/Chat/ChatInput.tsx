@@ -60,6 +60,8 @@ interface ChatInputProps {
    *  from the project context) so this component can be memoized — a context
    *  read would re-render every mounted composer on every tab/project switch. */
   projectPath?: string;
+  /** Whether the app is offline. Disables send. */
+  isOffline?: boolean;
   /** Show the quick-actions strip (Compact, Continue, Approve, ...). Defaults
    *  to on; the Pulse assistant drawer turns it off because those chips are
    *  project-session actions that make no sense for it and eat its height. */
@@ -112,6 +114,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   onClearPreviewContext,
   isActive,
   projectPath,
+  isOffline = false,
   quickActions: showQuickActions = true,
 }: ChatInputProps,
   ref: ForwardedRef<ChatInputHandle>
@@ -1747,7 +1750,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             size="sm"
             className="composer-control shrink-0 rounded-lg px-4"
             onClick={handleSend}
-            disabled={!input.trim()}
+            disabled={!input.trim() || isOffline}
+            title={isOffline ? "Offline — cannot send" : undefined}
           >
             Send
           </Button>

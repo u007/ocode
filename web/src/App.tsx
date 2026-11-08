@@ -3,6 +3,8 @@ import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
 import { Maximize2, PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { useOfflineStatus } from "./hooks/useOfflineStatus";
+import { OfflineBanner } from "./components/OfflineBanner";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
 import { PulseProvider } from "./stores/pulseStore";
@@ -369,6 +371,7 @@ function HomeApp() {
   // NOT the persisted desktop `fileTreePane.collapsed` — a desktop layout
   // preference must not decide the phone's initial state.
   const isMobile = useIsMobile();
+  const offlineStatus = useOfflineStatus();
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
   // Tab contents stay mounted, so leaving the Files view would otherwise keep
   // the drawer open for the rest of the session. Coming back should show the
@@ -1692,6 +1695,7 @@ function HomeApp() {
     // composer below the visible screen.
     <div className="app-viewport flex flex-col bg-background">
       <SessionTabSync onNewTab={openBackgroundBrowserTab} />
+      <OfflineBanner isOffline={offlineStatus.isOffline} lastSynced={offlineStatus.lastSynced} />
       <AttentionSoundBridge
         tabs={attentionTabs}
         activeTabId={activeTabId}
@@ -2265,6 +2269,7 @@ function HomeApp() {
                                 onClearPreviewContext={handleClearPreviewContext}
                                 sessionTabId={tab.id}
                                 onSessionCreated={stableHandleSessionCreated}
+                                isOffline={offlineStatus.isOffline}
                               />
                             </div>
                           </div>
