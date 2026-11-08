@@ -508,6 +508,10 @@ export function reportAuthFailure(status: number): void {
       err,
     );
   }
+  // Purge offline cache on auth failure (best-effort, non-blocking).
+  import("../lib/offlineDb")
+    .then(({ OfflineDB }) => new OfflineDB().clearAll())
+    .catch(() => {});
   onAuthFailure?.();
 }
 
