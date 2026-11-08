@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-08T17:15:00Z
+timestamp: 2026-11-08T17:30:00Z
 ---
 ## Decision
 
@@ -229,8 +229,8 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   whatever its host. (c) A config or input-source option asks unconditionally: curl `-K` and
   `--config`, and wget `-i`, `--input-file`, `-e`, `--execute` and `--config`, in any spelling,
   including getopt-style abbreviations of four or more characters with the dashes
-  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:636` and
-  `:616`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
+  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:618` and
+  `:598`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
   and anywhere on it (any segment, loop, function or group) there is a redirecting environment
   assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration
   aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` (or `set -o allexport`),
@@ -242,8 +242,9 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   hide an assignment. It is called from `permissionApiLoopback` (`permissions.go:4753`), and
   `lineRedirectSignal` (`permissions.go:4452`) is the scan of each view. Assignment names are
   normalised through `assignmentBaseName` (`internal/agent/network_guard_typesafe.go:197`), so `+=`
-  and `[subscript]=` forms resolve to their base variable; the subscript is bracket-aware, and an
-  unclosed subscript fails closed. The names are one shared predicate, `isRedirectEnvName`
+  and `[subscript]=` forms resolve to their base variable; an identifier followed by `[` with any `=` in
+  the word is treated as an assignment to that identifier, so quotes or expansions inside a
+  subscript cannot hide it (fail closed). The names are one shared predicate, `isRedirectEnvName`
   (`internal/agent/network_guard_typesafe.go:169`): every `*_proxy` name in either case except
   `NO_PROXY`, plus `ALL_PROXY`, `HTTPIE_CONFIG_DIR`, `SYSTEM_WGETRC`, `WGETRC`, `CURL_HOME`,
   `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `XDG_CONFIG_HOME` and
