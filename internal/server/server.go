@@ -568,6 +568,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/compact", s.authMiddleware(s.handleSetCompactConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-auto", s.authMiddleware(s.handleGetAutoPermissionConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-auto", s.authMiddleware(s.handleSetAutoPermissionConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/permissions-hosts", s.authMiddleware(s.handleGetAllowedHostsConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/permissions-hosts", s.authMiddleware(s.handleSetAllowedHostsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-concerns", s.authMiddleware(s.handleGetPermissionConcerns))
 	s.mux.HandleFunc("GET /api/config/ocode/discovery", s.authMiddleware(s.handleGetDiscoveryConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
@@ -2996,6 +2998,12 @@ func (s *Server) handleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Re
 }
 func (s *Server) handleSetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetAutoPermissionConfig(w, r)
+}
+func (s *Server) handleGetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAllowedHostsConfig(w, r)
+}
+func (s *Server) handleSetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAllowedHostsConfig(w, r)
 }
 func (s *Server) handleGetPermissionConcerns(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPermissionConcerns(w, r)

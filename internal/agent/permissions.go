@@ -226,6 +226,10 @@ type PermissionManager struct {
 	bashPrefixModes    cowMap[string, string]
 	workDir            string
 	webfetchDomains    cowMap[string, PermissionLevel]
+	// allowedHosts is the persisted permissions.allowed_hosts list, stored in
+	// normalised form (see NormalizeAllowedHost). A "*.example.com" key matches
+	// every subdomain of example.com but not example.com itself.
+	allowedHosts cowMap[string, bool]
 	// autoPermissionEnabled and autoConfig are atomics because the auto-permission
 	// layer is process-wide policy that the Settings UI can change while a turn is
 	// running (PUT /api/config/ocode/permissions-auto pushes it to every live
@@ -1974,6 +1978,7 @@ func NewPermissionManager() *PermissionManager {
 	pm.patterns.init(nil)
 	pm.pathPatterns.init(nil)
 	pm.webfetchDomains.init(nil)
+	pm.allowedHosts.init(nil)
 	pm.bashPrefixes.init(nil)
 	pm.bashAutoAllow.init(bashAutoAllowPrefixes)
 	pm.bashPrefixModes.init(bashAutoAllowDefaultModes)
@@ -2044,6 +2049,7 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 		pm.SetMode(PermissionMode(cfg.Mode))
 	}
 	pm.SetAutoPermissionConfig(cfg.Auto)
+	pm.SetAllowedHosts(cfg.AllowedHosts)
 	for k, v := range cfg.Tools {
 		level := PermissionLevel(v)
 		if validPermissionLevel(level) {
@@ -2433,6 +2439,15 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch localhost): tool=%s domain=%s", toolName, domain))
 				return PermissionDecision{Level: PermissionAllow}
 			}
+			// The persisted allowed-hosts list is the user's standing choice, so
+			// it is checked before the in-session domain cache and wins over a
+			// cached deny: a session deny click is narrower than the whitelist.
+			// An explicit tools.webfetch deny is narrower still and wins over the
+			// list, the same way the browser branch guards its allow.
+			if pm.HostAllowed(domain) && pm.Check(toolName) != PermissionDeny {
+				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch allowed host): tool=%s domain=%s", toolName, domain))
+				return PermissionDecision{Level: PermissionAllow}
+			}
 			if level, exists := pm.webfetchDomains.get(domain); exists {
 				pm.emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
 				if level == PermissionDeny {
@@ -2491,12 +2506,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	if toolName == "browser" {
 		var params struct {
 			Action string `json:"action"`
+			URL    string `json:"url"`
 		}
 		if err := json.Unmarshal(args, &params); err != nil {
 			pm.emitDebug("perm", fmt.Sprintf("Decide: browser arguments unparseable, treated as an unknown action (tool=browser): %v", err))
 			params.Action = ""
 		}
 		level := pm.Check(toolName)
+		// browserURLRefusal already ran at the top of Decide, so a refused
+		// scheme or metadata address never reaches this allow. An explicit
+		// tools.browser deny still wins over the host list.
+		if (params.Action == "navigate" || params.Action == "open") && level != PermissionDeny {
+			if host := extractDomainFromURL(params.URL); host != "" && pm.HostAllowed(host) {
+				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (browser allowed host): action=%s host=%s", params.Action, host))
+				return PermissionDecision{Level: PermissionAllow}
+			}
+		}
 		if browserObserveActions[params.Action] {
 			if level == PermissionDeny {
 				pm.emitDebug("perm", "Decide DENY (browser observe): action="+params.Action)
@@ -5339,6 +5364,106 @@ func (pm *PermissionManager) AllowedWebfetchDomains() []string {
 	return out
 }
 
+// NormalizeAllowedHost reduces a user-entered host, or a full URL, to the form
+// HostAllowed compares against: lower-case, with no scheme, userinfo, port,
+// path, query, fragment or trailing dot. A leading "*." is kept so a wildcard
+// entry stays a wildcard. It returns "" when nothing usable remains, including
+// a bare "*" or "*.", which would otherwise allow every host.
+func NormalizeAllowedHost(s string) string {
+	h := strings.ToLower(strings.TrimSpace(s))
+	if i := strings.Index(h, "://"); i >= 0 {
+		h = h[i+3:]
+	}
+	if i := strings.IndexAny(h, "/?#"); i >= 0 {
+		h = h[:i]
+	}
+	if i := strings.LastIndex(h, "@"); i >= 0 {
+		h = h[i+1:]
+	}
+	wildcard := strings.HasPrefix(h, "*.")
+	if wildcard {
+		h = h[2:]
+	}
+	if strings.HasPrefix(h, "[") {
+		// Bracketed IPv6 literal, optionally followed by a port: [::1]:8080.
+		end := strings.Index(h, "]")
+		if end < 0 {
+			return ""
+		}
+		h = h[1:end]
+	} else if strings.Count(h, ":") == 1 {
+		h = h[:strings.Index(h, ":")]
+	}
+	h = strings.TrimSuffix(h, ".")
+	if h == "" || strings.Contains(h, "*") {
+		return ""
+	}
+	if wildcard {
+		return "*." + h
+	}
+	return h
+}
+
+// SetAllowedHosts replaces the allowed-hosts list. Entries are normalised, and
+// any that normalise to nothing are dropped. It is replace, not merge, so the
+// list always matches what was last saved.
+func (pm *PermissionManager) SetAllowedHosts(hosts []string) {
+	if pm == nil {
+		return
+	}
+	next := make(map[string]bool, len(hosts))
+	for _, raw := range hosts {
+		if h := NormalizeAllowedHost(raw); h != "" {
+			next[h] = true
+		}
+	}
+	pm.allowedHosts.set(next)
+}
+
+// AllowedHosts returns the allowed-hosts list, sorted for a stable judge state.
+func (pm *PermissionManager) AllowedHosts() []string {
+	if pm == nil {
+		return nil
+	}
+	m := pm.allowedHosts.load()
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for h := range m {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HostAllowed reports whether host is on the allowed-hosts list. Matching is
+// case-insensitive and ignores any port. A "*.example.com" entry matches any
+// subdomain, such as a.example.com or a.b.example.com, but not example.com.
+// A nil manager allows nothing.
+func (pm *PermissionManager) HostAllowed(host string) bool {
+	if pm == nil {
+		return false
+	}
+	h := NormalizeAllowedHost(host)
+	if h == "" || strings.HasPrefix(h, "*.") {
+		return false
+	}
+	for entry := range pm.allowedHosts.load() {
+		if strings.HasPrefix(entry, "*.") {
+			suffix := entry[1:] // ".example.com"
+			if len(h) > len(suffix) && strings.HasSuffix(h, suffix) {
+				return true
+			}
+			continue
+		}
+		if h == entry {
+			return true
+		}
+	}
+	return false
+}
+
 func (pm *PermissionManager) Mode() PermissionMode {
 	if pm.mode == "" {
 		return PermissionModeNormal
@@ -5367,6 +5492,7 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 	clone.userConfirmedRules.set(pm.userConfirmedRules.load())
 	clone.patterns.set(pm.patterns.load())
 	clone.webfetchDomains.set(pm.webfetchDomains.load())
+	clone.allowedHosts.set(pm.allowedHosts.load())
 	clone.bashPrefixes.set(pm.bashPrefixSnapshot())
 	// The auto-allow and mode tables drop the internal in-root keys; the user
 	// tables keep everything (bashPrefixes filters them at read time).

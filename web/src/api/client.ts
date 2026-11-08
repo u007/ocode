@@ -1886,6 +1886,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
+  getAllowedHosts: () =>
+    fetchJSON<{ hosts: string[] }>("/api/config/ocode/permissions-hosts"),
+  setAllowedHosts: (hosts: string[]) =>
+    fetchJSON<{ hosts: string[] }>("/api/config/ocode/permissions-hosts", {
+      method: "PUT",
+      body: JSON.stringify({ hosts }),
+    }),
   getPermissionConcerns: () =>
     fetchJSON<{ concerns: RelaxableConcern[] }>(
       "/api/config/ocode/permissions-concerns",

@@ -1359,6 +1359,11 @@ type PermissionConfig struct {
 	Tools map[string]string     `json:"tools,omitempty"`
 	Bash  BashPermissionConfig  `json:"bash,omitempty"`
 	Auto  *AutoPermissionConfig `json:"auto,omitempty"`
+	// AllowedHosts is the user-maintained list of hosts the agent may reach
+	// (fetch or open) without a permission prompt; the outbound-request judge
+	// still sees the request and treats the host as vouched for. Entries are
+	// normalised hostnames; a leading "*." entry covers every subdomain.
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
 }
 
 // AutoPermissionConfig holds the LLM auto-permission layer state, described in
@@ -1417,10 +1422,11 @@ type autoPermissionConfigFile struct {
 }
 
 type permissionConfigFile struct {
-	Mode  string                    `json:"mode,omitempty"`
-	Tools map[string]string         `json:"tools,omitempty"`
-	Bash  BashPermissionConfig      `json:"bash,omitempty"`
-	Auto  *autoPermissionConfigFile `json:"auto,omitempty"`
+	Mode         string                    `json:"mode,omitempty"`
+	Tools        map[string]string         `json:"tools,omitempty"`
+	Bash         BashPermissionConfig      `json:"bash,omitempty"`
+	Auto         *autoPermissionConfigFile `json:"auto,omitempty"`
+	AllowedHosts []string                  `json:"allowed_hosts,omitempty"`
 }
 
 // AutoGrant is a typed, narrow, durable rule derived from a single tool/bash
@@ -2630,6 +2636,9 @@ func applyPermissionConfig(dst *PermissionConfig, src permissionConfigFile) {
 		dst.Bash.Prefixes[k] = v
 	}
 	dst.Bash.AutoAllowPrefixes = append([]string(nil), src.Bash.AutoAllowPrefixes...)
+	// Replace, not merge: the saver writes the full list, so a stale host
+	// left over from an earlier save must not survive a shorter one.
+	dst.AllowedHosts = append([]string(nil), src.AllowedHosts...)
 	if dst.Bash.PrefixModes == nil {
 		dst.Bash.PrefixModes = make(map[string]string)
 	}
@@ -4946,6 +4955,43 @@ func SaveOcodeAutoPermissionConfig(cfg AutoPermissionConfig) error {
 		c.Permissions.Auto = &cfg
 		return nil
 	})
+}
+
+// SaveOcodeAllowedHosts replaces permissions.allowed_hosts via load-modify-write.
+// Entries are trimmed, lower-cased, de-duplicated, empty entries dropped and the
+// result sorted. Nothing else in the permissions block is touched. Hostname
+// validation (scheme, port, path stripping) lives in the agent package, which
+// callers run before saving.
+func SaveOcodeAllowedHosts(hosts []string) error {
+	normalised := NormalizeAllowedHostList(hosts)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Permissions.AllowedHosts = normalised
+		return nil
+	})
+}
+
+// NormalizeAllowedHostList trims, lower-cases, de-duplicates and sorts a host
+// list, dropping empty entries. It returns nil for an empty result. It is
+// idempotent, so the server can reply with the same list the saver writes.
+func NormalizeAllowedHostList(hosts []string) []string {
+	seen := make(map[string]struct{}, len(hosts))
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SaveOcodeDiscoveryConfig persists the discovery-based skill/MCP retrieval settings.

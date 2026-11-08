@@ -1675,6 +1675,68 @@ func (h *Handler) HandleSetAutoPermissionConfig(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, req)
 }
 
+// allowedHostsDTO carries permissions.allowed_hosts over the wire.
+type allowedHostsDTO struct {
+	Hosts []string `json:"hosts"`
+}
+
+// HandleGetAllowedHostsConfig reports the persisted host whitelist: hosts the
+// agent may fetch or open without a permission prompt. The outbound-request
+// judge still sees those requests.
+func (h *Handler) HandleGetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	hosts := []string{}
+	if h.cfg != nil {
+		hosts = append(hosts, h.cfg.Ocode.Permissions.AllowedHosts...)
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, allowedHostsDTO{Hosts: hosts})
+}
+
+// HandleSetAllowedHostsConfig replaces the persisted host whitelist. Each entry
+// is normalised with agent.NormalizeAllowedHost. An entry that normalises to
+// nothing is rejected by name, so a typo cannot silently drop out of the list.
+// The saved list is pushed to every live agent, as the auto-permission config is.
+func (h *Handler) HandleSetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
+	var req allowedHostsDTO
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	normalised := make([]string, 0, len(req.Hosts))
+	for _, raw := range req.Hosts {
+		host := agent.NormalizeAllowedHost(raw)
+		if host == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid allowed host %q: expected a hostname such as app.example.com or *.example.com", raw))
+			return
+		}
+		normalised = append(normalised, host)
+	}
+	saved := config.NormalizeAllowedHostList(normalised)
+	if err := config.SaveOcodeAllowedHosts(saved); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Permissions.AllowedHosts = saved
+	}
+	// allAgents is safe under h.mu (see HandleSetAutoPermissionConfig). The
+	// PermissionManager reads its list from a copy-on-write table, so a turn's
+	// in-flight Decide sees either the old list or the new one, never a mix.
+	for _, a := range h.allAgents() {
+		if pm := a.Permissions(); pm != nil {
+			pm.SetAllowedHosts(saved)
+		}
+	}
+	h.mu.Unlock()
+	reply := saved
+	if reply == nil {
+		reply = []string{}
+	}
+	writeJSON(w, http.StatusOK, allowedHostsDTO{Hosts: reply})
+}
+
 // discoveryConfigDTO carries DiscoveryConfig over the wire. DiscoveryConfig has
 // no Go struct tags — the keys below match the hand-mapped discoveryMap keys in
 // writeOcodeConfigFile exactly.

@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-11-06T17:11:08Z
+timestamp: 2026-11-08T08:40:00Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -41,13 +41,15 @@ The closed set is `typesafeConcerns` in `internal/agent/permission_typesafe.go` 
 
 ## Amendment (2026-10-28) — `secrets` relaxation reaches `verifyAutoGrant`
 
-As of the 2026-10-28 working-tree change (`agent.go:4863` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **three independent consumers** — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 904; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4849/4860), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
+As of the 2026-10-28 working-tree change (`agent.go:4872` — verified source line: `readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`), the `secrets` opt-out (`permissions.auto.relaxed_concerns`) applies to **four independent consumers**, counting the outbound-network guard (item 4 below) — the judge rubric (`permission_typesafe.go`: rubric `state["relaxed_concerns"]` at line 904; the `secrets` note at line 83), the interpreter-effect verifier (`permission_interpreter.go`:467), and the deterministic `verifyAutoGrant` guard (`agent.go`:4861/4872), which is now narrowed to READS — not just the judge rubric and the interpreter-effect verifier:
 
 1. **Judge rubric** — `state["relaxed_concerns"]` line 904; `relaxedConcernSet()`; the `secrets` note (`permission_typesafe.go`:83, verified verbatim: "Switching this off lets a credential file be read without the deterministic sensitive-path refusal, and relaxes exposing the value plus the interpreter verifier's sensitive-path gate. Writing, editing or deleting a credential file is still gated, as is repo metadata (.git/, .github/workflows/).").
 2. **Interpreter-effect verifier** — `permission_interpreter.go`:467: `if !relaxed["secrets"] && isSensitivePath(p) { ... }`.
-3. **Deterministic `verifyAutoGrant` guard** — `agent.go`:4849 (`if isSensitivePath(path) {`) and 4860 (`readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`). Previously refused any sensitive path unconditionally; now allows a READ of secret material (`.env`, `.netrc`, ssh-key basenames, cert/key suffixes, `.aws/`) **only when `secrets` is in the relaxed set**. Writes, edits and deletes of a credential file, and every repo-metadata (`.git/`, `.github/workflows/`) operation, stay refused.
+3. **Deterministic `verifyAutoGrant` guard** — `agent.go`:4861 (`if isSensitivePath(path) {`) and 4872 (`readableSecret := toolName == "read" && isSecretMaterialPath(path) && a.relaxedConcernSet()["secrets"]`). Previously refused any sensitive path unconditionally; now allows a READ of secret material (`.env`, `.netrc`, ssh-key basenames, cert/key suffixes, `.aws/`) **only when `secrets` is in the relaxed set**. Writes, edits and deletes of a credential file, and every repo-metadata (`.git/`, `.github/workflows/`) operation, stay refused.
 
-As shipped: only a READ (`read` tool) of secret material (e.g. `.env`) is allowed by the guard when `secrets` is relaxed (`agent.go`:4860 `readableSecret := toolName == "read" && ...`); writes, edits, deletes, multiedits, multi_file_edits, replace_lines and apply_patch of a credential file stay refused, as does any operation on repo metadata (`.git/`, `.github/workflows/`). Reason: the user opted out of exposure (exposing a value), not of integrity (credential tampering — writes/edits/deletes). When enforced, both read and write ask. Regression: `internal/agent/permissions_relaxed_secrets_test.go` and `internal/agent/permissions_relaxed_secrets_writes_test.go` (`TestVerifyAutoGrantRelaxedSecretsDoesNotCoverCredentialWrites`).
+4. **Outbound-network guard** (`checkNetworkGuardCtx`, `internal/agent/network_guard_typesafe.go`). `networkGuardRelaxedConcernMap` maps `secrets` to the guard concern `secrets_in_request`, and only that. A verdict whose named concern is `secrets_in_request` is not escalated when `secrets` is relaxed, and the decision is logged as `tier=netguard_relaxed`. Every other guard concern stays enforced. `network` is deliberately not mapped, because it tunes the permission judge and not the last check before data leaves the machine. The Settings note for `secrets` (`permission_typesafe.go`:83) does not mention the outbound guard; it describes the judge and the verifier only. Details: [outbound-network guardrail](webfetch-websearch-guardrails.md#relaxed-secrets-the-secrets-opt-out-reaches-the-guard).
+
+As shipped: only a READ (`read` tool) of secret material (e.g. `.env`) is allowed by the guard when `secrets` is relaxed (`agent.go`:4872 `readableSecret := toolName == "read" && ...`); writes, edits, deletes, multiedits, multi_file_edits, replace_lines and apply_patch of a credential file stay refused, as does any operation on repo metadata (`.git/`, `.github/workflows/`). Reason: the user opted out of exposure (exposing a value), not of integrity (credential tampering — writes/edits/deletes). When enforced, both read and write ask. Regression: `internal/agent/permissions_relaxed_secrets_test.go` and `internal/agent/permissions_relaxed_secrets_writes_test.go` (`TestVerifyAutoGrantRelaxedSecretsDoesNotCoverCredentialWrites`).
 
 
 ## API
@@ -277,7 +279,7 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 
 ## Amendment (2026-10-04): The permission judge resolves through `resolveDecider(slotPermission)`
 
-The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:256`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:138`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
+The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:257`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:138`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
 
 `isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:253`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
 

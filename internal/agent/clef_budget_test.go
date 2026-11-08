@@ -143,7 +143,7 @@ func TestJudgePayloadBudgets(t *testing.T) {
 		Kind:  "url",
 		Value: "https://example.com/" + strings.Repeat("a-very-long-path-segment/", 200),
 	}})
-	networkQuestions := networkGuardQuestions()
+	networkQuestions := a.networkGuardQuestions()
 
 	cases := []struct {
 		name        string

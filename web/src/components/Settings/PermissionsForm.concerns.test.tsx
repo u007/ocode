@@ -21,6 +21,8 @@ vi.mock("../../api/client", () => ({
     setPermissionModel: vi.fn(),
     setYolo: vi.fn(),
     getPermissionConcerns: vi.fn(),
+    getAllowedHosts: vi.fn(),
+    setAllowedHosts: vi.fn(),
   },
 }));
 

@@ -15,6 +15,17 @@ import { Input } from "../ui/input";
 import { Loader2, X } from "lucide-react";
 import ModelDialog from "../Layout/ModelDialog";
 
+// Adds one allowed host the way the add row does: trimmed, empty ignored, and a
+// host already in the list (compared trimmed, as it is saved) not repeated.
+// Shared by addHost and save so a host typed but never entered is normalised
+// exactly like one that was.
+function withAllowedHost(list: string[], raw: string): string[] {
+  const host = raw.trim();
+  if (!host) return list;
+  if (list.some((h) => h.trim() === host)) return list;
+  return [...list, host];
+}
+
 const EMPTY_AUTO: AutoPermissionConfig = {
   enabled: false, allow_destructive: false, prompt: "",
   max_context_bytes: 0, max_context_sources: 0, max_context_lines_per_source: 0, min_confidence: 0,
@@ -56,6 +67,12 @@ export default function PermissionsForm() {
   // The checkbox catalog is served by Go (next to the Jev rubric) so the list,
   // the rubric and the chat judge prompt share one vocabulary.
   const [concerns, setConcerns] = useState<RelaxableConcern[]>([]);
+  // Hosts the agent may reach without asking (permissions.allowed_hosts). Staged
+  // like the rules: loadedHosts is the last-known server list, and Save writes
+  // the whole list only when it differs.
+  const [hosts, setHosts] = useState<string[]>([]);
+  const [loadedHosts, setLoadedHosts] = useState<string[]>([]);
+  const [newHost, setNewHost] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,17 +94,20 @@ export default function PermissionsForm() {
     setLoading(true);
     setError(null);
     try {
-      const [perms, autoCfg, defaultModeCfg, concernsCfg] = await Promise.all([
+      const [perms, autoCfg, defaultModeCfg, concernsCfg, hostsCfg] = await Promise.all([
         api.getPermissions(),
         api.getAutoPermissionConfig(),
         api.getPermissionModeConfig(),
         api.getPermissionConcerns(),
+        api.getAllowedHosts(),
       ]);
       setSandboxSupported(perms.sandbox_supported ?? true);
       setDefaultMode(defaultModeCfg.mode || "normal");
       setLoadedDefaultMode(defaultModeCfg.mode || "normal");
       setAuto({ ...EMPTY_AUTO, ...autoCfg });
       setConcerns(concernsCfg?.concerns ?? []);
+      setHosts(hostsCfg?.hosts ?? []);
+      setLoadedHosts(hostsCfg?.hosts ?? []);
       const rows = rowsFromResponse(perms.bash_rules);
       setBashRules(rows);
       setLoadedBashRules(rows);
@@ -117,6 +137,20 @@ export default function PermissionsForm() {
       if (model !== undefined) {
         await api.setPermissionModel(model ?? "");
       }
+      // The host list is written whole, and only when it differs from what the
+      // server last returned, so a plain Save never sends an unchanged list.
+      // A host still typed in the add row (no Enter pressed) is part of this save.
+      const stagedHosts = withAllowedHost(hosts, newHost);
+      const cleanHosts = stagedHosts.map((h) => h.trim()).filter((h) => h !== "");
+      if (cleanHosts.join("\n") !== loadedHosts.join("\n")) {
+        const res = await api.setAllowedHosts(cleanHosts);
+        const saved = res?.hosts ?? cleanHosts;
+        setHosts(saved);
+        setLoadedHosts(saved);
+      }
+      // Reached only once the host write (if any) succeeded, so a failed save
+      // keeps the typed host in the input for a retry.
+      setNewHost("");
       // Rule changes go last and only when there is something to change, so a
       // plain Save never fires an empty write (and never fails on a batch with
       // no entries). The response carries server truth, which becomes both the
@@ -192,6 +226,18 @@ export default function PermissionsForm() {
   // Enforcement is stored inverted: a ticked box means "enforce", so it is the
   // ABSENCE of the key from relaxed_concerns. Saving writes the unticked keys in
   // catalog order, which keeps the persisted list stable and diffable.
+  const addHost = () => {
+    if (!newHost.trim()) return;
+    setHosts((rows) => withAllowedHost(rows, newHost));
+    setNewHost("");
+  };
+  const updateHost = (index: number, value: string) => {
+    setHosts((rows) => rows.map((row, i) => (i === index ? value : row)));
+  };
+  const removeHost = (index: number) => {
+    setHosts((rows) => rows.filter((_, i) => i !== index));
+  };
+
   const relaxedSet = new Set(auto.relaxed_concerns ?? []);
   const toggleConcern = (key: string, enforced: boolean) => {
     const next = new Set(auto.relaxed_concerns ?? []);
@@ -509,6 +555,50 @@ export default function PermissionsForm() {
                 </span>
               </label>
             ))}
+          </div>
+        </div>
+
+        <div className="border-t border-border pt-4 space-y-2">
+          <div className="text-xs font-semibold text-foreground">Allowed hosts</div>
+          <p className="text-xs text-muted-foreground">
+            Hosts the agent may fetch or open without asking. Fetches and page opens on a listed host run
+            without asking; the outbound-request judge still sees them and only escalates a credential,
+            on-host data, or a high-impact irreversible action such as a bulk delete or a payment. Routine
+            deletes of test data or temporary files are allowed. <code className="font-mono">*.example.com</code>{" "}
+            covers every subdomain. The judge sees this list for every other host.
+          </p>
+          <div className="space-y-1.5">
+            {hosts.map((host, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  value={host}
+                  aria-label={`Allowed host ${host}`}
+                  onChange={(e) => updateHost(i, e.target.value)}
+                  className="h-7 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove host ${host}`}
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={() => removeHost(i)}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+            <Input
+              value={newHost}
+              aria-label="New allowed host"
+              placeholder="app.example.com or *.example.com"
+              onChange={(e) => setNewHost(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addHost();
+                }
+              }}
+              className="h-7 text-xs font-mono"
+            />
           </div>
         </div>
       </div>
