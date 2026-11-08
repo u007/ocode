@@ -261,6 +261,35 @@ func TestHandlePublishHubNotConnectedReturns409(t *testing.T) {
 	require.Contains(t, w.Body.String(), "/publish local")
 }
 
+func TestHandlePublishSecretScanRefusalAndOverride(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>hi</h1>"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1"), 0o644))
+
+	h, store := newHubHandlerTestStore(t)
+	h.workDir = dir
+	_, err := store.CreateArtifact(artifacts.Artifact{
+		ID: "art_test", Name: "demo", ProjectPath: dir, Status: "active",
+	})
+	require.NoError(t, err)
+
+	// Refused without a reason, with the code the dialog keys its override on.
+	w := httptest.NewRecorder()
+	h.HandlePublish(w, httptest.NewRequest(http.MethodPost, "/api/artifacts/art_test/publish", nil), "art_test")
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), `"code":"secret_scan"`)
+	require.Contains(t, w.Body.String(), "secret scan hit")
+
+	// A recorded reason lets the same publish through (local artifact: no hub).
+	w = httptest.NewRecorder()
+	body := strings.NewReader(`{"override_reason":"rotated, safe to publish"}`)
+	h.HandlePublish(w, httptest.NewRequest(http.MethodPost, "/api/artifacts/art_test/publish", body), "art_test")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), `"hub_url":""`)
+}
+
 func TestParseArtifactAccess(t *testing.T) {
 	t.Run("absent mode leaves the hub setting alone", func(t *testing.T) {
 		access, err := parseArtifactAccess(map[string]any{})

@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T07:51:29Z
+timestamp: 2026-11-08T08:00:55Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -133,8 +133,9 @@ store construction in `newArtifactTokenStore` (`internal/server/artifact_tokens.
    `proxyArtifactToRemote`).
 2. **Server-side secret scan** — the client flag is ignored (`_ = scanHit`); the
    handler walks the project for `.env`/`.env.*`, `*.pem`, `*.key`, `credentials`,
-   `secrets.{json,yaml,yml}`. A hit returns 409 unless an `override_reason` is supplied,
-   which is logged (`:401-434`).
+   `secrets.{json,yaml,yml}`. A hit returns 409 with a machine-readable body
+   `{"error":"secret scan hit","code":"secret_scan"}` (`writeErrorCode`, `:429`) unless
+   an `override_reason` is supplied, which is logged (`:401-434`).
 3. `build_cmd` is **parsed and stored, never executed** (`:436`, and the `buildDir`
    block's "no run" comment). See deferrals.
 4. `notify_on_publish` is read per request (`:437`); see below.
@@ -201,8 +202,8 @@ The publish response reports `access_mode`, `hub_invites` and `invite_errors`
 (`handler_artifacts.go:629-638`). The SPA maps the access fields explicitly
 (`web/src/api/artifacts.ts:288`, invites at `:291`) — **the existing `mode` field is a
 legacy alias for `hosting_mode`, so the access mode must never travel as `mode`**
-(`:283-287`). The dialog adds the select (`ArtifactPublishDialog.tsx:292`), the password
-field (`:309`, client-side 8-char check at `:100`) and the invite textarea (`:323`, split
+(`:283-287`). The dialog adds the select (`ArtifactPublishDialog.tsx:297`), the password
+field (`:314`, client-side 8-char check at `:100`) and the invite textarea (`:328`, split
 on commas/spaces/newlines, `:104`).
 
 Pinned by `TestParseArtifactAccess`,
@@ -248,16 +249,19 @@ publish reused the hub artifact and hit the same failure again.
 
 A `409` from publish is not one behaviour: the **secret-scan refusal is the only
 overridable one**, and the dialog — not the `/publish` command — owns the override. The
-`catch` opens the reason field only for `status === 409 && /secret scan/i.test(message)`
-(`ArtifactPublishDialog.tsx:199`), i.e. exactly the server's `secret scan hit`
-(`handler_artifacts.go:429`); it then renders a required override-reason textarea
-(`:338`), relabels the button **Publish anyway**, and refuses an empty reason
-client-side before sending (`:108`). A non-empty retry adds `override_reason` to the
-payload, which `artifacts.ts:274-276` already maps
+`catch` keys on the server's machine-readable code,
+`status === 409 && (code === "secret_scan" || /secret scan/i.test(message))`
+(`ArtifactPublishDialog.tsx:197-205` — `:197` reads `e.body.code`, `:203` decides),
+mirroring `writeErrorCode(…, "secret_scan", …)` at `handler_artifacts.go:429`. The
+message test is only the fallback for an older server, so a wording change can no longer
+close the override. It then renders a required override-reason textarea (`:343`),
+relabels the button **Publish anyway**, and refuses an empty reason client-side before
+sending (`:108`). A non-empty retry adds `override_reason` to the payload, which
+`artifacts.ts:274-276` already maps
 (`override_reason`/`overrideReason`/`reason`), so no API change was needed. **A
-`hub_not_connected` 409 is deliberately NOT overridable** — it stays a plain error and
-never opens the field, so a secret-scan override cannot double as a way past a missing
-hub login.
+`hub_not_connected` 409 (its own `"code":"hub_not_connected"`) is deliberately NOT
+overridable** — it stays a plain error and never opens the field, so a secret-scan
+override cannot double as a way past a missing hub login.
 
 `/publish` is registered in the command picker (`web/src/components/Chat/commands.ts:105`)
 and marked **instant** (`web/src/lib/instantCommands.ts:27`), so it runs during a live
@@ -597,7 +601,10 @@ Mode B:
   message), `TestHandlePublishHubSuccessReturnsURL` (full `HandlePublish` with
   `hosting_mode=hub` returns 200 and a `hub_url` containing `/p/art_test/`), and
   `TestHandlePublishHubFailureReturns502` (full `HandlePublish` against a failing hub
-  returns **502** and no version is accepted). Access: `TestParseArtifactAccess`,
+  returns **502** and no version is accepted), plus
+  `TestHandlePublishSecretScanRefusalAndOverride` (the secret scan refuses with 409 +
+  `"code":"secret_scan"`, then the same publish with `override_reason` returns 200 and
+  `"hub_url":""`). Access: `TestParseArtifactAccess`,
   `TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors` (access applied before
   publish; an invite failure is collected), `TestHandlePublishSendsAccessFieldsToHub`,
   and `TestHandlePublishRejectsAccessFieldsForLocalArtifact` (the 400).

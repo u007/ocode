@@ -194,9 +194,14 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
     } catch (e: any) {
       const status = typeof e?.status === "number" ? e.status : 0;
       const message = e?.message || String(e);
-      // 409 is also used for hub_not_connected, which is NOT overridable. Only
-      // the secret-scan refusal ("secret scan hit") opens the reason field.
-      if (status === 409 && /secret scan/i.test(message)) {
+      const code = e?.body?.code;
+      // 409 is also used for hub_not_connected, which is NOT overridable. Key on
+      // the server's code (falling back to the stable message for older
+      // servers) so a wording tweak cannot silently close the override path.
+      if (
+        status === 409 &&
+        (code === "secret_scan" || /secret scan/i.test(message))
+      ) {
         setSecretScanBlocked(true);
         setError(
           "This project contains .env or key files. Give a reason to publish anyway.",

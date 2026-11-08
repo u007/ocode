@@ -222,4 +222,16 @@ describe("ArtifactPublishDialog", () => {
     );
     expect(screen.queryByTestId("override-reason")).toBeNull();
   });
+
+  it("keys the override on the server code, not the message text", async () => {
+    const onPublish = vi.fn().mockRejectedValue(
+      Object.assign(new Error("policy refusal"), {
+        status: 409,
+        body: { code: "secret_scan" },
+      }),
+    );
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(await screen.findByTestId("override-reason")).toBeInTheDocument();
+  });
 });

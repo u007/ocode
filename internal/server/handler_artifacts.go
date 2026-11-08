@@ -426,7 +426,7 @@ func (h *Handler) HandlePublish(w http.ResponseWriter, r *http.Request, id strin
 		return nil
 	})
 	if hasSecret && overrideReason == "" {
-		writeError(w, http.StatusConflict, "secret scan hit")
+		writeErrorCode(w, http.StatusConflict, "secret_scan", "secret scan hit")
 		return
 	}
 	if hasSecret && overrideReason != "" {
