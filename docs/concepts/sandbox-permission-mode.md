@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-08T15:00:00Z
+timestamp: 2026-11-08T16:45:00Z
 ---
 ## Decision
 
@@ -73,7 +73,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Predicate split
 
-`isSensitivePath` (`permissions.go:3619`) is the OR of two named predicates:
+`isSensitivePath` (`permissions.go:3625`) is the OR of two named predicates:
 
 - **`isSecretMaterialPath()`** (line 3628) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
 
@@ -81,11 +81,11 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Per-target write classification
 
-`sandboxSensitiveTargets` (`permissions.go:3758`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+`sandboxSensitiveTargets` (`permissions.go:3764`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3920`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3926`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -112,19 +112,19 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 ## Code references
 
 - Mode constants: `internal/agent/permissions.go:42-52`
-- `Decide` (whole function): `internal/agent/permissions.go:2084-2590`
+- `Decide` (whole function): `internal/agent/permissions.go:2090-2596`
 - `persistPermissions`: `internal/tui/model.go:15686`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1108`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
 - `isHarmfulForceCommand`: `internal/agent/permissions.go:901`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1561`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1567`
 - `isReadOnlyGitStashForm`: `internal/agent/permissions.go:704`
-- `isSensitivePath`: `internal/agent/permissions.go:3619`
-- `isSecretMaterialPath`: `internal/agent/permissions.go:3628`
-- `isRepoMetadataPath`: `internal/agent/permissions.go:3681`
-- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3758`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3920`
+- `isSensitivePath`: `internal/agent/permissions.go:3625`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:3634`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:3687`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3764`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3926`
 
 ## Enforcement details (moved from CLAUDE.md)
 
@@ -204,22 +204,47 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   `/api/permissions*` or to any `/api/config/*` path → Ask (self-escalation guard, all modes).
   The path is taken from the raw request token, cleaned and lowercased before matching, and
   the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
-  on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4369`),
+  on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4625`),
   and a line that does not parse is checked from every word position. This is the escalation
-  rule (`isPermissionEscalation`, `internal/agent/permissions.go:3991`), and two more cases feed it.
+  rule (`isPermissionEscalation`, `internal/agent/permissions.go:3997`), and two more cases feed it.
   A network client (curl, wget, http, https) asks when a positional argument is a whole-word
   shell expansion (`curl "$U"`, `curl -s $A https://…`), even beside a literal URL, because curl
   and wget fetch every positional URL and the guard cannot see through the variable. The value
   word of a value-taking option is skipped, so `-o $OUT` is not a positional
-  (`bareExpansionTarget`, `internal/agent/permissions.go:4246`). Option arity is per client:
-  the curl, wget and httpie tables (`curlValueOptions`, `permissions.go:4166`;
-  `wgetValueOptions`, `permissions.go:4183`; `httpieValueOptions`, `permissions.go:4198`) are
-  read by `optionTakesNextWord` (`permissions.go:4216`), and an unknown client takes no value,
+  (`bareExpansionTarget`, `internal/agent/permissions.go:4252`). Option arity is per client:
+  the curl, wget and httpie tables (`curlValueOptions`, `permissions.go:4172`;
+  `wgetValueOptions`, `permissions.go:4189`; `httpieValueOptions`, `permissions.go:4204`) are
+  read by `optionTakesNextWord` (`permissions.go:4222`), and an unknown client takes no value,
   so it never skips a following expansion. A
   loopback URL whose path, host or userinfo holds a glob or expansion character (`*`, `?`, `[`,
   `{`, `$`, a backtick or a backslash) also asks. A port expansion is exempt only when the shell
-  proves it numeric (`tokenMayReachPermissionRoute`, `permissions.go:4326`, and
-  `loopbackAuthoritySafe`, `permissions.go:4295`).
+  proves it numeric (`tokenMayReachPermissionRoute`, `permissions.go:4582`, and
+  `loopbackAuthoritySafe`, `permissions.go:4551`). The loopback test behind this guard also reads
+  the unspecified addresses (`0.0.0.0`, `::`, and the inet_aton zero forms), `localhost.` and any
+  `*.localhost` name as loopback (`isLoopbackHostForPermissionGuard`,
+  `internal/agent/permissions.go:1340`). Four more rules apply to a network segment. (b) A segment
+  with a destination-shaping option (a proxy, `--connect-to`, `--resolve`, a socks, interface, DNS
+  or unix-socket option) is judged by `segmentRedirectsURLs` (`permissions.go:4280`): every URL on
+  it has its path checked for a permission or config route, or for a glob or expansion character,
+  whatever its host. (c) A config or input-source option asks unconditionally: curl `-K` and
+  `--config`, and wget `-i`, `--input-file`, `-e`, `--execute` and `--config`, in any spelling,
+  including getopt-style abbreviations of four or more characters with the dashes
+  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:621` and
+  `:601`). (d) A proxy or config environment assignment (`http_proxy`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `CURL_HOME`, `WGETRC`, `XDG_CONFIG_HOME` or `HOME`) asks when it reaches a client. As a prefix
+  (`HOME=/tmp/h curl`) it applies to that one command. As a standalone or exported assignment it is
+  sticky for the rest of the line (`configEnvBeforeClient`, `permissions.go:4306`; the names are in
+  `redirectEnvNames`, `internal/agent/network_guard_typesafe.go:169`). (e) Wrappers (`env`, `sudo`,
+  `command`, `exec`, `nohup`, `nice`, `timeout` and leading assignments) are peeled per segment by
+  `effectiveCommandWords`, so the real client is judged. `command`, `builtin` and `exec` are
+  transparent before the head word, which `effectiveHead` (`internal/agent/permissions.go:4397`)
+  returns. (f) A standalone or exported redirecting assignment, a `source` or `.` of a file, an
+  `eval`, and a state-setting builtin (`read`, `printf -v`, `mapfile` or `readarray`, `let`) whose
+  target is a redirect or config variable make the rest of the line sticky, so a later client
+  reads the value they set (`stateSetterSticky`, `permissions.go:4410`). State setters are parsed the
+  way the shell parses them: attached and clustered options (`read -rp`, `printf -vX`) are read, `getopts`
+  sets its NAME argument, and any `-n` nameref on `declare`, `typeset` or `local` counts, because a
+  nameref can alias a redirecting variable.
 
 Ask routes to the auto-permission LLM judge when `auto` is on, else a human
 prompt. These static checks catch direct commands (`cat auth.json`), but NOT a

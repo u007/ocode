@@ -5,7 +5,7 @@ description: Persistent, disk-backed cron engine + headless agent dispatcher for
 tags: [scheduler, cron, dispatch, agent, automation]
 status: active
 created: 2026-07-17
-timestamp: 2026-11-08T15:00:00Z
+timestamp: 2026-11-08T16:45:00Z
 ---
 # Scheduled Jobs / Cron Dispatch
 
@@ -65,7 +65,7 @@ fire unless a long-lived host is running. Document this in user-facing docs.
   + the 79 most recent turns so the transcript never grows unbounded
   (`session.Save` overwrites the full transcript and never prunes).
 - Per-job permission mode is bound via `ag.Permissions().SetMode(...)` (the
-  runtime mutation point in `internal/agent/permissions.go:5457`). Safe default
+  runtime mutation point in `internal/agent/permissions.go:5716`). Safe default
   is `normal`; `yolo`/`locked` are explicit opt-in.
 
 ### Dispatch semantics (mirroring Claude Code)
@@ -518,7 +518,7 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
   set as grow-only/sticky within a session.
 - **No exported `Agent.SetPermissions`**: `SetMode` is workflow mode, not
   permission mode. Per-job permission mode is set on the `PermissionManager`
-  after `NewAgent` (`internal/agent/permissions.go:5457`).
+  after `NewAgent` (`internal/agent/permissions.go:5716`).
 - **Persistent session trade-off**: a recurring `cron:<id>` session
   accumulates context across firings (good for jobs that need history) but
   must be capped — `session.Save` never prunes. The current cap is 80 messages;
