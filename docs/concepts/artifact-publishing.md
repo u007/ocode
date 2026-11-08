@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Artifact publishing / sharing (static snapshots, Mode A + Mode B client)
-description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, per-publish visitor access (public/password/allowlist) applied through the hub, hub_token persistence, presigned per-blob upload, and the 409-not-connected / 502 no-fallback rules; the hub-side API itself lives in the separate kakiit repo and is not in this tree. Also covers the owner API''s computed share_url and the project-level Artifacts top tab (client-side project scoping, reload-on-activation, and per-row publish/unpublish/copy/delete behind a confirm guard).'
+description: 'Phase 1 publish/share: immutable static project snapshots served at /p/{artifact}/{token}/... from a content-addressed blob store, with durable hashed capability tokens, allowlist invites, password gate, uniform 404, a computed blob_manifest_hash, access-log retention pruning, and tailscale serve/funnel exposure that MUST keep the /p upstream path. Also covers the Mode B (hub) CLIENT upload path: hosting_mode=hub publish, per-publish visitor access (public/password/allowlist) applied through the hub, hub_token persistence, presigned per-blob upload, and the 409-not-connected / 502 no-fallback rules; the hub-side API itself lives in the separate kakiit repo and is not in this tree. Also covers the owner API''s computed share_url and the project-level Artifacts top tab (client-side project scoping, reload-on-activation, per-row publish/unpublish/copy/delete behind a confirm guard, and a read-only per-row versions expander).'
 resource: docs/superpowers/specs/2026-11-07-publish-share-project-design.md
 tags:
   - artifacts
@@ -16,7 +16,7 @@ tags:
   - mode-a
   - mode-b
   - hub
-timestamp: 2026-11-08T10:10:48Z
+timestamp: 2026-11-08T11:10:47Z
 ---
 # Artifact publishing / sharing (Phase 1: static snapshots)
 
@@ -200,9 +200,9 @@ token is logged or put in error text.
 
 The publish response reports `access_mode`, `hub_invites` and `invite_errors`
 (`handler_artifacts.go:651-660`). The SPA maps the access fields explicitly
-(`web/src/api/artifacts.ts:290`, invites at `:293`) — **the existing `mode` field is a
+(`web/src/api/artifacts.ts:317-318`, invites at `:320-322`) — **the existing `mode` field is a
 legacy alias for `hosting_mode`, so the access mode must never travel as `mode`**
-(`:285-289`). The dialog adds the select (`ArtifactPublishDialog.tsx:297`), the password
+(`:312-316`). The dialog adds the select (`ArtifactPublishDialog.tsx:297`), the password
 field (`:314`, client-side 8-char check at `:100`) and the invite textarea (`:328`, split
 on commas/spaces/newlines, `:104`).
 
@@ -257,7 +257,7 @@ message test is only the fallback for an older server, so a wording change can n
 close the override. It then renders a required override-reason textarea (`:343`),
 relabels the button **Publish anyway**, and refuses an empty reason client-side before
 sending (`:108`). A non-empty retry adds `override_reason` to the payload, which
-`artifacts.ts:276-278` already maps
+`artifacts.ts:303-305` already maps
 (`override_reason`/`overrideReason`/`reason`), so no API change was needed. **A
 `hub_not_connected` 409 (its own `"code":"hub_not_connected"`) is deliberately NOT
 overridable** — it stays a plain error and never opens the field, so a secret-scan
@@ -281,37 +281,51 @@ after DB so DB stays beside Assets) renders `<ArtifactList>` (`App.tsx:2086`); `
   canonical link). `HandleListArtifacts`/`HandleGetArtifact` fill it (`:336-338`, `:374`);
   both routes sit behind `authMiddleware`, and the URL carries the same public token the
   owner already distributes. **Copy link** is disabled when it is empty
-  (`ArtifactList.tsx:202`); the old "Copy invite" that synthesized `/p/{id}` with no token
+  (`ArtifactList.tsx:253`); the old "Copy invite" that synthesized `/p/{id}` with no token
   is gone.
 - **Scoping is client-side.** The owner list endpoint is global (`ListArtifacts(limit,
   offset)` is not project-filtered), so the panel keeps only rows whose `project_path`
-  equals the active project's path (`ArtifactList.tsx:109`).
+  equals the active project's path (`ArtifactList.tsx:116`).
 - **Four per-row lifecycle actions.** Each handler prop is optional: Publish
-  (`ArtifactList.tsx:184`, only when `onPublish` is given — `App.tsx` gives it), Unpublish
-  (`:194`, hidden when `status === "unpublished"`), Copy link (`:202`, disabled without a
-  `share_url`) and Delete (`:217`, red via `text-destructive`). Delete is destructive and
+  (`ArtifactList.tsx:235`, only when `onPublish` is given — `App.tsx` gives it), Unpublish
+  (`:245`, hidden when `status === "unpublished"`), Copy link (`:253`, disabled without a
+  `share_url`) and Delete (`:268`, red via `text-destructive`). Delete is destructive and
   removes the artifact's files; Unpublish only stops it serving and is reversible by
   publishing the same row again.
+- **Version history per row, display-only.** A **Versions** toggle (`ArtifactList.tsx:226`)
+  expands one row into its versions — label, `formatBytes` size (`:33`: `B`/`KB`/`MB`,
+  empty when absent) and relative age — inside `data-testid="version-list"` (`:278`). The
+  first expand calls `getArtifactDetail` (`web/src/api/artifacts.ts:262`) through a dynamic
+  `import("../../api/artifacts")` so tests can mock it, caches the result per artifact id,
+  and a collapse/re-expand does not refetch (pinned by `expands a row to show its versions
+  and caches the fetch`). A failed fetch renders its error inline, an artifact with no
+  versions shows "No versions yet.", and there is **no rollback endpoint**, so nothing
+  here mutates state.
+- **`getArtifact` unwraps the detail envelope.** `GET /api/artifacts/{id}` returns
+  `{artifact, versions}`; `getArtifact` (`web/src/api/artifacts.ts:241-255`) now returns
+  `res?.artifact ?? res` instead of casting the whole envelope as `Artifact`, which left
+  its callers reading `undefined` fields.
 - **Confirm-guarded, and a failure keeps the dialog open.** `App.tsx` holds
   `artifactAction {kind, artifact}` (`:251`) and `artifactRefreshKey` (`:255`);
   `<ConfirmDialog>` (`:2596`) guards both actions, and its `onConfirm` is
   `runArtifactAction` (`:1232`) → `unpublishArtifact(id, host, projectPath)`
-  (`web/src/api/artifacts.ts:304`; revokes the tokens, so the artifact stops serving) or
-  `deleteArtifact(...)` (`:317`; removes the artifact and the store GCs unreferenced
+  (`web/src/api/artifacts.ts:331`; revokes the tokens, so the artifact stops serving) or
+  `deleteArtifact(...)` (`:344`; removes the artifact and the store GCs unreferenced
   blobs). A rejected promise renders the error inline and keeps the dialog open
   (`web/src/components/common/ConfirmDialog.tsx`), so a failed write is never reported as
   done; only success clears the target and bumps the refresh key.
 - **Reload on activation and after an action.** The tab is `forceMount`ed from boot, so a
   mount-only load showed stale data (a publish from the chat tab did not appear); the
   panel takes `active` and reloads when it becomes true, and its load effect depends on
-  `[active, refreshKey]` (`ArtifactList.tsx:134-141`), so the owner never mutates the list
+  `[active, refreshKey]` (`ArtifactList.tsx:141-148`), so the owner never mutates the list
   in place (pinned by `loads only when the tab becomes active` and
   `reloads when refreshKey changes`).
 
 Verified live: the tab renders, a publish made from the chat tab appears on activation,
 publish → Unpublish flips the row to `unpublished` and hides the button → Delete (after
 the confirm) returns the empty "No artifacts yet" state, and Copy link is disabled for a
-local artifact.
+local artifact. Two publishes of the same artifact showed two rows in the Versions
+expander, each with its own size and age.
 
 ## Mode B client upload path (`hosting_mode=hub`)
 
@@ -673,7 +687,8 @@ Mode B:
   copying the server `share_url` instead of a synthesized path, Copy link disabled
   without one, per-row Publish only when a handler is given, load-on-activate, the
   unpublish/delete row handlers, Unpublish hidden for an already-unpublished artifact,
-  and the `refreshKey` reload.
+  the `refreshKey` reload, and the version expander (one cached `getArtifactDetail`
+  fetch per artifact, inline error when it fails).
 
 ## Related
 

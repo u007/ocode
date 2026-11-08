@@ -243,12 +243,39 @@ export async function getArtifact(
   host?: string,
   projectPath?: string,
 ): Promise<Artifact> {
-  return fetchJSON<Artifact>(
+  // The endpoint returns { artifact, versions }; older callers expect just the
+  // artifact, so unwrap here rather than leaking the envelope.
+  const res = await fetchJSON<any>(
     `/api/artifacts/${encodeURIComponent(id)}`,
     undefined,
     host,
     projectPath,
   );
+  return (res?.artifact ?? res) as Artifact;
+}
+
+export interface ArtifactDetail {
+  artifact: Artifact;
+  versions: ArtifactVersion[];
+}
+
+export async function getArtifactDetail(
+  id: string,
+  host?: string,
+  projectPath?: string,
+): Promise<ArtifactDetail> {
+  const res = await fetchJSON<any>(
+    `/api/artifacts/${encodeURIComponent(id)}`,
+    undefined,
+    host,
+    projectPath,
+  );
+  return {
+    artifact: (res?.artifact ?? res) as Artifact,
+    versions: Array.isArray(res?.versions)
+      ? (res.versions as ArtifactVersion[])
+      : [],
+  };
 }
 
 export async function publishArtifact(

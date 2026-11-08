@@ -30,6 +30,13 @@ function formatRelTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+function formatBytes(n?: number): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
 function ArtifactList(props: ArtifactListProps) {
   const {
     host,
@@ -140,6 +147,41 @@ function ArtifactList(props: ArtifactListProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, refreshKey]);
 
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [details, setDetails] = useState<
+    Record<string, { versions?: any[]; error?: string } | "loading">
+  >({});
+
+  const toggleVersions = async (a: any) => {
+    const id = a?.id || a?.artifact_id;
+    if (!id) return;
+    if (expandedId === id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(id);
+    const cached = details[id];
+    if (cached && cached !== "loading") return;
+    setDetails((d) => ({ ...d, [id]: "loading" }));
+    try {
+      // Loaded through the module (not a static import) so tests can mock it,
+      // matching how the list itself resolves listArtifacts.
+      const mod: any = await import("../../api/artifacts");
+      const detail = await mod.getArtifactDetail(id, host, resolvedProjectPath);
+      setDetails((d) => ({
+        ...d,
+        [id]: {
+          versions: Array.isArray(detail?.versions) ? detail.versions : [],
+        },
+      }));
+    } catch (e: any) {
+      setDetails((d) => ({
+        ...d,
+        [id]: { error: e?.message || String(e) },
+      }));
+    }
+  };
+
   const copyShareLink = async (a: any) => {
     const url = typeof a?.share_url === "string" ? a.share_url : "";
     if (!url) return;
@@ -157,71 +199,126 @@ function ArtifactList(props: ArtifactListProps) {
         </div>
       )}
       <ul className="space-y-1">
-        {items.map((a, i) => (
-          <li
-            key={a?.id || i}
-            className="flex items-center justify-between gap-2 rounded border px-2 py-1.5 text-sm"
-          >
-            <button
-              type="button"
-              className="min-w-0 flex-1 text-left hover:underline"
-              onClick={() => onSelect?.(a)}
-            >
-              <span className="block truncate">
-                {a?.name || a?.id || "artifact"}
-              </span>
-              <span className="block text-xs text-muted-foreground">
-                {[a?.status, a?.hosting_mode].filter(Boolean).join(" · ")}
-                {a?.created_at ? ` · ${formatRelTime(a.created_at)}` : ""}
-              </span>
-            </button>
-            <div className="flex items-center gap-1">
-              {onPublish && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => onPublish(a)}
-                  data-testid="publish-artifact"
+        {items.map((a, i) => {
+          const id = a?.id || a?.artifact_id;
+          const entry = id ? details[id] : undefined;
+          return (
+            <li key={a?.id || i} className="rounded border px-2 py-1.5 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 text-left hover:underline"
+                  onClick={() => onSelect?.(a)}
                 >
-                  Publish
-                </Button>
-              )}
-              {onUnpublish && a?.status !== "unpublished" && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => onUnpublish(a)}
-                  data-testid="unpublish-artifact"
+                  <span className="block truncate">
+                    {a?.name || a?.id || "artifact"}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {[a?.status, a?.hosting_mode].filter(Boolean).join(" · ")}
+                    {a?.created_at ? ` · ${formatRelTime(a.created_at)}` : ""}
+                  </span>
+                </button>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => toggleVersions(a)}
+                    data-testid="toggle-versions"
+                  >
+                    Versions
+                  </Button>
+                  {onPublish && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onPublish(a)}
+                      data-testid="publish-artifact"
+                    >
+                      Publish
+                    </Button>
+                  )}
+                  {onUnpublish && a?.status !== "unpublished" && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onUnpublish(a)}
+                      data-testid="unpublish-artifact"
+                    >
+                      Unpublish
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!a?.share_url}
+                    title={a?.share_url ? "Copy the share link" : "No link yet"}
+                    onClick={() => copyShareLink(a)}
+                    data-testid="copy-share-link"
+                  >
+                    {copiedId === (a?.id || a?.artifact_id)
+                      ? "Copied"
+                      : "Copy link"}
+                  </Button>
+                  {onDelete && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      onClick={() => onDelete(a)}
+                      data-testid="delete-artifact"
+                    >
+                      Delete
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {expandedId === id && entry && (
+                <div
+                  className="mt-1 border-t pt-1 text-xs"
+                  data-testid="version-list"
                 >
-                  Unpublish
-                </Button>
+                  {entry === "loading" && (
+                    <div className="text-muted-foreground">
+                      Loading versions…
+                    </div>
+                  )}
+                  {entry !== "loading" && entry.error && (
+                    <div role="alert" className="text-destructive">
+                      {entry.error}
+                    </div>
+                  )}
+                  {entry !== "loading" &&
+                    entry.versions &&
+                    entry.versions.length === 0 && (
+                      <div className="text-muted-foreground">
+                        No versions yet.
+                      </div>
+                    )}
+                  {entry !== "loading" &&
+                    entry.versions &&
+                    entry.versions.length > 0 && (
+                      <ul className="space-y-0.5">
+                        {entry.versions.map((v: any) => (
+                          <li
+                            key={v?.id || v?.version}
+                            className="flex items-center justify-between gap-2"
+                          >
+                            <span>{v?.version || v?.id || "version"}</span>
+                            <span className="text-muted-foreground">
+                              {formatBytes(v?.size_bytes)}
+                              {v?.created_at
+                                ? ` · ${formatRelTime(v.created_at)}`
+                                : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                </div>
               )}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!a?.share_url}
-                title={a?.share_url ? "Copy the share link" : "No link yet"}
-                onClick={() => copyShareLink(a)}
-                data-testid="copy-share-link"
-              >
-                {copiedId === (a?.id || a?.artifact_id)
-                  ? "Copied"
-                  : "Copy link"}
-              </Button>
-              {onDelete && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-destructive"
-                  onClick={() => onDelete(a)}
-                  data-testid="delete-artifact"
-                >
-                  Delete
-                </Button>
-              )}
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
         {!loading && items.length === 0 && (
           <li className="text-xs text-muted-foreground">
             No artifacts yet. Publish this project to create one.

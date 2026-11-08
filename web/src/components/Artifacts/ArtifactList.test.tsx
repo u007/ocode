@@ -23,6 +23,7 @@ const artifacts = [
 
 vi.mock("../../api/artifacts", () => ({
   listArtifacts: vi.fn(),
+  getArtifactDetail: vi.fn(),
 }));
 
 vi.mock("../../lib/clipboard", () => ({
@@ -153,5 +154,53 @@ describe("ArtifactList", () => {
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(1));
     rerender(<ArtifactList projectPath="/p" refreshKey={1} />);
     await waitFor(() => expect(listArtifacts).toHaveBeenCalledTimes(2));
+  });
+
+  it("expands a row to show its versions and caches the fetch", async () => {
+    const { getArtifactDetail } = await import("../../api/artifacts");
+    vi.mocked(getArtifactDetail).mockClear();
+    vi.mocked(getArtifactDetail).mockResolvedValue({
+      artifact: { id: "a1" } as any,
+      versions: [
+        {
+          id: "v2",
+          version: "20261108120000",
+          size_bytes: 2048,
+          created_at: new Date().toISOString(),
+        },
+        { id: "v1", version: "20261107120000", size_bytes: 1024 },
+      ],
+    } as any);
+    render(<ArtifactList projectPath="/p" />);
+    await waitFor(() => expect(screen.getByText("One")).toBeInTheDocument());
+
+    fireEvent.click(screen.getAllByTestId("toggle-versions")[0]);
+    const list = await screen.findByTestId("version-list");
+    expect(list).toHaveTextContent("20261108120000");
+    expect(list).toHaveTextContent("2.0 KB");
+    expect(getArtifactDetail).toHaveBeenCalledWith("a1", undefined, "/p");
+
+    // Collapse then expand again: the cached fetch must not repeat.
+    fireEvent.click(screen.getAllByTestId("toggle-versions")[0]);
+    expect(screen.queryByTestId("version-list")).toBeNull();
+    fireEvent.click(screen.getAllByTestId("toggle-versions")[0]);
+    await waitFor(() =>
+      expect(screen.getByTestId("version-list")).toBeInTheDocument(),
+    );
+    expect(getArtifactDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an error when the version fetch fails", async () => {
+    const { getArtifactDetail } = await import("../../api/artifacts");
+    vi.mocked(getArtifactDetail).mockClear();
+    vi.mocked(getArtifactDetail).mockRejectedValueOnce(
+      new Error("versions unavailable"),
+    );
+    render(<ArtifactList projectPath="/p" refreshKey={7} />);
+    await waitFor(() => expect(screen.getByText("One")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByTestId("toggle-versions")[0]);
+    expect(await screen.findByTestId("version-list")).toHaveTextContent(
+      /versions unavailable/i,
+    );
   });
 });
