@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-09-30T07:37:19Z
+timestamp: 2026-11-08T15:00:00Z
 ---
 ## Decision
 
@@ -21,7 +21,7 @@ The `sandbox` permission mode is the fourth mode alongside `normal`, `yolo`, and
 
 ## Four permission modes
 
-`internal/agent/permissions.go` defines four modes (`PermissionMode*` constants, ~line 36):
+`internal/agent/permissions.go` defines four modes (`PermissionMode*` constants, ~line 42):
 
 - `normal` — prompts for writes outside allowed roots; auto-permission judge active
 - `yolo` — no prompts, no confinement; auto-permission layer disabled
@@ -65,7 +65,7 @@ In `PermissionManager.Decide` (`internal/agent/permissions.go`), three guards fi
 
 Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Normal mode is unchanged (already Ask via `IsHarmfulBashCommand`); YOLO remains the promptless escape hatch.
 
-Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:700`) and still auto-allow.
+Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:704`) and still auto-allow.
 
 ## Sensitive-path carve-outs
 
@@ -73,19 +73,19 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Predicate split
 
-`isSensitivePath` (`permissions.go:3590`) is the OR of two named predicates:
+`isSensitivePath` (`permissions.go:3619`) is the OR of two named predicates:
 
-- **`isSecretMaterialPath()`** (line 2799) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
+- **`isSecretMaterialPath()`** (line 3628) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
 
-- **`isRepoMetadataPath()`** (line 2852) — `.git/` and `.github/workflows/`. **Ask on WRITE only** — a planted `.git/hooks/*` or workflow executes arbitrary code and stays inside the workdir where the OS write-wall is blind. Reading/listing them (`ls .git/`, `cat .git/config`) auto-allows, matching normal mode.
+- **`isRepoMetadataPath()`** (line 3681) — `.git/` and `.github/workflows/`. **Ask on WRITE only** — a planted `.git/hooks/*` or workflow executes arbitrary code and stays inside the workdir where the OS write-wall is blind. Reading/listing them (`ls .git/`, `cat .git/config`) auto-allows, matching normal mode.
 
 ### Per-target write classification
 
-`sandboxSensitiveTargets` (`permissions.go:3729`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+`sandboxSensitiveTargets` (`permissions.go:3758`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3891`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3920`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -111,20 +111,20 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 
 ## Code references
 
-- Mode constants: `internal/agent/permissions.go:38-46`
-- `Decide` path: `internal/agent/permissions.go:~1430-1505`
+- Mode constants: `internal/agent/permissions.go:42-52`
+- `Decide` (whole function): `internal/agent/permissions.go:2084-2590`
 - `persistPermissions`: `internal/tui/model.go:15686`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1108`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
-- `isHarmfulForceCommand`: `internal/agent/permissions.go:897`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1557`
-- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:700`
-- `isSensitivePath`: `internal/agent/permissions.go:3590`
-- `isSecretMaterialPath`: `internal/agent/permissions.go:3599`
-- `isRepoMetadataPath`: `internal/agent/permissions.go:3652`
-- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3729`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3891`
+- `isHarmfulForceCommand`: `internal/agent/permissions.go:901`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1561`
+- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:704`
+- `isSensitivePath`: `internal/agent/permissions.go:3619`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:3628`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:3681`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3758`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3920`
 
 ## Enforcement details (moved from CLAUDE.md)
 
@@ -201,7 +201,25 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   (previously a body line that happened to read `git reset …` asked).
 - writes to permission-defining files (`.ocode/settings.json`,
   `.claude/settings.json`, ocode config gating files) and loopback requests to
-  `/api/permissions*` → Ask (self-escalation guard, all modes)
+  `/api/permissions*` or to any `/api/config/*` path → Ask (self-escalation guard, all modes).
+  The path is taken from the raw request token, cleaned and lowercased before matching, and
+  the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
+  on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4369`),
+  and a line that does not parse is checked from every word position. This is the escalation
+  rule (`isPermissionEscalation`, `internal/agent/permissions.go:3991`), and two more cases feed it.
+  A network client (curl, wget, http, https) asks when a positional argument is a whole-word
+  shell expansion (`curl "$U"`, `curl -s $A https://…`), even beside a literal URL, because curl
+  and wget fetch every positional URL and the guard cannot see through the variable. The value
+  word of a value-taking option is skipped, so `-o $OUT` is not a positional
+  (`bareExpansionTarget`, `internal/agent/permissions.go:4246`). Option arity is per client:
+  the curl, wget and httpie tables (`curlValueOptions`, `permissions.go:4166`;
+  `wgetValueOptions`, `permissions.go:4183`; `httpieValueOptions`, `permissions.go:4198`) are
+  read by `optionTakesNextWord` (`permissions.go:4216`), and an unknown client takes no value,
+  so it never skips a following expansion. A
+  loopback URL whose path, host or userinfo holds a glob or expansion character (`*`, `?`, `[`,
+  `{`, `$`, a backtick or a backslash) also asks. A port expansion is exempt only when the shell
+  proves it numeric (`tokenMayReachPermissionRoute`, `permissions.go:4326`, and
+  `loopbackAuthoritySafe`, `permissions.go:4295`).
 
 Ask routes to the auto-permission LLM judge when `auto` is on, else a human
 prompt. These static checks catch direct commands (`cat auth.json`), but NOT a

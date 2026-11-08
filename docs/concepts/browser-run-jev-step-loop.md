@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-01T05:22:30Z
+timestamp: 2026-11-08T15:00:00Z
 status: active
 ---
 
@@ -44,7 +44,7 @@ loop and never appended to the transcript. Only `browser_run`'s own result is.
 Arguments: `goal` (required), `data` (named string values the loop may type), `tab`
 (as for `browser`), and `max_steps` (default 15, at most 40). The tool is registered only
 when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:356`).
-It is `PermissionAllow` by default (`internal/agent/permissions.go:1990`), because it
+It is `PermissionAllow` by default (`internal/agent/permissions.go:1995-1996`), because it
 performs nothing on its own.
 
 The result starts with an untrusted-content notice, then a header, one line per step,
@@ -240,7 +240,7 @@ backend or to the main model.
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
   `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
   `internal/agent/agent.go:6835`). The dialog then reads like
-  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:5823`),
+  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6284`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.
 - **Agent types.** The built-in `scout`, `debug` and `docs` definitions list
@@ -330,7 +330,7 @@ non-model seconds in its runs went to waits on class names. Waiting for the docu
 quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
-(`internal/agent/permissions.go:5711`), so it is allowed on an agent-opened tab. A user tab
+(`internal/agent/permissions.go:6169`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:531`). Read-only
 agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:218`).
 
@@ -403,8 +403,8 @@ re-tuned on that corpus.
   `imageStateAllowanceBytes` (38).
 - `internal/agent/agent.go`: `handleToolCallWithContext` (3973), the context asker
   (4215), `attributePermAsker` (6811), `withPermissionAsker` (6832).
-- `internal/agent/permissions.go`: `browser_run` allow default (1990), the observe set
-  (5708), `browserAction` and its `run_step` summary (5823).
+- `internal/agent/permissions.go`: `browser_run` allow default (1995-1996), the observe set
+  (6169), `browserAction` (6212) and its `run_step` summary (6284).
 - `internal/agent/decider.go`: `slotBrowserRun` (29). `internal/config/ocodeconfig.go`:
   `BrowserRun` config key `browser_run.judge_model` (1041).
 - `internal/agent/content_guard_typesafe.go`: `browserGuardedOutputs` (266), the
