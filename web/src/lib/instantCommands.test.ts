@@ -8,6 +8,12 @@ describe("isInstantCommand", () => {
     }
   });
 
+  it("matches /publish with and without a mode argument", () => {
+    for (const text of ["/publish", "/publish local", "/publish hub"]) {
+      expect(isInstantCommand(text), text).toBe(true);
+    }
+  });
+
   it("is case-insensitive and tolerates surrounding whitespace", () => {
     expect(isInstantCommand("  /BTW use tabs  ")).toBe(true);
     expect(isInstantCommand("/By-The-Way x")).toBe(true);

@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { copyTextToClipboard } from "../../lib/clipboard";
 
 type ArtifactPublishDialogProps = {
   open?: boolean;
@@ -63,6 +64,7 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
   const [emails, setEmails] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [published, setPublished] = useState<any>(null);
 
   // Reset component-local state on each open; never persisted across opens.
   useEffect(() => {
@@ -73,6 +75,7 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
       setEmails("");
       setError(null);
       setPending(false);
+      setPublished(null);
     }
   }, [open]);
 
@@ -173,8 +176,9 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
         }
       }
       onPublished?.(result);
-      onOpenChange?.(false);
-      onClose?.();
+      // Keep the dialog open on the result step: the share URL and any invite
+      // links are the useful output, and closing first would discard them.
+      setPublished(result ?? {});
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -193,82 +197,150 @@ function ArtifactPublishDialog(props: ArtifactPublishDialogProps) {
         <DialogHeader>
           <DialogTitle className="text-sm">Publish artifact</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={notifyOnPublish}
-              onChange={(e) => setNotifyOnPublish(e.target.checked)}
-              data-testid="notify-on-publish"
-            />
-            Notify on publish
-          </label>
-          <label className="block text-sm">
-            <span className="mb-1 block text-xs text-muted-foreground">
-              Who can open the link?
-            </span>
-            <select
-              data-testid="access-mode"
-              value={accessMode}
-              onChange={(e) => setAccessMode(e.target.value as AccessMode)}
-              className="w-full rounded border bg-background px-2 py-1 text-sm"
-            >
-              <option value="public">Anyone with the link</option>
-              <option value="password">Anyone with the password</option>
-              <option value="allowlist">Only invited emails</option>
-            </select>
-          </label>
-          {accessMode === "password" && (
-            <label className="block text-sm">
-              <span className="mb-1 block text-xs text-muted-foreground">
-                Password
-              </span>
+        {published ? (
+          <div className="space-y-3" data-testid="publish-result">
+            {published.hub_url ? (
+              <div className="space-y-1">
+                <div className="text-xs text-muted-foreground">Share link</div>
+                <div className="flex items-center gap-2">
+                  <input
+                    readOnly
+                    value={published.hub_url}
+                    data-testid="publish-result-url"
+                    className="w-full rounded border bg-background px-2 py-1 text-xs"
+                  />
+                  <Button
+                    variant="ghost"
+                    data-testid="copy-publish-url"
+                    onClick={() => copyTextToClipboard(published.hub_url)}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm">
+                Published. This artifact is served by this machine.
+              </div>
+            )}
+            {Array.isArray(published.hub_invites) &&
+              published.hub_invites.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground">
+                    Invite links
+                  </div>
+                  <ul className="space-y-1 text-xs">
+                    {published.hub_invites.map((inv: any, index: number) => (
+                      <li key={`${inv?.email ?? "invite"}-${index}`}>
+                        <div>{inv?.email}</div>
+                        {inv?.inviteUrl && (
+                          <div className="break-all text-muted-foreground">
+                            {inv.inviteUrl}
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            {Array.isArray(published.invite_errors) &&
+              published.invite_errors.length > 0 && (
+                <div role="alert" className="text-xs text-destructive">
+                  {published.invite_errors.join("; ")}
+                </div>
+              )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 text-sm">
               <input
-                type="password"
-                data-testid="access-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-                className="w-full rounded border bg-background px-2 py-1 text-sm"
+                type="checkbox"
+                checked={notifyOnPublish}
+                onChange={(e) => setNotifyOnPublish(e.target.checked)}
+                data-testid="notify-on-publish"
               />
+              Notify on publish
             </label>
-          )}
-          {accessMode === "allowlist" && (
             <label className="block text-sm">
               <span className="mb-1 block text-xs text-muted-foreground">
-                Invite emails
+                Who can open the link?
               </span>
-              <textarea
-                data-testid="invite-emails"
-                rows={3}
-                value={emails}
-                onChange={(e) => setEmails(e.target.value)}
-                placeholder="a@example.com, b@example.com"
+              <select
+                data-testid="access-mode"
+                value={accessMode}
+                onChange={(e) => setAccessMode(e.target.value as AccessMode)}
                 className="w-full rounded border bg-background px-2 py-1 text-sm"
-              />
+              >
+                <option value="public">Anyone with the link</option>
+                <option value="password">Anyone with the password</option>
+                <option value="allowlist">Only invited emails</option>
+              </select>
             </label>
-          )}
-          {error && (
-            <div role="alert" className="text-xs text-destructive">
-              {error}
-            </div>
-          )}
-        </div>
+            {accessMode === "password" && (
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs text-muted-foreground">
+                  Password
+                </span>
+                <input
+                  type="password"
+                  data-testid="access-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  className="w-full rounded border bg-background px-2 py-1 text-sm"
+                />
+              </label>
+            )}
+            {accessMode === "allowlist" && (
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs text-muted-foreground">
+                  Invite emails
+                </span>
+                <textarea
+                  data-testid="invite-emails"
+                  rows={3}
+                  value={emails}
+                  onChange={(e) => setEmails(e.target.value)}
+                  placeholder="a@example.com, b@example.com"
+                  className="w-full rounded border bg-background px-2 py-1 text-sm"
+                />
+              </label>
+            )}
+            {error && (
+              <div role="alert" className="text-xs text-destructive">
+                {error}
+              </div>
+            )}
+          </div>
+        )}
         <DialogFooter className="gap-2">
-          <Button
-            variant="ghost"
-            onClick={() => (onOpenChange ? onOpenChange(false) : onClose?.())}
-            disabled={pending}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={submit}
-            disabled={pending}
-            data-testid="publish-submit"
-          >
-            {pending ? "Publishing…" : "Publish"}
-          </Button>
+          {published ? (
+            <Button
+              data-testid="publish-done"
+              onClick={() => (onOpenChange ? onOpenChange(false) : onClose?.())}
+            >
+              Done
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  onOpenChange ? onOpenChange(false) : onClose?.()
+                }
+                disabled={pending}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={submit}
+                disabled={pending}
+                data-testid="publish-submit"
+              >
+                {pending ? "Publishing…" : "Publish"}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -70,6 +70,8 @@ import { basename, cn } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
 import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
+import ArtifactPublishDialog from "./components/Artifacts/ArtifactPublishDialog";
+import { ensureArtifact, publishArtifact } from "./api/artifacts";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import QuestionDialog from "./components/Chat/QuestionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
@@ -238,6 +240,11 @@ function HomeApp() {
     typeof window === "undefined" ? true : window.innerWidth >= 768,
   );
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [publishTarget, setPublishTarget] = useState<{
+    artifactId: string;
+    projectPath: string;
+    host?: string;
+  } | null>(null);
   const [intentSkillsOpen, setIntentSkillsOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
@@ -1228,6 +1235,32 @@ function HomeApp() {
     if (baseCmd === "/model" && !cmd.slice(baseCmd.length).trim()) {
       openModelDialog("main");
       return { handled: true, accepted: true };
+    }
+    // /publish [hub|local] opens the publish dialog for the current project:
+    // find-or-create its artifact, then let the dialog carry notify + access.
+    if (baseCmd === "/publish") {
+      const modeArg = cmd.slice(baseCmd.length).trim().toLowerCase();
+      const hostingMode: "hub" | "local" = modeArg === "local" ? "local" : "hub";
+      if (!targetProjectPath) {
+        reportActionErrorMessage("/publish needs an active project.");
+        return { handled: true, accepted: false };
+      }
+      try {
+        const artifact = await ensureArtifact(
+          targetProjectPath,
+          targetHost,
+          hostingMode,
+        );
+        setPublishTarget({
+          artifactId: artifact.id,
+          projectPath: targetProjectPath,
+          host: targetHost,
+        });
+        return { handled: true, accepted: true };
+      } catch (e) {
+        reportActionError(e, "prepare the publish");
+        return { handled: true, accepted: false };
+      }
     }
 
     // Every client-side command funnels through this one await, so recording
@@ -2464,6 +2497,25 @@ function HomeApp() {
       {/* Dialogs */}
       <SessionDialog />
       <ShareDialog />
+      {publishTarget && (
+        <ArtifactPublishDialog
+          open
+          artifactId={publishTarget.artifactId}
+          projectPath={publishTarget.projectPath}
+          host={publishTarget.host}
+          onOpenChange={(open) => {
+            if (!open) setPublishTarget(null);
+          }}
+          onPublish={(payload) =>
+            publishArtifact(
+              publishTarget.artifactId,
+              payload,
+              publishTarget.host,
+              publishTarget.projectPath,
+            )
+          }
+        />
+      )}
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}

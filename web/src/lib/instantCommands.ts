@@ -24,7 +24,7 @@
  * turn nor appends to the transcript. A command that starts or mutates a turn
  * must stay queued.
  */
-const INSTANT_COMMANDS = new Set(["/btw", "/by-the-way"]);
+const INSTANT_COMMANDS = new Set(["/btw", "/by-the-way", "/publish"]);
 
 /**
  * True when `text` is a slash command that must run now rather than queue.

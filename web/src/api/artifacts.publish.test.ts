@@ -73,3 +73,60 @@ describe("publishArtifact access fields", () => {
     expect(body.invite_emails).toEqual(["a@example.com"]);
   });
 });
+
+describe("ensureArtifact", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    window.history.replaceState(null, "", "/");
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  function listResponse(artifacts: unknown[]): Response {
+    return jsonResponse({ artifacts, total: artifacts.length });
+  }
+
+  it("reuses the existing artifact for the project", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      listResponse([{ id: "art_1", project_path: "/p" }]),
+    );
+    const { ensureArtifact } = await import("./artifacts");
+    const artifact = await ensureArtifact("/p");
+    expect(artifact.id).toBe("art_1");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates an artifact when the project has none", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ id: "art_new", project_path: "/p" }));
+    const { ensureArtifact } = await import("./artifacts");
+    const artifact = await ensureArtifact("/p", undefined, "hub");
+    expect(artifact.id).toBe("art_new");
+    const createInit = fetchSpy.mock.calls[1][1] as RequestInit;
+    expect(createInit.method).toBe("POST");
+    expect(JSON.parse(createInit.body as string)).toEqual({
+      project: "/p",
+      hosting_mode: "hub",
+    });
+  });
+
+  it("prefers the artifact bound to the given host", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      listResponse([
+        { id: "art_local", project_path: "/p", project_host: "" },
+        { id: "art_remote", project_path: "/p", project_host: "box" },
+      ]),
+    );
+    const { ensureArtifact } = await import("./artifacts");
+    expect((await ensureArtifact("/p", "box")).id).toBe("art_remote");
+  });
+
+  it("refuses an empty project path", async () => {
+    const { ensureArtifact } = await import("./artifacts");
+    await expect(ensureArtifact("   ")).rejects.toThrow(/no project path/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

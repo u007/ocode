@@ -102,6 +102,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/init", description: "Create an AGENTS.md for this project", icon: Sparkles },
   { name: "/plugin", description: "List, enable, install, or remove plugins", icon: Puzzle },
   { name: "/share", description: "Share session link", icon: Share2 },
+  { name: "/publish", description: "Publish this project as a shareable link (/publish [local])", icon: Share2 },
   { name: "/help", description: "Show available commands", icon: HelpCircle },
   { name: "/review", description: "AI code review of changes, file, commit, branch, or PR", icon: GitPullRequest },
   { name: "/context", description: "Show context window token budget", icon: Gauge },

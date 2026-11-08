@@ -36,7 +36,7 @@ describe("COMMANDS registry ⇄ dispatch alignment", () => {
   // /new and /clear are intercepted in App.tsx before delegating to
   // dispatchCommand (they open a fresh session tab), so they legitimately
   // report handled:false here.
-  const APP_HANDLED = new Set(["/new", "/clear"]);
+  const APP_HANDLED = new Set(["/new", "/clear", "/publish"]);
 
   it("dispatches every picker entry instead of falling through to the LLM", async () => {
     const fallThrough: string[] = [];

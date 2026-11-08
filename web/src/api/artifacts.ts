@@ -145,6 +145,27 @@ function normalizeList(
     []) as Artifact[];
 }
 
+/**
+ * Ensures a project has an artifact to publish into. The list endpoint is
+ * project-scoped by the caller (host + projectPath), so the newest match is the
+ * project's existing artifact; only when none exists does this create one.
+ * `mode` is the hosting mode: "hub" (default) or "local".
+ */
+export async function ensureArtifact(
+  projectPath: string,
+  host?: string,
+  mode: "hub" | "local" = "hub",
+): Promise<Artifact> {
+  const path = (projectPath || "").trim();
+  if (!path) throw new Error("publish: no project path");
+  const { artifacts } = await listArtifacts({ limit: 100 }, host, path);
+  const matches = artifacts.filter((a) => (a.project_path ?? "") === path);
+  const match =
+    matches.find((a) => !host || (a.project_host ?? "") === host) ?? matches[0];
+  if (match) return match;
+  return createArtifact({ project: path, hosting_mode: mode }, host, path);
+}
+
 export async function listArtifacts(
   opts?: { limit?: number; offset?: number },
   host?: string,

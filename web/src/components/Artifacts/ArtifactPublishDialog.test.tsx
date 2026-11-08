@@ -100,4 +100,60 @@ describe("ArtifactPublishDialog", () => {
     );
     expect(onPublish).not.toHaveBeenCalled();
   });
+
+  it("shows the share link after publishing and keeps the dialog open", async () => {
+    const onPublish = vi.fn().mockResolvedValue({
+      hub_url: "https://hub.test/p/art_1/tok/",
+    });
+    const onOpenChange = vi.fn();
+    render(
+      <ArtifactPublishDialog
+        open
+        onPublish={onPublish}
+        onOpenChange={onOpenChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(await screen.findByTestId("publish-result-url")).toHaveValue(
+      "https://hub.test/p/art_1/tok/",
+    );
+    expect(screen.queryByTestId("publish-submit")).toBeNull();
+    fireEvent.click(screen.getByTestId("publish-done"));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("renders invite links and per-email invite errors", async () => {
+    const onPublish = vi.fn().mockResolvedValue({
+      hub_url: "https://hub.test/p/art_1/tok/",
+      hub_invites: [
+        {
+          email: "a@example.com",
+          inviteUrl: "https://hub.test/i/a",
+          emailSent: true,
+        },
+      ],
+      invite_errors: ["b@example.com: hub add invite: status 400"],
+    });
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.change(screen.getByTestId("access-mode"), {
+      target: { value: "allowlist" },
+    });
+    fireEvent.change(screen.getByTestId("invite-emails"), {
+      target: { value: "a@example.com,b@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(
+      await screen.findByText("https://hub.test/i/a"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/b@example.com/);
+  });
+
+  it("reports a local publish without a hub link", async () => {
+    const onPublish = vi.fn().mockResolvedValue({});
+    render(<ArtifactPublishDialog open onPublish={onPublish} />);
+    fireEvent.click(screen.getByRole("button", { name: /publish/i }));
+    expect(await screen.findByTestId("publish-result")).toHaveTextContent(
+      /served by this machine/i,
+    );
+  });
 });
