@@ -879,7 +879,7 @@ function HomeApp() {
       const host = activeProject?.host;
       let opened: boolean;
       try {
-        opened = await openOutsideProject(path, host);
+        opened = await openOutsideProject(path, host, activeProject?.path);
       } catch (err) {
         // The hook throws when the granted root does not contain the file the
         // server returned; surface that exact reason to the user.

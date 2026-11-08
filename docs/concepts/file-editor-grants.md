@@ -164,6 +164,15 @@ stronger action than browsing it.
 Remote (SSH/WSL) grants route through `remoteApiBase(host)`, so they land in the
 **remote** server's own grant list.
 
+## Opening a folder (directory grant)
+
+A path that names a **directory** (rather than a file) is also grantable: `canonicalGrantRoot`
+returns the directory itself and `canonicalGrantFile` returns the root, so the grant's relative
+path is `.`. The client treats such a grant as a successful "open folder": no editor tab is
+created, the granted directory is added to the Files tab's root selector (via
+`/api/files/grants`), and the tree switches its active root to it. The agent's scope is
+unaffected — the grant is editor-only, exactly like a file grant.
+
 ## Outside-root paths reach the grant prompt from every surface (2026-11-03)
 
 Every surface that opens a file asks the server before it shows the file. Only an

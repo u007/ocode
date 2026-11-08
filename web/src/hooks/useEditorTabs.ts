@@ -53,7 +53,7 @@ export interface UseEditorTabsResult {
   /** Grants the file editor access to a path OUTSIDE any project root and
    *  opens it anchored to the granted directory. The grant is editor-only —
    *  it never widens the agent's file scope. */
-  openOutsideProject: (path: string, host?: string) => Promise<boolean>;
+  openOutsideProject: (path: string, host?: string, projectPath?: string) => Promise<boolean>;
   reloadTabFromDisk: (id: string) => Promise<void>;
   dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
@@ -288,7 +288,7 @@ export function useEditorTabs(): UseEditorTabsResult {
   // (editor content, preview viewers, the media token) is anchored to it
   // without needing any special case in those surfaces.
   const openOutsideProject = useCallback(
-    async (path: string, host?: string): Promise<boolean> => {
+    async (path: string, host?: string, projectPath?: string): Promise<boolean> => {
       const clean = path.trim();
       if (!clean) return false;
       let grant: { root: string; path: string };
@@ -310,6 +310,21 @@ export function useEditorTabs(): UseEditorTabsResult {
       if (anchor === null) {
         throw new Error(`Cannot open ${clean}: it is not inside the granted folder ${grant.root}.`);
       }
+      // A granted path that names a DIRECTORY comes back from the server with
+      // `path === root` (and thus a "." relative path): there is no file to open
+      // in the editor. Treat it as a successful grant so the caller can reveal
+      // the folder in the file tree instead of reporting "server refused".
+      if (anchor.path === "." || anchor.path === "") {
+        // A granted folder becomes browsable in the file tree.
+        window.dispatchEvent(new CustomEvent("ocode:file-grants-changed"));
+        // host and projectPath scope the event to the tree that asked for it:
+        // every mounted FileTree listens, and the grant is per server.
+        window.dispatchEvent(
+          new CustomEvent("ocode:open-folder", { detail: { root: grant.root, host, projectPath } }),
+        );
+        return true;
+      }
+      window.dispatchEvent(new CustomEvent("ocode:file-grants-changed"));
       return handleOpenFile(anchor.path, anchor.projectRoot, host);
     },
     [handleOpenFile],

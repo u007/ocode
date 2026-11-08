@@ -150,6 +150,22 @@ describe("useEditorTabs — out-of-project files", () => {
     expect(result.current.editorTabs).toHaveLength(0);
   });
 
+  it("treats a directory grant as a successful open without opening a file", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    grantFilePath.mockResolvedValue({ root: "/Users/x/Downloads", path: "/Users/x/Downloads", granted: true, roots: ["/Users/x/Downloads"] });
+
+    const { result } = renderHook(() => useEditorTabs());
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.openOutsideProject("/Users/x/Downloads");
+    });
+
+    expect(ok).toBe(true);
+    expect(result.current.editorTabs).toHaveLength(0);
+    expect(dispatchSpy).toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
   it("surfaces the server's message when a file load is refused", async () => {
     // The server's refusal message must reach the caller so the UI can offer
     // the grant. A generic "Failed to load file" would make an out-of-project

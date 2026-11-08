@@ -1071,7 +1071,12 @@ export default function FileTree({
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  const [extraPaths, setExtraPaths] = useState<string[]>([]);
+  // Config roots (Settings) and granted roots (editor grants) load from
+  // different endpoints and can resolve in either order, so each keeps its own
+  // state and the root list is derived from both (see rootOptions).
+  const [configExtraPaths, setConfigExtraPaths] = useState<string[]>([]);
+  const [grantedRoots, setGrantedRoots] = useState<string[]>([]);
+  const grantsSeqRef = useRef(0);
   // Extra allowed roots load asynchronously; until they arrive the tree cannot
   // tell "this file is in another browsable root" from "this file is outside the
   // tree", and a reveal that guesses wrong is cancelled for good (see below).
@@ -1224,12 +1229,30 @@ export default function FileTree({
   }, []);
 
   // The active project is the default root; extra allowed paths (configured
-  // in Settings) are additional roots the user can switch the tree to.
+  // in Settings) are additional roots the user can switch the tree to. Editor
+  // grants (directories the user opened out-of-project files from) are also
+  // browsable roots, so a granted folder shows up in the root selector.
+  const refreshGrantedRoots = useCallback(() => {
+    const seq = ++grantsSeqRef.current;
+    api
+      .listFileGrants(projectHost)
+      .then((res) => {
+        // A response for a superseded request (e.g. the previous host) must not
+        // overwrite the list for the current one.
+        if (seq !== grantsSeqRef.current) return;
+        setGrantedRoots(res.roots || []);
+      })
+      .catch((err) => {
+        // Grants are best-effort for the tree, so a failure only logs.
+        console.warn("[file-tree] file grants lookup failed:", err);
+      });
+  }, [projectHost]);
+
   useEffect(() => {
     api
       .getPathsConfig()
       .then((cfg) => {
-        setExtraPaths(cfg.extra_allowed_paths || []);
+        setConfigExtraPaths(cfg.extra_allowed_paths || []);
         setServerPlatform(cfg.platform);
         setRootsConfigLoaded(true);
       })
@@ -1238,7 +1261,31 @@ export default function FileTree({
         // An empty list is now definitive — the request failed, not pending.
         setRootsConfigLoaded(true);
       });
-  }, []);
+    refreshGrantedRoots();
+  }, [refreshGrantedRoots]);
+
+  useEffect(() => {
+    const handler = () => refreshGrantedRoots();
+    window.addEventListener("ocode:file-grants-changed", handler);
+    return () => window.removeEventListener("ocode:file-grants-changed", handler);
+  }, [refreshGrantedRoots]);
+
+  // Every mounted tree hears this event (hidden project tabs stay mounted), so
+  // a grant made for another project or host must not switch this tree. An
+  // absent host is local on both sides; an absent projectPath matches any tree.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { root?: string; host?: string | null; projectPath?: string | null }
+        | undefined;
+      if (!detail?.root) return;
+      if ((detail.host || "") !== (projectHost || "")) return;
+      if (detail.projectPath && detail.projectPath !== projectPath) return;
+      setActiveRoot(detail.root);
+    };
+    window.addEventListener("ocode:open-folder", handler);
+    return () => window.removeEventListener("ocode:open-folder", handler);
+  }, [projectHost, projectPath]);
 
   useEffect(() => {
     setActiveRoot(projectPath);
@@ -1652,13 +1699,13 @@ export default function FileTree({
   const rootOptions = useMemo(() => {
     const opts: { path: string; label: string }[] = [];
     if (projectPath) opts.push({ path: projectPath, label: projectPath.split("/").pop() || projectPath });
-    for (const p of extraPaths) {
+    for (const p of [...configExtraPaths, ...grantedRoots]) {
       if (p && !opts.some((o) => o.path === p)) {
         opts.push({ path: p, label: p.split("/").pop() || p });
       }
     }
     return opts;
-  }, [projectPath, extraPaths]);
+  }, [projectPath, configExtraPaths, grantedRoots]);
 
   // ── Reveal: bring an editor/preview tab's file into view in this tree.
   //
