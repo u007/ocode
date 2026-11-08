@@ -26,6 +26,7 @@ type hubStub struct {
 	accessCalls []map[string]any
 	invites     []map[string]any
 	inviteFail  string
+	order       []string
 }
 
 func (s *hubStub) handler() http.Handler {
@@ -38,6 +39,7 @@ func (s *hubStub) handler() http.Handler {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		s.creates = append(s.creates, body)
+		s.order = append(s.order, "create")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"artifact":{"id":"art_test","name":"demo"}}`))
 	})
@@ -56,6 +58,7 @@ func (s *hubStub) handler() http.Handler {
 	})
 	mux.HandleFunc("/api/ocode/artifacts/art_test/versions", func(w http.ResponseWriter, r *http.Request) {
 		s.published++
+		s.order = append(s.order, "version")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"version":{"id":"v1"},"token":""}`))
 	})
@@ -63,6 +66,7 @@ func (s *hubStub) handler() http.Handler {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		s.accessCalls = append(s.accessCalls, body)
+		s.order = append(s.order, "access")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"mode":"ok"}`))
 	})
@@ -76,6 +80,7 @@ func (s *hubStub) handler() http.Handler {
 			return
 		}
 		s.invites = append(s.invites, body)
+		s.order = append(s.order, "invite")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"email":     email,
@@ -306,6 +311,8 @@ func TestPublishArtifactToHubAppliesAccessAndCollectsInviteErrors(t *testing.T) 
 	require.True(t, out.Invites[0].EmailSent)
 	require.Len(t, out.InviteErrors, 1)
 	require.Contains(t, out.InviteErrors[0], "bad@example.com")
+	// Access is applied before the version exists; invites only after it is live.
+	require.Equal(t, []string{"create", "access", "version", "invite"}, stub.order)
 }
 
 func TestHandlePublishSendsAccessFieldsToHub(t *testing.T) {
