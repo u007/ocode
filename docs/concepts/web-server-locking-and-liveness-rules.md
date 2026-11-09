@@ -8,7 +8,7 @@ tags:
   - concurrency
   - web
   - desktop
-timestamp: 2026-11-07T02:07:18Z
+timestamp: 2026-11-09T09:47:30Z
 ---
 # Web/Desktop Server Locking and Liveness Rules
 
@@ -117,3 +117,12 @@ Rules for anything in `internal/server`:
   one). A new endpoint must pick its wrapper deliberately, and a
   session/project-scoped route must accept and thread `?host=` (see
   `concepts/web-session-host-scoping.md`).
+- **A process-global hook that captures a `Server` must be registered from
+  `Serve`, not `New`, and removed by `Shutdown` — `New` runs for every test
+  that drives a handler, and a hook registered there lives for the process.**
+  `registerSyncHooks` installs the `config.OnConfigSaved` /
+  `auth.OnCredentialsSaved` remote-host sync callbacks once from `Serve`, under
+  `shutdownMu`; `Shutdown` snapshots and clears `removeSyncHooks` under that
+  lock before running the removers. A hook registered in `New` would pin the
+  dead handler in the global hook lists for every constructed-but-never-served
+  `Server` (the shape of most handler tests).

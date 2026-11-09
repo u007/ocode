@@ -3,7 +3,7 @@ type: Concept
 title: "Goal Condition Loop (/goal)"
 description: 'The /goal session condition: a judge checks after every turn whether the condition is met, impossible, or should pause the goal. Covers command syntax, the per-turn evaluation order, the verdict table, pause and resume rules, the sticky 50-turn cap, the persisted goal key, the session goal endpoints, and how it differs from /orchestrate.'
 tags: [goal, judge, agent-loop, server, tui, web, typesafe, auto-continue]
-timestamp: 2026-10-14T00:00:00Z
+timestamp: 2026-11-09T09:47:54Z
 ---
 # Goal Condition Loop (`/goal`)
 
@@ -142,7 +142,7 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
 
 ## Endpoints
 
-All three are behind `authMiddleware` (`internal/server/server.go:289-291`).
+All three are behind `authMiddleware` (`internal/server/server.go:363-365`).
 
 | Method and path | Request | Response |
 |---|---|---|

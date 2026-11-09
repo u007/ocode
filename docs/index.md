@@ -45,7 +45,7 @@ okf_version: 0.1
 - [browser_run step loop (Jev picks each control)](concepts/browser-run-jev-step-loop.md) - How the browser_run tool drives a browser task to completion. Each step reads the page's controls, asks the decision model (Jev, slot browser_run) which one control to act on, and runs that action through the normal browser tool call path. Covers the one-step loop, the decision request shape and floors, the status set, the permission and guard story, what the loop never does, the controls action and its Settle rule, v1 limits and the measurement plan.
 - [Code-Search Relevance Judge](concepts/code-search-relevance-judge.md) - TypeSafe/Jev relevance judge for grep/rgrep/glob — per-file judging against a required intent, carried on the tool-execution context, fail-open with disclosed footers. As-built record (v1 landed 2026-09-28); `list` deferred.
 - [Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass](concepts/compaction-cancellation.md) - User-initiated cancellation of in-flight conversation compaction: the compact/cancel endpoint, the ErrCompactionCanceled sentinel vs bare context.Canceled, Stop-also-cancels without poisoning pendingCancel, register-before-OnCompactStart ordering, and the web/desktop Cancel button.
-- [Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification](concepts/compaction-config.md) - Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source. Amended 2026-10-01: user-initiated cancel classified as its own §4 row (ErrCompactionCanceled → clean 200), cross-link to concepts/compaction-cancellation.md, all code anchors re-derived. Amended 2026-10-04: retry/cancellation attribution corrected from `runSummary` to `runSummaryCall` (shared by the batched and inline paths); the §2 anchor moved `compact.go:856` → `compact.go:888`.
+- [Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification](concepts/compaction-config.md) - Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source. Amended 2026-10-01: user-initiated cancel classified as its own §4 row (ErrCompactionCanceled → clean 200), cross-link to concepts/compaction-cancellation.md, all code anchors re-derived. Amended 2026-10-04: retry/cancellation attribution corrected from runSummary to runSummaryCall (shared by the batched and inline paths); the §2 anchor moved compact.go:856 → compact.go:888.
 - [Cross-process session activity sync (revision revalidation)](concepts/cross-process-session-sync.md) - How the web/desktop UI converges on session transcript changes made by another ocode server process (desktop + make dev + TUI) via an opaque stored-transcript revision token and a 15s revalidation poll.
 - [Data Storage Layout](concepts/data-storage-layout.md) - Cross-platform global data directory, its sub-directories, and how the project slug keys sessions.
 - [DB Connector (P1) — 2026-10-08, status 2026-10-09](concepts/db-connector.md) - PostgreSQL connector: saved encrypted connections, read-only enforcement, confirmed writes, in-memory unlock grants, environment templates resolved per project, and the web DB panel. Includes the unlock path's acceptance of the host's HOME-expanded spelling of a remote (~) project path.
@@ -282,26 +282,26 @@ okf_version: 0.1
 
 # superpowers
 
-- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
 - [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [browser_run — a Jev-driven step loop over the browser tool (design)](superpowers/specs/2026-11-01-browser-run-jev-step-loop-design.md) - Design spec for browser_run, an agent-layer tool that drives a browser task to completion by letting Jev pick each click from an indexed controls list, re-entering the normal browser tool call path per step so every mutating sub-step keeps its permission ask, while the main model pays one tool call for N steps. Modelled on agent-labs-dev/fastbrowse (Jev picks, LLM reads and writes, code owns the gates) and adapted to ocode's existing cdp snapshot, RefTable, fill_form, Decider slots and state budget.
 - [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.
@@ -325,8 +325,11 @@ okf_version: 0.1
 - [Part 01 — Per-session todo reader and todo_updated event](superpowers/plans/2026-09-24-pulse-dashboard/01-todo-reader-and-event.md) - Part 01 of the Pulse dashboard implementation plan; TDD steps ticked, commit left unticked (no commit exists yet).
 - [Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints](superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md) - Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns. Shipped follow-up: ask resolve endpoints now follow the same persist-then-202 async contract via dispatchAskContinuation.
 - [Part 05 — Frontend Status on Activation + Streaming Watchdog](superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md) - Clarified that turn-active for the 30s stall watchdog includes permission-resolve and question-answer continuation Steps, not just runTurn.
+- [Part 06 — RC-Bridge First-Class + Legacy Cleanup](superpowers/plans/2026-08-12-multiproject-event-architecture/06-rc-first-class-cleanup.md) - Plan part 06: RC-bridge first-class + legacy cleanup — TUI /rc sessions register into the SessionManager and are driven from the web like any other session; delete RC forwarding/re-stamping and legacy SSE endpoints.
 - [Per-Session Sidebar Models and Toggles](superpowers/specs/2026-09-18-per-session-sidebar-settings-design.md) - Design spec for making every chat-session sidebar model pick and on/off toggle per session (durable, server-side, full TUI parity), instead of one process-global config value shared by every chat.
+- [Persistent per-session shell for `!` commands — Implementation Plan](superpowers/plans/2026-09-21-persistent-shell-session.md) - Implementation plan for one persistent, pty-backed interactive shell per chat tab for ! composer commands: internal/shell.Session, server registry and lifecycle, frontend session key + cwd, docs and end-to-end verification.
 - [Plan: Tab Loading Indicators](superpowers/plans/2026-09-24-tab-loading-indicators.md) - Implementation plan for keyed tab loading indicators (Files/Git/Cron/Assets + session Changes).
+- [Publish / Share Project as a Browser Artifact — Design](superpowers/specs/2026-11-07-publish-share-project-design.md) - Design spec for publishing a local or remote project as a browser-accessible, hub-hosted artifact: static snapshots, per-artifact capability tokens, private/allow-list/public access, email invitations, storage model, security and phasing.
 - [Pulse — cross-project live sessions dashboard](superpowers/specs/2026-09-24-pulse-dashboard-design.md) - Approved design spec for the Pulse cross-project live-sessions dashboard, implemented 2026-09-28, with as-shipped amendment notes recorded inline: activeView value "pulse" instead of a route (no client router), a dashboard icon button beside the Projects heading in the ProjectSidebar instead of a pinned tab entry, no dock-badge click (Wails v3 dock service is display-only; gap tracked in TODO.md; shipped entries are a Dashboard app-menu item and a tray Open Pulse), todo_updated published from the server tool-result broadcast and deliberately excluded from live frames, scope=all metadata-only cost with an unmeasured budget, and TitleForDir single-row title reads.
 - [Remote Persistent Sessions and Terminals Design](superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md) - Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar shows a live (open∪running) chat inventory plus terminals for reattach.
 - [Remote-project port forwards in the web/desktop UI](superpowers/specs/2026-09-16-remote-project-port-forwards-design.md) - Design for restoring the Port forwards button so it works for the active remote SSH project (project-scoped /api/portmaps routes, per-project ssh -L forwards)
@@ -388,7 +391,6 @@ okf_version: 0.1
 - [01-session-manager.md](superpowers/plans/2026-08-12-multiproject-event-architecture/01-session-manager.md)
 - [02-event-bus.md](superpowers/plans/2026-08-12-multiproject-event-architecture/02-event-bus.md)
 - [04-frontend-transport.md](superpowers/plans/2026-08-12-multiproject-event-architecture/04-frontend-transport.md)
-- [06-rc-first-class-cleanup.md](superpowers/plans/2026-08-12-multiproject-event-architecture/06-rc-first-class-cleanup.md)
 - [INDEX.md](superpowers/plans/2026-08-12-multiproject-event-architecture/INDEX.md)
 - [01-schema-and-connection-helpers.md](superpowers/plans/2026-08-28-sqlite-session-storage/01-schema-and-connection-helpers.md)
 - [02-session-read-write-core.md](superpowers/plans/2026-08-28-sqlite-session-storage/02-session-read-write-core.md)
@@ -455,7 +457,6 @@ okf_version: 0.1
 - [05-docs-and-verification.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/05-docs-and-verification.md)
 - [INDEX.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/INDEX.md)
 - [2026-09-21-interrupted-turn-notice.md](superpowers/plans/2026-09-21-interrupted-turn-notice.md)
-- [2026-09-21-persistent-shell-session.md](superpowers/plans/2026-09-21-persistent-shell-session.md)
 - [INDEX.md](superpowers/plans/2026-09-24-pulse-dashboard/INDEX.md)
 - [01-tls-listener.md](superpowers/plans/2026-09-28-desktop-http2/01-tls-listener.md)
 - [02-desktop-boot.md](superpowers/plans/2026-09-28-desktop-http2/02-desktop-boot.md)
@@ -486,6 +487,7 @@ okf_version: 0.1
 - [06-docs.md](superpowers/plans/2026-11-01-browser-run-jev-step-loop/06-docs.md)
 - [INDEX.md](superpowers/plans/2026-11-01-browser-run-jev-step-loop/INDEX.md)
 - [2026-11-07-publish-share-project.md](superpowers/plans/2026-11-07-publish-share-project.md)
+- [2026-11-08-offline-read-cache.md](superpowers/plans/2026-11-08-offline-read-cache.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
@@ -510,6 +512,6 @@ okf_version: 0.1
 - [2026-10-07-web-btw-side-query-design.md](superpowers/specs/2026-10-07-web-btw-side-query-design.md)
 - [2026-10-20-suggested-responses-design.md](superpowers/specs/2026-10-20-suggested-responses-design.md)
 - [2026-10-29-todo-stream-cards-design.md](superpowers/specs/2026-10-29-todo-stream-cards-design.md)
-- [2026-11-07-publish-share-project-design.md](superpowers/specs/2026-11-07-publish-share-project-design.md)
+- [2026-11-08-offline-capable-web-client-design.md](superpowers/specs/2026-11-08-offline-capable-web-client-design.md)
 - [telegram-bot.md](telegram-bot.md)
 

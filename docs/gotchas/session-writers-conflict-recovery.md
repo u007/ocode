@@ -5,9 +5,8 @@ status: resolved-with-follow-ups
 tags: [session, sqlite, concurrency, persistence]
 type: Gotcha
 description: Concurrent session writers — conflict semantics and recovery (updated with 2026-11-05 dismissed-question incident)
-timestamp: 2026-11-05T13:12:09Z
+timestamp: 2026-11-09T07:48:45Z
 ---
-
 # Concurrent session writers — conflict semantics and recovery
 
 ## Incident (2026-09-06, ses_2026-09-06-021943-56a29b3c)
@@ -286,7 +285,8 @@ the dialog's "Don't answer" button (`useChat` `cancelQuestion`, which posts to
 identified by `isPulseOrigin`), and `web/src/components/Pulse/PulseFocusPane.tsx`.
 The next dismissal logs whether it came from the Pulse tool (`pulse=true`) or a remote address. It does not separate the dialog's button from `PulseFocusPane`, since both send an ordinary browser request.
 
-Follow-up, done: `isQuestionDismissed` in `handler_questions.go` and `session.dismissedQuestion` were deduped into `tool.QuestionDismissed` (`internal/tool/ask_sentinel.go:35`). The handler, the sqlite guard and the transcript tail now share that one check.
+Follow-up, done: `isQuestionDismissed` in `handler_questions.go` and
+`session.dismissedQuestion` were deduped into `tool.QuestionDismissed` (`internal/tool/ask_sentinel.go:35`). The handler, the sqlite guard and the transcript tail now share that one check.
 
 Diagnostic recipe:
 
@@ -321,6 +321,14 @@ pollution — previously masked by the shrink-delete nuking the file.
 `TestLiveWorkerRetiresWhenIdle` mutates the global `liveIdleTimeout`;
 workers capture the timeout at creation (`liveWriter.idleTimeout`) so a
 still-running worker from an earlier test cannot race the global.
+
+- `setHomeTree` (the package helper) also drains live session writes in
+  `t.Cleanup` via `session.FlushAll`. A session worker captures its storage
+  dir at **enqueue** time, so a queued snapshot write stays aimed at that
+  test's home after the test body ends; without the drain it lands inside the
+  tree `t.TempDir` is walking and an unrelated test fails with
+  `TempDir RemoveAll cleanup: … directory not empty`. `t.TempDir` is created
+  before the helper, so LIFO cleanup runs the flush before `RemoveAll`.
 
 ## Cross-process UI convergence (live-sync protocol)
 

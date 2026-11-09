@@ -9,7 +9,7 @@ tags:
   - web
   - tui
   - sqlite
-timestamp: 2026-09-25T11:41:14Z
+timestamp: 2026-11-09T09:50:46Z
 ---
 # Deferred, durable message rewind for ocode Web/Desktop
 
@@ -23,7 +23,7 @@ timestamp: 2026-09-25T11:41:14Z
 
 What the code does now, in the order the design specifies it:
 
-1. **Server capability.** `POST|GET|DELETE /api/sessions/{id}/rewinds[/{token}]` are registered at `internal/server/server.go:225-227` and handled by `HandlePreparePendingRewind` / `HandlePendingRewindStatus` / `HandleCancelPendingRewind` (`internal/server/handler_rewind.go:143`, `:179`, `:202`). Prepare and cancel take the per-session turn lock and answer **409 while a turn is active**; status is deliberately lock-free so it never blocks a running turn. The store is `internal/session/pending_rewind.go`: one row per session in the session's own SQLite file, `pendingRewindTTL = 24 * time.Hour` (`:40`), SHA-256 transcript fingerprint computed server-side, `armed | committed | stale`, lazy expiry prune, `ErrPendingRewindAlreadyCommitted` (`:56`), and the rekey move `movePendingRewindForRekey` (`:726`, invoked from `internal/session/session.go:1667`). Cancel of a committed row answers **410**.
+1. **Server capability.** `POST|GET|DELETE /api/sessions/{id}/rewinds[/{token}]` are registered at `internal/server/server.go:367-369` and handled by `HandlePreparePendingRewind` / `HandlePendingRewindStatus` / `HandleCancelPendingRewind` (`internal/server/handler_rewind.go:143`, `:179`, `:202`). Prepare and cancel take the per-session turn lock and answer **409 while a turn is active**; status is deliberately lock-free so it never blocks a running turn. The store is `internal/session/pending_rewind.go`: one row per session in the session's own SQLite file, `pendingRewindTTL = 24 * time.Hour` (`:40`), SHA-256 transcript fingerprint computed server-side, `armed | committed | stale`, lazy expiry prune, `ErrPendingRewindAlreadyCommitted` (`:56`), and the rekey move `movePendingRewindForRekey` (`:726`, invoked from `internal/session/session.go:1667`). Cancel of a committed row answers **410**.
 2. **localStorage recovery and cancel.** `web/src/lib/pendingRewindStore.ts` persists versioned `v1` records under `ocode.ui.pendingRewind.v1:<host>::<sessionId>` (load/save/clear/subscribe/rekey). `ChatInput` hydrates on session change (`loadPendingRewind`, `web/src/components/Chat/ChatInput.tsx:371`, live subscription at `:419`), keeps the draft synced back into the record (`:748`), renders the compact **Pending rewind** banner with a **Cancel restore** button (`:1116-1140`) that calls `DELETE …/rewinds/{token}` and restores the exact pre-Restore draft, and issues the cancel itself if the `localStorage` write fails after prepare (fail-closed). Restore shows the §2.10 confirmation dialog (`web/src/components/Chat/MessageBubble.tsx:363-…`). Rekey rewrites the record (`web/src/App.tsx:1146`, `web/src/lib/sessionEvents.ts:315`, `:362`).
 3. **Commit before 202.** `dispatchTurnWithRewind` (`internal/server/agent_session.go:1706`) queues the job; `executeTurnJob` runs `commitPendingRewindTurn` (`:1661`) **before** `close(job.persistAck)` — the 202 gate. That single transaction deletes transcript rows from the target onward, inserts the replacement user row with the next `UserSeq`, marks the resource `committed` + `committed_user_seq`, and bumps `history_gen`; afterwards it reconciles a resident agent (`as.messages = result.KeptPrefix`, `:1690`), reseeds the pending queue (`h.sessions.ReplacePending`, `:1693`), broadcasts the authoritative shortened transcript, and only then acks.
 4. **No-resident path.** With no resident `agentSession` the same durable transaction runs; the ordinary bootstrap appends the already-persisted user row exactly once (`TestRewindTokenizedAsyncSendWithoutResidentKeepsOneDurableRow`). A commit failure closes `persistAck` with an error and **no turn starts**.
@@ -191,10 +191,10 @@ proxy):
 - `DELETE /api/sessions/{id}/rewinds/{token}` — **cancel.** Removes the
   resource; no history change; no revision movement.
 - `POST /api/sessions/{id}/message` (existing `handleSendMessage`,
-  `internal/server/server.go:224`) — the request body gains an optional
+  `internal/server/server.go:366`) — the request body gains an optional
   `rewindToken`. Present ⇒ rewind send (§2.5); absent ⇒ normal send.
 - The existing immediate `POST /api/sessions/{id}/truncate`
-  (`server.go:325`, `handler_truncate.go`) **may remain** for compatibility,
+  (`server.go:534`, `handler_truncate.go`) **may remain** for compatibility,
   but **Web Restore must stop using it** (the `ChatPanel.tsx` RESTORE_EVENT
   truncation listener and its `api.truncateSession` call are replaced by the
   deferred flow).

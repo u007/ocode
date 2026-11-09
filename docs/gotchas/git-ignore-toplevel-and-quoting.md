@@ -12,7 +12,7 @@ tags:
   - porcelain
   - c-quoting
   - append
-timestamp: 2026-10-07T04:40:33Z
+timestamp: 2026-11-09T09:35:21Z
 ---
 # "Add to .gitignore" — toplevel targeting, C-quoting, append-not-truncate
 
@@ -85,8 +85,8 @@ The **API itself accepts a tracked path** — the frontend is what restricts the
 (`TestGitIgnoreAcceptsTrackedPath`, `handler_git_ignore_test.go:108`). Do not "fix" the
 server to reject tracked paths; the endpoint is a mechanism, the UI is the policy.
 
-Route is registered in `internal/server/server.go:331` behind `s.authMiddleware`, next to
-`/api/git/stage` (`:315`). A handler-only test cannot catch a missing/shadowed route
+Route is registered in `internal/server/server.go:408` behind `s.authMiddleware`, next to
+`/api/git/stage` (`:405`). A handler-only test cannot catch a missing/shadowed route
 (it presents as an SPA 404), hence `TestGitIgnoreRouteIsRegistered`
 (`handler_git_ignore_test.go:293`) drives the **real mux**.
 

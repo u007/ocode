@@ -14,7 +14,7 @@ tags:
   - capability-probe
   - background-autostart
   - gotcha
-timestamp: 2026-10-09T06:20:23Z
+timestamp: 2026-11-09T09:44:45Z
 ---
 # Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor
 
@@ -107,10 +107,7 @@ portMapsPath(target, `/${port}/disable`)    // → …/3510/disable?project=~/ap
 `web/src/api/client.ts`, called by `removePortMap` and `setPortMapEnabled` (symbol anchors
 only: that file was under concurrent edit when §4 was written and its line numbers had
 already drifted by >1000 since this page was created — re-grep rather than trust an old
-line). The five server routes are registered in `internal/server/server.go:726-734`
-(`GET /api/portmaps`, `POST /api/portmaps`, `DELETE /api/portmaps/{port}`,
-`POST /api/portmaps/{port}/enable|disable`); the handlers live in
-`internal/server/handler_portmaps.go`.
+line). The five server routes are registered in `internal/server/server.go` — `GET /api/portmaps` at `:780`, `POST /api/portmaps` at `:781`, `DELETE /api/portmaps/{port}` at `:786`, and `POST /api/portmaps/{port}/enable|disable` at `:787-788`; the HTR port-map routes interleave at `:782-785`. The handlers live in `internal/server/handler_portmaps.go`.
 
 ## 2. Process supervisor — terminal record blocks stable-ID restart
 
@@ -253,7 +250,7 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`entry.policy.forget`, `internal/server/handler_portmaps.go:541`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
-  `internal/server/server.go:2273-2274` (`go s.handler.evictIdleLoop(stop)` /
+  `internal/server/server.go:2413-2414` (`go s.handler.evictIdleLoop(stop)` /
   `go s.handler.portMapWatchdogLoop(stop)`), stopped by the same `stop` channel.
 
 ### Deliberately out of scope
@@ -349,7 +346,7 @@ and the user had to click the project to make it connect. The watchdog could not
 it visits only registry entries (`portMapWatchdogPass` → `monitorPortMaps`), so a project that
 was never listed had no registry entry at all.
 
-`Serve()` (`internal/server/server.go:2249`) now calls `s.handler.portMapAutoStartAll()`
+`Serve()` (`internal/server/server.go:2420`) now calls `s.handler.portMapAutoStartAll()`
 (`internal/server/handler_portmaps.go:345`) at boot. It iterates the full saved project list
 (`h.projects.List()`), skips local (`Host == ""`) and WSL (`target.Kind != remote.KindSSH`)
 projects, carries the saved SSH port explicitly (`Project.RemotePort` into

@@ -1,3 +1,15 @@
+---
+type: Plan
+title: Part 06 — RC-Bridge First-Class + Legacy Cleanup
+description: 'Plan part 06: RC-bridge first-class + legacy cleanup — TUI /rc sessions register into the SessionManager and are driven from the web like any other session; delete RC forwarding/re-stamping and legacy SSE endpoints.'
+tags:
+  - plan
+  - multiproject
+  - rc-bridge
+  - sse
+  - event-bus
+timestamp: 2026-11-09T09:52:16Z
+---
 # Part 06 — RC-Bridge First-Class + Legacy Cleanup
 
 **Goal:** A TUI `/rc` session registers into the SessionManager and is driven
@@ -13,7 +25,7 @@ paths are deleted, along with all legacy SSE endpoints and dead client code.
   headless events when a bridge is attached
   (`internal/server/agent_session.go:184-232`, `headless := h.RCBridge() ==
   nil`). The TUI registers with the server via
-  `RegisterExternalSession` (`internal/server/server.go:1840`).
+  `RegisterExternalSession` (`internal/server/server.go:2593`).
 - Parts 01–05 provide: `SessionManager.Register(sessionID, projectRoot)` and
   `Resolve`; `EventBus.Publish(event, project, sessionID, data)`; turn
   lifecycle events (`turn_started`/`turn_heartbeat`/`turn_done`/`turn_error`);

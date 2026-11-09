@@ -1,3 +1,15 @@
+---
+type: Plan
+title: Persistent per-session shell for `!` commands — Implementation Plan
+description: 'Implementation plan for one persistent, pty-backed interactive shell per chat tab for ! composer commands: internal/shell.Session, server registry and lifecycle, frontend session key + cwd, docs and end-to-end verification.'
+tags:
+  - plan
+  - shell
+  - pty
+  - server
+  - web
+timestamp: 2026-11-09T09:52:19Z
+---
 # Persistent per-session shell for `!` commands — Implementation Plan
 
 > **For agentic workers:** implement task-by-task, ticking the `- [ ]` steps.
@@ -157,7 +169,7 @@ React/TypeScript web client (`web/src`).
 **Interfaces:**
 - Consumes: `shellpkg.Session` from Task 1; `defaultSessionIdleTimeout`
   (`internal/server/session_manager.go:322`); the existing route
-  `POST /api/shell` (`internal/server/server.go:331`).
+  `POST /api/shell` (`internal/server/server.go:559`).
 - Produces: request body `{command, workDir, host, session, reset}`; response
   `{output, exitCode, error, cwd}` on **every** path — persistent shell
   (`$PWD`), one-shot fallback (the `workDir` it ran in), remote (the remote

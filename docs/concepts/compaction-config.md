@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: 'Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification'
-description: 'Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source. Amended 2026-10-01: user-initiated cancel classified as its own §4 row (ErrCompactionCanceled → clean 200), cross-link to concepts/compaction-cancellation.md, all code anchors re-derived. Amended 2026-10-04: retry/cancellation attribution corrected from `runSummary` to `runSummaryCall` (shared by the batched and inline paths); the §2 anchor moved `compact.go:856` → `compact.go:888`.'
+description: 'Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source. Amended 2026-10-01: user-initiated cancel classified as its own §4 row (ErrCompactionCanceled → clean 200), cross-link to concepts/compaction-cancellation.md, all code anchors re-derived. Amended 2026-10-04: retry/cancellation attribution corrected from runSummary to runSummaryCall (shared by the batched and inline paths); the §2 anchor moved compact.go:856 → compact.go:888.'
 tags:
   - compact
   - compaction
@@ -12,7 +12,7 @@ tags:
   - web
   - cancellation
   - failure-handling
-timestamp: 2026-11-05T08:42:21Z
+timestamp: 2026-11-09T09:56:59Z
 ---
 # Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification
 
@@ -55,12 +55,12 @@ So the semantics of an explicit `0` **for the two timeouts** are *"use the runti
 - A malformed summary that survives all attempts is returned as a **degraded success** (`compact.go:948-952`) — the batch and the pass succeed and the transcript shrinks, so (relevant to §5) a degraded success does **not** arm the stop-after-failure latch.
 - `runCompact` passes the resolved value through per batch (`agent.go:3331`).
 
-**API / UI:** `GET|PUT /api/config/ocode/compact` (`internal/server/server.go:552-553`) serve the raw persisted values; the web `CompactForm` (`web/src/components/Settings/CompactForm.tsx:23`, rows "First-token timeout (s)" / "Summary max retries" at `:18-19`) edits them through `api.getCompactConfig`/`setCompactConfig` (`web/src/api/client.ts:1726`, `:1732`).
+**API / UI:** `GET|PUT /api/config/ocode/compact` (`internal/server/server.go:588-589`) serve the raw persisted values; the web `CompactForm` (`web/src/components/Settings/CompactForm.tsx:23`, rows "First-token timeout (s)" / "Summary max retries" at `:18-19`) edits them through `api.getCompactConfig`/`setCompactConfig` (`web/src/api/client.ts:1726`, `:1732`).
 
 ## 2. Runtime data flow (one compaction pass)
 
 ```
-web /compact  →  POST /api/sessions/{id}/compact  (server.go:482)
+web /compact  →  POST /api/sessions/{id}/compact  (server.go:518)
   → HandleCompactSession (handler.go:2174)
   → Agent.CompactWithFocus → runCompact (agent.go:3197)
        resolveCompactRuntime → chunkMiddleByBudget (batches)

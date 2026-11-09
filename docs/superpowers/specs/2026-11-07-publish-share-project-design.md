@@ -1,3 +1,15 @@
+---
+type: Design
+title: Publish / Share Project as a Browser Artifact — Design
+description: 'Design spec for publishing a local or remote project as a browser-accessible, hub-hosted artifact: static snapshots, per-artifact capability tokens, private/allow-list/public access, email invitations, storage model, security and phasing.'
+tags:
+  - design-spec
+  - publish
+  - artifacts
+  - hub
+  - security
+timestamp: 2026-11-09T09:53:17Z
+---
 # Publish / Share Project as a Browser Artifact — Design
 
 Date: 2026-11-07
@@ -83,7 +95,7 @@ mode, never an automatic fallback from a failed hub publish.
 ## 5. References to existing ocode pieces (do not reinvent)
 
 - Auth: `Server.checkAuth` / `authMiddleware` / `mediaAuthMiddleware`
-  (`internal/server/server.go:879,919,945`). Master credential is Bearer / `?token=`
+  (`internal/server/server.go:948,988,1028`). Master credential is Bearer / `?token=`
   (forbidden in `--remote`) / WS subprotocol / Basic. Remote mode accepts Bearer only.
 - Capability precedent: `mediaTokenStore` (`internal/server/media_tokens.go`) — 256-bit
   random, single file+root+host, 6h TTL, in-memory, dies on restart. Copy this shape

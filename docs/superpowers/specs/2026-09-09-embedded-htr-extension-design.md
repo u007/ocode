@@ -11,7 +11,7 @@ tags:
   - htrcli
   - automation
   - companion-daemon
-timestamp: 2026-09-28T17:54:02Z
+timestamp: 2026-11-09T09:46:12Z
 ---
 # Embedded HTR Extension and Managed Daemon Design
 
@@ -64,7 +64,7 @@ The managed daemon lifecycle is driven entirely by four auth-wrapped HTTP endpoi
 | `POST` | `/api/config/ocode/htr/stop` | Persist `htr_enabled=false`, then stop the managed daemon |
 | `GET` | `/api/config/ocode/htr/tabs` | List browser tabs connected to the managed daemon |
 
-All four are wrapped by the existing auth middleware (`server.go:393–396`); unauthenticated callers receive 401/403.
+All four are wrapped by the existing auth middleware (`server.go:636-639`); unauthenticated callers receive 401/403.
 
 #### GET /api/config/ocode/htr — status snapshot
 
@@ -141,7 +141,7 @@ The existing browser-config write handler (`internal/server/handler_config.go:18
 
 ### Route registration
 
-All four endpoints are registered in `internal/server/server.go:393–396` behind `authMiddleware`:
+All four endpoints are registered in `internal/server/server.go:636-639` behind `authMiddleware`:
 
 ```
 GET  /api/config/ocode/htr          → handleGetHTRStatus
@@ -154,7 +154,7 @@ The server-level handler delegates to `Handler` methods (`HandleGetHTRStatus`, `
 
 ## Failure behavior
 
-HTR startup is best effort. If extraction, native-host setup, daemon startup, port binding, browser-family registration, or extension launch fails, ocode logs the reason, starts managed Chrome without HTR, and keeps browsing available. Branded Google Chrome's unsupported unpacked-extension preload is handled the same way. The browser panel displays a persistent actionable notice identifying the failure (`Server.SetHTRNotice`, `server.go:185`); there is no silent fallback. The `error` field on the four `/api/config/ocode/htr/*` responses carries the same information to Settings > Browser.
+HTR startup is best effort. If extraction, native-host setup, daemon startup, port binding, browser-family registration, or extension launch fails, ocode logs the reason, starts managed Chrome without HTR, and keeps browsing available. Branded Google Chrome's unsupported unpacked-extension preload is handled the same way. The browser panel displays a persistent actionable notice identifying the failure (`Server.SetHTRNotice`, `server.go:277`); there is no silent fallback. The `error` field on the four `/api/config/ocode/htr/*` responses carries the same information to Settings > Browser.
 
 ## Cross-platform behavior
 

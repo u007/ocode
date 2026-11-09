@@ -9,7 +9,7 @@ tags:
   - serve
   - boot
   - config
-timestamp: 2026-10-07T06:12:29Z
+timestamp: 2026-11-09T09:56:03Z
 ---
 # Auto-share-on-start (tailnet-only boot exposure)
 
@@ -123,7 +123,7 @@ The old `GET /api/tailscale-url` (which started a funnel-first exposure on read)
 | POST | `/api/tailscale-share/start` | `handleStartTailscaleShare` (`internal/server/tailscale_share.go:312`) | Starts funnel-first exposure (upgrades a warm serve mount) |
 | POST | `/api/tailscale-share/stop` | `handleStopTailscaleShare` (`internal/server/tailscale_share.go:329`) | Kills process + removes mount |
 
-Routes registered at `internal/server/server.go:462-464`.
+Routes registered at `internal/server/server.go:563-565`.
 
 ### Status shape
 
@@ -191,7 +191,7 @@ never publish the instance. Only the boot hook and explicit start actions may
 start one.
 
 The seam also keeps `h.mu` (a map lock, per the web-server locking rules) off any
-tailscale work. Wired at `internal/server/server.go:188`
+tailscale work. Wired at `internal/server/server.go:220`
 (`h.tailscaleShareSnapshot = s.tsShare.status`).
 
 ## Token reuse
@@ -211,7 +211,7 @@ unauthenticated route would let any tailnet peer turn sharing on):
 | GET | `/api/config/ocode/auto-share` | `HandleGetAutoShareConfig` (`internal/server/handler_config.go:3004`) |
 | PUT | `/api/config/ocode/auto-share` | `HandleSetAutoShareConfig` (`internal/server/handler_config.go:3026`) |
 
-Routes registered at `internal/server/server.go:530-531`.
+Routes registered at `internal/server/server.go:640-641`.
 
 Response shape: `{enabled, available, running, kind?, url?, hint?}`
 (`autoShareResponse`, `internal/server/handler_config.go:2976`). The `running` and
@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:2340` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:2489` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 

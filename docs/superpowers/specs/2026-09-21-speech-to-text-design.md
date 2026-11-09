@@ -2,7 +2,7 @@
 type: Design
 title: Local Speech-to-Text (In-App Dictation) — Design
 description: 'Design spec for adding local, offline speech-to-text dictation to ocode: mic button in chat composer, Settings surface for engine/model selection, reusing internal/tts machinery.'
-timestamp: 2026-09-20T17:44:08Z
+timestamp: 2026-11-09T09:56:07Z
 tags:
   - speech-to-text
   - dictation
@@ -99,7 +99,7 @@ web/src/components/Dictation/sttWorklet.ts
 web/src/components/Settings/STTForm.tsx (+ test)
 ```
 
-Routes are registered beside the existing TTS block at `internal/server/server.go:356-369`.
+Routes are registered beside the existing TTS block at `internal/server/server.go:597-613`.
 
 ## Engine catalog
 

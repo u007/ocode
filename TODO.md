@@ -89,11 +89,24 @@ The web/desktop transcript card can reopen a dismissed `question` prompt and `PO
 
 - **Teach the TUI to accept an answer for a dismissed tail.** On an unmatched resolution with `Answers`, find the tool message by `findToolMessageIndexByToolID`, require `raw.Content == tool.QuestionDismissedResult` and that it is still the trailing tool round, rebuild the prompts from the assistant tool call's `questions` arguments, then route through `submitRCQuestionAnswers`.
 
-## Open: git history graph on remote projects (2026-11-02)
+## Shipped: git history graph on remote projects (2026-11-09)
 
-`POST /api/git/ref-action` (checkout, branch, merge, cherry-pick, revert, reset, tag, branch-delete) is local-only: a remote host answers 501 "ref actions are not supported for remote projects yet" (`internal/server/handler_git_refs.go`), and the web History sub-tab disables every mutating menu item for a remote project. The log side (`parents`/`refs`/`all`/`skip`) already works over the remote transport (`remoteGitLog`).
+`POST /api/git/ref-action` now runs on remote (ssh/WSL) projects through `handler_remote_git_refs.go`: the same closed `gitRefActions` table, validated on the host, with every argv word `remote.ShellQuote`d and a 60 s `gitOperationTimeout` bound. The web History sub-tab enables every mutating menu item for a remote project.
 
-- **Port ref actions to the remote transport.** Build the validated argv and run it through `remoteGitMutation` with `remoteGitMutationCommand`, the same path `remoteGitOperation` uses. That helper sets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR` and `GIT_LITERAL_PATHSPECS` but not `GIT_TERMINAL_PROMPT=0` or `GIT_MERGE_AUTOEDIT=no`, so check that merge, cherry-pick and revert cannot hang before dropping the 501 guard.
+- **Turn guard is cross-process.** Worktree-writing actions (`merge`, `cherry-pick`, `revert`, `reset-hard`) ask the host's own server `GET /api/git/turn-active?project=…` (read-only, `projectTurnActive` over that server's session snapshot) over the already-connected workspace, and refuse with 409 when a turn is running or the state cannot be verified. An older host whose server predates the endpoint must be restarted to upgrade; it is never bypassed. Both guards are snapshots, so a turn racing the check is accepted.
+- **Validation is one rule table.** `validateGitRefActionUsing` (`refProbes`: resolve / branch-name / ref-format) holds every condition, order and 400 reason; the local and remote validators are thin probe adapters, and the hash-vs-branch precedence lives there too. `TestGitRefActionLocalRemoteValidationParity` pins each case to a literal reason on both transports (a local-vs-remote comparison alone would be vacuous).
+- **Validation probes are one round trip.** `remoteRefProbes` answers all five probes the rule table can ask in a single ssh script (fixed line order, `ShellQuote`d values, `GIT_OPTIONAL_LOCKS=0`); a missing or garbled line reads as "no" (`parseRemoteRefProbes`), so a truncated reply refuses the action. `TestRemoteRefValidationUsesOneRoundTrip` pins one trip for the worst case; `TestRemoteRefProbeParseFailsClosed` pins the refusal direction.
+
+## Fixed: `internal/server` temp-dir teardown raced background writers (2026-11-09)
+
+Full-package runs failed intermittently with `TempDir RemoveAll cleanup: unlinkat …: directory not empty` on a DIFFERENT test each time (`…/project/<slug>/sessions` twice, `…/artifacts` once) while that test's own assertions passed. Two writers raced `t.TempDir` cleanup:
+
+- **The artifact retention prune was spawned from Handler construction**, i.e. from every `NewHandler()` (520+ call sites in `internal/server`), as a `crashguard.Go` with no owner. Its write targets `<GlobalDataDir>/artifacts` — the temp home of whichever handler built it — so any test could lose the race. It now starts ONLY on the serve path (`handler_artifact_serve.go`, already throttled to once per hour inside `Store.MaybePruneAccessLog`), so a real server prunes on first serve instead of at boot.
+- **Queued live session snapshots outlived the test that enqueued them.** A worker captures its storage dir at enqueue time, so the pending write is aimed at that test's own tree — the one `t.TempDir` is deleting. `setHomeTree` now registers `t.Cleanup` that drains `session.FlushAll(2s)`; `t.TempDir` was created first, so LIFO cleanup order flushes before `RemoveAll`.
+
+Measured: **3 failures in 5 full runs before, 10/10 clean after** (each ~340 s, no runtime change). The `artifacts` half is a directly identified writer; the `sessions` half is an inference from the queue's enqueue-time dir capture — it never reproduced in isolation (20×/50×) or under `-race`, so the 10 clean runs are the evidence, not a reproduced-then-fixed trace.
+
+Also fixed from the same class: `New()` used to register global `config.OnConfigSaved` / `auth.OnCredentialsSaved` hooks that capture the handler, and only `Server.Shutdown` removed them. 106 test call sites build a `Server` and never serve it, so each left permanent callbacks into a dead handler (and grew the process-global hook slices). Registration now happens in `registerSyncHooks`, called once by `Serve`, guarded by `shutdownMu`, with `Shutdown` snapshotting and clearing the slice. Pinned by `TestSyncHooksInstallOnServeNotConstruction` (both mutants — dropping the idempotency guard and not clearing on Shutdown — fail it).
 
 ## Open: terminal input on a phone — what the IME fix does NOT cover (2026-11-02)
 

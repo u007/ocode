@@ -8,9 +8,8 @@ tags:
   - permissions
   - agent
   - tool-digest
-timestamp: 2026-10-21T07:39:09Z
+timestamp: 2026-11-09T09:34:44Z
 ---
-
 # Ask-dialog "Explain this call" digest
 
 When a permission ask shows raw arguments (`cat .env`, `git push origin main --force`), the approver has to infer effect from syntax. The **tool-call digest** turns the pending call's parameters into two-to-four sentences of plain prose (`internal/agent/tool_digest.go:64`: `toolDigestSystemPrompt` fences parameters as `<<<BEGIN CALL PARAMETERS>>>` / `<<<END CALL PARAMETERS>>>`) so the user can approve or deny with some idea of what the call touches.
@@ -34,7 +33,7 @@ Both surfaces disclose the same caveat next to the button: the session's **redac
 POST /api/sessions/{id}/tool-call-digest
 ```
 
-Registered at (`internal/server/server.go:460`):
+Registered at (`internal/server/server.go:531`):
 
 ```go
 s.mux.HandleFunc("POST /api/sessions/{id}/tool-call-digest", s.authMiddleware(s.handleToolCallDigest))
@@ -99,6 +98,6 @@ The system prompt (`internal/agent/tool_digest.go:64`) states the parameters are
 ## Verification references
 
 - Shared logic: `internal/agent/tool_digest.go` — `SummarizeToolCall` (`line 105`), `SummarizeToolCallCtx` (`line 131`), system prompt (`line 64`), constants (`lines 27-45`).
-- Endpoint: `internal/server/handler_tool_digest.go` (`line 36`, `HandleToolCallDigest`) and `internal/server/server.go` (`line 460`).
+- Endpoint: `internal/server/handler_tool_digest.go` (`line 36`, `HandleToolCallDigest`) and `internal/server/server.go` (`line 531`).
 - TUI: `internal/tui/model.go` — label (`line 17830`), availability (`line 17835`), rendering inside `permissionBodyText` (`line 17909`), geometry note (`line 18086`).
 - Tests: `internal/agent/tool_digest_test.go`, `internal/server/handler_tool_digest_test.go`, `internal/tui/perm_digest_test.go`, `web/src/components/Chat/PermissionDialog.digest.test.tsx`.

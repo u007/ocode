@@ -4,7 +4,7 @@ title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing
 description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
 resource: ""
 tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find]
-timestamp: 2026-11-05T13:12:09Z
+timestamp: 2026-11-09T09:42:56Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
@@ -241,7 +241,7 @@ capability** in `?media_token=`:
   with the server — no on-disk store to leak; a restart drops them by design.
 - **Issue endpoint** — `POST /api/files/media-token` → `Handler.HandleMediaToken`
   (`internal/server/handler_files.go:1500`), registered as
-  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:413`), i.e.
+  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:449`), i.e.
   issuing **requires the normal credential**. Validation: non-empty `path`;
   `host` must be empty (`"media streaming is local-only"` — remote is
   blob-only); the extension must be media (`previewExtIsMedia`); `project_root`,
@@ -249,12 +249,12 @@ capability** in `?media_token=`:
   `..`. Returns `{"token": "..."}`; a 500 (never a predictable token) if the
   system RNG fails.
 - **Grant validation happens at use time, in the middleware**, against the exact
-  triple (`server.go:980`) — the token is a capability, never a substitute for
+  triple (`server.go:1051`) — the token is a capability, never a substitute for
   the raw handler's own anchoring/containment checks.
 
 ## `mediaAuthMiddleware` — the rejection policy is load-bearing
 
-`mediaAuthMiddleware` (`server.go:957`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
+`mediaAuthMiddleware` (`server.go:1028`) wraps `handleFileRaw` (`GET /api/files/raw`) and enforces
 three constraints that make the capability safe even if leaked:
 
 - **No cross-host reuse.** A token granted for `(path, root, host_A)` fails
