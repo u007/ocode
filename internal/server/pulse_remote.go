@@ -36,8 +36,8 @@ const pulseRemoteTimeout = 8 * time.Second
 // pulseRemoteClient has no Timeout of its own: each request carries a context deadline.
 var pulseRemoteClient = &http.Client{}
 
-// errPulseRemoteNotConnected marks a host this server has no live connection to.
-var errPulseRemoteNotConnected = errors.New("remote host is not connected")
+// errRemoteNotConnected marks a host this server has no live connection to.
+var errRemoteNotConnected = errors.New("remote host is not connected")
 
 // pulseRemoteBodyCap bounds one remote response body. A whole transcript for a
 // search is the largest legitimate read.
@@ -55,7 +55,7 @@ func (h *Handler) pulseRemoteGetJSON(host string, port int, path string, query u
 // pulseRemoteRequest is one request to a connected host's own server, under its
 // own deadline. A 2xx is success; out, when non-nil, receives the JSON body (a 204
 // or a nil out ignores it). Any other status is a *pulseRemoteStatusError. It never
-// dials: a host with no live connection is errPulseRemoteNotConnected.
+// dials: a host with no live connection is errRemoteNotConnected.
 func (h *Handler) pulseRemoteRequest(host string, port int, method, path string, query url.Values, timeout time.Duration, bodyCap int64, out any) error {
 	if h.remoteHosts == nil {
 		return errors.New("remote connections are not available on this server")
@@ -70,18 +70,25 @@ func (h *Handler) pulseRemoteRequest(host string, port int, method, path string,
 // pulseRemoteNotConnected is the error for a saved host with no live connection.
 // The text tells the operator the one action that connects it.
 func pulseRemoteNotConnected(host string) error {
-	return fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errPulseRemoteNotConnected, host)
+	return fmt.Errorf("%w: %s (open one of its projects in the app to connect it)", errRemoteNotConnected, host)
 }
 
 // pulseRemoteCall performs one request over a named connection. The caller
 // chooses the workspace, so a board entry can record the connection it was fetched over.
 func pulseRemoteCall(ws remoteHostWorkspace, host, method, path string, query url.Values, timeout time.Duration, bodyCap int64, out any) error {
+	return remoteCallCtx(context.Background(), ws, host, method, path, query, timeout, bodyCap, out)
+}
+
+// remoteCallCtx is pulseRemoteCall with a caller-supplied context, so a
+// request-scoped caller (the remote git turn guard) aborts with its own request
+// instead of outliving it.
+func remoteCallCtx(ctx context.Context, ws remoteHostWorkspace, host, method, path string, query url.Values, timeout time.Duration, bodyCap int64, out any) error {
 	apiURL, err := url.Parse(ws.APIURL())
 	if err != nil {
 		return fmt.Errorf("parse API URL: %w", err)
 	}
 	target := apiURL.ResolveReference(&url.URL{Path: path, RawQuery: query.Encode()})
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
 	if err != nil {

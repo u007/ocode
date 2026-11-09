@@ -514,13 +514,17 @@ func TestRemoteGitOperationCommandSuppressesTheEditor(t *testing.T) {
 			t.Errorf("command %q does not pin %s", cmd, want)
 		}
 	}
-	// The assignments must sit immediately before `git`, not before the `cd`:
-	// a prefix on the cd would not reach the git process at all.
-	gitAt := strings.Index(cmd, " GIT_OPTIONAL_LOCKS=0 git")
+	// The assignments must sit after the `cd ... &&` and immediately before
+	// `git`, not before the `cd`: a prefix on the cd would not reach the git
+	// process at all.
+	gitAt := strings.Index(cmd, " git ")
 	if gitAt < 0 {
-		t.Fatalf("command %q lost the GIT_OPTIONAL_LOCKS=0 git invocation", cmd)
+		t.Fatalf("command %q lost the git invocation", cmd)
 	}
 	prefix := cmd[:gitAt]
+	if !strings.Contains(prefix, "&& GIT_OPTIONAL_LOCKS=0") {
+		t.Errorf("git invocation is not preceded by the cd and GIT_OPTIONAL_LOCKS=0: %q", prefix)
+	}
 	if !strings.Contains(prefix, "GIT_EDITOR=true") {
 		t.Errorf("GIT_EDITOR=true is not in the env prefix of the git invocation: %q", prefix)
 	}

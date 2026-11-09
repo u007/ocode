@@ -142,7 +142,6 @@ export default function GitHistoryPanel({
   onShowChanges,
   refreshToken,
 }: GitHistoryPanelProps) {
-  const remote = Boolean(projectHost);
   const [scope, setScope] = useState<HistoryScope>(loadScope);
   const [list, setList] = useState<CommitList>({ commits: [], hasMore: false });
   const [loading, setLoading] = useState(false);
@@ -343,10 +342,12 @@ export default function GitHistoryPanel({
   };
 
   const buildMenuItems = (c: GitCommit): ContextMenuItem[] => {
-    // A mutating item is disabled while busy and always for a remote project.
+    // A mutating item is disabled while busy. Remote projects run the same
+    // actions: the server asks the host's own server for the turn state before
+    // a worktree-writing action and refuses when it cannot verify it.
     const mutate = (item: ContextMenuItem): ContextMenuItem => ({
       ...item,
-      disabled: busy || remote,
+      disabled: busy,
     });
     const refs = visibleRefs(c.refs);
     const branchRefs = refs.filter((r) => r.kind === "head" && !r.current && r.name !== "HEAD");
@@ -356,9 +357,7 @@ export default function GitHistoryPanel({
     );
     const cur = currentBranch || "HEAD";
 
-    const note: ContextMenuItem[] = remote
-      ? [{ label: "Not available for remote projects yet", onClick: () => {}, disabled: true }]
-      : [];
+    const note: ContextMenuItem[] = [];
     const checkout: ContextMenuItem[] = [
       ...branchRefs.map((r) =>
         mutate({

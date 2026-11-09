@@ -380,6 +380,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/git/workspace", s.authMiddleware(s.handler.HandleGitWorkspace))
 	s.mux.HandleFunc("GET /api/git/log", s.authMiddleware(s.handler.HandleGitLog))
 	s.mux.HandleFunc("GET /api/git/show", s.authMiddleware(s.handler.HandleGitShow))
+	s.mux.HandleFunc("GET /api/git/turn-active", s.authMiddleware(s.handler.HandleGitTurnActive))
 	s.mux.HandleFunc("POST /api/git/hunk", s.authMiddleware(s.handler.HandleGitHunk))
 	s.mux.HandleFunc("POST /api/git/stage", s.authMiddleware(s.handler.HandleGitStage))
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))

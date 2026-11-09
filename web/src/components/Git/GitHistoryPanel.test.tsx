@@ -256,14 +256,21 @@ describe("GitHistoryPanel", () => {
     await waitFor(() => expect(mocks.copyTextToClipboard).toHaveBeenCalledWith("h1aaaaaaaa"));
   });
 
-  it("disables every mutating item for a remote project but keeps copy enabled", async () => {
+  it("enables every mutating item for a remote project and keeps copy enabled", async () => {
     renderPanel({ projectHost: "ssh-box" });
     await screen.findByText("subject x1aaaaaaaa");
     openMenu("x1aaaaaaaa");
 
-    expect(screen.getByText("Not available for remote projects yet")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Cherry-pick commit" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Checkout feature" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      screen.queryByText(
+        "Merge, cherry-pick, revert and reset-hard are not available for remote projects yet",
+      ),
+    ).toBeNull();
+    expect((screen.getByRole("button", { name: "Merge feature into main" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Cherry-pick commit" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Revert commit…" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Reset main to here (hard)" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Checkout feature" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Copy SHA" }) as HTMLButtonElement).disabled).toBe(false);
   });
 

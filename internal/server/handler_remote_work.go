@@ -293,6 +293,26 @@ func remoteRunRaw(ctx context.Context, rw remoteWork, command string) (string, e
 	return stdout.String(), nil
 }
 
+// remoteRunGitOperation is remoteRun with the local git-operation contract:
+// the gitOperationTimeout bound and combined stdout+stderr, trimmed — the
+// remote counterpart of runGitOperation. A non-zero remote exit is returned as
+// the error (not a transport error), with git's words in the output, so a git
+// refusal can be answered as a 409 exactly like the local path.
+func remoteRunGitOperation(ctx context.Context, rw remoteWork, command string) (string, error) {
+	// 2>&1 merges stderr into the single captured stream, matching
+	// CombinedOutput without racing two writers on one buffer.
+	cmd, err := remote.ExecCommand(rw.Target, command+" 2>&1")
+	if err != nil {
+		return "", &remoteTransportError{msg: err.Error()}
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := runBounded(ctx, rw.Target, cmd, gitOperationTimeout, remoteExecForeground); err != nil {
+		return strings.TrimSpace(out.String()), err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
 // runWithContext runs cmd, aborting it when ctx is done. Context support is
 // attached at start time (CommandContext) so an abandoned web request can't
 // leave an ssh child running; without a deadline (plain requests) the exec
@@ -679,8 +699,18 @@ const remoteNetworkTimeout = 120 * time.Second
 // git on that machine. A leading VAR=value is POSIX sh syntax and both remote
 // shells (ssh → POSIX sh, WSL → sh) accept it; mandatory locks are unaffected.
 func remoteGitCommand(dir string, args ...string) string {
-	parts := make([]string, 0, len(args)+4)
-	parts = append(parts, "cd", shellQuotePathPOSIX(dir), "&&", "GIT_OPTIONAL_LOCKS=0", "git")
+	return remoteGitCommandEnv(dir, nil, args...)
+}
+
+// remoteGitCommandEnv is remoteGitCommand with extra VAR=value assignments
+// placed immediately before `git`. The remote shell applies a leading
+// assignment only to the command that follows it, so these must sit after
+// `cd <dir> &&` and after GIT_OPTIONAL_LOCKS=0, never before `cd`.
+func remoteGitCommandEnv(dir string, env []string, args ...string) string {
+	parts := make([]string, 0, len(args)+len(env)+5)
+	parts = append(parts, "cd", shellQuotePathPOSIX(dir), "&&", "GIT_OPTIONAL_LOCKS=0")
+	parts = append(parts, env...)
+	parts = append(parts, "git")
 	parts = append(parts, args...)
 	return strings.Join(parts, " ")
 }

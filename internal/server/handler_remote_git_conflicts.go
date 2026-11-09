@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 )
 
 // Phase 05, mutation half: the conflict-resolve and operation endpoints over
@@ -70,8 +69,9 @@ func (h *Handler) remoteGitConflictSpec(w http.ResponseWriter, rw remoteWork, p 
 //
 // GIT_OPTIONAL_LOCKS=0 is already applied by remoteGitCommand.
 func remoteGitMutationCommand(rw remoteWork, args ...string) string {
-	env := "GIT_LITERAL_PATHSPECS=1 GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true"
-	return strings.Replace(remoteGitCommand(rw.Path, args...), "GIT_OPTIONAL_LOCKS=0 git", env+" GIT_OPTIONAL_LOCKS=0 git", 1)
+	return remoteGitCommandEnv(rw.Path, []string{
+		"GIT_LITERAL_PATHSPECS=1", "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true",
+	}, args...)
 }
 
 // remoteGitResolveConflict resolves a conflict on a remote (SSH/WSL) project.

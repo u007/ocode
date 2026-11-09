@@ -53,49 +53,62 @@ type refActionSpec struct {
 	needsName bool
 	// writesWorktree marks an action that can overwrite or move files in the
 	// checkout, so it is refused while a chat turn is running in the project.
+	// Both transports enforce this: local via projectTurnActive, remote via the
+	// host's own turn-state probe (remoteProjectTurnActive), which fails closed
+	// when the state cannot be verified.
 	writesWorktree bool
+	// trackingCheckout marks the checkout row: its argv adds --track when the
+	// target is a remote-tracking branch with no local branch of the same name.
+	// The caller resolves that question (local git for the local path, a remote
+	// probe for the remote one) and passes the answer in, so this table stays
+	// the single source of truth for checkout's argv.
+	trackingCheckout bool
 	// argv builds the git arguments once the request has been validated.
-	argv func(dir, target, name string) []string
+	// remoteTrackingOnly is only meaningful when trackingCheckout is set.
+	argv func(target, name string, remoteTrackingOnly bool) []string
 }
 
 // gitRefActions is the closed action table for POST /api/git/ref-action.
 var gitRefActions = map[string]refActionSpec{
-	"checkout": {target: refTargetAny, argv: func(dir, target, _ string) []string {
-		// A remote-tracking name with no local branch of the same name needs
-		// --track, or git would detach HEAD at that commit.
-		if gitRefIsRemoteTrackingOnly(dir, target) {
+	// A remote-tracking name with no local branch of the same name needs
+	// --track, or git would detach HEAD at that commit. The caller answers
+	// that question per transport (local git or a remote probe).
+	// checkout rewrites tracked files in the checkout, like merge and reset
+	// --hard, so it takes the same turn guard.
+	"checkout": {target: refTargetAny, writesWorktree: true, trackingCheckout: true, argv: func(target, _ string, remoteTrackingOnly bool) []string {
+		if remoteTrackingOnly {
 			return []string{"checkout", "--track", target}
 		}
 		return []string{"checkout", target}
 	}},
-	"branch": {target: refTargetAny, needsName: true, argv: func(_, target, name string) []string {
+	"branch": {target: refTargetAny, needsName: true, argv: func(target, name string, _ bool) []string {
 		return []string{"branch", name, target}
 	}},
-	"branch-checkout": {target: refTargetAny, needsName: true, argv: func(_, target, name string) []string {
+	"branch-checkout": {target: refTargetAny, needsName: true, writesWorktree: true, argv: func(target, name string, _ bool) []string {
 		return []string{"checkout", "-b", name, target}
 	}},
-	"branch-delete": {target: refTargetBranch, argv: func(_, target, _ string) []string {
+	"branch-delete": {target: refTargetBranch, argv: func(target, _ string, _ bool) []string {
 		return []string{"branch", "-d", target}
 	}},
-	"merge": {target: refTargetAny, writesWorktree: true, argv: func(_, target, _ string) []string {
+	"merge": {target: refTargetAny, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
 		return []string{"merge", "--no-edit", target}
 	}},
-	"cherry-pick": {target: refTargetHash, writesWorktree: true, argv: func(_, target, _ string) []string {
+	"cherry-pick": {target: refTargetHash, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
 		return []string{"cherry-pick", target}
 	}},
-	"revert": {target: refTargetHash, writesWorktree: true, argv: func(_, target, _ string) []string {
+	"revert": {target: refTargetHash, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
 		return []string{"revert", "--no-edit", target}
 	}},
-	"reset-soft": {target: refTargetAny, argv: func(_, target, _ string) []string {
+	"reset-soft": {target: refTargetAny, argv: func(target, _ string, _ bool) []string {
 		return []string{"reset", "--soft", target}
 	}},
-	"reset-mixed": {target: refTargetAny, argv: func(_, target, _ string) []string {
+	"reset-mixed": {target: refTargetAny, argv: func(target, _ string, _ bool) []string {
 		return []string{"reset", "--mixed", target}
 	}},
-	"reset-hard": {target: refTargetAny, writesWorktree: true, argv: func(_, target, _ string) []string {
+	"reset-hard": {target: refTargetAny, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
 		return []string{"reset", "--hard", target}
 	}},
-	"tag": {target: refTargetAny, needsName: true, argv: func(_, target, name string) []string {
+	"tag": {target: refTargetAny, needsName: true, argv: func(target, name string, _ bool) []string {
 		return []string{"tag", name, target}
 	}},
 }
@@ -104,8 +117,8 @@ var gitRefActions = map[string]refActionSpec{
 // on the project's repository. The action comes from gitRefActions, and every
 // target and name is validated before git runs.
 func (h *Handler) HandleGitRefAction(w http.ResponseWriter, r *http.Request) {
-	if hostParam(r) != "" {
-		writeError(w, http.StatusNotImplemented, "ref actions are not supported for remote projects yet")
+	if host := hostParam(r); host != "" {
+		h.remoteGitRefAction(w, r, host)
 		return
 	}
 	var req GitRefActionRequest
@@ -130,7 +143,8 @@ func (h *Handler) HandleGitRefAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, req.Action+" refused: a chat turn is running in this project; try again when it finishes")
 		return
 	}
-	args := spec.argv(dir, req.Target, req.Name)
+	tracking := spec.trackingCheckout && gitRefIsRemoteTrackingOnly(dir, req.Target)
+	args := spec.argv(req.Target, req.Name, tracking)
 	out, err := runGitOperation(r.Context(), dir, args...)
 	if err != nil {
 		slog.Error("git ref action failed",
@@ -155,28 +169,43 @@ func (h *Handler) HandleGitRefAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, GitRefActionResult{Workspace: ws, Output: out})
 }
 
-// validateGitRefAction returns the 400 reason for a request that git must not
-// see, or "" when the request may run.
-func validateGitRefAction(dir, action string, spec refActionSpec, req GitRefActionRequest) string {
+// refProbes are the git queries ref-action validation needs. Each transport
+// supplies its own; the rules, their order and their wording live once in
+// validateGitRefActionUsing so the local and remote paths cannot drift.
+type refProbes struct {
+	// refResolves reports whether rev names an object or ref.
+	refResolves func(rev string) bool
+	// branchNameValid reports whether name is an acceptable branch name.
+	branchNameValid func(name string) bool
+	// refFormatValid reports whether ref is a valid full ref name.
+	refFormatValid func(ref string) bool
+}
+
+// validateGitRefActionUsing returns the 400 reason for a request that git must
+// not see, or "" when the request may run.
+func validateGitRefActionUsing(p refProbes, action string, spec refActionSpec, req GitRefActionRequest) string {
 	if action == "reset-hard" && !req.Confirm {
 		return "reset-hard discards uncommitted work; send confirm:true to run it"
 	}
 	if req.Target == "" || strings.HasPrefix(req.Target, "-") {
 		return "target must be a commit hash or branch name"
 	}
-	hash := gitRefTargetIsHash(dir, req.Target)
+	// A hex-looking string is a hash only when no branch has that name: git
+	// itself prefers the ref over an abbreviated object id, so a branch named
+	// cafe or dead is a branch.
+	hash := isHexHash(req.Target) && !p.refResolves("refs/heads/"+req.Target)
 	switch {
 	case spec.target == refTargetHash && !hash:
 		return action + " needs a commit hash"
 	case spec.target == refTargetBranch && hash:
 		return action + " needs a branch name"
-	case !hash && !gitBranchNameValid(dir, req.Target):
+	case !hash && !p.branchNameValid(req.Target):
 		return fmt.Sprintf("invalid target %q", req.Target)
 	}
 	// Every target must resolve to a commit. Without this, a file name that is
 	// not a revision reaches `checkout`, which would restore that file and
 	// discard its local edits.
-	if !gitRefResolves(dir, req.Target+"^{commit}") {
+	if !p.refResolves(req.Target + "^{commit}") {
 		return fmt.Sprintf("target %q does not resolve to a commit", req.Target)
 	}
 	if !spec.needsName {
@@ -192,15 +221,25 @@ func validateGitRefAction(dir, action string, spec refActionSpec, req GitRefActi
 		return fmt.Sprintf("invalid name %q", req.Name)
 	}
 	if action == "tag" {
-		if !gitRefFormatValid(dir, "refs/tags/"+req.Name) {
+		if !p.refFormatValid("refs/tags/" + req.Name) {
 			return fmt.Sprintf("invalid tag name %q", req.Name)
 		}
 		return ""
 	}
-	if !gitBranchNameValid(dir, req.Name) {
+	if !p.branchNameValid(req.Name) {
 		return fmt.Sprintf("invalid branch name %q", req.Name)
 	}
 	return ""
+}
+
+// validateGitRefAction validates a local ref action against this machine's
+// repository.
+func validateGitRefAction(dir, action string, spec refActionSpec, req GitRefActionRequest) string {
+	return validateGitRefActionUsing(refProbes{
+		refResolves:     func(rev string) bool { return gitRefResolves(dir, rev) },
+		branchNameValid: func(name string) bool { return gitBranchNameValid(dir, name) },
+		refFormatValid:  func(ref string) bool { return gitRefFormatValid(dir, ref) },
+	}, action, spec, req)
 }
 
 // gitBranchNameValid reports whether name is an acceptable branch name.
@@ -234,14 +273,6 @@ func gitRefResolves(dir, rev string) bool {
 	return err == nil
 }
 
-// gitRefTargetIsHash reports whether target should be read as a commit hash.
-// A hex-looking string is a hash only when no local branch has that name: git
-// itself prefers the ref over an abbreviated object id, so a branch named cafe
-// or dead is a branch.
-func gitRefTargetIsHash(dir, target string) bool {
-	return isHexHash(target) && !gitRefResolves(dir, "refs/heads/"+target)
-}
-
 // projectTurnActive reports whether a chat session rooted at dir has a turn in
 // flight. The check is a snapshot: a turn that starts right after it returns is
 // not seen, which the ref action accepts rather than holding every session's
@@ -254,6 +285,27 @@ func (h *Handler) projectTurnActive(dir string) bool {
 		}
 	}
 	return false
+}
+
+// HandleGitTurnActive answers whether a chat turn is running in the given
+// project. It exists so a REMOTE project's worktree-writing ref action can ask
+// the host's own server — whose registry knows that project's turns — before
+// mutating a checkout this process cannot see. Read-only: it reads the registry
+// snapshot and nothing else.
+//
+// The project must pass the same admission as a git mutation, so the endpoint
+// cannot be used to probe arbitrary paths on the host.
+func (h *Handler) HandleGitTurnActive(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("project") == "" {
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+	dir, ok := h.mutationProjectDir(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown project")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"turn_active": h.projectTurnActive(dir)})
 }
 
 // gitRefIsRemoteTrackingOnly reports whether target names a remote-tracking
