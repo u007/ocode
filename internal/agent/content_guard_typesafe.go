@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -263,6 +267,20 @@ func (a *Agent) contentGuardApplies(toolName, toolArgs string) bool {
 // reads a tool's result, not its error: a browser error that quotes page text
 // (for example a pick's option list) is not scanned. That gap is in TODO.md and
 // docs/concepts/browser-agent-tools.md.
+//
+// Each action is judged on the view contentGuardScanView builds for it, which
+// keeps only the page-authored bytes:
+//   - tabs: the "- " entry lines. A tab's title is %q-quoted and its URL sits on
+//     the same line, so the host's status and empty-state lines are dropped. The
+//     empty-state line ("no browser tabs are open ...") judged raw was flagged as
+//     tool_coercion, which stopped every browser task before its first read.
+//   - pick, select: only the Go-quoted runs, which hold the page's option text.
+//     The host sentence around them is dropped.
+//   - fill_form: the body after the host header. Page values are %q-quoted, but
+//     a field's error text is not, so the body is not narrowed to entry lines.
+//
+// Tab management (open, close, activate, navigate) is not guarded: those results
+// are host status with no page text.
 var browserGuardedOutputs = map[string]string{
 	"console":   "browser console",
 	"controls":  "browser controls index",
@@ -433,14 +451,186 @@ func isContentGuardHostWrapper(line string) bool {
 	return strings.Contains(line, contentGuardHostWrapper) && strings.HasSuffix(line, "):")
 }
 
+// contentGuardTabURL finds the tab URL the host writes after the tab id in a
+// guarded browser header ("... tab t1 at https://shop.example/cart ...").
+var contentGuardTabURL = regexp.MustCompile(`\btab \S+ at (\S+)`)
+
+// contentGuardQuotedString matches one Go-quoted string as the host writes it
+// with %q: find's target, the frame name and browser_run's title and labels.
+var contentGuardQuotedString = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// contentGuardBrowserRunStatus matches browser_run's status line. The page URL is
+// the unquoted token before the Go-quoted title, which ends the line.
+var contentGuardBrowserRunStatus = regexp.MustCompile(`page=(\S+) (".*")$`)
+
+// contentGuardHeaderTabURL returns the tab URL a guarded browser header carries,
+// or "" when the host could not read it (the header then has no " at <url>").
+// Quoted runs are removed first: find's target and a frame name are agent
+// arguments written with %q, so "tab x at http://localhost/" typed into a target
+// must not be read as the page's address. The header's own punctuation follows
+// the URL with no space (console and find write "at <url>:", snapshot writes
+// "at <url>,"), so it is trimmed: left on a path-less URL it would read as part
+// of the host and defeat the local-page check.
+func contentGuardHeaderTabURL(header string) string {
+	unquoted := contentGuardQuotedString.ReplaceAllString(header, "")
+	m := contentGuardTabURL.FindStringSubmatch(unquoted)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimRight(m[1], ",:;.")
+}
+
+// isContentGuardLoopbackHost reports whether host is this machine's loopback:
+// localhost, 127.0.0.0/8, ::1 and the IPv4-mapped 127.x form. It is the only host
+// class a browser read is exempt for. It is deliberately narrower than
+// isLocalNetworkHost, which the bash permission paths keep using. A private-LAN
+// address is another machine, and a page served from one can be as hostile as any
+// remote page. A 192.168.x or 10.x page is therefore judged, as is 0.0.0.0,
+// "*.localhost", a trailing-dot name and a zoned address. The match is exact, so
+// "127.0.0.1.evil.com" is remote.
+func isContentGuardLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	// A zoned address is judged, not exempt. netip.IsLoopback ignores the zone, so
+	// "::1%lo0" would otherwise pass.
+	if strings.Contains(host, "%") {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.Unmap().IsLoopback()
+}
+
+// contentGuardExemptLocalPage reports whether a browser read came from this
+// machine's own top-level page, so it is delivered without a judge call. Only
+// loopback is exempt (isContentGuardLoopbackHost). A URL that fails to parse, or
+// has no host, is not exempt.
+//
+// The exemption covers only reads of the top document's own DOM: text
+// (innerText) and frame-less find (querySelectorAll). Neither reaches into an
+// iframe. It does not cover snapshot or controls, which read the top
+// accessibility tree. That tree includes iframe subtrees, and a local page can
+// embed a remote document. It never covers a read that names a frame. Console and
+// network are never exempted on the page URL either: their logs span navigations,
+// so a remote page can log an injection and then redirect the tab to localhost.
+//
+// Accepted residual: the trust extends to the loopback top document itself. A
+// local app that renders third-party text into its own top-level DOM has that text
+// delivered unjudged.
+func contentGuardExemptLocalPage(action, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || !isContentGuardLoopbackHost(u.Hostname()) {
+		return false
+	}
+	emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_local_page action=%s host=%s", action, u.Hostname()))
+	return true
+}
+
+// contentGuardEntryLines keeps only the entry lines of a list read (console,
+// network, find) or of the tabs listing. The host writes every page-derived entry
+// as a line starting with "- " and quotes the page text inside it, so the filter
+// cannot drop page text. A %q-quoted string cannot hold a raw newline, so no page
+// text can start a new "- " line. Everything else in those bodies is host text: find's trailing "more
+// matches" note, network's "capture was last armed" note and the "note:" line
+// for a page still loading. This filter is NOT applied to text or snapshot.
+// Their bodies are free page text, and dropping a line by its prefix would hand
+// an attacker a line the judge never sees.
+func contentGuardEntryLines(body string) string {
+	var keep []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
+// contentGuardQuotedSpans is the judged view of a result whose page text is only
+// in Go-quoted runs: pick's selected label and select's option text. The host
+// sentence around them is dropped. Each run is unquoted, and a run that does not
+// unquote is kept as written. A result with no quoted run at all is judged raw, so
+// a change in the host's format fails toward judging, not toward silence.
+func contentGuardQuotedSpans(content string) string {
+	runs := contentGuardQuotedString.FindAllString(content, -1)
+	if runs == nil {
+		return content
+	}
+	spans := make([]string, 0, len(runs))
+	for _, q := range runs {
+		s, err := strconv.Unquote(q)
+		if err != nil {
+			// intentionally not logged: a run that does not unquote is judged as written.
+			s = q
+		}
+		spans = append(spans, s)
+	}
+	return strings.Join(spans, "\n")
+}
+
+// Console is not exempted per entry, whatever its origin. An entry's origin is the
+// execution context's security origin, and the log carries no frame-to-top
+// relationship. A remote page can embed <iframe src="http://localhost:5173/#...">,
+// so a console entry from that frame reads as localhost. Attributing it would take
+// frame information the log does not record. The log also spans navigations, so a
+// local origin does not prove the entry's page. Every console entry is judged.
+
+// contentGuardBrowserRunView builds the judged view of a browser_run result after
+// its notice line is dropped. The status line, the step lines and the "next:"
+// block are host or decision-model text, quoted only where a page supplies the
+// string. So the judge sees the page URL, the Go-quoted title and every quoted
+// label, and nothing else. A result whose status line does not parse is returned
+// with only its notice dropped, which is how it was judged before this view.
+//
+// The final-page exemption below is safe: the reads that produced the labels here
+// are sub-step controls reads. Each went through the content guard when it ran
+// (handleToolCallWithContext). controls is never exempt, so each was judged on its
+// own read. So the labels carry no bytes the guard did not see.
+func contentGuardBrowserRunView(body string) string {
+	status, rest, _ := strings.Cut(body, "\n")
+	m := contentGuardBrowserRunStatus.FindStringSubmatch(status)
+	if m == nil {
+		// intentionally not logged: a status line that does not parse is judged as it arrived.
+		return body
+	}
+	title, err := strconv.Unquote(m[2])
+	if err != nil {
+		// intentionally not logged: a title that does not unquote is judged as it arrived.
+		return body
+	}
+	pageURL := m[1]
+	if contentGuardExemptLocalPage("browser_run", pageURL) {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "title: %s\nurl: %s\nlabels:", title, pageURL)
+	for _, line := range strings.Split(rest, "\n") {
+		if strings.HasPrefix(line, "reason:") {
+			continue
+		}
+		for _, q := range contentGuardQuotedString.FindAllString(line, -1) {
+			label, err := strconv.Unquote(q)
+			if err != nil {
+				// intentionally not logged: a quoted run that does not unquote is not a label.
+				continue
+			}
+			b.WriteString("\n" + label)
+		}
+	}
+	return b.String()
+}
+
 // contentGuardScanView returns the text the guardrail judges in place of content.
 // For a guarded browser action it drops the host's wrapper line, and a result that is
 // the wrapper line alone (no body, no newline) yields an empty view. For a controls
 // read it also renders the JSON as plain lines: the title, url and visible text,
 // then one line per control, with no refs, operations, states, fingerprint or
-// JSON keys. For browser_run it drops the host's untrusted-content notice line,
-// for the same reason. Every other result is judged as it is. The delivered
-// content is never this view; see scanContentGuard.
+// JSON keys. For browser_run it drops the host's untrusted-content notice line and
+// judges only the page URL, title and quoted labels, for the same reason. A list
+// read (console, network, find) and tabs keep only their entry lines. pick and
+// select keep only their quoted runs. A text or frame-less find read of a loopback
+// page yields an empty view (see contentGuardExemptLocalPage). Every other result
+// is judged as it is. The delivered content is never this view; see
+// scanContentGuard.
 //
 // Measured 2026-11-01 on a live four-control newsletter form, clean confidence
 // judged through judgeContentChunk, three runs per variant:
@@ -456,7 +646,7 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 		// the same clause the measurement above shows pulls a clean verdict below
 		// the floor. It is host text, not page content, so it is never judged.
 		if line, rest, found := strings.Cut(content, "\n"); found && strings.HasPrefix(line, browserRunUntrustedNotice) {
-			return rest
+			return contentGuardBrowserRunView(rest)
 		}
 		// intentionally not logged: the host writes the notice on every result, so
 		// one without it is judged as it arrived.
@@ -467,6 +657,7 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 	}
 	var p struct {
 		Action string `json:"action"`
+		Frame  string `json:"frame"`
 	}
 	// intentionally not logged: the browser tool rejects unparseable arguments
 	// itself, so such a result is never a guarded browser read.
@@ -475,6 +666,14 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 	}
 	if _, guarded := browserGuardedOutputs[p.Action]; !guarded {
 		return content
+	}
+	// tabs, pick and select have no wrapper line to strip, so they are narrowed
+	// before the wrapper check below, which would judge them raw.
+	switch p.Action {
+	case "tabs":
+		return contentGuardEntryLines(content)
+	case "pick", "select":
+		return contentGuardQuotedSpans(content)
 	}
 	header, body, found := strings.Cut(content, "\n")
 	if !found && isContentGuardHostWrapper(content) {
@@ -489,6 +688,23 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 		return content
 	}
 	if p.Action != "controls" {
+		// The header carries the TOP document's URL. text and frame-less find read
+		// the top document's own DOM, so a loopback top page exempts them. A read
+		// that names a frame is never exempt on the top URL: the frame can be a
+		// remote document embedded in a local page. snapshot is never exempt here,
+		// because its accessibility tree includes iframe subtrees. console and
+		// network are never exempt on the page URL either; their logs span
+		// navigations.
+		switch p.Action {
+		case "text", "find":
+			if rawURL := contentGuardHeaderTabURL(header); p.Frame == "" && rawURL != "" && contentGuardExemptLocalPage(p.Action, rawURL) {
+				return ""
+			}
+		}
+		switch p.Action {
+		case "console", "network", "find":
+			return contentGuardEntryLines(body)
+		}
 		return body
 	}
 	var page contentGuardControlsBody
@@ -496,6 +712,8 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 		emitDebug("PERMISSION", fmt.Sprintf("contentguard: controls result did not parse, judging its body raw: %v", err))
 		return body
 	}
+	// controls is never exempt on the page URL: it reads the top accessibility
+	// tree, which includes iframe subtrees.
 	var b strings.Builder
 	fmt.Fprintf(&b, "title: %s\nurl: %s\ntext: %s", page.Title, page.URL, page.Text)
 	for _, c := range page.Controls {

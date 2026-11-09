@@ -30,8 +30,13 @@ type ConsoleEntry struct {
 	Kind              string // "console" or "exception"
 	Text              string
 	TextTruncated     bool
-	Location          string // exceptions only: "url:line:column" when CDP reports a URL
+	Location          string // "url:line:column" when CDP reports a URL: the calling script for console API entries, the throw site for exceptions
 	LocationTruncated bool
+	// Origin is the security origin (scheme://host[:port]) of the execution
+	// context that logged the entry, from Runtime.executionContextCreated. The
+	// browser sets it, so a page cannot forge it the way it can forge a stack
+	// frame URL with a sourceURL comment. Empty when the context is unknown.
+	Origin string
 }
 
 // consoleLog is the bounded console buffer. Its mutex is dedicated: it is never
@@ -60,9 +65,17 @@ func (c *consoleLog) add(e ConsoleEntry) {
 // and regardless of the FrameSink, so headless targets keep their history.
 func (t *Target) recordConsoleAPI(raw json.RawMessage) {
 	var ev struct {
-		Type      string         `json:"type"`
-		Args      []remoteObject `json:"args"`
-		Timestamp float64        `json:"timestamp"`
+		Type               string         `json:"type"`
+		Args               []remoteObject `json:"args"`
+		Timestamp          float64        `json:"timestamp"`
+		ExecutionContextID int64          `json:"executionContextId"`
+		StackTrace         *struct {
+			CallFrames []struct {
+				URL          string `json:"url"`
+				LineNumber   int    `json:"lineNumber"`
+				ColumnNumber int    `json:"columnNumber"`
+			} `json:"callFrames"`
+		} `json:"stackTrace"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		t.logCaptureError("Runtime.consoleAPICalled", err)
@@ -73,13 +86,23 @@ func (t *Target) recordConsoleAPI(raw json.RawMessage) {
 		parts[i] = a.text()
 	}
 	text, truncated := truncateRunes(strings.Join(parts, " "), consoleTextRunes)
-	t.console.add(ConsoleEntry{
+	entry := ConsoleEntry{
 		TS:            int64(ev.Timestamp),
 		Level:         consoleLevel(ev.Type),
 		Kind:          "console",
 		Text:          text,
 		TextTruncated: truncated,
-	})
+	}
+	// The top call frame is the script that made the call. Without a stack trace,
+	// or with a frame that has no URL, the entry keeps an empty Location.
+	if st := ev.StackTrace; st != nil && len(st.CallFrames) > 0 {
+		if f := st.CallFrames[0]; f.URL != "" {
+			entry.Location, entry.LocationTruncated = truncateBytes(
+				fmt.Sprintf("%s:%d:%d", f.URL, f.LineNumber, f.ColumnNumber), consoleLocationBytes)
+		}
+	}
+	entry.Origin = t.originFor(ev.ExecutionContextID)
+	t.console.add(entry)
 }
 
 // recordException records one Runtime.exceptionThrown event (uncaught error).
@@ -87,11 +110,12 @@ func (t *Target) recordException(raw json.RawMessage) {
 	var ev struct {
 		Timestamp        float64 `json:"timestamp"`
 		ExceptionDetails struct {
-			Text         string        `json:"text"`
-			Exception    *remoteObject `json:"exception"`
-			URL          string        `json:"url"`
-			LineNumber   int           `json:"lineNumber"`
-			ColumnNumber int           `json:"columnNumber"`
+			Text               string        `json:"text"`
+			Exception          *remoteObject `json:"exception"`
+			URL                string        `json:"url"`
+			LineNumber         int           `json:"lineNumber"`
+			ColumnNumber       int           `json:"columnNumber"`
+			ExecutionContextID int64         `json:"executionContextId"`
 		} `json:"exceptionDetails"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
@@ -115,7 +139,15 @@ func (t *Target) recordException(raw json.RawMessage) {
 		entry.Location, entry.LocationTruncated = truncateBytes(
 			fmt.Sprintf("%s:%d:%d", d.URL, d.LineNumber, d.ColumnNumber), consoleLocationBytes)
 	}
+	entry.Origin = t.originFor(d.ExecutionContextID)
 	t.console.add(entry)
+}
+
+// originFor returns the security origin of the execution context contextID, or
+// "" when Chrome never announced that context to this target.
+func (t *Target) originFor(contextID int64) string {
+	origin, _ := t.frameCtx.originOf(contextID)
+	return origin
 }
 
 // remoteObject is the subset of Runtime.RemoteObject the console log reads.

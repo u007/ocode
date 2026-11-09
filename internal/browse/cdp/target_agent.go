@@ -95,6 +95,25 @@ func (t *Target) PageText(ctx context.Context) (text string, truncated bool, err
 	return v.Text, v.Total > pageTextMaxChars, nil
 }
 
+// URL returns the page's current URL, read live from the tab. The result headers
+// that the content guard parses carry it, so it is never cached.
+func (t *Target) URL(ctx context.Context) (string, error) {
+	var res struct {
+		Result struct {
+			Value string `json:"value"`
+		} `json:"result"`
+		ExceptionDetails json.RawMessage `json:"exceptionDetails"`
+	}
+	if err := t.conn.Call(ctx, t.sessionID, "Runtime.evaluate",
+		map[string]any{"expression": "location.href", "returnByValue": true}, &res); err != nil {
+		return "", err
+	}
+	if len(res.ExceptionDetails) > 0 {
+		return "", fmt.Errorf("page url evaluation threw: %s", res.ExceptionDetails)
+	}
+	return res.Result.Value, nil
+}
+
 // Click clicks at (x, y) in CSS pixels of the viewport. The pointer moves there
 // first so hover state matches a real click, then one left press and release.
 // The move carries button "none" and no buttons held, as the panel's own moves

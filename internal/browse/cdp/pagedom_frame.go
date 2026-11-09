@@ -25,10 +25,33 @@ var errFrameNotReady = errors.New("frame not ready")
 // page, and an out-of-process frame lives in its own CDP target.
 
 // frameContexts maps a frame id to the id of its default (main-world)
-// execution context. The zero value is ready to use.
+// execution context, and every execution context id to its security origin.
+// The zero value is ready to use.
 type frameContexts struct {
 	mu      sync.Mutex
 	byFrame map[string]int64
+	// byID holds every context Chrome announced, isolated worlds included, since
+	// a console call can come from any realm.
+	byID map[int64]string
+}
+
+// recordOrigin remembers the security origin of one execution context.
+func (f *frameContexts) recordOrigin(contextID int64, origin string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.byID == nil {
+		f.byID = make(map[int64]string)
+	}
+	f.byID[contextID] = origin
+}
+
+// originOf returns the security origin of contextID, and whether the context
+// was announced and not yet destroyed.
+func (f *frameContexts) originOf(contextID int64) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	origin, ok := f.byID[contextID]
+	return origin, ok
 }
 
 func (f *frameContexts) record(frameID string, contextID int64) {
@@ -51,12 +74,14 @@ func (f *frameContexts) forget(contextID int64) {
 			delete(f.byFrame, frameID)
 		}
 	}
+	delete(f.byID, contextID)
 }
 
 func (f *frameContexts) clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.byFrame = nil
+	f.byID = nil
 }
 
 func (f *frameContexts) lookup(frameID string) (int64, bool) {
@@ -85,7 +110,8 @@ func (t *Target) handleExecutionContextCreated(ch <-chan json.RawMessage) {
 	for raw := range ch {
 		var ev struct {
 			Context struct {
-				ID      int64 `json:"id"`
+				ID      int64  `json:"id"`
+				Origin  string `json:"origin"`
 				AuxData struct {
 					FrameID   string `json:"frameId"`
 					IsDefault bool   `json:"isDefault"`
@@ -96,6 +122,9 @@ func (t *Target) handleExecutionContextCreated(ch <-chan json.RawMessage) {
 			log.Printf("browse cdp: decoding Runtime.executionContextCreated: %v", err)
 			continue
 		}
+		// Every context's origin is kept: the origin is set by the browser, not the
+		// page, so a console entry can be attributed to it.
+		t.frameCtx.recordOrigin(ev.Context.ID, ev.Context.Origin)
 		// Only the main world answers for a frame; isolated worlds (extensions,
 		// devtools) carry isDefault=false and are never the page's realm.
 		if !ev.Context.AuxData.IsDefault || ev.Context.AuxData.FrameID == "" {

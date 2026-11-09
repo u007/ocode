@@ -366,8 +366,10 @@ func TestExecutionContextDestroyedForgetsFrame(t *testing.T) {
 		"context": map[string]any{"id": 7, "auxData": map[string]any{"frameId": "F2", "isDefault": true}},
 	})
 	waitFor(t, func() bool { _, ok := tgt.frameCtx.lookup("F2"); return ok })
+	waitFor(t, func() bool { _, ok := tgt.frameCtx.originOf(7); return ok })
 	s.inject("Runtime.executionContextDestroyed", map[string]any{"executionContextId": 7})
 	waitFor(t, func() bool { _, ok := tgt.frameCtx.lookup("F2"); return !ok })
+	waitFor(t, func() bool { _, ok := tgt.frameCtx.originOf(7); return !ok })
 }
 
 // waitFor polls cond until it holds or two seconds pass (events arrive on the

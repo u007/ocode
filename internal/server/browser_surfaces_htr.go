@@ -902,6 +902,15 @@ func (s htrSurface) Screenshot(ctx context.Context) ([]byte, int, int, error) {
 }
 
 // PageText returns the body text, cut to the CDP path's cap.
+// URL is the tab's current page URL, read from the daemon's page state.
+func (s htrSurface) URL(ctx context.Context) (string, error) {
+	p, err := s.page(ctx)
+	if err != nil {
+		return "", err
+	}
+	return p.URL, nil
+}
+
 func (s htrSurface) PageText(ctx context.Context) (string, bool, error) {
 	text, err := s.bodyText(ctx, "")
 	if err != nil {
@@ -1220,6 +1229,9 @@ func consoleEntriesOf(ev htrEvents) ([]cdp.ConsoleEntry, error) {
 		}
 		text, textTruncated := cdp.TruncateRunes(strings.Join(d.Args, " "), cdp.ConsoleTextRunes)
 		location, locationTruncated := cdp.TruncateBytes(d.Source, cdp.ConsoleLocationBytes)
+		// Origin stays empty on purpose: d.Source is stack data the extension reads
+		// from the page, not the security origin of the context that logged it, so
+		// this path cannot attribute an origin.
 		out = append(out, cdp.ConsoleEntry{
 			TS:                e.Timestamp,
 			Level:             d.Level,

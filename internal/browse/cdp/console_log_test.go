@@ -62,6 +62,41 @@ func stringArg(s string) map[string]any {
 	return map[string]any{"type": "string", "value": s}
 }
 
+// withStackTrace gives params a stack trace whose top frame is at url:line:column,
+// the way CDP reports the script that made a console call.
+func withStackTrace(params map[string]any, url string, line, col int) map[string]any {
+	params["stackTrace"] = map[string]any{"callFrames": []any{
+		map[string]any{"url": url, "lineNumber": line, "columnNumber": col},
+	}}
+	return params
+}
+
+// TestConsoleAPIEntryRecordsCallingScriptLocation pins that a console API entry
+// carries the top call frame's URL, line and column as its Location, and that an
+// entry with no stack trace, or a frame with no URL, keeps an empty Location.
+func TestConsoleAPIEntryRecordsCallingScriptLocation(t *testing.T) {
+	tgt, stub := newHeadlessCaptureTarget(t, "tab:console-origin")
+	injectConsole(t, tgt, stub, "Runtime.consoleAPICalled", withStackTrace(
+		consoleAPIParams("log", 2000, stringArg("from app")), "http://localhost:5173/src/App.tsx", 12, 5))
+	injectConsole(t, tgt, stub, "Runtime.consoleAPICalled", consoleAPIParams("log", 2001, stringArg("no stack")))
+	injectConsole(t, tgt, stub, "Runtime.consoleAPICalled", withStackTrace(
+		consoleAPIParams("log", 2002, stringArg("no url")), "", 1, 1))
+
+	entries, _ := tgt.ConsoleEntries(10)
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+	if got := entries[0].Location; got != "http://localhost:5173/src/App.tsx:12:5" {
+		t.Fatalf("calling-script location = %q, want the frame's url:line:column", got)
+	}
+	if entries[0].Kind != "console" {
+		t.Fatalf("kind = %q, want console", entries[0].Kind)
+	}
+	if entries[1].Location != "" || entries[2].Location != "" {
+		t.Fatalf("locations without a frame URL = %q, %q, want empty", entries[1].Location, entries[2].Location)
+	}
+}
+
 func TestConsoleEntriesRecordsCallsAndExceptionsWithoutSink(t *testing.T) {
 	tgt, stub := newHeadlessCaptureTarget(t, "tab:console")
 	if tgt.sink != nil {
@@ -227,5 +262,52 @@ func TestBoundedRingWrapsCountsDropsAndClamps(t *testing.T) {
 	var empty boundedRing[int]
 	if got, dropped := empty.newest(5, 5); len(got) != 0 || dropped != 0 {
 		t.Fatalf("empty ring newest = %v dropped %d", got, dropped)
+	}
+}
+
+// inContext names the execution context an event came from, the way CDP does on
+// Runtime.consoleAPICalled and on exceptionDetails.
+func inContext(params map[string]any, id int64) map[string]any {
+	params["executionContextId"] = id
+	return params
+}
+
+// TestConsoleEntryCarriesExecutionContextOrigin pins that a console entry and an
+// exception take the security origin of the execution context they came from,
+// as announced by Runtime.executionContextCreated, and that an entry from a
+// context the target never saw has an empty Origin.
+func TestConsoleEntryCarriesExecutionContextOrigin(t *testing.T) {
+	tgt, stub := newHeadlessCaptureTarget(t, "tab:console-origin-ctx")
+	stub.InjectEvent(tgt.sessionID, "Runtime.executionContextCreated", map[string]any{
+		"context": map[string]any{
+			"id":      7,
+			"origin":  "http://localhost:5173",
+			"auxData": map[string]any{"frameId": "F7", "isDefault": true},
+		},
+	})
+	waitFor(t, func() bool { _, ok := tgt.frameCtx.originOf(7); return ok })
+
+	injectConsole(t, tgt, stub, "Runtime.consoleAPICalled", inContext(consoleAPIParams("log", 3000, stringArg("from page")), 7))
+	injectConsole(t, tgt, stub, "Runtime.consoleAPICalled", inContext(consoleAPIParams("log", 3001, stringArg("unknown realm")), 99))
+	injectConsole(t, tgt, stub, "Runtime.exceptionThrown", map[string]any{
+		"timestamp": 3002.0,
+		"exceptionDetails": map[string]any{
+			"text":               "Uncaught",
+			"executionContextId": 7,
+		},
+	})
+
+	entries, _ := tgt.ConsoleEntries(10)
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+	if entries[0].Origin != "http://localhost:5173" {
+		t.Fatalf("console origin = %q, want the context's origin", entries[0].Origin)
+	}
+	if entries[1].Origin != "" {
+		t.Fatalf("unknown-context origin = %q, want empty", entries[1].Origin)
+	}
+	if entries[2].Origin != "http://localhost:5173" {
+		t.Fatalf("exception origin = %q, want the context's origin", entries[2].Origin)
 	}
 }
