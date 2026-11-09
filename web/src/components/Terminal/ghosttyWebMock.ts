@@ -154,7 +154,15 @@ export class FakeTerminal {
 }
 
 export class FakeFitAddon {
+  static instances: FakeFitAddon[] = [];
+
   fit = vi.fn();
+  /** Undefined by default: the panel's post-layout retry then has nothing to do. */
+  proposeDimensions = vi.fn((): { cols: number; rows: number } | undefined => undefined);
+
+  constructor() {
+    FakeFitAddon.instances.push(this);
+  }
 }
 
 /** The `ghostty-web` module surface the panel uses. */
@@ -177,6 +185,7 @@ export function ghosttyInternalsMock() {
     // that pretends to scale metrics would assert nothing about the renderer.
     applyCellAdjust: vi.fn(),
     applyTerminalTheme: vi.fn(),
+    resyncTerminalViewport: vi.fn(),
   };
 }
 

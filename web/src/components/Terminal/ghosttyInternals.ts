@@ -179,6 +179,35 @@ export function redrawTerminal(term: Terminal): void {
   renderer.render(buffer as unknown as Renderable, true, term.viewportY, term);
 }
 
+/** Re-asserts the canvas from the terminal's CURRENT geometry and repaints the
+ *  whole viewport.
+ *
+ *  `FitAddon.fit()` is a no-op when the proposed cols/rows equal the current
+ *  ones, so it cannot repair a canvas whose backing store went stale while the
+ *  tab was hidden (an ancestor `display: none`; WKWebView in the desktop shell
+ *  is the reported case). The render loop only repaints rows the wasm buffer
+ *  flags as dirty, so a lost/descaled backing store stays broken until
+ *  something re-creates the canvas — which is what a window resize does, and why
+ *  resizing "fixes" it for the user. `CanvasRenderer.resize` is the only
+ *  ghostty-web entry point that re-creates the backing store and re-applies the
+ *  device-pixel transform, so both are restored by calling it here.
+ *
+ *  Call on activation only (one canvas allocate + one full-frame repaint), never
+ *  from the ResizeObserver path. */
+export function resyncTerminalViewport(term: Terminal): void {
+  const renderer = term.renderer;
+  // No renderer means open() has not run (or the terminal is disposed).
+  if (!renderer) return;
+  // Without a buffer the redraw would repaint nothing, so resizing first would
+  // only blank the canvas.
+  if (!term.wasmTerm) return;
+  if (typeof renderer.resize !== "function") {
+    throw new Error("ghostty-web internals changed: CanvasRenderer.resize is not a function");
+  }
+  renderer.resize(term.cols, term.rows);
+  redrawTerminal(term);
+}
+
 /**
  * Applies a theme to an OPEN terminal.
  *

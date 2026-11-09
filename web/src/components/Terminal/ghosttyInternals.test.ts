@@ -4,6 +4,7 @@ import {
   clearBuiltinLinkProviders,
   disableBuiltinMouseReporting,
   disableBuiltinSelectionCopy,
+  resyncTerminalViewport,
   setSelectionAbsolute,
 } from "./ghosttyInternals";
 
@@ -173,6 +174,41 @@ describe("setSelectionAbsolute", () => {
     const sm = makeSelectionManager({ requestRender: undefined });
     expect(() => setSelectionAbsolute(asTerm({ selectionManager: sm }), 0, 0, 0, 0)).toThrow(
       "ghostty-web internals changed: SelectionManager.requestRender is not a function",
+    );
+  });
+});
+
+describe("resyncTerminalViewport", () => {
+  it("re-creates the canvas from the current geometry and repaints in full", () => {
+    const render = vi.fn();
+    const resize = vi.fn();
+    const buffer = { id: "buffer" };
+    const term = asTerm({
+      cols: 120,
+      rows: 40,
+      viewportY: 0,
+      renderer: { resize, render },
+      wasmTerm: buffer,
+    });
+
+    resyncTerminalViewport(term);
+
+    // `renderer.resize` is the only ghostty-web path that re-creates the backing
+    // store and re-applies the device-pixel transform, which a stale hidden-tab
+    // canvas needs.
+    expect(resize).toHaveBeenCalledWith(120, 40);
+    // Full redraw (second argument), otherwise the partial loop repaints only
+    // dirty rows and leaves the rest of the canvas stale.
+    expect(render).toHaveBeenCalledWith(buffer, true, 0, term);
+  });
+
+  it("is a no-op before open()", () => {
+    expect(() => resyncTerminalViewport(asTerm({ cols: 80, rows: 24 }))).not.toThrow();
+  });
+
+  it("throws when the renderer loses resize (a ghostty-web bump)", () => {
+    expect(() => resyncTerminalViewport(asTerm({ cols: 80, rows: 24, renderer: {}, wasmTerm: {} }))).toThrow(
+      "ghostty-web internals changed: CanvasRenderer.resize is not a function",
     );
   });
 });

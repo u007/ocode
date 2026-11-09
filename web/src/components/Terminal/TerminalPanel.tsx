@@ -32,6 +32,7 @@ import {
   clearBuiltinLinkProviders,
   disableBuiltinMouseReporting,
   disableBuiltinSelectionCopy,
+  resyncTerminalViewport,
   setSelectionAbsolute,
 } from "./ghosttyInternals";
 import type { CellAdjust, GhosttyKeybind } from "./terminalAppearance";
@@ -285,6 +286,38 @@ const REMOTE_HISTORY_RESTORE_RETRY_MAX_MS = 8000;
  * afterwards. This only reads gate state; it issues no request.
  */
 const REMOTE_HOST_RECHECK_MS = 10_000;
+
+/**
+ * Delay for the post-layout re-fit.
+ *
+ * ghostty-web's FitAddon silently ignores a `fit()` that arrives within 50 ms of
+ * its own resize (`_isResizing`). A tab switch can hand the terminal a pane that
+ * has not reached its final size yet — a tab strip that re-wraps, a flex layout
+ * pass between `display: none` and visible — and the follow-up ResizeObserver fit
+ * then lands inside that window and is dropped. Nothing else changes the pane, so
+ * the transient proposal sticks until some UNRELATED resize re-fits it (reported
+ * as "I have to resize the window"). One retry past the guard makes the settled
+ * size win; when the pane has already settled, the retry finds nothing to apply and
+ * skips the fit.
+ */
+const FIT_RETRY_MS = 70;
+
+/** What `fitAndResize` did: `skipped` (no layout or no terminal), `deferred` (the
+ *  first fit waits for two frames), `unchanged` or `resized` (cols/rows result). */
+type FitOutcome = "skipped" | "deferred" | "unchanged" | "resized";
+
+/**
+ * Activation repaint, isolated from the effect that calls it. `resyncTerminalViewport`
+ * throws when ghostty-web's renderer loses `resize`, and a throw inside a React
+ * effect unmounts the whole terminal tree; a failed repaint is only cosmetic.
+ */
+function resyncViewportSafely(term: Terminal): void {
+  try {
+    resyncTerminalViewport(term);
+  } catch (err) {
+    console.warn("terminal: viewport resync failed:", err);
+  }
+}
 
 /**
  * Upper bound on history bytes replayed into the emulator on (re)open. The on-disk
@@ -912,25 +945,50 @@ export default function TerminalPanel({
   // container has no layout (hidden tab), which would otherwise force the terminal to
   // a degenerate 1x1 grid and wreck the shell's line wrapping.
   const initialFitDoneRef = useRef(false);
-  const fitAndResize = useRef(() => {
+  /** Pending post-layout re-fit (see FIT_RETRY_MS); one shot per fit. */
+  const fitRetryTimerRef = useRef<number | null>(null);
+  const fitAndResize = useRef((): FitOutcome => {
     const el = containerRef.current;
     const term = termRef.current;
     const fit = fitRef.current;
-    if (!el || !term || !fit) return;
-    if (el.clientWidth === 0 || el.clientHeight === 0) return;
+    if (!el || !term || !fit) return "skipped";
+    if (el.clientWidth === 0 || el.clientHeight === 0) return "skipped";
 
-    const applyFit = () => {
+    // Returns true when fit() changed cols/rows (Terminal.resize repaints then).
+    const applyFit = (): boolean => {
+      const beforeCols = term.cols;
+      const beforeRows = term.rows;
       fit.fit();
       const sock = socketRef.current;
       if (sock && sock.readyState === WebSocket.OPEN) {
         sock.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       }
+      return term.cols !== beforeCols || term.rows !== beforeRows;
     };
 
-    if (initialFitDoneRef.current) {
+    // Never let a pending retry fire against a hidden or disposed container. It
+    // also skips when the pane already matches what a fit would apply: the retry
+    // only has work to do when the 50 ms guard dropped a fit, and re-running a
+    // settled fit repeats the socket resize for nothing.
+    const retry = () => {
+      const current = containerRef.current;
+      if (!current || current.clientWidth === 0 || current.clientHeight === 0) return;
+      const proposed = fit.proposeDimensions();
+      if (!proposed || (proposed.cols === term.cols && proposed.rows === term.rows)) return;
       applyFit();
-      return;
-    }
+    };
+
+    const run = (): FitOutcome => {
+      const resized = applyFit();
+      if (fitRetryTimerRef.current !== null) window.clearTimeout(fitRetryTimerRef.current);
+      fitRetryTimerRef.current = window.setTimeout(() => {
+        fitRetryTimerRef.current = null;
+        retry();
+      }, FIT_RETRY_MS);
+      return resized ? "resized" : "unchanged";
+    };
+
+    if (initialFitDoneRef.current) return run();
 
     // On cold launch the surrounding layout (tab bar, sidebar panels) can
     // still be settling when this first fires, so el.clientWidth may be
@@ -944,9 +1002,10 @@ export default function TerminalPanel({
       requestAnimationFrame(() => {
         if (!containerRef.current || containerRef.current.clientWidth !== w) return;
         initialFitDoneRef.current = true;
-        applyFit();
+        run();
       });
     });
+    return "deferred";
   });
 
   // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
@@ -2183,6 +2242,11 @@ export default function TerminalPanel({
         reconnectTimerRef.current = null;
       }
       reconnectingRef.current = false;
+      // A pending post-layout re-fit must not fire after the terminal is gone.
+      if (fitRetryTimerRef.current !== null) {
+        clearTimeout(fitRetryTimerRef.current);
+        fitRetryTimerRef.current = null;
+      }
       // Closing the socket only detaches the shell server-side: it survives
       // for the detach TTL so a reload/remount reattaches to it. Explicit tab
       // close kills it via DELETE /api/terminal/{id} in the terminal store.
@@ -2287,10 +2351,18 @@ export default function TerminalPanel({
   // while hidden was skipped because the container had no layout.
   // Also focus the terminal so the user can type immediately.
   useEffect(() => {
-    if (active) {
-      fitAndResize.current();
-      if (termRef.current) focusTerminalInput(termRef.current);
-    }
+    if (!active) return;
+    const term = termRef.current;
+    // `fit()` is a no-op when the proposed size matches the current one, so it
+    // cannot repair a canvas whose backing store went stale while the ancestor
+    // was `display: none`. Re-assert the viewport on activation (cheap: one full
+    // repaint) — the same work a window resize does, which is why resizing
+    // "fixes" the terminal for the user. Resync only when the fit ran and left
+    // the size alone: a resize repaints already, and a deferred first fit has
+    // not applied yet, so resyncing now would repaint pre-fit geometry twice.
+    const outcome = fitAndResize.current();
+    if (term && outcome === "unchanged") resyncViewportSafely(term);
+    if (term) focusTerminalInput(term);
   }, [active]);
 
   // Allow the tab bar to focus this shell on single left-click, even when
