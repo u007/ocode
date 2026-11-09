@@ -887,7 +887,7 @@ function HomeApp() {
         return;
       }
       if (!opened) {
-        reportActionErrorMessage(`Could not open ${path}. The server refused the path.`);
+        reportActionErrorMessage(`Could not open ${path}. The server refused the path (it may not exist, or it is outside the allowed roots - try an absolute path under your home, e.g. ~/Downloads/...).`);
         return;
       }
       setActiveView("files");
