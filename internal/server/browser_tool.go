@@ -1026,8 +1026,9 @@ func readPageURL(ctx context.Context, surf browserSurface) pageURLRead {
 }
 
 // tabAt is the " at <url>" part of a guarded read's header. The content guard
-// parses it to skip judging pages on this machine or the private LAN, so the URL
-// must describe the document the content came from. It is written only when the
+// parses it to skip judging a page served from this machine's loopback (a
+// private-LAN page is another machine and stays judged), so the URL must
+// describe the document the content came from. It is written only when the
 // URL read before and the one read after both succeeded and agree. Otherwise it
 // is left out, so the guard judges that result as before: the failure direction
 // is toward scanning, never toward an exemption.
@@ -1150,7 +1151,8 @@ func (b *browserTool) find(ctx context.Context, tabID string, surf browserSurfac
 // console returns the newest entries of the tab's console and exception log.
 // The log starts when the tab is attached, so a headless tab restored earlier
 // starts empty. Its header carries no page URL: the log spans navigations, so
-// the content guard judges each entry by its own origin.
+// the content guard judges every console entry (the recorded origin is display
+// only, never an exemption).
 func (b *browserTool) console(ctx context.Context, tabID string, surf browserSurface, p browserArgs) (string, error) {
 	limit, err := browserListLimit(p.Max)
 	if err != nil {

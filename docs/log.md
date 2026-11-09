@@ -8,6 +8,8 @@
 
 ## 2026-11-09
 
+* **Update**: Browser agent tool — agents see and drive the Chrome tabs of their session's machine ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
 * **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
 * **Update**: Local Speech-to-Text (In-App Dictation) — Design ([superpowers/specs/2026-09-21-speech-to-text-design.md](/superpowers/specs/2026-09-21-speech-to-text-design.md))
 * **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
