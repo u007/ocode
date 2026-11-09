@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/artifacts"
-	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/paths"
 	"golang.org/x/crypto/argon2"
 )
@@ -124,12 +123,25 @@ func newArtifactTokenStore(dir string) (*artifactTokenStore, error) {
 		s.Close()
 		return nil, err
 	}
-	// Retention prune at startup, off the construction path; the serve path
-	// throttles subsequent runs to once per hour.
-	crashguard.Go(func() {
-		s.MaybePruneAccessLog(artifactLogRetention())
-	})
+	// The retention prune does NOT run here. Construction happens in NewHandler,
+	// so a goroutine spawned from it is owned by nobody and outlives the
+	// Handler (every test that builds one leaked a writer racing t.TempDir
+	// cleanup). The prune runs from Serve instead: pruneAccessLogAtStart, once
+	// per process start, synchronously, and skipped under `go test`.
 	return &artifactTokenStore{store: s, pwSem: make(chan struct{}, artifactArgon2Concurrency)}, nil
+}
+
+// pruneAccessLogAtStart applies the access-log retention window once when a
+// server starts serving. Without it, a server that restarts often or serves no
+// public artifact never reaches the serve-path prune (handler_artifact_serve.go)
+// and the log grows without bound. It is synchronous on purpose: one DELETE,
+// no goroutine to own. The caller (Serve) gates it off under `go test`.
+// Nil-safe, because the store is nil when init failed.
+func (st *artifactTokenStore) pruneAccessLogAtStart() {
+	if st == nil || st.store == nil {
+		return
+	}
+	st.store.MaybePruneAccessLog(artifactLogRetention())
 }
 
 // checkPassword verifies a password for token at under the Argon2 semaphore.

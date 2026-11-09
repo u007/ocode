@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tailscale"
 )
@@ -28,6 +30,19 @@ func setHomeTree(t *testing.T, home string) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	// Drain queued live session writes before this test's tree disappears.
+	// t.TempDir was created BEFORE this call, so LIFO cleanup order runs this
+	// flush before RemoveAll — otherwise a session worker still flushing its
+	// snapshot lands inside the directory RemoveAll is walking, and the test
+	// fails on an unrelated TempDir error ("directory not empty"). The worker
+	// captured its storage dir at enqueue time, so the write is aimed at THIS
+	// test's home: nothing else removes it, and FlushAll never unregisters a
+	// worker that is still queued.
+	t.Cleanup(func() {
+		if err := session.FlushAll(2 * time.Second); err != nil {
+			t.Logf("live session flush on cleanup: %v", err)
+		}
+	})
 }
 
 // TestMain isolates every global-config read/write for the whole server test

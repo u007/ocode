@@ -29,6 +29,22 @@ func (h *Hooks) Add(fn func()) (remove func()) {
 	}
 }
 
+// Len reports how many callbacks are currently registered. Removed callbacks
+// leave nil slots and are not counted. Tests use it to pin who registers what
+// on the process-global hook lists (e.g. a Server must not install its
+// config/auth sync hooks until it actually serves).
+func (h *Hooks) Len() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, fn := range h.fns {
+		if fn != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // Fire invokes every registered callback. Nil entries (from removed
 // callbacks) are skipped. Safe to call from within a callback (no
 // reentrancy deadlock — we snapshot under lock).

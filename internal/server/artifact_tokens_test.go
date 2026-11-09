@@ -88,3 +88,15 @@ func TestATS_PruneExpired(t *testing.T) {
 	require.NoError(t, err)
 	st.pruneExpired()
 }
+
+// The startup prune must be safe when the token store failed to initialise
+// (handler.artifactTokens stays nil), and on a live store it must not panic.
+func TestATS_PruneAccessLogAtStart_NilAndLive(t *testing.T) {
+	var nilStore *artifactTokenStore
+	nilStore.pruneAccessLogAtStart()
+
+	st, err := newArtifactTokenStore(t.TempDir())
+	require.NoError(t, err)
+	defer st.store.Close()
+	st.pruneAccessLogAtStart()
+}

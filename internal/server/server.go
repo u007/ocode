@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -182,6 +183,10 @@ type Server struct {
 	artifactTailscaleShare *tailscaleShare
 	tsArtifactShare        *tailscaleShare
 	artifactsShare         *tailscaleShare
+
+	// shutdown is set by Shutdown, under shutdownMu, and stops registerSyncHooks
+	// from re-installing the process-global hooks after teardown.
+	shutdown bool
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -210,14 +215,11 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.procSup = s.procSup
 	h.portMaps = newPortMapRegistry(s.procSup)
 	h.remoteHosts = newRemoteHostRegistry(s.procSup)
-	// Propagate local config/auth changes to already-connected remote
-	// hosts (SSH/WSL) without requiring a reconnect. Best-effort.
-	// The hooks are process-global, so Shutdown removes them: otherwise every
-	// New() leaves a permanent callback pinning its handler.
-	s.removeSyncHooks = []func(){
-		config.OnConfigSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
-		auth.OnCredentialsSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
-	}
+	// The process-global config/auth sync hooks are installed by
+	// registerSyncHooks, which Serve calls — never here. They stay registered
+	// until Shutdown, so constructing a Server that never serves (every test
+	// that drives a Handler directly) would otherwise leave a callback pinning
+	// the dead handler in the global hook lists.
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	// Let the config handlers report exposure state without starting one.
 	h.tailscaleShareSnapshot = s.tsShare.status
@@ -225,6 +227,33 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
+}
+
+// registerSyncHooks installs the process-global callbacks that propagate local
+// config/credential changes to already-connected remote hosts (SSH/WSL) without
+// a reconnect. Best-effort, and installed exactly once per Server.
+//
+// It runs from Serve, NOT from New. The hooks are process-global and live until
+// Shutdown, so registering them at construction left a callback pinning the
+// handler in config.OnConfigSaved / auth.OnCredentialsSaved for every Server
+// that was built and never served — which is what every test that drives a
+// Handler directly does. Guarded by shutdownMu so a Serve racing a Shutdown
+// cannot leave the slice half-written.
+//
+// After Shutdown has run, this is a no-op: Shutdown already removed the hooks,
+// and a Serve that starts afterwards must not re-pin the dead handler with
+// nothing left to remove it.
+func (s *Server) registerSyncHooks() {
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	if s.shutdown || len(s.removeSyncHooks) > 0 {
+		return
+	}
+	h := s.handler
+	s.removeSyncHooks = []func(){
+		config.OnConfigSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
+		auth.OnCredentialsSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
+	}
 }
 
 // ttsCacheRoot is the data dir that holds models/tts. An unresolvable data
@@ -2373,6 +2402,15 @@ func (s *Server) Serve(ln net.Listener) error {
 	// tell a live owner from a recycled pid. Non-fatal by design.
 	cleanupInstance := registerServeInstance(ln.Addr().String(), s.workDir)
 	defer cleanupInstance()
+	// A server that serves is the only one that needs the config/auth sync
+	// hooks, so they are installed here and stay until Shutdown.
+	s.registerSyncHooks()
+	// Startup access-log retention prune. Synchronous (one DELETE, no goroutine
+	// to leak) and skipped under `go test`, so the suite never prunes the
+	// developer's real artifact log; see pruneAccessLogAtStart.
+	if !testing.Testing() && s.handler != nil {
+		s.handler.artifactTokens.pruneAccessLogAtStart()
+	}
 	// Populate the live model caches (OpenRouter, Novita, Groq) in the background so
 	// the model-list endpoint can enrich the embedded snapshot with live models
 	// without ever blocking a request on a network fetch. The Preload* helpers
@@ -2445,7 +2483,17 @@ func (s *Server) serveHandler() http.Handler {
 // in-flight ones. It always returns by the time ctx expires — callers pass a
 // TTL context so a desktop quit never hangs.
 func (s *Server) Shutdown(ctx context.Context) error {
-	for _, remove := range s.removeSyncHooks {
+	// Mark shutdown and snapshot-and-clear in ONE locked section: a Serve
+	// racing this call either registered before it (and its hooks are removed
+	// here) or sees shutdown set and registers nothing. A second Shutdown must
+	// not re-run the removers, so clearing keeps the state honest for the tests
+	// that assert the slice is empty afterwards.
+	s.shutdownMu.Lock()
+	s.shutdown = true
+	syncHooks := s.removeSyncHooks
+	s.removeSyncHooks = nil
+	s.shutdownMu.Unlock()
+	for _, remove := range syncHooks {
 		remove()
 	}
 	if s.handler != nil {
