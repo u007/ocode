@@ -1,14 +1,14 @@
 ---
 type: Concept
 title: Prompt Cache Stability
-description: 'Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints.'
+description: 'Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints, and the one-time busts from the backend-neutral browser schema and the static [ocode:htr_routing] fragment.'
 resource: CLAUDE.md
 tags:
   - prompt-cache
   - anthropic
   - tools
   - discovery
-timestamp: 2026-10-20T01:37:07Z
+timestamp: 2026-11-10T13:59:39Z
 ---
 # Prompt Cache Stability
 
@@ -24,7 +24,35 @@ The agent's base system prompt now also includes a static `[ocode:recap]`
 contract fragment (`recapPromptContent` in `internal/agent/prompt.go`), a const
 so it is cache-safe and re-cached the prefix once when it shipped.
 
-Rules for any change that touches tools or the base prompt:
+## Two one-time busts shipped together (browser backend note)
+
+- **The `browser` tool's schema text changed.** `browserTool.Definition`'s
+  `description` went from `"Drive browser tabs (Chrome, on the machine running
+  this session). …"` to the backend-neutral `"Drive browser tabs on the machine
+  running this session. …"` (`internal/server/browser_tool.go:257`).
+  `Description()` (`browser_tool.go:251`) is already neutral. This is a tools
+  array change, so it invalidated the **whole** cached prefix once — `tools`,
+  then `system`, then `messages` — for every session that carries the tool. It is
+  a one-time re-cache, not a per-turn cost. Leaving a backend name in the schema
+  would have made the tools array claim something the `htrcli` surface cannot
+  honour (it can drive the client's Firefox too), so neutrality is the correct
+  state; do not restore a backend name to "fix" the re-cache.
+- **A new static `[ocode:htr_routing]` system fragment appeared.** It is
+  `htrRoutingPromptContent` (`internal/agent/prompt.go:49`), appended directly
+  after `[ocode:browser_routing]` in `BasePromptMessages`
+  (`prompt.go:317-319`). It is a `const` and its gate is the config flag
+  `browser.htr_enabled` (default true,
+  `internal/config/ocodeconfig.go:1730`), never daemon health — the text itself
+  tells the model to verify with `command -v htrcli` and `htrcli health` — so the
+  prefix stays byte-stable while the daemon starts and stops. It re-cached the
+  `system` block once for sessions with the flag on; flipping the setting
+  re-caches it once more, exactly like any other prompt-shape change. The gate
+  does not require the session to have the `browser` tool: the fragment describes
+  the machine's shell CLI availability, not this agent's toolset. Pinned by
+  `TestHTRRoutingPromptGatedOnConfig` (on, off, nil-config, and `system` role).
+
+## Rules for any change that touches tools or the base prompt
+
 - **Never put per-turn-varying content in `tools` or `system`.** `LoadContext`
   (system) must be a function of stable, preload-time state (config flags), not
   of a per-turn computed result.
@@ -97,7 +125,6 @@ Rules for any change that touches tools or the base prompt:
   persisted and are gone with the splice.
 - **Per-model hard triggers belong in `{MODEL}.OCODE.md`, not in a shared
   fragment.** A model-specific file (e.g. `minimax-m3.OCODE.md` — renamed from the wildcard `minimax-m*.OCODE.md` on 2026-10-21; see the wildcard-vs-exact boundary note below) is injected as the `[ocode:model_context]` system message
-  root) is injected as the `[ocode:model_context]` system message
   (`internal/agent/prompt.go`), so it sits in the cached prefix **for that
   model only** — it cannot change any other model's behaviour, and it does not
   re-cache the prefix for anyone else. The shared `docPromptContent` fragment

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -87,9 +88,10 @@ func pulseCall(method, target string, body any, call func(w http.ResponseWriter,
 	return json.RawMessage(out), nil
 }
 
-// pulseWriteTarget validates a session id a write tool is about to act on:
-// never the assistant itself, never a child session, and it must exist.
-func (h *Handler) pulseWriteTarget(id string) error {
+// pulseWriteTargetChecks validates the parts of a write target that never depend
+// on where the session runs: never the assistant itself, never a child session,
+// and a non-empty id.
+func (h *Handler) pulseWriteTargetChecks(id string) error {
 	if id == "" {
 		return errors.New("session_id is required")
 	}
@@ -99,13 +101,55 @@ func (h *Handler) pulseWriteTarget(id string) error {
 	if strings.Contains(id, childSessionInfix) {
 		return fmt.Errorf("refusing to act on child session %q; act on its parent", id)
 	}
+	return nil
+}
+
+// pulseWriteTarget validates a session id a LOCAL-ONLY write tool is about to act
+// on. A session that runs on a remote host is named and refused: the tool's
+// handler runs in this process and cannot reach it. The host comes only from a
+// fresh, successful board row (pulseRemoteSessionHost), never a guess.
+func (h *Handler) pulseWriteTarget(id string) error {
+	if err := h.pulseWriteTargetChecks(id); err != nil {
+		return err
+	}
 	if _, err := h.sessions.Resolve(id); err != nil {
 		if host := h.pulseRemoteSessionHost(id); host != "" {
-			return fmt.Errorf("session %q runs on remote host %s; acting on a remote session is not supported from the Pulse assistant yet", id, host)
+			return fmt.Errorf("session %q runs on remote host %s; this tool does not act on a remote session yet", id, host)
 		}
 		return fmt.Errorf("session %q not found", id)
 	}
 	return nil
+}
+
+// pulseWriteTargetHost resolves a write target to the remote host it runs on, ""
+// for a local session. explicitHost (an optional tool argument) wins over the
+// cached board row, but it is validated against the saved projects: the board
+// cache alone is never a trust source. A remote id is admitted only by a saved
+// project's host, and the caller must already hold a live connection to it.
+func (h *Handler) pulseWriteTargetHost(id, explicitHost string) (string, error) {
+	if err := h.pulseWriteTargetChecks(id); err != nil {
+		return "", err
+	}
+	if _, err := h.sessions.Resolve(id); err == nil {
+		if strings.TrimSpace(explicitHost) != "" {
+			return "", fmt.Errorf("session %q is local; remove host", id)
+		}
+		return "", nil
+	}
+	host := strings.TrimSpace(explicitHost)
+	if host == "" {
+		host = h.pulseRemoteSessionHost(id)
+	}
+	if host == "" {
+		return "", fmt.Errorf("session %q not found", id)
+	}
+	if err := h.pulseRemoteSessionHostOK(host); err != nil {
+		return "", err
+	}
+	if !h.pulseRemoteHostConnected(host) {
+		return "", pulseRemoteNotConnected(host)
+	}
+	return host, nil
 }
 
 // pulseSessionBusy reports why a message cannot be sent to id right now, or
@@ -161,10 +205,11 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 	return []*pulseTool{
 		{
 			name: "session_send",
-			desc: "Send a message to another session, starting a turn on it. Refused when that session is mid-turn or paused on an ask unless queue=true, in which case the message is persisted and drained when the session goes idle. Needs the operator's approval.",
+			desc: "Send a message to another session, starting a turn on it. Works for a session on a connected remote host too, through that host's own send handler. Refused when that session is mid-turn or paused on an ask unless queue=true, in which case the message is persisted and drained when the session goes idle. Needs the operator's approval.",
 			ask:  true,
 			props: map[string]any{
 				"session_id": str("Target session id"),
+				"host":       str("Optional: the remote host the session runs on. Pass the board row's host for a remote session so the approval dialog names it; omit it for a local session"),
 				"content":    str("The message to send, as the operator would type it"),
 				"queue":      map[string]any{"type": "boolean", "description": "If true, queue the message for when the target is idle instead of refusing"},
 			},
@@ -258,6 +303,7 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		SessionID string `json:"session_id"`
+		Host      string `json:"host,omitempty"`
 		Content   string `json:"content"`
 		Queue     bool   `json:"queue,omitempty"`
 	}
@@ -267,8 +313,12 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 	if strings.TrimSpace(args.Content) == "" {
 		return "", errors.New("content is required")
 	}
-	if err := h.pulseWriteTarget(args.SessionID); err != nil {
+	host, err := h.pulseWriteTargetHost(args.SessionID, args.Host)
+	if err != nil {
 		return "", err
+	}
+	if host != "" {
+		return h.pulseRemoteSessionSend(host, args.SessionID, args.Content, args.Queue)
 	}
 	if err := h.pulseSessionBusy(args.SessionID); err != nil {
 		if !args.Queue {
@@ -289,6 +339,75 @@ func (h *Handler) pulseSessionSendTool(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("send to %s: %w", args.SessionID, err)
 	}
 	return marshalPulseString(map[string]any{"session_id": args.SessionID, "accepted": true})
+}
+
+// pulseRemoteSessionSend delivers session_send to a session that runs on a
+// connected host, through that host's own message/queue handler. The host owns
+// the turn, the pending-ask state and the queue, so this is not a second send
+// path: it is the same handler the web client reaches, over the workspace
+// connection. Nothing here dials; a host without a live connection is refused.
+//
+// Write tools never queue, so a busy target is refused unless the caller asked
+// for queue=true, exactly like a local one. The pre-check reads the host's own
+// session state; the host's dispatch is still the authority if the target starts
+// a turn in between.
+func (h *Handler) pulseRemoteSessionSend(host, id, content string, queue bool) (string, error) {
+	if err := h.pulseRemoteSessionBusy(host, id); err != nil {
+		if !queue {
+			return "", err
+		}
+		if err := h.pulseRemotePostJSON(host, "/api/sessions/"+url.PathEscape(id)+"/queue",
+			map[string]any{"content": content}, nil); err != nil {
+			return "", fmt.Errorf("queue on %s: %w", id, err)
+		}
+		return marshalPulseString(map[string]any{"session_id": id, "queued": true})
+	}
+	if err := h.pulseRemotePostJSON(host, "/api/sessions/"+url.PathEscape(id)+"/message",
+		map[string]any{"content": content, "async": true}, nil); err != nil {
+		return "", fmt.Errorf("send to %s: %w", id, err)
+	}
+	return marshalPulseString(map[string]any{"session_id": id, "accepted": true})
+}
+
+// pulseRemoteSessionBusy reports why a message cannot be sent to a remote
+// session right now, or nil. It reads the host's own session state rather than
+// the cached board: turn_active, compacting and pending_asks are all on
+// GET /api/sessions/{id}/state, so one read decides. A failed read is an error,
+// never an assumed-idle send.
+func (h *Handler) pulseRemoteSessionBusy(host, id string) error {
+	// Pointers, so a field the host did not send is a refusal rather than a
+	// silent zero: TurnActive/Compacting are always serialized by this server, so
+	// absence means the host answered a shape we do not understand.
+	var state struct {
+		TurnActive  *bool        `json:"turn_active"`
+		Compacting  *bool        `json:"compacting"`
+		PendingAsks *PendingAsks `json:"pending_asks"`
+	}
+	if err := h.pulseRemoteGetJSON(host, h.pulseRemotePort(host), "/api/sessions/"+url.PathEscape(id)+"/state", nil, &state); err != nil {
+		return fmt.Errorf("check session %q on %s: %w", id, host, err)
+	}
+	if state.TurnActive == nil || state.Compacting == nil {
+		return fmt.Errorf("session %q on %s answered an unreadable state; refusing to send", id, host)
+	}
+	if *state.TurnActive {
+		return fmt.Errorf("session %s is mid-turn; try again when it finishes", id)
+	}
+	if *state.Compacting {
+		return fmt.Errorf("session %s is compacting; try again when it finishes", id)
+	}
+	if asks := state.PendingAsks; asks != nil {
+		if len(asks.Permissions) > 0 {
+			summary := asks.Permissions[0].Summary
+			if summary == "" {
+				summary = asks.Permissions[0].Tool
+			}
+			return fmt.Errorf("session %s is paused on a pending permission ask (%s); resolve it with permission_resolve first", id, summary)
+		}
+		if len(asks.Questions) > 0 {
+			return fmt.Errorf("session %s is paused on a pending question ask; answer it with question_answer first", id)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) pulseSessionCommandTool(raw json.RawMessage) (string, error) {

@@ -138,6 +138,14 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   const [addPassword, setAddPassword] = useState("");
   // Only read on first setup, where the typed master password must be confirmed.
   const [addConfirm, setAddConfirm] = useState("");
+  const [addTunnelEnabled, setAddTunnelEnabled] = useState(false);
+  const [addTunnelHost, setAddTunnelHost] = useState("");
+  const [addTunnelPort, setAddTunnelPort] = useState("");
+  const [addTunnelRemoteHost, setAddTunnelRemoteHost] = useState("");
+  const [addTunnelRemotePort, setAddTunnelRemotePort] = useState("");
+  const [addTunnelIdentity, setAddTunnelIdentity] = useState("");
+  const [addTunnelAuthMethod, setAddTunnelAuthMethod] = useState<"key" | "password" | "auto">("key");
+  const [addTunnelPassword, setAddTunnelPassword] = useState("");
   const [unlockPassword, setUnlockPassword] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -286,7 +294,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     // the same path goes to the host's server, which validates it against its own
     // allowed roots and reads the host's .env.
     try {
-      const res = await api.dbConnectUnlock(surface, password, ...unlockScope);
+      const res = await api.dbConnectUnlock(surface, password, undefined, ...unlockScope);
       setUnlockFailures(res.failed);
       // Apply the server's answer locally as well, so a failed refresh below
       // cannot leave the panel claiming the opposite of what the server did:
@@ -330,11 +338,30 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       // A template URL is saved in the clear and needs no password; a literal
       // URL is sealed under it. The server enforces the same rule.
       const literal = !addIsTemplate;
-      await api.dbConnectAdd(name, addUrl.trim(), password, target);
+      const tunnel = addTunnelEnabled
+        ? {
+            host: addTunnelHost.trim(),
+            port: addTunnelPort ? Number(addTunnelPort) : undefined,
+            remote_host: addTunnelRemoteHost.trim(),
+            remote_port: Number(addTunnelRemotePort),
+            identity_file: addTunnelIdentity.trim() || undefined,
+            auth_method: addTunnelAuthMethod,
+            password: addTunnelAuthMethod === "password" ? addTunnelPassword : undefined,
+          }
+        : undefined;
+      await api.dbConnectAdd(name, addUrl.trim(), password, target, tunnel);
       setAddUrl("");
       setAddPassword("");
       setAddConfirm("");
       setAddName("");
+      setAddTunnelEnabled(false);
+      setAddTunnelHost("");
+      setAddTunnelPort("");
+      setAddTunnelRemoteHost("");
+      setAddTunnelRemotePort("");
+      setAddTunnelIdentity("");
+      setAddTunnelAuthMethod("key");
+      setAddTunnelPassword("");
       // The connection set changed; a failure recorded for a name that was just
       // (re)added no longer describes the saved state.
       setUnlockFailures((prev) => prev.filter((f) => f.name !== name));
@@ -477,6 +504,22 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             onUrl={setAddUrl}
             onPassword={setAddPassword}
             onConfirmPassword={setAddConfirm}
+            tunnelEnabled={addTunnelEnabled}
+            tunnelHost={addTunnelHost}
+            tunnelPort={addTunnelPort}
+            tunnelRemoteHost={addTunnelRemoteHost}
+            tunnelRemotePort={addTunnelRemotePort}
+            tunnelIdentity={addTunnelIdentity}
+            tunnelAuthMethod={addTunnelAuthMethod}
+            tunnelPassword={addTunnelPassword}
+            onTunnelEnabled={setAddTunnelEnabled}
+            onTunnelHost={setAddTunnelHost}
+            onTunnelPort={setAddTunnelPort}
+            onTunnelRemoteHost={setAddTunnelRemoteHost}
+            onTunnelRemotePort={setAddTunnelRemotePort}
+            onTunnelIdentity={setAddTunnelIdentity}
+            onTunnelAuthMethod={setAddTunnelAuthMethod}
+            onTunnelPassword={setAddTunnelPassword}
           />
           <Button type="submit" size="sm" disabled={addSaveDisabled}>
             Save connection
@@ -606,6 +649,22 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
                 onConfirmPassword={setAddConfirm}
+                tunnelEnabled={addTunnelEnabled}
+                tunnelHost={addTunnelHost}
+                tunnelPort={addTunnelPort}
+                tunnelRemoteHost={addTunnelRemoteHost}
+                tunnelRemotePort={addTunnelRemotePort}
+                tunnelIdentity={addTunnelIdentity}
+                tunnelAuthMethod={addTunnelAuthMethod}
+                tunnelPassword={addTunnelPassword}
+                onTunnelEnabled={setAddTunnelEnabled}
+                onTunnelHost={setAddTunnelHost}
+                onTunnelPort={setAddTunnelPort}
+                onTunnelRemoteHost={setAddTunnelRemoteHost}
+                onTunnelRemotePort={setAddTunnelRemotePort}
+                onTunnelIdentity={setAddTunnelIdentity}
+                onTunnelAuthMethod={setAddTunnelAuthMethod}
+                onTunnelPassword={setAddTunnelPassword}
               />
               <Button type="submit" size="sm" variant="outline" disabled={addSaveDisabled}>
                 Save connection
@@ -791,21 +850,52 @@ function AddFields({
   password,
   confirmPassword,
   firstSetup,
+  tunnelEnabled,
+  tunnelHost,
+  tunnelPort,
+  tunnelRemoteHost,
+  tunnelRemotePort,
+  tunnelIdentity,
+  tunnelAuthMethod,
+  tunnelPassword,
   onName,
   onUrl,
   onPassword,
   onConfirmPassword,
+  onTunnelEnabled,
+  onTunnelHost,
+  onTunnelPort,
+  onTunnelRemoteHost,
+  onTunnelRemotePort,
+  onTunnelIdentity,
+  onTunnelAuthMethod,
+  onTunnelPassword,
 }: {
   name: string;
   url: string;
   password: string;
   confirmPassword: string;
-  /** No connection is saved yet, so this password becomes the master password. */
   firstSetup: boolean;
+  tunnelEnabled: boolean;
+  tunnelHost: string;
+  tunnelPort: string;
+  tunnelRemoteHost: string;
+  tunnelRemotePort: string;
+  tunnelIdentity: string;
+  tunnelAuthMethod: "key" | "password" | "auto";
+  tunnelPassword: string;
   onName: (v: string) => void;
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
   onConfirmPassword: (v: string) => void;
+  onTunnelEnabled: (v: boolean) => void;
+  onTunnelHost: (v: string) => void;
+  onTunnelPort: (v: string) => void;
+  onTunnelRemoteHost: (v: string) => void;
+  onTunnelRemotePort: (v: string) => void;
+  onTunnelIdentity: (v: string) => void;
+  onTunnelAuthMethod: (v: "key" | "password" | "auto") => void;
+  onTunnelPassword: (v: string) => void;
 }) {
   // A URL that references an environment variable is not a secret, so the
   // password field is neither required nor meaningful for it.
@@ -879,6 +969,50 @@ function AddFields({
               ? "Choose a new password now. It is not an existing account password. You will enter it each time you connect, and it cannot be recovered if forgotten."
               : "Required for a literal URL: it seals the value that is saved."}
         </p>
+      </div>
+      <div className="space-y-2 rounded-md border border-border p-2">
+        <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <input type="checkbox" checked={tunnelEnabled} onChange={(e) => onTunnelEnabled(e.target.checked)} />
+          Use SSH tunnel
+        </label>
+        {tunnelEnabled && (
+          <div className="space-y-2">
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              SSH host
+              <Input value={tunnelHost} onChange={(e) => onTunnelHost(e.target.value)} className="h-8 text-xs" />
+            </label>
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              SSH port (optional)
+              <Input value={tunnelPort} onChange={(e) => onTunnelPort(e.target.value)} className="h-8 text-xs" />
+            </label>
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              Remote DB host
+              <Input value={tunnelRemoteHost} onChange={(e) => onTunnelRemoteHost(e.target.value)} className="h-8 text-xs" />
+            </label>
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              Remote DB port
+              <Input value={tunnelRemotePort} onChange={(e) => onTunnelRemotePort(e.target.value)} className="h-8 text-xs" />
+            </label>
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              Identity file (optional)
+              <Input value={tunnelIdentity} onChange={(e) => onTunnelIdentity(e.target.value)} className="h-8 text-xs" />
+            </label>
+            <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+              Auth method
+              <select value={tunnelAuthMethod} onChange={(e) => onTunnelAuthMethod(e.target.value as any)} className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs">
+                <option value="key">Key / agent</option>
+                <option value="password">Password</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+            {tunnelAuthMethod === "password" && (
+              <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+                SSH password
+                <Input type="password" value={tunnelPassword} onChange={(e) => onTunnelPassword(e.target.value)} className="h-8 text-xs" />
+              </label>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

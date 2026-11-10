@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // maxQueryRows caps how many rows QueryReadOnly returns to the caller.
@@ -53,7 +55,17 @@ const sqlstateReadOnlyTx = "25006"
 // a READ ONLY transaction. It matches the SQLSTATE, never the message text.
 func IsReadOnlyViolation(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == sqlstateReadOnlyTx
+	if errors.As(err, &pgErr) && pgErr.Code == sqlstateReadOnlyTx {
+		return true
+	}
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 1290, 1792, 1836: // read-only transaction violations
+			return true
+		}
+	}
+	return false
 }
 
 // serverSideEffectRE matches constructs PostgreSQL accepts inside a READ ONLY
@@ -74,25 +86,103 @@ func HasServerSideEffect(query string) bool {
 	return serverSideEffectRE.MatchString(query)
 }
 
-// Open connects to a DB using the connection URL.
-//
-// Queries use the extended protocol only (QueryExecModeExec). A Parse message
-// carries exactly one statement, so "COMMIT; DELETE …" is rejected by the
-// server instead of running the DELETE outside the read-only transaction.
+// mysqlServerSideEffectRE matches MySQL constructs that a READ ONLY transaction
+// does not stop: they write files on the server, take named locks, or burn CPU
+// or time on purpose. Function forms require the open paren, as in
+// serverSideEffectRE, so a column that shares a function's name is not flagged.
+var mysqlServerSideEffectRE = regexp.MustCompile(`(?i)\b(?:` +
+	`into\s+(?:outfile|dumpfile)\b` +
+	`|(?:get_lock|release_lock|sleep|benchmark|load_file)\s*\(` +
+	`|load\s+data\b` +
+	`)`)
+
+// HasServerSideEffectFor is HasServerSideEffect for the driver named by a
+// connection URL scheme ("mysql" or "postgres"/"postgresql"). For MySQL it also
+// applies mysqlServerSideEffectRE. The PostgreSQL behavior is unchanged.
+func HasServerSideEffectFor(scheme, query string) bool {
+	if scheme == "mysql" && mysqlServerSideEffectRE.MatchString(query) {
+		return true
+	}
+	return serverSideEffectRE.MatchString(query)
+}
+
+// HasServerSideEffectDB is HasServerSideEffectFor for an already-open handle,
+// choosing the driver from db itself.
+func HasServerSideEffectDB(db *sql.DB, query string) bool {
+	if isMySQLDB(db) {
+		return HasServerSideEffectFor("mysql", query)
+	}
+	return HasServerSideEffect(query)
+}
+
+// Open connects to a DB using the connection URL. The scheme selects the
+// driver: postgres/postgresql -> pgx, mysql -> go-sql-driver/mysql.
 func Open(ctx context.Context, connURL string) (*sql.DB, error) {
-	if _, err := ParseURL(connURL); err != nil {
+	u, err := ParseURL(connURL)
+	if err != nil {
 		return nil, err
 	}
-	cfg, err := pgx.ParseConfig(connURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse db config: %w", err)
+	switch u.Scheme {
+	case "mysql":
+		return openMySQL(ctx, connURL)
+	default:
+		cfg, err := pgx.ParseConfig(connURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse db config: %w", err)
+		}
+		cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
+		db := stdlib.OpenDB(*cfg)
+		if err := db.PingContext(ctx); err != nil {
+			return nil, fmt.Errorf("ping db: %w", err)
+		}
+		return db, nil
 	}
-	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
-	db := stdlib.OpenDB(*cfg)
+}
+
+// openMySQL connects to a MySQL database using the mysql driver.
+func openMySQL(ctx context.Context, connURL string) (*sql.DB, error) {
+	dsn, err := mysqlDSN(connURL)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
 	if err := db.PingContext(ctx); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	return db, nil
+}
+
+// mysqlDSN converts a mysql:// URL to a go-sql-driver/mysql DSN.
+func mysqlDSN(connURL string) (string, error) {
+	u, err := url.Parse(connURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid connection url")
+	}
+	cfg := mysql.Config{
+		User:   u.User.Username(),
+		DBName: strings.TrimPrefix(u.Path, "/"),
+		Net:    "tcp",
+		Addr:   u.Host,
+		Params: map[string]string{},
+	}
+	if p, ok := u.User.Password(); ok {
+		cfg.Passwd = p
+	}
+	if cfg.Addr == "" {
+		cfg.Addr = "127.0.0.1:3306"
+	} else if !strings.Contains(cfg.Addr, ":") {
+		cfg.Addr += ":3306"
+	}
+	for k, v := range u.Query() {
+		if len(v) > 0 {
+			cfg.Params[k] = v[0]
+		}
+	}
+	return cfg.FormatDSN(), nil
 }
 
 // QueryReadOnly runs one statement inside a READ ONLY transaction and returns
@@ -175,6 +265,36 @@ var dbRedirectParams = map[string]bool{
 	"sslrootcert": true,
 }
 
+// mysqlDangerousParams are go-sql-driver/mysql query parameters that read
+// local files or enable multi-statement execution, so a repo-supplied URL
+// must not be able to turn them on.
+var mysqlDangerousParams = map[string]bool{
+	"allowallfiles":            true,
+	"localinfile":              true,
+	"interpolateparams":        true,
+	"multistatements":          true,
+	"allowcleartextpasswords":  true,
+	"allownativepasswords":     true,
+	"allowfallbacktoplaintext": true,
+	"allowoldpasswords":        true,
+}
+
+// mysqlTLSWeakened reports whether a go-sql-driver tls= value turns TLS off or
+// lets it fall back to plaintext or skip certificate verification. The driver
+// reads "0"/"false" (any case) as off, "preferred" as plaintext fallback and
+// "skip-verify" as unverified TLS. Only "true"-style values and registered
+// custom TLS config names are left allowed.
+func mysqlTLSWeakened(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "skip-verify" || v == "preferred" {
+		return true
+	}
+	if b, err := strconv.ParseBool(v); err == nil && !b {
+		return true
+	}
+	return false
+}
+
 // ParseURL validates a postgres:// URL.
 //
 // A '#' is refused outright. pgx's URI parser is libpq-compatible, not RFC 3986:
@@ -194,7 +314,7 @@ func ParseURL(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid connection url")
 	}
-	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "mysql" {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
 	}
 	// Parse the query the way pgx does (split on '&', decode the key) instead
@@ -211,12 +331,50 @@ func ParseURL(raw string) (*url.URL, error) {
 			// parameter behind an escape pgx would still decode.
 			return nil, fmt.Errorf("invalid connection url")
 		}
-		if dbRedirectParams[strings.ToLower(decoded)] {
+		dangerous := dbRedirectParams
+		if u.Scheme == "mysql" {
+			dangerous = mysqlDangerousParams
+		}
+		if dangerous[strings.ToLower(decoded)] {
 			// Name the parameter only: its value may be a path or a secret.
 			return nil, fmt.Errorf("connection parameter %q is not allowed", decoded)
 		}
+		// Value-level guard for MySQL: never allow TLS to be turned off, downgraded
+		// to plaintext, or left unverified.
+		if u.Scheme == "mysql" && strings.EqualFold(decoded, "tls") {
+			_, val, _ := strings.Cut(pair, "=")
+			if v, verr := url.QueryUnescape(val); verr != nil || mysqlTLSWeakened(v) {
+				return nil, fmt.Errorf("connection parameter %q value is not allowed", decoded)
+			}
+		}
 	}
 	return u, nil
+}
+
+// listTablesPostgresSQL and listTablesMySQLSQL each take (limit, offset). The
+// MySQL form restricts to base tables so it matches pg_tables, which has no views.
+const (
+	listTablesPostgresSQL = "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename LIMIT $1 OFFSET $2"
+	listTablesMySQLSQL    = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name LIMIT ? OFFSET ?"
+)
+
+// isMySQLDB reports whether db was opened with the go-sql-driver/mysql driver.
+// database/sql exposes the driver through the connector, so no extra state is
+// tracked alongside the *sql.DB.
+func isMySQLDB(db *sql.DB) bool {
+	switch db.Driver().(type) {
+	case *mysql.MySQLDriver, mysql.MySQLDriver:
+		return true
+	}
+	return false
+}
+
+// listTablesSQL returns the table-listing query for db's driver.
+func listTablesSQL(db *sql.DB) string {
+	if isMySQLDB(db) {
+		return listTablesMySQLSQL
+	}
+	return listTablesPostgresSQL
 }
 
 // TablePage is one page of public table names, sorted. HasMore reports whether
@@ -229,9 +387,7 @@ type TablePage struct {
 // ListTables returns one page of public table names, sorted by name. It fetches
 // one extra row to learn whether another page exists.
 func ListTables(ctx context.Context, db *sql.DB, limit, offset int) (TablePage, error) {
-	rows, err := db.QueryContext(ctx,
-		"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename LIMIT $1 OFFSET $2",
-		limit+1, offset)
+	rows, err := db.QueryContext(ctx, listTablesSQL(db), limit+1, offset)
 	if err != nil {
 		return TablePage{}, fmt.Errorf("list tables: %w", err)
 	}
@@ -252,4 +408,29 @@ func ListTables(ctx context.Context, db *sql.DB, limit, offset int) (TablePage, 
 		return TablePage{}, fmt.Errorf("list tables: rows: %w", err)
 	}
 	return page, nil
+}
+
+// SealPassword encrypts a raw secret (e.g. an SSH password) under the master
+// password. It does not validate the value as a URL.
+func SealPassword(secret, password string) (string, error) {
+	if secret == "" {
+		return "", fmt.Errorf("secret is required")
+	}
+	if password == "" {
+		return "", fmt.Errorf("master password is required")
+	}
+	sealed, err := encryption.EncryptJSON([]byte(secret), password)
+	if err != nil {
+		return "", fmt.Errorf("seal password: %w", err)
+	}
+	return sealed, nil
+}
+
+// OpenPassword decrypts a value from SealPassword.
+func OpenPassword(sealed, password string) (string, error) {
+	plain, err := encryption.DecryptJSON(sealed, password)
+	if err != nil {
+		return "", fmt.Errorf("open password: %w", err)
+	}
+	return string(plain), nil
 }

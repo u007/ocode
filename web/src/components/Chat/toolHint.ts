@@ -79,6 +79,39 @@ export function formatToolArgsHint(tool: string, argsJson?: string): string {
     }
     case "write":
       return `write ${first("path", "file_path")}`;
+    case "edit":
+      return `edit ${first("path", "file_path")}`;
+    case "multiedit":
+      return `multiedit ${first("path", "file_path", "filePath")}`;
+    case "delete":
+      return `delete ${first("path", "file_path")}`;
+    case "replace_lines": {
+      const p = first("path", "file_path");
+      const start = first("start_line");
+      const end = first("end_line");
+      if (p && start && end) return `replace_lines ${p}:${start}-${end}`;
+      if (p && start) return `replace_lines ${p}:${start}`;
+      return `replace_lines ${p}`;
+    }
+    case "multi_file_edit": {
+      const edits = Array.isArray(args?.edits) ? (args.edits as Array<Record<string, unknown>>) : [];
+      const paths = edits
+        .map((e) => (typeof e?.path === "string" ? (e.path as string) : ""))
+        .filter(Boolean);
+      if (paths.length === 0) return "multi_file_edit";
+      if (paths.length === 1) return `multi_file_edit ${paths[0]}`;
+      return `multi_file_edit ${paths[0]} (+${paths.length - 1})`;
+    }
+    case "apply_patch": {
+      const patch = typeof args?.patchText === "string" ? (args.patchText as string) : (typeof args?.patch === "string" ? (args.patch as string) : "");
+      const files: string[] = [];
+      for (const m of patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)) {
+        files.push(m[1].trim());
+      }
+      if (files.length === 0) return "apply_patch";
+      if (files.length === 1) return `apply_patch ${files[0]}`;
+      return `apply_patch ${files[0]} (+${files.length - 1})`;
+    }
     case "skill":
     // load_skill is the registered alias (internal/tool/misc.go SkillAliasTool)
     // that some models guess instead of "skill"; without this case it rendered

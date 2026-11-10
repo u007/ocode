@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-11-06T12:25:20Z
+timestamp: 2026-11-09T17:22:16Z
 ---
 # File Editor Grants — Editor-Only Out-of-Project Access
 
@@ -242,6 +242,9 @@ file (`MarkdownLink` → `openFile` → the Files tab). The browser cannot read
 Pinned by `TestFileGrant_HomeTildePathExpandsThenContained`
 (`internal/server/handler_file_grants_test.go`). Why other link shapes stay
 no-op: [chat file links silent no-op](../gotchas/chat-file-links-silent-noop.md).
+
+Prose auto-linkification is a separate path from an authored `[x](~/...)` href:
+[the prose auto-linkifier](../gotchas/chat-file-links-silent-noop.md#prose-auto-links-vs-markdown-hrefs).
 
 ## Verification
 

@@ -47,13 +47,18 @@ type pulseRemoteFake struct {
 	histories  int
 
 	// board and session endpoints
-	pulseHits int
-	boardRows []PulseRow
-	messages  []agent.Message
-	asks      *PendingAsks
-	killed    []string
-	attached  []string // terminal ids created by a websocket attach
-	attachDir []string // project_path of each attach
+	pulseHits  int
+	boardRows  []PulseRow
+	messages   []agent.Message
+	asks       *PendingAsks
+	turnActive bool
+	compacting bool
+	stateErr   bool
+	sent       []string // contents POSTed to /api/sessions/{id}/message
+	queued     []string // contents POSTed to /api/sessions/{id}/queue
+	killed     []string
+	attached   []string // terminal ids created by a websocket attach
+	attachDir  []string // project_path of each attach
 
 	// firstFrame, when set, replaces the attach frame the terminal websocket sends first.
 	firstFrame string
@@ -181,9 +186,45 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 	}))
 	mux.HandleFunc("GET /api/sessions/{id}/state", auth(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		asks := f.asks
+		asks, active, compacting, stateErr := f.asks, f.turnActive, f.compacting, f.stateErr
 		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"pending_asks": asks})
+		if stateErr {
+			http.Error(w, `{"error":"state unavailable"}`, http.StatusInternalServerError)
+			return
+		}
+		// pending_asks is omitempty on the real host, so an idle session omits it.
+		resp := map[string]any{
+			"session_id":  r.PathValue("id"),
+			"turn_active": active,
+			"compacting":  compacting,
+		}
+		if asks != nil {
+			resp["pending_asks"] = asks
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	mux.HandleFunc("POST /api/sessions/{id}/message", auth(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Content string `json:"content"`
+			Async   bool   `json:"async"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.sent = append(f.sent, body.Content)
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": r.PathValue("id")})
+	}))
+	mux.HandleFunc("POST /api/sessions/{id}/queue", auth(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.queued = append(f.queued, body.Content)
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"session_id": r.PathValue("id"), "queued": true})
 	}))
 	mux.HandleFunc("DELETE /api/terminal/{id}", auth(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -611,10 +652,107 @@ func TestSessionToolsReadARemoteSessionThroughItsHost(t *testing.T) {
 	if _, err := runPulseTool(t, h, "session_read", `{"session_id":"rs-1","host":"evil@elsewhere"}`); err == nil {
 		t.Fatal("a host that is not a saved project's host must be refused")
 	}
-	// Acting on a remote session says why it cannot, instead of "not found".
-	_, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"hi"}`)
-	if err == nil || !strings.Contains(err.Error(), "remote host "+pulseRemoteTestHost) {
-		t.Fatalf("a write to a remote session must name the host, got %v", err)
+
+	// session_send reaches the host's own message endpoint instead of refusing a
+	// remote session, so the assistant can hand work to a session it can only see
+	// on the board.
+	f.mu.Lock()
+	f.asks = nil
+	f.mu.Unlock()
+	if out := mustPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"continue the work"}`); !strings.Contains(out, "accepted") {
+		t.Fatalf("remote send = %s", out)
+	}
+	f.mu.Lock()
+	sent := append([]string{}, f.sent...)
+	f.mu.Unlock()
+	if len(sent) != 1 || sent[0] != "continue the work" {
+		t.Fatalf("the host must receive the message, got %v", sent)
+	}
+
+	// A busy target is refused unless queue=true; queueing goes to the host.
+	f.mu.Lock()
+	f.turnActive = true
+	f.mu.Unlock()
+	if _, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"busy"}`); err == nil || !strings.Contains(err.Error(), "mid-turn") {
+		t.Fatalf("a mid-turn target must be refused, got %v", err)
+	}
+	if out := mustPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"queued work","queue":true}`); !strings.Contains(out, "queued") {
+		t.Fatalf("remote queue = %s", out)
+	}
+	f.mu.Lock()
+	queued := append([]string{}, f.queued...)
+	f.turnActive = false
+	f.mu.Unlock()
+	if len(queued) != 1 || queued[0] != "queued work" {
+		t.Fatalf("the host must receive the queued message, got %v", queued)
+	}
+
+	// Compacting is refused too; comm-status carries it like turn_active.
+	f.mu.Lock()
+	f.compacting = true
+	f.mu.Unlock()
+	if _, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"compacting"}`); err == nil || !strings.Contains(err.Error(), "compacting") {
+		t.Fatalf("a compacting target must be refused, got %v", err)
+	}
+	f.mu.Lock()
+	f.compacting = false
+	f.mu.Unlock()
+
+	// A target paused on an ask is refused without queue, like a local one.
+	f.mu.Lock()
+	f.asks = &PendingAsks{Permissions: []PermissionEvent{{RequestID: "req-2", Tool: "bash", Summary: "run secret-command"}}}
+	f.mu.Unlock()
+	if _, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"paused"}`); err == nil || !strings.Contains(err.Error(), "pending permission ask") {
+		t.Fatalf("a target paused on an ask must be refused, got %v", err)
+	}
+	f.mu.Lock()
+	f.asks = nil
+	f.mu.Unlock()
+
+	// An unreadable state is a refusal, never an assumed-idle send.
+	f.mu.Lock()
+	f.stateErr = true
+	f.mu.Unlock()
+	if _, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","content":"unknown"}`); err == nil || !strings.Contains(err.Error(), "state unavailable") {
+		t.Fatalf("an unreadable host state must refuse the send, got %v", err)
+	}
+	f.mu.Lock()
+	f.stateErr = false
+	f.mu.Unlock()
+
+	// The assistant's own session is refused before any host resolution.
+	if _, err := runPulseTool(t, h, "session_send", fmt.Sprintf(`{"session_id":%q,"content":"hi"}`, pulseSessionPrefix+"x")); err == nil || !strings.Contains(err.Error(), "assistant's own session") {
+		t.Fatalf("the assistant's own session must be refused, got %v", err)
+	}
+
+	// The host must be a saved project's host, never just a cached board row.
+	if _, err := runPulseTool(t, h, "session_send", `{"session_id":"rs-1","host":"evil@elsewhere","content":"hi"}`); err == nil || !strings.Contains(err.Error(), "saved project") {
+		t.Fatalf("an unsaved host must be refused, got %v", err)
+	}
+}
+
+// A saved host with no live connection must be refused, never dialed from a
+// send tool: the connect-wait rules keep a slow connect from parking the turn.
+func TestSessionSendRefusesADisconnectedRemoteHost(t *testing.T) {
+	h := pulseRemoteTestHandler(t, nil)
+	send := func() error {
+		_, err := runPulseTool(t, h, "session_send", fmt.Sprintf(`{"session_id":"rs-1","host":%q,"content":"hi"}`, pulseRemoteTestHost))
+		return err
+	}
+	if err := send(); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("a disconnected host must be refused, got %v", err)
+	}
+
+	// An entry for a connect still in flight is not "connected": the send path
+	// uses connectedWorkspace, so it refuses immediately instead of parking on the
+	// connect (there is no 502/503 here; the refusal is the not-connected error).
+	h.remoteHosts.mu.Lock()
+	e := &remoteHostEntry{startedAt: time.Now()}
+	e.connecting.L = &e.mu
+	h.remoteHosts.byConn[remoteConnectionKey(pulseRemoteTestHost, 0)] = e
+	h.remoteHosts.mu.Unlock()
+	if err := send(); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("a host mid-connect must be refused, not parked, got %v", err)
 	}
 }
 

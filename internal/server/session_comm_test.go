@@ -216,6 +216,20 @@ func TestSessionCommSelfTargetCanonicalAlias(t *testing.T) {
 	}
 }
 
+// TestSessionCommRefusesAHostFromANormalSession: the shared subset must not let a
+// normal session name a remote host, even though the Pulse assistant's own
+// session_send now accepts one.
+func TestSessionCommRefusesAHostFromANormalSession(t *testing.T) {
+	h := pulseTestHandler(t)
+	h.workDir = "/work/allowed"
+	registerLiveSession(t, h, "ses_me", "/work/allowed", false, []agent.Message{{Role: "user", Content: "hi"}})
+	tl := commToolByName(t, h, "ses_me", "session_send")
+	_, err := tl.Execute(json.RawMessage(`{"session_id":"ses_x","host":"dev@box","content":"hi"}`))
+	if err == nil || !strings.Contains(err.Error(), "not reachable from a normal session") {
+		t.Fatalf("a normal session must not name a remote host, got %v", err)
+	}
+}
+
 // TestQueueRefusesTargetWithoutResidentAgent: a TUI-owned or disk-only session
 // has no agent on this server. The queue must refuse it up front (409) and
 // persist nothing, instead of writing a file the TUI owns.

@@ -1,7 +1,7 @@
 ---
 type: Concept
-title: Browser agent tool — agents see and drive the Chrome tabs of their session's machine
-description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome or, with an htrcli token, the client''s browser over htrcli, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
+title: Browser agent tool — agents see and drive the browser tabs of their session's machine
+description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), the backend-neutral tool schema and the static [ocode:htr_routing] shell-htrcli availability fragment, element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome or, with an htrcli token, the client''s browser over htrcli, subagents (own instances, same permission asks), the screenshot coordinate contract, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
 tags:
   - browser
   - agent
@@ -13,7 +13,9 @@ tags:
   - remote
   - web
   - desktop
-timestamp: 2026-11-09T11:22:59Z
+  - htr
+  - htrcli
+timestamp: 2026-11-10T13:56:43Z
 ---
 # Browser agent tool
 
@@ -47,6 +49,44 @@ htrcli token (see Wiring and the htrcli section). The TUI's own chat agent does 
 - The tool is bound to the session's project root (`newBrowserTool`). Its
   `Definition` is static: the action enum and the named-key enum are sorted, and
   no tab id is ever in the schema.
+
+## Tool schema and the HTR routing prompt
+
+- **The schema names no backend.** `browserTool.Definition` describes the tool as
+  "Drive browser tabs on the machine running this session."
+  (`internal/server/browser_tool.go`), and `Description()` as "Drive browser tabs
+  on this machine: the project's Browser-panel tabs and tabs opened with
+  action=open." The old definition said "Chrome", which stopped being true once a
+  remote host's htrcli surface could drive the client's Firefox as well. Neutral
+  text is also what keeps the tools array byte-stable across backends — it is part
+  of the cached prompt prefix; see
+  [prompt-cache-stability](prompt-cache-stability.md).
+- **The HTR fragment describes a shell CLI, not a backend choice.** A static
+  `[ocode:htr_routing]` system fragment (`htrRoutingPromptContent`,
+  `internal/agent/prompt.go`) is appended directly after `[ocode:browser_routing]`
+  in `BasePromptMessages`. It says htrcli (HTR NControl) is available on this
+  machine for browser automation from the shell — recording, network mocking,
+  contexts and raw commands — to prefer `browser_run`/`browser` for page tasks
+  when those tools are present, and to verify availability with
+  `command -v htrcli` and `htrcli health`. It also says the fragment may be
+  present while the daemon is down, so the model must check before relying on it.
+  It makes no claim about a default backend: on a local host the agent `browser`
+  tool always drives Chrome. htrcli reaches the agent tool only on a remote host
+  that has a token (Wiring and the htrcli section); locally the supervised
+  `htrcli serve` daemon started by `StartBrowse` serves the embedded browser
+  panel's extension, not the agent tool. See
+  [prompt-cache-stability](prompt-cache-stability.md).
+- **Gated on config, never on daemon health.** The gate is `browser.htr_enabled`
+  (default true) — not whether `htrcli` is installed or its daemon is up — so the
+  fragment is emitted while the daemon is down, and the fragment itself says to
+  check. Emitting it statically keeps the cached prefix byte-stable; a per-turn
+  health probe would bust the system block whenever the daemon started or stopped.
+  This is the HTR analogue of the boot-time surface choice in Wiring: both are
+  decided from stable state, and both are verified per call.
+- **Emitted for any session with the flag on**, whether or not that session holds
+  the `browser` tool: it describes the machine's shell CLI availability, not this
+  agent's toolset. `TestHTRRoutingPromptGatedOnConfig` pins the on/off/nil-config cases and
+  the `system` role.
 
 ## Subagents
 

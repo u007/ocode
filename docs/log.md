@@ -6,6 +6,29 @@
 
 
 
+
+
+## 2026-11-11
+
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
+* **Update**: Inter-session communication — shared tools and HTTP surface for agents to inspect and drive other sessions ([concepts/inter-session-communication.md](/concepts/inter-session-communication.md))
+## 2026-11-10
+
+* **Update**: DB Connector: per-project config (.ocode/db.json) + SSH tunnel ([concepts/db-connector-ssh-tunnel.md](/concepts/db-connector-ssh-tunnel.md))
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: Browser agent tool — agents see and drive the browser tabs of their session's machine ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
+* **Update**: Browser agent tool — agents see and drive the browser tabs of their session's machine ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: DB Connector: per-project config (.ocode/db.json) + SSH tunnel ([concepts/db-connector-ssh-tunnel.md](/concepts/db-connector-ssh-tunnel.md))
+* **Creation**: DB Connector: per-project config (.ocode/db.json) + SSH tunnel ([concepts/db-connector-ssh-tunnel.md](/concepts/db-connector-ssh-tunnel.md))
+* **Update**: File search result ordering: shortest path first ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
+* **Update**: File tree walk: node budget, symlink budget, and truncation ([concepts/file-tree-walk-budget.md](/concepts/file-tree-walk-budget.md))
+* **Creation**: Remote (SSH/WSL) Files-tab content search: one grep invocation ([concepts/remote-files-content-search.md](/concepts/remote-files-content-search.md))
+* **Update**: Chat file links with relative or ~ hrefs silently did nothing ([gotchas/chat-file-links-silent-noop.md](/gotchas/chat-file-links-silent-noop.md))
+* **Update**: File Editor Grants — Editor-Only Out-of-Project Access ([concepts/file-editor-grants.md](/concepts/file-editor-grants.md))
+* **Update**: Chat file links with relative or ~ hrefs silently did nothing ([gotchas/chat-file-links-silent-noop.md](/gotchas/chat-file-links-silent-noop.md))
 ## 2026-11-09
 
 * **Update**: Browser agent tool — agents see and drive the Chrome tabs of their session's machine ([concepts/browser-agent-tools.md](/concepts/browser-agent-tools.md))

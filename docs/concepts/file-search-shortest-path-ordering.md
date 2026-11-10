@@ -11,7 +11,7 @@ tags:
   - file picker
   - truncation
   - index
-timestamp: 2026-11-03T15:19:36Z
+timestamp: 2026-11-10T02:53:57Z
 ---
 # File search result ordering: shortest path first
 
@@ -101,3 +101,4 @@ flag: see [File tree walk: node budget, symlink budget, and truncation](./file-t
 - [File tree walk: node budget, symlink budget, and truncation](./file-tree-walk-budget.md) — what the picker's index contains, why it can be truncated, and how the truncation is surfaced.
 - [Web file search relevance ranking](../CHANGES.md) — the 2026-09-02 entry that established relevance-first semantics.
 - [File search UX](../concepts/file-search.md) — broader file search design context (if present).
+- [Remote (SSH/WSL) Files-tab content search: one grep invocation](./remote-files-content-search.md) — content search is a deliberate ordering carve-out, and this describes the remote grep path that produces that batch.

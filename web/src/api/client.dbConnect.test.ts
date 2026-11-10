@@ -72,7 +72,7 @@ describe("dbConnectUnlock wire shape", () => {
   it("sends project_path, never session_id", async () => {
     const fetchMock = stubFetch({ unlocked: ["env"], failed: [] });
 
-    await api.dbConnectUnlock("s1", "", "/proj");
+    await api.dbConnectUnlock("s1", "", undefined, "/proj");
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(body).toEqual({ surface: "s1", password: "", project_path: "/proj" });
@@ -82,7 +82,7 @@ describe("dbConnectUnlock wire shape", () => {
   it("normalises null unlocked/failed to empty arrays", async () => {
     stubFetch({ unlocked: null, failed: null });
 
-    await expect(api.dbConnectUnlock("s1", "", "/proj")).resolves.toEqual({
+    await expect(api.dbConnectUnlock("s1", "", undefined, "/proj")).resolves.toEqual({
       unlocked: [],
       failed: [],
     });
@@ -94,7 +94,7 @@ describe("dbConnectUnlock wire shape", () => {
       failed: [{ name: "break", error: 'environment variable "DB_URL" is not set' }],
     });
 
-    const res = await api.dbConnectUnlock("s1", "", "/proj");
+    const res = await api.dbConnectUnlock("s1", "", undefined, "/proj");
 
     expect(res.unlocked).toEqual(["keep"]);
     expect(res.failed).toEqual([
@@ -125,7 +125,7 @@ describe("dbConnectUnlock project scope", () => {
   it("sends a local project's path to this server with no host header", async () => {
     const fetchMock = stubFetch({ unlocked: [], failed: [] });
 
-    await api.dbConnectUnlock("s1", "", "/proj");
+    await api.dbConnectUnlock("s1", "", undefined, "/proj");
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/api/dbconnect/unlock");
@@ -136,7 +136,7 @@ describe("dbConnectUnlock project scope", () => {
   it("routes a remote scope to its host, sending the path as header and body", async () => {
     const fetchMock = stubFetch({ unlocked: [], failed: [] });
 
-    await api.dbConnectUnlock("s1", "", "/srv/app", { host: "me@box", projectPath: "/srv/app" });
+    await api.dbConnectUnlock("s1", "", undefined, "/srv/app", { host: "me@box", projectPath: "/srv/app" });
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/api/remote/me%40box/api/dbconnect/unlock");
@@ -147,7 +147,7 @@ describe("dbConnectUnlock project scope", () => {
   it("throws, without calling the server, for a remote path given without its host", () => {
     const fetchMock = stubFetch({ unlocked: [], failed: [] });
 
-    expect(() => unlockUntyped("s1", "", "/srv/app", { projectPath: "/srv/app" })).toThrow(
+    expect(() => unlockUntyped("s1", "", undefined, "/srv/app", { projectPath: "/srv/app" })).toThrow(
       "without its host",
     );
     expect(fetchMock).not.toHaveBeenCalled();
@@ -156,7 +156,7 @@ describe("dbConnectUnlock project scope", () => {
   it("throws, without calling the server, for a remote host given without its path", () => {
     const fetchMock = stubFetch({ unlocked: [], failed: [] });
 
-    expect(() => unlockUntyped("s1", "", undefined, { host: "me@box", projectPath: "/srv/app" })).toThrow(
+    expect(() => unlockUntyped("s1", "", undefined, undefined, { host: "me@box", projectPath: "/srv/app" })).toThrow(
       "without its project path",
     );
     expect(fetchMock).not.toHaveBeenCalled();
@@ -168,7 +168,7 @@ describe("dbConnectUnlock project scope", () => {
       // @ts-expect-error a remote host needs its project path
       api.dbConnectUnlock("s1", "", undefined, { host: "me@box", projectPath: "/srv/app" });
       // @ts-expect-error a remote project path needs its host
-      api.dbConnectUnlock("s1", "", "/srv/app", { projectPath: "/srv/app" });
+      api.dbConnectUnlock("s1", "", undefined, "/srv/app", { projectPath: "/srv/app" });
     };
     expect(neverCalled).toBeTypeOf("function");
   });

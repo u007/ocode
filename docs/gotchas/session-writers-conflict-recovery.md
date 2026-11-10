@@ -281,7 +281,7 @@ Regression tests are in `internal/session/ask_resolve_test.go`:
 `HandleDismissQuestion` (`internal/server/handler_questions.go:123`; the log call is at `:140`) calls `slog.Info("question dismiss", "session", ..., "request_id", ..., "pulse", ..., "remote", ...)` to trace the caller. The repo sets no slog default, so slog's default handler writes the record through the stdlib `log` package, and `cmd/ocode-desktop` tees `log` output into `desktop.log`. The line reads `<YYYY/MM/DD> <HH:MM:SS> INFO question dismiss session=<id> request_id=<id> pulse=<true|false> remote=<addr>`. An empty value prints as `""`: `session=""` when the request omits `session_id`, and `remote=""` for a Pulse call, which has no `RemoteAddr`. `pulse` is `isPulseOrigin`, true for the in-process Pulse tool. User-Agent, Referer and X-Requested-With are deliberately not logged, because a Referer can carry a URL with tokens or paths. The original dismissal of this incident was not attributed. Candidate callers are
 the dialog's "Don't answer" button (`useChat` `cancelQuestion`, which posts to
 `/api/questions/cancel`), the Pulse tool `pulseQuestionDismissTool`
-(`internal/server/pulse_tools_write.go:569`, reached through `pulseCall` and
+(`internal/server/pulse_tools_write.go:700`, reached through `pulseCall` and
 identified by `isPulseOrigin`), and `web/src/components/Pulse/PulseFocusPane.tsx`.
 The next dismissal logs whether it came from the Pulse tool (`pulse=true`) or a remote address. It does not separate the dialog's button from `PulseFocusPane`, since both send an ordinary browser request.
 

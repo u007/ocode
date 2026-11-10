@@ -10,14 +10,32 @@ const EXT =
   "tsx?|jsx?|go|py|rs|rb|java|kt|swift|c|cc|cpp|cxx|h|hh|hpp|cs|php|scala|sh|bash|zsh|sql|json|jsonc|ya?ml|toml|ini|md|mdx|txt|csv|css|scss|sass|less|html?|xml|vue|svelte|lua|dart|ex|exs|erl|clj|hs|ml|proto|gradle|dockerfile|mod|sum|lock";
 
 // A path token is either:
-//   1. an `.ocode/uploads/`-anchored path (see UPLOAD_SOURCE below), or
-//   2. anchored by a leading ./  ../  or /  (clearly a path), or
-//   3. a (possibly nested) path whose final segment ends in a code extension.
+//   1. a home-relative `~/...` path (see HOME_SOURCE below), or
+//   2. an `.ocode/uploads/`-anchored path (see UPLOAD_SOURCE below), or
+//   3. anchored by a leading ./  ../  or /  (clearly a path), or
+//   4. a (possibly nested) path whose final segment ends in a code extension.
 // Each may carry a trailing :line or :line:col suffix (e.g. handler.go:42).
 // GUARD prevents starting mid-token or inside a URL ("https://host/path"); the
 // extension guard (?!\w) forces the longest extension (package.json, not .js).
 const LINE = "(?::\\d+(?::\\d+)?)?";
-const GUARD = "(?<![\\w:/.\\-])";
+// The FINAL segment may not end in ".": prose ends sentences with it ("see
+// ~/Downloads/notes."), and a token that keeps the period links a path that
+// does not exist. Dots stay legal INSIDE a segment, so ~/a.b.c and .env still
+// match whole. Intermediate segments need no such rule — a "/" follows them.
+const SEG_TAIL = "[\\w.\\-]*[\\w\\-]";
+// `~` is in the guard so a home-relative path can never match a SECOND time
+// from its own slash: that produced a link on "/Downloads/foo" (a ROOT path)
+// with the "~" left as prose, so clicking it tried to open /Downloads/foo.
+const GUARD = "(?<![\\w:/.\\-~])";
+
+// Home-relative paths ("~/Downloads/notes/") are how agents report scratch and
+// out-of-project work. The "~" must stay INSIDE the token (the SPA does not
+// expand it — the server owning that $HOME does, via projects.ExpandHome), and
+// a trailing slash belongs to the token too: it is what makes a directory look
+// like one, and the grant path opens a directory in the file tree.
+// `~user/...` is deliberately NOT matched: ExpandHome leaves it alone, so it
+// would resolve against the cwd instead of that user's home.
+const HOME_SOURCE = `~/(?:[\\w.\\-]+/)*${SEG_TAIL}/?${LINE}`;
 
 // Uploads are referenced in chat by the relative path `.ocode/uploads/<name>`
 // (see CLAUDE.md "Web/Desktop Server"), and macOS screenshot names contain
@@ -31,8 +49,10 @@ const UPLOAD_SOURCE =
   `\\.ocode/uploads/[\\w.\\-]+(?:[ \\u00A0\\u202F]+[\\w.\\-]+)*\\.(?:${UPLOAD_EXT})(?![\\w])${LINE}`;
 const PATH_SOURCE =
   `${GUARD}(?:` +
+  HOME_SOURCE +
+  `|` +
   UPLOAD_SOURCE +
-  `|(?:\\.{1,2}/|/)[\\w.\\-]+(?:/[\\w.\\-]+)*${LINE}` +
+  `|(?:\\.{1,2}/|/)(?:[\\w.\\-]+/)*${SEG_TAIL}${LINE}` +
   `|[\\w.\\-]+(?:/[\\w.\\-]+)*\\.(?:${EXT})(?![\\w])${LINE}` +
   `)`;
 

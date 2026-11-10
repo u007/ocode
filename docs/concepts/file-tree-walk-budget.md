@@ -11,7 +11,7 @@ tags:
   - server
   - web
   - budget
-timestamp: 2026-11-05T06:53:03Z
+timestamp: 2026-11-10T02:53:39Z
 ---
 # File tree walk: node budget, symlink budget, and truncation
 
@@ -152,3 +152,4 @@ All mutation-verified.
 ## Cross-links
 
 - [File search result ordering: shortest path first](./file-search-shortest-path-ordering.md) — the ordering applied to the picker's *filtered* results, and what the index contains.
+- [Remote (SSH/WSL) Files-tab content search: one grep invocation](./remote-files-content-search.md) — the remote content grep path behind `remoteSearchFiles`, which is separate from this tree walk and has its own root-prune and include/exclude gotchas.

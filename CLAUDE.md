@@ -766,7 +766,18 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
   command is an error. Never add a "send it as chat text" fallback.
 - **Write tools never queue.** `session_send` refuses a target that is mid-turn,
   compacting or paused on an ask. Write tools reuse the HTTP handlers through
-  `pulseCall`; do not copy their logic.
+  `pulseCall`; do not copy their logic. **A remote target is Pulse-only.** When
+  the session is not local, `pulseWriteTargetHost` resolves the host from the
+  board row (or an explicit `host`, always validated against saved projects) and
+  refuses a host with no live connection — it never dials. The busy pre-check reads
+  the host's `GET /api/sessions/{id}/state` (`turn_active`, `compacting`,
+  `pending_asks`) and treats a missing field or a failed read as a refusal, then the
+  same host handler is reached over the workspace connection
+  (`pulseRemotePostJSON` → `/api/sessions/{id}/message` or `/queue`).
+  The other write tools (`session_command`, `permission_resolve`,
+  `question_answer`, `question_dismiss`, `session_close`) stay local-only and
+  name the host. `sessionCommScope` still refuses `host`, so this does not widen
+  the non-Pulse subset.
 - **No pre-built agent on `GET /api/pulse/assistant`:** the first message builds it,
   so profile resolution matches the message path (a pre-build forced a rebuild and
   an illegal bootstrap transition).

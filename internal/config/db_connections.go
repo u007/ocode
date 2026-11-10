@@ -10,9 +10,22 @@ import (
 // verification and the locked write. The caller must re-verify and retry.
 var ErrDBConnectionsChanged = errors.New("saved db connections changed; retry")
 
-// DBDriverPostgres is the only driver a saved DB connection may use in P1.
+// DBDriverPostgres and DBDriverMySQL are the drivers a saved DB connection may use.
 // SQLite browsing takes a local file path and is not stored here.
 const DBDriverPostgres = "postgres"
+const DBDriverMySQL = "mysql"
+
+// DBTunnel describes an optional SSH tunnel. Stored in project config only.
+type DBTunnel struct {
+	Host         string `json:"host"`
+	Port         int    `json:"port,omitempty"`
+	LocalPort    int    `json:"local_port,omitempty"`
+	RemoteHost   string `json:"remote_host"`
+	RemotePort   int    `json:"remote_port"`
+	IdentityFile string `json:"identity_file,omitempty"`
+	AuthMethod   string `json:"auth_method,omitempty"`
+	Password     string `json:"password,omitempty"`
+}
 
 // DBEnvTemplatesKey is the ocodeconfig.json top-level key that holds the
 // environment templates of saved database connections, as a name -> template
@@ -57,7 +70,8 @@ type DBConnection struct {
 	// EnvTemplate is a template resolved against the environment at unlock
 	// time. It is omitted from the JSON when empty, so a literal connection's
 	// on-disk shape is unchanged.
-	EnvTemplate string `json:"env_template,omitempty"`
+	EnvTemplate string    `json:"env_template,omitempty"`
+	Tunnel      *DBTunnel `json:"tunnel,omitempty"`
 }
 
 // DBConfig is the ocodeconfig.json "db" section.
@@ -117,7 +131,7 @@ func AddDBConnection(conn DBConnection, verified []DBConnection) error {
 	if conn.Name == "" {
 		return fmt.Errorf("db connection name is required")
 	}
-	if conn.Driver != DBDriverPostgres {
+	if conn.Driver != DBDriverPostgres && conn.Driver != DBDriverMySQL {
 		return fmt.Errorf("unsupported db driver %q", conn.Driver)
 	}
 	// Exactly one of the two URL forms must be present. A connection with

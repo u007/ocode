@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -34,17 +36,67 @@ import (
 //     everything is walked (same as the local includeIgnored path).
 //   - regex: the pattern is validated as Go RE2 by parseSearchParams but
 //     executed as POSIX grep -E (ERE). RE2-only constructs (e.g. \p{...},
-//     (?:...), (?i:...)) pass validation then fail remotely — the grep
-//     stderr surfaces in the returned error, never silent "no results"
-//     (grep exit 2 propagates; exit 1 stays the empty-result case).
+//     (?:...), (?i:...)) pass validation then fail remotely. KNOWN
+//     LIMITATION: the output is bounded by `head`, so the pipeline's exit
+//     status is head's — grep's own exit 2 (bad pattern/option) is masked
+//     and shows up as an empty result. Only a failed cd/root check (exit 3,
+//     emitted before the pipeline) reaches the caller as an error.
 func remoteSearchFiles(ctx context.Context, rw remoteWork, p fileSearchParams) ([]FileSearchResult, bool, error) {
 	if len(p.keywords) == 0 {
 		return []FileSearchResult{}, false, nil
 	}
+	script, base, cerr := remoteSearchCommand(rw, p)
+	if cerr != nil {
+		return nil, false, cerr
+	}
+	out, err := remoteRun(ctx, rw, script)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			// grep exits 1 on no matches — that's an empty result, not a
+			// failure. Any other status (2: bad pattern/options; 3: the root
+			// could not be entered) propagates as an error so the caller can
+			// surface it instead of reporting a silent "no results".
+			return []FileSearchResult{}, false, nil
+		}
+		return nil, false, err
+	}
+	results, capped := parseRemoteSearchOutput(out, base)
+	return results, capped, nil
+}
+
+// remoteSearchCommand builds the single remote shell command for the content
+// search and returns the path prefix its output lines carry (the searched
+// directory's basename).
+//
+// The command must NOT be `cd <root> && grep … .`. grep matches --exclude-dir
+// patterns against the search ROOT as well as its children, and the ".*"
+// pattern that skips dot-directories also matches the operand "." — so grep
+// prunes the root itself and every remote content search silently returns
+// zero matches (GNU grep 3.11 and BSD grep 2.6.0 both do this). Naming the
+// directory instead (`cd <parent> && grep … <name>`) keeps the hidden-dir
+// exclusion while the root, now a plain basename, never matches a dot
+// pattern. Output paths are therefore "<name>/rel"; parseRemoteSearchOutput
+// strips that prefix to recover project-relative paths.
+func remoteSearchCommand(rw remoteWork, p fileSearchParams) (command, base string, err error) {
+	root := strings.TrimRight(rw.Path, "/")
+	if root == "" {
+		root = "/"
+	}
+	dir, base := path.Dir(root), path.Base(root)
+	if base == "." || base == "/" {
+		// A relative "." (or filesystem root) cannot be named without
+		// re-introducing the root-prune bug. Registered remote projects are
+		// absolute or "~/"-rooted, so refuse instead of returning nothing.
+		return "", "", fmt.Errorf("remote search root must name a directory, got %q", rw.Path)
+	}
 	// Extra-keyword AND: run grep once per keyword over the previous
 	// output. Simpler: pipe them.
-	script := "cd " + remote.ShellQuotePath(rw.Path) + " && "
 	var chain strings.Builder
+	// A stale/missing project path exits 3 so it is an error, not an empty
+	// result (grep's own status is hidden behind the pipe to head). The root
+	// itself is checked because the cd targets its PARENT.
+	chain.WriteString("cd " + remote.ShellQuotePath(dir) + " || exit 3; [ -d " + remote.ShellQuote(base) + " ] || exit 3; ")
 	chain.WriteString("grep -rIn")
 	if !p.caseSensitive {
 		chain.WriteString(" -i")
@@ -56,6 +108,15 @@ func remoteSearchFiles(ctx context.Context, rw remoteWork, p fileSearchParams) (
 		chain.WriteString(" -E -e " + remote.ShellQuote(p.keywords[0]))
 	} else {
 		chain.WriteString(" -e " + remote.ShellQuote(p.keywords[0]))
+	}
+	// Extensions go BEFORE any --exclude: GNU grep only honours --include
+	// when the --include/--exclude pair starts with --include. With
+	// --exclude first, grep searches EVERY file and the include filter is
+	// silently dropped. (--exclude-dir is not part of the pair, so it can
+	// precede --include, but keeping includes first is simpler and safe on
+	// both GNU and BSD grep.)
+	for _, e := range p.exts {
+		chain.WriteString(" --include=" + remote.ShellQuote("*."+e))
 	}
 	if !p.includeIgnored {
 		// Mirror the local walk's default skips (searchFiles: .git,
@@ -70,10 +131,7 @@ func remoteSearchFiles(ctx context.Context, rw remoteWork, p fileSearchParams) (
 	for _, ig := range p.ignorePatterns {
 		chain.WriteString(" --exclude=" + remote.ShellQuote(ig))
 	}
-	for _, e := range p.exts {
-		chain.WriteString(" --include=" + remote.ShellQuote("*."+e))
-	}
-	chain.WriteString(" . 2>/dev/null")
+	chain.WriteString(" " + remote.ShellQuote(base) + " 2>/dev/null")
 	for _, kw := range extraKw(p.keywords) {
 		chain.WriteString(" | grep")
 		if !p.caseSensitive {
@@ -85,20 +143,17 @@ func remoteSearchFiles(ctx context.Context, rw remoteWork, p fileSearchParams) (
 		chain.WriteString(" -e " + remote.ShellQuote(kw))
 	}
 	chain.WriteString(" | head -n " + strconv.Itoa(maxSearchResults+1))
-	script += chain.String()
-	out, err := remoteRun(ctx, rw, script)
-	if err != nil {
-		// grep exits 1 on no matches — that's an empty result, not a
-		// failure. Exit 2 (bad pattern/options, e.g. an RE2-only regex
-		// under grep -E) propagates as an error so the caller can
-		// surface stderr instead of reporting silent "no results".
-		if strings.Contains(err.Error(), "exit status 1") || strings.Contains(err.Error(), "exit 1") {
-			return []FileSearchResult{}, false, nil
-		}
-		return nil, false, err
-	}
+	return chain.String(), base, nil
+}
+
+// parseRemoteSearchOutput parses `grep -rIn` output whose paths are prefixed
+// with base (the searched directory's basename), decoding each
+// "path:line:text" record and stripping the prefix to a project-relative
+// path. More than maxSearchResults records sets capped.
+func parseRemoteSearchOutput(out, base string) ([]FileSearchResult, bool) {
 	results := []FileSearchResult{}
 	capped := false
+	prefix := base + "/"
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
@@ -123,9 +178,9 @@ func remoteSearchFiles(ctx context.Context, rw remoteWork, p fileSearchParams) (
 		if len([]rune(text)) > maxRunes {
 			text = string([]rune(text)[:maxRunes])
 		}
-		results = append(results, FileSearchResult{Path: strings.TrimPrefix(rel, "./"), Line: ln, Text: text})
+		results = append(results, FileSearchResult{Path: strings.TrimPrefix(rel, prefix), Line: ln, Text: text})
 	}
-	return results, capped, nil
+	return results, capped
 }
 
 // extraKw returns keywords[1:] (the grep pipeline's AND keywords).

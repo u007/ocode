@@ -52,6 +52,23 @@ func (h *Handler) pulseRemoteGetJSON(host string, port int, path string, query u
 	return h.pulseRemoteRequest(host, port, http.MethodGet, path, query, pulseRemoteTimeout, pulseRemoteBodyCap, out)
 }
 
+// pulseRemotePostJSON POSTs a JSON body to a connected host's own server, so a
+// remote write reuses the host's handler instead of a second implementation.
+func (h *Handler) pulseRemotePostJSON(host, path string, body, out any) error {
+	if h.remoteHosts == nil {
+		return errors.New("remote connections are not available on this server")
+	}
+	ws, ok := h.remoteHosts.connectedWorkspace(host, h.pulseRemotePort(host))
+	if !ok {
+		return pulseRemoteNotConnected(host)
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encode request: %w", err)
+	}
+	return remoteCallBodyCtx(context.Background(), ws, host, http.MethodPost, path, nil, payload, pulseRemoteTimeout, pulseRemoteBodyCap, out)
+}
+
 // pulseRemoteRequest is one request to a connected host's own server, under its
 // own deadline. A 2xx is success; out, when non-nil, receives the JSON body (a 204
 // or a nil out ignores it). Any other status is a *pulseRemoteStatusError. It never
@@ -83,6 +100,13 @@ func pulseRemoteCall(ws remoteHostWorkspace, host, method, path string, query ur
 // request-scoped caller (the remote git turn guard) aborts with its own request
 // instead of outliving it.
 func remoteCallCtx(ctx context.Context, ws remoteHostWorkspace, host, method, path string, query url.Values, timeout time.Duration, bodyCap int64, out any) error {
+	return remoteCallBodyCtx(ctx, ws, host, method, path, query, nil, timeout, bodyCap, out)
+}
+
+// remoteCallBodyCtx is remoteCallCtx with an optional JSON request body, so a
+// remote write can reach the host's own handler instead of re-implementing it.
+// A nil/empty body sends no body and no Content-Type, exactly like a read.
+func remoteCallBodyCtx(ctx context.Context, ws remoteHostWorkspace, host, method, path string, query url.Values, body []byte, timeout time.Duration, bodyCap int64, out any) error {
 	apiURL, err := url.Parse(ws.APIURL())
 	if err != nil {
 		return fmt.Errorf("parse API URL: %w", err)
@@ -90,9 +114,16 @@ func remoteCallCtx(ctx context.Context, ws remoteHostWorkspace, host, method, pa
 	target := apiURL.ResolveReference(&url.URL{Path: path, RawQuery: query.Encode()})
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+	var bodyReader io.Reader
+	if len(body) > 0 {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target.String(), bodyReader)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
+	}
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if tok := ws.Token(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
@@ -102,27 +133,27 @@ func remoteCallCtx(ctx context.Context, ws remoteHostWorkspace, host, method, pa
 		return fmt.Errorf("host %s: %w", host, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyCap+1))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, bodyCap+1))
 	if err != nil {
 		return fmt.Errorf("host %s: read response: %w", host, err)
 	}
-	if int64(len(body)) > bodyCap {
+	if int64(len(respBody)) > bodyCap {
 		return fmt.Errorf("host %s: response is over %d MiB", host, bodyCap>>20)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var e struct {
 			Error string `json:"error"`
 		}
-		msg := strings.TrimSpace(string(body))
-		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		msg := strings.TrimSpace(string(respBody))
+		if json.Unmarshal(respBody, &e) == nil && e.Error != "" {
 			msg = e.Error
 		}
 		return &pulseRemoteStatusError{Host: host, Status: resp.StatusCode, Msg: msg}
 	}
-	if out == nil || resp.StatusCode == http.StatusNoContent || len(bytes.TrimSpace(body)) == 0 {
+	if out == nil || resp.StatusCode == http.StatusNoContent || len(bytes.TrimSpace(respBody)) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(body, out); err != nil {
+	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("host %s: decode response: %w", host, err)
 	}
 	return nil

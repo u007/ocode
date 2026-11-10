@@ -24,7 +24,7 @@ describe("formatToolArgsHint", () => {
 
   it("returns empty for tools without a summary", () => {
     expect(formatToolArgsHint("glob", '{"pattern":"**/*.ts"}')).toBe("");
-    expect(formatToolArgsHint("edit", '{"path":"/src/app.ts"}')).toBe("");
+    expect(formatToolArgsHint("edit", '{"path":"/src/app.ts"}')).toBe("edit /src/app.ts");
   });
 
   it("returns empty for missing or malformed arguments", () => {

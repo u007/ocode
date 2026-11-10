@@ -1458,6 +1458,8 @@ describe("ChatPanel", () => {
     expect(groupedItem?.textContent).toContain('content of a.go');
     expect(groupedItem?.textContent).toContain('b.go');
     expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
+    // Parallel tool calls render inside a shared wrapper div.
+    expect(container.querySelector('[data-testid="parallel-tool-calls"]')).toBeTruthy();
   });
 
   it("keeps a row's disclosure state across the turn-end snapshot that replaces every message object", async () => {

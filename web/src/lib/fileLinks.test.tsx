@@ -120,6 +120,103 @@ describe("fileLinks", () => {
       expect(container.querySelectorAll('[role="link"]')).toHaveLength(0);
     });
 
+    // Home-relative paths are what agents report for scratch/out-of-project
+    // work ("the sample is at ~/Downloads/foo/"). The link must carry the "~"
+    // AND the trailing slash: a token that starts at the "/" is a ROOT path,
+    // so the server would look for /Downloads/foo and refuse it.
+    it("linkifies a home-relative path with a trailing slash, keeping the ~", () => {
+      const handler = vi.fn();
+      window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+      const nodes = linkifyPlainText("sample is at ~/Downloads/word-editor-sample/ today");
+      const { container } = render(<div>{nodes}</div>);
+      const link = container.querySelector('[role="link"]') as HTMLElement;
+      expect(link).toBeTruthy();
+      expect(link.textContent).toBe("~/Downloads/word-editor-sample/");
+      fireEvent.click(link);
+      expect((handler.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        path: "~/Downloads/word-editor-sample/",
+        line: undefined,
+      });
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    });
+
+    it("linkifies a home-relative file path, with and without :line", () => {
+      const nodes = linkifyPlainText("open ~/Downloads/notes.md and ~/.config/opencode/auth.json:12");
+      const { container } = render(<div>{nodes}</div>);
+      const links = Array.from(container.querySelectorAll('[role="link"]')) as HTMLElement[];
+      expect(links.map((l) => l.textContent)).toEqual([
+        "~/Downloads/notes.md",
+        "~/.config/opencode/auth.json:12",
+      ]);
+      const handler = vi.fn();
+      window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+      fireEvent.click(links[1]);
+      expect((handler.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        path: "~/.config/opencode/auth.json",
+        line: 12,
+      });
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    });
+
+    it("linkifies a home-relative path inside markdown prose", () => {
+      render(
+        // @ts-expect-error custom hast element
+        <ReactMarkdown rehypePlugins={[rehypeFileLinks]} components={{ filelink: FileLinkFromNode }}>
+          {"the output is in ~/Downloads/word-editor-sample/ now"}
+        </ReactMarkdown>,
+      );
+      const link = document.querySelector('[role="link"]') as HTMLElement;
+      expect(link).toBeTruthy();
+      expect(link.textContent).toBe("~/Downloads/word-editor-sample/");
+    });
+
+    it("linkifies the exact reported sentence without swallowing the ;", () => {
+      const text =
+        "the sample is valid at ~/Downloads/word-editor-sample/; the expected behaviors are code-derived";
+      const nodes = linkifyPlainText(text);
+      const { container } = render(<div>{nodes}</div>);
+      const link = container.querySelector('[role="link"]') as HTMLElement;
+      expect(link.textContent).toBe("~/Downloads/word-editor-sample/");
+      // the punctuation stays prose, outside the link
+      expect(container.textContent).toBe(text);
+    });
+
+    it("does not swallow a sentence-ending period into the path", () => {
+      const nodes = linkifyPlainText("the dump is in ~/Downloads/notes. Also see /Users/x/notes.");
+      const { container } = render(<div>{nodes}</div>);
+      const links = Array.from(container.querySelectorAll('[role="link"]')) as HTMLElement[];
+      expect(links.map((l) => l.textContent)).toEqual(["~/Downloads/notes", "/Users/x/notes"]);
+      expect(container.textContent).toBe("the dump is in ~/Downloads/notes. Also see /Users/x/notes.");
+    });
+
+    it("keeps dots INSIDE a segment and a dot-leading name whole", () => {
+      const nodes = linkifyPlainText("see ~/a.b.c and ~/.env and ~/.config/opencode/auth.json");
+      const { container } = render(<div>{nodes}</div>);
+      const links = Array.from(container.querySelectorAll('[role="link"]')) as HTMLElement[];
+      expect(links.map((l) => l.textContent)).toEqual([
+        "~/a.b.c",
+        "~/.env",
+        "~/.config/opencode/auth.json",
+      ]);
+    });
+
+    it("does not linkify a bare ~, '~user/x', or a mid-word tilde", () => {
+      const nodes = linkifyPlainText("about ~100 files, and ~/ alone, and ~foo/bar, and a~/b");
+      const { container } = render(<div>{nodes}</div>);
+      expect(container.querySelectorAll('[role="link"]')).toHaveLength(0);
+    });
+
+    it("keeps plain absolute and relative paths working (regression guards)", () => {
+      const nodes = linkifyPlainText("see /etc/hosts and ./web/src/App.tsx and src/app.ts:10");
+      const { container } = render(<div>{nodes}</div>);
+      const links = Array.from(container.querySelectorAll('[role="link"]')) as HTMLElement[];
+      expect(links.map((l) => l.textContent)).toEqual([
+        "/etc/hosts",
+        "./web/src/App.tsx",
+        "src/app.ts:10",
+      ]);
+    });
+
     it("handler in App would switch Files tab - event contract", async () => {
       // Simulate the App listener: on event, it calls openFileAndShow which sets activeView="files"
       let activeView = "sessions";

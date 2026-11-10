@@ -8,7 +8,7 @@ tags:
   - server
   - api
   - permissions
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-10T16:24:41Z
 ---
 # Inter-session communication — shared tools and HTTP surface for agents to inspect and drive other sessions
 
@@ -110,7 +110,9 @@ without loading the whole transcript.
 - **Remote hosts are read-only here.** `session_read`, `session_recap` and `session_ask`
   accept a board row `host`; `session_send`, `session_command`, `permission_resolve`,
   `question_answer`, `question_dismiss` and `session_close` refuse a remote session with
-  an error naming the host.
+  an error naming the host. That limit is the shared subset's: the Pulse assistant's own
+  `session_send` does reach a remote session through the host's message/queue handler
+  ([pulse-assistant.md](pulse-assistant.md), "Remote hosts").
 - **Cross-process blindness.** A session held by another `ocode` process is invisible
   until it persists, the same limitation as the Pulse assistant.
 - **`session_read` prefers live state.** It takes `as.mu.TryLock()` and falls back to

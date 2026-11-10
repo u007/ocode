@@ -66,7 +66,7 @@ func TestOpenURLRejectsMalformedEnvelope(t *testing.T) {
 }
 
 func TestSealURLRejectsBadURLAndEmptyPassword(t *testing.T) {
-	if _, err := SealURL("mysql://localhost/db", "master-pw"); err == nil {
+	if _, err := SealURL("oracle://localhost/db", "master-pw"); err == nil {
 		t.Fatal("SealURL accepted a non-postgres URL")
 	}
 	if _, err := SealURL(testPGURL, ""); err == nil {

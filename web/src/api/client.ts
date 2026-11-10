@@ -1049,6 +1049,17 @@ export interface DBConnectTarget {
   projectPath?: string;
 }
 
+export interface DBConnectTunnel {
+  host: string;
+  port?: number;
+  local_port?: number;
+  remote_host: string;
+  remote_port: number;
+  identity_file?: string;
+  auth_method?: "key" | "password" | "auto";
+  password?: string;
+}
+
 /** A remote project's host and its path. The path travels with the host: the
  *  host validates it against its own allowed roots. */
 export interface DBRemoteTarget {
@@ -4809,7 +4820,9 @@ export const api = {
   // Null lists are normalised here, once, at the fetch boundary.
   dbConnectList: (surface: string, target?: DBConnectTarget) =>
     fetchJSON<{ connections: DBConnectConnectionWire[] | null }>(
-      `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
+      `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}${
+        target?.projectPath ? `&project_path=${encodeURIComponent(target.projectPath)}` : ""
+      }`,
       undefined,
       target?.host,
       target?.projectPath,
@@ -4826,19 +4839,21 @@ export const api = {
     })),
   /** `password` is required only for a literal (sealed) URL. An environment
    *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
-  dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget) =>
+  dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget, tunnel?: DBConnectTunnel) =>
     fetchJSON<{ name: string }>(
       "/api/dbconnect/connections",
       {
         method: "POST",
-        body: JSON.stringify({ name, url, password }),
+        body: JSON.stringify({ name, url, password, project_path: target?.projectPath, tunnel }),
       },
       target?.host,
       target?.projectPath,
     ),
   dbConnectRemove: (name: string, target?: DBConnectTarget) =>
     fetchEmpty(
-      `/api/dbconnect/connections/${encodeURIComponent(name)}`,
+      `/api/dbconnect/connections/${encodeURIComponent(name)}${
+        target?.projectPath ? `?project_path=${encodeURIComponent(target.projectPath)}` : ""
+      }`,
       { method: "DELETE" },
       target?.host,
       target?.projectPath,
@@ -4850,7 +4865,7 @@ export const api = {
    *  and a runtime throw). An empty password unlocks only those connections;
    *  sealed connections still need the master password. A template that fails is
    *  reported in `failed`; the others are still granted. */
-  dbConnectUnlock: (surface: string, password: string, ...scope: DBUnlockScope) => {
+  dbConnectUnlock: (surface: string, password: string, tunnelPassword?: string, ...scope: DBUnlockScope) => {
     const [projectPath, target] = scope;
     // Untyped callers (JS, casts) can still pass a half-specified remote scope.
     if (target && !target.host)
@@ -4861,7 +4876,7 @@ export const api = {
       "/api/dbconnect/unlock",
       {
         method: "POST",
-        body: JSON.stringify({ surface, password, project_path: projectPath }),
+        body: JSON.stringify({ surface, password, tunnel_password: tunnelPassword, project_path: projectPath }),
       },
       target?.host,
       target?.projectPath,

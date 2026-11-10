@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -31,6 +32,7 @@ func (h *Handler) Shutdown(ctx context.Context) {
 	if h.remoteHosts != nil {
 		h.remoteHosts.closeAll(ctx)
 	}
+	remote.DefaultDBTunnelManager().StopAll()
 }
 
 // flushLiveSessionWrites drains session workers' queued snapshots so a quit

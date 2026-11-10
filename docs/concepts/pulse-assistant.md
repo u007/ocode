@@ -10,7 +10,7 @@ tags:
   - server
   - api
   - prompt-cache
-timestamp: 2026-10-19T00:00:00Z
+timestamp: 2026-11-10T16:37:26Z
 ---
 # Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)
 
@@ -359,7 +359,7 @@ rule; the ask tools keep the normal permission dialog. See
 | `terminal_screen` | `terminal_id`, `host?` | `{terminal_id, host?, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
 | `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
-| `session_send` | `session_id`, `content`, `queue?` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage`. With `queue: true` on a busy target: `{session_id, queued: true}` | **asks**; refuses the assistant's own id, child ids and unknown sessions. A target that is mid-turn, compacting or paused on an ask is refused unless `queue: true`, in which case the message is persisted, pushed onto its pending queue (cap 10) and drained when it goes idle (`scheduleQueueDrain`). On an idle target `queue` is ignored and the send starts immediately. The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
+| `session_send` | `session_id`, `content`, `queue?`, `host?` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage`. With `queue: true` on a busy target: `{session_id, queued: true}` | **asks**; refuses the assistant's own id, child ids and unknown sessions. A target that is mid-turn, compacting or paused on an ask is refused unless `queue: true`, in which case the message is persisted, pushed onto its pending queue (cap 10) and drained when it goes idle (`scheduleQueueDrain`). On an idle target `queue` is ignored and the send starts immediately. The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check. A session on a connected remote host is supported: `host?` (or the session's fresh board row) must name a saved project's connected host (`pulseWriteTargetHost`), and the send goes to that host's own `/message` (`{content, async: true}`) or `/queue` (`{content}`) through `pulseRemotePostJSON` — the only send path; the busy pre-check reads the host's `state` (`turn_active`, `compacting`, `pending_asks`), and a missing field or a failed read refuses rather than assuming idle |
 | `session_command` | `session_id`, `command`, `args?` | `{session_id, command, result}` where `result` is the operation's own JSON | **asks**; fixed allowlist `/btw` `/cancel` `/compact` `/recap` `/title`, anything else is an error listing them, no send-as-text fallback |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
 | `session_ask` | `session_id`, `host?` | `{session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]}` (empty arrays when nothing is pending) | read; details of the pending permission/question ask(s) a session is paused on — tool for permissions, header/question/options/multiple for questions; use before resolving so the request_id and available options are known. Unless terminal access is enabled (the same gate as `pulseTerminalRows`), a permission keeps only `request_id`, `tool`, `scope` and `agent_name`; an unknown session is an error |
@@ -474,6 +474,18 @@ connection, with the same bearer token the browser proxy injects
   endpoint admits only registered projects. The saved path is what is registered and what
   keys the tab store. The history request names the host's own path of the project
   (`pulseRemoteProjectPaths`).
+- **`session_send` reaches a remote session, through the host.** `pulseWriteTargetHost` is
+  the admission: an optional `host` argument or the session's fresh board row
+  (`pulseRemoteSessionHost`), which must be a saved project's host
+  (`pulseRemoteSessionHostOK`) with a live workspace (`pulseRemoteHostConnected`);
+  otherwise the tool refuses and never dials. The busy pre-check reads the host's
+  `GET /api/sessions/{id}/state` (`turn_active`, `compacting` and `pending_asks`); a
+  missing field or a failed read is an error, never an assumed-idle send. A busy target
+  is refused unless `queue=true`, and the send goes to
+  the host's own `POST /api/sessions/{id}/message` (`{content, async: true}`) or
+  `POST /api/sessions/{id}/queue` (`{content}`) through `pulseRemotePostJSON` — the host's
+  handler is the only send path, never a second implementation. The other write tools stay
+  local-only.
 - The local `terminalAccessAllowed()` gate applies to remote output too: it reaches the
   model provider from this process, so the remote host's own gate is not the only one.
 - `terminal_new` with `host` creates the shell on the host: the host spawns a pty when a
@@ -512,10 +524,11 @@ successful rows of a connected host (2 min). Only the assistant's board merges h
 `session_read`, `session_recap` and `session_ask` take the row's `host` and ask the host's
 `GET /api/sessions/{id}` (newest N, or the whole transcript for a search), `/recap` and
 `/state`; message indexes are absolute within the host's transcript. A remote project's
-memory is not injected (project memory keys on local paths). The write tools
-(`session_send`, `session_command`, `permission_resolve`, `question_answer`,
-`question_dismiss`, `session_close`) do not reach remote sessions: they refuse with an
-error naming the host.
+memory is not injected (project memory keys on local paths). `session_send` reaches a
+remote session through the host's own message/queue handler (see the bullet above); the
+other write tools (`session_command`, `permission_resolve`, `question_answer`,
+`question_dismiss`, `session_close`) still refuse a remote session with an error naming
+the host.
 
 **Access**
 
@@ -582,7 +595,8 @@ assistant never appears as a card, never counts as a child, and is absent from
 - Always-allow decisions through `permission_resolve` (only allow/deny are exposed;
   harmful operations must stay a human click).
 - Reading or writing memory for remote (SSH/WSL) projects.
-- Acting on remote sessions, and stop indicators from remote hosts.
+- Acting on remote sessions beyond `session_send` (commands, permission and question
+  answers, close), and stop indicators from remote hosts.
 
 ## Known limits
 
@@ -597,8 +611,9 @@ assistant never appears as a card, never counts as a child, and is absent from
   persist.
 - Remote (SSH/WSL) projects: their terminals and sessions are readable through `host` (see
   "Remote hosts"), but only while connected. Sessions are the host's live registry plus
-  what its `/api/pulse` reports; this server's disk scan never reaches them. Acting on a
-  remote session (send, command, permission and question answers, close) is not built.
+  what its `/api/pulse` reports; this server's disk scan never reaches them. `session_send`
+  reaches a remote session through its host; acting on one otherwise (command, permission
+  and question answers, close) is not built.
 - Stop indicators and the activation gate cover this server's sessions and terminals only;
   a remote host's turn-done, ask or terminal-stop never wakes the assistant.
 - A remote host is readable only while connected from this server. The assistant can start

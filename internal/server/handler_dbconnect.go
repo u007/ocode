@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/dbconnect"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/remote"
 )
 
 // Postgres DB connector HTTP surface (/api/dbconnect/*).
@@ -45,19 +48,45 @@ const (
 	dbSurfaceMaxLen = 256
 )
 
-// dbGrant maps connection name to its plaintext URL for one unlocked surface.
-type dbGrant map[string]string
+// dbGrant maps connection name to what unlock granted for it, for one surface.
+type dbGrant map[string]dbGrantEntry
 
-// dbGrantURL returns the plaintext URL for an unlocked connection, if any.
+// dbGrantEntry is one unlocked connection. The URL is the one the database
+// really listens on; an SSH tunnel, when configured, is started when the
+// connection is first opened (dbGrantDB), never during unlock.
+//
+// Every field is a value, so entries compare with == (sameDBGrant). The tunnel
+// password is plaintext, like the URL: it lives only in this grant, is never
+// logged, and is dropped with the grant on lock.
+type dbGrantEntry struct {
+	url            string
+	tunnel         config.DBTunnel
+	hasTunnel      bool
+	tunnelPassword string
+	// poolPort is the local tunnel port the pooled handle was opened on. A
+	// restarted tunnel can bind a new port, and a pool keeps its old one.
+	poolPort int
+}
+
+// sameDBGrant reports whether two entries describe the same connection, which
+// is what decides whether a pool may be reused. poolPort is pool bookkeeping,
+// not part of the grant.
+func sameDBGrant(a, b dbGrantEntry) bool {
+	a.poolPort = 0
+	b.poolPort = 0
+	return a == b
+}
+
+// dbGrantURL returns the unrewritten URL for an unlocked connection, if any.
 // It also marks the surface as in use, which retires surfaces left behind by a
 // client that never called lock (see dbTouchLocked).
 func (h *Handler) dbGrantURL(surface, name string) (string, bool) {
 	h.dbMu.Lock()
 	stale := h.dbTouchLocked(surface, time.Now())
-	u, ok := h.dbGrants[surface][name]
+	e, ok := h.dbGrants[surface][name]
 	h.dbMu.Unlock()
 	dbClosePools(stale)
-	return u, ok
+	return e.url, ok
 }
 
 // dbSetGrant replaces the grant for one surface. Pools opened under the old
@@ -90,14 +119,14 @@ func (h *Handler) dbAddToGrant(surface string, entries dbGrant) {
 		h.dbGrants[surface] = grant
 	}
 	stale := h.dbTouchLocked(surface, time.Now())
-	for name, u := range entries {
-		if old, ok := grant[name]; ok && old != u {
+	for name, e := range entries {
+		if old, ok := grant[name]; ok && !sameDBGrant(old, e) {
 			if db := h.dbPools[surface][name]; db != nil {
 				stale = append(stale, db)
 				delete(h.dbPools[surface], name)
 			}
 		}
-		grant[name] = u
+		grant[name] = e
 	}
 	h.dbMu.Unlock()
 	dbClosePools(stale)
@@ -274,33 +303,72 @@ func dbClosePools(pools []*sql.DB) {
 // meantime discards the new handle.
 func (h *Handler) dbGrantDB(ctx context.Context, surface, name string) (db *sql.DB, granted bool, err error) {
 	h.dbMu.Lock()
-	u, ok := h.dbGrants[surface][name]
+	e, ok := h.dbGrants[surface][name]
 	if !ok {
 		h.dbMu.Unlock()
 		return nil, false, nil
 	}
-	if cached := h.dbPools[surface][name]; cached != nil {
-		h.dbMu.Unlock()
-		return cached, true, nil
+	// A tunnelled connection always goes through the tunnel manager, even with
+	// a pool cached: that is what restarts a dead tunnel and yields the port the
+	// pool must match. A direct connection is served from the pool as before.
+	if !e.hasTunnel {
+		if cached := h.dbPools[surface][name]; cached != nil {
+			h.dbMu.Unlock()
+			return cached, true, nil
+		}
 	}
 	h.dbMu.Unlock()
 
-	opened, err := dbconnect.Open(ctx, u)
+	dsn := e.url
+	port := 0
+	if e.hasTunnel {
+		// ssh can take seconds, so the tunnel is started outside dbMu.
+		port, err = dbTunnelPort(ctx, name, e)
+		if err != nil {
+			return nil, true, err
+		}
+		dsn, err = rewriteURLForTunnel(e.url, port)
+		if err != nil {
+			return nil, true, err
+		}
+		h.dbMu.Lock()
+		cur, ok := h.dbGrants[surface][name]
+		if !ok || !sameDBGrant(cur, e) {
+			h.dbMu.Unlock()
+			return nil, false, nil
+		}
+		if cached := h.dbPools[surface][name]; cached != nil && cur.poolPort == port {
+			h.dbMu.Unlock()
+			return cached, true, nil
+		}
+		h.dbMu.Unlock()
+	}
+
+	opened, err := dbconnect.Open(ctx, dsn)
 	if err != nil {
 		return nil, true, err
 	}
 
 	h.dbMu.Lock()
-	if cur, ok := h.dbGrants[surface][name]; !ok || cur != u {
+	cur, ok := h.dbGrants[surface][name]
+	if !ok || !sameDBGrant(cur, e) {
+		// Locked or replaced while we connected: discard the new handle.
 		h.dbMu.Unlock()
 		dbClosePools([]*sql.DB{opened})
 		return nil, false, nil
 	}
+	var stale []*sql.DB
 	if cached := h.dbPools[surface][name]; cached != nil {
-		// A concurrent request opened this connection first; share its handle.
-		h.dbMu.Unlock()
-		dbClosePools([]*sql.DB{opened})
-		return cached, true, nil
+		if !e.hasTunnel || cur.poolPort == port {
+			// A concurrent request opened this connection first; share its handle.
+			h.dbMu.Unlock()
+			dbClosePools([]*sql.DB{opened})
+			return cached, true, nil
+		}
+		// The tunnel restarted on another port, so the cached handle dials a
+		// dead one. Replace it.
+		stale = append(stale, cached)
+		delete(h.dbPools[surface], name)
 	}
 	if h.dbPools == nil {
 		h.dbPools = make(map[string]map[string]*sql.DB)
@@ -309,8 +377,48 @@ func (h *Handler) dbGrantDB(ctx context.Context, surface, name string) (db *sql.
 		h.dbPools[surface] = make(map[string]*sql.DB)
 	}
 	h.dbPools[surface][name] = opened
+	cur.poolPort = port
+	h.dbGrants[surface][name] = cur
 	h.dbMu.Unlock()
+	dbClosePools(stale)
 	return opened, true, nil
+}
+
+// dbEnsureTunnel starts or reuses the SSH tunnel for one saved connection. It is
+// a variable so tests can stand in for ssh.
+var dbEnsureTunnel = func(ctx context.Context, name string, t *config.DBTunnel, password string) (int, error) {
+	return remote.DefaultDBTunnelManager().Ensure(ctx, name, t, password)
+}
+
+// dbTunnelOpenTries and dbTunnelOpenGap bound how long one open waits on a
+// tunnel that is still connecting. ssh normally answers in well under a second,
+// and a request must not stay parked on a slow host.
+const (
+	dbTunnelOpenTries = 12
+	dbTunnelOpenGap   = 250 * time.Millisecond
+)
+
+// dbTunnelPort returns the local port of the connection's tunnel, starting it
+// if needed. The tunnel is shared by every surface, so it runs on a context
+// that one caller hanging up does not cancel. It would otherwise kill the ssh
+// process that others are using.
+func dbTunnelPort(ctx context.Context, name string, e dbGrantEntry) (int, error) {
+	tctx := context.WithoutCancel(ctx)
+	t := e.tunnel
+	for try := 1; ; try++ {
+		port, err := dbEnsureTunnel(tctx, name, &t, e.tunnelPassword)
+		if err == nil {
+			return port, nil
+		}
+		if !errors.Is(err, remote.ErrTunnelInProgress) || try >= dbTunnelOpenTries {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(dbTunnelOpenGap):
+		}
+	}
 }
 
 // HandleDBConnectList lists saved connections, sorted by name. unlocked reflects
@@ -339,6 +447,13 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 		FromEnv bool `json:"from_env"`
 	}
 	conns := cfg.DB.Connections
+	if pp := r.URL.Query().Get("project_path"); pp != "" {
+		if root, ok := h.dbProjectRootFor(pp); ok {
+			if pc, err := config.LoadProjectDBConnections(root); err == nil {
+				conns = config.MergeDBConnections(conns, pc)
+			}
+		}
+	}
 	sort.Slice(conns, func(i, j int) bool { return conns[i].Name < conns[j].Name })
 	out := make([]entry, 0, len(conns))
 	for _, c := range conns {
@@ -363,9 +478,12 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 // there is nothing to encrypt.
 func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string `json:"name"`
-		URL      string `json:"url"`
-		Password string `json:"password"`
+		Name        string           `json:"name"`
+		URL         string           `json:"url"`
+		Password    string           `json:"password"`
+		ProjectPath string           `json:"project_path"`
+		Driver      string           `json:"driver"`
+		Tunnel      *config.DBTunnel `json:"tunnel"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		log.Printf("dbconnect: add: decode request: %v", err)
@@ -374,6 +492,10 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" || req.URL == "" {
 		writeError(w, http.StatusBadRequest, "name and url are required")
+		return
+	}
+	if req.Driver != "" && req.Driver != config.DBDriverPostgres && req.Driver != config.DBDriverMySQL {
+		writeError(w, http.StatusBadRequest, "unsupported db driver "+req.Driver)
 		return
 	}
 	// A template names variables instead of carrying a credential, so there is
@@ -400,17 +522,57 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load saved connections")
 		return
 	}
+	// A tunnel password stored in the global config is sealed under the master
+	// password. It is verified against the saved set like a sealed URL, so a new
+	// seal can never drift from the rest. A project connection never stores one.
+	storesTunnelPassword := req.Tunnel != nil && req.Tunnel.AuthMethod == "password" &&
+		req.Tunnel.Password != "" && req.ProjectPath == ""
+	if storesTunnelPassword && req.Password == "" {
+		writeError(w, http.StatusBadRequest,
+			"the master password is required to store a tunnel password; leave the tunnel password empty to enter it at unlock")
+		return
+	}
 	verified := cfg.DB.Connections
-	if !isTemplate {
+	if !isTemplate || storesTunnelPassword {
 		if err := dbCheckMasterPassword(verified, req.Password); err != nil {
 			log.Printf("dbconnect: add %q: %v", req.Name, err)
 			writeError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 	}
+	// The explicit driver (validated above) wins. The URL scheme is only a guess
+	// for a caller that did not name one: an environment template such as
+	// "${DATABASE_URL}" does not parse, and must not silently become postgres.
+	driver := req.Driver
+	if driver == "" {
+		driver = config.DBDriverPostgres
+		if u, perr := dbconnect.ParseURL(req.URL); perr == nil && u.Scheme == "mysql" {
+			driver = config.DBDriverMySQL
+		}
+	}
+	// Validate + normalize the optional tunnel descriptor.
+	if req.Tunnel != nil {
+		if err := remote.ValidateTunnelDescriptor(req.Tunnel); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.Tunnel.AuthMethod == "" {
+			req.Tunnel.AuthMethod = "key"
+		}
+	}
 	conn := config.DBConnection{
 		Name:   req.Name,
-		Driver: config.DBDriverPostgres,
+		Driver: driver,
+		Tunnel: req.Tunnel,
+	}
+	// Seal the tunnel password (if password auth) under the master password.
+	if storesTunnelPassword {
+		sealed, err := dbconnect.SealPassword(req.Tunnel.Password, req.Password)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		conn.Tunnel.Password = sealed
 	}
 	if isTemplate {
 		// A template is not a secret, so it is stored in the clear. It is
@@ -424,6 +586,41 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conn.EncryptedURL = sealed
+	}
+	// Per-project config path: store the connection in .ocode/db.json instead of
+	// the global ocodeconfig.json. Only templates (no secrets) are allowed there.
+	if req.ProjectPath != "" {
+		root, ok := h.dbProjectRootFor(req.ProjectPath)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_path is not an allowed project root")
+			return
+		}
+		if !isTemplate {
+			writeError(w, http.StatusBadRequest, "only environment-backed connections can be saved per project")
+			return
+		}
+		existing, err := config.LoadProjectDBConnections(root)
+		if err != nil {
+			log.Printf("dbconnect: add %q: load project config: %v", req.Name, err)
+			writeError(w, http.StatusInternalServerError, "could not load project connections")
+			return
+		}
+		for _, c := range existing {
+			if c.Name == req.Name {
+				writeError(w, http.StatusConflict, fmt.Sprintf("db connection %q already exists", req.Name))
+				return
+			}
+		}
+		if conn.Tunnel != nil {
+			conn.Tunnel.Password = ""
+		}
+		if err := config.SaveProjectDBConnections(root, append(existing, conn)); err != nil {
+			log.Printf("dbconnect: add %q: save project config: %v", req.Name, err)
+			writeError(w, http.StatusInternalServerError, "could not save project connection")
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"name": req.Name})
+		return
 	}
 	if err := config.AddDBConnection(conn, verified); err != nil {
 		log.Printf("dbconnect: add %q: save: %v", req.Name, err)
@@ -445,11 +642,16 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 // this password; it gates the sealed connections only.
 func dbCheckMasterPassword(conns []config.DBConnection, password string) error {
 	for _, c := range conns {
-		if c.EncryptedURL == "" {
-			continue
+		if c.EncryptedURL != "" {
+			if _, err := dbconnect.OpenURL(c.EncryptedURL, password); err != nil {
+				return fmt.Errorf("master password does not match saved connection %s", c.Name)
+			}
 		}
-		if _, err := dbconnect.OpenURL(c.EncryptedURL, password); err != nil {
-			return fmt.Errorf("master password does not match saved connection %s", c.Name)
+		// A sealed tunnel password is opened at unlock, so it must match too.
+		if c.Tunnel != nil && c.Tunnel.Password != "" {
+			if _, err := dbconnect.OpenPassword(c.Tunnel.Password, password); err != nil {
+				return fmt.Errorf("master password does not match the saved tunnel password of %s", c.Name)
+			}
 		}
 	}
 	return nil
@@ -458,12 +660,49 @@ func dbCheckMasterPassword(conns []config.DBConnection, password string) error {
 // HandleDBConnectRemove deletes a saved connection and drops any grant for it.
 func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if pp := r.URL.Query().Get("project_path"); pp != "" {
+		root, ok := h.dbProjectRootFor(pp)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_path is not an allowed project root")
+			return
+		}
+		existing, err := config.LoadProjectDBConnections(root)
+		if err != nil {
+			log.Printf("dbconnect: remove %q: load project config: %v", name, err)
+			writeError(w, http.StatusInternalServerError, "could not load project connections")
+			return
+		}
+		out := make([]config.DBConnection, 0, len(existing))
+		found := false
+		for _, c := range existing {
+			if c.Name == name {
+				found = true
+				continue
+			}
+			out = append(out, c)
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("db connection %q not found", name))
+			return
+		}
+		if err := config.SaveProjectDBConnections(root, out); err != nil {
+			log.Printf("dbconnect: remove %q: save project config: %v", name, err)
+			writeError(w, http.StatusInternalServerError, "could not save project connections")
+			return
+		}
+		h.dbDropConnection(name)
+		remote.DefaultDBTunnelManager().StopConnection(name)
+		writeJSON(w, http.StatusOK, map[string]string{"removed": name})
+		return
+	}
 	if err := config.RemoveDBConnection(name); err != nil {
 		log.Printf("dbconnect: remove %q: %v", name, err)
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	h.dbDropConnection(name)
+	// The ssh -L process outlives the grant, so it must be stopped here too.
+	remote.DefaultDBTunnelManager().StopConnection(name)
 	writeJSON(w, http.StatusOK, map[string]string{"removed": name})
 }
 
@@ -499,8 +738,9 @@ type dbUnlockFailure struct {
 // unlock. The resolved URL is never returned, logged, or written to disk.
 func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Surface  string `json:"surface"`
-		Password string `json:"password"`
+		Surface        string `json:"surface"`
+		Password       string `json:"password"`
+		TunnelPassword string `json:"tunnel_password"`
 		// ProjectPath is the project whose .env files provide template
 		// values. It is resolved only when it names a project root this
 		// server may read.
@@ -527,6 +767,14 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		log.Printf("dbconnect: unlock: load config: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not load saved connections")
 		return
+	}
+	// Merge per-project connections (.ocode/db.json) when a project is given.
+	if req.ProjectPath != "" {
+		if root, ok := h.dbProjectRootFor(req.ProjectPath); ok {
+			if pc, err := config.LoadProjectDBConnections(root); err == nil {
+				cfg.DB.Connections = config.MergeDBConnections(cfg.DB.Connections, pc)
+			}
+		}
 	}
 	if len(cfg.DB.Connections) == 0 {
 		writeError(w, http.StatusBadRequest, "no saved connections")
@@ -572,6 +820,15 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	// nothing to decrypt, and a sealed connection must never open without
 	// the password that sealed it.
 	for _, c := range cfg.DB.Connections {
+		if c.EnvTemplate == "" && req.Password == "" {
+			// Sealed connection and no master password: leave it out of
+			// the grant. The caller is loading an environment connection,
+			// not unlocking the sealed set.
+			continue
+		}
+		// The URL is resolved (and a sealed one opened) BEFORE the tunnel
+		// password, so a wrong master password still aborts the whole unlock.
+		var connURL string
 		if c.EnvTemplate != "" {
 			if projectRoot == "" {
 				// Never fall back to the process environment: this panel
@@ -592,23 +849,45 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				staleNames = append(staleNames, c.Name)
 				continue
 			}
-			grant[c.Name] = resolved
-			names = append(names, c.Name)
-			continue
+			connURL = resolved
+		} else {
+			opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
+			if err != nil {
+				log.Printf("dbconnect: unlock %q: %v", c.Name, err)
+				writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
+				return
+			}
+			connURL = opened
 		}
-		if req.Password == "" {
-			// Sealed connection and no master password: leave it out of
-			// the grant. The caller is loading an environment connection,
-			// not unlocking the sealed set.
-			continue
+		entry := dbGrantEntry{url: connURL}
+		if c.Tunnel != nil {
+			// The SSH tunnel is NOT started here. A tunnel is an ssh to the host
+			// the saved config names, and a project's db.json comes from the
+			// repo: starting it during unlock would make unlocking a cloned repo
+			// connect to a repo-chosen host, and one slow tunnel would stall
+			// every connection. It starts when this connection is first opened
+			// (dbGrantDB), after its credentials are known to be right.
+			tunnelPassword, perr := dbUnlockTunnelPassword(c, req.TunnelPassword, req.Password)
+			if perr != nil {
+				// Per connection, never a whole-unlock abort: one bad tunnel
+				// secret must not lock the other connections out.
+				log.Printf("dbconnect: unlock %q: tunnel password: %v", c.Name, perr)
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: perr.Error()})
+				staleNames = append(staleNames, c.Name)
+				continue
+			}
+			// Reject a URL the tunnel cannot route now, not at the first query.
+			if _, rerr := rewriteURLForTunnel(connURL, 1); rerr != nil {
+				log.Printf("dbconnect: unlock %q: tunnel: %v", c.Name, rerr)
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: rerr.Error()})
+				staleNames = append(staleNames, c.Name)
+				continue
+			}
+			entry.hasTunnel = true
+			entry.tunnel = *c.Tunnel
+			entry.tunnelPassword = tunnelPassword
 		}
-		opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
-		if err != nil {
-			log.Printf("dbconnect: unlock %q: %v", c.Name, err)
-			writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
-			return
-		}
-		grant[c.Name] = opened
+		grant[c.Name] = entry
 		names = append(names, c.Name)
 	}
 	// Drop the grant of every template that no longer resolves, whatever the
@@ -742,7 +1021,8 @@ func (h *Handler) HandleDBConnectQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A read-only transaction does not stop calls that act on the server, so
-	// they are asked for before anything runs.
+	// they are asked for before anything runs. The generic check runs before
+	// connecting (no tunnel/connection is needed to refuse).
 	if !req.Confirm && dbconnect.HasServerSideEffect(req.SQL) {
 		log.Printf("dbconnect: query %q: server-side statement awaiting confirmation", req.Connection)
 		writeError(w, http.StatusConflict, dbConnectWriteNeedsConfirm)
@@ -752,6 +1032,13 @@ func (h *Handler) HandleDBConnectQuery(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	db, ok := h.dbOpenGranted(ctx, w, req.Surface, req.Connection)
 	if !ok {
+		return
+	}
+	// The driver-aware check needs the open handle (MySQL has INTO OUTFILE,
+	// GET_LOCK, SLEEP...), so it adds to the generic one above.
+	if !req.Confirm && dbconnect.HasServerSideEffectDB(db, req.SQL) {
+		log.Printf("dbconnect: query %q: server-side statement awaiting confirmation", req.Connection)
+		writeError(w, http.StatusConflict, dbConnectWriteNeedsConfirm)
 		return
 	}
 	res, err := dbconnect.QueryReadOnly(ctx, db, req.SQL)
@@ -769,4 +1056,64 @@ func (h *Handler) HandleDBConnectQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// dbUnlockTunnelPassword returns the SSH password for one connection at unlock.
+//
+// A stored (sealed) tunnel password is opened with the master password, and
+// the client's value is never used in its place: that would authenticate with
+// the wrong secret. Only a connection with NO stored password takes the
+// password the client supplied for this unlock.
+func dbUnlockTunnelPassword(c config.DBConnection, supplied, master string) (string, error) {
+	if c.Tunnel == nil || c.Tunnel.Password == "" {
+		return supplied, nil
+	}
+	if master == "" {
+		return "", errors.New("the master password is needed to open the saved tunnel password")
+	}
+	dec, err := dbconnect.OpenPassword(c.Tunnel.Password, master)
+	if err != nil {
+		return "", errors.New("the master password does not open the saved tunnel password")
+	}
+	return dec, nil
+}
+
+// errTunnelURL is returned when a URL cannot be routed through a tunnel. It
+// never includes the URL: the URL carries the password.
+var errTunnelURL = errors.New("connection url cannot be routed through its ssh tunnel")
+
+// rewriteURLForTunnel replaces the host:port of a connection URL with the local
+// tunnel port. Only that span changes. Everything else (scheme, userinfo with
+// its exact escaping, path, query) is copied byte for byte, because a re-encode
+// through url.URL.String can change the credentials.
+//
+// It returns an error rather than the original URL when it cannot do this. A
+// caller that connected to the unrewritten URL would bypass the tunnel.
+func rewriteURLForTunnel(raw string, port int) (string, error) {
+	if _, err := url.Parse(raw); err != nil {
+		return "", errTunnelURL
+	}
+	scheme := strings.Index(raw, "://")
+	if scheme < 0 {
+		return "", errTunnelURL
+	}
+	start := scheme + len("://")
+	// The authority ends at the first path, query or fragment delimiter, the same
+	// split net/url makes.
+	end := len(raw)
+	if i := strings.IndexAny(raw[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	authority := raw[start:end]
+	// The userinfo ends at the LAST '@', as net/url does, so an '@' inside the
+	// password is handled the same way by both.
+	at := strings.LastIndex(authority, "@")
+	userinfo := authority[:at+1] // "" when there is no '@'
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host != authority[at+1:] {
+		// The surgery and the parser disagree on where the host is: refuse
+		// rather than guess.
+		return "", errTunnelURL
+	}
+	return raw[:start] + userinfo + fmt.Sprintf("127.0.0.1:%d", port) + raw[end:], nil
 }

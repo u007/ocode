@@ -85,7 +85,7 @@ func TestAddDBConnectionRejectsDuplicateAndBadInput(t *testing.T) {
 	if err := addDB(t, ok); err == nil {
 		t.Fatal("duplicate name accepted")
 	}
-	if err := addDB(t, DBConnection{Name: "x", Driver: "mysql", EncryptedURL: "ENCv1:argon2:a:b:c"}); err == nil {
+	if err := addDB(t, DBConnection{Name: "x", Driver: "oracle", EncryptedURL: "ENCv1:argon2:a:b:c"}); err == nil {
 		t.Fatal("unsupported driver accepted")
 	}
 	if err := addDB(t, DBConnection{Name: "", Driver: DBDriverPostgres, EncryptedURL: "ENCv1:argon2:a:b:c"}); err == nil {

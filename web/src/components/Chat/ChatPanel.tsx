@@ -1940,52 +1940,100 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             forceOpen={forceOpen}
                           />
                         ) : null}
-                        {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
-                          <ToolBlock
-                            key={tc.id}
-                            tool={tc.function.name}
-                            command={tc.function.arguments}
-                            output={resultContent}
-                            images={resultImages}
-                            toolCallId={tc.id}
-                            sessionId={sessionId}
-                            highlight={highlight}
-                            questionDismissed={!!dismissedQuestion && !pendingQuestion}
-                            // A dismissed prompt is reopened as a LOCAL dialog (the
-                            // server holds no ask for it) and is answerable only while
-                            // the dismissal is the trailing round with no turn running.
-                            onOpenQuestion={
-                              pendingQuestion
-                                ? () =>
-                                    dispatch({
-                                      type: "QUESTION_SHOW",
-                                      sessionId,
-                                      requestId: pendingQuestion.request_id,
-                                    })
-                                : dismissedQuestion && !slice.turnActive
+                        {entry.calls.length > 1 ? (
+                          <div
+                            data-testid="parallel-tool-calls"
+                            className={(typeof localStorage !== "undefined" && localStorage.getItem("ocode:inlineParallelToolCalls") === "1") ? "flex flex-wrap gap-2" : "flex flex-col gap-2"}
+                          >
+                            {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                              <ToolBlock
+                                key={tc.id}
+                                tool={tc.function.name}
+                                command={tc.function.arguments}
+                                output={resultContent}
+                                images={resultImages}
+                                toolCallId={tc.id}
+                                sessionId={sessionId}
+                                highlight={highlight}
+                                questionDismissed={!!dismissedQuestion && !pendingQuestion}
+                                onOpenQuestion={
+                                  pendingQuestion
+                                    ? () =>
+                                        dispatch({
+                                          type: "QUESTION_SHOW",
+                                          sessionId,
+                                          requestId: pendingQuestion.request_id,
+                                        })
+                                    : dismissedQuestion && !slice.turnActive
+                                      ? () =>
+                                          dispatch({
+                                            type: "QUESTION_REQUEST",
+                                            sessionId,
+                                            question: dismissedQuestion,
+                                          })
+                                      : undefined
+                                }
+                                onOpenPermission={
+                                  pendingPermission
+                                    ? () =>
+                                        dispatch({
+                                          type: "PERMISSION_SHOW",
+                                          sessionId,
+                                          requestId: pendingPermission.request_id,
+                                        })
+                                    : undefined
+                                }
+                                callKey={`${entryKey}:call:${tc.id}`}
+                                outputKey={`${entryKey}:output:${tc.id}`}
+                                forceOpen={forceOpen}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                            <ToolBlock
+                              key={tc.id}
+                              tool={tc.function.name}
+                              command={tc.function.arguments}
+                              output={resultContent}
+                              images={resultImages}
+                              toolCallId={tc.id}
+                              sessionId={sessionId}
+                              highlight={highlight}
+                              questionDismissed={!!dismissedQuestion && !pendingQuestion}
+                              onOpenQuestion={
+                                pendingQuestion
                                   ? () =>
                                       dispatch({
-                                        type: "QUESTION_REQUEST",
+                                        type: "QUESTION_SHOW",
                                         sessionId,
-                                        question: dismissedQuestion,
+                                        requestId: pendingQuestion.request_id,
+                                      })
+                                  : dismissedQuestion && !slice.turnActive
+                                    ? () =>
+                                        dispatch({
+                                          type: "QUESTION_REQUEST",
+                                          sessionId,
+                                          question: dismissedQuestion,
+                                        })
+                                    : undefined
+                              }
+                              onOpenPermission={
+                                pendingPermission
+                                  ? () =>
+                                      dispatch({
+                                        type: "PERMISSION_SHOW",
+                                        sessionId,
+                                        requestId: pendingPermission.request_id,
                                       })
                                   : undefined
-                            }
-                            onOpenPermission={
-                              pendingPermission
-                                ? () =>
-                                    dispatch({
-                                      type: "PERMISSION_SHOW",
-                                      sessionId,
-                                      requestId: pendingPermission.request_id,
-                                    })
-                                : undefined
-                            }
-                            callKey={`${entryKey}:call:${tc.id}`}
-                            outputKey={`${entryKey}:output:${tc.id}`}
-                            forceOpen={forceOpen}
-                          />
-                        ))}
+                              }
+                              callKey={`${entryKey}:call:${tc.id}`}
+                              outputKey={`${entryKey}:output:${tc.id}`}
+                              forceOpen={forceOpen}
+                            />
+                          ))
+                        )}
                         {hasRenderableText(entry.assistant.content) ? (
                           <AssistantText content={entry.assistant.content} onSpeak={requestSpeech} />
                         ) : null}

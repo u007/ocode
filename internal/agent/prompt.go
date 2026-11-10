@@ -34,11 +34,19 @@ const (
 	promptCommunicationStyleMarker = "[ocode:communication_style]"
 	// promptBrowserRoutingMarker labels the browser-routing prompt fragment.
 	promptBrowserRoutingMarker = "[ocode:browser_routing]"
+	// promptHTREnabledMarker labels the HTR (htrcli) shell-availability prompt fragment.
+	promptHTREnabledMarker = "[ocode:htr_routing]"
 )
 
 // browserRoutingPromptContent steers the model off webfetch and the shell for
 // JavaScript-heavy sites. It is emitted only when the session has a browser tool.
 const browserRoutingPromptContent = "For sites that need JavaScript, a login or clicks, use browser_run (multi-step) or browser (single read/action); webfetch is for static pages only. Do not script page extraction in the shell."
+
+// htrRoutingPromptContent notes that htrcli (HTR NControl) is available for
+// browser automation from the shell. Emitted statically when htr_enabled is
+// on, regardless of whether the daemon is currently reachable, so the cached
+// prefix stays byte-stable. The model must check availability at runtime.
+const htrRoutingPromptContent = "htrcli (HTR NControl) is available on this machine for browser automation from the shell: recording, network mocking, contexts, and raw commands. Prefer browser_run/browser for page tasks when those tools are present. Verify availability before relying on it: `command -v htrcli` and `htrcli health`. This fragment may be present while the daemon is down — check before relying on it."
 
 // docPromptContent is the documentation-first development prompt injected
 // when DocPromptEnabled is true. It requires inspection and alignment checks
@@ -302,6 +310,12 @@ func (a *Agent) BasePromptMessages() []Message {
 	a.toolsMu.RUnlock()
 	if hasBrowser {
 		msgs = append(msgs, Message{Role: "system", Content: promptBrowserRoutingMarker + "\n" + browserRoutingPromptContent})
+	}
+	// HTR (htrcli) shell-availability note. Gated on the config flag (stable at
+	// session start, so the cached prefix stays byte-stable) rather than on
+	// runtime daemon health, so it is present even when htrcli is unavailable.
+	if a.config != nil && a.config.Ocode.Browser.HTREnabled {
+		msgs = append(msgs, Message{Role: "system", Content: promptHTREnabledMarker + "\n" + htrRoutingPromptContent})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {

@@ -103,7 +103,7 @@ describe("DBPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock & connect" }));
 
     await waitFor(() =>
-      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "hunter2", "/proj"),
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "hunter2", undefined, "/proj"),
     );
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
     expect((screen.queryByLabelText("Master password") as HTMLInputElement | null)?.value ?? "").toBe("");
@@ -386,10 +386,10 @@ describe("DBPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
     await waitFor(() =>
-      expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master", undefined),
+      expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master", undefined, undefined),
     );
     await waitFor(() =>
-      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "master", "/proj"),
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "master", undefined, "/proj"),
     );
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Unlock & connect" })).toBeNull();
@@ -415,7 +415,7 @@ describe("DBPanel", () => {
       "textContent",
       "Connection stage was saved, but unlocking it failed: master password does not open connection stage. Unlock it manually with the master password.",
     );
-    expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master", undefined);
+    expect(mockAdd).toHaveBeenCalledWith("stage", "postgres://app:pw@db/app", "master", undefined, undefined);
     expect(screen.getByRole("button", { name: "Unlock & connect" })).toBeTruthy();
   });
 
@@ -505,7 +505,7 @@ describe("DBPanel", () => {
     fireEvent.click(load);
 
     await waitFor(() =>
-      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", "/proj"),
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", undefined, "/proj"),
     );
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
   });
@@ -530,7 +530,7 @@ describe("DBPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Load from \.env/ }));
 
     await waitFor(() =>
-      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(REMOTE_SURFACE_RE), "", "~/proj", target),
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(REMOTE_SURFACE_RE), "", undefined, "~/proj", target),
     );
     expect(await screen.findByRole("button", { name: "users" })).toBeTruthy();
     await waitFor(() =>
@@ -632,7 +632,7 @@ describe("DBPanel", () => {
     expect((screen.getByLabelText(/Master password/) as HTMLInputElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
-    await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("env2", "${DATABASE_URL}", "", undefined));
+    await waitFor(() => expect(mockAdd).toHaveBeenCalledWith("env2", "${DATABASE_URL}", "", undefined, undefined));
     // An environment URL is loaded from .env, never auto-unlocked on save.
     expect(mockUnlock).not.toHaveBeenCalled();
   });

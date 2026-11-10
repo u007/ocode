@@ -1051,7 +1051,7 @@ func TestDBConnectUnlockSealedOnlyIgnoresAMovedProject(t *testing.T) {
 
 func TestDBTouchRetiresIdleSurfacesAndClosesPools(t *testing.T) {
 	h := &Handler{}
-	h.dbAddToGrant("idle", dbGrant{"boom": "postgres://app:pw@127.0.0.1:1/app"})
+	h.dbAddToGrant("idle", dbGrant{"boom": {url: "postgres://app:pw@127.0.0.1:1/app"}})
 
 	pool, err := sql.Open("pgx", "postgres://app:pw@127.0.0.1:1/app")
 	if err != nil {
@@ -1119,7 +1119,7 @@ func TestDBGrantMapsAreSafeUnderConcurrentUse(t *testing.T) {
 			for j := range 40 {
 				surface := fmt.Sprintf("s%d", (i+j)%5)
 				h.dbAddToGrant(surface, dbGrant{
-					fmt.Sprintf("c%d", j%3): "postgres://app:pw@127.0.0.1:1/app",
+					fmt.Sprintf("c%d", j%3): {url: "postgres://app:pw@127.0.0.1:1/app"},
 				})
 				h.dbGrantURL(surface, "c0")
 				h.dbRemoveFromGrant(surface, []string{"c1"})
