@@ -10,6 +10,18 @@
 
 ## 2026-11-11
 
+* **Update**: Code-Search Relevance Judge (v1) ([superpowers/specs/2026-09-28-code-search-relevance-judge-design.md](/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md))
+* **Update**: Code-Search Relevance Judge ([concepts/code-search-relevance-judge.md](/concepts/code-search-relevance-judge.md))
+* **Update**: Code-Search Relevance Judge (v1) ([superpowers/specs/2026-09-28-code-search-relevance-judge-design.md](/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md))
+* **Update**: Code-Search Relevance Judge ([concepts/code-search-relevance-judge.md](/concepts/code-search-relevance-judge.md))
+* **Update**: Messaging connectors — WhatsApp/Telegram accounts, storage, tools, HTTP surface and sync ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Update**: Messaging connectors — WhatsApp/Telegram accounts, storage, tools, HTTP surface and sync ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Update**: Messaging connectors — WhatsApp/Telegram accounts, storage, tools, HTTP surface and sync ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Update**: Code-Search Relevance Judge (v1) ([superpowers/specs/2026-09-28-code-search-relevance-judge-design.md](/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md))
+* **Update**: Code-Search Relevance Judge ([concepts/code-search-relevance-judge.md](/concepts/code-search-relevance-judge.md))
+* **Update**: Messaging connectors — WhatsApp/Telegram accounts, storage, tools and HTTP surface ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Creation**: Messaging connectors — WhatsApp/Telegram accounts, storage, tools and HTTP surface ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
 * **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
 * **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
 * **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))

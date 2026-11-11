@@ -270,11 +270,13 @@ func remoteProxyTarget(r *http.Request) (host, rest string, err error) {
 // resolveProjectPath determines which remote project path a request belongs
 // to. Returns "" if no path is present (session-scoped endpoints).
 func resolveProjectPath(r *http.Request) string {
-	// 1. ?project= / ?path= query params
+	// Explicit project identifiers win over ?path=, because ?path= can name a
+	// file (e.g. a SQLite db) rather than a project. ?path= is the last
+	// fallback for callers (listProjectSessions) that put the project there.
 	if p := r.URL.Query().Get("project"); p != "" {
 		return p
 	}
-	if p := r.URL.Query().Get("path"); p != "" {
+	if p := r.URL.Query().Get("project_root"); p != "" {
 		return p
 	}
 
@@ -283,12 +285,13 @@ func resolveProjectPath(r *http.Request) string {
 		return h
 	}
 
-	// 2b. ?project_path= query param. The terminal endpoints (WS + history +
-	// list) carry the project as project_path, and a WebSocket handshake cannot
-	// set the X-Ocode-Project header, so without this the proxy would admit the
-	// socket on host alone and never register the project on the remote — the
-	// remote's own project-root check would then 403 the shell.
+	// 2b. ?project_path= query param.
 	if p := r.URL.Query().Get("project_path"); p != "" {
+		return p
+	}
+
+	// ?path= fallback (listProjectSessions and other project-scoped callers).
+	if p := r.URL.Query().Get("path"); p != "" {
 		return p
 	}
 

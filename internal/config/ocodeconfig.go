@@ -1833,6 +1833,7 @@ func defaultPermissionConfig() PermissionConfig {
 			"bash":            "ask",
 			"webfetch":        "ask",
 			"websearch":       "ask",
+			"chat_send":       "ask",
 			"agent":           "ask",
 			"task":            "ask",
 			"skill":           "allow",

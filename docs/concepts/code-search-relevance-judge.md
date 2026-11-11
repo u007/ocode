@@ -8,7 +8,7 @@ tags:
   - relevance-judge
   - tools
   - architecture
-timestamp: 2026-10-05T00:45:48Z
+timestamp: 2026-11-11T03:56:47Z
 ---
 # Code-Search Relevance Judge
 
@@ -32,7 +32,7 @@ Its contract is **fail-open**: a judge can only ever hide a result. An error, a 
 
 ## When the judge is live
 
-There is **no config key**. The judge is active exactly when `(*Agent).searchResultJudge` (`internal/agent/search_typesafe.go:149`) resolves a keyed `*TypesafeClient` through `(*Agent).discoveryJudgeClient` (`internal/agent/discovery_typesafe.go:41`) — the same shared connected check the discovery and doc_search judges use (same factory, `typesafe/jev-latest` model, caching). A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge".
+There is **no config key**. The judge is active exactly when `(*Agent).searchResultJudge` (`internal/agent/search_typesafe.go:149`) resolves a keyed `*TypesafeClient` through `(*Agent).discoveryJudgeClient` (`internal/agent/discovery_typesafe.go:35`) — the same shared connected check the discovery and doc_search judges use (same factory, `typesafe/jev-latest` model, caching). A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge".
 
 With no judge, `runSearchJudge` returns every result untouched (`internal/tool/search_judge_apply.go:79`) and appends no footer: output is **byte-identical to before** this feature existed. That is the common case and it stays that way.
 
@@ -41,15 +41,15 @@ With no judge, `runSearchJudge` returns every result untouched (`internal/tool/s
 `grep`, `rgrep` and `glob` gained a new schema argument `intent` — one sentence stating what the caller is looking for and why — listed in `required`: glob at `internal/tool/search.go:213`, grep at `internal/tool/search.go:466`, rgrep at `internal/tool/rgrep.go:182` (field `grepParams.Intent`, `internal/tool/search.go:423`).
 
 - **`required` is a teaching device, not enforcement.** An empty `intent` skips the judge entirely and logs `intent-missing` (`internal/agent/search_typesafe.go:156`); it never returns an error demanding the argument, which would burn a turn on a formality.
-- The requirement is also reinforced in the prompt directive that already names the search tools (`internal/agent/prompt.go:52`), pinned by `TestDocPromptDirectiveRequiresSearchIntent` (`internal/agent/search_wiring_test.go:272`).
+- The requirement is also reinforced in the prompt directive that already names the search tools (`internal/agent/prompt.go:76`), pinned by `TestDocPromptDirectiveRequiresSearchIntent` (`internal/agent/search_wiring_test.go:272`).
 - Model laziness is measurable: the count of `intent-missing` debug lines is the signal for whether `required` is honoured in practice.
 - **Empty intent and replayed pre-change sessions degrade to unfiltered — correct, not broken.** A recorded tool call from before this feature has no `intent`, so a replay takes the skip path.
 
 ## The seam: the judge rides the execution context
 
-The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:5700`), gated to the three tool names (`internal/agent/agent.go:5700`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5700`). Any other tool's dispatch never touches the judge client factory.
+The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:5909`), gated to the three tool names (`internal/agent/agent.go:5909`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5909`). Any other tool's dispatch never touches the judge client factory.
 
-The rationale is load-bearing: sub-agents and the transient advisor are handed the **parent's** tool objects (`internal/agent/ask.go:166`, `internal/agent/subagent.go:1126`, `internal/agent/advisor_tool.go:176` all call `GetTools()`), so a judge field on the tool struct would be overwritten by each child — and the advisor is shut down after one call, leaving the parent judging against a dead agent. It would also be a data race, since the search tools are `Parallel() == true`. With the context seam each agent attaches its own judge for its own call: no shared mutable state, no clobbering.
+The rationale is load-bearing: sub-agents and the transient advisor are handed the **parent's** tool objects (`internal/agent/ask.go:215`, `internal/agent/subagent.go:1286`, `internal/agent/advisor_tool.go:196` all call `GetTools()`), so a judge field on the tool struct would be overwritten by each child — and the advisor is shut down after one call, leaving the parent judging against a dead agent. It would also be a data race, since the search tools are `Parallel() == true`. With the context seam each agent attaches its own judge for its own call: no shared mutable state, no clobbering.
 
 Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 
@@ -60,8 +60,8 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 
 **A judge can only ever hide a result — never create, never drop on failure.** Every failure mode keeps results, and the failure itself is disclosed rather than swallowed (the `SearchResultJudge` signature's `error` return exists precisely so "the judge errored and I kept everything" stays distinguishable from "the judge ran and everything was in scope", `internal/tool/search_judge.go:50`).
 
-- The code-search judge runs on a short budget: `searchJudgeTimeout` = **4s** (`internal/agent/search_typesafe.go:27`), applied through the context-aware `DecideCtx` (`internal/agent/typesafe.go:88`). Fail-open still *waits*, so without this a provider that accepts the connection and then stalls would add the full default timeout to every search in the session.
-- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:76`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:262` and `internal/agent/autocontinue_typesafe.go:126`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
+- The code-search judge runs on a short budget: `searchJudgeTimeout` = **4s** (`internal/agent/search_typesafe.go:27`), applied through the context-aware `DecideCtx` (`internal/agent/typesafe.go:114`). Fail-open still *waits*, so without this a provider that accepts the connection and then stalls would add the full default timeout to every search in the session.
+- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:102`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:267` and `internal/agent/autocontinue_typesafe.go:430`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
 
 | Condition | Behaviour |
 |---|---|

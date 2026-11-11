@@ -192,6 +192,7 @@ type Server struct {
 func New(addr, username, password string, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 	h := NewHandler()
+	go h.StartMessagingAccounts()
 	s := &Server{
 		addr:                   addr,
 		username:               username,
@@ -318,6 +319,16 @@ func (s *Server) registerRoutes() {
 	// header (see healthProbeCmd's doc). Every other server requires the
 	// same auth as any other route.
 	s.mux.HandleFunc("GET /api/health", s.healthMiddleware(s.handleHealth))
+
+	// Messaging (WhatsApp/Telegram) connector management.
+	s.mux.HandleFunc("/api/messaging/accounts", s.authMiddleware(s.handler.handleMessagingAccounts))
+	s.mux.HandleFunc("/api/messaging/accounts/", s.authMiddleware(s.handler.handleMessagingAccountAction))
+	s.mux.HandleFunc("GET /api/messaging/accounts/{id}/qr", s.authMiddleware(s.handler.handleMessagingAccountQR))
+	s.mux.HandleFunc("GET /api/messaging/chats", s.authMiddleware(s.handler.handleMessagingChats))
+	s.mux.HandleFunc("GET /api/messaging/messages", s.authMiddleware(s.handler.handleMessagingMessages))
+	s.mux.HandleFunc("GET /api/messaging/search", s.authMiddleware(s.handler.handleMessagingSearch))
+	s.mux.HandleFunc("POST /api/messaging/send", s.authMiddleware(s.handler.handleMessagingSend))
+	s.mux.HandleFunc("POST /api/messaging/sync", s.authMiddleware(s.handler.handleMessagingSync))
 	s.mux.HandleFunc("POST /api/browse/tab-origin", s.authMiddleware(s.handleBrowseTabOrigin))
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))

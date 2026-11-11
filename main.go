@@ -23,6 +23,8 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debugcli"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/messaging"
+	"github.com/u007/ocode/internal/paths"
 	_ "github.com/u007/ocode/internal/plugin/codex"
 	_ "github.com/u007/ocode/internal/plugin/grok"
 	"github.com/u007/ocode/internal/reminders"
@@ -339,6 +341,19 @@ func main() {
 				opts.Effort = level
 				i++
 			}
+		}
+	}
+
+	if gd, err := paths.GlobalDataDir(); err == nil {
+		if st, err := messaging.NewStore(gd + "/messaging.sqlite"); err == nil {
+			mgr := messaging.NewManager(st, gd)
+			messaging.DefaultManager = mgr
+			go func() {
+				accs, _ := st.ListAccounts()
+				for _, a := range accs {
+					_ = mgr.StartAccount(context.Background(), a)
+				}
+			}()
 		}
 	}
 

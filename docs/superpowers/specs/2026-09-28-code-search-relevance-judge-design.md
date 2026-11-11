@@ -9,7 +9,7 @@ tags:
   - typesafe
   - tools
   - agent
-timestamp: 2026-09-28T06:47:18Z
+timestamp: 2026-11-11T03:58:00Z
 ---
 # Code-Search Relevance Judge (v1)
 
@@ -38,19 +38,19 @@ Four decisions were taken explicitly, and each constrains the rest of the design
 
 ## 3. Seam: the judge rides the execution context
 
-`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:541` and `internal/tui/model.go:2350` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
+`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:599` and `internal/tui/model.go:2495` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
 
 Two candidate seams were considered.
 
 **Rejected: a field on the tool struct, wired from `NewAgent`.** The tool list is per-session, so this looks safe, and it was the first design. It is wrong. Sub-agents do not get their own tool objects — they are handed the parent's:
 
-- `internal/agent/ask.go:166` — `tools = a.GetTools()`
-- `internal/agent/subagent.go:1126` and `:1128` — `t.mainAgent.GetTools()`
-- `internal/agent/advisor_tool.go:176` — `t.mainAgent.GetTools()`
+- `internal/agent/ask.go:215` — `tools = a.GetTools()`
+- `internal/agent/subagent.go:1286` and `:1288` — `t.mainAgent.GetTools()`
+- `internal/agent/advisor_tool.go:196` — `t.mainAgent.GetTools()`
 
 Each of those then calls `NewAgent`. A `NewAgent` that wrote a judge onto the tool structs would have a child overwrite the parent's judge with one bound to the child — and the advisor child is transient, shut down immediately after a single call (`advisor_tool.go`). The parent's searches would then judge against a dead agent. It is also a data race, because the search tools are `Parallel() == true`.
 
-**Adopted: the judge is carried on the execution context**, exactly as the session's project root is (`tool.WithWorkDir`, `internal/tool/workdir_ctx.go`). `executeToolCallWithContext` builds a `toolCtx` and already attaches three things to it — the snapshot store, the work dir (`internal/agent/agent.go:5775`, the `tool.WithWorkDir` call), and the full-output flag. The judge is attached alongside them. Each agent attaches its own judge for its own call, so there is no shared mutable state, no clobbering, and no race.
+**Adopted: the judge is carried on the execution context**, exactly as the session's project root is (`tool.WithWorkDir`, `internal/tool/workdir_ctx.go`). `executeToolCallWithContext` builds a `toolCtx` and already attaches three things to it — the snapshot store, the work dir (`internal/agent/agent.go:5891`, the `tool.WithWorkDir` call), and the full-output flag. The judge is attached alongside them. Each agent attaches its own judge for its own call, so there is no shared mutable state, no clobbering, and no race.
 
 Coverage is complete for model-initiated searches. Every `grep`/`rgrep`/`glob`/`list` invocation in non-test code goes through the dispatch chain in `internal/agent/agent.go:4987-4999` (the tool-dispatch `if/else if` chain that ends in `t.Execute(args)`; `agent.go` has uncommitted changes in the working tree, so re-derive this range by symbol before relying on it); the other `Execute`/`ExecuteCtx` call sites in the package are the tool's own `Execute` → `ExecuteCtx` delegation, or agent-owned tools (`advisor`, `task`, `doc_*`). A regression test pins that invariant, because a future direct-`Execute` caller would silently lose filtering.
 
@@ -100,11 +100,11 @@ This order is not neutral, and the spec records it rather than hiding it: `glob`
 
 All three in-scope tools currently build a formatted **string**, so the judge has nothing structured to score. Each tool gains a structured pass producing `[]SearchResult`, the judge runs on it, and the tool's existing formatter then runs on the kept set. One judge call site per tool covers all `output_mode` values.
 
-**`grep`** (`internal/tool/search.go:403`, `:441`) is the easy one: it already builds `fileResult{path, count, lines}` internally and formats through a switch on `output_mode`. The internal type becomes `SearchResult` and the switch moves after the judge.
+**`grep`** (`internal/tool/search.go:587`) is the easy one: it already builds `fileResult{path, count, lines}` internally and formats through a switch on `output_mode`. The internal type becomes `SearchResult` and the switch moves after the judge.
 
-**`glob`** (`search.go:187`, `:222`) builds `matches []globMatch{path, mtime}` and caps at `globMaxResults = 100`, sorting by mtime. That order is preserved as the pre-judge order.
+**`glob`** (`search.go:281`) builds `matches []globMatch{path, mtime}` and caps at `globMaxResults = 100`, sorting by mtime. That order is preserved as the pre-judge order.
 
-**`rgrep`** (`internal/tool/rgrep.go:89`, `:140`) is the risky one. It shells out to `rg --json` into a `cappedBuffer`, and `format()` (`rgrep.go:304`) re-decodes the raw JSON inside a switch on `output_mode` using `rgJSONRecord`. The refactor replaces that re-decode with a grouping pass. This is tractable because rg is invoked with `--sort path` (`rgrep.go`, argv construction), so records for one path are contiguous. The grouping pass must preserve exactly: `rgMaxLineLen` line truncation, path ordering, `files_with_matches` deduplication, and the `cappedBuffer` truncated-tail behaviour. A golden-output test pins the judge-absent output byte-for-byte against the current implementation.
+**`rgrep`** (`internal/tool/rgrep.go:89`, `:140`) is the risky one. It shells out to `rg --json` into a `cappedBuffer`, and the former `format()` re-decoded the raw JSON inside a switch on `output_mode` using `rgJSONRecord`; that re-decode is now the `groupResults` grouping pass (`internal/tool/rgrep.go:420`). This is tractable because rg is invoked with `--sort path` (`rgrep.go`, argv construction), so records for one path are contiguous. The grouping pass must preserve exactly: `rgMaxLineLen` line truncation, path ordering, `files_with_matches` deduplication, and the `cappedBuffer` truncated-tail behaviour. A golden-output test pins the judge-absent output byte-for-byte against the current implementation.
 
 **`list` is deferred** — see §8.
 
@@ -125,16 +125,16 @@ New file `internal/agent/search_typesafe.go`, mirroring `doc_search_typesafe.go`
 
 `searchJudgeSummaryCap = 400` — code lines are long and the question is yes/no, so a much smaller window than `docSearchJudgeSummaryCap` (1000) is right. Match line numbers are preserved in the summary so the judge can see *where* the file matched, not just that it did. Candidate ids are paths, unique within a result set, and each question refers to its candidate by backticked path — the same convention as the doc search judge.
 
-Each candidate gets one `noul` question, and the request goes through the **existing** `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:41`) so the lenient `relevanceJudgeMinConfidenceDefault` floor (0.5), per-candidate fail-open, side-usage accounting and debug lines are inherited rather than reimplemented. Rubric is lenient in the same product sense as the doc rubric — even slight relevance is kept; only a genuinely different area of the codebase is vetoed — with two guards the doc rubric does not need:
+Each candidate gets one `noul` question, and the request goes through the **existing** `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:34`) so the lenient `relevanceJudgeMinConfidenceDefault` floor (0.5), per-candidate fail-open, side-usage accounting and debug lines are inherited rather than reimplemented. Rubric is lenient in the same product sense as the doc rubric — even slight relevance is kept; only a genuinely different area of the codebase is vetoed — with two guards the doc rubric does not need:
 
 - do not veto a file merely for being a test, fixture, or generated artifact; those are frequently the target
 - do not veto on a substring match that is not what the request is about (the `\bTest\b` collision)
 
-Activation is unchanged from `doc_search`: no config flag; `(*Agent) searchResultJudge()` returns nil unless `discoveryJudgeClient()` (`internal/agent/discovery_typesafe.go:40`) yields a keyed `*TypesafeClient`. A nil judge means unfiltered.
+Activation is unchanged from `doc_search`: no config flag; `(*Agent) searchResultJudge()` returns nil unless `discoveryJudgeClient()` (`internal/agent/discovery_typesafe.go:35`) yields a keyed `*TypesafeClient`. A nil judge means unfiltered.
 
 ### Timeout budget
 
-`typesafeRequestTimeout` is 30 s (`internal/agent/typesafe.go:22`) and is applied as an `http.Client.Timeout` inside `Decide`. Under D4 every search pays a judge round trip, and fail-open still *waits* — a provider that accepts the connection and then stalls would add 30 s to every search in the session. That is the real cost of D4, and it is not acceptable.
+`typesafeRequestTimeout` is 30 s (`internal/agent/typesafe.go:23`) and is applied as an `http.Client.Timeout` inside `Decide`. Under D4 every search pays a judge round trip, and fail-open still *waits* — a provider that accepts the connection and then stalls would add 30 s to every search in the session. That is the real cost of D4, and it is not acceptable.
 
 The relevance judge therefore gets a short budget: `searchJudgeTimeout = 4s`, roughly 5× the measured Jev median of 872 ms (700–900 ms range; see `superpowers/specs/2026-09-22-laya-local-judge-evaluation.md`). Timing out early costs only an unfiltered result, so a tight budget is nearly free.
 
@@ -145,7 +145,7 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 func (c *TypesafeClient) Decide(state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, error) // existing callers, unchanged
 ```
 
-`Decide` becomes a wrapper over `DecideCtx` with a `context.Background()`-derived timeout, so the three existing callers — `permission_typesafe.go:262`, `autocontinue_typesafe.go:126`, `relevance_typesafe.go:45` — are untouched and keep the 30 s budget appropriate to their stakes. A side benefit is that the relevance judge now also stops when the user interrupts, which the current fixed-timeout form cannot do.
+`Decide` becomes a wrapper over `DecideCtx` with a `context.Background()`-derived timeout, so its existing callers are untouched and keep the 30 s budget appropriate to their stakes (the high-stakes ones are `permission_typesafe.go:267` and `autocontinue_typesafe.go:430`). The relevance path goes through the shared `judgeNoulCandidates`, which calls `DecideCtx` with the caller's context (`relevance_typesafe.go:70`) — a background context for `doc_search` (inheriting the same 30 s fallback), the 4 s `searchJudgeTimeout` for code search. A side benefit is that the relevance judge now also stops when the user interrupts, which the pre-change fixed-timeout form cannot do.
 
 ## 7. Rendering and footers
 
@@ -167,11 +167,11 @@ Narrow "pattern"/"include", or re-run with an intent that matches what these fil
 
 Note that the "judge ran, vetoed 0" and "no judge wired" states both render a bare list. That is intentional — the common case stays byte-identical to today — but it means the *absence* of filtering is never announced. Debug logging is the observability path: the tool logs `intent-missing` for an empty intent, and the agent logs `kept=/vetoed=/min=/model=` per judged call.
 
-One ordering consequence, stated because it is load-bearing: in `grep` the judge runs **before** `truncateOutput` (`search.go:609`, the `return truncateOutput(...)` line). Filtering first means the output cap applies to the kept set, so dropping out-of-scope files can change which lines survive the cut. That is the intended effect — the cap bounds what the model pays for — but it does mean the pre-judge order determines what is at risk of being cut, which is another reason not to have the cap decide relevance.
+One ordering consequence, stated because it is load-bearing: in `grep` the judge runs **before** `truncateOutput` (`search.go:697`, the `return truncateOutput(...)` line). Filtering first means the output cap applies to the kept set, so dropping out-of-scope files can change which lines survive the cut. That is the intended effect — the cap bounds what the model pays for — but it does mean the pre-judge order determines what is at risk of being cut, which is another reason not to have the cap decide relevance.
 
 ## 8. Scope decisions
 
-**`list` is deferred out of v1.** It is `os.ReadDir` on a single directory (`search.go:641`, `ListTool.ExecuteCtx`, appending sibling names at `:680`) returning them as a `[]string`, with no cap and no `required` in its schema. Judging sibling filenames within one directory is the weakest relevance signal of the code-search tools and the highest false-positive risk — a veto hides a name the model needed — for the least context saved, since the bulk this feature targets comes from `glob`'s 100-result cap and `grep`'s per-line noise. Adding it later is a `SearchResult` producer and one call site; nothing in the design forecloses it.
+**`list` is deferred out of v1.** It is `os.ReadDir` on a single directory (`search.go:729`, `ListTool.ExecuteCtx`, appending sibling names at `:768`) returning them as a `[]string`, with no cap and no `required` in its schema. Judging sibling filenames within one directory is the weakest relevance signal of the code-search tools and the highest false-positive risk — a veto hides a name the model needed — for the least context saved, since the bulk this feature targets comes from `glob`'s 100-result cap and `grep`'s per-line noise. Adding it later is a `SearchResult` producer and one call site; nothing in the design forecloses it.
 
 **`read` is never judged.** Same carve-out as `doc_get`: reading a named path is an explicit caller choice, and the doc-search concept doc records that carve-out as deliberate. A judge cannot improve an explicit choice.
 
@@ -181,7 +181,7 @@ One ordering consequence, stated because it is load-bearing: in `grep` the judge
 
 ## 9. The `intent` argument
 
-Added to the schema of `grep`, `rgrep`, and `glob`, and listed in `required`, with a description that states the judge depends on it. Also reinforced in the directive line at `internal/agent/prompt.go:52`, the one place that already names grep/glob to the model, so the requirement is stated outside the schema too.
+Added to the schema of `grep`, `rgrep`, and `glob`, and listed in `required`, with a description that states the judge depends on it. Also reinforced in the directive line at `internal/agent/prompt.go:76`, the one place that already names grep/glob to the model, so the requirement is stated outside the schema too.
 
 **An empty `intent` skips the judge entirely.** `required` is a teaching device for the model, not an enforcement mechanism: ocode unmarshals tool args into a params struct and ignores missing fields, so a missing `intent` is benign here, and returning an error to demand it would burn a turn on a formality. The risk that a stricter provider rejects a tool call whose arguments omit a required field is not fully eliminated by this design; it is judged low because the widely used providers in this repo do not validate tool arguments against the declared schema before dispatch, and ocode itself does not. Replayed pre-change sessions, whose recorded tool calls have no `intent`, degrade to the unfiltered path — correct, not broken.
 

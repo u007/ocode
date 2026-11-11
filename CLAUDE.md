@@ -398,7 +398,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1648`, the `GoalEvaluable`
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1720`, the `GoalEvaluable`
   stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5641`, the
   `goalEvaluable` branch; the RC branches at `:5406` and `:5482` use the same gate).
 - **A pending permission or question ask never auto-resumes a goal.** Server

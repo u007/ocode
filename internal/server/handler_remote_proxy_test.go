@@ -386,6 +386,56 @@ func TestHandleRemoteProxy_HeaderFallback(t *testing.T) {
 	}
 }
 
+func TestHandleRemoteProxy_ProjectRootBeatsPath(t *testing.T) {
+	ws := &fakeTestWorkspace{apiURL: "http://unused", token: "remote-tok"}
+	remote := fakeRemoteServer(t, ws)
+	defer remote.Close()
+	ws.apiURL = remote.URL
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/db/info?path=/home/user/project/app.db&project_root=/home/user/project", nil)
+	setPathValues(r, map[string]string{"host": "user@realhost", "rest": "db/info"})
+	h.HandleRemoteProxy(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleRemoteProxy_PathFallbackForProject(t *testing.T) {
+	ws := &fakeTestWorkspace{apiURL: "http://unused", token: "remote-tok"}
+	remote := fakeRemoteServer(t, ws)
+	defer remote.Close()
+	ws.apiURL = remote.URL
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/sessions?path=/home/user/project", nil)
+	setPathValues(r, map[string]string{"host": "user@realhost", "rest": "sessions"})
+	h.HandleRemoteProxy(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// A project_root that is not a saved project must still be rejected, even when
+// ?path= names a registered project (no smuggling via ?path).
+func TestHandleRemoteProxy_ProjectRootUnregisteredRejected(t *testing.T) {
+	ws := &fakeTestWorkspace{apiURL: "http://unused", token: "remote-tok"}
+	remote := fakeRemoteServer(t, ws)
+	defer remote.Close()
+	ws.apiURL = remote.URL
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/remote/user@realhost/api/db/info?path=/home/user/project&project_root=/etc/not-a-project", nil)
+	setPathValues(r, map[string]string{"host": "user@realhost", "rest": "db/info"})
+	h.HandleRemoteProxy(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleRemoteProxy_NilRemoteHosts(t *testing.T) {
 	h := NewHandler()
 	h.projects = nil

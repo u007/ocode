@@ -440,6 +440,11 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 
 	reasonKey := ""
 	if r, ok := resp.Answers[typesafeAutoContinueReasonKey]; ok && r.Type == "choice" {
+		// validateAnswer: the triage judge acts for the user, so an untrustworthy
+		// reason answer fails closed rather than being used.
+		if err := validateAnswer(questions[typesafeAutoContinueReasonKey], r); err != nil {
+			return AutoContinueDecision{Detail: fmt.Sprintf("%s triage returned invalid reason: %v", model, err)}, nil
+		}
 		reasonKey = r.Choice
 	}
 	reason := ""
@@ -459,6 +464,12 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 	if !found {
 		return AutoContinueDecision{Detail: fmt.Sprintf("%s returned unknown choice %q", model, ans.Choice)}, nil
 	}
+	// validateAnswer: the triage judge acts for the user, so an untrustworthy
+	// answer (e.g. confidence outside [0,1], unnormalised probabilities) fails
+	// closed rather than being used. Choice membership was already checked above.
+	if err := validateAnswer(questions[typesafeAutoContinueVerdictKey], ans); err != nil {
+		return AutoContinueDecision{Detail: fmt.Sprintf("%s triage returned invalid verdict: %v", model, err)}, nil
+	}
 	dec := AutoContinueDecision{Action: act.Key}
 	prompt := act.Prompt
 	// A todo-specific action is only actionable against one open item. The item
@@ -468,7 +479,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 	// an unknown id or a low-confidence pick leaves it empty and nothing resumes.
 	if act.NeedsTodo {
 		todoID := ""
-		if ti, ok := resp.Answers[typesafeAutoContinueTodoItemKey]; ok && ti.Type == "choice" && ti.Confidence >= a.resolveAutoContinueMinConfidence() {
+		if ti, ok := resp.Answers[typesafeAutoContinueTodoItemKey]; ok && ti.Type == "choice" && validateAnswer(questions[typesafeAutoContinueTodoItemKey], ti) == nil && ti.Confidence >= a.resolveAutoContinueMinConfidence() {
 			for _, it := range todoItems {
 				if id, _ := it["id"].(string); id == ti.Choice {
 					todoID = id

@@ -27,6 +27,7 @@ import (
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/messaging"
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
@@ -97,6 +98,7 @@ type Handler struct {
 	remoteHosts *remoteHostRegistry
 	agents      map[string]*agentSession
 	cfg         *config.Config
+	messaging   *messaging.Manager
 	rc          *RCBridge          // set when proxying to a TUI session
 	scheduler   *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// cronServices resolves the cron engine for a project root, per call. It is
@@ -675,7 +677,11 @@ type agentSession struct {
 	// liveReset replaces the live-persist view after a between-step compaction
 	// rewrote the transcript (set alongside liveAppend).
 	liveReset func([]agent.Message)
-	mu        sync.Mutex
+	// liveResetHook is a test-only seam: when non-nil it is invoked with the
+	// same messages as liveReset, so a test can observe the live-persist view
+	// being restarted without instrumenting production code.
+	liveResetHook func([]agent.Message)
+	mu            sync.Mutex
 	// childAsks is the registry of sub-agent permission asks parked on this
 	// session. It deliberately lives OUTSIDE as.mu (own mutex, never takes
 	// as.mu): runTurn holds as.mu for the whole turn and a synchronous sub-agent
@@ -745,6 +751,16 @@ func NewHandler() *Handler {
 		log.Printf("handler: init browser tab store: %v (shared browser-tab persistence disabled)", err)
 	}
 
+	gd, _ := paths.GlobalDataDir()
+	msgStore, err := messaging.NewStore(filepath.Join(gd, "messaging.sqlite"))
+	var msgMgr *messaging.Manager
+	if err != nil {
+		log.Printf("handler: init messaging store: %v", err)
+	} else {
+		msgMgr = messaging.NewManager(msgStore, gd)
+		messaging.DefaultManager = msgMgr
+	}
+
 	monacoStore, err := monaco.NewStore()
 	if err != nil {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
@@ -774,6 +790,7 @@ func NewHandler() *Handler {
 		tabsStore:           tabsStore,
 		termTabsStore:       termTabsStore,
 		browserTabsStore:    browserTabsStore,
+		messaging:           msgMgr,
 		monaco:              monacoStore,
 		appearance:          appearanceService,
 		vaultGrants:         make(map[string]bool),
@@ -788,8 +805,8 @@ func NewHandler() *Handler {
 		shellSessions: newShellSessionRegistry(func(opts shellpkg.SessionOptions) (shellSession, error) {
 			return shellpkg.NewSession(opts)
 		}, defaultSessionIdleTimeout, time.Now),
-		mediaTokens:                  newMediaTokenStore(),
-		artifactTokens:               func() *artifactTokenStore {
+		mediaTokens: newMediaTokenStore(),
+		artifactTokens: func() *artifactTokenStore {
 			st, err := newArtifactTokenStore(artifactStoreDir())
 			if err != nil {
 				log.Printf("artifact token store init failed: %v", err)
@@ -809,6 +826,13 @@ func NewHandler() *Handler {
 		pulsePreviousTurnActive:      make(map[string]bool),
 		pulsePreviousTerminalRunning: make(map[string]bool),
 		pulsePreviousAsk:             make(map[string]pulseAskMark),
+	}
+	if msgMgr != nil {
+		msgMgr.OnInbound = func(m messaging.Message) {
+			if h.bus != nil {
+				h.bus.Publish("messaging_message", "", "", m)
+			}
+		}
 	}
 
 	// The session registry is the single authority for session → project root

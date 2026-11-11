@@ -1516,6 +1516,9 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 			if as.liveReset != nil {
 				as.liveReset(as.messages)
 			}
+			if as.liveResetHook != nil {
+				as.liveResetHook(as.messages)
+			}
 			h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "question_resolved", Data: map[string]string{"request_id": fire.RequestID}})
 			// Mirror the rewritten tool row to watchers, as HandleAnswerQuestion
 			// does. Without it the transcript keeps the unanswered question card
@@ -2868,6 +2871,9 @@ func (h *Handler) compactBeforeResume(sessionID string, as *agentSession, headle
 	// follows.
 	if as.liveReset != nil {
 		as.liveReset(as.messages)
+	}
+	if as.liveResetHook != nil {
+		as.liveResetHook(as.messages)
 	}
 	return append([]agent.Message(nil), as.messages...), len(as.messages)
 }
