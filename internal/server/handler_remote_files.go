@@ -489,7 +489,7 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 	}
 	if root != "" {
 		abs := remoteAbsJoin(rw.Path, path)
-		if _, cerr := remoteRelCheck(rw.Path, abs); cerr != nil {
+		if _, cerr := remoteReadRelCheck(rw.Path, abs); cerr != nil {
 			writeError(w, http.StatusBadRequest, "path is outside the project root")
 			return
 		}
@@ -514,14 +514,16 @@ func (h *Handler) remoteFileContent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// remoteRawContainment anchors a remote preview path the way remoteFileRaw and
-// the access probe both need: with a project_root the path must stay inside
-// the remote project root (errMsg otherwise); without one it is only joined
-// onto the work path. It returns the absolute remote path, or errMsg.
+// remoteRawContainment anchors a remote preview/read path the way remoteFileRaw,
+// the access probe and the content endpoint all need: with a project_root the
+// path must stay inside the remote project root (errMsg otherwise); without
+// one it is only joined onto the work path. Read-side containment — the .git
+// boundary is NOT applied (mirrors the local read path). It returns the
+// absolute remote path, or errMsg.
 func remoteRawContainment(rw remoteWork, path, root string) (string, string) {
 	abs := remoteAbsJoin(rw.Path, path)
 	if root != "" {
-		if _, cerr := remoteRelCheck(rw.Path, abs); cerr != nil {
+		if _, cerr := remoteReadRelCheck(rw.Path, abs); cerr != nil {
 			return "", "path is outside the project root"
 		}
 	}

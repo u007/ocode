@@ -72,7 +72,7 @@ func applyConfineToSelf(writableRoots []string, shell string, shellArgs []string
 	rulesetCap := landlockReadExec | mutation
 
 	var attr unix.LandlockRulesetAttr
-	attr.Access_fs = rulesetCap
+	attr.Handled_access_fs = rulesetCap
 	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET,
 		uintptr(unsafe.Pointer(&attr)), landlockAttrSize, 0)
 	if errno != 0 {

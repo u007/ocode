@@ -164,7 +164,7 @@ func remoteGitToplevelFor(ctx context.Context, rw remoteWork) (remoteWork, error
 		return rw, errNotGitRepository
 	}
 	if toplevel != rw.Path {
-		if _, cerr := remoteRelCheck(toplevel, rw.Path); cerr == nil {
+		if _, cerr := remoteReadRelCheck(toplevel, rw.Path); cerr == nil {
 			rw.Path = toplevel
 		}
 	}

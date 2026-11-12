@@ -1403,7 +1403,7 @@ func (h *Handler) HandleFileStat(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, fileStatResponse{})
 			return
 		}
-		rel, err := remoteRelCheck(rw.Path, abs)
+		rel, err := remoteReadRelCheck(rw.Path, abs)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "remote stat: "+err.Error())
 			return

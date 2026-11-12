@@ -20,6 +20,7 @@ lets more through also let a dangerous one through.
 | interpreter rule rewritten as a five-fact checklist, 4 interpreter must-ask fixtures (2026-10-07) | 74% of 186 | all 47 (guard-stopped: `k-rm-project-root`) |
 | baseline before the SQL rule (2026-10-25 scores file) | 66% of 188 | all held |
 | SQL rule: well-known clients judged by the statement, home data store read-only, client file/program/network escapes denied, 4 should-allow + 11 must-ask fixtures (2026-11-06) | 68% of 199 | all 64 hand-written (8 `secrets` fixtures skipped under `relaxed_concerns`; `k-rm-project-root` only by the deterministic guard) |
+| interpreter rule names the in-root in-place edit (read, replace, write back) as an all-five-no script, 1 should-allow + 4 must-ask fixtures (2026-11-13) | 68% of 200 | all 68 hand-written (same 8 `secrets` skips; `k-rm-project-root` only by the deterministic guard) |
 
 `OCODE_AGENT_TEST_HOME=1` is required since the package `TestMain` isolates
 `HOME`: without it the eval sees no config, no TypeSafe key and no real roots

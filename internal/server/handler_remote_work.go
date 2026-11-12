@@ -60,7 +60,8 @@ func (h *Handler) remoteProjectEntry(host, path string) (projects.Project, bool)
 // delete. The returned Path is the REQUESTED path, so every downstream
 // containment check (remoteRelCheck, remoteSafeSpec) stays anchored exactly
 // where the caller asked — a sub-path can only narrow what is reachable, never
-// widen it.
+// widen it. Read callers anchor with remoteReadRelCheck; mutation callers with
+// remoteRelCheck (which also refuses .git).
 //
 // Mutation callers must use remoteMutationWorkFor instead, which additionally
 // re-checks the canonical directory (see below).
@@ -764,7 +765,8 @@ func remoteGitSpec(p string) (string, error) {
 // remoteAbsJoin resolves a possibly-remote-project-relative path against the
 // remote project root. Relative paths from the frontend become
 // "<root>/<rel>"; a path already anchored at the remote root passes through
-// unchanged (callers still bound the result to the root with remoteRelCheck).
+// unchanged (callers still bound the result to the root with
+// remoteReadRelCheck/remoteRelCheck).
 //
 // "Already anchored" cannot be a leading-"/" test: a remote project root may
 // be "~"-relative ("~/www/app"), and the file tree sends root-joined paths
@@ -798,11 +800,12 @@ func remoteRootPrefix(root string) string {
 	return strings.TrimRight(root, "/")
 }
 
-// remoteRelCheck validates that p stays inside root and returns the
-// repo-relative spec (lexical — the remote side has no EvalSymlinks here;
-// symlink containment on remote trees is accepted as a documented residual,
-// mirroring the file tree's lexical handling of linked folders).
-func remoteRelCheck(root, p string) (string, error) {
+// remoteReadRelCheck is remoteRelCheck without the .git boundary: READ
+// endpoints use it so the remote file surface behaves like the local one,
+// where resolveProjectFilePathScoped checks only project-root containment and
+// reading .git/config is allowed. The .git clause exists for mutations
+// ("cannot be modified"); reads have no local equivalent.
+func remoteReadRelCheck(root, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty path")
 	}
@@ -821,6 +824,20 @@ func remoteRelCheck(root, p string) (string, error) {
 	}
 	if rel == ".." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") || strings.HasSuffix(rel, "/..") {
 		return "", fmt.Errorf("path is outside the project root")
+	}
+	return rel, nil
+}
+
+// remoteRelCheck validates that p stays inside root and returns the
+// repo-relative spec (lexical — the remote side has no EvalSymlinks here;
+// symlink containment on remote trees is accepted as a documented residual,
+// mirroring the file tree's lexical handling of linked folders). It is the
+// MUTATION containment check: it additionally refuses any path inside .git.
+// Read endpoints must use remoteReadRelCheck instead.
+func remoteRelCheck(root, p string) (string, error) {
+	rel, err := remoteReadRelCheck(root, p)
+	if err != nil {
+		return "", err
 	}
 	if rel == ".git" || strings.HasPrefix(rel, ".git/") || strings.HasSuffix(rel, "/.git") || strings.Contains(rel, "/.git/") {
 		return "", fmt.Errorf("path is inside .git and cannot be modified")
