@@ -12,9 +12,9 @@ wait; turns emit started/heartbeat/done/error; new reconcile and per-session
 status endpoints give the frontend server truth to derive state from.
 
 **Context (self-contained):**
-- Today `HandleChat` (`internal/server/handler.go:997-1003`) builds the agent
+- Today `HandleChat` (`internal/server/handler.go:1009-1015`) builds the agent
   session synchronously via `ensureAgentSession` → `buildAgentSession`
-  (`internal/server/agent_session.go:47-66`): spawns plugin processes, may
+  (`internal/server/agent_session.go:48-67`): spawns plugin processes, may
   auto-start a local model server, and blocks unbounded on
   `h.mcpCache.wait()`. First message in a new session can hang minutes with
   no feedback; the client spinner is tied to this unsettled promise.

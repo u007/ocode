@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/mcp"
+	"github.com/u007/ocode/internal/plugins"
 )
 
 func Run(args []string) error {
@@ -141,6 +142,8 @@ func runList() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	// List plugin-declared servers too; "" resolves the project from the cwd.
+	plugins.MergeMCPServers(cfg, "")
 
 	if len(cfg.MCP) == 0 {
 		fmt.Println("No MCP servers configured.")

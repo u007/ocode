@@ -94,8 +94,10 @@ import type {
   PendingRewind,
   PreparePendingRewindRequest,
   PulsePage,
+  McpAppResource,
 } from "./types";
 
+import { isEnvTemplateURL } from "../lib/dbConnectTemplate";
 import { noteSessionRevision } from "../lib/sessionRevision";
 import type { ViewerState } from "../lib/viewerContext";
 
@@ -1870,6 +1872,34 @@ export const api = {
       host,
     ),
 
+  // MCP Apps widget: the HTML resource a `ui://` tool declared. 409 = the
+  // session's agent is not loaded in the server right now.
+  fetchMcpAppResource: (
+    sessionId: string,
+    server: string,
+    uri: string,
+    host?: string,
+    signal?: AbortSignal,
+  ) =>
+    fetchJSON<McpAppResource>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/mcp-app/resource?server=${encodeURIComponent(server)}&uri=${encodeURIComponent(uri)}`,
+      { signal },
+      host,
+    ),
+
+  // MCP Apps widget: forward a tools/call from the widget to its MCP server.
+  callMcpAppTool: (
+    sessionId: string,
+    payload: { server: string; name: string; arguments: Record<string, unknown> },
+    host?: string,
+    signal?: AbortSignal,
+  ) =>
+    fetchJSON<{ result: unknown }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/mcp-app/tools/call`,
+      { method: "POST", body: JSON.stringify(payload), signal },
+      host,
+    ),
+
   // Advisor model + backend + trigger set. With a sessionId these read/write
   // THAT chat's own pinned values (persisted to its transcript metadata by the
   // server, never to global config); without one they are the process-wide
@@ -3346,11 +3376,13 @@ export const api = {
         body: JSON.stringify({ command, workDir, host, session }),
       },
     ),
-  listProjects: () => fetchJSON<Project[]>("/api/projects").then((projects) => {
+  /** `signal` aborts the request (the offline retry uses it so a hung attempt does
+   *  not stay open). The write-through cache below runs only on a successful answer. */
+  listProjects: (signal?: AbortSignal) => fetchJSON<Project[]>("/api/projects", { signal }).then((projects) => {
     // Write-through cache for offline read access (best-effort, non-blocking).
     import("../lib/offlineSync")
       .then(({ syncProjectToCache }) => {
-        projects.forEach((p) => void syncProjectToCache(p));
+        projects.forEach((p, i) => void syncProjectToCache(p, i));
       })
       .catch(() => {});
     return projects;
@@ -4838,13 +4870,23 @@ export const api = {
       })),
     })),
   /** `password` is required only for a literal (sealed) URL. An environment
-   *  template ("${DATABASE_URL}") carries no secret and is saved without one. */
+   *  template ("${DATABASE_URL}") carries no secret and is saved without one.
+   *  `project_path` is sent only for a template: the server saves a template into
+   *  the project's .ocode/db.json and refuses a literal URL there. A literal URL on
+   *  a remote project still routes to that host (fetchJSON below) and is saved to
+   *  the host's global config. */
   dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget, tunnel?: DBConnectTunnel) =>
     fetchJSON<{ name: string }>(
       "/api/dbconnect/connections",
       {
         method: "POST",
-        body: JSON.stringify({ name, url, password, project_path: target?.projectPath, tunnel }),
+        body: JSON.stringify({
+          name,
+          url,
+          password,
+          project_path: isEnvTemplateURL(url) ? target?.projectPath : undefined,
+          tunnel,
+        }),
       },
       target?.host,
       target?.projectPath,

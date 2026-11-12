@@ -15,17 +15,25 @@ and type while the person uses their desktop. If `atlas` is missing or
 
 ## In ocode
 
-This plugin is the Atlas skill plus the upstream `atlas` CLI. ocode has no
-Atlas tool of its own, so every step below is an ordinary `bash` command.
+This plugin is the Atlas skill plus the upstream `atlas` CLI. When the `atlas`
+MCP server is attached (`.mcp.json`), ocode offers the tools `atlas_atlas_status`,
+`atlas_show_screen` and `atlas_take_screenshot`; every other step below is an
+ordinary `bash` `atlas …` command. This plugin is project-local, so its MCP server
+starts only after the plugin is explicitly enabled (`/plugin enable atlas`).
 
 - ocode's permission rules apply to each `atlas` command like any other shell
   command. Never wrap, alias, background or redirect one to hide what it does.
 - ocode does not report a host session to Atlas. Put `ATLAS_SESSION=ocode`
   before every command; beside sibling subagents, add `ATLAS_TASK=NAME` to
   every command too, cleanup included.
-- ocode has no embedded Atlas view and no `show_screen` or `take_screenshot`
-  tool. Read a screenshot's `path`; run `atlas monitor` only when the person
-  asks to watch the helper or take control.
+- When the `atlas` MCP tools are attached, call `atlas_show_screen` once when
+  visible work in the helper starts. The web and desktop chat shows the live
+  helper screen with a Stop button. The terminal UI has no embedded view, so
+  there run `atlas monitor` only when the person asks to watch the helper or
+  take control. `atlas_take_screenshot` returns the picture to you when the model can
+  see images; otherwise you get only its text result. If the
+  tools are not available, fall back to the CLI: `atlas screenshot`, then read
+  its `path`.
 - Never run the Atlas installer, `sudo` or any admin step yourself. Setup
   belongs to the person: https://atlas.insanearts.io/install.sh
 - macOS only. On another platform say so instead of trying.

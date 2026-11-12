@@ -404,6 +404,9 @@ type Agent struct {
 	client   LLMClient
 	tools    map[string]tool.Tool
 	mcpTools map[string]struct{}
+	// mcpAppRefs holds the MCP Apps ref of each completed call, keyed by tool
+	// call ID, until the call's tool message takes it (see keepMCPAppRef).
+	mcpAppRefs sync.Map
 	// mcpServers maps MCP tool name -> server name; filled by addMCPTools when the tool implements tool.MCPServerTool.
 	mcpServers map[string]string
 	// pinnedMCPServers are the server names whose tools every discovery sync attaches. Set per session by SetPinnedMCPServers.
@@ -2158,7 +2161,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
 							result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 							content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
-							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
+							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display, MCPApp: a.takeMCPAppRef(tc.ID, result)}
 						}(i, k, tc)
 					}
 					wg.Wait()
@@ -2171,7 +2174,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					// call at parallelIdx[k].
 					for k, i := range parallelTCs {
 						if k < len(dagMsgs) {
-							results[i] = dagMsgs[k]
+							msg := dagMsgs[k]
+							msg.MCPApp = a.takeMCPAppRef(msg.ToolID, msg.Content)
+							results[i] = msg
 						}
 					}
 				}
@@ -2225,7 +2230,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
 						result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 						content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
-						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
+						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display, MCPApp: a.takeMCPAppRef(tc.ID, result)}
 					}(i, k, resp.ToolCalls[i], isCancelled)
 				}
 				wg.Wait()
@@ -2289,7 +2294,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 			fullResult := result
 			result = TruncateToolResult(tc.ID, result)
-			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
+			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice, MCPApp: a.takeMCPAppRef(tc.ID, result)}
 			if fullResult != result {
 				results[i].DisplayContent = fullResult
 			}
@@ -2439,6 +2444,9 @@ func (a *Agent) finishCancelledRound(newMsgs, messages []Message, resp *Message,
 	// backing array.
 	tail := append([]Message(nil), results[published:]...)
 	for _, tc := range resp.ToolCalls {
+		// A call that completed but whose message is not built on this path
+		// must not leave its MCP Apps ref behind for a later call.
+		a.mcpAppRefs.Delete(tc.ID)
 		if answered[tc.ID] {
 			continue
 		}
@@ -3882,6 +3890,10 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 // message for it (see finishCancelledRound).
 func (a *Agent) handleToolCallWithImages(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
 	text, err := a.handleToolCallWithContext(ctx, name, args, b, toolCallID)
+	// An MCP tool's image belongs to this call alone. It is taken on every
+	// path, so nothing is retained, and it is used only when the model can see
+	// images.
+	mcpRaw, mcpMime, mcpOK := a.takeMCPCallImage(name, toolCallID)
 	if err != nil && ctx.Err() != nil {
 		return tool.ToolCancelledResult, nil, nil
 	}
@@ -3890,6 +3902,14 @@ func (a *Agent) handleToolCallWithImages(ctx context.Context, name string, args 
 	}
 	if !a.currentModelSupportsVision() {
 		return text, nil, nil
+	}
+	if mcpOK {
+		enc, ierr := NewImageFromBytes(mcpRaw, mcpMime, a.imageMaxDim())
+		if ierr != nil {
+			a.emitDebug("ERROR", fmt.Sprintf("MCP tool %s: encoding vision block: %v", name, ierr))
+			return text, nil, nil
+		}
+		return text + "\n[image shown below]", []Image{enc.Image}, nil
 	}
 	// Tool that produces an image without a file path (e.g. screenshot).
 	if ipt, ok := a.tools[name].(tool.ImageProducingTool); ok && ipt.ProducesImage(args) {
@@ -3993,7 +4013,18 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 // orphan recovery. Keeping the context through permission-approved execution
 // lets ContextualTool implementations (notably bash and formatters) stop when
 // recovery is cancelled or times out.
+//
+// Every execution path goes through here, so this is where an MCP Apps result
+// is taken: it is taken once after the call, whatever the outcome, and kept
+// under toolCallID only when the call completed (see keepMCPAppRef).
 func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
+	text, err := a.runToolCallWithContext(ctx, name, args, b, toolCallID)
+	a.keepMCPAppRef(name, toolCallID)
+	return text, err
+}
+
+// runToolCallWithContext is the body of handleToolCallWithContext.
+func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	// A tool that doesn't exist here was never advertised to the model and is
 	// a hallucination. Respond with "tool not found" immediately — do not
 	// route it through the permission layer, which would otherwise ask the
@@ -5889,6 +5920,9 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// never reach the changes tab. An empty workDir is harmless: confinedPath
 	// falls back to os.Getwd().
 	toolCtx = tool.WithWorkDir(toolCtx, a.WorkDir())
+	// The model's call ID keys the per-call side channels of MCP tools (their
+	// image and MCP Apps result), so two calls of one tool never share state.
+	toolCtx = tool.WithToolCallID(toolCtx, toolCallID)
 	// Address the todo tools at this agent's own plan (project root + session
 	// id). The store has no usable process-global session on a multi-session
 	// server, so without this todowrite/todoread/todo_update refuse to run
@@ -7103,7 +7137,7 @@ func (a *Agent) recoverOrphanedToolCalls(messages []Message, stopCh <-chan struc
 			result = fmt.Sprintf("ORPHAN_TOOL_ERROR:%s:%v\n%s", tc.Function.Name, err, result)
 		}
 		result = TruncateToolResult(tc.ID, result)
-		toolMsg := Message{Role: "tool", ToolID: tc.ID, Content: result}
+		toolMsg := Message{Role: "tool", ToolID: tc.ID, Content: result, MCPApp: a.takeMCPAppRef(tc.ID, result)}
 		out = append(out, toolMsg)
 		if a.OnMessage != nil {
 			a.OnMessage(toolMsg)

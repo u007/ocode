@@ -26,7 +26,13 @@ import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { absoluteRestoreTarget } from "../../lib/inputRestore";
 import { transcriptItemKey } from "../../lib/chatItemKeys";
+import { mcpAppKey } from "./mcpApp/mcpAppHost";
 import { SESSION_PREFETCH_LIMIT, takePrefetchedSession } from "../../lib/sessionPrefetch";
+import {
+  PARALLEL_TOOL_CALLS_INLINE_CLASS,
+  PARALLEL_TOOL_CALLS_STACKED_CLASS,
+  useInlineParallelToolCalls,
+} from "./inlineParallelToolCalls";
 import {
   buildJumpTargets,
   inWindowMatchCount,
@@ -137,6 +143,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
   const projectDispatch = useProjectDispatch();
   const { messages, live, hasMore, loadingMore, windowStartServerIndex, totalMessages } = slice;
   const { config: chatVerbosityConfig, policy: chatDisplayPolicy, revision: chatPolicyRevision } = useChatVerbosity();
+  const inlineParallelToolCalls = useInlineParallelToolCalls();
   const disclosureValuesRef = useRef(new Map<string, boolean>());
   const disclosureListenersRef = useRef(new Map<string, Set<() => void>>());
   const disclosure = useMemo<ChatDisclosureStore>(() => ({
@@ -351,6 +358,11 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           /** The unanswered `permission` prompt this call is paused on, so the
            *  card can re-open its dialog on demand. */
           pendingPermission?: PermissionRequest;
+          /** MCP Apps widget metadata of this call's result (see McpAppRef). */
+          resultMcpApp?: import("../../api/types").McpAppRef;
+          /** True only for the last committed result of this widget
+           *  (server + resource_uri), so older cards do not start a second poller. */
+          mcpAppActive?: boolean;
         }>;
       };
 
@@ -383,13 +395,35 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
   // Sentinel tool messages (QUESTION_PROMPT / PERMISSION_ASK) are already
   // rendered by dedicated dialogs and are excluded from both grouping and
   // virtualization so they never claim a slot.
+  // MCP Apps widgets with a live tool result. The live part is always the one
+  // that polls, so a committed card for the same widget must not also start
+  // (see isLiveMcpApp). Only the last live part of a widget is active.
+  const liveMcpLast = useMemo(() => {
+    const last = new Map<string, number>();
+    live.forEach((part, i) => {
+      if (part.kind === "tool" && part.mcpApp) last.set(mcpAppKey(part.mcpApp), i);
+    });
+    return last;
+  }, [live]);
+  const isLiveMcpApp = (ref?: import("../../api/types").McpAppRef) =>
+    ref !== undefined && liveMcpLast.has(mcpAppKey(ref));
+
   const renderEntries: RenderEntry[] = useMemo(() => {
-    const resultById = new Map<string, { content: string; idx: number; images?: import("../../api/types").MessageImage[] }>();
+    const resultById = new Map<
+      string,
+      { content: string; idx: number; images?: import("../../api/types").MessageImage[]; mcpApp?: import("../../api/types").McpAppRef }
+    >();
     const pendingQuestionById = new Map<string, QuestionRequest>();
     const pendingPermissionById = new Map<string, PermissionRequest>();
+    // The last committed tool result per MCP Apps widget: only that card starts
+    // its widget, so older cards never open a second poller on the same server.
+    const lastMcpAppIdx = new Map<string, number>();
     messages.forEach((m, idx) => {
       if (m.role === "tool" && m.tool_call_id && !isSentinelToolContent(m.content)) {
-        resultById.set(m.tool_call_id, { content: m.content, idx, images: m.images });
+        resultById.set(m.tool_call_id, { content: m.content, idx, images: m.images, mcpApp: m.mcp_app });
+      }
+      if (m.role === "tool" && m.mcp_app && !isSentinelToolContent(m.content)) {
+        lastMcpAppIdx.set(mcpAppKey(m.mcp_app), idx);
       }
       if (m.role === "tool" && m.tool_call_id) {
         const q = parseQuestionFromMessage(m);
@@ -429,6 +463,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
               resultContent: hit.content,
               resultIdx: hit.idx,
               resultImages: hit.images,
+              resultMcpApp: hit.mcpApp,
+              mcpAppActive: hit.mcpApp !== undefined && lastMcpAppIdx.get(mcpAppKey(hit.mcpApp)) === hit.idx,
               dismissedQuestion: dismissedQuestionFor(tc, hit.content, hit.idx, trailingStart),
             };
           }
@@ -1943,15 +1979,18 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                         {entry.calls.length > 1 ? (
                           <div
                             data-testid="parallel-tool-calls"
-                            className={(typeof localStorage !== "undefined" && localStorage.getItem("ocode:inlineParallelToolCalls") === "1") ? "flex flex-wrap gap-2" : "flex flex-col gap-2"}
+                            className={inlineParallelToolCalls ? PARALLEL_TOOL_CALLS_INLINE_CLASS : PARALLEL_TOOL_CALLS_STACKED_CLASS}
                           >
-                            {entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                            {entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission }) => (
                               <ToolBlock
                                 key={tc.id}
                                 tool={tc.function.name}
                                 command={tc.function.arguments}
                                 output={resultContent}
                                 images={resultImages}
+                                mcpApp={resultMcpApp}
+                                mcpAppActive={mcpAppActive && !isLiveMcpApp(resultMcpApp)}
+                                host={host}
                                 toolCallId={tc.id}
                                 sessionId={sessionId}
                                 highlight={highlight}
@@ -1990,13 +2029,16 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             ))}
                           </div>
                         ) : (
-                          entry.calls.map(({ tc, resultContent, resultImages, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                          entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission }) => (
                             <ToolBlock
                               key={tc.id}
                               tool={tc.function.name}
                               command={tc.function.arguments}
                               output={resultContent}
                               images={resultImages}
+                              mcpApp={resultMcpApp}
+                              mcpAppActive={mcpAppActive && !isLiveMcpApp(resultMcpApp)}
+                              host={host}
                               toolCallId={tc.id}
                               sessionId={sessionId}
                               highlight={highlight}
@@ -2109,6 +2151,9 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                   output={part.output}
                   toolCallId={part.callId}
                   sessionId={sessionId}
+                  mcpApp={part.mcpApp}
+                  mcpAppActive={part.mcpApp !== undefined && liveMcpLast.get(mcpAppKey(part.mcpApp)) === i}
+                  host={host}
                   // Mid-turn the ask's tool card lives ONLY in the live buffer
                   // (the committed snapshot lands at turn end, and an ask pauses
                   // the turn), so without this an X/Escape hide leaves no reopen

@@ -15,11 +15,17 @@ import (
 const (
 	maxUpstreamConnsPerKey = 32
 	// upstreamSlotWait bounds how long an over-limit request queues before
-	// failing. The queue wait happens BEFORE the 30s upstream fetch timeout
+	// failing with errUpstreamBusy. An over-limit request queues here, as it
+	// would in a browser's own per-host connection queue. A page served over
+	// HTTP/2 sends its whole module graph at once, and a cold dev server can
+	// take longer than a few seconds to turn the first 32 requests over, so a
+	// short deadline fails module requests that would have succeeded. The wait
+	// is still bounded, so a waiter is never parked forever behind a wedged
+	// upstream. A cancelled request leaves the queue at once through its
+	// context. The queue wait happens BEFORE the 30s upstream fetch timeout
 	// starts (handlers acquire before building the upstream request), so it
-	// needs its own deadline; waiters are never parked indefinitely behind
-	// a wedged upstream.
-	upstreamSlotWait = 5 * time.Second
+	// needs its own deadline.
+	upstreamSlotWait = 60 * time.Second
 )
 
 // errUpstreamBusy is returned when a slot could not be acquired within

@@ -168,7 +168,7 @@ Two caveats qualify "the layers beneath":
 
 ## The wiring
 
-Insertion point: `handleToolCallWithContext` (`internal/agent/agent.go`). The guard runs immediately after `decision := a.permissions.Decide(name, args)` (agent.go:4049) and the `browserDecision` pass, and before the Deny and Ask branches. Placing it there also covers the paths that never consult a model, most importantly the cached-domain allow and the allowed-host allow. The guard is entered only when `decision.Level != PermissionDeny` (agent.go:4073). On escalation it:
+Insertion point: `handleToolCallWithContext` (`internal/agent/agent.go`). The guard runs immediately after `decision := a.permissions.Decide(name, args)` (agent.go:4080) and the `browserDecision` pass, and before the Deny and Ask branches. Placing it there also covers the paths that never consult a model, most importantly the cached-domain allow and the allowed-host allow. The guard is entered only when `decision.Level != PermissionDeny` (agent.go:4104). On escalation it:
 
 - rewrites the decision to `PermissionAsk` with `req.DenyReason` set to the guardrail reason, which ends with the concern key in brackets, and `req.Summary` set to `"TypeSafe outbound-request guardrail"`;
 - sets a local `guardEscalated` flag. The bash auto-judge branch (agent.go:4110) and the Ask branch's auto-judge (agent.go:4181, `if autoEnabled && !guardEscalated`) both stand down, so the auto-permission model cannot wave through a call the guardrail just routed to a human;

@@ -13,8 +13,8 @@
 ### Task 1: TUI — permission-mode cycle + `/sandbox` + non-persistence
 
 **Files:**
-- Modify: `internal/tui/model.go` — the status-bar/allowed-header permission-mode click cycle (`:7010-7031`, mirrored at `:7174-7198`). Current machine: `normal(auto off) → normal(auto on) → YOLO → Locked → normal`. Insert sandbox so the machine becomes `normal(auto off) → normal(auto on) → YOLO → Locked → Sandbox → normal`. Entering/leaving sandbox does **not** change `AutoPermissionEnabled` (Part 01 Task 1). Extend the mode-indicator label switch to render `SANDBOX`.
-- Modify: `internal/tui/model.go:8205-8213` instant-command allowlist — add `cmd == "/sandbox"` so it applies immediately like `/yolo`.
+- Modify: `internal/tui/model.go` — the status-bar/allowed-header permission-mode click cycle (`:7010-7036`, mirrored at `:7179-7203`). Current machine: `normal(auto off) → normal(auto on) → YOLO → Locked → normal`. Insert sandbox so the machine becomes `normal(auto off) → normal(auto on) → YOLO → Locked → Sandbox → normal`. Entering/leaving sandbox does **not** change `AutoPermissionEnabled` (Part 01 Task 1). Extend the mode-indicator label switch to render `SANDBOX`.
+- Modify: `internal/tui/model.go:8210-8218` instant-command allowlist — add `cmd == "/sandbox"` so it applies immediately like `/yolo`.
 - Modify: `internal/tui/commands.go` — register `/sandbox` (beside `/yolo` at `:145`) with a `runSandboxCmd` handler (`on|off|status`); `on` sets `PermissionModeSandbox`, `off` sets `normal`.
 - Modify: the persist path (`persistPermissions()` / the config saver it calls) — when the live mode is `sandbox`, persist `normal` for the durable mode field (Decision 2). The live agent stays in sandbox; only the on-disk default is clamped.
 - Test: `internal/tui/model_test.go`, `internal/tui/commands_test.go`
@@ -52,8 +52,8 @@
 ### Task 3: Web UI — dispatcher, API client, mode control, PermissionsForm
 
 **Files:**
-- Modify: `web/src/api/types.ts` — add `"sandbox"` to the live permission-mode string handling around `permission_mode` (`:444`); leave `CronPermissionMode` (`:86`) unchanged (out of scope).
-- Modify: `web/src/api/client.ts` — add `setPermissionMode(mode: string)` → `PUT /api/permissions/mode` (beside `getYolo`/`setYolo` at `:1038-1041`).
+- Modify: `web/src/api/types.ts` — add `"sandbox"` to the live permission-mode string handling around `permission_mode` (`:466`); leave `CronPermissionMode` (`:108`) unchanged (out of scope).
+- Modify: `web/src/api/client.ts` — add `setPermissionMode(mode: string)` → `PUT /api/permissions/mode` (beside `getYolo`/`setYolo` at `:1040-1043`).
 - Modify: `web/src/components/Chat/commands.ts` — add the `/sandbox` descriptor (beside `:76`) **and** a `case "/sandbox":` handler in the dispatcher (beside `:391`, mirroring the `/yolo` handler at `:898-923`) that calls `api.setPermissionMode` and reports status from `GET /api/permissions.mode`.
 - Modify: the permission-mode control/pill (the surface that drives YOLO today) to offer Sandbox and render the active mode label.
 - Modify: `web/src/components/Settings/PermissionsForm.tsx` — it currently stores mode as a boolean (`:14`, `useState(false) // yolo on/off`) and `save()` calls `api.setYolo(mode)`, which would **revert sandbox to normal** on save. Change it to load the real mode string from `GET /api/permissions.mode` and, on save, call `api.setPermissionMode(currentMode)` (or leave mode untouched unless changed in this form) so sandbox is preserved.

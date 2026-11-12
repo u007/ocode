@@ -28,7 +28,7 @@
 **Files:**
 - Modify: `internal/tool/bash_build.go` → finalise `buildBashCmd(ctx, command, dir, w sandbox.Wrapper, roots sandbox.RootSet, active bool) (*exec.Cmd, error)`. When `active`: if `!w.Available()` return an error (fail-closed); else return `w.Wrap(cmd, roots)`. When `!active`: return the plain cmd, nil.
 - Modify: foreground `internal/tool/exec.go` and **background** `internal/tool/process.go:257-287` — call the new signature. **The wrap/error must occur before `cmd.Start()` and before any `ProcessRegistry`/`StartBackgroundDisplay` record is created**, so a wrap failure leaves no phantom process record.
-- Modify: `BashTool` (`internal/tool/exec.go:58`) + construction (`internal/agent/agent.go:1357`) to receive the `Wrapper` and a roots+mode provider from the agent's `PermissionManager` (dynamic — see Part 03 subagent note; resolve `NewRootSet(pm.AllowedRootsClassified())` and `pm.Mode()` fresh per command so `extra_allowed_paths` and mode changes take effect immediately).
+- Modify: `BashTool` (`internal/tool/exec.go:58`) + construction (`internal/agent/agent.go:1360`) to receive the `Wrapper` and a roots+mode provider from the agent's `PermissionManager` (dynamic — see Part 03 subagent note; resolve `NewRootSet(pm.AllowedRootsClassified())` and `pm.Mode()` fresh per command so `extra_allowed_paths` and mode changes take effect immediately).
 - Modify: `internal/agent/permissions.go` `Decide()` bash branch (`:1179-1260`) — insert the sandbox auto-allow at the **same position as the YOLO shortcut (`:1204`)**: after `isHardBlockedCommand`/Claude-deny/dangerous-`rm`, before interpreter/heredoc/compound/prefix/sensitive-path checks. Decision matrix below.
 - Test: `internal/tool/bash_build_test.go`, `internal/agent/permissions_test.go`
 

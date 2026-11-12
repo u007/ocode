@@ -532,4 +532,52 @@ describe("reader mode flag", () => {
     browserActions.setReader("tab:missing" as const, true);
     expect(browserStore.state.byKey["tab:missing" as const]).toBeUndefined();
   });
+
+  describe("fillNetworkStatus", () => {
+    const LOCAL = "local-7-1";
+    const row = (status: number): NetworkEvent => ({
+      requestId: LOCAL,
+      method: "GET",
+      url: "https://a.dev/app.js",
+      status,
+      durationMs: 3,
+      ts: 1,
+    });
+
+    it("fills a row whose status is unknown (0)", () => {
+      browserActions.open(KEY);
+      browserActions.pushNetwork(KEY, row(0));
+      browserActions.fillNetworkStatus(KEY, LOCAL, 200);
+
+      expect(browserStore.state.byKey[KEY].networkEvents[0].status).toBe(200);
+    });
+
+    it("leaves a status the timing entry already reported alone", () => {
+      browserActions.open(KEY);
+      browserActions.pushNetwork(KEY, row(404));
+      browserActions.fillNetworkStatus(KEY, LOCAL, 200);
+
+      expect(browserStore.state.byKey[KEY].networkEvents[0].status).toBe(404);
+    });
+
+    it("ignores a non-numeric status and an unknown requestId", () => {
+      browserActions.open(KEY);
+      browserActions.pushNetwork(KEY, row(0));
+      browserActions.fillNetworkStatus(KEY, LOCAL, Number.NaN);
+      browserActions.fillNetworkStatus(KEY, "local-missing", 200);
+
+      expect(browserStore.state.byKey[KEY].networkEvents[0].status).toBe(0);
+    });
+
+    it("keeps a stored body when a status-only message fills the row", () => {
+      browserActions.open(KEY);
+      browserActions.pushNetwork(KEY, row(0));
+      browserActions.setResponseBody(KEY, LOCAL, { body: "kept", base64Encoded: false, truncated: false });
+      browserActions.fillNetworkStatus(KEY, LOCAL, 200);
+
+      const s = browserStore.state.byKey[KEY];
+      expect(s.networkEvents[0].status).toBe(200);
+      expect(s.responseBodies[LOCAL]?.body).toBe("kept");
+    });
+  });
 });

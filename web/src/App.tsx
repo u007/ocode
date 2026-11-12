@@ -1695,7 +1695,7 @@ function HomeApp() {
     // composer below the visible screen.
     <div className="app-viewport flex flex-col bg-background">
       <SessionTabSync onNewTab={openBackgroundBrowserTab} />
-      <OfflineBanner isOffline={offlineStatus.isOffline} lastSynced={offlineStatus.lastSynced} />
+      <OfflineBanner isOffline={offlineStatus.isOffline || projectState.offline} lastSynced={offlineStatus.lastSynced} />
       <AttentionSoundBridge
         tabs={attentionTabs}
         activeTabId={activeTabId}

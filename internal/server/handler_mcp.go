@@ -7,6 +7,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -121,6 +122,11 @@ func (h *Handler) HandleSetMCPEnabled(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusNotFound, "MCP server not found")
 		return
 	}
+	if plugin, fromPlugin := h.pluginMCP[name]; fromPlugin {
+		h.mu.Unlock()
+		writeError(w, http.StatusBadRequest, plugins.MCPProvidedByPluginMessage(name, plugin))
+		return
+	}
 	h.mu.Unlock()
 
 	if err := config.SaveMCPEnabled(name, enabled); err != nil {
@@ -174,21 +180,49 @@ func (h *Handler) rebuildAgentForMCP(sessionID string) {
 // so a sidebar toggle takes effect on the toggling chat only. It clones the
 // session's effective config, applies the overrides, and re-runs the
 // enumeration (bounded by the caller / bootstrap timeout).
-func (h *Handler) mcpToolsForSession(cfg *config.Config, sessionID string) ([]tool.Tool, []string) {
+//
+// own reports whether the session's tools come from this call. It is taken when
+// the session toggled a server, or when ownPlugins says the session's config
+// holds plugin servers the shared cache does not (see hasSessionOnlyPluginMCP).
+// Otherwise the caller uses the shared cache and own is false.
+func (h *Handler) mcpToolsForSession(cfg *config.Config, sessionID string, ownPlugins bool) (tools []tool.Tool, errs []string, own bool) {
 	if cfg == nil {
-		return nil, nil
+		return nil, nil, false
 	}
-	// Fast path: a session with no overrides reuses the process-wide cache, so
-	// we pay the extra enumeration only for chats that actually toggled a server.
-	if !h.hasMCPSessionOverrides(sessionID) {
-		return nil, nil
+	// Fast path: a session with no overrides and no project-local plugin
+	// servers reuses the process-wide cache, so we pay the extra enumeration
+	// only for chats that need their own servers.
+	if !ownPlugins && !h.hasMCPSessionOverrides(sessionID) {
+		return nil, nil, false
 	}
 	effCfg := h.applyMCPSessionOverrides(cfg, sessionID)
 	if effCfg == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 	res := agent.LoadMCPToolsForConfig(effCfg)
-	return res.Tools, res.Errors
+	return res.Tools, res.Errors, true
+}
+
+// hasSessionOnlyPluginMCP reports whether the plugin servers a session merged
+// (merged maps each name to its plugin) include one the process-wide config does
+// not carry. Only a project-local plugin can contribute such a server, since
+// the shared config holds every other plugin's servers. Without a shared config
+// every merged server counts as session-only.
+func (h *Handler) hasSessionOnlyPluginMCP(merged map[string]string) bool {
+	if len(merged) == 0 {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for name := range merged {
+		if h.cfg == nil {
+			return true
+		}
+		if _, shared := h.cfg.MCP[name]; !shared {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) hasMCPSessionOverrides(sessionID string) bool {

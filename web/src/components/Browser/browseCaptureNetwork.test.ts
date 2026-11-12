@@ -28,6 +28,8 @@ const beacons: Array<{ url: string; data: unknown }> = [];
 let fetchResponse: unknown = null;
 // When set, the stubbed fetch holds its response until the gate resolves.
 let fetchGate: Promise<void> | null = null;
+// Every stubbed fetch call, including calls still held at the gate.
+let fetchCalls = 0;
 const originalFetch = window.fetch;
 const originalXHR = window.XMLHttpRequest;
 
@@ -73,6 +75,11 @@ function fakeResponse({ ct = "application/json", headers = {}, body = '{"ok":tru
       },
     },
     clone,
+    // The re-fetch path reads the response body directly (no clone). A fresh
+    // stream per access, so each read path gets its own.
+    get body() {
+      return bodyStream ? bodyStream() : streamOf([body]);
+    },
   };
 }
 
@@ -186,9 +193,14 @@ beforeAll(() => {
   vi.spyOn(window, "postMessage").mockImplementation(((msg: Post) => {
     posts.push(msg);
   }) as unknown as typeof window.postMessage);
-  window.fetch = (async () => {
+  window.fetch = (async (_input: unknown, init?: RequestInit) => {
+    fetchCalls++;
+    // The gate is read synchronously at call time, so a test can hold only the
+    // calls made while it is set.
     if (fetchGate) await fetchGate;
-    return fetchResponse;
+    // A function is a per-call factory: it receives the request init, so a test
+    // can read the abort signal or hand out a fresh body stream per request.
+    return typeof fetchResponse === "function" ? (fetchResponse as (i?: RequestInit) => unknown)(init) : fetchResponse;
   }) as unknown as typeof window.fetch;
   window.XMLHttpRequest = FakeXHR as unknown as typeof XMLHttpRequest;
   // capture.js wraps navigator.sendBeacon at eval time, so the stub must exist
@@ -577,6 +589,413 @@ describe("browse capture network telemetry (local mode)", () => {
       // Chrome reports a beacon's timing entry with initiatorType "beacon".
       FakePerformanceObserver.instances[0].emit([resourceEntry(BEACON_URL, "beacon")]);
       expect(posts).toHaveLength(1);
+    });
+  });
+
+  describe("same-origin resource body re-fetch", () => {
+    const observer = () => FakePerformanceObserver.instances[0];
+    const networkBodies = () => posts.filter((p) => p.type === "ocode:browse:networkbody");
+    // A same-origin URL the page loads directly (not through the /b/ proxy route).
+    const direct = (path: string) => new URL(path, location.origin).href;
+
+    it("re-fetches a same-origin resource entry once and posts its body", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const x = 1;" });
+      try {
+        const url = direct("/src/routes/about.tsx");
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(1);
+        expect(networkBodies()[0].responseBody).toBe("export const x = 1;");
+        expect(networkBodies()[0].responseBodyTruncated).toBe(false);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not re-fetch a URL already on the /b/ browse-proxy route", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const x = 1;" });
+      try {
+        const url = routed("https://example.test/src/routes/about.tsx");
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not re-fetch cross-origin resource entries", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const x = 1;" });
+      try {
+        const url = "https://cdn.example.test/markup-only.js";
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not re-fetch a fetch-typed resource entry", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const x = 1;" });
+      try {
+        const url = direct("/src/routes/about.tsx");
+        observer().emit([resourceEntry(url, "fetch")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not re-fetch an xmlhttprequest-typed resource entry", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const x = 1;" });
+      try {
+        const url = direct("/src/routes/about.tsx");
+        observer().emit([resourceEntry(url, "xmlhttprequest")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not read a binary response into memory", async () => {
+      fetchResponse = fakeResponse({ ct: "image/png", body: "\x89PNG\r\n" });
+      try {
+        const url = direct("/logo.png");
+        observer().emit([resourceEntry(url, "img")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("caps an oversized body at 256KB and marks it truncated", async () => {
+      const bigBody = "x".repeat(300 * 1024);
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: bigBody });
+      try {
+        const url = direct("/big.js");
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(1);
+        expect(String(networkBodies()[0].responseBody)).toHaveLength(256 * 1024);
+        expect(networkBodies()[0].responseBodyTruncated).toBe(true);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("leaves the row intact when the re-fetch is rejected", async () => {
+      fetchResponse = Promise.reject(new Error("network error")) as unknown as ReturnType<typeof fakeResponse>;
+      try {
+        const url = direct("/src/routes/about.tsx");
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        // The network row itself must still exist; only the body is missing.
+        expect(posts.filter((p) => p.type === "ocode:browse:network")).toHaveLength(1);
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    /** A re-fetch response with a content type and a body stream the test can observe. */
+    function scriptResponse(ct: string, body: ReadableStream<Uint8Array> | null) {
+      return {
+        status: 200,
+        type: "basic",
+        headers: {
+          get: (name: string) => (name.toLowerCase() === "content-type" ? ct : null),
+          forEach: () => {},
+        },
+        body,
+        clone: vi.fn(),
+      };
+    }
+
+    it("re-fetches an entry whose timing carries no responseStatus field (WebKit)", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const w = 2;" });
+      try {
+        const url = direct("/src/webkit-entry.js");
+        const entry: Record<string, unknown> = { ...resourceEntry(url, "script") };
+        delete entry.responseStatus;
+        const before = fetchCalls;
+        observer().emit([entry]);
+        await flush();
+
+        expect(fetchCalls - before).toBe(1);
+        expect(networkBodies()).toHaveLength(1);
+        expect(networkBodies()[0].responseBody).toBe("export const w = 2;");
+        // The engine reported no status, so the row carries none.
+        expect(posts.find((p) => p.type === "ocode:browse:network" && p.url === url)?.status).toBeUndefined();
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not re-fetch an entry the engine reports status 0 for (withheld)", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "x" });
+      try {
+        const before = fetchCalls;
+        observer().emit([{ ...resourceEntry(direct("/src/withheld.js"), "script"), responseStatus: 0 }]);
+        await flush();
+
+        expect(fetchCalls).toBe(before);
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it.each(["img", "iframe", "audio", "video", "font", "other"])(
+      "does not re-fetch a %s resource entry",
+      async (initiatorType) => {
+        fetchResponse = fakeResponse({ ct: "application/javascript", body: "x" });
+        try {
+          const before = fetchCalls;
+          observer().emit([resourceEntry(direct(`/markup/asset.bin?t=${initiatorType}`), initiatorType)]);
+          await flush();
+
+          expect(fetchCalls).toBe(before);
+          expect(networkBodies()).toHaveLength(0);
+        } finally {
+          fetchResponse = null;
+        }
+      },
+    );
+
+    it("cancels an unread body that is not a captured type, and posts no body", async () => {
+      let cancels = 0;
+      fetchResponse = () =>
+        scriptResponse(
+          "image/png",
+          new ReadableStream<Uint8Array>({
+            cancel: () => {
+              cancels++;
+            },
+          }),
+        );
+      try {
+        observer().emit([resourceEntry(direct("/src/not-text.js"), "script")]);
+        await flush();
+
+        expect(cancels).toBe(1);
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("posts the re-fetch's status for a timing entry with no responseStatus, even when the body is not captured", async () => {
+      let cancels = 0;
+      // A cached 404: the status must be the response's own, not a constant.
+      fetchResponse = () => ({
+        ...scriptResponse(
+          "image/png",
+          new ReadableStream<Uint8Array>({
+            cancel: () => {
+              cancels++;
+            },
+          }),
+        ),
+        status: 404,
+      });
+      try {
+        const url = direct("/src/webkit-not-text.js");
+        const entry: Record<string, unknown> = { ...resourceEntry(url, "script") };
+        delete entry.responseStatus;
+        observer().emit([entry]);
+        await flush();
+
+        const row = posts.find((p) => p.type === "ocode:browse:network" && p.url === url);
+        expect(cancels).toBe(1);
+        expect(networkBodies()).toHaveLength(1);
+        expect(networkBodies()[0]).toMatchObject({ requestId: row?.requestId, status: 404 });
+        expect(networkBodies()[0].responseBody).toBeUndefined();
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("posts the re-fetch's status alongside the body for a timing entry with no responseStatus", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const v = 3;" });
+      try {
+        const url = direct("/src/webkit-with-body.js");
+        const entry: Record<string, unknown> = { ...resourceEntry(url, "script") };
+        delete entry.responseStatus;
+        observer().emit([entry]);
+        await flush();
+
+        const row = posts.find((p) => p.type === "ocode:browse:network" && p.url === url);
+        expect(networkBodies()).toHaveLength(1);
+        expect(networkBodies()[0]).toMatchObject({
+          requestId: row?.requestId,
+          status: 200,
+          responseBody: "export const v = 3;",
+          responseBodyTruncated: false,
+        });
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("does not post a status when the timing entry already reported one", async () => {
+      fetchResponse = fakeResponse({ ct: "application/javascript", body: "export const c = 4;" });
+      try {
+        const url = direct("/src/chrome-with-status.js");
+        observer().emit([resourceEntry(url, "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(1);
+        expect(networkBodies()[0].responseBody).toBe("export const c = 4;");
+        expect("status" in networkBodies()[0]).toBe(false);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("posts no status message for a known-status entry whose body is not captured", async () => {
+      fetchResponse = () => scriptResponse("image/png", null);
+      try {
+        observer().emit([resourceEntry(direct("/src/chrome-not-text.js"), "script")]);
+        await flush();
+
+        expect(networkBodies()).toHaveLength(0);
+      } finally {
+        fetchResponse = null;
+      }
+    });
+
+    it("gives up on a body that stalls at the 5 s deadline, and frees the URL", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const seen: { signal?: AbortSignal } = {};
+      try {
+        fetchResponse = (init?: RequestInit) => {
+          seen.signal = init?.signal ?? undefined;
+          // A body that never produces bytes. Abort errors it, as a browser does.
+          const body = new ReadableStream<Uint8Array>({
+            start(c) {
+              seen.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+            },
+          });
+          return scriptResponse("application/javascript", body);
+        };
+        const url = direct("/src/stalled-body.js");
+        observer().emit([resourceEntry(url, "script")]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(seen.signal?.aborted).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(seen.signal?.aborted).toBe(true);
+        expect(networkBodies()).toHaveLength(0);
+
+        // The settled job released its URL, so the same resource is re-fetched again.
+        const before = fetchCalls;
+        fetchResponse = () => scriptResponse("image/png", new ReadableStream<Uint8Array>());
+        observer().emit([resourceEntry(url, "script")]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchCalls - before).toBe(1);
+      } finally {
+        vi.useRealTimers();
+        debug.mockRestore();
+        fetchResponse = null;
+      }
+    });
+
+    it("runs at most four re-fetches at once and queues the rest", async () => {
+      let release!: () => void;
+      fetchGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      fetchResponse = () => scriptResponse("image/png", new ReadableStream<Uint8Array>());
+      try {
+        const before = fetchCalls;
+        observer().emit(Array.from({ length: 12 }, (_, i) => resourceEntry(direct(`/conc/${i}.js`), "script")));
+        await flush();
+        // Every call made while the gate is shut is a job in flight.
+        expect(fetchCalls - before).toBe(4);
+
+        fetchGate = null;
+        release();
+        await vi.waitFor(() => expect(fetchCalls - before).toBe(12));
+      } finally {
+        fetchGate = null;
+        fetchResponse = null;
+      }
+    });
+
+    it("bounds the pending queue at 500 and drops the oldest jobs beyond it", async () => {
+      let release!: () => void;
+      fetchGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      fetchResponse = () => scriptResponse("image/png", new ReadableStream<Uint8Array>());
+      try {
+        const before = fetchCalls;
+        // 4 start at once; 510 more queue behind them, so the oldest 10 are dropped.
+        observer().emit(Array.from({ length: 514 }, (_, i) => resourceEntry(direct(`/flood/${i}.js`), "script")));
+        await flush();
+        expect(fetchCalls - before).toBe(4);
+
+        fetchGate = null;
+        release();
+        await vi.waitFor(() => expect(fetchCalls - before).toBe(504));
+        await flush();
+        expect(fetchCalls - before).toBe(504);
+      } finally {
+        fetchGate = null;
+        fetchResponse = null;
+      }
+    });
+
+    it("a burst of completed re-fetches does not evict a page fetch still in flight", async () => {
+      const LIVE = "https://api.example.test/live-during-burst";
+      let release!: () => void;
+      fetchGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let burstDone = 0;
+      fetchResponse = () =>
+        scriptResponse(
+          "image/png",
+          new ReadableStream<Uint8Array>({
+            cancel: () => {
+              burstDone++;
+            },
+          }),
+        );
+      try {
+        // The page's own fetch: its wrapper record stays open until the gate opens.
+        const live = window.fetch(LIVE);
+        fetchGate = null;
+        observer().emit(Array.from({ length: 300 }, (_, i) => resourceEntry(direct(`/burst/${i}.js`), "script")));
+        await vi.waitFor(() => expect(burstDone).toBe(300));
+
+        release();
+        await live;
+        await flush();
+        const liveRows = () =>
+          posts.filter((p) => p.type === "ocode:browse:network" && (p.url === LIVE || p.url === routed(LIVE)));
+        expect(liveRows()).toHaveLength(1);
+
+        // Its Resource Timing entry is consumed by the still-open record, not posted again.
+        observer().emit([resourceEntry(routed(LIVE), "fetch")]);
+        expect(liveRows()).toHaveLength(1);
+      } finally {
+        fetchGate = null;
+        fetchResponse = null;
+      }
     });
   });
 

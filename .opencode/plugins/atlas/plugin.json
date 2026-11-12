@@ -1,7 +1,7 @@
 {
   "name": "atlas",
-  "description": "Test and operate macOS GUI apps in a hidden second login (the helper) without touching the person's desktop. Bundles the Atlas skill; toggle with /plugin enable|disable atlas.",
-  "version": "0.1.0",
+  "description": "Test and operate macOS GUI apps in a hidden second login (the helper) without touching the person's desktop. Bundles the Atlas skill and an atlas MCP server (atlas_atlas_status, atlas_show_screen, atlas_take_screenshot); toggle with /plugin enable|disable atlas.",
+  "version": "0.2.0",
   "commands": [],
   "tools": []
 }

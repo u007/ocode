@@ -136,8 +136,8 @@ display state pushed to `browserStore`; nothing is persisted.
   - `clearNetwork` drops rows and bodies together.
 - **Trust boundary is page → parent SPA only.** `capture.js` posts only to
   `spaOrigin` (`capture.js:40`). `useBrowserMessages.ts` drops any message whose
-  `stateKey` differs (`:46`) and applies `isTrustedBrowseMessage` first
-  (`:43`), which requires the exact document origin AND `event.source`
+  `stateKey` differs (`:49`) and applies `isTrustedBrowseMessage` first
+  (`:46`), which requires the exact document origin AND `event.source`
   (`web/src/components/Browser/browseOrigin.ts:33`). Everything downstream is
   display state, held in memory only and never persisted.
 - **Body text is not redacted (decision recorded 2026-11-05).** Redaction would

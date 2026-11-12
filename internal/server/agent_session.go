@@ -22,6 +22,7 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
@@ -524,6 +525,24 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			effCfg = cfg
 		}
 	}
+	// Plugin MCP servers of THIS session's project. A session with no recorded
+	// root falls back to the server's workDir, never the process cwd (a
+	// desktop launch starts in /). The copy keeps the shared config untouched;
+	// names already present win.
+	// ownPluginMCP is set when the merge adds a server the shared config does
+	// not carry (a project-local plugin): such a session loads its MCP tools from
+	// its own config, not from the shared cache.
+	ownPluginMCP := false
+	if effCfg != nil {
+		root := projectRoot
+		if root == "" {
+			root = h.workDir
+		}
+		sessionCfg := *effCfg
+		merged := plugins.MergeMCPServers(&sessionCfg, root)
+		ownPluginMCP = h.hasSessionOnlyPluginMCP(merged)
+		effCfg = &sessionCfg
+	}
 	// Per-session reasoning level: copy the config so the override never
 	// leaks into the shared h.cfg / profile cache.
 	thinkingBudget := h.effectiveSessionThinkingBudget(sessionID)
@@ -677,7 +696,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// effect in THIS chat only. Sessions with no override reuse the process-wide
 	// cache (the common case) instead of re-running the blocking enumeration.
 	if !pulse {
-		if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
+		if sidTools, sidErrs, own := h.mcpToolsForSession(effCfg, sessionID, ownPluginMCP); own {
 			ag.AddMCPTools(sidTools)
 			ag.AddMCPErrors(sidErrs)
 		} else {

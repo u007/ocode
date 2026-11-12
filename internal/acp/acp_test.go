@@ -618,3 +618,37 @@ func TestBridgePermissionDeny(t *testing.T) {
 		t.Errorf("expected tool_call_update after deny, got kinds: %v", kinds)
 	}
 }
+
+// TestSessionAgentLoadsPluginMCPFromMergedConfig pins that the agent of an ACP
+// session loads the MCP servers of its cwd's plugins: they must be in the config
+// the agent was built with, and the shared config must stay unmerged.
+func TestSessionAgentLoadsPluginMCPFromMergedConfig(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "workspace")
+	pluginDir := filepath.Join(cwd, ".opencode", "plugins", "projplug")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(`{"name":"projplug"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, ".mcp.json"),
+		[]byte(`{"mcpServers":{"plugin-srv":{"command":"/bin/sh","args":["-c","exit 0"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Model:   "lmstudio/local",
+		Plugins: map[string]config.PluginConfig{"projplug": {Enabled: true}},
+	}
+	b, err := newSessionBridge(cfg, cwd)
+	if err != nil {
+		t.Fatalf("newSessionBridge error: %v", err)
+	}
+	if _, ok := b.ag.Config().MCP["plugin-srv"]; !ok {
+		t.Fatalf("the session agent's config has no plugin-srv: %+v", b.ag.Config().MCP)
+	}
+	if _, ok := cfg.MCP["plugin-srv"]; ok {
+		t.Fatal("the shared config was merged in place")
+	}
+}

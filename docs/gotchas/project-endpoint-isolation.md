@@ -26,7 +26,7 @@ or session.** Violations show up as "everywhere hangs" or "the whole app freezes
 1. **`Handler.mu` is a MAP lock, never a work lock.** It guards the `h.agents` map and a few
    config fields for the duration of a map lookup/insert only. Holding it across any slow work
    (LLM call, Step, compaction, agent construction, disk I/O, SSH) freezes every project/session
-   in the process — not just the caller. Source: `internal/server/agent_session.go:34-42`.
+   in the process — not just the caller. Source: `internal/server/agent_session.go:35-43`.
 2. **Any per-project work driven from a shared loop needs a per-item deadline plus per-item
    fan-out.** A bare `exec.Command` without a timeout in a shared loop stalls every item behind
    the slowest one.

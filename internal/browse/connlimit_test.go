@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -245,5 +246,55 @@ func TestExternalBusyClosesNavPair(t *testing.T) {
 	s.handleLocal(httptest.NewRecorder(), sub, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/i.png", Local: true}, "")
 	if len(navs) != before {
 		t.Errorf("subresource busy emitted navs (total %d), want %d", len(navs), before)
+	}
+}
+
+// TestConnLimiterQueuedBurstCompletes models a browser sending a whole
+// module graph at once: 12 requests against a cap of 2 all queue and all
+// succeed under the DEFAULT wait, never exceeding the cap.
+func TestConnLimiterQueuedBurstCompletes(t *testing.T) {
+	l := newConnLimiter(2)
+	const n = 12
+	var inFlight, peak atomic.Int32
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			rel, err := l.acquire(t.Context(), "tab:burst")
+			if err != nil {
+				errs <- err
+				return
+			}
+			cur := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if cur <= p || peak.CompareAndSwap(p, cur) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			inFlight.Add(-1)
+			rel()
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("queued acquire failed: %v, want every queued request to complete", err)
+	}
+	if p := peak.Load(); p > 2 {
+		t.Errorf("peak concurrency = %d, want <= 2 (the cap)", p)
+	}
+	if n := l.inUse(); n != 0 {
+		t.Errorf("inUse = %d after the burst drained, want 0", n)
+	}
+}
+
+// TestUpstreamSlotWaitOutlastsColdDevServer pins the queue deadline above
+// the time a cold dev server can take to turn the first 32 module requests
+// over. A shorter deadline 503s module requests loaded over HTTP/2.
+func TestUpstreamSlotWaitOutlastsColdDevServer(t *testing.T) {
+	if upstreamSlotWait < 30*time.Second {
+		t.Errorf("upstreamSlotWait = %v, want >= 30s: a shorter queue deadline 503s module requests of a cold dev server loaded over HTTP/2", upstreamSlotWait)
 	}
 }

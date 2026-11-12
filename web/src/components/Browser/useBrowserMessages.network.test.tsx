@@ -19,6 +19,7 @@ function setup() {
     pushConsole: vi.fn(),
     pushNetwork: vi.fn(),
     pushResponseBody: vi.fn(),
+    fillNetworkStatus: vi.fn(),
     onTitle: vi.fn(),
     onScroll: vi.fn(),
     onNav: vi.fn(),
@@ -121,6 +122,37 @@ describe("useBrowserMessages network mapping", () => {
 
     expect(handlers.pushNetwork).not.toHaveBeenCalled();
     expect(handlers.pushResponseBody).not.toHaveBeenCalled();
+    expect(handlers.fillNetworkStatus).not.toHaveBeenCalled();
+  });
+
+  it("fills the row status from a networkbody message that carries a status and a body", () => {
+    const { post, handlers } = setup();
+    post({ type: "ocode:browse:networkbody", stateKey: STATE_KEY, requestId: "local-4-1", status: 200, responseBody: "x" });
+
+    expect(handlers.fillNetworkStatus).toHaveBeenCalledWith(STATE_KEY, "local-4-1", 200);
+    expect(handlers.pushResponseBody).toHaveBeenCalledWith(STATE_KEY, "local-4-1", {
+      body: "x",
+      base64Encoded: false,
+      truncated: false,
+    });
+    expect(handlers.pushNetwork).not.toHaveBeenCalled();
+  });
+
+  it("fills the status from a status-only networkbody message and does not touch the stored body", () => {
+    const { post, handlers } = setup();
+    post({ type: "ocode:browse:networkbody", stateKey: STATE_KEY, requestId: "local-4-2", status: 404 });
+
+    expect(handlers.fillNetworkStatus).toHaveBeenCalledTimes(1);
+    expect(handlers.fillNetworkStatus).toHaveBeenCalledWith(STATE_KEY, "local-4-2", 404);
+    expect(handlers.pushResponseBody).not.toHaveBeenCalled();
+    expect(handlers.pushNetwork).not.toHaveBeenCalled();
+  });
+
+  it("ignores a non-numeric status on a networkbody message", () => {
+    const { post, handlers } = setup();
+    post({ type: "ocode:browse:networkbody", stateKey: STATE_KEY, requestId: "local-4-3", status: "200" });
+
+    expect(handlers.fillNetworkStatus).not.toHaveBeenCalled();
   });
 
   it("stores an XHR row's inline response body under the same requestId", () => {

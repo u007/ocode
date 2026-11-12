@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/skill"
 )
@@ -77,6 +78,47 @@ func TestAtlasEmbeddedPluginDiscoverable(t *testing.T) {
 	}
 	if !strings.Contains(atlas.ForModel(), "Plugin root:") {
 		t.Fatal("plugin skill should tell the model its plugin root")
+	}
+}
+
+// TestAtlasPluginDeclaresStdioMCPServer verifies the repo atlas plugin ships
+// its .mcp.json, so the atlas MCP server (the tools the SKILL.md "In ocode"
+// section names) is declared as a stdio server started through /bin/sh.
+func TestAtlasPluginDeclaresStdioMCPServer(t *testing.T) {
+	root := repoRoot(t)
+	want := filepath.Join(root, ".opencode", "plugins", "atlas")
+	var atlas *plugins.Plugin
+	for _, p := range plugins.LoadAllPluginsForProject(root) {
+		if p.Name == "atlas" && p.Dir == want {
+			pp := p
+			atlas = &pp
+		}
+	}
+	if atlas == nil {
+		t.Fatalf("repo atlas plugin not discovered at %q", want)
+	}
+	mc, ok := atlas.MCPServers["atlas"]
+	if !ok {
+		t.Fatalf("atlas plugin declares no atlas MCP server: %+v", atlas.MCPServers)
+	}
+	if len(mc.Command) == 0 || mc.Command[0] != "/bin/sh" {
+		t.Fatalf("atlas MCP command = %q, want to start with /bin/sh", mc.Command)
+	}
+	if mc.Type != "local" || !mc.Enabled {
+		t.Fatalf("atlas MCP server should be an enabled stdio (local) server: %+v", mc)
+	}
+	// The repo copy is project-local, so its server starts only after an
+	// explicit enable, never from DefaultEnabled alone.
+	if !atlas.ProjectScoped {
+		t.Fatal("repo atlas plugin lives in the project and must be ProjectScoped")
+	}
+	if got := plugins.MergeMCPServers(&config.Config{}, root); got["atlas"] != "" {
+		t.Fatalf("atlas MCP server merged without an explicit enable: %v", got)
+	}
+	cfg := &config.Config{Plugins: map[string]config.PluginConfig{"atlas": {Enabled: true}}}
+	plugins.MergeMCPServers(cfg, root)
+	if got := cfg.MCP["atlas"].Command; len(got) == 0 || got[0] != "/bin/sh" {
+		t.Fatalf("explicitly enabled atlas MCP command = %q, want to start with /bin/sh", got)
 	}
 }
 

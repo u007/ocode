@@ -29,7 +29,7 @@ HTTP request, so the POST stayed pending for the whole model round (Step can
 run for minutes). The browser's `await` never settled, the dialog's local
 answer echo + dismissal were gated on it, and the request held one of the
 browser's ~6 connections per origin for its whole duration — the same
-starvation the async send path was fixed for (`web/src/api/client.ts:3189`
+starvation the async send path was fixed for (`web/src/api/client.ts:3219`
 `async: true`; see the comment at `web/src/hooks/useChat.ts:212`). The TUI
 never had this problem: resolving a dialog just resumes its single in-process
 loop.
@@ -76,7 +76,7 @@ deadlocks the session.
 
 ### Shutdown admission mirrors `dispatchTurn`
 
-`dispatchTurn` (`internal/server/agent_session.go:1978`) is the pattern;
+`dispatchTurn` (`internal/server/agent_session.go:1997`) is the pattern;
 `dispatchAskContinuation` mirrors it exactly:
 
 - Under `shutdownMu`, if `shutdownStarted`: unlock and run `fn` INLINE on the
@@ -93,7 +93,7 @@ deadlocks the session.
   as `serve error: ask continuation panic`) → decrement `turnInFlight` →
   `turnJobsWG.Done()` (`handler_ask_continuation.go:52-69`).
 
-The flush in that chain (`handler_ask_continuation.go:66`) is one of two ways a deferred memory pass runs. A job event that finds `as.mu` busy is deferred by `queueJobMemoryMaintenance` (`internal/server/agent_session.go:2488`), which keeps only the latest event and starts `awaitDeferredMemoryMaintenance` (`agent_session.go:2510`) on its own goroutine. That waiter blocks for `as.mu` off the job loop and takes the marker once the lock is released, so a holder that never flushes (an HTTP compaction, recap or stream) still gets the pass. Lock order is `as.mu` then `memoryMaintMu`; `h.mu` is not taken.
+The flush in that chain (`handler_ask_continuation.go:66`) is one of two ways a deferred memory pass runs. A job event that finds `as.mu` busy is deferred by `queueJobMemoryMaintenance` (`internal/server/agent_session.go:2507`), which keeps only the latest event and starts `awaitDeferredMemoryMaintenance` (`agent_session.go:2529`) on its own goroutine. That waiter blocks for `as.mu` off the job loop and takes the marker once the lock is released, so a holder that never flushes (an HTTP compaction, recap or stream) still gets the pass. Lock order is `as.mu` then `memoryMaintMu`; `h.mu` is not taken.
 
 The continuation keeps the full `turnActive`/heartbeat contract from the
 original fix below: `setTurnActive(true)` + `startTurnHeartbeat` +

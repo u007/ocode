@@ -141,7 +141,7 @@ The existing browser-config write handler (`internal/server/handler_config.go:18
 
 ### Route registration
 
-All four endpoints are registered in `internal/server/server.go:636-639` behind `authMiddleware`:
+All four endpoints are registered in `internal/server/server.go:640-643` behind `authMiddleware`:
 
 ```
 GET  /api/config/ocode/htr          → handleGetHTRStatus

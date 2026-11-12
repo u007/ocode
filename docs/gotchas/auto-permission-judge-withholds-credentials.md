@@ -3,7 +3,7 @@ type: Gotcha
 title: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context
 description: |-
   buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).
-resource: internal/agent/agent.go:4872; internal/agent/agent.go:4124
+resource: internal/agent/agent.go:4903; internal/agent/agent.go:4155
 timestamp: 2026-10-07T04:23:15Z
 tags:
   - security
@@ -22,7 +22,7 @@ tags:
 The auto-permission judge is an **LLM**. Shipping a credential-bearing file
 (`.env`, `auth.json`, SSH keys, …) into its prompt is the exact exposure the
 permission layer exists to prevent. `buildPermissionContext`
-(`internal/agent/agent.go:4594`) therefore assembles the judge's
+(`internal/agent/agent.go:4625`) therefore assembles the judge's
 `project_context` while refusing to embed sensitive file contents — the same
 predicate family `scanToolResult` uses for tool results, but here the raw
 content never reaches the judge at all.
@@ -64,7 +64,7 @@ sensitiveContextFile := func(p string) bool {
 }
 ```
 
-`internal/agent/agent.go:5273`. `redact.IsSensitiveFile`
+`internal/agent/agent.go:5304`. `redact.IsSensitiveFile`
 (`internal/redact/sensitive.go:19`) and `isSecretMaterialPath`
 (`internal/agent/permissions.go:3599`) cover `.env` / `.env.*` (except the
 committed `.env.example|.sample|.template|.dist`), `*.pem|*.key|*.p12|*.pfx|

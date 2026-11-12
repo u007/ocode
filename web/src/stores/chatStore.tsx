@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
-import type { Message, LivePart, TUIStatus, AgentActivityEvent, QuestionPrompt, QuestionAnswerPayload } from "../api/types";
+import type { Message, LivePart, TUIStatus, AgentActivityEvent, QuestionPrompt, QuestionAnswerPayload, McpAppRef } from "../api/types";
 import { isRecentUserInput } from "../lib/recentInputs";
 
 // ── Rehydrate pending asks from persisted transcript ──────────────
@@ -590,7 +590,7 @@ export type ChatAction =
       command?: string;
     }
   | { type: "LIVE_TOOL_OUTPUT"; sessionId: string; callId?: string; chunk: string }
-  | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string }
+  | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string; mcpApp?: McpAppRef }
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
   | { type: "LIVE_ADVISOR_CHECKPOINT"; sessionId: string; kind: string; active: boolean }
@@ -1010,7 +1010,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const part = s.live[idx];
         if (part.kind !== "tool") return s;
         const live = [...s.live];
-        live[idx] = { ...part, output: action.output };
+        live[idx] = { ...part, output: action.output, mcpApp: action.mcpApp ?? part.mcpApp };
         return { ...s, live };
       });
     case "LIVE_RESET":

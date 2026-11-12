@@ -9,6 +9,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -52,8 +53,13 @@ func newSessionBridge(cfg *config.Config, cwd string) (*sessionBridge, error) {
 	}
 
 	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
-	ag := agent.NewAgent(client, tools, cfg, lspMgr)
-	ag.LoadExternalToolsWithMCP(cfg)
+	// Plugin MCP servers of this session's cwd are merged into a copy of the
+	// config before the agent is built, so the agent loads its MCP tools from
+	// the merged config. The shared cfg (used by every session) is untouched.
+	sessionCfg := *cfg
+	plugins.MergeMCPServers(&sessionCfg, cwd)
+	ag := agent.NewAgent(client, tools, &sessionCfg, lspMgr)
+	ag.LoadExternalToolsWithMCP(&sessionCfg)
 
 	return &sessionBridge{
 		id:           session.NewSessionID(),

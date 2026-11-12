@@ -233,7 +233,7 @@ devtools). The local streaming path therefore uses a **short-lived, single-file
 capability** in `?media_token=`:
 
 - **Store** — `internal/server/media_tokens.go`, an in-memory `mediaTokenStore`
-  held on the `Handler` (`internal/server/handler.go:407`, initialized `:760`).
+  held on the `Handler` (`internal/server/handler.go:411`, initialized `:769`).
   `mediaTokenTTL = 6h`, `mediaTokenMaxLen = 128`, and tokens are 32 bytes of
   `crypto/rand` base64url (**256 bits**). A `mediaGrant` is bound to the exact
   `(path, project_root, host)` triple and authorizes nothing else. Pruning is

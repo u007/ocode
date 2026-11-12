@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "atlas": {
+      "command": "/bin/sh",
+      "args": ["-c", "a=$(command -v atlas 2>/dev/null); [ -n \"$a\" ] || a=\"$HOME/.local/bin/atlas\"; exec \"$a\" mcp"],
+      "requiresAny": ["atlas", "~/.local/bin/atlas"]
+    }
+  }
+}

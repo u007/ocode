@@ -83,10 +83,11 @@ ship this way today, both under `.opencode/plugins/`:
 Neither plugin bundles its upstream binary. The skill teaches the agent to drive the
 CLI through ocode's `bash` tool, and the person installs the CLI once.
 
-- **Actions are ordinary `bash` calls.** ocode has no Atlas or agent-desktop tool, so
-  every step runs through the normal `bash` tool and ocode's permission rules. Neither
-  plugin has an embedded view; output (including a screenshot's returned `path`) is read
-  from the command result.
+- **Actions are ordinary `bash` calls.** ocode has no agent-desktop tool, so every
+  `agent-desktop` step runs through the normal `bash` tool and ocode's permission rules.
+  `atlas` also declares an MCP server (see [Plugin MCP Servers](#plugin-mcp-servers)),
+  and its other steps are `bash` calls. The terminal UI has no embedded view for either
+  plugin; output (including a screenshot's returned `path`) is read from the command result.
 - **Namespaced as `<plugin>:<skill>`.** The plugins expose `atlas:atlas` and
   `agent-desktop:agent-desktop`. A bare name resolves to the plugin skill only when no
   user/project skill has that name. Loaded plugin skill bodies carry a `Plugin root:`
@@ -95,9 +96,10 @@ CLI through ocode's `bash` tool, and the person installs the CLI once.
   entry. They cannot be removed, so the toggle is `/plugin disable <name>` /
   `/plugin enable <name>`, which writes an `external_plugins` entry.
 - **A bundled `mcp` block would never register.** `mcp.auto_register` runs only at install
-  time, and bundled plugins are never installed, so neither plugin ships an `mcp` block;
-  if the person wants the server, they add it to their own config (for agent-desktop,
-  `agent-desktop mcp`).
+  time, and bundled plugins are never installed, so neither plugin ships an `mcp` block.
+  Plugin servers go in `.mcp.json` instead, which is read at every load (see
+  [Plugin MCP Servers](#plugin-mcp-servers)). For agent-desktop, the person adds
+  `agent-desktop mcp` to their own config if they want the server.
 - **Platform limits live in the skill, not in discovery.** Plugin discovery does not
   filter by platform, so both skills are listed everywhere; `atlas` refuses off macOS,
   and `agent-desktop` loads a per-OS skill from the installed binary.
@@ -110,9 +112,12 @@ apps without disturbing the person's desktop. Atlas itself is not bundled and ne
 own admin setup (a helper macOS account, a signed daemon); the skill tells the agent to
 ask the person to finish that setup and never run the installer or `sudo`.
 
-- There is no embedded Atlas view and no `show_screen`; screenshots are read from the
-  returned `path`, and `ATLAS_SESSION=ocode` supplies the session label ocode does not
-  report.
+- The `atlas` MCP server (`.mcp.json`, started only after `/plugin enable atlas`, since
+  the plugin is project-local) offers `atlas_atlas_status`, `atlas_show_screen`
+  and `atlas_take_screenshot`. The web and desktop chat shows the live helper screen once
+  `atlas_show_screen` is called; the terminal UI has no embedded view. Without the tools,
+  screenshots are read from the CLI's returned `path`. `ATLAS_SESSION=ocode` supplies the
+  session label ocode does not report.
 
 #### `agent-desktop`
 
@@ -289,7 +294,64 @@ Claude Code install; uninstall those from Claude Code.
 | `skills/<name>/SKILL.md` (+ manifest `skills` paths) | Skills named `<plugin>:<name>`, like Claude Code. A bare `<name>` resolves to the plugin skill only when no user/project skill has that name. |
 | `commands/*.md` | Slash commands |
 | `hooks/hooks.json` → `SessionStart` | Command hooks whose matcher accepts `startup` run once per process per project; their `hookSpecificOutput.additionalContext` (or plain stdout) is added to the system prompt next to plugin `instructions`. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PROJECT_DIR}` are expanded and exported; cwd is the project root; 30 s default timeout, 60 s cap. Only plugins with a Claude Code manifest run hooks. |
-| `agents/`, other hook events, `.mcp.json` | Not loaded yet |
+| `agents/`, other hook events | Not loaded yet |
+| `.mcp.json`, manifest `mcpServers` | Stdio MCP servers, started while the plugin is enabled; see [Plugin MCP Servers](#plugin-mcp-servers) |
+
+## Plugin MCP Servers
+
+A plugin can declare MCP servers. ocode starts the **stdio** servers of every **enabled**
+plugin, for ocode-format and Claude Code-format plugins alike.
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/docs-server",
+      "args": ["--root", "{plugin_dir}/data"],
+      "env": { "DOCS_MODE": "read" }
+    }
+  }
+}
+```
+
+- **Files read.** `.mcp.json` at the plugin root, then the Claude Code manifest's
+  `mcpServers` field (an inline object, or a path to a JSON file inside the plugin dir; a
+  path that escapes the plugin dir is refused). Each file takes either the wrapped
+  `{"mcpServers": {...}}` shape or the bare `{"<name>": {...}}` map. The first definition
+  of a name wins.
+- **Stdio only.** An entry with a `command`, no `url`, and a `type` that is empty or
+  `"stdio"` is started. Remote entries (`url`, `http`, `sse`) are skipped: they need OAuth
+  flows, which ocode does not run for plugins.
+- **Optional binaries.** An ocode-only `"requiresAny": ["<name>", "<path>"]` key starts a server only when at least one entry resolves, either a bare name on `PATH` or a path (a leading `~/` expands to your home directory) to an existing file.
+- **Variables.** `${CLAUDE_PLUGIN_ROOT}` and `{plugin_dir}` expand to the plugin's absolute
+  directory in `command`, `args` and `env` values. No other variable is expanded.
+- **In memory only.** The servers are merged into the loaded config and never written to
+  `opencode.json`. A file that fails to parse is logged once and that plugin loads with no
+  servers; the plugin itself still loads.
+- **Project-local plugins need an explicit enable.** A plugin under the project's own
+  `.opencode/plugins` dir can come from a cloned repo you have not vetted. Its MCP servers
+  start only when your config has an explicit enabled entry for it (`/plugin enable <name>`);
+  `DefaultEnabled` alone does not start them, and ocode logs the gated plugin once. Its
+  skills, commands and tools still load as before. Global, bundled and Claude Code plugins
+  follow the normal enabled rule.
+- **User config wins.** A server whose name is already in your config is used as written,
+  even when that entry is disabled. To replace a plugin's server, add your own entry with the
+  same name to `opencode.json`.
+- **Turning it off.** The TUI `/mcp enable|disable` refuses any plugin-provided server, since
+  it has no entry on disk to change. The web toggle refuses only a shared plugin's server. A
+  project-local plugin's server is not in the web server's shared config, so the toggle answers
+  "not found" for it. Disable the plugin with `/plugin disable <name>`, or override the server
+  with your own entry.
+- **Where it applies.** `ocode mcp list` (the project is the cwd), the TUI, `ocode run`, and ACP
+  sessions (per session cwd). The web and desktop server merges only the shared plugins at
+  startup (those that are not project-local), because its MCP tool cache is process-wide. Each
+  session merges its own project's plugins. When that adds a server the shared config does not
+  have, the session enumerates its own copy of that server instead of using the shared cache.
+  The repo's `atlas` plugin ships one at `.opencode/plugins/atlas/.mcp.json`; being
+  project-local, that server starts only after `/plugin enable atlas`.
+
+The `ui://` views a plugin's or any server's tools can declare (MCP Apps widgets) are
+documented in [MCP Apps widgets and plugin MCP servers](concepts/mcp-apps-widgets.md).
 
 ## Managing Plugins
 

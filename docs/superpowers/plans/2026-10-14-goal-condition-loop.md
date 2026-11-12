@@ -39,14 +39,14 @@
 **Risk:** standard — mechanical rename plus deletion of code that is already unreachable.
 
 **Files:**
-- Modify: `internal/tui/commands.go:175` (command table entry), `internal/tui/commands.go:1829-1847` (delete `runGoalCmd`)
-- Modify: `internal/tui/model.go:9029-9036`, `:9097`, `:9111-9117` (alias flag + instant list + rewrite), `:5748-5771` (delete `goalDoneMsg`/`goalStatusMsg` cases)
+- Modify: `internal/tui/commands.go:175` (command table entry), `internal/tui/commands.go:1833-1851` (delete `runGoalCmd`)
+- Modify: `internal/tui/model.go:9034-9041`, `:9102`, `:9116-9122` (alias flag + instant list + rewrite), `:5753-5776` (delete `goalDoneMsg`/`goalStatusMsg` cases)
 - Delete: `internal/tui/goal.go`, `internal/tui/goal_test.go` (it asserts `strings.Join`, not a feature)
 - Rename: `internal/cli/goal.go` → `internal/cli/orchestrate.go`, `internal/cli/goal_test.go` → `internal/cli/orchestrate_test.go`; `main.go:221` subcommand `goal` → `orchestrate`
 - Modify: `internal/agent/agent_registry.go:157-160` (comment: there is no TUI intercept; `/orchestrate` switches to the plugin's `orchestrator` primary agent and sends the goal as a normal turn; the Go pipeline is CLI-only)
 - Modify: `web/src/components/Chat/commands.ts:120`, `:578`, `:1931-1948` (`/goal` → `/orchestrate`, `handleGoal` → `handleOrchestrate`; the `/goal` slot is reused in Task 5)
 - Modify: `internal/tui/command_test.go:1686`
-- Modify docs: `README.md:562`, `:605`, `:670`, `:877`, `:883`; `skills/ocode-usage/SKILL.md:285`, `:527`; `skills/ocode-tui/SKILL.md:151`; `docs/web-desktop-parity-todo.md:111-115`; `internal/tui/commands.go:1899` (help copy "not just /goal" → "not just /orchestrate")
+- Modify docs: `README.md:562`, `:605`, `:670`, `:877`, `:883`; `skills/ocode-usage/SKILL.md:285`, `:527`; `skills/ocode-tui/SKILL.md:151`; `docs/web-desktop-parity-todo.md:111-115`; `internal/tui/commands.go:1903` (help copy "not just /goal" → "not just /orchestrate")
 
 **Interfaces:**
 - Produces: slash command `/orchestrate <goal>` (TUI + web), CLI `ocode orchestrate …` with unchanged flags. `cli.ParseGoalArgs`/`GoalOptions` renamed to `ParseOrchestrateArgs`/`OrchestrateOptions`.
@@ -67,7 +67,7 @@
 - Create: `internal/agent/goal.go`, `internal/agent/goal_test.go`
 - Modify: `internal/agent/decider.go` (new slot `slotGoal = "goal"`; `slotModel` reads `oc.Goal.JudgeModel`)
 - Modify: `internal/config/ocodeconfig.go:884` area (add `Goal JudgeModelConfig` to the `Ocode` struct next to `ContentGuard`), `:1703-1707` area (`applyJudgeModelConfig(&cfg.Goal.JudgeModel, file.Goal.JudgeModel)`), and the file-schema struct that `file.ContentGuard` comes from
-- Modify: `internal/agent/agent.go` (new field `OnGoalJudge func(GoalJudgeResult)` beside `OnAutoContinueJudge` at `:660`; new private field `goal *GoalState` guarded by the agent's existing state mutex)
+- Modify: `internal/agent/agent.go` (new field `OnGoalJudge func(GoalJudgeResult)` beside `OnAutoContinueJudge` at `:663`; new private field `goal *GoalState` guarded by the agent's existing state mutex)
 
 **Interfaces (produces; Tasks 3–5 consume exactly these):**
 - `type GoalStatus string` with `GoalActive`, `GoalPaused`, `GoalMet`, `GoalImpossible` (`"active"`, `"paused"`, `"met"`, `"impossible"`).
@@ -121,7 +121,7 @@
 
 **Files:**
 - Modify: `internal/tui/commands.go` (new table entry `/goal` with usage `/goal [<condition> | clear]`, handler `runGoalCmd`)
-- Modify: `internal/tui/model.go`: `isInstantCmd` chain (`:9041-9097`), stream-done branch (`:5471-5494`), new `case goalJudgeFinishedMsg` beside `:5675`, `sessionSidebarMetadata` (`:20997`), the two `restoreTodoState` call sites (`:2875`, `:11408`), the three `tool.ResetTodoState()` sites (`:2604`, `:11406`, `:11865`), the human-send path where `settleAutoContinueChain` runs (`:5259`, `:5324`) and the model fields block near `autoContinueGen` (`:1337`)
+- Modify: `internal/tui/model.go`: `isInstantCmd` chain (`:9046-9102`), stream-done branch (`:5476-5499`), new `case goalJudgeFinishedMsg` beside `:5680`, `sessionSidebarMetadata` (`:21002`), the two `restoreTodoState` call sites (`:2880`, `:11413`), the three `tool.ResetTodoState()` sites (`:2608`, `:11411`, `:11870`), the human-send path where `settleAutoContinueChain` runs (`:5264`, `:5324`) and the model fields block near `autoContinueGen` (`:1337`)
 - Test: `internal/tui/command_test.go`, `internal/tui/model_test.go` (or the file that already tests `shouldAutoContinue`)
 
 **Interfaces:**
@@ -158,7 +158,7 @@
 
 **Files:**
 - Create: `internal/server/handler_session_goal.go`, `internal/server/handler_session_goal_test.go`
-- Modify: `internal/server/agent_session.go` (`runTurn` loop `:1270-1296`; `buildAgentSession` `:437`; the human-turn entry at `:1739`), `internal/server/server.go` (routes beside `:287-288`)
+- Modify: `internal/server/agent_session.go` (`runTurn` loop `:1289-1315`; `buildAgentSession` `:438`; the human-turn entry at `:1758`), `internal/server/server.go` (routes beside `:287-288`)
 - Test: `internal/server/agent_session_test.go` (or the file holding the existing auto-continue runTurn tests)
 
 **Interfaces:**
@@ -190,7 +190,7 @@
 **Risk:** standard — thin client over Task 4's endpoints.
 
 **Files:**
-- Modify: `web/src/components/Chat/commands.ts` (reuse the `/goal` slot freed in Task 1: `handleGoal(args, ctx)`), `web/src/api/client.ts` (beside `getAutoContinue`/`setAutoContinue` at `:3608`: `getSessionGoal`, `setSessionGoal`, `clearSessionGoal`, host-threaded like the thinking-budget calls at `:1327`)
+- Modify: `web/src/components/Chat/commands.ts` (reuse the `/goal` slot freed in Task 1: `handleGoal(args, ctx)`), `web/src/api/client.ts` (beside `getAutoContinue`/`setAutoContinue` at `:3640`: `getSessionGoal`, `setSessionGoal`, `clearSessionGoal`, host-threaded like the thinking-budget calls at `:1329`)
 - Test: `web/src/components/Chat/commands.goal.test.tsx` (pattern: `commands.autocontinue.test.tsx`)
 
 **Interfaces:**

@@ -2,7 +2,7 @@ import { pulseEventSink } from "../stores/pulseStore";
 import { api } from "../api/client";
 import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState, type SessionSlice } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
-import type { Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent, TodoUpdatedEvent } from "../api/types";
+import type { McpAppRef, Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent, TodoUpdatedEvent } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
 import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
@@ -794,6 +794,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           sessionId,
           callId: (data as { call_id?: string }).call_id,
           output: (data as { output: string }).output,
+          mcpApp: (data as { mcp_app?: McpAppRef }).mcp_app,
         });
         return;
       case "question": {

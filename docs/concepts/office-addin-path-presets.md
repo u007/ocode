@@ -64,7 +64,7 @@ exclude it from the free-text field without duplicating it
 ## Endpoints
 
 All three routes are registered behind `authMiddleware`
-(`internal/server/server.go:627-629`):
+(`internal/server/server.go:631-633`):
 
 | Route | Handler | Contract |
 |---|---|---|
@@ -83,8 +83,8 @@ The handler re-reads `h.officeAddinPresets()` when it runs
 rejects invalid JSON and an empty `apps` list with 400 (`:104-116`), dedupes app
 ids (`:124-130`), and rejects an unknown app id rather than ignoring it
 (`:132-135`). The preset seam is a `Handler` field so tests can pin the list
-without mutating a package var (`internal/server/handler.go:82`); the request
-override for the probe is at `internal/server/handler.go:87`.
+without mutating a package var (`internal/server/handler.go:83`); the request
+override for the probe is at `internal/server/handler.go:88`.
 
 ## The save ordering that matters
 
@@ -140,7 +140,7 @@ installed.
 Result shape (`officeAddinAccessResult`, `:19-25`):
 `{app, path, status, message, opened_settings}`.
 
-Declared statuses and the web labels (`web/src/api/client.ts:137-144`,
+Declared statuses and the web labels (`web/src/api/client.ts:139-146`,
 `ACCESS_LABEL` in `PathsForm.tsx:22-29`):
 
 | Status | Meaning | Label |

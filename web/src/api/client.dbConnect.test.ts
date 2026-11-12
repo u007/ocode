@@ -112,6 +112,46 @@ describe("dbConnectAdd wire shape", () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(body).toEqual({ name: "env", url: "${DATABASE_URL}", password: "" });
   });
+
+  // project_path is the server's "save into this project's .ocode/db.json" switch,
+  // and that file may hold only templates. So the client sends it for a template
+  // only. A literal URL on a remote project stays routed to the host, with no
+  // project_path, so the host saves it to its global config.
+  const remote = { host: "user@box", projectPath: "/srv/app" };
+
+  it("omits project_path for a literal URL on a remote project, but still routes to the host", async () => {
+    const fetchMock = stubFetch({ name: "prod" }, 201);
+
+    await api.dbConnectAdd("prod", "postgres://app:pw@db:5432/app", "master-pw", remote);
+
+    const [path, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body).not.toHaveProperty("project_path");
+    expect(body).toEqual({ name: "prod", url: "postgres://app:pw@db:5432/app", password: "master-pw" });
+    expect(String(path)).toContain("/api/remote/user%40box/api/dbconnect/connections");
+    expect(new Headers(init?.headers).get("X-Ocode-Project")).toBe("/srv/app");
+  });
+
+  it("sends project_path for an environment template on a remote project", async () => {
+    const fetchMock = stubFetch({ name: "env" }, 201);
+
+    await api.dbConnectAdd("env", "${DATABASE_URL}", "", remote);
+
+    const [path, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body).toEqual({ name: "env", url: "${DATABASE_URL}", password: "", project_path: "/srv/app" });
+    expect(String(path)).toContain("/api/remote/user%40box/api/dbconnect/connections");
+  });
+
+  it("leaves a local project's add unchanged: no target means no project_path and no remote route", async () => {
+    const fetchMock = stubFetch({ name: "prod" }, 201);
+
+    await api.dbConnectAdd("prod", "postgres://app:pw@db:5432/app", "master-pw");
+
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).not.toHaveProperty("project_path");
+    expect(String(path)).not.toContain("/api/remote/");
+  });
 });
 
 describe("dbConnectUnlock project scope", () => {

@@ -19,7 +19,7 @@ Fixed 2026-09-24. Symptom: unchecking a category in **Settings → Permissions**
 
 Two independent bugs compounded:
 
-1. **Runtime reads used the agent's build-time snapshot** (`a.config.Ocode.Permissions.Auto`). The PUT only wrote `h.cfg` + disk; it never pushed to a running agent. A resident agent was rebuilt only on profile/model/credential change (`reconcileProfileAgent`, `internal/server/agent_session.go:1302`), so a permissions-only change never landed on the next judge call.
+1. **Runtime reads used the agent's build-time snapshot** (`a.config.Ocode.Permissions.Auto`). The PUT only wrote `h.cfg` + disk; it never pushed to a running agent. A resident agent was rebuilt only on profile/model/credential change (`reconcileProfileAgent`, `internal/server/agent_session.go:1321`), so a permissions-only change never landed on the next judge call.
 
 2. **Profile-bound sessions hold a separate config.** `buildAgentSession` sets `effCfg = config.LoadEffectiveForProfile(prof)`; `EffectiveOcodeConfig` shallow-clones, so the global write never reached that session's agent.
 

@@ -7,7 +7,7 @@ sessions. Total long-lived connections: 2 (events SSE + terminal WebSocket).
 
 **Context (self-contained):**
 - Today the client opens: a permanent chat-mirror `EventSource`
-  (`web/src/api/client.ts:710-738 connectSessionMirror`, consumed by
+  (`web/src/api/client.ts:712-740 connectSessionMirror`, consumed by
   `web/src/components/Layout/SessionTabSync.tsx:38-246`), one agent-runs
   `EventSource` per session (`web/src/hooks/useAgentRuns.ts:26-53`), a logs
   `EventSource` (`web/src/components/.../LogPanel.tsx:86`), a terminal

@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { syncProjectToCache, syncSessionToCache, loadFromCache, loadCacheSummary } from '../offlineSync';
+import { syncProjectToCache, syncSessionToCache, loadFromCache, loadCacheSummary, removeProjectFromCache } from '../offlineSync';
 import { OfflineDB } from '../offlineDb';
 
 describe('offlineSync', () => {
@@ -14,7 +14,7 @@ describe('offlineSync', () => {
   });
 
   it('syncProjectToCache writes to IndexedDB', async () => {
-    await syncProjectToCache({ id: '/p', name: 'p', data: {} } as any);
+    await syncProjectToCache({ path: '/p', name: 'p', data: {} } as any);
     const result = await db.getProject('/p');
     expect(result?.name).toBe('p');
   });
@@ -49,7 +49,7 @@ describe('offlineSync', () => {
 
   it('loadCacheSummary reflects what is stored, not an in-memory value', async () => {
     expect(await loadCacheSummary()).toEqual({ hasData: false, newestLastSynced: null });
-    await syncProjectToCache({ id: '/p', name: 'p', data: {} } as any);
+    await syncProjectToCache({ path: '/p', name: 'p', data: {} } as any);
     const summary = await loadCacheSummary();
     expect(summary?.hasData).toBe(true);
     expect(summary?.newestLastSynced).not.toBeNull();
@@ -60,5 +60,26 @@ describe('offlineSync', () => {
     vi.spyOn(OfflineDB.prototype, 'summarize').mockRejectedValueOnce(new Error('boom'));
     expect(await loadCacheSummary()).toBeUndefined();
     expect(warn).toHaveBeenCalledWith('[offlineSync] loadCacheSummary failed:', expect.any(Error));
+  });
+
+  it('removeProjectFromCache deletes a local project record by its bare path', async () => {
+    await syncProjectToCache({ path: '/p', name: 'p' } as any);
+    await removeProjectFromCache({ path: '/p' });
+    expect(await db.getProject('/p')).toBeUndefined();
+  });
+
+  it('removeProjectFromCache deletes only the host-qualified record, not a local one with the same path', async () => {
+    await syncProjectToCache({ path: '/same', name: 'local' } as any);
+    await syncProjectToCache({ path: '/same', host: 'dev@box', name: 'remote' } as any);
+    await removeProjectFromCache({ path: '/same', host: 'dev@box' });
+    expect(await db.getProject('dev@box::/same')).toBeUndefined();
+    expect((await db.getProject('/same'))?.name).toBe('local');
+  });
+
+  it('removeProjectFromCache logs and resolves when the delete fails', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    vi.spyOn(OfflineDB.prototype, 'deleteProject').mockRejectedValueOnce(new Error('boom'));
+    await expect(removeProjectFromCache({ path: '/p' })).resolves.toBeUndefined();
+    expect(debug).toHaveBeenCalledWith('[offlineSync] removeProjectFromCache failed:', expect.any(Error));
   });
 });

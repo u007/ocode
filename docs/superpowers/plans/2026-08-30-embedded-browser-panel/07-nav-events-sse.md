@@ -6,7 +6,7 @@
 
 ## Verified codebase facts (do not re-derive)
 
-- The unified bus is `*EventBus` at `internal/server/event_bus.go`, held on the **Handler**: `Handler.bus` (`internal/server/handler.go:48`). From a `*Server` value reach it as **`s.handler.bus`**.
+- The unified bus is `*EventBus` at `internal/server/event_bus.go`, held on the **Handler**: `Handler.bus` (`internal/server/handler.go:49`). From a `*Server` value reach it as **`s.handler.bus`**.
 - `func (b *EventBus) Publish(event, project, sessionID string, data any)` (`event_bus.go:129`) fans every envelope out to **all** subscribers non-blockingly; there is no server-side project filtering inside `Publish`, so a global event with an empty `project` reaches every open SSE client.
 - `Envelope` fields: `Event, Project, SessionID string; Seq uint64; Data any` (`event_bus.go`).
 - `func (b *EventBus) Subscribe(projects []string) chan Envelope` (`event_bus.go:79`) and `func (b *EventBus) Unsubscribe(ch chan Envelope)` (`event_bus.go:98`) — the test uses these directly.
@@ -107,7 +107,7 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 }
 ```
 
-**Test-helper note:** if `newTestServer` does not already exist in the `server` package tests, add a minimal one that mirrors how other `internal/server` tests build a `*Server` (grep existing `_test.go` for the constructor pattern — several call `New(...)` directly). It must return a `*Server` whose `handler.bus` is live (it is, because `NewEventBus()` runs in the handler constructor at `handler.go:292`). The `publishBrowseNav` helper is introduced in Step 3 so the test can drive emission deterministically without a real HTTP round-trip.
+**Test-helper note:** if `newTestServer` does not already exist in the `server` package tests, add a minimal one that mirrors how other `internal/server` tests build a `*Server` (grep existing `_test.go` for the constructor pattern — several call `New(...)` directly). It must return a `*Server` whose `handler.bus` is live (it is, because `NewEventBus()` runs in the handler constructor at `handler.go:296`). The `publishBrowseNav` helper is introduced in Step 3 so the test can drive emission deterministically without a real HTTP round-trip.
 
 - [ ] **Step 2: Run to verify it fails**
 

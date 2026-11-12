@@ -29,7 +29,7 @@ Full design at `docs/superpowers/specs/2026-08-08-per-tab-chat-state-design.md`.
 **Why first:** `UPDATE_TAB_TITLE` and `UPDATE_TAB_ID` currently only touch `state.tabsByProject[state.activeProject.path]` — they silently no-op for a tab that belongs to a *different* project than the one currently active. Once background tabs (Task 5, Task 6) can rename themselves or get their title updated while some other project is active, this bug becomes reachable and must be fixed first.
 
 **Files:**
-- Modify: `web/src/stores/projectStore.tsx:65-161` (the `projectReducer` function)
+- Modify: `web/src/stores/projectStore.tsx:67-168` (the `projectReducer` function)
 - Test: `web/src/stores/projectStore.test.tsx` (new)
 
 **Interfaces:**

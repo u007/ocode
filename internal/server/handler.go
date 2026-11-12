@@ -30,6 +30,7 @@ import (
 	"github.com/u007/ocode/internal/messaging"
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretjob"
@@ -98,9 +99,12 @@ type Handler struct {
 	remoteHosts *remoteHostRegistry
 	agents      map[string]*agentSession
 	cfg         *config.Config
-	messaging   *messaging.Manager
-	rc          *RCBridge          // set when proxying to a TUI session
-	scheduler   *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// pluginMCP maps each MCP server merged into cfg from an enabled plugin to
+	// that plugin's name (plugins.MergeMCPServers). Guarded by mu, like cfg.
+	pluginMCP map[string]string
+	messaging *messaging.Manager
+	rc        *RCBridge          // set when proxying to a TUI session
+	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// cronServices resolves the cron engine for a project root, per call. It is
 	// installed by the Server (see Server.cronServiceResolver) so the LLM `cron`
 	// tool operates on the SESSION's project instead of the server's boot project.
@@ -730,6 +734,11 @@ func NewHandler() *Handler {
 	// The desktop/server boot path replaces this with its explicit project root
 	// through SetWorkDir before serving requests.
 	defaultWorkDir, _ := os.Getwd()
+	// Plugin-declared MCP servers of the default project join the in-memory
+	// config before the process-wide MCP cache warms from it. Project-local
+	// plugins are left out: the shared config serves every project, and each
+	// session merges its own project's plugins (see buildAgentSession).
+	pluginMCP := plugins.MergeSharedMCPServers(cfg, defaultWorkDir)
 
 	projStore, projGroupStore, err := projects.NewStore()
 	if err != nil {
@@ -782,6 +791,7 @@ func NewHandler() *Handler {
 	h := &Handler{
 		agents:              make(map[string]*agentSession),
 		cfg:                 cfg,
+		pluginMCP:           pluginMCP,
 		officeAddinPaths:    paths.OfficeAddinPaths,
 		advisorEnabled:      advisorEnabled,
 		workDir:             defaultWorkDir,
@@ -973,12 +983,14 @@ func (h *Handler) SetWorkDir(dir string) {
 		return
 	}
 	agent.ApplyAgentConfig(cfg)
+	pluginMCP := plugins.MergeSharedMCPServers(cfg, dir)
 
 	mcpCache := newMCPCache()
 	mcpCache.warm(cfg)
 
 	h.mu.Lock()
 	h.cfg = cfg
+	h.pluginMCP = pluginMCP
 	h.advisorEnabled = cfg == nil || cfg.Ocode.Advisor.Enabled
 	h.mcpCache = mcpCache
 	h.mu.Unlock()
@@ -1194,7 +1206,7 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			h.broadcastEvent(SSEEvent{
 				SessionID: sessionID,
 				Event:     "tool_result",
-				Data:      ToolResultEvent{Tool: "tool", CallID: m.ToolID, Output: m.Content},
+				Data:      ToolResultEvent{Tool: "tool", CallID: m.ToolID, Output: m.Content, MCPApp: m.MCPApp},
 			})
 			if prompts, ok := parseQuestionAsk(m.Content); ok {
 				h.broadcastEvent(SSEEvent{

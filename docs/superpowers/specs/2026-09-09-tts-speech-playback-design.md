@@ -198,7 +198,7 @@ profile and usage attribution as its turns. Settings pair is read/written via
 - **No work lock.** The config PUT releases `h.mu` around
   `config.SaveOcodeSpeechSummary` (cross-process config lock, ~5s bound) and
   re-locks only to update `h.cfg` — `h.mu` is a short-lived map lock, never a
-  work lock (`internal/server/agent_session.go:39-46`).
+  work lock (`internal/server/agent_session.go:40-47`).
 - **Scope stays local.** No server-global lock anywhere in the speech path;
   blocking scope is one request / one session. `POST /api/tts/speak` still
   returns immediately with synthesis in a background goroutine, and §7's one

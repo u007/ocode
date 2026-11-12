@@ -12,6 +12,24 @@ export interface MessageImage {
   path?: string;
 }
 
+/** An MCP tool whose result the host renders as an MCP Apps widget. Set on a
+ *  `tool` message (and the live `tool_result` event) when the tool declared a
+ *  `ui://` resource. `result` is the raw CallToolResult of that call. */
+export interface McpAppRef {
+  server: string;
+  tool: string;
+  resource_uri: string;
+  result?: unknown;
+}
+
+/** Body of GET /api/sessions/{id}/mcp-app/resource: the widget's HTML and the
+ *  CSP domains it may reach. */
+export interface McpAppResource {
+  html: string;
+  csp?: { connectDomains?: string[]; resourceDomains?: string[] };
+  prefers_border?: boolean;
+}
+
 export interface Message {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
@@ -20,6 +38,8 @@ export interface Message {
   /** Images the tool result carried for a vision model (e.g. a browser
    *  screenshot). Serialised from agent.Message.Images. */
   images?: MessageImage[];
+  /** MCP Apps widget metadata for a tool result (see McpAppRef). */
+  mcp_app?: McpAppRef;
   reasoning_content?: string;
   /** Durable per-session sequence stamped on user-role messages by the
    *  server, identical on the persisted copy and the `user_message` SSE echo.
@@ -68,6 +88,8 @@ export type LivePart =
        *  only — `output` carries the authoritative result. */
       stream?: string;
       output?: string;
+      /** MCP Apps widget metadata, from the `tool_result` event. */
+      mcpApp?: McpAppRef;
     }
   | { kind: "status"; text: string }
   /** A user message injected mid-turn (queued input). It sits in the live

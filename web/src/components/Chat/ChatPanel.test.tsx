@@ -23,6 +23,10 @@ import {
 } from "../../stores/chatStore";
 import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
 import { __resetChatVerbosityForTests } from "../../lib/chatVerbosity";
+import {
+  INLINE_PARALLEL_TOOL_CALLS_STORAGE_KEY,
+  saveInlineParallelToolCalls,
+} from "./inlineParallelToolCalls";
 import type { ChatVerbosityConfig, Message } from "../../api/types";
 
 // --- Mock the API so the initial load + prepend pagination are controllable.
@@ -1460,6 +1464,47 @@ describe("ChatPanel", () => {
     expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
     // Parallel tool calls render inside a shared wrapper div.
     expect(container.querySelector('[data-testid="parallel-tool-calls"]')).toBeTruthy();
+  });
+
+  it("re-lays out an open parallel tool-call group in place when the inline setting changes", async () => {
+    const msgs: Message[] = [
+      mk("user", "please read both files"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call-1", function: { name: "read", arguments: '{"path":"a.go"}' } },
+          { id: "call-2", function: { name: "read", arguments: '{"path":"b.go"}' } },
+        ],
+      },
+      { role: "tool", content: "content of a.go", tool_call_id: "call-1" },
+      { role: "tool", content: "content of b.go", tool_call_id: "call-2" },
+    ];
+    localStorage.removeItem(INLINE_PARALLEL_TOOL_CALLS_STORAGE_KEY);
+    try {
+      const { container } = render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-inline-toggle" messages={msgs} />
+          <ChatPanel sessionId="sess-inline-toggle" />
+        </ChatProvider>,
+      );
+      await tick();
+      await flushRAF();
+      const wrapper = container.querySelector('[data-testid="parallel-tool-calls"]');
+      expect(wrapper).toBeTruthy();
+      expect(wrapper!.classList.contains("flex-col")).toBe(true);
+      expect(wrapper!.classList.contains("flex-wrap")).toBe(false);
+
+      act(() => saveInlineParallelToolCalls(true));
+
+      // Same DOM node: the toggle must update the open chat without remounting it.
+      const after = container.querySelector('[data-testid="parallel-tool-calls"]');
+      expect(after).toBe(wrapper);
+      expect(after!.classList.contains("flex-wrap")).toBe(true);
+      expect(after!.classList.contains("[&>*]:max-w-full")).toBe(true);
+    } finally {
+      localStorage.removeItem(INLINE_PARALLEL_TOOL_CALLS_STORAGE_KEY);
+    }
   });
 
   it("keeps a row's disclosure state across the turn-end snapshot that replaces every message object", async () => {

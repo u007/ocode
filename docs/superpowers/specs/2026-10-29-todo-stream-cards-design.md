@@ -71,9 +71,9 @@ GET /api/sessions/{id}/todo/outputs ──→ initial load / replay
 ```
 
 The recorder is server-side only. `wireHeadlessAgentCallbacks`
-(`internal/server/handler.go:946`) already owns every hook except
+(`internal/server/handler.go:956`) already owns every hook except
 `OnSubAgentMessage`; the server currently leaves that unset
-(`internal/server/agent_session.go:665`), so this feature wires it. No
+(`internal/server/agent_session.go:684`), so this feature wires it. No
 `internal/agent` change.
 
 ## 6. Capture
@@ -85,8 +85,8 @@ The recorder is server-side only. `wireHeadlessAgentCallbacks`
 - Created lazily when a session's callbacks are wired or its first block
   arrives. The project root comes from `h.sessions.SnapshotEntry(sessionID)`.
   Without a root the recorder stays in-memory and does not persist.
-- On agent release/eviction (`internal/server/agent_session.go:1007` and
-  `:1044`, where `h.toolOutput.dropSession` is called) flush, drop the map entry,
+- On agent release/eviction (`internal/server/agent_session.go:1026` and
+  `:1063`, where `h.toolOutput.dropSession` is called) flush, drop the map entry,
   and clear the open-call table.
 - `todo_output` carries `session_id`; add it to `sessionScopedEvents`
   (`internal/server/event_bus.go`) and the web `SESSION_SCOPED_EVENTS`
@@ -107,7 +107,7 @@ every plan write:
 - no candidates → no active item.
 
 Ordering matters: `OnTodoWritten` fires after every plan write. The server's
-existing hook (`internal/server/handler.go:791`) hands the plan read and bus
+existing hook (`internal/server/handler.go:801`) hands the plan read and bus
 publish to a goroutine. That races the first deltas of the item just marked
 `in_progress`, which would be dropped. Change the hook to:
 
@@ -115,7 +115,7 @@ publish to a goroutine. That races the first deltas of the item just marked
    per turn) and update the recorder's active item;
 2. hand the existing `todo_updated` bus publish to the goroutine as today.
 
-Refactor `publishTodoUpdated` (`internal/server/handler.go:1095`) into a helper
+Refactor `publishTodoUpdated` (`internal/server/handler.go:1107`) into a helper
 that returns the read event so the file is read once, not twice.
 
 When callbacks are wired for an existing session (server restart, agent

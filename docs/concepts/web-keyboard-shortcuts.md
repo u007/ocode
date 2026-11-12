@@ -21,7 +21,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 
 - **Dispatch:** `web/src/hooks/useKeyboard.ts` — a single `window` `keydown` listener created by `useKeyboard` (`useKeyboard.ts:33`) with one `useEffect` and an empty dep array; handlers are read through a ref so re-renders never rebind. This is the only place **app-level/global** shortcuts may be registered (the surface-local find listeners are the single documented exception, below).
 - **Wiring/semantics:** `web/src/App.tsx:1027-1106` — an `openNewChat` helper (`:1027-1031`) plus the top-level `useKeyboard({...})` call (`:1033-1106`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
-- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1261-1270`, guarded to the visible chat tab (`offsetParent === null` → ignore). The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1285`).
+- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1297-1306`, guarded to the visible chat tab (`offsetParent === null` → ignore). The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1321`).
 - **Surface-local (not global):** in-document find in the PDF / Markdown / Word / HTML previews is owned by each viewer (`FindBar` + a window keydown gated to that surface). See the exception caveat and [preview-find.md](preview-find.md).
 
 ## Bindings

@@ -19,13 +19,13 @@ paths are deleted, along with all legacy SSE endpoints and dead client code.
 **Context (self-contained):**
 - Today, when a TUI attaches via RC-bridge: `HandleSendMessage` ignores the
   `:id` path parameter and forwards every message to the single TUI agent
-  (`internal/server/handler.go:532-561`); the mirror SSE handler re-stamps
+  (`internal/server/handler.go:536-565`); the mirror SSE handler re-stamps
   every untagged frame with the bridge's session id
-  (`internal/server/handler_sse.go:283-285`); and `runTurn` suppresses
+  (`internal/server/handler_sse.go:286-288`); and `runTurn` suppresses
   headless events when a bridge is attached
-  (`internal/server/agent_session.go:184-232`, `headless := h.RCBridge() ==
+  (`internal/server/agent_session.go:185-233`, `headless := h.RCBridge() ==
   nil`). The TUI registers with the server via
-  `RegisterExternalSession` (`internal/server/server.go:2593`).
+  `RegisterExternalSession` (`internal/server/server.go:2597`).
 - Parts 01–05 provide: `SessionManager.Register(sessionID, projectRoot)` and
   `Resolve`; `EventBus.Publish(event, project, sessionID, data)`; turn
   lifecycle events (`turn_started`/`turn_heartbeat`/`turn_done`/`turn_error`);

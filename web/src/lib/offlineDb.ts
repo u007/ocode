@@ -36,6 +36,7 @@ export interface CachedProject {
   id: string;
   name: string;
   lastSynced: number;
+  order?: number;
   data: unknown;
 }
 
@@ -199,6 +200,66 @@ export class OfflineDB {
     if (!result) return undefined;
     if (Date.now() - result.lastSynced > TTL_MS.projects) return undefined;
     return result;
+  }
+
+
+  async listProjects(): Promise<CachedProject[]> {
+    const db = await this.getDB();
+    const projects: CachedProject[] = [];
+    await forEachRecord(db, STORES.projects, (_key, record) => {
+      const cached = record as unknown as CachedProject;
+      if (Date.now() - cached.lastSynced > TTL_MS.projects) return;
+      projects.push(cached);
+    });
+    projects.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    return projects;
+  }
+
+  /**
+   * Deletes cached project records whose id is not in `keep`, in one readwrite
+   * transaction. Returns how many were removed. Only call this with the keys of a
+   * successful server listing: a failed request says nothing about which projects
+   * still exist.
+   */
+  async pruneProjects(keep: ReadonlySet<string>): Promise<number> {
+    const db = await this.getDB();
+    const tx = db.transaction(STORES.projects, 'readwrite');
+    const done = txDone(tx);
+    let removed = 0;
+    let removedBytes = 0;
+    const request = tx.objectStore(STORES.projects).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (!keep.has(String(cursor.primaryKey))) {
+        removed += 1;
+        removedBytes += recordBytes(cursor.value as StoredRecord);
+        cursor.delete();
+      }
+      cursor.continue();
+    };
+    await done;
+    this.total = Math.max(0, this.total - removedBytes);
+    return removed;
+  }
+
+  /**
+   * Deletes one cached project record by its key, in one readwrite transaction.
+   * Returns false when no record had that key, in which case the running total is
+   * left alone. Only call this after the server has confirmed the project's removal.
+   */
+  async deleteProject(id: string): Promise<boolean> {
+    const db = await this.getDB();
+    const tx = db.transaction(STORES.projects, 'readwrite');
+    const done = txDone(tx);
+    const store = tx.objectStore(STORES.projects);
+    // Read the record in the same transaction so its bytes come off the total.
+    const existing = idbRequest<StoredRecord | undefined>(store.get(id));
+    store.delete(id);
+    const [old] = await Promise.all([existing, done]);
+    if (!old) return false;
+    this.total = Math.max(0, this.total - recordBytes(old));
+    return true;
   }
 
   async putSession(session: CachedSession): Promise<void> {

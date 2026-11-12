@@ -181,9 +181,9 @@ func TestMCPToolsForSessionCacheFastPath(t *testing.T) {
 	cfg = h.cfg
 	h.mu.Unlock()
 
-	tools, errs := h.mcpToolsForSession(cfg, "ses_no_override")
-	if tools != nil || errs != nil {
-		t.Errorf("expected nil result for override-less session, got tools=%v errs=%v", tools, errs)
+	tools, errs, own := h.mcpToolsForSession(cfg, "ses_no_override", false)
+	if tools != nil || errs != nil || own {
+		t.Errorf("expected nil result for override-less session, got tools=%v errs=%v own=%v", tools, errs, own)
 	}
 
 	// With an override the fast path is skipped (the call proceeds to the real

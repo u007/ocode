@@ -496,6 +496,27 @@ export const browserActions = {
     });
   },
 
+  /** Fills the status of an existing row whose status is unknown (0, the
+   *  value a withheld timing status maps to). A row that already has a status
+   *  is never changed, and nothing else on the tab is touched, so a body
+   *  stored under the same requestId survives. */
+  fillNetworkStatus(key: StateKey, requestId: string, status: number) {
+    if (!Number.isFinite(status)) return;
+    mutate(key, (t) => {
+      let idx = -1;
+      for (let i = t.networkEvents.length - 1; i >= 0; i--) {
+        if (t.networkEvents[i].requestId === requestId) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx < 0 || t.networkEvents[idx].status) return t;
+      const networkEvents = t.networkEvents.slice();
+      networkEvents[idx] = { ...networkEvents[idx], status };
+      return { ...t, networkEvents };
+    });
+  },
+
   clearConsole(key: StateKey) {
     mutate(key, (t) => ({ ...t, consoleEvents: [] }));
   },

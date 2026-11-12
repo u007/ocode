@@ -1,6 +1,6 @@
 import { memo, useRef, useSyncExternalStore, type ComponentProps } from "react";
 import { CheckCircle2 } from "lucide-react";
-import type { MessageImage, QuestionAnswerPayload } from "@/api/types";
+import type { McpAppRef, MessageImage, QuestionAnswerPayload } from "@/api/types";
 import { isInlineSafeMediaType } from "../Preview/blobPreview";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
@@ -12,6 +12,7 @@ import { SpeakButton, type SpeakAction } from "../Speech/SpeakButton";
 import { BlockCopyControl } from "./BlockCopyControl";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
 import RunNode from "../Agents/RunNode";
+import { McpAppView } from "./mcpApp/McpAppView";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
 
@@ -605,16 +606,42 @@ type PlainToolBlockProps = ComponentProps<typeof PlainToolBlock>;
 export const ToolBlock = memo(function ToolBlock({
   toolCallId,
   sessionId,
+  mcpApp,
+  mcpAppActive = false,
+  host,
   ...block
 }: PlainToolBlockProps & {
   /** This call's id, matched against a run's `toolCallId`. */
   toolCallId?: string;
   sessionId?: string;
+  /** The MCP Apps widget this tool result declared; renders McpAppView below the block. */
+  mcpApp?: McpAppRef;
+  /** True for the card that starts its widget (the live or last one in the transcript). */
+  mcpAppActive?: boolean;
+  /** SSH/WSL host of the session's project; routes the widget's API calls. */
+  host?: string;
 }) {
-  if ((block.tool === "task" || block.tool === "agent") && toolCallId && sessionId) {
-    return <TaskToolBlock sessionId={sessionId} toolCallId={toolCallId} block={block} />;
-  }
-  return <PlainToolBlock {...block} />;
+  const blockEl =
+    (block.tool === "task" || block.tool === "agent") && toolCallId && sessionId ? (
+      <TaskToolBlock sessionId={sessionId} toolCallId={toolCallId} block={block} />
+    ) : (
+      <PlainToolBlock {...block} />
+    );
+  if (!mcpApp || !sessionId || !toolCallId) return blockEl;
+  return (
+    <div className="w-full basis-full min-w-0">
+      {blockEl}
+      <McpAppView
+        sessionId={sessionId}
+        toolCallId={toolCallId}
+        host={host}
+        mcpApp={mcpApp}
+        toolArguments={block.command}
+        output={block.output}
+        active={mcpAppActive}
+      />
+    </div>
+  );
 });
 
 function TaskToolBlock({

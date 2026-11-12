@@ -46,17 +46,17 @@ timestamp: 2026-09-25T14:06:25Z
   (`web/src/lib/sessionEvents.ts:468-479`) and dispatches the same action;
   `turn_done` / `turn_error` handlers are untouched, so the value is retained.
 - **Server — `turn_started`:** `publishTurnStarted(sessionID, model string)`
-  (`internal/server/agent_session.go:871`) adds `data["model"]` when non-empty;
-  its only call site is `runTurn` (`agent_session.go:1122`). This is the
+  (`internal/server/agent_session.go:890`) adds `data["model"]` when non-empty;
+  its only call site is `runTurn` (`agent_session.go:1141`). This is the
   **headless/server-event fallback** — see §5.1 and R1 for exactly which turns
   emit it.
 - **Server — rewind 202:** the tokenized-rewind 202 reports the model handed to
   the queued job (`h.effectiveSessionModel` → `dispatchTurnWithRewind`), **not** a
-  stale resident-agent model (`internal/server/handler.go:1343-1363`, with an
+  stale resident-agent model (`internal/server/handler.go:1355-1375`, with an
   inline comment forbidding the old overwrite).
 - **Server — bridged RC responses:** all three bridged RC response branches —
-  async send 202 (`handler.go:1378`), rewind 202 (`handler.go:1340`), and the
-  synchronous send 200 (`handler.go:1402-1406`) — return
+  async send 202 (`handler.go:1390`), rewind 202 (`handler.go:1352`), and the
+  synchronous send 200 (`handler.go:1414-1418`) — return
   `ChatResponse{Model: rc.ModelForDispatch()}` — live `TUIStatus.MainModel`
   first, registration `RCBridge.Model` only as fallback
   (`internal/server/rc_bridge.go:276-286`). The browser captures only the
@@ -273,9 +273,9 @@ not a redefinition.
     that overwrite was removed with an inline comment — the 202 must report the
     model the queued job will use, not a stale resident-agent model. Pinned by
     `TestRewindAcceptedResponseUsesDispatchedModel`.
-  - **Bridged RC response branches** (async send `handler.go:1378`, rewind
-    `handler.go:1340`, synchronous send 200 at the RC result branch
-    `handler.go:1402-1406`): all three return
+  - **Bridged RC response branches** (async send `handler.go:1390`, rewind
+    `handler.go:1352`, synchronous send 200 at the RC result branch
+    `handler.go:1414-1418`): all three return
     `ChatResponse{Model: rc.ModelForDispatch()}`.
     `ModelForDispatch` (`rc_bridge.go:276-286`) returns the live
     `TUIStatus.MainModel` when set and falls back to the registration-time

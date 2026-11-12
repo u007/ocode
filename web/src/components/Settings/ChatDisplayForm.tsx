@@ -12,6 +12,10 @@ import {
   saveChatVerbosityConfig,
   useChatVerbosity,
 } from "@/lib/chatVerbosity";
+import {
+  saveInlineParallelToolCalls,
+  useInlineParallelToolCalls,
+} from "@/components/Chat/inlineParallelToolCalls";
 
 // plan_panel is a different kind of setting (initial plan panel size), edited by its own select.
 type OverrideKey = Exclude<keyof typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides, "plan_panel">;
@@ -91,20 +95,7 @@ function presetOverrides(): typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides {
 }
 
 export default function ChatDisplayForm() {
-  const [inlineParallel, setInlineParallel] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem("ocode:inlineParallelToolCalls") === "1";
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("ocode:inlineParallelToolCalls", inlineParallel ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-  }, [inlineParallel]);
+  const inlineParallel = useInlineParallelToolCalls();
   const { config, loading, error: loadError } = useChatVerbosity();
   const [preset, setPreset] = useState<ChatVerbosityPreset>(config.preset);
   const [overrides, setOverrides] = useState(config.overrides);
@@ -265,16 +256,16 @@ export default function ChatDisplayForm() {
           {saving ? "Saving…" : "Save changes"}
         </button>
       </div>
-    <div className="space-y-2">
-      <label className="flex items-center gap-2 text-xs text-foreground">
-        <input
-          type="checkbox"
-          checked={inlineParallel}
-          onChange={(e) => setInlineParallel(e.target.checked)}
-        />
-        Inline grouping of parallel tool calls
-      </label>
-    </div>
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={inlineParallel}
+            onChange={(e) => saveInlineParallelToolCalls(e.target.checked)}
+          />
+          Inline grouping of parallel tool calls
+        </label>
+      </div>
     </div>
   );
 }

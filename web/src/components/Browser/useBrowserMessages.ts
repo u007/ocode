@@ -6,6 +6,9 @@ interface Handlers {
   pushConsole: (key: StateKey, ev: { level: string; text: string; ts: number }) => void;
   pushNetwork: (key: StateKey, ev: NetworkEvent) => void;
   pushResponseBody: (key: StateKey, requestId: string, body: { body: string; base64Encoded: boolean; truncated: boolean }) => void;
+  /** Fills the status of a row whose timing entry withheld it (WebKit). Only
+   *  fills a row that has no status yet; never overwrites a known one. */
+  fillNetworkStatus: (key: StateKey, requestId: string, status: number) => void;
   /** Local-mode page title (capture.js title observer). Display only. */
   onTitle?: (key: StateKey, title: string, url: string) => void;
   /** Local-mode scroll offset report (capture.js throttled scroll). */
@@ -34,7 +37,7 @@ export interface BrowseMessageSource {
 // tabs' origins, other frames — is dropped. "ocode:browse:nav" is a same-document
 // hint only: the receiver accepts it solely for the tab's current origin.
 export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, source: BrowseMessageSource, h: Handlers) {
-  const { pushConsole, pushNetwork, pushResponseBody, onTitle, onScroll, onNav } = h;
+  const { pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav } = h;
   const { originRef, frameRef } = source;
   useEffect(() => {
     if (!browseBase) return;
@@ -87,7 +90,13 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
         }
         case "ocode:browse:networkbody":
           // Local-mode body, posted after its network row (same requestId). It
-          // is a separate message so it never creates a second row.
+          // is a separate message so it never creates a second row. The message
+          // may also carry the re-fetch's response `status` (WebKit withholds it
+          // from the timing entry), with or without a body: a status-only message
+          // fills the row and leaves any stored body alone.
+          if (d.requestId && typeof d.status === "number") {
+            fillNetworkStatus(stateKey, String(d.requestId), d.status);
+          }
           if (typeof d.responseBody === "string" && d.requestId) {
             pushResponseBody(stateKey, String(d.requestId), {
               body: d.responseBody,
@@ -120,5 +129,5 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, pushResponseBody, onTitle, onScroll, onNav]);
+  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav]);
 }

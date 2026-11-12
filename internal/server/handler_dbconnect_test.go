@@ -107,6 +107,80 @@ func TestDBConnectAddRejectsBadURLWithoutEchoingIt(t *testing.T) {
 	}
 }
 
+// dbRemoveVia sends one DELETE through the real route, so the {name} path value
+// is populated the way the server populates it.
+func dbRemoveVia(t *testing.T, h *Handler, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/dbconnect/connections/{name}", h.HandleDBConnectRemove)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, target, nil))
+	return rec
+}
+
+// A remote project's panel lists the global connections too, and it sends
+// project_path on remove. The project has no .ocode/db.json at all, so the
+// removal must reach the global config instead of answering 404.
+func TestDBConnectRemoveWithProjectPathFallsThroughToGlobal(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := dbRemoveVia(t, h, "/api/dbconnect/connections/prod?project_path="+url.QueryEscape(project))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove = %d body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 0 {
+		t.Fatalf("global connections after remove = %+v, want none", cfg.DB.Connections)
+	}
+}
+
+func TestDBConnectRemoveWithProjectPathNotFoundAnywhereIs404(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	h := dbEnvProjectHandler(t, project)
+
+	rec := dbRemoveVia(t, h, "/api/dbconnect/connections/nope?project_path="+url.QueryEscape(project))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("remove = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// The fall-through must not bypass root validation: a project_path outside the
+// allowed roots is refused before any config is read or changed.
+func TestDBConnectRemoveWithForeignProjectPathStillRefused(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	project := t.TempDir()
+	h := dbEnvProjectHandler(t, project)
+
+	if rec := dbPostJSON(t, h.HandleDBConnectAdd, "/api/dbconnect/connections",
+		map[string]string{"name": "prod", "url": dbTestURL, "password": "master-pw"}); rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	foreign := t.TempDir()
+	rec := dbRemoveVia(t, h, "/api/dbconnect/connections/prod?project_path="+url.QueryEscape(foreign))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("remove with a foreign project = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DB.Connections) != 1 {
+		t.Fatalf("a refused remove changed the global config: %+v", cfg.DB.Connections)
+	}
+}
+
 func TestDBConnectAddRequiresSameMasterPassword(t *testing.T) {
 	setHomeTree(t, t.TempDir())
 	h := &Handler{}

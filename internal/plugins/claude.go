@@ -45,6 +45,7 @@ type claudeManifest struct {
 	Description string          `json:"description"`
 	Version     string          `json:"version"`
 	Skills      json.RawMessage `json:"skills"`
+	MCPServers  json.RawMessage `json:"mcpServers"`
 }
 
 // readPluginManifest reads the plugin manifest(s) in dir. ok is false when the
@@ -73,6 +74,12 @@ func readPluginManifest(dir string) (Plugin, bool) {
 	if !hasOcode && !hasClaude {
 		return Plugin{}, false
 	}
+
+	var mcpRaw json.RawMessage
+	if hasClaude {
+		mcpRaw = cm.MCPServers
+	}
+	p.MCPServers, p.MCPRequires = pluginMCPServers(dir, mcpRaw)
 
 	if hasClaude {
 		p.HasClaudeManifest = true
@@ -355,9 +362,7 @@ func configuredEnabled() map[string]bool {
 	}
 	m := map[string]bool{}
 	if cfg, err := config.Load(); err == nil && cfg != nil {
-		for name, pc := range cfg.Plugins {
-			m[name] = pc.Enabled
-		}
+		m = enabledFromConfig(cfg)
 	}
 	enabledCache, enabledCacheAt = m, time.Now()
 	return m

@@ -28,20 +28,20 @@ Three separate locks were being held across slow work, and each one turns a
 side task into a stall for unrelated code:
 
 1. **Waiting behind the turn.** `runTurn` does `as.mu.Lock(); defer
-   as.mu.Unlock()` (`internal/server/agent_session.go:1074-1076`) and holds it
+   as.mu.Unlock()` (`internal/server/agent_session.go:1093-1095`) and holds it
    for the **entire** turn. The handler's later `as.mu.Lock()` to read
    `as.agent` therefore used to block until the turn finished — the summariser
    only started after the turn ended, with the user waiting the whole time.
 2. **Holding `h.mu` across the config write.** `h.mu` is documented as "a
    short-lived map lock, never a work lock"
-   (`internal/server/agent_session.go:39-46`). `SaveOcodeSpeechSummary` does a
+   (`internal/server/agent_session.go:40-47`). `SaveOcodeSpeechSummary` does a
    cross-process read-modify-write bounded at ~5s on a contended lock file
    (`lockOcodeConfig`, `internal/config/ocodeconfig.go:2269-2299`). Holding
    `h.mu` across it stalls every other session's send, the run-state polls and
    the config endpoints — the original "session doesn't run while another
    session is running" bug class.
 3. **A timeout that didn't cancel anything.** `SummarizeForSpeech` used the
-   contextless `Chat` (`internal/agent/client.go:769-771`,
+   contextless `Chat` (`internal/agent/client.go:782-784`,
    `context.Background()`), so `speechSummaryTimeout` (60s) only *abandoned the
    wait*: the goroutine and the provider request kept running.
 

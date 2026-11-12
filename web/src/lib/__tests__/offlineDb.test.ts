@@ -160,3 +160,99 @@ describe('OfflineDB', () => {
     });
   });
 });
+
+describe('OfflineDB listProjects', () => {
+  let db: OfflineDB;
+  beforeEach(async () => {
+    db = new OfflineDB();
+    await db.clearAll();
+  });
+  it('returns cached unexpired projects', async () => {
+    await db.putProject({ id: '/p1', name: 'p1', lastSynced: Date.now(), data: { path: '/p1' } });
+    await db.putProject({ id: '/p2', name: 'p2', lastSynced: Date.now(), data: { path: '/p2' } });
+    const list = await db.listProjects();
+    expect(list).toHaveLength(2);
+  });
+  it('skips expired projects', async () => {
+    await db.putProject({ id: '/old', name: 'old', lastSynced: Date.now() - 31 * 24 * 60 * 60 * 1000, data: {} });
+    const list = await db.listProjects();
+    expect(list).toHaveLength(0);
+  });
+});
+
+describe('OfflineDB pruneProjects', () => {
+  let db: OfflineDB;
+  beforeEach(async () => {
+    db = new OfflineDB();
+    await db.clearAll();
+  });
+
+  it('removes cached projects whose key the server no longer lists', async () => {
+    await db.putProject({ id: '/kept', name: 'kept', lastSynced: Date.now(), order: 0, data: {} });
+    await db.putProject({ id: '/deleted', name: 'deleted', lastSynced: Date.now(), order: 1, data: {} });
+    await db.putProject({ id: 'dev@box::/renamed-away', name: 'old', lastSynced: Date.now(), order: 2, data: {} });
+
+    const removed = await db.pruneProjects(new Set(['/kept']));
+
+    expect(removed).toBe(2);
+    expect(await db.getProject('/deleted')).toBeUndefined();
+    expect(await db.getProject('dev@box::/renamed-away')).toBeUndefined();
+    expect((await db.listProjects()).map((p) => p.id)).toEqual(['/kept']);
+  });
+
+  it('removes nothing when every cached key is still listed', async () => {
+    await db.putProject({ id: '/a', name: 'a', lastSynced: Date.now(), data: {} });
+    await db.putProject({ id: '/b', name: 'b', lastSynced: Date.now(), data: {} });
+    expect(await db.pruneProjects(new Set(['/a', '/b']))).toBe(0);
+    expect((await db.listProjects()).map((p) => p.id).sort()).toEqual(['/a', '/b']);
+  });
+
+  it('keeps the running byte total in step with what is stored', async () => {
+    const kept: CachedProject = { id: '/kept', name: 'kept', lastSynced: Date.now(), data: { pad: 'y'.repeat(300) } };
+    await db.putProject(kept);
+    await db.putProject(project('/gone', Date.now(), 1000));
+
+    await db.pruneProjects(new Set(['/kept']));
+
+    expect(runningTotal(db)).toBe(bytesOf(kept));
+  });
+});
+
+describe('OfflineDB deleteProject', () => {
+  let db: OfflineDB;
+  beforeEach(async () => {
+    db = new OfflineDB();
+    await db.clearAll();
+  });
+
+  it('removes one cached project by its key and leaves the others', async () => {
+    await db.putProject({ id: '/a', name: 'a', lastSynced: Date.now(), data: {} });
+    await db.putProject({ id: 'dev@box::/a', name: 'remote a', lastSynced: Date.now(), data: {} });
+
+    expect(await db.deleteProject('/a')).toBe(true);
+
+    expect(await db.getProject('/a')).toBeUndefined();
+    expect((await db.listProjects()).map((p) => p.id)).toEqual(['dev@box::/a']);
+  });
+
+  it('returns false and leaves the running total alone when the key is not cached', async () => {
+    const kept: CachedProject = { id: '/kept', name: 'kept', lastSynced: Date.now(), data: { pad: 'y'.repeat(300) } };
+    await db.putProject(kept);
+    const before = runningTotal(db);
+
+    expect(await db.deleteProject('/missing')).toBe(false);
+
+    expect(runningTotal(db)).toBe(before);
+    expect(runningTotal(db)).toBe(bytesOf(kept));
+  });
+
+  it('keeps the running byte total in step with what is stored', async () => {
+    const kept: CachedProject = { id: '/kept', name: 'kept', lastSynced: Date.now(), data: { pad: 'y'.repeat(300) } };
+    await db.putProject(kept);
+    await db.putProject(project('/gone', Date.now(), 1000));
+
+    await db.deleteProject('/gone');
+
+    expect(runningTotal(db)).toBe(bytesOf(kept));
+  });
+});

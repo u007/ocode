@@ -169,7 +169,7 @@ React/TypeScript web client (`web/src`).
 **Interfaces:**
 - Consumes: `shellpkg.Session` from Task 1; `defaultSessionIdleTimeout`
   (`internal/server/session_manager.go:322`); the existing route
-  `POST /api/shell` (`internal/server/server.go:559`).
+  `POST /api/shell` (`internal/server/server.go:563`).
 - Produces: request body `{command, workDir, host, session, reset}`; response
   `{output, exitCode, error, cwd}` on **every** path — persistent shell
   (`$PWD`), one-shot fallback (the `workDir` it ran in), remote (the remote

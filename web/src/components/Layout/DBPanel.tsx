@@ -18,6 +18,7 @@ import {
   type DBUnlockScope,
 } from "../../api/client";
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
+import { isEnvTemplateURL as isEnvTemplate } from "../../lib/dbConnectTemplate";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../Preview/SQLiteDialogs";
 import { ResultGrid } from "../Preview/SQLiteResultGrid";
@@ -37,14 +38,6 @@ const LIST_MAX_PX = 480;
 const LIST_DEFAULT_PX = 160;
 const HANDLE_PX = 4;
 const DATA_MIN_PX = 320;
-
-// A URL that names environment variables ("${DATABASE_URL}") is not a secret,
-// so it needs no master password. This mirrors dbconnect.IsTemplate on the
-// server exactly: a BRACED reference with a shell-valid name makes it a
-// template; a bare "$" (as in a password) or an invalid name stays literal.
-function isEnvTemplate(url: string): boolean {
-  return /\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(url);
-}
 
 // Per-mount id for the unlock surface. The surface must be unique per panel, not
 // only per project: two windows viewing the same project would otherwise share

@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/config"
 )
 
 type PluginMCPConfig struct {
@@ -43,6 +44,19 @@ type Plugin struct {
 	// config entry always overrides it, and ocode never writes Claude Code's
 	// settings, so toggling in ocode leaves Claude Code untouched.
 	DefaultEnabled bool `json:"-"`
+	// MCPServers are the stdio MCP servers the plugin declares in .mcp.json or
+	// its Claude manifest (see mcp_servers.go). Keyed by server name; populated
+	// by readPluginManifest and merged into the config by MergeMCPServers.
+	MCPServers map[string]config.MCPConfig `json:"-"`
+	// MCPRequires holds the requiresAny entries of the MCP servers that declare
+	// them, keyed by server name. MergeMCPServers checks them, so a server whose
+	// binary is missing on this machine is not started.
+	MCPRequires map[string][]string `json:"-"`
+	// ProjectScoped is true for a plugin under the project's own
+	// .opencode/plugins dir. That dir comes from the checkout, which may be an
+	// untrusted clone, so its MCP servers start only after an explicit enable
+	// (see MergeMCPServers).
+	ProjectScoped bool `json:"-"`
 }
 
 func LoadPlugins(enabled map[string]bool) []Plugin {
@@ -79,6 +93,7 @@ func LoadPluginsForProject(enabled map[string]bool, projectRoot string) []Plugin
 func LoadAllPluginsForProject(projectRoot string) []Plugin {
 	var plugins []Plugin
 	seen := make(map[string]bool)
+	projectDir := projectPluginSearchPathForRoot(projectRoot)
 	for _, c := range pluginCandidatesForProject(projectRoot) {
 		p, ok := readPluginManifest(c.dir)
 		if !ok {
@@ -94,6 +109,7 @@ func LoadAllPluginsForProject(projectRoot string) []Plugin {
 		p.Dir = c.dir
 		p.Source = c.source
 		p.DefaultEnabled = c.defaultEnabled
+		p.ProjectScoped = c.source == SourceOcode && isUnderProjectPluginDir(projectDir, c.dir)
 		plugins = append(plugins, p)
 	}
 	return plugins

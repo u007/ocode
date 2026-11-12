@@ -488,6 +488,10 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("MCP server %q not found.", name)})
 			return nil
 		}
+		if plugin, fromPlugin := m.pluginMCP[name]; fromPlugin {
+			m.messages = append(m.messages, message{role: roleAssistant, text: plugins.MCPProvidedByPluginMessage(name, plugin)})
+			return nil
+		}
 		enabled := action == "enable" || action == "on"
 		if err := config.SaveMCPEnabled(name, enabled); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update MCP config: %v", err)})

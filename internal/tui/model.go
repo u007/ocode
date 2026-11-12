@@ -1523,11 +1523,14 @@ type model struct {
 	modelPromptInfoKey string
 	modelPromptInfoVal *server.ModelPromptInfo
 	config             *config.Config
-	sessionID          string
-	sessionTitle       string
-	expandedTitle      bool // transient sidebar title state; reset when the active session changes
-	sessionCreatedAt   time.Time
-	titleRegenerating  bool // true while a manual title regeneration (gen button) is in flight
+	// pluginMCP maps MCP servers merged into config from enabled plugins to the
+	// plugin name; /mcp enable|disable refuses them (no on-disk entry to toggle).
+	pluginMCP         map[string]string
+	sessionID         string
+	sessionTitle      string
+	expandedTitle     bool // transient sidebar title state; reset when the active session changes
+	sessionCreatedAt  time.Time
+	titleRegenerating bool // true while a manual title regeneration (gen button) is in flight
 	// sessionLoadErr records a failure to load an explicitly requested
 	// session (via -session or -continue). When set, Run aborts before the
 	// TUI starts instead of silently continuing with a placeholder file.
@@ -2581,6 +2584,7 @@ func newModel(opts ...RunOptions) model {
 	// cwd + config model here before m is constructed. Re-refreshed below once
 	// m.workDir / m.activeModel are set, and again on /model or /cd.
 	initWD, _ := os.Getwd()
+	pluginMCP := plugins.MergeMCPServers(cfg, initWD)
 	initModel := ""
 	if cfg != nil {
 		initModel = cfg.Model
@@ -2807,6 +2811,7 @@ func newModel(opts ...RunOptions) model {
 		}(),
 		ocrEnabledSet: true,
 		config:        cfg,
+		pluginMCP:     pluginMCP,
 		chatVerbosity: chatVerbosity,
 		chatDisplay:   chatDisplay,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the

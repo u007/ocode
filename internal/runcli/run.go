@@ -14,6 +14,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -190,6 +191,9 @@ func Run(args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	agent.ApplyAgentConfig(cfg)
+	// Plugin MCP servers for this run's project (opts.dir, or the cwd when it
+	// is unset: Run has already chdir'd there).
+	plugins.MergeMCPServers(cfg, opts.dir)
 
 	// Headless runs default discovery off regardless of the user's saved
 	// config: no TUI to warm the corpus or show discovery state, and a

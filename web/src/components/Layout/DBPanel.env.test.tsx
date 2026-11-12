@@ -89,13 +89,23 @@ describe("DBPanel environment-backed connections", () => {
     fireEvent.click(load);
 
     await waitFor(() => {
-      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", "/proj");
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", undefined, "/proj");
     });
   });
 
-  it("sends the project path when saving an environment connection", async () => {
-    mockList.mockResolvedValue({ connections: [] });
-    mockAdd.mockResolvedValue({ name: "env" });
+  it("saves an environment connection without a project target, then loads it with the project path", async () => {
+    // A local project's add carries no project target (the saved connection is
+    // global). The project path reaches the API on the "Load from .env" unlock,
+    // which is where the ${DATABASE_URL} template is resolved.
+    let saved = false;
+    mockList.mockImplementation(async () => ({
+      connections: saved ? [{ name: "env", driver: "postgres", unlocked: false, fromEnv: true }] : [],
+    }));
+    mockAdd.mockImplementation(async () => {
+      saved = true;
+      return { name: "env" };
+    });
+    mockUnlock.mockResolvedValue({ unlocked: ["env"], failed: [] });
     render(<DBPanel projectPath="/proj" />);
 
     await screen.findByText("Add a PostgreSQL connection");
@@ -109,7 +119,13 @@ describe("DBPanel environment-backed connections", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
 
     await waitFor(() => {
-      expect(mockAdd).toHaveBeenCalledWith("env", "${DATABASE_URL}", "", undefined);
+      expect(mockAdd).toHaveBeenCalledWith("env", "${DATABASE_URL}", "", undefined, undefined);
+    });
+
+    const load = await screen.findByRole("button", { name: /Load from \.env/ });
+    fireEvent.click(load);
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith(expect.stringMatching(SURFACE_RE), "", undefined, "/proj");
     });
   });
 

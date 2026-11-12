@@ -95,7 +95,7 @@ mode, never an automatic fallback from a failed hub publish.
 ## 5. References to existing ocode pieces (do not reinvent)
 
 - Auth: `Server.checkAuth` / `authMiddleware` / `mediaAuthMiddleware`
-  (`internal/server/server.go:948,988,1028`). Master credential is Bearer / `?token=`
+  (`internal/server/server.go:952,992,1032`). Master credential is Bearer / `?token=`
   (forbidden in `--remote`) / WS subprotocol / Basic. Remote mode accepts Bearer only.
 - Capability precedent: `mediaTokenStore` (`internal/server/media_tokens.go`) — 256-bit
   random, single file+root+host, 6h TTL, in-memory, dies on restart. Copy this shape
@@ -104,7 +104,7 @@ mode, never an automatic fallback from a failed hub publish.
 - Share token: `internal/server/share_token.go`, `internal/desktop/share_token.go`
   (durable second credential, rotate-only revocation). Artifact tokens differ:
   per-artifact, immediate revoke via row delete.
-- Project scoping: `allowedProjectRoots()` (`internal/server/handler.go:875`) — workdir
+- Project scoping: `allowedProjectRoots()` (`internal/server/handler.go:885`) — workdir
   + saved **local** projects only; remote excluded on purpose. Never widen.
 - Handler project resolution: `h.workDir` is default only; sessions carry their own
   root. New directory-bound endpoints take explicit `?project=` validated against

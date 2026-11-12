@@ -681,19 +681,21 @@ func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) 
 			}
 			out = append(out, c)
 		}
-		if !found {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("db connection %q not found", name))
+		if found {
+			if err := config.SaveProjectDBConnections(root, out); err != nil {
+				log.Printf("dbconnect: remove %q: save project config: %v", name, err)
+				writeError(w, http.StatusInternalServerError, "could not save project connections")
+				return
+			}
+			h.dbDropConnection(name)
+			remote.DefaultDBTunnelManager().StopConnection(name)
+			writeJSON(w, http.StatusOK, map[string]string{"removed": name})
 			return
 		}
-		if err := config.SaveProjectDBConnections(root, out); err != nil {
-			log.Printf("dbconnect: remove %q: save project config: %v", name, err)
-			writeError(w, http.StatusInternalServerError, "could not save project connections")
-			return
-		}
-		h.dbDropConnection(name)
-		remote.DefaultDBTunnelManager().StopConnection(name)
-		writeJSON(w, http.StatusOK, map[string]string{"removed": name})
-		return
+		// Not in this project's file. A project's list also shows the global
+		// connections (HandleDBConnectList merges them in), so a remote panel can
+		// ask to remove one with project_path set. Fall through to the global config,
+		// which answers 404 when the name is in neither place.
 	}
 	if err := config.RemoveDBConnection(name); err != nil {
 		log.Printf("dbconnect: remove %q: %v", name, err)

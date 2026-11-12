@@ -34,7 +34,7 @@ slower per task).
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
 `internal/agent/browser_run.go:255`). Each sub-step is a real call to
-`handleToolCallWithContext` (`internal/agent/agent.go:3976`) with the tool name
+`handleToolCallWithContext` (`internal/agent/agent.go:3996`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
 loop and never appended to the transcript. Only `browser_run`'s own result is.
@@ -239,7 +239,7 @@ backend or to the main model.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
   `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
-  `internal/agent/agent.go:6835`). The dialog then reads like
+  `internal/agent/agent.go:6869`). The dialog then reads like
   `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6671`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.

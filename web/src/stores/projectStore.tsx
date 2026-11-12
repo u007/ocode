@@ -3,6 +3,7 @@ import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
 import { eventBus } from "../lib/eventBus";
+import { loadCachedProjects, projectCacheKey, pruneProjectCache, removeProjectFromCache } from "../lib/offlineSync";
 import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../lib/title";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
@@ -53,6 +54,7 @@ export interface ProjectState {
   loading: boolean;
   /** The project list is trusted only after at least one request succeeds. */
   projectsStatus: ProjectMetadataStatus;
+  offline: boolean;
   activeProject: Project | null;
   /** The active project's session list (derived from `sessionsByProject`). Kept
    *  as its own field so `SessionDialog` and friends read the current project's
@@ -88,7 +90,11 @@ export interface ProjectState {
 
 export type ProjectAction =
   | { type: "SET_PROJECTS"; projects: Project[] }
-  | { type: "SET_PROJECTS_ERROR" }
+  /** Drops one project the server has just confirmed removed. Matches on path AND
+   *  host, since a local and a remote project can share a path. */
+  | { type: "REMOVE_PROJECT"; path: string; host?: string }
+  | { type: "SET_CACHED_PROJECTS"; projects: Project[]; offline?: boolean }
+  | { type: "SET_PROJECTS_ERROR"; offline?: boolean }
   | { type: "SET_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_PROJECT"; project: Project | null }
   | { type: "SET_PROJECT_SESSIONS"; sessions: SessionInfo[] }
@@ -117,6 +123,7 @@ const initialState: ProjectState = {
   projects: [],
   loading: false,
   projectsStatus: "loading",
+  offline: false,
   activeProject: null,
   projectSessions: [],
   sessionsLoading: false,
@@ -216,6 +223,26 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         projects: Array.isArray(action.projects) ? action.projects : [],
         loading: false,
         projectsStatus: "ready",
+        offline: false,
+      };
+    case "REMOVE_PROJECT":
+      // Only the list changes, exactly as SET_PROJECTS leaves the active project
+      // and tabs alone for a project that is no longer listed.
+      return {
+        ...state,
+        projects: state.projects.filter(
+          (p) => !(p.path === action.path && (p.host || "") === (action.host || "")),
+        ),
+      };
+    case "SET_CACHED_PROJECTS":
+      return {
+        ...state,
+        projects: Array.isArray(action.projects) ? action.projects : state.projects,
+        loading: false,
+        // Keep the metadata status non-ready so terminals/agent runs stay
+        // paused; the sidebar still renders the cached project list.
+        projectsStatus: state.projectsStatus === "ready" ? "ready" : "error",
+        offline: action.offline ?? true,
       };
     case "SET_PROJECTS_ERROR":
       return {
@@ -224,6 +251,12 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         // A later refresh failure must not revoke the last trusted metadata
         // snapshot or make live remote terminals look local.
         projectsStatus: state.projectsStatus === "ready" ? "ready" : "error",
+        // A non-offline failure means the server answered and refused the list
+        // (e.g. 401 after the auth purge). While `offline` was set, the shown
+        // projects came from the cache, so drop them rather than keep showing
+        // them to a viewer the server no longer admits.
+        projects: action.offline === false && state.offline ? [] : state.projects,
+        offline: action.offline ?? true,
       };
     case "SET_LOADING":
       return { ...state, loading: action.loading };
@@ -689,6 +722,26 @@ const ProjectContext = createContext<ProjectContextType | null>(null);
  *  project switch. */
 export const ProjectDispatchContext = createContext<React.Dispatch<ProjectAction> | null>(null);
 
+
+/** How often an offline project list is re-requested while `offline` is set. */
+const OFFLINE_RETRY_MS = 10_000;
+/** How long one offline retry may stay unsettled before the retry chain moves on. */
+const OFFLINE_ATTEMPT_TIMEOUT_MS = 30_000;
+
+function isOfflineFailure(err: unknown): boolean {
+  // Network-level or server-unreachable failures. Auth/validation errors
+  // (401/403/400/404) mean the server answered, so not "offline".
+  if (!(err instanceof Error)) return true;
+  const status = (err as { status?: number }).status;
+  if (typeof status === "number") {
+    if (status === 0) return true;
+    if (status === 401 || status === 403 || status === 400 || status === 404 || status === 409) return false;
+    return status >= 500;
+  }
+  // fetch throws TypeError on network failure; any other untyped error
+  // (e.g. a rejected mock) is treated as unreachable.
+  return true;
+}
 export function ProjectProvider({ children }: { children: ReactNode }) {
   // Backed by a @tanstack/store Store instance rather than useReducer — same
   // action-dispatch shape (projectReducer + ProjectAction) so the large body
@@ -816,19 +869,47 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     };
   }, [store, refetchTabs, restoreTabs]);
 
-  const refreshProjects = useCallback(async () => {
+  // `signal` is only passed by the offline retry, to abort an attempt it has
+  // given up on or that belongs to an unmounted/recovered chain.
+  const refreshProjects = useCallback(async (signal?: AbortSignal) => {
     const requestId = ++projectsRequestRef.current;
     dispatch({ type: "SET_LOADING", loading: true });
     try {
-      const projects = await api.listProjects();
+      const projects = await api.listProjects(signal);
       if (requestId !== projectsRequestRef.current) return;
       dispatch({ type: "SET_PROJECTS", projects });
+      // Only a successful answer may prune the offline cache: a failed request
+      // says nothing about which projects still exist.
+      if (Array.isArray(projects)) {
+        void pruneProjectCache(projects.map((p) => projectCacheKey(p)));
+      }
     } catch (err) {
       if (requestId !== projectsRequestRef.current) return;
+      // The caller aborted this attempt, so its failure is not news: no error
+      // state, no cache hydrate, no log line.
+      if (signal?.aborted) return;
       console.error("Failed to load projects:", err);
-      dispatch({ type: "SET_PROJECTS_ERROR" });
+      const offline = isOfflineFailure(err);
+      // Only an unreachable server falls back to the cache. A 401/403 means the
+      // server answered, so an unauthenticated viewer must not see cached projects.
+      const canHydrate =
+        offline && (store.state.projects.length === 0 || store.state.projectsStatus !== "ready");
+      if (canHydrate) {
+        try {
+          const cached = await loadCachedProjects();
+          if (requestId !== projectsRequestRef.current) return;
+          if (cached.length > 0) {
+            dispatch({ type: "SET_CACHED_PROJECTS", projects: cached, offline });
+            return;
+          }
+        } catch {
+          // ignore cache read failures
+        }
+      }
+      if (requestId !== projectsRequestRef.current) return;
+      dispatch({ type: "SET_PROJECTS_ERROR", offline });
     }
-  }, [dispatch]);
+  }, [dispatch, store]);
 
   // A project's bound profile is server state shared by every window, so a
   // binding changed elsewhere must refresh this client's project list (the
@@ -856,6 +937,77 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     refreshProjects();
     refreshGroups();
   }, [refreshProjects, refreshGroups]);
+
+  // Retry project loading when connectivity returns, so the offline banner
+  // clears after the server comes back.
+  useEffect(() => {
+    const handler = () => {
+      void refreshProjects();
+    };
+    window.addEventListener("online", handler);
+    const onFocus = () => {
+      if (store.state.offline) void refreshProjects();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("online", handler);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refreshProjects, store]);
+
+  // A local server that restarts while this tab stays focused and online fires
+  // neither `online` nor `focus`. The event bus reconnects when the server is
+  // back, so refetch then.
+  useEffect(() => {
+    return eventBus.onReconnect(() => {
+      void refreshProjects();
+    });
+  }, [refreshProjects]);
+
+  // While offline, retry on a timer. Each attempt is awaited before the next is
+  // scheduled, so retries never overlap. An attempt that has not settled within
+  // OFFLINE_ATTEMPT_TIMEOUT_MS is abandoned: its request is aborted, so a server
+  // that hangs cannot leave one open request per cycle, and the chain moves on.
+  // An aborted attempt records nothing (refreshProjects returns early on abort).
+  // The timers stop as soon as `offline` clears, and on unmount, and the in-flight
+  // request is aborted with them.
+  useEffect(() => {
+    if (!state.offline) return;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let boundTimer: ReturnType<typeof setTimeout> | undefined;
+    let inflight: AbortController | undefined;
+    const schedule = () => {
+      if (!cancelled) retryTimer = setTimeout(attempt, OFFLINE_RETRY_MS);
+    };
+    const attempt = async () => {
+      const controller = new AbortController();
+      inflight = controller;
+      const bound = new Promise<void>((resolve) => {
+        boundTimer = setTimeout(() => {
+          controller.abort();
+          resolve();
+        }, OFFLINE_ATTEMPT_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([refreshProjects(controller.signal), bound]);
+      } catch (err) {
+        console.error("Offline project retry failed:", err);
+      } finally {
+        clearTimeout(boundTimer);
+        if (inflight === controller) inflight = undefined;
+        schedule();
+      }
+    };
+    retryTimer = setTimeout(attempt, OFFLINE_RETRY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      clearTimeout(boundTimer);
+      inflight?.abort();
+      inflight = undefined;
+    };
+  }, [state.offline, refreshProjects]);
 
   /** Fetch a project's session list into the cache. Deduped per project, so a
    *  hover prefetch already in flight is joined rather than duplicated.
@@ -1098,6 +1250,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (input.old_host && input.old_path !== updated.path) {
       dispatch({ type: "REKEY_TABS", oldPath: input.old_path, newPath: updated.path });
     }
+    // The server now lists the project under its new host and path, so the record
+    // cached under the old key is stale. Drop it now, not on the next list load.
+    const oldKey = projectCacheKey({ path: input.old_path, host: input.old_host });
+    if (oldKey !== projectCacheKey(updated)) {
+      await removeProjectFromCache({ path: input.old_path, host: input.old_host });
+    }
     await refreshProjects();
   }, [dispatch, refreshProjects, state.activeProject, state.projects]);
 
@@ -1108,6 +1266,13 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       } else {
         await api.removeProject(path);
       }
+      // The server confirmed the removal, so drop the project from memory now. The
+      // follow-up list may fail while the store is ready, and a failed list keeps
+      // the old list, so without this the project would stay on screen.
+      dispatch({ type: "REMOVE_PROJECT", path, host });
+      // The server confirmed the removal, so drop the cache record now. Left for
+      // the next list load, it would come back from the cache if that load fails.
+      await removeProjectFromCache({ path, host });
       await refreshProjects();
     } catch (err) {
       // Re-thrown so the sidebar's removal confirm can keep the dialog open
@@ -1116,7 +1281,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       console.error("Failed to remove project:", err);
       throw err;
     }
-  }, [refreshProjects]);
+  }, [dispatch, refreshProjects]);
 
   const renameProject = useCallback(async (path: string, name: string, host?: string) => {
     try {

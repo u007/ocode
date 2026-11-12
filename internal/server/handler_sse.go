@@ -43,6 +43,9 @@ type ToolResultEvent struct {
 	// (agent.Message.ToolID). See ToolStartEvent.CallID.
 	CallID string `json:"call_id,omitempty"`
 	Output string `json:"output"`
+	// MCPApp is set when the tool declares an MCP Apps UI resource; the web
+	// chat renders that widget next to the call. It is display state only.
+	MCPApp *agent.MCPAppRef `json:"mcp_app,omitempty"`
 }
 
 // SuggestionsEvent carries the follow-up options the agent proposed at the
@@ -284,6 +287,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 				Tool:   "tool",
 				CallID: m.ToolID,
 				Output: m.Content,
+				MCPApp: m.MCPApp,
 			})
 		}
 	}

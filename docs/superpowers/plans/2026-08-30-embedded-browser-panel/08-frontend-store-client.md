@@ -4,7 +4,7 @@
 
 **Goal:** Add the per-`stateKey` browser state store, the client helpers that fetch the browse base URL / mint a grant / build the iframe `src`, and the SSE routing for the server-authoritative `browse_nav` event. No UI yet — Part 09 consumes this store.
 
-> **STACK CORRECTION (verified in-repo):** this project does **not** use zustand. Global stores use **`@tanstack/react-store`** — `new Store(initialState)` at module scope, mutated with `store.setState(...)`, read in React via `useSelector(store, selector)` (see `web/src/stores/projectStore.tsx:2,289,291`). Persistence mirrors `web/src/components/Layout/tabOrderPersistence.ts` (a versioned localStorage file keyed by project path). The SSE stream is routed by `routeBusEnvelope(env, r)` in `web/src/lib/sessionEvents.ts`, and the set of subscribed event names is `ROUTABLE_EVENTS` (`sessionEvents.ts:140`), consumed by `web/src/components/Layout/SessionTabSync.tsx:67`. All code below uses these real patterns.
+> **STACK CORRECTION (verified in-repo):** this project does **not** use zustand. Global stores use **`@tanstack/react-store`** — `new Store(initialState)` at module scope, mutated with `store.setState(...)`, read in React via `useSelector(store, selector)` (see `web/src/stores/projectStore.tsx:2,322,324`). Persistence mirrors `web/src/components/Layout/tabOrderPersistence.ts` (a versioned localStorage file keyed by project path). The SSE stream is routed by `routeBusEnvelope(env, r)` in `web/src/lib/sessionEvents.ts`, and the set of subscribed event names is `ROUTABLE_EVENTS` (`sessionEvents.ts:140`), consumed by `web/src/components/Layout/SessionTabSync.tsx:67`. All code below uses these real patterns.
 
 **Files:**
 - Create: `web/src/lib/browserStore.ts`, `web/src/lib/browserStore.test.ts`

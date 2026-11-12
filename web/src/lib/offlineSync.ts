@@ -2,6 +2,7 @@
 // All functions are best-effort: failures are logged but never thrown.
 
 import type { CacheSummary, CachedProject, CachedSession, CachedTerminal } from './offlineDb';
+import type { Project } from '../api/types';
 
 let dbPromise: Promise<import('./offlineDb').OfflineDB> | null = null;
 
@@ -12,13 +13,25 @@ async function getDB(): Promise<import('./offlineDb').OfflineDB> {
   return dbPromise;
 }
 
-export async function syncProjectToCache(project: any): Promise<void> {
+/**
+ * The offline cache key for a project. A local project is keyed by its bare path,
+ * which is what existing records already use. A remote (SSH/WSL) project lives in
+ * its own namespace, so its path can equal a local project's; it is qualified by
+ * host with the same `host::path` format as projectStore's `projectSessionKey`.
+ * Every reader and writer of a project record must go through this.
+ */
+export function projectCacheKey(project: { path: string; host?: string }): string {
+  return project.host ? `${project.host}::${project.path}` : project.path;
+}
+
+export async function syncProjectToCache(project: any, order?: number): Promise<void> {
   try {
     const db = await getDB();
     const cached: CachedProject = {
-      id: project.id ?? project.path ?? '',
+      id: projectCacheKey(project),
       name: project.name,
       lastSynced: Date.now(),
+      order: order ?? project.order,
       data: project,
     };
     await db.putProject(cached);
@@ -103,5 +116,44 @@ export async function loadCacheSummary(): Promise<CacheSummary | undefined> {
   } catch (err) {
     console.warn('[offlineSync] loadCacheSummary failed:', err);
     return undefined;
+  }
+}
+
+/**
+ * Drops cached project records whose key is not in `keepKeys`. Call only after a
+ * successful project-list response, with the keys of that list. An empty list
+ * means the server reported no projects, so every record is removed.
+ */
+export async function pruneProjectCache(keepKeys: readonly string[]): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.pruneProjects(new Set(keepKeys));
+  } catch (err) {
+    console.debug('[offlineSync] pruneProjectCache failed:', err);
+  }
+}
+
+/**
+ * Drops one project's cache record. Call only after the server confirmed the
+ * project was removed or moved, so a project that is gone from the server cannot
+ * come back from the cache while the server is unreachable.
+ */
+export async function removeProjectFromCache(project: { path: string; host?: string }): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.deleteProject(projectCacheKey(project));
+  } catch (err) {
+    console.debug('[offlineSync] removeProjectFromCache failed:', err);
+  }
+}
+
+export async function loadCachedProjects(): Promise<Project[]> {
+  try {
+    const db = await getDB();
+    const cached = await db.listProjects();
+    return cached.map((c) => c.data).filter(Boolean) as Project[];
+  } catch (err) {
+    console.debug('[offlineSync] loadCachedProjects failed:', err);
+    return [];
   }
 }

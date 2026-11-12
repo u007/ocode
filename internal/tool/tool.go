@@ -59,6 +59,26 @@ type MCPServerTool interface {
 	MCPServer() string
 }
 
+// MCPAppTool is implemented by MCP tools that declare an MCP Apps UI resource
+// (tools/list `_meta.ui.resourceUri`). The web UI renders that resource next
+// to the tool call. TakeMCPAppResult returns and removes the raw JSON-RPC
+// result that the call with this tool call ID produced. ran is true only when
+// that call executed on the server and returned a non-error result; raw may
+// still be nil when the result was over the size cap. The result is display
+// state and is never sent to the model.
+type MCPAppTool interface {
+	MCPAppResource() string
+	TakeMCPAppResult(toolCallID string) (raw json.RawMessage, ran bool)
+}
+
+// MCPCallImageTool is implemented by MCP tools that can return an image. The
+// image belongs to one call: TakeCallImage returns and removes the first image
+// that the call with this tool call ID produced, and ok is false when that call
+// produced none.
+type MCPCallImageTool interface {
+	TakeCallImage(toolCallID string) (raw []byte, mimeType string, ok bool)
+}
+
 // RiskHintTool is implemented by tools whose source reports a risk class (an MCP server's per-tool "risk" field). Risk returns "" when none was reported.
 type RiskHintTool interface {
 	Risk() string

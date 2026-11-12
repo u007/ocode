@@ -27,7 +27,7 @@ sessions. The engine is `internal/agent/goal.go`.
 | `/goal clear` (also `stop`, `off`, `reset`, `none`, `cancel`) | Removes the goal. Recognised only as the lone argument. | Instant | Queued while busy |
 
 - `/goal stop the flaky test` is a condition, not a clear: a clear verb counts only when it is the
-  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1920`).
+  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1924`).
 - A condition must be non-empty and at most `GoalMaxConditionLen` (4000) characters
   (`internal/agent/goal.go:30`, `SetGoal` at `:163`).
 - The kickoff turn is `GoalKickoffPrompt` (`internal/agent/goal.go:231`): the condition plus "verify
@@ -133,7 +133,7 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `no_tool_turns`, `last_reason`, and `set_at` (RFC 3339). `GoalStateToMetadata` writes it;
   `GoalStateFromMetadata` (`goal.go:466`) reads it. A malformed record is rejected, and the
   rejected values are logged with the `GOAL` debug kind.
-- Written after every judged turn (`goalShouldResume`, `agent_session.go:1491`), by the server
+- Written after every judged turn (`goalShouldResume`, `agent_session.go:1510`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
   (`sessionSidebarMetadata`, `model.go:21331`).
 - Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads

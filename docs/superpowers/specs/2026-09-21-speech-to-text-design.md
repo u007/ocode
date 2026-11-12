@@ -99,7 +99,7 @@ web/src/components/Dictation/sttWorklet.ts
 web/src/components/Settings/STTForm.tsx (+ test)
 ```
 
-Routes are registered beside the existing TTS block at `internal/server/server.go:597-613`.
+Routes are registered beside the existing TTS block at `internal/server/server.go:601-617`.
 
 ## Engine catalog
 

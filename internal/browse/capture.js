@@ -269,7 +269,7 @@
   function isTextualType(ct) {
     var t = String(ct || "").toLowerCase();
     if (!t) return false;
-    return /^text\//.test(t) || /^application\/(json|xml|javascript|ecmascript|x-www-form-urlencoded|graphql)\b/.test(t) || /\+json\b/.test(t) || /\+xml\b/.test(t);
+    return /^text\//.test(t) || /^application\/(json|xml|javascript|ecmascript|x-www-form-urlencoded|graphql|typescript)\b/.test(t) || /\+json\b/.test(t) || /\+xml\b/.test(t);
   }
   // Types that never end on their own. Their stream is never teed: a page's
   // branch of a tee buffers whatever the clone branch pulled, and a stream that
@@ -331,6 +331,138 @@
     });
   }
 
+  // Re-fetch a same-origin resource the wrappers never saw. Native script and
+  // stylesheet loads bypass fetch/XHR, so their only signal is the
+  // PerformanceObserver timing entry, which carries no body. Re-fetch once,
+  // same-origin, cache-first, and post the body under this row's requestId so
+  // DevConsole matches it to the row.
+  //
+  // Skips anything already on the /b/ browse-proxy route (browseBase()): those
+  // requests already flow through the proxy, and re-fetching them double-hops.
+  // Uses the native fetch captured before wrapping (origFetch), so the re-fetch
+  // itself is not captured as a network row. Its own Resource Timing entry is
+  // consumed by the wrapper record opened when the re-fetch STARTS, so it is not
+  // posted as a duplicate row.
+  //
+  // At most REFETCH_MAX_INFLIGHT re-fetches run at once, so a page with hundreds
+  // of modules cannot take the proxy's per-tab connection slots from the page's
+  // own requests. The rest wait in a queue capped at REFETCH_MAX_QUEUED; beyond
+  // that the oldest pending job is dropped.
+  var REFETCH_MAX_INFLIGHT = 4;
+  var REFETCH_MAX_QUEUED = 500;
+  // One deadline for the whole job, headers and body read together.
+  var REFETCH_TIMEOUT_MS = 5000;
+  var refetching = new Set(); // URLs queued or in flight
+  var refetchQueue = [];
+  var refetchInFlight = 0;
+  // Only script and link loads are re-fetched, plus "css": the initiator of
+  // anything a stylesheet references (url() backgrounds, @font-face, @import).
+  // "css" therefore also covers a CSS-loaded image or font, which is re-issued
+  // and then cancelled by the content-type gate. Markup-level img, iframe,
+  // media and font loads are excluded: re-issuing them would double-count
+  // tracking pixels or consume a one-time URL in an iframe. fetch,
+  // xmlhttprequest, beacon and eventsource are already captured by the
+  // wrappers, and re-issuing them duplicates traffic.
+  var REFETCH_INITIATOR_TYPES = /^(script|link|css)$/;
+  // statusUnknown: the timing entry withheld responseStatus (WebKit), so the
+  // re-fetch's response status is the only status this row will ever get.
+  function maybeRefetchBody(requestId, url, initiatorType, statusUnknown) {
+    if (!REFETCH_INITIATOR_TYPES.test(initiatorType || "")) return;
+    var base = browseBase();
+    var u;
+    try { u = new URL(url); } catch (e) { return; }
+    if (u.origin !== location.origin) return; // cross-origin: body is opaque, can't read it
+    if (base && url.indexOf(location.origin + base + "/") === 0) return; // proxied URL: skip
+    if (refetching.has(url)) return;
+    refetching.add(url);
+    refetchQueue.push({ requestId: requestId, url: url, statusUnknown: !!statusUnknown });
+    while (refetchQueue.length > REFETCH_MAX_QUEUED) refetching.delete(refetchQueue.shift().url);
+    pumpRefetch();
+  }
+  function pumpRefetch() {
+    while (refetchInFlight < REFETCH_MAX_INFLIGHT && refetchQueue.length) {
+      startRefetch(refetchQueue.shift());
+    }
+  }
+  // Drops an unread response body so its connection is released. Guarded for
+  // engines that expose no body stream.
+  function cancelBody(res) {
+    if (res && res.body && typeof res.body.cancel === "function") {
+      res.body.cancel().then(null, function () {
+        // intentionally not logged: a cancel that rejects means the stream
+        // had already errored, so there is nothing left to release.
+      });
+    }
+  }
+  function startRefetch(job) {
+    refetchInFlight++;
+    var rec = beginWrapped(job.url, job.url);
+    var controller = new AbortController();
+    var settled = false;
+    // Runs once per job, from whichever path finishes first: releases the slot,
+    // closes the wrapper record and starts the next queued job.
+    function settle() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      endWrapped(rec);
+      refetching.delete(job.url);
+      refetchInFlight--;
+      pumpRefetch();
+    }
+    // The deadline also settles, so a slot is released even if neither the
+    // headers nor the body path ever runs to completion. abort() errors a body
+    // read that is still pending in the browser.
+    var timer = setTimeout(function () {
+      controller.abort();
+      settle();
+    }, REFETCH_TIMEOUT_MS);
+    var p;
+    try {
+      p = origFetch(job.url, { credentials: "same-origin", cache: "force-cache", signal: controller.signal });
+    } catch (e) {
+      settle();
+      return;
+    }
+    p.then(
+      function (res) {
+        var c = res.headers.get("content-type") || "";
+        var readable = (res.type === "basic" || res.type === "cors" || res.type === "default") && capturesBody(c) && !!res.body;
+        // The response status fills a row whose timing entry withheld it. Only
+        // a numeric status is sent, and only for a job flagged statusUnknown.
+        var status = job.statusUnknown && typeof res.status === "number" ? res.status : undefined;
+        if (!readable) {
+          // Headers only: nothing will be read, so release the connection now.
+          // The status still goes out (body-less) so the row is not left at 0.
+          cancelBody(res);
+          if (status !== undefined) post({ type: "ocode:browse:networkbody", requestId: job.requestId, status: status });
+          settle();
+          return;
+        }
+        // Read the body directly, not through clone(): nothing else reads this
+        // response, and a clone's unread branch would buffer what it pulls.
+        // readCapped cancels the stream once the body passes the cap.
+        readCapped(res.body).then(
+          function (cap) {
+            var msg = { type: "ocode:browse:networkbody", requestId: job.requestId, responseBody: cap.body, responseBodyTruncated: cap.truncated };
+            if (status !== undefined) msg.status = status;
+            post(msg);
+            settle();
+          },
+          function (err) {
+            console.debug("ocode capture: could not read the re-fetched body of " + job.url, err);
+            settle();
+          }
+        );
+      },
+      function () {
+        // intentionally not logged: a failed re-fetch leaves the row body-less,
+        // which is benign; capture must not break the page.
+        settle();
+      }
+    );
+  }
+
   // Dedup: fetch/XHR wrappers report the same request Resource Timing does, so a
   // Resource Timing entry is skipped when a wrapper request matches it. Each
   // wrapper call is one record, kept while the request is in flight and for
@@ -359,8 +491,20 @@
     if (r !== urls[0]) urls.push(r);
     var rec = { urls: urls, doneAt: 0 };
     wrapped.push(rec);
-    while (wrapped.length > MAX_WRAPPED) wrapped.shift();
+    while (wrapped.length > MAX_WRAPPED) evictWrapped();
     return rec;
+  }
+  // Over the cap, the oldest COMPLETED record goes first. A record still in
+  // flight belongs to a live request whose Resource Timing entry has not
+  // arrived yet; a burst of completed re-fetches must not push it out.
+  function evictWrapped() {
+    for (var i = 0; i < wrapped.length; i++) {
+      if (wrapped[i].doneAt !== 0) {
+        wrapped.splice(i, 1);
+        return;
+      }
+    }
+    wrapped.shift();
   }
   function endWrapped(rec) {
     rec.doneAt = Date.now();
@@ -414,9 +558,10 @@
           // responseStatus is 0 when the engine withholds it (cross-origin
           // without Timing-Allow-Origin); the SPA maps a non-number to 0 too.
           var ms = Math.round(e.duration);
+          var id = localId();
           post({
             type: "ocode:browse:network",
-            requestId: localId(),
+            requestId: id,
             method: "-",
             url: url,
             status: e.responseStatus,
@@ -425,6 +570,13 @@
             ts: Math.round(performance.timeOrigin + e.startTime),
             size: e.transferSize,
           });
+          // Native script/link loads bypass fetch/XHR, so their only signal is
+          // this timing entry. Re-fetch same-origin, non-proxied resources once
+          // to capture the body under this row's requestId. Only an explicit 0
+          // skips: that is the engine withholding the status. WebKit and Safari
+          // do not expose responseStatus at all (undefined), and the re-fetch
+          // still runs there, and its response status fills the row's status.
+          if (e.responseStatus !== 0) maybeRefetchBody(id, url, e.initiatorType, typeof e.responseStatus !== "number");
         });
       });
       po.observe({ type: "resource", buffered: true });

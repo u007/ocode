@@ -549,6 +549,10 @@ func (s *Server) registerRoutes() {
 	// Ask-dialog "Explain this tool call": a plain-prose digest of a PENDING
 	// tool call's parameters. Not a judge — it cannot approve or deny anything.
 	s.mux.HandleFunc("POST /api/sessions/{id}/tool-call-digest", s.authMiddleware(s.handleToolCallDigest))
+	// MCP Apps widgets: the view's HTML (read-only) and tool calls the view
+	// makes on the same MCP server. See handler_mcp_app.go.
+	s.mux.HandleFunc("GET /api/sessions/{id}/mcp-app/resource", s.authMiddleware(s.handleMCPAppResource))
+	s.mux.HandleFunc("POST /api/sessions/{id}/mcp-app/tools/call", s.authMiddleware(s.handleMCPAppToolCall))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("GET /api/sessions/{id}/discovery", s.authMiddleware(s.handleSessionDiscovery))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))

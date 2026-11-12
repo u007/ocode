@@ -123,7 +123,7 @@ The old `GET /api/tailscale-url` (which started a funnel-first exposure on read)
 | POST | `/api/tailscale-share/start` | `handleStartTailscaleShare` (`internal/server/tailscale_share.go:312`) | Starts funnel-first exposure (upgrades a warm serve mount) |
 | POST | `/api/tailscale-share/stop` | `handleStopTailscaleShare` (`internal/server/tailscale_share.go:329`) | Kills process + removes mount |
 
-Routes registered at `internal/server/server.go:563-565`.
+Routes registered at `internal/server/server.go:567-569`.
 
 ### Status shape
 
@@ -211,7 +211,7 @@ unauthenticated route would let any tailnet peer turn sharing on):
 | GET | `/api/config/ocode/auto-share` | `HandleGetAutoShareConfig` (`internal/server/handler_config.go:3004`) |
 | PUT | `/api/config/ocode/auto-share` | `HandleSetAutoShareConfig` (`internal/server/handler_config.go:3026`) |
 
-Routes registered at `internal/server/server.go:640-641`.
+Routes registered at `internal/server/server.go:644-645`.
 
 Response shape: `{enabled, available, running, kind?, url?, hint?}`
 (`autoShareResponse`, `internal/server/handler_config.go:2976`). The `running` and
@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:2489` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:2493` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 
@@ -264,7 +264,7 @@ never a global reset, which would tear down TUI `/rc` sessions on the same node.
   shows the same Running/Not-sharing badge + kind, and Start/Stop. The status block
   is independent of the persisted toggle.
 - **TUI:** `/auto-share [on|off|status]` (`internal/tui/commands.go:147`,
-  handler at `internal/tui/commands.go:1154`). Both write the same config key; the
+  handler at `internal/tui/commands.go:1158`). Both write the same config key; the
   `status` verb is read-only and an unrecognised argument prints usage without
   changing the setting.
 

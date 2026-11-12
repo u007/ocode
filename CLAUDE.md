@@ -398,9 +398,9 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1720`, the `GoalEvaluable`
-  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5641`, the
-  `goalEvaluable` branch; the RC branches at `:5406` and `:5482` use the same gate).
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1739`, the `GoalEvaluable`
+  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5646`, the
+  `goalEvaluable` branch; the RC branches at `:5411` and `:5487` use the same gate).
 - **A pending permission or question ask never auto-resumes a goal.** Server
   `agent_session.go:1473` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
   decisions sit behind `queueDrainBlocked()`. The one thing that may run on a pending
@@ -427,7 +427,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.
-- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12151`).
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12156`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
   a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
   `capped`, but `met` and `impossible` still close the goal.
@@ -437,7 +437,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21900`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21905`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## browser_run step loop (`browser_run`)
 `browser_run` (`internal/agent/browser_run.go`) lets Jev pick each click of a browser task.
@@ -729,6 +729,19 @@ the fallback, never the reverse. Details: `docs/concepts/web-context-gauge-resol
   because it lands in the cached prompt prefix; re-running per turn would
   both spawn subprocesses and risk busting the prefix. Invalidate on plugin
   install/remove, never per turn.
+
+## MCP Apps widgets and plugin MCP servers
+An MCP tool whose `tools/list` entry declares `_meta.ui.resourceUri` gets its `ui://` HTML rendered by the web chat; enabled plugins' stdio `.mcp.json` servers are merged into `cfg.MCP` in memory. Flow, host protocol and limits: `docs/concepts/mcp-apps-widgets.md`. Invariants:
+
+- **Widget HTML never gets the SPA origin.** It is returned inside JSON and rendered as `srcdoc` with `sandbox="allow-scripts"` only; never add `allow-same-origin`, never serve it as a document from the ocode origin. The host accepts a message only when `event.source` is that iframe's window AND `event.origin === "null"`, and closes the view on a second `load` (self-navigation).
+- **The widget tool-call endpoint does not widen what the model can call, and it is not permission-checked.** `MCPClient.AppToolAllowed` admits only tools the server LISTED with `_meta.ui.visibility` containing `"app"`; absent visibility, model-only and unlisted names are 403. Both `/mcp-app/` endpoints refuse a `locked` session. A widget call runs without the permission prompt, so that allowlist is its only gate. Never widen this to "any tool of the server".
+- **Tools whose visibility lacks `"model"` are dropped in `ListTools`**, never later: anything in `a.tools` enters the discovery corpus and `GetTool` dispatch. `MCPTool.Definition()` must stay byte-stable (no `_meta`, title or annotations): it is part of the cached tools prefix.
+- **Per-call MCP side channels are keyed by tool call ID, never by tool name.** One `*MCPClient` is shared by every session through the process-wide `mcpCache`; a name-keyed image or app result is a cross-session leak. `Execute` without a call ID records nothing.
+- **`Message.MCPApp` is display state.** It is attached only when the tool actually ran (`TakeMCPAppResult` reports `ran`); a denied or unanswered call gets none. It must never enter a provider payload.
+- **`ui/open-link` confirms before opening**, the same rule as every other URL surface.
+- **A project-local plugin's MCP server starts only with an explicit enable** (`external_plugins` entry), never on `DefaultEnabled`: a cloned repo must not spawn a command by being opened. On the web server the process-wide config merges only shared plugins (`MergeSharedMCPServers`); project-local servers load per session, never through `mcpCache`.
+- **Plugin MCP servers are stdio only, in memory only, and never override a user `cfg.MCP` entry** (enabled or disabled). `requiresAny` is checked at merge time.
+- **The local MCP stdout reader routes by JSON-RPC id and drops everything else.** Never go back to "the next line is the response"; a widget polling a server makes stale and unsolicited lines routine.
 
 ## Pulse assistant
 The Pulse dashboard's overview chat is one current `pulse_…` session at a time

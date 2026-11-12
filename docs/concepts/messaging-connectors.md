@@ -20,7 +20,7 @@ to chat platforms: accounts are configured once, inbound messages are persisted 
 SQLite, and both the agent and the web UI can read, search and send.
 
 It is **server-mode only**. `messaging.DefaultManager` is set at server boot
-(`internal/server/handler.go:757`); a TUI or headless process never sets it, so every
+(`internal/server/handler.go:766`); a TUI or headless process never sets it, so every
 `chat_*` tool fails with `chat connectors not initialized` outside the web/desktop
 server.
 
@@ -51,7 +51,7 @@ connector subsystem.
 
 ## Storage and SQLite schema
 
-`Store` opens `<GlobalDataDir>/messaging.sqlite` (`internal/server/handler.go:751`),
+`Store` opens `<GlobalDataDir>/messaging.sqlite` (`internal/server/handler.go:760`),
 creating the parent directory with mode `0700` and chmodding the database file to
 `0600`. The driver is `modernc.org/sqlite` (pure Go).
 
@@ -96,7 +96,7 @@ Known provider limitations in this first cut:
 
 ## LLM tools
 
-Five builtins registered in `internal/tool/tool.go:219` (`internal/tool/messaging_tools.go`):
+Five builtins registered in `internal/tool/tool.go:239` (`internal/tool/messaging_tools.go`):
 
 | Tool | Params | Returns |
 |------|--------|---------|
@@ -233,7 +233,7 @@ Two sync-facing behaviours live here:
 ## Inbound event bus
 
 At boot the server wires `msgMgr.OnInbound` to publish a non-session-scoped event
-(`internal/server/handler.go:829`):
+(`internal/server/handler.go:839`):
 
 ```go
 h.bus.Publish("messaging_message", "", "", m)

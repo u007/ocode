@@ -8,6 +8,11 @@
 
 
 
+## 2026-11-12
+
+* **Creation**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
+* **Update**: Plugin MCP servers: web-server merge scope, project-local toggle answer and TUI/web refusal scope corrected ([plugins.md](/plugins.md))
+
 ## 2026-11-11
 
 * **Update**: Code-Search Relevance Judge (v1) ([superpowers/specs/2026-09-28-code-search-relevance-judge-design.md](/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md))

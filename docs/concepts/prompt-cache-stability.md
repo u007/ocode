@@ -187,7 +187,7 @@ so it is cache-safe and re-cached the prefix once when it shipped.
 ## Wire-only dedup of trailing duplicate user messages
 
 `dedupeTrailingUserMessages` (`internal/agent/message_tail_dedup.go`, called at
-the top of `GenericClient.ChatWithContext`, `client.go:786`) collapses duplicate
+the top of `GenericClient.ChatWithContext`, `client.go:799`) collapses duplicate
 sends in the trailing user-run of the transcript **in the outgoing provider
 payload only** — the UI and the persisted transcript keep every message the user
 sent.

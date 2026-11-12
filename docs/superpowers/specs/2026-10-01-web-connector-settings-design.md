@@ -101,13 +101,13 @@ extra `cancel` entry locally; the server does not. The TUI keeps its
 
 ## 3. A new key does NOT reach live agents today — this is a bug to fix
 
-`NewClientWithProfile` (`internal/agent/client.go:4590`) resolves the credential
+`NewClientWithProfile` (`internal/agent/client.go:4603`) resolves the credential
 **at client construction**: `auth.Get(provider)` at :4685,
 `auth.ResolveKeyForProfile` at :4808/:4828. An agent constructed before a
 connector write keeps the old key until it is rebuilt.
 
 There is a next-turn rebuild path — `reconcileProfileAgent`
-(`internal/server/agent_session.go:676-717`) compares `as.credVersion` against
+(`internal/server/agent_session.go:695-736`) compares `as.credVersion` against
 `auth.CredentialVersion()` and rebuilds on a mismatch. Its comment
 (:678-680) states the intent outright: *"The credential version is global, not
 per-profile: an in-place edit must invalidate the cached client."*
@@ -134,7 +134,7 @@ decision above: the bump lives directly in `Set`/`Remove`
 on the seed-on-load path that materialises an empty `auth.json` without changing
 a credential, which would invalidate every agent for a no-op write (14 tests
 failed until it moved). The reconcile check now compares the single
-`auth.CredentialVersion()` (`internal/server/agent_session.go:700`);
+`auth.CredentialVersion()` (`internal/server/agent_session.go:719`);
 `ProfileCredentialVersion()` remains as a delegating alias.
 
 Prompt-cache impact is nil: rebuilding an `LLMClient` touches neither the `tools`

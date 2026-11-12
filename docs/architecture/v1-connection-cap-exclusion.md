@@ -43,7 +43,7 @@ A future change should add a **semaphore-based concurrency cap** around `handleE
 
 The follow-up has **landed** (repo HEAD `2ad684f`). The per-stateKey concurrent upstream connection cap is fully implemented and wired:
 
-- **`connLimiter`** (`internal/browse/connlimit.go`): per-stateKey counting semaphore shared by external + local traffic. `acquire()` blocks up to 5 s (`upstreamSlotWait`) before returning `errUpstreamBusy`; entry cleanup at `refs==0` (no TTL sweep needed — closed tabs leave nothing behind). `Server.failBusy` responds with 503 + `Retry-After: 1` and closes the loading nav event for document requests (Part 07 contract).
+- **`connLimiter`** (`internal/browse/connlimit.go`): per-stateKey counting semaphore shared by external + local traffic. `acquire()` blocks up to 60 s (`upstreamSlotWait`) before returning `errUpstreamBusy`; entry cleanup at `refs==0` (no TTL sweep needed — closed tabs leave nothing behind). `Server.failBusy` responds with 503 + `Retry-After: 1` and closes the loading nav event for document requests (Part 07 contract).
 - **Instantiation** (`internal/browse/server.go:61`): `s.conns = newConnLimiter(maxUpstreamConnsPerKey)` in `New()`.
 - **External mode** (`internal/browse/external.go:48–54`): `handleExternal` calls `s.conns.acquire(r.Context(), t.StateKey)`, routes `errUpstreamBusy` to `s.failBusy(w, r, t, "proxied")`, and defers `release()`.
 - **Local mode** (`internal/browse/local.go:110–116`): `handleLocal` calls `s.conns.acquire(r.Context(), t.StateKey)`, routes errors to `s.failBusy(w, r, t, "local")`, and defers `release()`. The slot is held for the full connection lifetime, including hijacked WebSocket tunnels.

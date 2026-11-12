@@ -12,7 +12,7 @@ with idle agent eviction.
   (`internal/session/session.go:287 Load` → `GetStorageDir()` →
   `effectiveWorkDir()`), so sessions from other projects 404 on
   `GET /api/sessions/:id`, `.../context`, `POST .../message`
-  (`internal/server/handler.go:498, 552, 916`).
+  (`internal/server/handler.go:502, 556, 926`).
 - The persisted server-side project list already exists: `h.projects`
   (`internal/projects`), used by `HandleListProjects`.
 - Agent sessions are built per session in

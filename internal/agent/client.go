@@ -164,6 +164,19 @@ type Message struct {
 	// a large result render in full in the UI while the model still receives a
 	// bounded prefix. It is runtime-only (json:"-") and never sent to the LLM.
 	DisplayContent string `json:"-"`
+	// MCPApp is set on a tool message whose tool declares an MCP Apps UI
+	// resource. It is display state for the web UI (which renders the resource
+	// next to the tool call) and is NEVER sent to the LLM: provider payload
+	// builders construct their payloads from explicit fields.
+	MCPApp *MCPAppRef `json:"mcp_app,omitempty"`
+}
+
+// MCPAppRef describes the MCP Apps widget of one tool call (see Message.MCPApp).
+type MCPAppRef struct {
+	Server      string          `json:"server"`
+	Tool        string          `json:"tool"` // short tool name, without the server prefix
+	ResourceURI string          `json:"resource_uri"`
+	Result      json.RawMessage `json:"result,omitempty"` // raw MCP CallToolResult of this call
 }
 
 type Image struct {
