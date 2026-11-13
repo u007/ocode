@@ -4241,6 +4241,12 @@ export const api = {
       { method: "PUT" },
       host,
     ),
+  reloadMCP: (host?: string) =>
+    fetchJSON<{ status: string; tools: number; errors: string[] }>(
+      "/api/mcp/reload",
+      { method: "POST" },
+      host,
+    ),
 
   // ── MCP OAuth (/mcp-auth) ──
   // The server refuses non-loopback callers (the browser callback only reaches
@@ -5136,6 +5142,25 @@ export const api = {
     fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/allowlist/${encodeURIComponent(email)}`, { method: "DELETE" }, host),
   getArtifactAccessLog: (id: any, host: any) =>
     fetchJSON<any>(`/api/artifacts/${encodeURIComponent(id)}/access-log`, undefined, host),
+  // ── Cloud storage connectors (Phase 1) ──
+  listCloudConnectors: (host?: string) =>
+    fetchJSON<any>("/api/cloud/connectors", undefined, host),
+  registerCloudConnector: (payload: any, host?: string) =>
+    fetchJSON<any>("/api/cloud/connectors", { method: "POST", body: JSON.stringify(payload) }, host),
+  removeCloudConnector: (id: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/connectors?id=${encodeURIComponent(id)}`, { method: "DELETE" }, host),
+  browseCloudConnector: (id: string, path: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/browse?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, undefined, host),
+  readCloudConnector: (id: string, path: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/read?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, undefined, host),
+  cloudConnectorMetadata: (id: string, path: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/metadata?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, undefined, host),
+  writeCloudConnector: (id: string, path: string, content: string, host?: string) =>
+    fetchJSON<any>("/api/cloud/write", { method: "POST", body: JSON.stringify({ connector_id: id, path, content }) }, host),
+  deleteCloudConnector: (id: string, path: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/delete?connector_id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, { method: "DELETE" }, host),
+  startCloudOAuth: (payload: any, host?: string) =>
+    fetchJSON<any>("/api/cloud/oauth/start", { method: "POST", body: JSON.stringify(payload) }, host),
 };
 
 /** Port-forwards route for a target: the project-scoped family when a remote

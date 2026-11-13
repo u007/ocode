@@ -329,6 +329,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/messaging/search", s.authMiddleware(s.handler.handleMessagingSearch))
 	s.mux.HandleFunc("POST /api/messaging/send", s.authMiddleware(s.handler.handleMessagingSend))
 	s.mux.HandleFunc("POST /api/messaging/sync", s.authMiddleware(s.handler.handleMessagingSync))
+	// Cloud storage connectors (Phase 1: framework + Google Drive read-only).
+	s.mux.HandleFunc("/api/cloud/connectors", s.authMiddleware(s.handler.handleCloudConnectors))
+	s.mux.HandleFunc("GET /api/cloud/browse", s.authMiddleware(s.handler.handleCloudConnectBrowse))
+	s.mux.HandleFunc("GET /api/cloud/read", s.authMiddleware(s.handler.handleCloudConnectRead))
+	s.mux.HandleFunc("GET /api/cloud/metadata", s.authMiddleware(s.handler.handleCloudConnectMetadata))
+	s.mux.HandleFunc("POST /api/cloud/oauth/start", s.authMiddleware(s.handler.handleCloudConnectOAuthStart))
+	s.mux.HandleFunc("GET /api/cloud/oauth/callback", s.authMiddleware(s.handler.handleCloudConnectOAuthCallback))
 	s.mux.HandleFunc("POST /api/browse/tab-origin", s.authMiddleware(s.handleBrowseTabOrigin))
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
@@ -743,6 +750,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/mcp", s.authMiddleware(s.handleListMCP))
 	s.mux.HandleFunc("PUT /api/mcp/{name}/enable", s.authMiddleware(s.handleEnableMCP))
 	s.mux.HandleFunc("PUT /api/mcp/{name}/disable", s.authMiddleware(s.handleDisableMCP))
+	s.mux.HandleFunc("POST /api/mcp/reload", s.authMiddleware(s.handleReloadMCP))
 	// MCP OAuth (the `/mcp-auth <server>` command). The handler itself refuses
 	// non-loopback callers — the browser callback only reaches a server running
 	// on the caller's own machine (see handler_mcp_auth.go).
@@ -3333,6 +3341,9 @@ func (s *Server) handleEnableMCP(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleDisableMCP(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetMCPEnabled(w, r, r.PathValue("name"), false)
+}
+func (s *Server) handleReloadMCP(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleReloadMCP(w, r)
 }
 
 func (s *Server) handleStartMCPAuth(w http.ResponseWriter, r *http.Request) {

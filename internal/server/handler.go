@@ -21,6 +21,7 @@ import (
 	"github.com/u007/ocode/internal/appearance"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/browsertabs"
+	"github.com/u007/ocode/internal/cloudconnect"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
@@ -101,10 +102,11 @@ type Handler struct {
 	cfg         *config.Config
 	// pluginMCP maps each MCP server merged into cfg from an enabled plugin to
 	// that plugin's name (plugins.MergeMCPServers). Guarded by mu, like cfg.
-	pluginMCP map[string]string
-	messaging *messaging.Manager
-	rc        *RCBridge          // set when proxying to a TUI session
-	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	pluginMCP    map[string]string
+	messaging    *messaging.Manager
+	cloudconnect *cloudconnect.Manager
+	rc           *RCBridge          // set when proxying to a TUI session
+	scheduler    *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// cronServices resolves the cron engine for a project root, per call. It is
 	// installed by the Server (see Server.cronServiceResolver) so the LLM `cron`
 	// tool operates on the SESSION's project instead of the server's boot project.
@@ -164,6 +166,10 @@ type Handler struct {
 	// "follow the process-wide config". Guarded by mcpSessionOverridesMu.
 	mcpSessionOverrides   map[string]map[string]bool
 	mcpSessionOverridesMu sync.RWMutex
+	// mcpPendingRebuild marks sessions whose MCP tool set changed but whose
+	// rebuild was deferred (turn active/busy). Reconciled on the next turn.
+	mcpPendingRebuild   map[string]bool
+	mcpPendingRebuildMu sync.Mutex
 	// advisorEnabled is the process-wide runtime gate for the advisor tool,
 	// used by sessions with no per-session override and by the pre-session
 	// sidebar/Settings fallback. Seeded from config, flipped from the web
@@ -770,6 +776,10 @@ func NewHandler() *Handler {
 		messaging.DefaultManager = msgMgr
 	}
 
+	// Cloud storage connectors (Phase 1: framework + Google Drive read-only).
+	var ccMgr *cloudconnect.Manager
+	ccMgr = cloudconnect.NewManager(gd, defaultWorkDir, os.Getenv("OCODE_CLOUD_MASTER_PASSWORD"))
+
 	monacoStore, err := monaco.NewStore()
 	if err != nil {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
@@ -801,6 +811,7 @@ func NewHandler() *Handler {
 		termTabsStore:       termTabsStore,
 		browserTabsStore:    browserTabsStore,
 		messaging:           msgMgr,
+		cloudconnect:        ccMgr,
 		monaco:              monacoStore,
 		appearance:          appearanceService,
 		vaultGrants:         make(map[string]bool),
@@ -808,6 +819,7 @@ func NewHandler() *Handler {
 		toolOutput:          newToolOutputCoalescer(),
 		mcpCache:            newMCPCache(),
 		mcpSessionOverrides: make(map[string]map[string]bool),
+		mcpPendingRebuild:   make(map[string]bool),
 		titleGen:            newTitleGenState(),
 		bus:                 NewEventBus(),
 		terminalProcs:       newTerminalRegistry(),
