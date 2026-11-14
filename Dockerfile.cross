@@ -28,7 +28,7 @@
 #
 # ──────────────────────────────────────────────────────────────────────────
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.26.11
 ARG NODE_VERSION=22
 
 # ── Stage 1: Web frontend builder (shared by all targets) ────────────────

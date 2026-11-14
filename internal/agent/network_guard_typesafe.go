@@ -338,6 +338,7 @@ func bashEgressTargets(command string) []egressTarget {
 	if command == "" {
 		return nil
 	}
+	command = stripInertHeredocBodies(command)
 	// An unparseable line keeps the single-line split, so it does not lose the coverage it had before.
 	// The redirect signal is line-wide: a loop, a function or a brace group can
 	// run a redirecting assignment, a source or an eval before a client, so every

@@ -316,10 +316,11 @@ func (h *Handler) rebuildAgentForSkills(sessionID string) {
 }
 
 // rebuildAgentForPreferenceChange force-rebuilds a session's agent after a
-// preference that is baked into its construction (MCP tool set, skill catalog)
+// preference that is baked into its construction (skill catalog, MCP tool set)
 // changed. No-op when there is no live agent; deferred while a turn is running
 // or starting so in-flight work keeps its agent (the next turn reconciles — for
-// skills via reconcileProfileAgent's disabled-set comparison).
+// skills via reconcileProfileAgent's disabled-set comparison, for MCP via the
+// session's cache-pointer comparison; a deferred rebuild needs no extra state).
 //
 // Exclusion: the per-session turn lock is held by a turn job for its whole run
 // (persist -> reconcile -> runTurn), so TryLock on it excludes both a running
@@ -374,8 +375,9 @@ func (h *Handler) rebuildAgentForPreferenceChange(sessionID, what string) {
 }
 
 // rebuildAgentsForFeatureChange rebuilds EVERY resident agent session after a
-// feature toggle that is baked into the agent's construction (the
-// suggested-responses and communication-style prompt fragments).
+// feature toggle that is baked into the agent's construction: the
+// suggested-responses and communication-style prompt fragments, and the
+// process-wide MCP tool set after a reload.
 //
 // These toggles live in the cached SYSTEM prompt, so an agent built before the
 // toggle keeps the old fragment until it is rebuilt.

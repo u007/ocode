@@ -27,9 +27,13 @@ func newMCPCache() *mcpCache {
 // warm kicks off the blocking MCP enumeration in the background. Call once,
 // as early as possible (Handler construction), so it has usually finished
 // by the time a real user message arrives.
+//
+// It uses the process-wide shared client registry: a reload of an unchanged
+// server reuses its live client instead of spawning a second subprocess, and a
+// removed or changed server's client is retired by the loader itself.
 func (c *mcpCache) warm(cfg *config.Config) {
 	go func() {
-		res := agent.LoadMCPToolsForConfig(cfg)
+		res := agent.LoadMCPToolsForConfigShared(cfg)
 		c.tools = res.Tools
 		c.errs = res.Errors
 		close(c.ready)
@@ -55,5 +59,18 @@ func (c *mcpCache) waitTimeout(timeout time.Duration) ([]tool.Tool, []string, bo
 		return c.tools, c.errs, false
 	case <-time.After(timeout):
 		return nil, nil, true
+	}
+}
+
+// toolsNow reports how many tools this cache holds right now, without waiting:
+// 0 while the enumeration is still in flight. It is the non-blocking read used
+// by the reload's swap decision, where waiting on a straggling warm would
+// re-introduce the unbounded stall the async protocol exists to remove.
+func (c *mcpCache) toolsNow() int {
+	select {
+	case <-c.ready:
+		return len(c.tools)
+	default:
+		return 0
 	}
 }

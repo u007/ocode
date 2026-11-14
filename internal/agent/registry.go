@@ -55,9 +55,10 @@ var DefaultAgents = []AgentSpec{
 }
 
 func PrimaryAgentSpecs() []AgentSpec {
-	specs := make([]AgentSpec, 0, len(DefaultAgents))
+	defaults := DefaultAgentsSnapshot()
+	specs := make([]AgentSpec, 0, len(defaults))
 	seen := make(map[string]bool)
-	for _, spec := range DefaultAgents {
+	for _, spec := range defaults {
 		specs = append(specs, spec)
 		seen[spec.Name] = true
 	}

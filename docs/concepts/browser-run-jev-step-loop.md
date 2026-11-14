@@ -240,7 +240,7 @@ backend or to the main model.
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
   `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
   `internal/agent/agent.go:6869`). The dialog then reads like
-  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6671`),
+  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6672`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.
 - **Agent types.** The built-in `scout`, `debug` and `docs` definitions list
@@ -330,7 +330,7 @@ non-model seconds in its runs went to waits on class names. Waiting for the docu
 quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
-(`internal/agent/permissions.go:6556`), so it is allowed on an agent-opened tab. A user tab
+(`internal/agent/permissions.go:6557`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:531`). Read-only
 agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:222`).
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -130,7 +131,9 @@ func (h *Handler) HandleSetMCPEnabled(w http.ResponseWriter, r *http.Request, na
 	h.mu.Unlock()
 
 	if err := config.SaveMCPEnabled(name, enabled); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// The detail stays in the log; the body must not echo an internal path.
+		log.Printf("mcp: persist enabled=%v for %q: %v", enabled, name, err)
+		writeError(w, http.StatusInternalServerError, "failed to save MCP server setting")
 		return
 	}
 
@@ -274,4 +277,26 @@ func (h *Handler) clearMCPSessionOverrides(sessionID string) {
 	h.mcpSessionOverridesMu.Lock()
 	delete(h.mcpSessionOverrides, sessionID)
 	h.mcpSessionOverridesMu.Unlock()
+}
+
+// applyLoadedConfig installs a freshly loaded config, plugin-MCP map and (when
+// cache is non-nil) the enumerated tool cache, returning the cache it replaced.
+//
+// Callers pass a nil cache to apply the config WITHOUT claiming its tool
+// enumeration succeeded: the on-disk config did change, but the caller could
+// not prove the new tool set works, so live sessions keep enumerating from the
+// cache they were built against. Clients are owned by the process-wide registry
+// (agent.LoadMCPToolsForConfigShared), so a superseded cache holds no handle
+// that must be closed here.
+func (h *Handler) applyLoadedConfig(cfg *config.Config, pluginMCP map[string]string, cache *mcpCache) *mcpCache {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	old := h.mcpCache
+	h.cfg = cfg
+	h.pluginMCP = pluginMCP
+	h.advisorEnabled = cfg == nil || cfg.Ocode.Advisor.Enabled
+	if cache != nil {
+		h.mcpCache = cache
+	}
+	return old
 }

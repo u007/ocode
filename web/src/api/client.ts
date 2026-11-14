@@ -4241,12 +4241,39 @@ export const api = {
       { method: "PUT" },
       host,
     ),
+  /** Start an async MCP reload. The server answers 202 and finishes in the
+   *  background; poll getMCPReloadStatus (or use reloadMCPAndWait). */
   reloadMCP: (host?: string) =>
-    fetchJSON<{ status: string; tools: number; errors: string[] }>(
+    fetchJSON<{ status: string; generation?: number }>(
       "/api/mcp/reload",
       { method: "POST" },
       host,
     ),
+  getMCPReloadStatus: (host?: string) =>
+    fetchJSON<{
+      status: string;
+      generation: number;
+      tools: number;
+      errors: string[];
+    }>("/api/mcp/reload", undefined, host),
+  /** Reload and poll until the server reports reloaded/failed. A throwing POST
+   *  is fatal; a throwing poll is not retried (it surfaces as-is). */
+  reloadMCPAndWait: async (
+    host?: string,
+  ): Promise<{ status: "reloaded" | "failed"; tools: number; errors: string[] }> => {
+    await api.reloadMCP(host);
+    const startedAt = Date.now();
+    for (;;) {
+      const s = await api.getMCPReloadStatus(host);
+      if (s.status === "reloaded" || s.status === "failed") {
+        return { status: s.status, tools: s.tools, errors: s.errors ?? [] };
+      }
+      if (Date.now() - startedAt >= 35_000) {
+        throw new Error("MCP reload timed out after 35s");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  },
 
   // ── MCP OAuth (/mcp-auth) ──
   // The server refuses non-loopback callers (the browser callback only reaches

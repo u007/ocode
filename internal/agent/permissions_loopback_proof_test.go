@@ -392,6 +392,21 @@ func TestPermissionApiLoopbackCoversConfigPermissionRoutes(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "loopback MCP reload asks",
+			command: `curl -X POST http://127.0.0.1:4096/api/mcp/reload`,
+			want:    true,
+		},
+		{
+			name:    "loopback MCP enable toggle asks",
+			command: `curl -X POST http://127.0.0.1:4096/api/mcp/github/enable`,
+			want:    true,
+		},
+		{
+			name:    "loopback MCP lookalike path does not ask",
+			command: `curl http://127.0.0.1:4096/api/mcpx`,
+			want:    false,
+		},
+		{
 			name:    "percent in the query alone does not ask",
 			command: `curl "http://127.0.0.1:4096/api/sessions?q=a%20b"`,
 			want:    false,
@@ -431,6 +446,11 @@ func TestIsPermissionAPIPath(t *testing.T) {
 		"http://127.0.0.1:4096/api/config",
 		"http://127.0.0.1:4096/api/config/",
 		"http://127.0.0.1:4096/api/config/prompts/network_guard",
+		"http://127.0.0.1:4096/api/mcp",
+		"http://127.0.0.1:4096/api/mcp/",
+		"http://127.0.0.1:4096/api/mcp/reload",
+		"http://127.0.0.1:4096/api/mcp/x/enable",
+		"http://127.0.0.1:4096/API/MCP/reload",
 		"http://127.0.0.1:4096/API/CONFIG/model",
 		"http://127.0.0.1:4096/api/%70ermissions",
 		"http://127.0.0.1:4096/api/%zz",
@@ -443,6 +463,8 @@ func TestIsPermissionAPIPath(t *testing.T) {
 	for _, p := range []string{
 		"http://127.0.0.1:4096/api/sessions",
 		"http://127.0.0.1:4096/api/configs",
+		"http://127.0.0.1:4096/api/mcpx",
+		"http://127.0.0.1:4096/api/mcp-extra/reload",
 		"http://127.0.0.1:4096/json/version",
 		"http://127.0.0.1:4096/json/version?x=/api/permissions",
 		"http://127.0.0.1:4096",

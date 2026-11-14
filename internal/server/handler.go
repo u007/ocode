@@ -166,10 +166,13 @@ type Handler struct {
 	// "follow the process-wide config". Guarded by mcpSessionOverridesMu.
 	mcpSessionOverrides   map[string]map[string]bool
 	mcpSessionOverridesMu sync.RWMutex
-	// mcpPendingRebuild marks sessions whose MCP tool set changed but whose
-	// rebuild was deferred (turn active/busy). Reconciled on the next turn.
-	mcpPendingRebuild   map[string]bool
-	mcpPendingRebuildMu sync.Mutex
+	// mcpReload is the async reload state reported by GET /api/mcp/reload.
+	// Guarded by mcpReloadMu alone (never h.mu): a status read must not queue
+	// behind a reload's config swap. mcpReloadFn is the loader seam tests use
+	// to fake enumeration; nil means the real config.Load + warm path.
+	mcpReload   mcpReloadStatus
+	mcpReloadMu sync.Mutex
+	mcpReloadFn func() mcpReloadOutcome
 	// advisorEnabled is the process-wide runtime gate for the advisor tool,
 	// used by sessions with no per-session override and by the pre-session
 	// sidebar/Settings fallback. Seeded from config, flipped from the web
@@ -658,6 +661,13 @@ type agentSession struct {
 	// a turn was running still lands (the mid-turn rebuild is deferred, exactly
 	// like an MCP toggle). Nil/empty means "nothing disabled".
 	disabledSkills map[string]bool
+	// mcpCache is the process-wide MCP cache this agent's tool set was
+	// enumerated from. A reload installs a NEW cache pointer rather than
+	// mutating the old one, so reconcileProfileAgent detects a rebuild that was
+	// deferred mid-turn by comparing this pointer against the live h.mcpCache.
+	// Nil means "not recorded" (a session not built by buildAgentSession), which
+	// reconcile treats as "no change" — the same rule as suggestedResponses.
+	mcpCache *mcpCache
 	// suggestedResponses snapshots the suggested-responses setting this agent
 	// was BUILT WITH. The prompt fragment is baked into the cached system
 	// prompt at construction, so a toggle must rebuild the agent to take
@@ -820,7 +830,7 @@ func NewHandler() *Handler {
 		toolOutput:          newToolOutputCoalescer(),
 		mcpCache:            newMCPCache(),
 		mcpSessionOverrides: make(map[string]map[string]bool),
-		mcpPendingRebuild:   make(map[string]bool),
+		mcpReload:           mcpReloadStatus{phase: mcpReloadIdle},
 		titleGen:            newTitleGenState(),
 		bus:                 NewEventBus(),
 		terminalProcs:       newTerminalRegistry(),
@@ -1001,12 +1011,7 @@ func (h *Handler) SetWorkDir(dir string) {
 	mcpCache := newMCPCache()
 	mcpCache.warm(cfg)
 
-	h.mu.Lock()
-	h.cfg = cfg
-	h.pluginMCP = pluginMCP
-	h.advisorEnabled = cfg == nil || cfg.Ocode.Advisor.Enabled
-	h.mcpCache = mcpCache
-	h.mu.Unlock()
+	h.applyLoadedConfig(cfg, pluginMCP, mcpCache)
 }
 
 // RCBridge returns the bridge to a TUI session, or nil if the handler is

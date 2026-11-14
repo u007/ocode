@@ -185,6 +185,27 @@ type MCPClient struct {
 // Name returns the configured server name.
 func (c *MCPClient) Name() string { return c.name }
 
+// Alive reports whether the client can still serve requests. A local client's
+// stdout reader exits when the server process dies, so a closed readerDone
+// means the subprocess is gone; the client must then be replaced rather than
+// reused. A remote client holds no process, so it is always alive (a failed
+// HTTP connect is a per-request error, not a dead client). Callers use this to
+// avoid spawning a duplicate subprocess for an unchanged server config.
+func (c *MCPClient) Alive() bool {
+	if !c.isLocal {
+		return true
+	}
+	if c.readerDone == nil {
+		return false
+	}
+	select {
+	case <-c.readerDone:
+		return false
+	default:
+		return true
+	}
+}
+
 // RemoteHTTPError reports an HTTP failure before attempting to decode an MCP
 // response. It intentionally excludes the response body and endpoint URL,
 // which may contain credentials or secret-bearing path segments.
@@ -997,8 +1018,9 @@ func (c *MCPClient) finishReader(scanErr error) {
 
 // Close stops a local server. It closes the server's stdin, kills the process
 // and reaps it, so the stdout reader ends and every waiting request fails. It
-// is idempotent and does nothing for a remote client. Nothing calls it yet: the
-// process-wide MCP cache and the per-session clients are not wired to it.
+// is idempotent and does nothing for a remote client. The shared MCP client
+// registry (internal/agent/mcp_clients.go) calls it when a server is disabled,
+// reconfigured, or fails to enumerate, and on shutdown.
 func (c *MCPClient) Close() error {
 	if !c.isLocal {
 		return nil

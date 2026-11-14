@@ -8,7 +8,7 @@ tags:
   - mcp-apps
   - plugins
   - web
-timestamp: 2026-11-12T09:08:40Z
+timestamp: 2026-11-14T16:45:26Z
 ---
 # MCP Apps widgets and plugin MCP servers
 
@@ -185,11 +185,12 @@ Other providers were not checked against this list.
   (`web/src/components/Chat/mcpApp/McpAppView.tsx:219`), because an opaque-origin frame
   cannot be targeted by origin. A message sent in that window reaches whatever the frame
   now shows.
-- **Client lifetime.** `MCPClient.Close` exists (`internal/mcp/client.go:1002`), but no
-  production code calls it. Replacing the cache (`internal/server/handler.go:995`) leaves
-  the old clients running, and so does each session's own enumeration. In
-  `LoadMCPToolsForConfig`, a server whose `ListTools` call (`internal/agent/agent.go:7044`)
-  fails is skipped with `continue`, without Close, so its process keeps running.
+- **Client lifetime.** `MCPClient.Close` (`internal/mcp/client.go:1024`) is called by the
+  shared loader (`internal/agent/mcp_clients.go`) when a client's config changed, its
+  server was removed, or its `ListTools` failed; `CloseAllMCPClients` closes every cached
+  client at server shutdown (`internal/server/handler_shutdown.go:28`). Per-session
+  override enumerations still use fresh clients (`LoadMCPToolsForConfig`) and are not in
+  the registry.
 - **Widget calls** are not permission-checked (see Security boundaries).
 - **Image providers.** Images reach the model only through the Anthropic and OpenAI
   chat-completions builders, and only on a vision-capable model.

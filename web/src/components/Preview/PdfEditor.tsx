@@ -4,7 +4,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { PDFDocument, degrees } from "pdf-lib";
 import { addHighlight, addTextNote, canvasToPdfRect } from "./pdfAnnotate";
-import { api as apiClient } from "../../api/client";
+import { api as apiClient, authHeaders, apiPath } from "../../api/client";
 
 ensureReadableStreamAsyncIterator();
 
@@ -55,7 +55,7 @@ export default function PdfEditor({
         params.set("path", path);
         if (projectRoot) params.set("project_root", projectRoot);
         if (projectHost) params.set("host", projectHost);
-        const res = await fetch(`/api/files/raw?${params.toString()}`, { credentials: "include" });
+        const res = await fetch(apiPath(`/api/files/raw?${params.toString()}`), { credentials: "include", headers: authHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         const bytes = new Uint8Array(buf);

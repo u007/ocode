@@ -376,9 +376,12 @@ export default function QuestionDialog({
             <Tabs defaultValue="0" className="w-full">
               {/* One row that scrolls sideways: TabsList is a fixed h-10 box, so a
                   wrapping strip would spill out of it and overlap the content. */}
-              <TabsList className="flex-nowrap max-w-full overflow-x-auto overflow-y-hidden scrollbar-hide">
+              <TabsList
+                className="flex-nowrap max-w-full min-w-0 justify-start overflow-x-auto overflow-y-hidden scrollbar-hide touch-pan-x overscroll-x-contain flex-1"
+                style={{ WebkitOverflowScrolling: "touch" } as React.CSSProperties}
+              >
                 {questions.map((q, qi) => (
-                  <TabsTrigger key={qi} value={String(qi)}>
+                  <TabsTrigger key={qi} value={String(qi)} className="shrink-0">
                     {(q.header || `Question ${qi + 1}`) +
                       (isAnswered(qi) ? " ✓" : "")}
                   </TabsTrigger>

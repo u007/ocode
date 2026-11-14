@@ -139,7 +139,7 @@ func init() {
 		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
 		{name: "/context", help: "Show context window token budget", handler: runContextCmd},
 		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
-		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
+		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>|reload]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
@@ -465,15 +465,35 @@ func runMCPAuthCmd(m *model, args []string) tea.Cmd {
 }
 
 func runMCPCmd(m *model, args []string) tea.Cmd {
-	if m.config == nil || len(m.config.MCP) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "No MCP servers configured in opencode config."})
-		return nil
-	}
 	action := "list"
 	if len(args) > 0 {
 		action = strings.ToLower(args[0])
 	}
+	// Reload must run with an empty in-memory config: that is exactly the case
+	// where the on-disk config has servers the running TUI has not read yet.
+	reload := action == "reload" || action == "refresh" || action == "restart"
+	if !reload && (m.config == nil || len(m.config.MCP) == 0) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No MCP servers configured in opencode config."})
+		return nil
+	}
 	switch action {
+	case "reload", "refresh", "restart":
+		cfg, err := config.Load()
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to reload MCP config: %v", err)})
+			return nil
+		}
+		// MergeMCPServers mutates cfg.MCP, so it must run before cfg is assigned.
+		m.pluginMCP = plugins.MergeMCPServers(cfg, m.workDir)
+		m.config = cfg
+		agent.ApplyAgentConfig(cfg)
+		reloadCmd := m.rebuildAgentWithExternalTools()
+		if reloadCmd == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Failed to reload MCP servers: no usable model configured. Restart ocode to apply the config."})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Reloading MCP servers..."})
+		return reloadCmd
 	case "list", "ls", "status":
 		m.messages = append(m.messages, message{role: roleAssistant, text: m.renderMCPList()})
 		return nil
@@ -507,7 +527,7 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("MCP server %q %s.", name, state)})
 		return listenCmd
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp [list|enable <server>|disable <server>]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp [list|enable <server>|disable <server>|reload]"})
 		return nil
 	}
 }

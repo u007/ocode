@@ -136,6 +136,29 @@ func TestHomeSync_SymlinkIntoCredentialDirsOrOutsideHomeIsSkipped(t *testing.T) 
 	}
 }
 
+func TestHomeSync_SkipsClaudeAppSyncedSkillCache(t *testing.T) {
+	home := t.TempDir()
+	writeHomeFile(t, home, ".claude/skills/foo/SKILL.md", "skill", 0o644)
+	writeHomeFile(t, home, ".claude/skills/synced/abc_def/docx/SKILL.md", "account-synced", 0o644)
+	// a real skill that merely shares the name "synced" in a different tree
+	writeHomeFile(t, home, ".config/opencode/skills/synced/SKILL.md", "real skill", 0o644)
+	got := homeFilesByName(t, home)
+	for _, want := range []string{".claude/skills/foo/SKILL.md", ".config/opencode/skills/synced/SKILL.md"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if _, ok := got[".claude/skills/synced/abc_def/docx/SKILL.md"]; ok {
+		t.Error("collected the Claude app's synced skill cache")
+	}
+	// Not collecting the cache must not drop it from the allowlist: the remote
+	// manifest cleanup (applyHomeSyncManifest) still has to delete the copies an
+	// earlier sync wrote there.
+	if !allowedHomeSyncPath(".claude/skills/synced/abc_def/docx/SKILL.md") {
+		t.Error("synced cache must stay allowlisted so stale-file deletion on the remote can remove it")
+	}
+}
+
 func TestHomeSync_SymlinkCycleTerminates(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "skills", "loop")

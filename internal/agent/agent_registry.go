@@ -250,7 +250,23 @@ func (r *AgentRegistry) addLoaded(def AgentDefinition) {
 	r.defs = append(r.defs, def)
 }
 
+// agentCfgMu guards the package-level DefaultAgents slice. ApplyAgentConfig and
+// SetDefaultAgentMaxSteps write it from live handlers (config save, plugin
+// enable, MCP reload) while the picker and prompt builders read it, so both
+// paths take this lock. It is separate from AgentRegistry.mu: the registry
+// protects its own definitions, and a reload takes that lock while this one is
+// held (never the reverse).
+var agentCfgMu sync.RWMutex
+
 func ApplyAgentConfig(cfg *config.Config) {
+	agentCfgMu.Lock()
+	defer agentCfgMu.Unlock()
+	applyAgentConfigLocked(cfg)
+}
+
+// applyAgentConfigLocked is ApplyAgentConfig's body; the caller holds
+// agentCfgMu.
+func applyAgentConfigLocked(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
@@ -277,6 +293,28 @@ func ApplyAgentConfig(cfg *config.Config) {
 			def.MaxSteps = steps
 		}
 	}
+}
+
+// SetDefaultAgentMaxSteps updates one default agent's step cap. It takes the
+// same lock ApplyAgentConfig does, so a live handler cannot race a config load.
+func SetDefaultAgentMaxSteps(name string, steps int) {
+	agentCfgMu.Lock()
+	defer agentCfgMu.Unlock()
+	for i := range DefaultAgents {
+		if DefaultAgents[i].Name == name {
+			DefaultAgents[i].MaxSteps = steps
+		}
+	}
+}
+
+// DefaultAgentsSnapshot returns a copy of the package-level default agent specs.
+// Callers must not mutate it: ApplyAgentConfig keeps writing the original slice.
+// The copy is shallow (Tools/DeniedTools/Temperature alias the originals), which
+// is enough because no path writes those fields after init.
+func DefaultAgentsSnapshot() []AgentSpec {
+	agentCfgMu.RLock()
+	defer agentCfgMu.RUnlock()
+	return append([]AgentSpec(nil), DefaultAgents...)
 }
 
 func enabledPluginMap(cfg *config.Config) map[string]bool {

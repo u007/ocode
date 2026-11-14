@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { MCPStatus } from "../../api/types";
-import { Loader2 } from "lucide-react";
+import { Loader2, RefreshCw } from "lucide-react";
 
 export default function OpencodeMcpForm() {
   const [servers, setServers] = useState<MCPStatus[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -24,6 +25,24 @@ export default function OpencodeMcpForm() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const reloadAll = async () => {
+    setReloading(true);
+    setError(null);
+    try {
+      const res = await api.reloadMCPAndWait();
+      // load() clears the error, so surface reload errors AFTER it — the POST
+      // body is only an acknowledgement now, the poll carries the outcome.
+      await load();
+      if (res.errors.length) {
+        setError(res.errors.join("; "));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReloading(false);
+    }
+  };
 
   const toggle = async (m: MCPStatus) => {
     setBusy(m.name);
@@ -48,7 +67,18 @@ export default function OpencodeMcpForm() {
 
   return (
     <div className="p-6 max-w-lg space-y-4">
-      <h2 className="text-sm font-semibold text-foreground">MCP Servers</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">MCP Servers</h2>
+        <button
+          type="button"
+          onClick={reloadAll}
+          disabled={reloading}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3 h-3 ${reloading ? "animate-spin" : ""}`} />
+          Reload all
+        </button>
+      </div>
       {error && <div className="text-xs text-red-400">{error}</div>}
       {servers.length === 0 ? (
         <div className="text-xs text-muted-foreground">No MCP servers configured.</div>

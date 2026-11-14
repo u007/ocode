@@ -58,6 +58,13 @@ var claudeSettingsSyncKeys = map[string]bool{
 // skippedHomeSyncDirs are never descended into.
 var skippedHomeSyncDirs = map[string]bool{".git": true, "node_modules": true}
 
+// skippedHomeSyncPaths are home-relative directories never collected even
+// though they sit inside a synced tree. ~/.claude/skills/synced is the Claude
+// app's account-synced skill cache (synced/<uuid>/<skill>/SKILL.md): the skill
+// loader reads only <tree>/<name>/SKILL.md, so it is dead weight on the remote
+// and large enough to push the sync over maxHomeSyncTotalBytes.
+var skippedHomeSyncPaths = map[string]bool{".claude/skills/synced": true}
+
 // allowedHomeSyncPath reports whether rel (slash-separated, relative to $HOME)
 // is something the sync may carry.
 func allowedHomeSyncPath(rel string) bool {
@@ -228,7 +235,7 @@ func collectHomeSyncFiles(home string) ([]SyncFile, error) {
 			}
 			switch {
 			case info.IsDir():
-				if skippedHomeSyncDirs[e.Name()] {
+				if skippedHomeSyncDirs[e.Name()] || skippedHomeSyncPaths[childRel] {
 					continue
 				}
 				sub, err := walk(childRel, visited, depth+1)

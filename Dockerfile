@@ -2,11 +2,11 @@
 # Multi-stage build: frontend assets → Go binary → minimal runtime image.
 #
 # Build args:
-#   GO_VERSION       Go toolchain version (default: 1.26)
+#   GO_VERSION       Go toolchain version (default: 1.26.11)
 #   NODE_VERSION     Node version for the web UI build (default: 22, same as Dockerfile.cross)
 #   ALPINE_VERSION   Runtime base image tag (default: 3.20)
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.26.11
 ARG NODE_VERSION=22
 ARG ALPINE_VERSION=3.20
 

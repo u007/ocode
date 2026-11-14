@@ -156,6 +156,7 @@ export default function CoworkSidebar({
   // the sidebar reflects the toggle state for THIS conversation.
   const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+  const [mcpReloading, setMcpReloading] = useState(false);
   // Skills for the active project, with their effective enabled state. "Enabled"
   // means DISCOVERABLE (catalog / discovery corpus / Kaizen digest / slash list,
   // and loadable by the skill tool). Disabled skills stay in this list so they
@@ -818,6 +819,29 @@ export default function CoworkSidebar({
       );
     } finally {
       setMcpBusy(null);
+    }
+  };
+
+  const reloadAllMcp = async () => {
+    setMcpReloading(true);
+    try {
+      const sid = sessionId && !sessionId.startsWith("new-") ? sessionId : undefined;
+      // Stays "reloading" for the whole poll: the server finishes in the
+      // background, and the list is only authoritative once it reports back.
+      const res = await api.reloadMCPAndWait(sessionHost);
+      if (res.status === "failed" && res.errors.length) {
+        reportActionError(
+          new Error(res.errors.join("; ")),
+          "Reloading MCP servers",
+        );
+      }
+      const fresh = await api.getMCP(sessionHost, sid);
+      setMcpServers(fresh);
+    } catch (e) {
+      console.error("reload mcp error", e);
+      reportActionError(e, "Reloading MCP servers");
+    } finally {
+      setMcpReloading(false);
     }
   };
 
@@ -1579,6 +1603,14 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
           </button>
           {expandedSections.mcp && (
             <div className="px-4 pb-3">
+              <button
+                type="button"
+                onClick={reloadAllMcp}
+                disabled={mcpReloading}
+                className="mb-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                {mcpReloading ? "Reloading…" : "Reload all MCP"}
+              </button>
               {mcpServers.length > 0 ? (
                 <div className="space-y-1">
                   {mcpServers.map((s) => (
@@ -1647,12 +1679,20 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
               ) : orderedSkills.length > 0 ? (
                 <div className="space-y-1">
                   {orderedSkills.map((s) => (
-                    <label
+                    <div
                       key={s.name}
                       className={`flex items-center justify-between gap-2 cursor-pointer rounded px-1 py-1 hover:bg-muted${
                         s.enabled ? "" : " opacity-60"
                       }`}
                       title={s.description || s.name}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        if (!s.source || sessionHost) return;
+                        void api.revealInFileManager?.(s.source, activeProject?.path).catch((e) => {
+                          console.error("reveal skill folder error", e);
+                        });
+                      }}
                     >
                       <span className="flex min-w-0 items-center gap-2">
                         <span
@@ -1673,9 +1713,10 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                         checked={s.enabled}
                         disabled={skillBusy === s.name}
                         onChange={() => toggleSkill(s.name)}
+                        onClick={(e) => e.stopPropagation()}
                         className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                       />
-                    </label>
+                    </div>
                   ))}
                 </div>
               ) : (

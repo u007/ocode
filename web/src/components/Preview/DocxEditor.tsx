@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api as apiClient, authHeaders } from "../../api/client";
+import { api as apiClient, authHeaders, apiPath } from "../../api/client";
 import ConfirmDialog from "../common/ConfirmDialog";
 import { mountUniverDoc } from "./univerDocMount";
 import { docxToUniver, univerToDocx, externalImageHosts, imageRequestHeaders } from "./docxData";
@@ -53,7 +53,7 @@ export default function DocxEditor({
         params.set("path", path);
         if (projectRoot) params.set("project_root", projectRoot);
         if (projectHost) params.set("host", projectHost);
-        const res = await fetch(`/api/files/raw?${params.toString()}`, { credentials: "include" });
+        const res = await fetch(apiPath(`/api/files/raw?${params.toString()}`), { credentials: "include", headers: authHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         const bytes = new Uint8Array(buf);

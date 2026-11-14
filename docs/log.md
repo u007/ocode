@@ -8,6 +8,20 @@
 
 
 
+
+
+## 2026-11-15
+
+* **Update**: Auto-permission enforced categories: file changes are ordinary in the Jev rubric (restore/checkout/reset stay denied), the `cd` fold accepts quoted newlines, and a folded `cd` moves the working directory in `project_context` ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Messaging connectors — WhatsApp/Telegram/Messenger accounts, storage, tools, webhook and sync ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
+* **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+## 2026-11-14
+
+* **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
 ## 2026-11-12
 
 * **Creation**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))

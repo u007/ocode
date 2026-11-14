@@ -2,6 +2,7 @@ import {
   INTENT_PACKAGE_NAME,
   type ComputerUseConfig,
   type ContextBudgetReport,
+  type MCPStatus,
   type Message,
   type OcrConfig,
   type OcrModelsResponse,
@@ -402,6 +403,9 @@ export interface CommandContext {
     listSkills: (host?: string, projectPath?: string) => Promise<import("../../api/types").SkillEntry[]>;
     /** MCP server status (/mcp). */
     getMCP: (host?: string, sessionId?: string) => Promise<import("../../api/types").MCPStatus[]>;
+    reloadMCP: (host?: string) => Promise<{ status: string; generation?: number }>;
+    /** Blocking reload: polls the server's status until it finishes. */
+    reloadMCPAndWait: (host?: string) => Promise<{ status: "reloaded" | "failed"; tools: number; errors: string[] }>;
     /** GitHub PR details + diff (/github pr). */
     getGithubPR: (owner: string, repo: string, number: number) => Promise<{ pr: Record<string, unknown>; diff?: string }>;
     /** GitHub issue list (/github issue list). */
@@ -732,7 +736,7 @@ export async function dispatchCommand(
       return handleSkills(ctx);
 
     case "/mcp":
-      return handleMcp(ctx);
+      return handleMcp(args, ctx);
 
     case "/cron":
       return handleCron(args, ctx);
@@ -3181,7 +3185,36 @@ async function handleSkills(ctx: CommandContext): Promise<CommandResult> {
 
 // ─── /mcp — MCP server status ─────────────────────────────────────────────
 
-async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
+function formatMCPList(servers: MCPStatus[]): string {
+  return servers
+    .map((s) => `- **${s.name}** — ${s.enabled ? "enabled" : "disabled"}`)
+    .join("\n");
+}
+
+async function handleMcp(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const sub = args.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase();
+  if (sub === "reload" || sub === "refresh" || sub === "restart") {
+    try {
+      const res = await ctx.api.reloadMCPAndWait(ctx.host);
+      const servers = await ctx.api.getMCP(ctx.host, ctx.getSessionId?.() || undefined);
+      const header = res.status === "failed" ? "## MCP reload failed" : "## MCP reloaded";
+      const errors = res.errors?.length
+        ? `\n\n${res.errors.map((e) => `- ${e}`).join("\n")}`
+        : "";
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `${header}\n\n${res.tools} tool(s) loaded${res.errors?.length ? ` (${res.errors.length} error(s))` : ""}.${errors}\n\n${formatMCPList(servers)}`,
+        }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `**/mcp reload failed:** ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  }
   try {
     // Scope to this chat so the list reflects its per-session overrides (the
     // server falls back to the process-wide config for a draft/no-session tab).
@@ -3193,14 +3226,11 @@ async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
         messages: [{ role: "assistant", content: "No MCP servers configured." }],
       };
     }
-    const lines = servers.map(
-      (s) => `- **${s.name}** — ${s.enabled ? "enabled" : "disabled"}`,
-    );
     return {
       handled: true,
       messages: [{
         role: "assistant",
-        content: `## MCP Servers\n\n${lines.join("\n")}\n\nToggle a server from the **MCP** section of the Cowork sidebar (applies to this chat).`,
+        content: `## MCP Servers\n\n${formatMCPList(servers)}\n\nToggle a server from the **MCP** section of the Cowork sidebar (applies to this chat).`,
       }],
     };
   } catch (err) {

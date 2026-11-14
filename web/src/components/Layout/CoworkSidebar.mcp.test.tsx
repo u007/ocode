@@ -3,6 +3,7 @@ import { fireEvent, render, cleanup, screen, waitFor } from "@testing-library/re
 import CoworkSidebar from "./CoworkSidebar";
 import { ChatProvider } from "../../stores/chatStore";
 import { api } from "../../api/client";
+import { getActionError, resetActionErrors } from "../../lib/actionErrors";
 import { EMPTY_COMPACT_CONFIG } from "../../lib/compactConfig";
 import { DEFAULT_SPEECH_SUMMARY_CONFIG } from "../../lib/speechSummaryConfig";
 import type { CompactConfig } from "../../api/client";
@@ -62,6 +63,9 @@ vi.mock("../../api/client", () => ({
     getSessionStatus: vi.fn(() => Promise.resolve({})),
     getMCP: vi.fn(() => Promise.resolve(SERVERS)),
     setMCPEnabled: vi.fn(() => Promise.resolve({ name: "beta", status: "enabled" })),
+    reloadMCPAndWait: vi.fn(() =>
+      Promise.resolve({ status: "reloaded" as const, tools: SERVERS.length, errors: [] }),
+    ),
   },
   apiPath: (p: string) => p,
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
@@ -81,6 +85,12 @@ beforeEach(() => {
   window.localStorage.clear();
   vi.mocked(api.getMCP).mockResolvedValue(SERVERS);
   vi.mocked(api.setMCPEnabled).mockResolvedValue({ name: "beta", status: "enabled" });
+  vi.mocked(api.reloadMCPAndWait).mockResolvedValue({
+    status: "reloaded",
+    tools: SERVERS.length,
+    errors: [],
+  });
+  resetActionErrors();
 });
 
 function renderSidebar() {
@@ -148,5 +158,58 @@ describe("CoworkSidebar MCP toggle", () => {
       const after = screen.getByLabelText("MCP server beta") as HTMLInputElement;
       expect(after.checked).toBe(false);
     });
+  });
+});
+
+describe("CoworkSidebar MCP reload", () => {
+  it("waits for the async reload, then refetches the list", async () => {
+    renderSidebar();
+    await openMcpSection();
+
+    fireEvent.click(screen.getByText("Reload all MCP"));
+
+    await waitFor(() => {
+      expect(api.reloadMCPAndWait).toHaveBeenCalledWith(undefined);
+    });
+    await waitFor(() => {
+      expect(vi.mocked(api.getMCP).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("keeps the button busy for the whole poll", async () => {
+    let finish: ((v: { status: "reloaded"; tools: number; errors: string[] }) => void) | undefined;
+    vi.mocked(api.reloadMCPAndWait).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderSidebar();
+    await openMcpSection();
+
+    fireEvent.click(screen.getByText("Reload all MCP"));
+    expect(await screen.findByText("Reloading…")).toBeTruthy();
+
+    finish?.({ status: "reloaded", tools: 2, errors: [] });
+    await waitFor(() => {
+      expect(screen.getByText("Reload all MCP")).toBeTruthy();
+    });
+  });
+
+  it("surfaces the poll errors when the reload failed", async () => {
+    vi.mocked(api.reloadMCPAndWait).mockResolvedValue({
+      status: "failed",
+      tools: 0,
+      errors: ["alpha: boom", "beta: timeout"],
+    });
+    renderSidebar();
+    await openMcpSection();
+
+    fireEvent.click(screen.getByText("Reload all MCP"));
+
+    await waitFor(() => {
+      expect(getActionError()?.message).toContain("alpha: boom");
+    });
+    expect(getActionError()?.message).toContain("Reloading MCP servers failed");
+    expect(getActionError()?.message).toContain("beta: timeout");
   });
 });

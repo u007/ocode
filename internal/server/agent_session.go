@@ -511,8 +511,12 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	// Resolve effective profile per-session when windowId is bound, otherwise
 	// fall back to env > window-state global (v1 global fallback).
+	// mcpCache is read ONCE here under h.mu and carried on the session, so the
+	// MCP wait below never reads the field unsynchronised (a reload swaps it)
+	// and reconcileProfileAgent can tell which cache this agent was built from.
 	h.mu.Lock()
 	effCfg := h.cfg
+	mcpCache := h.mcpCache
 	h.mu.Unlock()
 	var prof string
 	if entry := h.sessions.Lookup(sessionID); entry != nil {
@@ -704,7 +708,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			if timeout <= 0 {
 				timeout = bootstrapMCPTimeout
 			}
-			mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
+			mcpTools, mcpErrs, timedOut := mcpCache.waitTimeout(timeout)
 			ag.AddMCPTools(mcpTools)
 			ag.AddMCPErrors(mcpErrs)
 			if timedOut {
@@ -725,7 +729,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if h.RCBridge() == nil {
 		h.wireJobEventCallbacks(sessionID, ag)
 	}
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled()), communicationStyle: boolPtr(ag.CommunicationStyleEnabled())}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), mcpCache: mcpCache, suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled()), communicationStyle: boolPtr(ag.CommunicationStyleEnabled())}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
 	// server never wires OnSubAgentMessage and a child's messages never reach
@@ -811,6 +815,11 @@ func (h *Handler) resolveSessionProfile(entry *sessionEntry) string {
 //     profile, per the design), or
 //   - the profile hasn't changed.
 //
+// It also carries the DEFERRED rebuilds: a skill toggle, a prompt-fragment
+// toggle, a credential edit and an MCP reload all snapshot their built-with
+// state on the session, so a change made while a turn was running lands here on
+// the next turn instead of tearing the agent down mid-flight.
+//
 // The rebuild calls buildAgentSession (slow: may spawn plugin/MCP processes),
 // which is acceptable because profile switches are rare and happen at turn
 // boundaries.
@@ -857,6 +866,16 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// (that path deliberately defers the swap). skill.DisabledForRoot is
 	// TTL-cached and invalidated by the toggle itself, so this is cheap.
 	skillsChanged := !sameSkillSet(as.disabledSkills, skill.DisabledForRoot(entry.ProjectRoot))
+	// An MCP reload installs a NEW process-wide cache rather than mutating the
+	// one the agent enumerated from. A rebuild deferred mid-turn therefore needs
+	// no pending flag: this session keeps its old pointer until it is rebuilt,
+	// and the pointer comparison below sees the mismatch on the next turn.
+	// Nil means "not recorded" (the session was not built by buildAgentSession),
+	// so there is nothing to compare — same rule as suggestedResponses.
+	h.mu.Lock()
+	currentMCPCache := h.mcpCache
+	h.mu.Unlock()
+	mcpCacheChanged := as.mcpCache != nil && as.mcpCache != currentMCPCache
 	// The suggested-responses fragment is also baked into the cached system prompt
 	// at build time. Its toggle is deferred mid-turn (rebuildAgentsForFeatureChange),
 	// so compare the value the agent was BUILT WITH against the CURRENT config.
@@ -878,7 +897,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// The communication-style fragment is baked in the same way, so it follows
 	// the same built-with-versus-current comparison.
 	styleChanged := as.communicationStyle != nil && *as.communicationStyle != styleNow
-	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged && !suggestedChanged && !styleChanged {
+	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged && !suggestedChanged && !styleChanged && !mcpCacheChanged {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)

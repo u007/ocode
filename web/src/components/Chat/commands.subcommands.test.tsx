@@ -325,3 +325,85 @@ describe("/mcp-auth", () => {
     expect(result.messages?.[0]?.content).toContain("Usage");
   });
 });
+
+describe("/mcp reload waits for the async server reload", () => {
+  const SERVERS = [
+    { name: "alpha", type: "local", enabled: true },
+    { name: "beta", type: "remote", enabled: false },
+  ];
+
+  it("reports the finished reload and lists the servers", async () => {
+    const reloadMCPAndWait = vi.fn(async () => ({
+      status: "reloaded" as const,
+      tools: 4,
+      errors: [],
+    }));
+    const getMCP = vi.fn(async () => SERVERS);
+
+    const result = await dispatchCommand("/mcp reload", ctx({ reloadMCPAndWait, getMCP }));
+    const content = result.messages?.[0]?.content ?? "";
+
+    expect(reloadMCPAndWait).toHaveBeenCalledWith(undefined);
+    expect(content).toContain("## MCP reloaded");
+    expect(content).toContain("4 tool(s) loaded");
+    expect(content).toContain("- **alpha** — enabled");
+    expect(content).toContain("- **beta** — disabled");
+  });
+
+  it("passes the session's host to the wait call", async () => {
+    const reloadMCPAndWait = vi.fn(async () => ({
+      status: "reloaded" as const,
+      tools: 1,
+      errors: [],
+    }));
+    await dispatchCommand(
+      "/mcp refresh",
+      ctx({ reloadMCPAndWait, getMCP: vi.fn(async () => SERVERS) }, { host: "mac-mini" }),
+    );
+    expect(reloadMCPAndWait).toHaveBeenCalledWith("mac-mini");
+  });
+
+  it("includes the poll errors when the reload failed", async () => {
+    const reloadMCPAndWait = vi.fn(async () => ({
+      status: "failed" as const,
+      tools: 0,
+      errors: ["alpha: boom", "beta: timeout"],
+    }));
+
+    const result = await dispatchCommand(
+      "/mcp restart",
+      ctx({ reloadMCPAndWait, getMCP: vi.fn(async () => SERVERS) }),
+    );
+    const content = result.messages?.[0]?.content ?? "";
+
+    expect(content).toContain("## MCP reload failed");
+    expect(content).toContain("2 error(s)");
+    expect(content).toContain("- alpha: boom");
+    expect(content).toContain("- beta: timeout");
+  });
+
+  it("keeps the failure message shape when the wait throws (timeout)", async () => {
+    const reloadMCPAndWait = vi.fn(async () => {
+      throw new Error("MCP reload timed out after 35s");
+    });
+
+    const result = await dispatchCommand(
+      "/mcp reload",
+      ctx({ reloadMCPAndWait, getMCP: vi.fn(async () => SERVERS) }),
+    );
+    expect(result.messages?.[0]?.content).toBe(
+      "**/mcp reload failed:** MCP reload timed out after 35s",
+    );
+  });
+
+  it("formats the default list through the same helper", async () => {
+    const result = await dispatchCommand(
+      "/mcp",
+      ctx({ getMCP: vi.fn(async () => SERVERS) }),
+    );
+    const content = result.messages?.[0]?.content ?? "";
+    expect(content).toContain("## MCP Servers");
+    expect(content).toContain("- **alpha** — enabled");
+    expect(content).toContain("- **beta** — disabled");
+  });
+});

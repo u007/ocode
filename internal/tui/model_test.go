@@ -2087,6 +2087,27 @@ func TestMCPCmdListsConfiguredServers(t *testing.T) {
 	}
 }
 
+// /mcp reload must reach config.Load even when the running TUI has no MCP
+// servers in memory — that is the case where the on-disk config changed.
+func TestMCPCmdReloadReachableWithEmptyConfig(t *testing.T) {
+	m := model{workDir: t.TempDir()}
+
+	runMCPCmd(&m, []string{"reload"})
+
+	if len(m.messages) != 1 {
+		t.Fatalf("expected one message, got %d", len(m.messages))
+	}
+	text := m.messages[0].text
+	if strings.Contains(text, "No MCP servers configured") {
+		t.Fatalf("reload must not be blocked by the empty-config guard, got %q", text)
+	}
+	// The isolated HOME has no model configured, so the agent rebuild fails.
+	// The message must report that instead of promising a reload that did not happen.
+	if !strings.Contains(text, "Failed to reload MCP servers") {
+		t.Fatalf("expected reload failure message, got %q", text)
+	}
+}
+
 func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
 	m := model{
 		input:             textarea.New(),

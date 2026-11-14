@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Per-Chat MCP Toggle
-description: 'Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, and the mcpCache rebuild gotcha.'
+description: 'Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, the mcpCache rebuild gotcha, and the background /api/mcp/reload hot reload (generation-gated, client reuse).'
 tags:
   - mcp
   - sidebar
@@ -10,14 +10,15 @@ tags:
   - session
   - agent-rebuild
   - caching
+  - reload
   - gotcha
-timestamp: 2026-09-25T06:32:57Z
+timestamp: 2026-11-14T16:45:54Z
 ---
 # Per-Chat MCP Toggle
 
 **Type:** Concept
-**Status:** Current as of 2026-09-24
-**Files:** `internal/server/handler_mcp.go`, `internal/server/mcp_cache.go`, `internal/server/agent_session.go`, `web/src/components/Layout/CoworkSidebar.tsx`, `web/src/api/client.ts`
+**Status:** Current as of 2026-11-14
+**Files:** `internal/server/handler_mcp.go`, `internal/server/handler_mcp_reload.go`, `internal/server/mcp_cache.go`, `internal/agent/mcp_clients.go`, `internal/server/agent_session.go`, `web/src/components/Layout/CoworkSidebar.tsx`, `web/src/api/client.ts`
 
 ## Overview
 
@@ -63,6 +64,18 @@ MCP tools are enumerated **once per process** into a process-wide `mcpCache` war
 - **Has overrides**: re-enumerates MCP tools from a **cloned** copy of the session's effective config produced by `applyMCPSessionOverrides`, which honors the per-window profile's `delta.MCP`.
 
 **Invariant:** `applyMCPSessionOverrides` must never mutate the shared `h.cfg.MCP` — it shallow-copies the config and clones the MCP map. Mutating the shared map would leak one chat's toggle into every other chat and into the persisted process default (pinned by a test that fails if the shared config is mutated).
+
+## Hot reload (`POST` / `GET /api/mcp/reload`)
+
+`POST /api/mcp/reload` (`HandleReloadMCP`, `internal/server/handler_mcp_reload.go`) returns **202** `{status:"reloading",generation}` and runs the reload in the background. A second POST while one is in flight returns the same `generation` and starts nothing.
+
+`GET /api/mcp/reload` (`HandleGetMCPReload`, the same file) reports `{status:"idle"|"reloading"|"reloaded"|"failed",generation,tools,errors,finished_at}`. Web clients poll it every 250 ms with a 35 s cap (`api.reloadMCPAndWait`, `web/src/api/client.ts`).
+
+- Reload re-reads the config from disk (`config.Load`), re-merges shared plugin MCP servers, and rebuilds live agents (`rebuildAgentsForFeatureChange`).
+- Config and plugin state are applied even when enumeration fails; the old tool cache is kept and the status is `failed`.
+- MCP clients are reused across reloads when the server name and config signature are unchanged, so a reload does not spawn duplicate subprocesses. Removed or changed servers are closed, and clients are closed at server shutdown (`internal/agent/mcp_clients.go`).
+- `h.cfg` and `mcpCache` stay process-wide by design: every session on the process shares one config, so a reload applies the config of the server's workdir.
+- Live agents reconcile through a built-with cache pointer comparison, not a pending flag.
 
 ## Lifecycle
 

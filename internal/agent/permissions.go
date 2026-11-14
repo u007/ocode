@@ -4070,11 +4070,12 @@ func isPermissionConfigTarget(resolved string) bool {
 
 // isPermissionAPIPath reports whether a URL token's path names a route the
 // agent must not drive on the local server: anything under /api/permissions,
-// or anything under /api/config/ (the model, judge rubrics, prompts, writable
-// roots, discovery and every other config route). Those routes decide the
-// agent's own guards, so the config prefix is broad on purpose: an over-ask on
-// a loopback GET of /api/config/model costs one prompt, an under-ask lets the
-// agent rewrite its own rubric.
+// /api/config/ (the model, judge rubrics, prompts, writable roots, discovery
+// and every other config route), or /api/mcp (MCP reload starts the commands a
+// project's MCP config declares, and enable/disable changes the agent's tool
+// set). Those routes decide the agent's own guards, so the prefixes are broad
+// on purpose: an over-ask on a loopback GET of /api/config/model costs one
+// prompt, an under-ask lets the agent rewrite its own rubric or run a server.
 //
 // The path is read from the raw token, not from a decoded parse, and cleaned
 // the way the server's router would see it: percent-encoding is refused
@@ -4094,7 +4095,9 @@ func isPermissionAPIPath(t string) bool {
 	clean := path.Clean(strings.ToLower(raw))
 	return strings.HasPrefix(clean, "/api/permissions") ||
 		clean == "/api/config" ||
-		strings.HasPrefix(clean, "/api/config/")
+		strings.HasPrefix(clean, "/api/config/") ||
+		clean == "/api/mcp" ||
+		strings.HasPrefix(clean, "/api/mcp/")
 }
 
 // rawURLPathToken returns the undecoded path of a URL-like token: the text

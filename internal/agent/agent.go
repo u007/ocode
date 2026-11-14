@@ -7068,6 +7068,48 @@ func LoadMCPToolsForConfig(cfg *config.Config) mcpLoadResult {
 	return res
 }
 
+// LoadMCPToolsForConfigShared is LoadMCPToolsForConfig with a process-wide
+// client cache: an enabled server whose config is unchanged and whose client is
+// still alive is reused, so a reload re-enumerates tools without spawning a
+// second subprocess. Servers that are disabled or reconfigured are closed after
+// the load. LoadMCPToolsForConfig stays the per-session path, whose overrides
+// must not share clients with the process-wide config.
+func LoadMCPToolsForConfigShared(cfg *config.Config) mcpLoadResult {
+	res := mcpLoadResult{}
+	if cfg == nil {
+		return res
+	}
+	names := make([]string, 0, len(cfg.MCP))
+	for name, serverCfg := range cfg.MCP {
+		if serverCfg.Enabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	enabled := make(map[string]string, len(names))
+	for _, name := range names {
+		serverCfg := cfg.MCP[name]
+		signature := mcpConfigSignature(serverCfg)
+		enabled[name] = signature
+		mcpTools, err := mcpSharedLoadOne(name, serverCfg, signature)
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		for _, mt := range mcpTools {
+			res.Tools = append(res.Tools, mt)
+		}
+	}
+
+	for _, name := range mcpClientsToRetire(mcpRegistryEntries(), enabled) {
+		if old := mcpRegistryDelete(name); old != nil {
+			_ = old.Close()
+		}
+	}
+	return res
+}
+
 // AddMCPErrors records MCP enumeration failures without touching the tool set.
 func (a *Agent) AddMCPErrors(errs []string) {
 	a.mcpErrors = append(a.mcpErrors, errs...)

@@ -1349,6 +1349,7 @@ function HomeApp() {
         listSkills: (host, projectPath) => api.listSkills(host, projectPath),
         getMCP: (host, sessionId) => api.getMCP(host, sessionId),
         reloadMCP: (host) => api.reloadMCP(host),
+        reloadMCPAndWait: (host) => api.reloadMCPAndWait(host),
         startMCPAuth: (name, host) => api.startMCPAuth(name, host),
         getMCPAuthStatus: (jobId, host) => api.getMCPAuthStatus(jobId, host),
         resetSessionId: (sessionId, host) => api.resetSessionId(sessionId, host),

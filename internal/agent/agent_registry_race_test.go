@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/u007/ocode/internal/config"
 )
 
 // TestAgentRegistryConcurrentReloadAndRead pins the invariant that a registry
@@ -106,5 +108,98 @@ func TestAgentRegistryGetIsStableAcrossUpdate(t *testing.T) {
 	// The registry itself must reflect the update.
 	if got := r.Get("build"); got == nil || got.Description != "description written by the test" {
 		t.Fatalf("registry did not apply the update: %+v", got)
+	}
+}
+
+// TestDefaultAgentsConcurrentConfigAndSnapshot pins the lock discipline for the
+// package-level DefaultAgents slice. ApplyAgentConfig runs from live handlers
+// (config save, plugin toggle, MCP reload) while the picker and prompt builders
+// read it through DefaultAgentsSnapshot, so an unguarded write is a plain data
+// race: the observable failure is not a corrupted list but a torn MaxSteps that
+// silently changes an agent's step cap.
+//
+// The barrier makes the writer and the readers provably overlap, so the test
+// cannot pass by finishing the writes before the first read. No sleeps.
+func TestDefaultAgentsConcurrentConfigAndSnapshot(t *testing.T) {
+	// Restore the step caps the test writes: DefaultAgents is package state and
+	// other tests read it.
+	original := DefaultAgentsSnapshot()
+	t.Cleanup(func() {
+		for _, spec := range original {
+			SetDefaultAgentMaxSteps(spec.Name, spec.MaxSteps)
+		}
+	})
+
+	cfg := &config.Config{Agent: map[string]interface{}{
+		"build": map[string]interface{}{"steps": float64(7)},
+		"plan":  map[string]interface{}{"steps": float64(9)},
+	}}
+
+	const (
+		writes  = 40
+		readers = 8
+		perRead = 40
+	)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < writes; i++ {
+			ApplyAgentConfig(cfg)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < writes; i++ {
+			SetDefaultAgentMaxSteps("build", i)
+		}
+	}()
+
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < perRead; j++ {
+				specs := DefaultAgentsSnapshot()
+				if len(specs) == 0 {
+					t.Errorf("DefaultAgentsSnapshot returned no specs")
+					return
+				}
+				_ = PrimaryAgentSpecs()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// A snapshot is the caller's own copy: a later write to the package-level slice
+// must not change a snapshot already handed out.
+func TestDefaultAgentsSnapshotIsIsolated(t *testing.T) {
+	original := DefaultAgentsSnapshot()
+	t.Cleanup(func() {
+		for _, spec := range original {
+			SetDefaultAgentMaxSteps(spec.Name, spec.MaxSteps)
+		}
+	})
+
+	snapshot := DefaultAgentsSnapshot()
+	SetDefaultAgentMaxSteps("build", 42)
+
+	for _, spec := range snapshot {
+		if spec.Name == "build" && spec.MaxSteps == 42 {
+			t.Fatal("a later SetDefaultAgentMaxSteps changed an existing snapshot")
+		}
+	}
+	fresh := DefaultAgentsSnapshot()
+	for _, spec := range fresh {
+		if spec.Name == "build" && spec.MaxSteps != 42 {
+			t.Fatalf("SetDefaultAgentMaxSteps did not reach DefaultAgents: %+v", spec)
+		}
 	}
 }

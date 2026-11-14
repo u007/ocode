@@ -329,6 +329,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/messaging/search", s.authMiddleware(s.handler.handleMessagingSearch))
 	s.mux.HandleFunc("POST /api/messaging/send", s.authMiddleware(s.handler.handleMessagingSend))
 	s.mux.HandleFunc("POST /api/messaging/sync", s.authMiddleware(s.handler.handleMessagingSync))
+	// Facebook Messenger webhook (unauthenticated; verified via hub.verify_token).
+	s.mux.HandleFunc("/api/messaging/messenger/webhook", s.handler.handleMessengerWebhook)
 	// Cloud storage connectors (Phase 1: framework + Google Drive read-only).
 	s.mux.HandleFunc("/api/cloud/connectors", s.authMiddleware(s.handler.handleCloudConnectors))
 	s.mux.HandleFunc("GET /api/cloud/browse", s.authMiddleware(s.handler.handleCloudConnectBrowse))
@@ -754,6 +756,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/mcp/{name}/enable", s.authMiddleware(s.handleEnableMCP))
 	s.mux.HandleFunc("PUT /api/mcp/{name}/disable", s.authMiddleware(s.handleDisableMCP))
 	s.mux.HandleFunc("POST /api/mcp/reload", s.authMiddleware(s.handleReloadMCP))
+	// Async reload status: POST answers 202 immediately and the caller polls
+	// this. Same auth as the POST — it reports tool counts and per-server
+	// enumeration errors.
+	s.mux.HandleFunc("GET /api/mcp/reload", s.authMiddleware(s.handleGetMCPReload))
 	// MCP OAuth (the `/mcp-auth <server>` command). The handler itself refuses
 	// non-loopback callers — the browser callback only reaches a server running
 	// on the caller's own machine (see handler_mcp_auth.go).
@@ -3347,6 +3353,9 @@ func (s *Server) handleDisableMCP(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleReloadMCP(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleReloadMCP(w, r)
+}
+func (s *Server) handleGetMCPReload(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetMCPReload(w, r)
 }
 
 func (s *Server) handleStartMCPAuth(w http.ResponseWriter, r *http.Request) {
