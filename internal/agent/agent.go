@@ -576,6 +576,12 @@ type Agent struct {
 	// one writer, the main agent, so the task tool's todo_item link (a system
 	// write to the plan) is refused when its dispatcher is a sub-agent.
 	isSubAgent bool
+	// helperAgent is set by MarkHelperAgent (advisor, ask side-query, sub-agent).
+	// Their Step prompt is written by a tool or a dispatcher, not a person, so
+	// UserPromptSubmit hooks never run for them (see plugin_hooks.go).
+	helperAgent bool
+	// pluginHooks memoises the plugin hook lists and the UserPromptSubmit run.
+	pluginHooks pluginHookState
 	// advisorInFlight is the root guard for this logical session. Rebuilt agents
 	// and child agents inherit the root pointer through parentAdvisorInFlight;
 	// unrelated sessions get independent guards.
@@ -1324,6 +1330,7 @@ func (a *Agent) PlanPromptEnabled() bool {
 // noise or harmful there. Any NEW helper agent built with NewAgent must call
 // this, so the opt-outs live in one place instead of drifting per call site.
 func (a *Agent) MarkHelperAgent() {
+	a.helperAgent = true
 	a.SetRecapPromptEnabled(false)
 	a.SetPlanPromptEnabled(false)
 	a.SetSuggestedResponsesEnabled(false)
@@ -1661,6 +1668,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	preInjectMessages := append([]Message(nil), messages...)
 	a.RunDiscoveryForMessages(messages)
 	messages = a.PrepareMessages(messages, "")
+	// UserPromptSubmit plugin hooks (user-role tail, once per human prompt). Must
+	// run before the other user-role tails below: it looks for the human prompt
+	// as the last user-role message. See injectPluginPromptTail.
+	messages = a.injectPluginPromptTail(guardCtx, messages)
 	// Order matters for cache stability: stable content
 	// (PrepareMessages output) is followed by the volatile
 	// tail (notes delta, LSP delta, todo re-anchor). Every
@@ -6009,6 +6020,9 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 
 	if a.pipeline != nil && err == nil {
 		result = a.pipeline.RunToolAfter(name, result)
+	}
+	if err == nil {
+		result = a.runPluginPostToolHooks(toolCtx, name, argsStr, result)
 	}
 
 	if err != nil {

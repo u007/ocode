@@ -293,6 +293,32 @@ func LoadProjectPluginAgentsDirPaths(enabled map[string]bool) []string {
 	return loadPluginSubdirPaths([]string{root}, "agents", enabled)
 }
 
+// ClaudeCodePluginAgentsDir is the agents/ directory of one enabled plugin that
+// Claude Code installed, with the plugin name that prefixes its agent names.
+type ClaudeCodePluginAgentsDir struct {
+	Plugin string
+	Dir    string
+}
+
+// LoadClaudeCodePluginAgentsDirs returns the agents/ directory of every enabled
+// Claude Code-installed plugin that has one. It uses the same enable filter as
+// LoadPluginCommandDirPaths. Plugins under ocode's own plugin dirs are left out
+// because LoadGlobalPluginAgentsDirPaths and LoadProjectPluginAgentsDirPaths
+// already load them.
+func LoadClaudeCodePluginAgentsDirs(enabled map[string]bool) []ClaudeCodePluginAgentsDir {
+	var out []ClaudeCodePluginAgentsDir
+	for _, p := range LoadPlugins(enabled) {
+		if p.Source != SourceClaudeCode {
+			continue
+		}
+		agentsDir := filepath.Join(p.Dir, "agents")
+		if info, err := os.Stat(agentsDir); err == nil && info.IsDir() {
+			out = append(out, ClaudeCodePluginAgentsDir{Plugin: p.Name, Dir: agentsDir})
+		}
+	}
+	return out
+}
+
 func loadPluginSubdirPaths(roots []string, subdir string, enabled map[string]bool) []string {
 	var paths []string
 

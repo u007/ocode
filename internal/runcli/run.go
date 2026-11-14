@@ -413,8 +413,7 @@ func resolveCommandPrompt(name, args string) (string, error) {
 	if cmd == nil {
 		return "", fmt.Errorf("command %q not found", name)
 	}
-	p := strings.ReplaceAll(cmd.Prompt, "{{args}}", args)
-	p = strings.ReplaceAll(p, "{args}", args)
+	p := commands.ExpandArgs(cmd.Prompt, args)
 	if !cmd.HasArgs && strings.TrimSpace(args) != "" {
 		p = strings.TrimSpace(p) + "\n\nArguments:\n" + args
 	}

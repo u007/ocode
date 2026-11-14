@@ -292,9 +292,15 @@ Claude Code install; uninstall those from Claude Code.
 | Component | In ocode |
 |---|---|
 | `skills/<name>/SKILL.md` (+ manifest `skills` paths) | Skills named `<plugin>:<name>`, like Claude Code. A bare `<name>` resolves to the plugin skill only when no user/project skill has that name. |
-| `commands/*.md` | Slash commands |
-| `hooks/hooks.json` → `SessionStart` | Command hooks whose matcher accepts `startup` run once per process per project; their `hookSpecificOutput.additionalContext` (or plain stdout) is added to the system prompt next to plugin `instructions`. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PROJECT_DIR}` are expanded and exported; cwd is the project root; 30 s default timeout, 60 s cap. Only plugins with a Claude Code manifest run hooks. |
-| `agents/`, other hook events | Not loaded yet |
+| `commands/*.md` | Slash commands. `$ARGUMENTS` is replaced with the command's arguments, like `{{args}}`. |
+| `hooks/hooks.json` and the manifest `hooks` field → `SessionStart` | The manifest field may be a path, a list of paths, or an inline hooks object; paths outside the plugin directory are ignored. Command hooks whose matcher accepts `startup` run once per process per project; their `hookSpecificOutput.additionalContext` (or plain stdout) is added to the system prompt next to plugin `instructions`. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PROJECT_DIR}` are expanded and exported; cwd is the project root; 30 s default timeout, 60 s cap. Only plugins with a Claude Code manifest run hooks. |
+| `PostToolUse` hooks | Run after a successful tool call when the matcher accepts the tool's Claude Code name (`bash` is `Bash`, `webfetch` is `WebFetch`, an MCP tool is `mcp__<server>__<tool>`). The hook gets `tool_name`, `tool_input`, `tool_response` (a string), `cwd` and `session_id` as JSON on stdin. `updatedToolOutput` replaces the result; a `decision: "block"` reason and `additionalContext` are appended to it. A failing or timed-out hook changes nothing and writes a debug line. Stop cancels a running hook. |
+| `UserPromptSubmit` hooks | Run once per human prompt on the main agent (not on goal or auto-continue resumes, sub-agents or helper agents). Plain stdout or `additionalContext` is sent to the model as a user-role `[ocode:plugin-hook]` block for that turn and is never saved to the transcript. Blocking a prompt is not supported: a `decision: "block"` reply is logged and ignored. |
+| `SubagentStart` hooks | Run once when a sub-agent is dispatched and the matcher accepts its agent name. The output becomes one fixed system message in the child's starting context. Not run again on resume. |
+| `agents/*.md` | Sub-agents named `<plugin>:<name>`, below user and project agents of the same name. A model alias (`haiku`, `sonnet`, `opus`) inherits the parent's model. `tools:` is an allowlist mapped to ocode tools (`Read`, `Grep`, `Glob`, `LS`, `Bash`, `Edit`, `Write`, `MultiEdit`, `WebFetch`, `WebSearch`, `Skill`); other names grant nothing, and an agent whose list grants nothing is not loaded. A `permission:` block is ignored. |
+| Other hook events (`PreToolUse`, `Stop`, `PreCompact`, ...) and non-command hook types | Not loaded |
+
+The hook list of a session is read once and then fixed: a plugin enabled, disabled, installed or removed takes effect in new sessions.
 | `.mcp.json`, manifest `mcpServers` | Stdio MCP servers, started while the plugin is enabled; see [Plugin MCP Servers](#plugin-mcp-servers) |
 
 ## Plugin MCP Servers

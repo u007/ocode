@@ -308,6 +308,145 @@ func TestSessionStartContext(t *testing.T) {
 	}
 }
 
+// hookGroup is one SessionStart matcher group that prints marker.
+func hookGroup(marker string) string {
+	return `{"hooks":[{"type":"command","command":"echo ` + marker + `"}]}`
+}
+
+// hookManifestPlugin installs a Claude Code plugin named manifesthook under
+// home whose manifest "hooks" field is the raw JSON hooks, and returns its dir.
+func hookManifestPlugin(t *testing.T, home, hooks string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "plugins", "cache", "m", "manifesthook", "1")
+	writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"),
+		`{"name":"manifesthook","hooks":`+hooks+`}`)
+	installInClaudeCode(t, home, map[string]string{"manifesthook@m": dir})
+	return dir
+}
+
+func TestSessionStartManifestHooksField(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook fixtures use bash")
+	}
+	cases := []struct {
+		name   string
+		hooks  string
+		files  map[string]string // plugin-relative path -> body
+		want   []string          // markers that must appear, in order
+		absent []string          // markers that must not appear
+	}{
+		{
+			name:  "string path",
+			hooks: `"./config/hooks.json"`,
+			files: map[string]string{"config/hooks.json": `{"hooks":{"SessionStart":[` + hookGroup("FROM_STRING_PATH") + `]}}`},
+			want:  []string{"FROM_STRING_PATH"},
+		},
+		{
+			name:  "array of two paths runs in order",
+			hooks: `["./hooks/a.json","./hooks/b.json"]`,
+			files: map[string]string{
+				"hooks/a.json": `{"hooks":{"SessionStart":[` + hookGroup("A_FIRST") + `]}}`,
+				"hooks/b.json": `{"hooks":{"SessionStart":[` + hookGroup("B_SECOND") + `]}}`,
+			},
+			want: []string{"A_FIRST", "B_SECOND"},
+		},
+		{
+			name:  "inline wrapped object",
+			hooks: `{"hooks":{"SessionStart":[` + hookGroup("WRAPPED_INLINE") + `]}}`,
+			want:  []string{"WRAPPED_INLINE"},
+		},
+		{
+			name:  "inline bare object",
+			hooks: `{"SessionStart":[` + hookGroup("BARE_INLINE") + `]}`,
+			want:  []string{"BARE_INLINE"},
+		},
+		{
+			name:  "array mixing a path and an inline object",
+			hooks: `["./config/hooks.json",{"SessionStart":[` + hookGroup("MIXED_INLINE") + `]}]`,
+			files: map[string]string{"config/hooks.json": `{"hooks":{"SessionStart":[` + hookGroup("MIXED_PATH") + `]}}`},
+			want:  []string{"MIXED_PATH", "MIXED_INLINE"},
+		},
+		{
+			name:  "path escaping the plugin dir is ignored",
+			hooks: `["../outside.json","./config/hooks.json"]`,
+			files: map[string]string{
+				"../outside.json":   `{"hooks":{"SessionStart":[` + hookGroup("ESCAPED") + `]}}`,
+				"config/hooks.json": `{"hooks":{"SessionStart":[` + hookGroup("KEPT") + `]}}`,
+			},
+			want:   []string{"KEPT"},
+			absent: []string{"ESCAPED"},
+		},
+		{
+			name:  "malformed entries and a missing path contribute nothing",
+			hooks: `[42,"./missing.json",{"SessionStart":"bad"},"./config/hooks.json"]`,
+			files: map[string]string{"config/hooks.json": `{"hooks":{"SessionStart":[` + hookGroup("SURVIVES") + `]}}`},
+			want:  []string{"SURVIVES"},
+		},
+		{
+			name:  "hooks/hooks.json and a manifest path both run, hooks.json first",
+			hooks: `"./config/hooks.json"`,
+			files: map[string]string{
+				"hooks/hooks.json":  `{"hooks":{"SessionStart":[` + hookGroup("FROM_HOOKS_JSON") + `]}}`,
+				"config/hooks.json": `{"hooks":{"SessionStart":[` + hookGroup("FROM_MANIFEST_PATH") + `]}}`,
+			},
+			want: []string{"FROM_HOOKS_JSON", "FROM_MANIFEST_PATH"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := isolatePluginEnv(t)
+			dir := hookManifestPlugin(t, home, tc.hooks)
+			for rel, body := range tc.files {
+				writeFile(t, filepath.Join(dir, rel), body)
+			}
+			got := SessionStartContext(nil, t.TempDir())
+			last := -1
+			for _, marker := range tc.want {
+				i := strings.Index(got, marker)
+				if i < 0 {
+					t.Fatalf("missing %q in:\n%s", marker, got)
+				}
+				if i < last {
+					t.Errorf("%q ran out of order in:\n%s", marker, got)
+				}
+				last = i
+			}
+			for _, marker := range tc.absent {
+				if strings.Contains(got, marker) {
+					t.Errorf("unexpected %q in:\n%s", marker, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionStartManifestPathToHooksJSONRunsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook fixtures use bash")
+	}
+	home := isolatePluginEnv(t)
+	dir := hookManifestPlugin(t, home, `["./hooks/hooks.json","./hooks/../hooks/hooks.json"]`)
+	writeFile(t, filepath.Join(dir, "hooks", "hooks.json"),
+		`{"hooks":{"SessionStart":[`+hookGroup("HOOK_RAN_ONCE")+`]}}`)
+	got := SessionStartContext(nil, t.TempDir())
+	if n := strings.Count(got, "HOOK_RAN_ONCE"); n != 1 {
+		t.Fatalf("hook ran %d times, want 1, in:\n%s", n, got)
+	}
+}
+
+func TestRunSessionStartHooksMalformedManifestKeepsHooksJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook fixtures use bash")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":`)
+	writeFile(t, filepath.Join(dir, "hooks", "hooks.json"),
+		`{"hooks":{"SessionStart":[`+hookGroup("HOOKS_JSON_ONLY")+`]}}`)
+	if got := runSessionStartHooks(dir, t.TempDir()); got != "HOOKS_JSON_ONLY" {
+		t.Fatalf("got %q, want HOOKS_JSON_ONLY", got)
+	}
+}
+
 func TestParseHookOutput(t *testing.T) {
 	cases := map[string]string{
 		"":                "",

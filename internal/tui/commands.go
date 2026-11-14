@@ -83,7 +83,7 @@ func refreshCustomCommands(cfg *config.Config, workDir, activeModel string) {
 			Name:        dirName,
 			Description: sc.Description,
 			Prompt:      sc.Content,
-			HasArgs:     strings.Contains(sc.Content, "{{args}}") || strings.Contains(sc.Content, "{args}"),
+			HasArgs:     commands.PromptHasArgs(sc.Content),
 		}
 		customCommandLookup[key] = cmd
 		loadedCustomCommands = append(loadedCustomCommands, *cmd)

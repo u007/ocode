@@ -618,6 +618,11 @@ func (t TaskTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 			Content: "Background Context: " + params.Context,
 		})
 	}
+	// Claude Code SubagentStart hooks: their output is fixed child context, set
+	// once here and never on resume (resume reuses the child's transcript).
+	if m, ok := t.mainAgent.subagentStartMessage(ctx, spec.Name); ok {
+		subAgentMsgs = append(subAgentMsgs, m)
+	}
 	subAgentMsgs = append(subAgentMsgs, Message{Role: "user", Content: params.Prompt})
 
 	attachRunTranscript := func(run *AgentRun) {

@@ -31,6 +31,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/commandctx"
+	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
@@ -9370,9 +9371,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		prompt := customCmd.Prompt
 		userArgs := strings.Join(args, " ")
 		if userArgs != "" {
-			if strings.Contains(prompt, "{{args}}") || strings.Contains(prompt, "{args}") {
-				prompt = strings.ReplaceAll(prompt, "{{args}}", userArgs)
-				prompt = strings.ReplaceAll(prompt, "{args}", userArgs)
+			if commands.PromptHasArgs(prompt) {
+				prompt = commands.ExpandArgs(prompt, userArgs)
 			} else {
 				prompt += "\n\n<user instruction>\n" + userArgs + "\n</user instruction>"
 			}

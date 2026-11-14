@@ -16,6 +16,29 @@ type Command struct {
 	HasArgs     bool
 }
 
+// argsPlaceholders are the prompt placeholders that receive a command's
+// arguments: ocode's {{args}} and {args}, and Claude Code's $ARGUMENTS.
+var argsPlaceholders = []string{"{{args}}", "{args}", "$ARGUMENTS"}
+
+// PromptHasArgs reports whether prompt contains an arguments placeholder.
+func PromptHasArgs(prompt string) bool {
+	for _, p := range argsPlaceholders {
+		if strings.Contains(prompt, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExpandArgs replaces every arguments placeholder in prompt with args. {{args}}
+// goes first because {args} is a substring of it.
+func ExpandArgs(prompt, args string) string {
+	for _, p := range argsPlaceholders {
+		prompt = strings.ReplaceAll(prompt, p, args)
+	}
+	return prompt
+}
+
 func LoadCommands(enabled map[string]bool) []Command {
 	var cmds []Command
 	seen := make(map[string]bool)
@@ -136,7 +159,7 @@ func parseCommandFile(path string) (Command, error) {
 		}
 	}
 
-	hasArgs := strings.Contains(prompt, "{{args}}") || strings.Contains(prompt, "{args}")
+	hasArgs := PromptHasArgs(prompt)
 
 	return Command{
 		Name:        name,

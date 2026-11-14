@@ -729,6 +729,23 @@ the fallback, never the reverse. Details: `docs/concepts/web-context-gauge-resol
   because it lands in the cached prompt prefix; re-running per turn would
   both spawn subprocesses and risk busting the prefix. Invalidate on plugin
   install/remove, never per turn.
+- **Claude Code hook events other than SessionStart** (`PostToolUse`,
+  `UserPromptSubmit`, `SubagentStart`; `internal/agent/plugin_hooks.go`,
+  `internal/plugins/claudehooks.go`). The hook list is memoised per agent
+  (`pluginHooksFor`); never go back to resolving it per tool call, which
+  re-scans the plugin directories. `UserPromptSubmit` output is a user-role
+  `[ocode:plugin-hook]` tail block, never system-role and never persisted, and
+  runs only for a genuine human prompt (`isHumanPromptMessage`): a new
+  synthetic user-role message must start with an `[ocode:` marker or it will
+  trigger the hooks. `SubagentStart` output is one system message set at child
+  creation only. No lock is held while a hook runs. A hook failure never
+  fails the turn, and always writes a debug line.
+- **A Claude Code plugin agent's `tools:` list is enforced through
+  `AgentDefinition.Tools`, never through `Permissions`.** A sub-agent's
+  `Permissions` are applied to the parent's shared `PermissionManager`, so a
+  plugin agent's `write: deny` would deny writes for the main agent and every
+  sibling. An empty `Tools` means all tools, so a `tools:` field that maps to
+  nothing must not load the agent.
 
 ## MCP Apps widgets and plugin MCP servers
 An MCP tool whose `tools/list` entry declares `_meta.ui.resourceUri` gets its `ui://` HTML rendered by the web chat; enabled plugins' stdio `.mcp.json` servers are merged into `cfg.MCP` in memory. Flow, host protocol and limits: `docs/concepts/mcp-apps-widgets.md`. Invariants:

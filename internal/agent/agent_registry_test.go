@@ -603,6 +603,23 @@ func TestChildAgentSession(t *testing.T) {
 	}
 }
 
+// TestChildSessionIDSanitisesAgentName checks that a plugin agent name with a
+// colon, slash or space yields a file-name-safe id, while a plain name is kept.
+func TestChildSessionIDSanitisesAgentName(t *testing.T) {
+	if id := childSessionID("ses_parent", "okf:context"); !strings.Contains(id, "_child_okf-context_") {
+		t.Fatalf("colon not sanitised: %q", id)
+	}
+	if id := childSessionID("ses_parent", "explore"); !strings.Contains(id, "_child_explore_") {
+		t.Fatalf("plain name changed: %q", id)
+	}
+	if id := childSessionID("ses_parent", "a/b c"); !strings.Contains(id, "_child_a-b-c_") {
+		t.Fatalf("slash or space not sanitised: %q", id)
+	}
+	if meta := childSessionMetadata("ses_parent", "okf:context", "running"); meta["agent_name"] != "okf:context" {
+		t.Fatalf("metadata agent_name must keep the real name, got %v", meta["agent_name"])
+	}
+}
+
 // Hidden agents must be excluded from BOTH the description and the JSON
 // Schema enum. An earlier iteration only filtered the description, which
 // meant the model could still call task(agent="secret") via the enum.
