@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,4 +140,104 @@ func (h *Handler) handleCloudConnectMetadata(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, e)
+}
+
+// handleCloudConnectWrite writes text content to a connector path.
+// POST /api/cloud/write  {connector_id, path, content}
+func (h *Handler) handleCloudConnectWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	mgr := h.cloudManager()
+	if mgr == nil {
+		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB
+	var in struct {
+		ConnectorID string `json:"connector_id"`
+		Path        string `json:"path"`
+		Content     string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.ConnectorID == "" || in.Path == "" {
+		http.Error(w, "connector_id and path required", http.StatusBadRequest)
+		return
+	}
+	if err := mgr.Write(r.Context(), in.ConnectorID, in.Path, strings.NewReader(in.Content), int64(len(in.Content))); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": in.Path})
+}
+
+// handleCloudConnectUpload handles multipart file upload.
+// POST /api/cloud/upload  (multipart: connector_id, path, file)
+func (h *Handler) handleCloudConnectUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	mgr := h.cloudManager()
+	if mgr == nil {
+		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20) // 50 MB
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := r.FormValue("connector_id")
+	path := r.FormValue("path")
+	if id == "" || path == "" {
+		http.Error(w, "connector_id and path required", http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	// read into buffer to get size
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := mgr.Write(r.Context(), id, path, bytes.NewReader(data), int64(len(data))); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": path})
+}
+
+// handleCloudConnectDelete deletes a file at a connector path.
+// DELETE /api/cloud/delete?connector_id=...&path=...
+func (h *Handler) handleCloudConnectDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	mgr := h.cloudManager()
+	if mgr == nil {
+		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.URL.Query().Get("connector_id")
+	path := r.URL.Query().Get("path")
+	if id == "" || path == "" {
+		http.Error(w, "connector_id and path required", http.StatusBadRequest)
+		return
+	}
+	if err := mgr.Delete(r.Context(), id, path); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

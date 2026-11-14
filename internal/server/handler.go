@@ -779,6 +779,7 @@ func NewHandler() *Handler {
 	// Cloud storage connectors (Phase 1: framework + Google Drive read-only).
 	var ccMgr *cloudconnect.Manager
 	ccMgr = cloudconnect.NewManager(gd, defaultWorkDir, os.Getenv("OCODE_CLOUD_MASTER_PASSWORD"))
+	cloudconnect.DefaultManager = ccMgr
 
 	monacoStore, err := monaco.NewStore()
 	if err != nil {

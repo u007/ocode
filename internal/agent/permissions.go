@@ -4057,7 +4057,7 @@ func isPermissionConfigTarget(resolved string) bool {
 	// ocode global config files (config dir) that gate permissions/allowlist.
 	if cfgDir, err := paths.GlobalConfigDir(); err == nil && pathUnderRoot(resolved, cfgDir) {
 		switch base {
-		case "ocodeconfig.json", "opencode.json", "autopermission-prompt.md", "smartpermission-prompt.md":
+		case "ocodeconfig.json", "opencode.json", "autopermission-prompt.md", "smartpermission-prompt.md", "storage-connectors.json":
 			return true
 		}
 	}
@@ -4751,6 +4751,7 @@ func isNetworkAPIClient(word string) bool {
 // shell expansion could rewrite is asked too, because the route it reaches
 // cannot be read off the text.
 func permissionApiLoopback(command string) bool {
+	command = stripInertHeredocBodies(command)
 	if fields := splitShellFields(spaceOutOperators(command)); lineRedirectSignalAll(command) != "" && lineHasNetworkClient(fields) {
 		return true
 	}

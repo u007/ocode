@@ -5157,6 +5157,13 @@ export const api = {
     fetchJSON<any>(`/api/cloud/metadata?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, undefined, host),
   writeCloudConnector: (id: string, path: string, content: string, host?: string) =>
     fetchJSON<any>("/api/cloud/write", { method: "POST", body: JSON.stringify({ connector_id: id, path, content }) }, host),
+  uploadCloudConnector: (id: string, path: string, file: File, host?: string) => {
+    const form = new FormData();
+    form.append("connector_id", id);
+    form.append("path", path);
+    form.append("file", file);
+    return fetchJSON<any>("/api/cloud/upload", { method: "POST", body: form }, host);
+  },
   deleteCloudConnector: (id: string, path: string, host?: string) =>
     fetchJSON<any>(`/api/cloud/delete?connector_id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, { method: "DELETE" }, host),
   startCloudOAuth: (payload: any, host?: string) =>

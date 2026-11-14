@@ -29,6 +29,7 @@ var expectedBuiltinTools = []string{
 	"chat_read_messages",
 	"chat_search_messages",
 	"chat_send",
+	"cloud_storage",
 	"read",
 	"undo_file_change",
 	"write",

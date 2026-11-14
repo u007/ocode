@@ -45,6 +45,7 @@ import CommandPalette from "./components/common/CommandPalette";
 import GitPanel from "./components/Git/GitPanel";
 import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
+import CloudFileTree from "./components/Files/CloudFileTree";
 import FileTabContent from "./components/Files/FileTabContent";
 import type { TreeRevealRequest } from "./components/Files/FileTree";
 import LogPanel from "./components/Logs/LogPanel";
@@ -1347,6 +1348,7 @@ function HomeApp() {
         getLSPStatuses: (host) => api.getLSPStatuses(host),
         listSkills: (host, projectPath) => api.listSkills(host, projectPath),
         getMCP: (host, sessionId) => api.getMCP(host, sessionId),
+        reloadMCP: (host) => api.reloadMCP(host),
         startMCPAuth: (name, host) => api.startMCPAuth(name, host),
         getMCPAuthStatus: (jobId, host) => api.getMCPAuthStatus(jobId, host),
         resetSessionId: (sessionId, host) => api.resetSessionId(sessionId, host),
@@ -1922,6 +1924,11 @@ function HomeApp() {
                         if (!proj) return;
                         setFocusedKind("terminal");
                         openTerminal(proj.path, proj.host, folderPath);
+                      }}
+                    />
+                    <CloudFileTree
+                      onOpenFile={(path, connectorId) => {
+                        void openFileAndShow(`cloud://${connectorId}/${path}`);
                       }}
                     />
                   </div>

@@ -200,7 +200,7 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   Consequence: an interpreter heredoc body is not inspected in sandbox mode
   (previously a body line that happened to read `git reset …` asked).
 - writes to permission-defining files (`.ocode/settings.json`,
-  `.claude/settings.json`, ocode config gating files) and loopback requests to
+  `.claude/settings.json`, `storage-connectors.json`, ocode config gating files) and loopback requests to
   `/api/permissions*` or to any `/api/config/*` path → Ask (self-escalation guard, all modes).
   The path is taken from the raw request token, cleaned and lowercased before matching, and
   the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
@@ -229,8 +229,8 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   whatever its host. (c) A config or input-source option asks unconditionally: curl `-K` and
   `--config`, and wget `-i`, `--input-file`, `-e`, `--execute` and `--config`, in any spelling,
   including getopt-style abbreviations of four or more characters with the dashes
-  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:618` and
-  `:598`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
+  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:619` and
+  `:599`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
   and anywhere on it (any segment, loop, function or group) there is a redirecting environment
   assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration
   aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` (or `set -o allexport`),

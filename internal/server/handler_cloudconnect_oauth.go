@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -191,7 +192,9 @@ func (h *Handler) handleCloudConnectOAuthCallback(w http.ResponseWriter, r *http
 	data.Set("grant_type", "authorization_code")
 	data.Set("code_verifier", flow.verifier)
 
-	req, err := http.NewRequestWithContext(r.Context(), "POST", tokenURL, strings.NewReader(data.Encode()))
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

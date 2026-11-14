@@ -40,6 +40,7 @@ import QuickActionsForm from "./QuickActionsForm";
 import SkillsForm from "./SkillsForm";
 import ConnectorsForm from "./ConnectorsForm";
 import ChatConnectorsForm from "./ChatConnectorsForm";
+import CloudConnectorsForm from "./CloudConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
 import PromptsForm from "./PromptsForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
@@ -51,6 +52,7 @@ export type SettingsGroupId =
   | "tts"
   | "stt"
   | "connectors"
+  | "cloud-connectors"
   | "chat-connectors"
   | "profiles"
   | "profile-debug"
@@ -124,6 +126,7 @@ const OCODE_GROUPS: GroupDef[] = [
   // Discovery & Skills
   { id: "discovery", label: "Discovery", category: "Discovery & Skills" },
   { id: "connectors", label: "Connectors", category: "Discovery & Skills" },
+  { id: "cloud-connectors", label: "Cloud Connectors", category: "Discovery & Skills" },
   { id: "chat-connectors", label: "Chat Connectors", category: "Discovery & Skills" },
   { id: "plugins", label: "Plugins & Local Models", category: "Discovery & Skills" },
   { id: "skills", label: "Skills", category: "Discovery & Skills" },
@@ -177,6 +180,8 @@ function renderGroup(id: SettingsGroupId) {
       return <ConnectorsForm />;
     case "chat-connectors":
       return <ChatConnectorsForm />;
+    case "cloud-connectors":
+      return <CloudConnectorsForm />;
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":

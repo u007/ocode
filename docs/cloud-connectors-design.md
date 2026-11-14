@@ -1,6 +1,6 @@
 # Design: Cloud Storage Connectors (Drive, OneDrive, GCS, S3)
 
-Status: Phase 2 in progress (virtual roots + Write/Delete + OAuth PKCE + keychain + sandbox gating). Phase 1 read-only complete.
+Status: Phase 2 in progress (Write/Delete + upload + OAuth PKCE + keychain + sandbox gating). Virtual roots via separate Cloud section. Edit-in-place and unified tree open.
 Author: ocode agent
 Date: 2026-10-08
 

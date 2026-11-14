@@ -13,6 +13,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/encryption"
+	"github.com/u007/ocode/internal/keychain"
 	"github.com/u007/ocode/internal/paths"
 )
 
@@ -22,6 +23,7 @@ type Manager struct {
 	dataDir        string
 	projectRoot    string
 	masterPassword string
+	keychainStore  keychain.Store
 	connectors     map[string]Connector // id -> connector
 	configs        map[string]Config    // id -> metadata
 	secrets        map[string]SecretBundle
@@ -39,6 +41,7 @@ func NewManager(dataDir, projectRoot, masterPassword string) *Manager {
 		dataDir:        dataDir,
 		projectRoot:    projectRoot,
 		masterPassword: masterPassword,
+		keychainStore:  keychain.New(keychain.WithPath(filepath.Join(dataDir, "cloud-secrets.enc")), keychain.WithMasterPassword(masterPassword)),
 		connectors:     map[string]Connector{},
 		configs:        map[string]Config{},
 		secrets:        map[string]SecretBundle{},
@@ -69,11 +72,22 @@ func (m *Manager) load() {
 			}
 		}
 	}
-	// Load encrypted secrets.
-	if m.masterPassword != "" {
+	// Load secrets: prefer OS keychain, fall back to encrypted file.
+	loaded := false
+	if m.keychainStore != nil {
+		// keychain stores one JSON blob per connector under service ocode-cloud
+		// We store the whole map under account "_all" for simplicity.
+		if v, err := m.keychainStore.Get("ocode-cloud", "_all"); err == nil {
+			var m2 map[string]SecretBundle
+			if json.Unmarshal([]byte(v), &m2) == nil {
+				m.secrets = m2
+				loaded = true
+			}
+		}
+	}
+	if !loaded && m.masterPassword != "" {
 		data, err := os.ReadFile(m.secretsPath())
 		if err == nil {
-			// file stores an encrypted envelope string
 			plain, err := encryption.DecryptJSON(string(data), m.masterPassword)
 			if err == nil {
 				var m2 map[string]SecretBundle
@@ -111,12 +125,19 @@ func (m *Manager) saveMetadata() error {
 }
 
 func (m *Manager) saveSecrets() error {
-	if m.masterPassword == "" {
-		return nil // in-memory only
-	}
 	data, err := json.Marshal(m.secrets)
 	if err != nil {
 		return err
+	}
+	// Primary: OS keychain (when available).
+	if m.keychainStore != nil {
+		if err := m.keychainStore.Set("ocode-cloud", "_all", string(data)); err == nil {
+			return nil
+		}
+	}
+	// Fallback: encrypted file (requires master password).
+	if m.masterPassword == "" {
+		return nil // in-memory only
 	}
 	enc, err := encryption.EncryptJSON(data, m.masterPassword)
 	if err != nil {
@@ -155,6 +176,9 @@ func (m *Manager) Remove(id string) error {
 	delete(m.secrets, id)
 	if err := m.saveMetadata(); err != nil {
 		return err
+	}
+	if m.keychainStore != nil {
+		_ = m.keychainStore.Delete("ocode-cloud", "_all")
 	}
 	return m.saveSecrets()
 }
@@ -267,3 +291,7 @@ func ResolveConflictPath(conn Connector, path string) string {
 func (m *Manager) ResolveConflictPath(conn Connector, path string) string {
 	return ResolveConflictPath(conn, path)
 }
+
+// DefaultManager is the process-wide cloud connector manager, set by the
+// server host at startup. Tools and other non-HTTP callers read it.
+var DefaultManager *Manager

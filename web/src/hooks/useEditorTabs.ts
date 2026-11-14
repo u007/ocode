@@ -156,6 +156,47 @@ export function useEditorTabs(): UseEditorTabsResult {
     // over focus, selection sync, and caret position.
     openFileIdsRef.current.add(id);
 
+    // Cloud-backed files: fetch content from the connector, open in Monaco,
+    // and save back through the cloud write endpoint. Path format:
+    // cloud://<connector_id>/<path-within-connector>.
+    if (path.startsWith("cloud://")) {
+      const rest = path.slice("cloud://".length);
+      const slash = rest.indexOf("/");
+      const connectorId = slash === -1 ? rest : rest.slice(0, slash);
+      const cloudPath = slash === -1 ? "" : rest.slice(slash + 1);
+      try {
+        const text = await api.readCloudConnector(connectorId, cloudPath);
+        const content = typeof text === "string" ? text : JSON.stringify(text);
+        setEditorTabs((prev) =>
+          prev.some((t) => t.id === id)
+            ? prev
+            : [
+                ...prev,
+                {
+                  id,
+                  path,
+                  projectRoot: projectRoot ?? "",
+                  projectHost: host,
+                  content,
+                  originalContent: content,
+                  isBinary: false,
+                  isDirty: false,
+                  diffVersion: 0,
+                  externalChange: false,
+                  includeInContext: true,
+                  baseHash: hashContent(content),
+                },
+              ],
+        );
+        setActiveEditorTabId(id);
+        return true;
+      } catch (err) {
+        openFileIdsRef.current.delete(id);
+        console.error("Failed to open cloud file:", err);
+        return false;
+      }
+    }
+
     // Preview-only formats (PDF/Office/media) and legacy .doc/.ppt render a
     // viewer (or the OS-open pane) for the Files tab, never Monaco. Skip the
     // /api/files/content fetch: the viewers read their own bytes via
@@ -565,6 +606,26 @@ export function useEditorTabs(): UseEditorTabsResult {
     async (id: string, opts?: { force?: boolean }) => {
       const tab = editorTabs.find((t) => t.id === id);
       if (!tab) return;
+      // Cloud-backed tabs save through the cloud write endpoint.
+      if (tab.path.startsWith("cloud://")) {
+        const rest = tab.path.slice("cloud://".length);
+        const slash = rest.indexOf("/");
+        const connectorId = slash === -1 ? rest : rest.slice(0, slash);
+        const cloudPath = slash === -1 ? "" : rest.slice(slash + 1);
+        try {
+          await api.writeCloudConnector(connectorId, cloudPath, tab.content);
+          setSaveError(null);
+          setEditorTabs((prev) =>
+            prev.map((t) =>
+              t.id === id ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false, baseHash: hashContent(t.content) } : t,
+            ),
+          );
+        } catch (err) {
+          setSaveError(err instanceof Error ? err.message : "Failed to save cloud file");
+          throw err;
+        }
+        return;
+      }
       try {
         // Preview-only tabs (Excel, PDF, DOCX, and the other viewer-only kinds)
         // save through the handler registered via registerExcelSaveHandler, never
