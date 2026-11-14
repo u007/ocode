@@ -6,8 +6,10 @@ import "time"
 type Provider string
 
 const (
-	ProviderTelegram Provider = "telegram"
-	ProviderWhatsApp Provider = "whatsapp"
+	ProviderTelegram  Provider = "telegram"
+	ProviderWhatsApp  Provider = "whatsapp"
+	ProviderFacebook  Provider = "facebook"
+	ProviderMessenger Provider = "messenger"
 )
 
 // Account is a configured connector account (one bot/phone number).

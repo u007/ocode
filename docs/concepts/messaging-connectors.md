@@ -1,23 +1,27 @@
 ---
 type: Concept
-title: Messaging connectors — WhatsApp/Telegram accounts, storage, tools, HTTP surface and sync
-description: '''The chat-connector subsystem: internal/messaging (Store, Manager, Platform), the SQLite schema (accounts, chats, messages, messages_fts, sync_cursor), Telegram and WhatsApp providers, the five chat_* LLM tools, /api/messaging/* endpoints, the ChatConnectorsForm settings surface (sync button + messaging_message SSE consumer), the cursor-based ExportChanges/ImportMessages sync primitives, the stub PushToRemote/PullFromRemote remote sync (kakiit endpoints required), security rules (masked credentials, 0600 store), and the untrusted-inbound labeling.'''
+title: Messaging connectors — WhatsApp/Telegram/Messenger accounts, storage, tools, webhook and sync
+description: 'The chat-connector subsystem: internal/messaging (Store, Manager, Platform), the SQLite schema (accounts, chats, messages, messages_fts, sync_cursor), the Telegram, WhatsApp and Facebook Messenger providers, the five chat_* LLM tools, /api/messaging/* endpoints including the unauth''d Messenger webhook, the ChatConnectorsForm settings surface, cursor-based sync primitives, security rules (masked credentials, 0600 store, HMAC-SHA256 webhook signatures, 1 MiB body cap), and the untrusted-inbound labeling.'
 resource: internal/messaging
 tags:
   - messaging
   - telegram
   - whatsapp
+  - facebook
+  - messenger
+  - webhook
   - sqlite
   - tools
   - server
   - settings
   - security
   - sync
-timestamp: 2026-11-11T03:35:23Z
+timestamp: 2026-11-14T16:53:14Z
 ---
-New, experimental subsystem (files were untracked at time of writing) that links ocode
-to chat platforms: accounts are configured once, inbound messages are persisted to
-SQLite, and both the agent and the web UI can read, search and send.
+Experimental subsystem that links ocode to chat platforms: accounts are configured once,
+inbound messages are persisted to SQLite, and both the agent and the web UI can read,
+search and send. Three providers share one interface — Telegram, WhatsApp and Facebook
+Messenger.
 
 It is **server-mode only**. `messaging.DefaultManager` is set at server boot
 (`internal/server/handler.go:766`); a TUI or headless process never sets it, so every
@@ -35,11 +39,13 @@ connector subsystem.
 | `Store` | SQLite persistence for accounts, chats, messages (`internal/messaging/store.go:20`) |
 | `Manager` | Owns the account list and the live per-account providers (`internal/messaging/manager.go`) |
 | `Platform` | Provider interface: `Name`, `Start(ctx, Account, *Store, InboundHandler)`, `Stop`, `Send(ctx, chatID, text)`, `Status` (`internal/messaging/manager.go:10`) |
+| `TelegramProvider` / `WhatsAppProvider` / `MessengerProvider` | One implementation per platform |
 | `Account` / `Chat` / `Message` | Wire + persistence records (`internal/messaging/types.go`) |
 
 - `NewManager(store, dataDir)` keeps `map[accountID]Platform`; `StartAccount` constructs
-  the provider, starts it, and records it in the map
-  (`internal/messaging/manager.go:54`).
+  the provider by `Account.Provider` (`internal/messaging/manager.go:38-44`, where
+  `ProviderFacebook` and `ProviderMessenger` both build a `MessengerProvider`), starts
+  it, and records it in the map.
 - The inbound callback is wired in `StartAccount`: every provider message is written with
   `store.AddMessage` before being forwarded to `Manager.OnInbound`.
 - `Send` requires a live provider, sends, then persists the outbound message with
@@ -81,18 +87,78 @@ creating the parent directory with mode `0700` and chmodding the database file t
 |----------|----------------|-----------|
 | Telegram | `go-telegram-bot-api/v5` (`internal/messaging/telegram.go`) | Credentials are the bot token. Starts a long-poll `GetUpdates` loop under `crashguard.Go`; each update upserts the chat and emits an inbound `Message`. Sends via `SendMessage`. Media is only flagged (`media_url = "photo"`), not downloaded. |
 | WhatsApp | `whatsmeow` (`internal/messaging/whatsapp.go`) | Per-account `whatsmeow` SQLite session at `<dataDir>/whatsapp/<accountID>/session.db` (directory `0700`). Uses the first device; an unpaired device runs `GetQRChannel`, sets status `awaiting_qr` and stores the QR code on the provider. Text is read from `GetConversation()` only. |
+| Facebook Messenger | Graph API v18.0 (`internal/messaging/messenger.go`) | Credentials are a JSON blob `{page_token, verify_token, app_secret}`; a bare non-JSON string is treated as the page token (`parseMessengerCreds`, `internal/messaging/messenger.go:28`). `Start` requires a page token, resolves page id/name via `GET /me`, registers the provider by page id and verify token, and sets status `connected`. There is **no polling loop** — inbound arrives over the webhook. `Send` POSTs `/me/messages`. |
 
-Both run their event loop in `crashguard.Go`, so a panic is recovered with ocode's
-crash guard rather than killing the server.
+Telegram and WhatsApp run their event loop in `crashguard.Go`, so a panic is recovered
+with ocode's crash guard rather than killing the server. Messenger has no loop; its
+webhook handler dispatches each inbound through `crashguard.Go`.
 
 Known provider limitations in this first cut:
 - The WhatsApp QR is captured on the provider and exposed as a base64 data URL by
   `GET /api/messaging/accounts/{id}/qr`; the settings form fetches it on each load for
   accounts whose status starts with `awaiting_qr`.
 - WhatsApp extended text messages (non-`conversation` payloads) arrive with empty text,
-  and media is not downloaded for either provider.
+  and media is not downloaded for any provider.
 - Telegram chat titles fall back `Title → FirstName → chat id`; WhatsApp groups are
   stored as type `dm` (the provider does not classify them).
+- Messenger chats are stored as type `dm` with the sender id as both id and title, and
+  only text messages are persisted (attachments/quick replies are ignored).
+
+## Facebook Messenger webhook
+
+Route: **`/api/messaging/messenger/webhook`** (`internal/server/server.go:333`), a thin
+`Handler.handleMessengerWebhook` wrapper around `messaging.HandleMessengerWebhook`
+(`internal/messaging/messenger.go:268`).
+
+- **It is the one messaging route NOT behind `authMiddleware`.** Meta calls it
+  unauthenticated; the `hub.verify_token` (GET) and the app-secret signature (POST) are
+  its only gates. Every other `/api/messaging/*` route is wrapped in `authMiddleware`
+  (`internal/server/server.go:324-331`).
+- **GET = subscription verification.** With `hub.mode=subscribe` it looks up the
+  `hub.verify_token` in the live-provider registry and echoes `hub.challenge` on a match;
+  anything else is `403`. Because the lookup is against *registered* providers, the
+  account must already be **started** for Meta to verify the webhook.
+- **POST = events.** It decodes `entry[].messaging[]`, skips echoes and messages whose
+  sender is the page, routes by `recipient.id` (falling back to `entry.id`) through the
+  page-id registry, and persists each message (upserting the chat) before handing it to
+  the inbound handler. It always answers `200 EVENT_RECEIVED` after processing so Meta
+  does not retry.
+- **Body size cap: 1 MiB** — `http.MaxBytesReader(w, r.Body, 1<<20)`
+  (`internal/messaging/messenger.go:284`). A larger POST is truncated at the reader, so
+  the JSON will fail to parse and no message is ingested.
+
+### Security: app secret is required, signature is HMAC-SHA256
+
+- **An app secret is mandatory.** If the matched provider has no `app_secret` the POST is
+  rejected with `403 app secret required` (`internal/messaging/messenger.go:342`);
+  there is no unsigned-ingest mode.
+- **Every POST is verified** with `X-Hub-Signature-256: sha256=<hex>`, an
+  HMAC-SHA256 over the **raw request body** keyed by the app secret
+  (`verifyMessengerSignature`, `internal/messaging/messenger.go:253`). The comparison is
+  `hmac.Equal`; a missing/malformed header or wrong digest is `403 invalid signature`.
+  Read the body before signature checking (the handler does) — re-serialising JSON would
+  change the bytes and break the MAC.
+- The `verify_token` defaults to the account id when omitted, which makes the GET
+  handshake guessable; set an explicit random value.
+
+- **Sender gating.** `allowed_senders` (list of PSIDs in the credentials JSON) restricts
+  which Facebook users may drive the agent. When empty, **every** sender is accepted —
+  same as the other connectors — so keep the page private or restrict it via Meta's
+  page settings unless you have set an allowlist.
+- **Outbound limits.** Replies longer than 2000 chars are chunked; the Graph API
+  version is pinned to `v18.0`; 24-hour messaging-window errors surface from `Send`
+  rather than being retried.
+
+### Hosting: needs a public HTTPS webhook, not the Tailscale artifact mount
+
+Meta requires a publicly reachable **HTTPS** URL for the webhook. The Tailscale funnel
+mount ocode exposes is **artifact-only**: `artifactTailscalePath` is `"p"` and
+`newArtifactTailscaleShare` pins `upstreamPath` to `/p`, so `--set-path /p` forwards only
+`/p/*` artifact routes to the local server (`internal/server/tailscale_share.go:29-32`,
+`:125-140`). It is not a general reverse proxy and cannot reach
+`/api/messaging/messenger/webhook`. Put the connector behind your own HTTPS reverse proxy
+(or a dedicated funnel for the API origin) and point the Meta app's webhook subscription
+at that URL.
 
 ## LLM tools
 
@@ -118,10 +184,10 @@ Five builtins registered in `internal/tool/tool.go:239` (`internal/tool/messagin
 
 ## HTTP API
 
-All routes are registered in `Server.registerRoutes()` behind `authMiddleware`
-(`internal/server/server.go:323-330`); handlers live in
+Managing routes are registered in `Server.registerRoutes()` behind `authMiddleware`
+(`internal/server/server.go:324-331`); handlers live in
 `internal/server/handler_messaging.go`. Every handler returns 503 when messaging was not
-initialized at boot.
+initialized at boot. The Messenger webhook is the exception (unauthenticated, see above).
 
 | Method + path | Purpose |
 |---------------|---------|
@@ -136,6 +202,7 @@ initialized at boot.
 | `GET /api/messaging/search?q=&account_id=` | FTS search |
 | `POST /api/messaging/send` | `{account_id, chat_id, text}` → `{id}` |
 | `POST /api/messaging/sync` | `{url, dir}` → push (`dir != "pull"`) or pull; `{cursor, status}` on push |
+| `GET/POST /api/messaging/messenger/webhook` | **unauthenticated** Meta verification + event delivery |
 
 Note: the messages handler currently parses but ignores `?limit` and always uses the
 store default of 50 (`internal/server/handler_messaging.go:139`).
@@ -195,9 +262,11 @@ stub for a real client does not need a new timeout policy.
 `chat-connectors` tab (`web/src/components/Settings/SettingsPanel.tsx:179`) and is a
 **global** surface (no project host binding, unlike the connectors form). It lists
 accounts with live status, offers Start / Stop / Remove per row, renders the WhatsApp QR
-when one is available, and an add form choosing Telegram (bot token) or WhatsApp (QR
-pairing). It only ever renders id, provider, label, status and error, because that is all
-the GET returns.
+when one is available, and an add form choosing Telegram (bot token), WhatsApp (QR
+pairing) or Messenger. It only ever renders id, provider, label, status and error,
+because that is all the GET returns. For Messenger it shows the webhook URL and the
+constraints inline: "must be publicly reachable; Meta requires HTTPS. App secret is
+required." (`web/src/components/Settings/ChatConnectorsForm.tsx:125`).
 
 Two sync-facing behaviours live here:
 
@@ -227,6 +296,11 @@ Two sync-facing behaviours live here:
 - **Inbound text is untrusted.** Read/search tool output is wrapped in the
   `UNTRUSTED CONNECTOR MESSAGES` notice; messages are third-party content and must not be
   treated as instructions.
+- **The Messenger webhook is public and self-authenticating.** It bypasses
+  `authMiddleware`, so the app secret + HMAC-SHA256 check is the only thing standing
+  between the internet and the message store; an account with no `app_secret` cannot
+  receive at all. The GET handshake is a plain token compare, so use a random
+  `verify_token`.
 - **Account deletion does not scrub the WhatsApp session directory**, which retains the
   device credentials used to pair.
 
@@ -257,7 +331,10 @@ h.bus.Publish("messaging_message", "", "", m)
   exposes push but not pull.
 - The sync cursor is a coarse unix-second timestamp in a single global `"push"` scope;
   per-account scopes are not used.
-- WhatsApp extended text and all media downloads are unimplemented.
+- WhatsApp extended text and all media downloads are unimplemented; Messenger ignores
+  attachments, quick replies and postbacks.
+- Messenger has **no outbound webhook for delivery/read events** and no Graph API
+  health check; `connected` only means the page-info lookup succeeded.
 - `?limit` is ignored on `GET /api/messaging/messages`.
 - No at-rest encryption; credentials and raw payloads sit in plaintext SQLite.
 - Deleting an account leaves its WhatsApp session directory on disk.
@@ -269,4 +346,7 @@ h.bus.Publish("messaging_message", "", "", m)
   re-deliver, FTS search, and `TestStoreExportAndCursor` (export advances the cursor,
   `SetCursor`/`GetCursor` round-trip, `ImportMessages` is idempotent).
 - `internal/messaging/manager_test.go` — `Manager.Send` against a fake provider.
+- `internal/messaging/messenger_test.go` — GET verification (correct token echoes the
+  challenge, wrong token 403) and POST signature handling (unsigned/`deadbeef` rejected,
+  valid HMAC accepted).
 - `internal/tool/tool_test.go` — the builtin registry includes `chat_accounts`.

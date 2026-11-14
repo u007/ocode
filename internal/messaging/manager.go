@@ -39,6 +39,8 @@ func (m *Manager) StartAccount(ctx context.Context, acc Account) error {
 		p = NewTelegramProvider(acc)
 	case ProviderWhatsApp:
 		p = NewWhatsAppProvider(acc, m.dataDir)
+	case ProviderFacebook, ProviderMessenger:
+		p = NewMessengerProvider(acc)
 	default:
 		return fmt.Errorf("unknown provider %s", acc.Provider)
 	}

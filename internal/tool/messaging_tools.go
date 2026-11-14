@@ -12,12 +12,12 @@ type ChatAccountsTool struct{}
 
 func (ChatAccountsTool) Name() string { return "chat_accounts" }
 func (ChatAccountsTool) Description() string {
-	return "List configured WhatsApp/Telegram chat connector accounts and their connection status."
+	return "List configured WhatsApp/Telegram/Facebook chat connector accounts and their connection status."
 }
 func (ChatAccountsTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "chat_accounts",
-		"description": "List configured WhatsApp/Telegram chat connector accounts and their connection status.",
+		"description": "List configured WhatsApp/Telegram/Facebook chat connector accounts and their connection status.",
 		"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	}
 }
@@ -180,12 +180,12 @@ type ChatSendTool struct{}
 
 func (ChatSendTool) Name() string { return "chat_send" }
 func (ChatSendTool) Description() string {
-	return "Send a message to a chat on a connector account (WhatsApp/Telegram)."
+	return "Send a message to a chat on a connector account (WhatsApp/Telegram/Facebook)."
 }
 func (ChatSendTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "chat_send",
-		"description": "Send a message to a chat on a connector account (WhatsApp/Telegram).",
+		"description": "Send a message to a chat on a connector account (WhatsApp/Telegram/Facebook).",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

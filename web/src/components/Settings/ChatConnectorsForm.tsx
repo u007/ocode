@@ -16,6 +16,10 @@ export default function ChatConnectorsForm() {
   const [provider, setProvider] = useState("telegram");
   const [label, setLabel] = useState("");
   const [credentials, setCredentials] = useState("");
+  const [fbPageToken, setFbPageToken] = useState("");
+  const [fbVerifyToken, setFbVerifyToken] = useState("");
+  const [fbAppSecret, setFbAppSecret] = useState("");
+  const [fbAllowed, setFbAllowed] = useState("");
   const [busy, setBusy] = useState(false);
   const [syncUrl, setSyncUrl] = useState("");
   const [recent, setRecent] = useState<any[]>([]);
@@ -48,10 +52,14 @@ export default function ChatConnectorsForm() {
   const add = async () => {
     setBusy(true);
     try {
+      let creds = credentials;
+      if (provider === "facebook") {
+        creds = JSON.stringify({ page_token: fbPageToken, verify_token: fbVerifyToken, app_secret: fbAppSecret, allowed_senders: fbAllowed.split(",").map((x) => x.trim()).filter(Boolean) });
+      }
       await fetch("/api/messaging/accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, label, credentials }),
+        body: JSON.stringify({ provider, label, credentials: creds }),
       });
       setLabel("");
       setCredentials("");
@@ -76,7 +84,7 @@ export default function ChatConnectorsForm() {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-medium">Chat Connectors (WhatsApp / Telegram)</h3>
+      <h3 className="text-lg font-medium">Chat Connectors (WhatsApp / Telegram / Facebook)</h3>
       {recent.length > 0 && (
         <div className="border rounded p-2 space-y-1 max-h-40 overflow-auto">
           <div className="text-xs font-medium">Recent inbound messages</div>
@@ -107,9 +115,20 @@ export default function ChatConnectorsForm() {
         <select className="border rounded px-2 py-1" value={provider} onChange={(e) => setProvider(e.target.value)}>
           <option value="telegram">Telegram (bot token)</option>
           <option value="whatsapp">WhatsApp (QR pairing)</option>
+          <option value="facebook">Facebook Messenger (page token JSON)</option>
         </select>
         <Input placeholder="Label" value={label} onChange={(e) => setLabel(e.target.value)} />
-        <Input placeholder={provider === "telegram" ? "Bot token" : "Session dir (optional)"} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+        {provider === "facebook" ? (
+          <>
+            <Input placeholder="Page access token" value={fbPageToken} onChange={(e) => setFbPageToken(e.target.value)} />
+            <Input placeholder="Verify token (must match Meta app dashboard)" value={fbVerifyToken} onChange={(e) => setFbVerifyToken(e.target.value)} />
+            <Input placeholder="App secret (required for webhook signatures)" value={fbAppSecret} onChange={(e) => setFbAppSecret(e.target.value)} />
+            <Input placeholder="Allowed sender PSIDs (comma-separated, optional)" value={fbAllowed} onChange={(e) => setFbAllowed(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Webhook URL: /api/messaging/messenger/webhook (must be publicly reachable; Meta requires HTTPS). App secret is required.</p>
+          </>
+        ) : (
+          <Input placeholder={provider === "telegram" ? "Bot token" : "Session dir (optional)"} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+        )}
         <Button onClick={add} disabled={busy}>Add account</Button>
         <div className="flex gap-2 items-center">
           <Input placeholder="kakiit sync URL" value={syncUrl} onChange={(e) => setSyncUrl(e.target.value)} />

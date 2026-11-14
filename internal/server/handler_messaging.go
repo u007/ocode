@@ -290,3 +290,7 @@ func (h *Handler) StartMessagingAccounts() {
 		_ = mgr.StartAccount(context.Background(), a)
 	}
 }
+
+func (h *Handler) handleMessengerWebhook(w http.ResponseWriter, r *http.Request) {
+	messaging.HandleMessengerWebhook(w, r)
+}
