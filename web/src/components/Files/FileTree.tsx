@@ -598,9 +598,12 @@ function TreeNode({
     setLoadingChildren(true);
     (async () => {
       try {
+        const isCloud = node.path.startsWith("cloud://");
         const res = await fetch(
           apiPath(
-            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`,
+            isCloud
+              ? `/api/cloud/browse?path=${encodeURIComponent(node.path)}`
+              : `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1&show_hidden=${showHiddenFiles ? "1" : "0"}${projectHost ? `&host=${encodeURIComponent(projectHost)}` : ""}`,
           ),
           { headers: authHeaders(), signal: controller.signal },
         );
@@ -617,11 +620,23 @@ function TreeNode({
           }
           return;
         }
-        const data: FileTreeResponse = await res.json();
-        if (data.truncated) {
-          console.warn(`File tree truncated under ${node.path}; not all entries were loaded`);
+        if (isCloud) {
+          const cdata: { entries?: Array<{ name: string; path: string; is_dir: boolean; size: number; mime_type: string }> } = await res.json();
+          const cloudChildren: FileNode[] = (cdata.entries || []).map((e) => ({
+            name: e.name,
+            path: e.path,
+            is_dir: e.is_dir,
+            size: e.size,
+            mime_type: e.mime_type,
+          }));
+          setChildren(cloudChildren);
+        } else {
+          const data: FileTreeResponse = await res.json();
+          if (data.truncated) {
+            console.warn(`File tree truncated under ${node.path}; not all entries were loaded`);
+          }
+          setChildren(data.children);
         }
-        setChildren(data.children);
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           console.error("File tree children error:", err);
@@ -1322,7 +1337,22 @@ export default function FileTree({
         },
       ).then((result) => {
         if (result.status === "success" || result.status === "empty") {
-          setTree(result.value.children);
+          // Append cloud connectors as top-level nodes (unified tree)
+          void fetch(apiPath("/api/cloud/connectors"), { headers: authHeaders() })
+            .then((r) => r.json())
+            .then((data: { connectors?: Array<{ id: string; name: string; provider: string }> }) => {
+              const cloudNodes: FileNode[] = (data.connectors || []).map((c) => ({
+                name: c.name || c.id,
+                path: `cloud://${c.id}/`,
+                is_dir: true,
+                size: 0,
+                mime_type: "",
+              }));
+              setTree([...(result.value.children || []), ...cloudNodes]);
+            })
+            .catch(() => {
+              setTree(result.value.children);
+            });
           setIsGitRepo(!!result.value.is_git_repo);
           setLoading(false);
           setRefreshing(false);
@@ -1353,7 +1383,21 @@ export default function FileTree({
         setRefreshing(false);
       }
       if (result.status === "success" || result.status === "empty") {
-        setTree(result.value.children);
+        void fetch(apiPath("/api/cloud/connectors"), { headers: authHeaders() })
+          .then((r) => r.json())
+          .then((data: { connectors?: Array<{ id: string; name: string; provider: string }> }) => {
+            const cloudNodes: FileNode[] = (data.connectors || []).map((c) => ({
+              name: c.name || c.id,
+              path: `cloud://${c.id}/`,
+              is_dir: true,
+              size: 0,
+              mime_type: "",
+            }));
+            setTree([...(result.value.children || []), ...cloudNodes]);
+          })
+          .catch(() => {
+            setTree(result.value.children);
+          });
         setIsGitRepo(!!result.value.is_git_repo);
       } else if (result.status === "error") {
         console.error("File tree refresh error:", result.error);
