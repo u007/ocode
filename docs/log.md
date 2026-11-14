@@ -12,6 +12,17 @@
 
 ## 2026-11-15
 
+* **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
+* **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
+* **Update**: browser_run step loop (Jev picks each control) ([concepts/browser-run-jev-step-loop.md](/concepts/browser-run-jev-step-loop.md))
+* **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+* **Creation**: Session model switch during a paused ask ([concepts/session-model-switch-during-paused-ask.md](/concepts/session-model-switch-during-paused-ask.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Update**: Auto-Permission Dependency Binaries — Policy Decision ([gotchas/auto-permission-dependency-bin-policy.md](/gotchas/auto-permission-dependency-bin-policy.md))
 * **Update**: Auto-permission enforced categories: file changes are ordinary in the Jev rubric (restore/checkout/reset stay denied), the `cd` fold accepts quoted newlines, and a folded `cd` moves the working directory in `project_context` ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
 * **Update**: Messaging connectors — WhatsApp/Telegram/Messenger accounts, storage, tools, webhook and sync ([concepts/messaging-connectors.md](/concepts/messaging-connectors.md))
 * **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))

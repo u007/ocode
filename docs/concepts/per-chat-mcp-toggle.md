@@ -12,7 +12,7 @@ tags:
   - caching
   - reload
   - gotcha
-timestamp: 2026-11-14T16:45:54Z
+timestamp: 2026-11-14T18:22:54Z
 ---
 # Per-Chat MCP Toggle
 
@@ -58,7 +58,7 @@ MCP tools are enumerated **once per process** into a process-wide `mcpCache` war
 
 ## Fast path vs. re-enumeration (`mcpToolsForSession`)
 
-`mcpToolsForSession(cfg, sessionID)` (called from `buildAgentSession`, `internal/server/agent_session.go:604`):
+`mcpToolsForSession(cfg, sessionID)` (called from `buildAgentSession`, `internal/server/agent_session.go:703`):
 
 - **No overrides** (the overwhelmingly common case): returns nil so the builder keeps the process-wide `mcpCache` fast path — sessions that never toggled anything pay zero extra MCP enumeration cost.
 - **Has overrides**: re-enumerates MCP tools from a **cloned** copy of the session's effective config produced by `applyMCPSessionOverrides`, which honors the per-window profile's `delta.MCP`.
@@ -79,7 +79,7 @@ MCP tools are enumerated **once per process** into a process-wide `mcpCache` war
 
 ## Lifecycle
 
-Overrides are **in-memory only** (the durable record is the process-wide `opencode.json` write) and are cleared on session release: the registry `onEvict` hook calls `clearMCPSessionOverrides(sessionID)` (`internal/server/handler.go:772`) so the map does not grow one entry per session id the process has ever served.
+Overrides are **in-memory only** (the durable record is the process-wide `opencode.json` write) and are cleared on session release: the registry `onEvict` hook calls `clearMCPSessionOverrides(sessionID)` (`internal/server/handler.go:896`) so the map does not grow one entry per session id the process has ever served.
 
 ## `/mcp` web command
 

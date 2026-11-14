@@ -8,7 +8,7 @@ tags:
   - mcp-apps
   - plugins
   - web
-timestamp: 2026-11-14T16:45:26Z
+timestamp: 2026-11-14T18:54:12Z
 ---
 # MCP Apps widgets and plugin MCP servers
 
@@ -26,7 +26,7 @@ summarises them and links to the code.
 A tool whose `tools/list` entry carries `_meta.ui.resourceUri` declares a widget.
 The URI must start with `ui://` to be served (`internal/server/handler_mcp_app.go:93`).
 ocode also reads the flat `ui/resourceUri` spelling some servers use
-(`internal/mcp/client.go:1062`).
+(`internal/mcp/client.go:1068`).
 
 `_meta.ui.visibility` lists the audiences of the tool:
 
@@ -35,25 +35,25 @@ ocode also reads the flat `ui/resourceUri` spelling some servers use
 - `"app"`: a widget may call the tool through the host.
 
 A tool whose visibility lacks `"model"` is not registered for the model at all
-(`internal/mcp/client.go:1110`). It can be called only from a widget.
+(`internal/mcp/client.go:1132`). It can be called only from a widget.
 
 ## End-to-end flow
 
 1. **Listing.** `MCPClient.ListTools` records each listed tool's UI resource and
-   visibility (`internal/mcp/client.go:1075`), then keeps only the model-visible
+   visibility (`internal/mcp/client.go:1097`), then keeps only the model-visible
    tools.
 2. **Model call.** The agent runs a model-visible tool through `ExecuteCtx`, which
    carries the tool call ID (`internal/mcp/client.go:90`). For a successful call of
    a tool with a UI resource, `recordCallOutcome` stores the raw result under that
-   call ID (`internal/mcp/client.go:1239`).
+   call ID (`internal/mcp/client.go:1261`).
 3. **Attach to the tool message.** `handleToolCallWithContext` calls
-   `keepMCPAppRef` (`internal/agent/agent.go:4022`). `keepMCPAppRef` keeps a
+   `keepMCPAppRef` (`internal/agent/agent.go:4033`). `keepMCPAppRef` keeps a
    `MCPAppRef` only when the call ran (`internal/agent/mcp_app.go:17`).
    `takeMCPAppRef` then puts it on the tool message as `Message.MCPApp`, and gives
    none when the result is a pending ask (`internal/agent/mcp_app.go:54`). The
-   message is built at `internal/agent/agent.go:2164`.
+   message is built at `internal/agent/agent.go:2175`.
 4. **Stream.** The live path broadcasts a `tool_result` event carrying the ref
-   (`internal/server/handler.go:1208`). Stream replay sends the same
+   (`internal/server/handler.go:1227`). Stream replay sends the same
    `ToolResultEvent` (`internal/server/handler_sse.go:286`; the type is at
    `internal/server/handler_sse.go:40`).
 5. **Web card.** `ToolBlock` renders `McpAppView` under the block when the tool
@@ -94,11 +94,11 @@ Any other request gets `-32601`. Unknown notifications are ignored.
 ## Image results
 
 An MCP tool result that contains an image block keeps its first decodable image
-under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1208`) and
-`recordCallOutcome` stores it (`internal/mcp/client.go:1239`).
+under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1230`) and
+`recordCallOutcome` stores it (`internal/mcp/client.go:1261`).
 `handleToolCallWithImages` takes that image on every path, so nothing is kept
-(`internal/agent/agent.go:3896`). It attaches the image to the tool message only
-when the current model supports vision (`internal/agent/agent.go:3903`). Otherwise
+(`internal/agent/agent.go:3902`). It attaches the image to the tool message only
+when the current model supports vision (`internal/agent/agent.go:3914`). Otherwise
 the text result alone is returned.
 
 Which provider builders carry the image, verified in `internal/agent/client.go`:
@@ -134,26 +134,26 @@ Other providers were not checked against this list.
 - **requiresAny.** Checked at merge time (`internal/plugins/mcp_servers.go:331`). A
   server whose requirement fails does not claim its name.
 - **Web and desktop server.** The process-wide config merges only shared plugins:
-  `internal/server/handler.go:741` at startup and `internal/server/handler.go:986` on
-  reload. The MCP tool cache is built from that config (`internal/server/mcp_cache.go:30`).
-  Each session merges its own project's plugins (`internal/server/agent_session.go:542`).
+  `internal/server/handler.go:757` at startup and `internal/server/handler.go:1009` on
+  reload. The MCP tool cache is built from that config (`internal/server/mcp_cache.go:34`).
+  Each session merges its own project's plugins (`internal/server/agent_session.go:546`).
   When the merge adds a server the shared config lacks, the session enumerates its own
-  tools (`internal/server/agent_session.go:543`, `internal/server/handler_mcp.go:188`).
-  Otherwise it uses the shared cache (`internal/server/agent_session.go:707`).
+  tools (`internal/server/agent_session.go:547`, `internal/server/handler_mcp.go:188`).
+  Otherwise it uses the shared cache (`internal/server/agent_session.go:711`).
 - **Web toggle.** `HandleSetMCPEnabled` refuses a server in `h.pluginMCP`, which holds
-  only the shared merge (`internal/server/handler_mcp.go:125`). A project-local server is
-  not in `h.cfg.MCP`, so the toggle answers 404 for it (`internal/server/handler_mcp.go:120`).
+  only the shared merge (`internal/server/handler_mcp.go:126`). A project-local server is
+  not in `h.cfg.MCP`, so the toggle answers 404 for it (`internal/server/handler_mcp.go:123`).
 
 ## Stdio transport
 
-- `NewLocalClient` starts the process (`internal/mcp/client.go:279`). The stdout reader
-  `readStdout` (`internal/mcp/client.go:326`) is the only reader.
-- Replies are routed by JSON-RPC id (`routeLocalLine`, `internal/mcp/client.go:911`).
+- `NewLocalClient` starts the process (`internal/mcp/client.go:300`). The stdout reader
+  `readStdout` (`internal/mcp/client.go:347`) is the only reader.
+- Replies are routed by JSON-RPC id (`routeLocalLine`, `internal/mcp/client.go:932`).
   Notifications, server-initiated requests, stale and unsolicited lines are dropped.
 - The handshake is `initialize` with protocol `2025-06-18` (`internal/mcp/client.go:99`).
   It advertises the `io.modelcontextprotocol/ui` extension with `text/html;profile=mcp-app`
-  (`internal/mcp/client.go:831`). A server that answers `initialize` with `-32601` is
-  treated as having no handshake (`handshakeLocked`, `internal/mcp/client.go:823`).
+  (`internal/mcp/client.go:852`). A server that answers `initialize` with `-32601` is
+  treated as having no handshake (`handshakeLocked`, `internal/mcp/client.go:844`).
 - Per-call side channels (images, MCP Apps results) are keyed by tool call ID in a
   bounded map of 64 entries (`internal/mcp/callside.go:20`, `internal/mcp/callside.go:39`).
   The fields are at `internal/mcp/client.go:181`.
@@ -169,11 +169,11 @@ Other providers were not checked against this list.
 - **Self-navigation.** The first `load` is the srcdoc document. A later `load` tears the
   host down and closes the view (`web/src/components/Chat/mcpApp/McpAppView.tsx:288`).
 - **Widget tool calls.** `AppToolAllowed` admits only tools the server listed with
-  `"app"` in visibility (`internal/mcp/client.go:1133`). Both `/mcp-app/` endpoints refuse a
+  `"app"` in visibility (`internal/mcp/client.go:1155`). Both `/mcp-app/` endpoints refuse a
   locked session with 403 (`internal/server/handler_mcp_app.go:67`). Widget calls go straight
   to the MCP server. They do not pass through the agent's permission prompt, and they keep no
   image or app result under a call ID, because `CallToolRaw` records nothing
-  (`internal/mcp/client.go:1178`).
+  (`internal/mcp/client.go:1200`).
 - **Links.** `ui/open-link` waits for the user's confirmation, as every URL surface does.
 
 ## Known limits

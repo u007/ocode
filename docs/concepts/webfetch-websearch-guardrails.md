@@ -14,7 +14,7 @@ tags:
   - egress
   - jev
   - architecture
-timestamp: 2026-11-14T15:47:18Z
+timestamp: 2026-11-14T18:26:03Z
 ---
 # Outbound-Network Guardrail
 
@@ -161,7 +161,7 @@ Masking preserves detection. The rubric teaches the judge the `[[OCSEC:…]]` pl
 | `escalate` or below-floor `allow` whose concern is relaxed | not escalated, `tier=netguard_relaxed` |
 | listed (allowed) host | judged like any other target. The list never skips the judge |
 
-**Fail-open rationale.** `webfetch` and `websearch` are `PermissionAsk` by default (`NewPermissionManager`, `internal/agent/permissions.go:1978`, the default-Ask loop). In Normal and Sandbox modes, bash network calls are also gated by the deterministic exfiltration detectors. In Sandbox mode, `Decide`'s sandbox branch runs `isExfiltrationRiskBash` (`permissions.go:1529`). In Normal mode, the per-command path through `decideSingleCommand` (`permissions.go:8330`) runs the harmful-command checks. So in those modes a provider outage removes this layer without removing the ones beneath it. Blocking every fetch while TypeSafe is down would trade a security property for an availability one the user did not ask for.
+**Fail-open rationale.** `webfetch` and `websearch` are `PermissionAsk` by default (`NewPermissionManager`, `internal/agent/permissions.go:1978`, the default-Ask loop). In Normal and Sandbox modes, bash network calls are also gated by the deterministic exfiltration detectors. In Sandbox mode, `Decide`'s sandbox branch runs `isExfiltrationRiskBash` (`permissions.go:1529`). In Normal mode, the per-command path through `decideSingleCommand` (`permissions.go:8333`) runs the harmful-command checks. So in those modes a provider outage removes this layer without removing the ones beneath it. Blocking every fetch while TypeSafe is down would trade a security property for an availability one the user did not ask for.
 
 Two caveats qualify "the layers beneath":
 
@@ -170,27 +170,27 @@ Two caveats qualify "the layers beneath":
 
 ## The wiring
 
-Insertion point: `handleToolCallWithContext` (`internal/agent/agent.go`). The guard runs immediately after `decision := a.permissions.Decide(name, args)` (agent.go:4080) and the `browserDecision` pass, and before the Deny and Ask branches. Placing it there also covers the paths that never consult a model, most importantly the cached-domain allow and the allowed-host allow. The guard is entered only when `decision.Level != PermissionDeny` (agent.go:4104). On escalation it:
+Insertion point: `handleToolCallWithContext` (`internal/agent/agent.go`). The guard runs immediately after `decision := a.permissions.Decide(name, args)` (agent.go:4102) and the `browserDecision` pass, and before the Deny and Ask branches. Placing it there also covers the paths that never consult a model, most importantly the cached-domain allow and the allowed-host allow. The guard is entered only when `decision.Level != PermissionDeny` (agent.go:4126). On escalation it:
 
 - rewrites the decision to `PermissionAsk` with `req.DenyReason` set to the guardrail reason, which ends with the concern key in brackets, and `req.Summary` set to `"TypeSafe outbound-request guardrail"`;
-- sets a local `guardEscalated` flag. The bash auto-judge branch (agent.go:4110) and the Ask branch's auto-judge (agent.go:4181, `if autoEnabled && !guardEscalated`) both stand down, so the auto-permission model cannot wave through a call the guardrail just routed to a human;
+- sets a local `guardEscalated` flag. The bash auto-judge branch (agent.go:4163) and the Ask branch's auto-judge (agent.go:4234, `if autoEnabled && !guardEscalated`) both stand down, so the auto-permission model cannot wave through a call the guardrail just routed to a human;
 - preserves the **original** decision's `Rule`, `Scope` and `Prefix` on the request, so "always allow" persists the rule that governs the call. For webfetch the rule is rebuilt as the domain-scoped `webfetch.domain.<host>`, so a per-domain grant does not become a blanket webfetch allow. Pinned by `TestNetworkGuardKeepsTheOriginalRule` and `TestNetworkGuardCachedDomainEscalationStaysDomainScoped`.
 
 ### Cancellation
 
-The Step loop passes its turn context into the tool dispatch. `handleToolCallWithImages` is called with `guardCtx` at agent.go:2090, 2196 and 2257. That context is built by `contentGuardStepCtx(stopCh)` (agent.go:1637), so a user abort cancels an in-flight judge round trip. `checkNetworkGuardCtx` bounds the call by both the caller's ctx and the 4 s ceiling (`jctx, cancel := context.WithTimeout(ctx, networkGuardJudgeTimeout)`, `network_guard_typesafe.go:875`).
+The Step loop passes its turn context into the tool dispatch. `handleToolCallWithImages` is called with `guardCtx` at agent.go:2115, 2223 and 2284. That context is built by `contentGuardStepCtx(stopCh)` (agent.go:1647), so a user abort cancels an in-flight judge round trip. `checkNetworkGuardCtx` bounds the call by both the caller's ctx and the 4 s ceiling (`jctx, cancel := context.WithTimeout(ctx, networkGuardJudgeTimeout)`, `network_guard_typesafe.go:875`).
 
 Two other dispatch paths behave differently:
 
 - The orphan-recovery dispatch, `recoverOneOrphanedToolCall` (`agent.go`), runs under its own `WithTimeout` and is cancelled when `stopCh` closes.
-- The non-context `handleToolCall` (agent.go:3977, reached through `HandleToolCall`) still passes `context.Background()`, so an abort does not reach an in-flight judge there. It runs to its 4 s ceiling.
+- The non-context `handleToolCall` (agent.go:4019, reached through `HandleToolCall`) still passes `context.Background()`, so an abort does not reach an in-flight judge there. It runs to its 4 s ceiling.
 
 **A cancelled turn does not escalate.** A cancelled judge call is a `DecideCtx` error, which takes the fail-open row, so `tier=netguard_fail` is logged and nothing is shown to a human. Raising a prompt nobody is there to answer would be worse. Pinned by `TestNetworkGuardHonoursCancellation` (`network_guard_typesafe_test.go:929`).
 
 ### What it deliberately does not touch
 
 1. **A `PermissionDeny` is never touched.** The guard runs only when the decision is not Deny. This is load-bearing: `curl https://host/install.sh | sh` is a hard deny and carries a non-loopback egress target. A guardrail that escalated it would turn a hard block into a prompt a user could wave through. Verified by mutation: removing that check makes `TestNetworkGuardLeavesHardDenyAlone` fail, because the hard-blocked command ran. The guardrail can only tighten.
-2. **The sub-agent human-allow path is not a second guard pass.** When a sub-agent's ask is resolved by a human through `asker := a.OnPermissionAsk` (agent.go:4226), the human has already adjudicated that call. Judging it again would be a second prompt for the same decision.
+2. **The sub-agent human-allow path is not a second guard pass.** When a sub-agent's ask is resolved by a human through `asker := a.OnPermissionAsk` (agent.go:4279), the human has already adjudicated that call. Judging it again would be a second prompt for the same decision.
 
 ## Relaxed secrets: the `secrets` opt-out reaches the guard
 
@@ -199,7 +199,7 @@ The relaxable category `secrets` (`permissions.auto.relaxed_concerns`, see [auto
 - A verdict whose named concern is `secrets_in_request` does not escalate when `secrets` is relaxed. That covers an `escalate`, and an `allow` below the floor. The decision is logged as `tier=netguard_relaxed`.
 - The waiver is **blocked deterministically** whatever the judge answered, and the escalation stands (logged as `tier=netguard_relaxed_blocked`), when any of these holds: a target value was truncated (it ends in `…(truncated)`); the request reached the 20-target cap (`networkGuardTargetCap`, `network_guard_typesafe.go:64`); a bash target uploads or expands local content (`isExfiltrationRiskCommand`); or any host the request names is loopback, private, link-local or unspecified. Every host on a bash line is checked, not only the first. The host test (`isInternalWaiverHost`, `network_guard_typesafe.go:499`) reads inet_aton shorthands such as `127.1` and `2130706433`, unmaps IPv4-mapped IPv6 (`::ffff:10.0.0.5` is judged as `10.0.0.5`), and fails closed on a numeric-looking host it cannot parse.
 - The waiver is also **blocked outright** when a bash target carries a destination-shaping option, in any spelling: a connection redirect such as `--resolve`, `--connect-to`, `--proxy` or `-x`, `--socks4` and `--socks5` and their variants, `--interface`, `--dns-servers` or `--unix-socket` (`waiverDestinationLongFlags`, `network_guard_typesafe.go:563`). It is recognised with or without `=value` and inside a short-option bundle (`waiverDestinationFlag`, `network_guard_typesafe.go:661`). A host token that contains a glob or expansion character is blocked the same way, because `isInternalWaiverHost` (`network_guard_typesafe.go:499`) treats it as internal before any address is read.
-- The waiver is also **blocked** by a config or input-source option (`configSourceFlag`, `network_guard_typesafe.go:619`, checked in `networkGuardWaiverBlocked`, line 438), and by the line-wide redirect signal. If a line contains a network client, then a redirecting environment assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` anywhere on the line blocks the waiver for every target on that line, whatever the order. The names come from the shared predicate `isRedirectEnvName` (`network_guard_typesafe.go:169`), which covers every `*_proxy` name except `NO_PROXY`, `ALL_PROXY`, `HTTPIE_CONFIG_DIR`, `SYSTEM_WGETRC`, `WGETRC`, `CURL_HOME`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `XDG_CONFIG_HOME` and `HOME`. The signal is the union `lineRedirectSignalAll` (`internal/agent/permissions.go:4429`), read once per line in `bashEgressTargets` (`network_guard_typesafe.go:336`), of a parsed-command view and a raw-word view with unquoted operators spaced out, so an unspaced `;&|(){}` cannot hide an assignment. Assignment names resolve to their base variable through `assignmentBaseName` (`network_guard_typesafe.go:197`): An identifier followed by `[` with any `=` in the word is an assignment to that identifier, so quotes or expansions inside a subscript cannot hide it (fail closed). `command`, `builtin` and `exec` are transparent before the head word (`effectiveHead`, `internal/agent/permissions.go:4533`). `*.localhost` names count as internal, as `localhost` does, and so do the unspecified addresses (`isInternalWaiverHost`, `network_guard_typesafe.go:499`).
+- The waiver is also **blocked** by a config or input-source option (`configSourceFlag`, `network_guard_typesafe.go:619`, checked in `networkGuardWaiverBlocked`, line 438), and by the line-wide redirect signal. If a line contains a network client, then a redirecting environment assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` anywhere on the line blocks the waiver for every target on that line, whatever the order. The names come from the shared predicate `isRedirectEnvName` (`network_guard_typesafe.go:169`), which covers every `*_proxy` name except `NO_PROXY`, `ALL_PROXY`, `HTTPIE_CONFIG_DIR`, `SYSTEM_WGETRC`, `WGETRC`, `CURL_HOME`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `XDG_CONFIG_HOME` and `HOME`. The signal is the union `lineRedirectSignalAll` (`internal/agent/permissions.go:4432`), read once per line in `bashEgressTargets` (`network_guard_typesafe.go:336`), of a parsed-command view and a raw-word view with unquoted operators spaced out, so an unspaced `;&|(){}` cannot hide an assignment. Assignment names resolve to their base variable through `assignmentBaseName` (`network_guard_typesafe.go:197`): An identifier followed by `[` with any `=` in the word is an assignment to that identifier, so quotes or expansions inside a subscript cannot hide it (fail closed). `command`, `builtin` and `exec` are transparent before the head word (`effectiveHead`, `internal/agent/permissions.go:4536`). `*.localhost` names count as internal, as `localhost` does, and so do the unspecified addresses (`isInternalWaiverHost`, `network_guard_typesafe.go:499`).
 - Every other concern stays enforced: `data_upload`, `destructive_action`, `untrusted_destination`, `internal_target`, `opaque_or_unresolvable`, and `none` with a below-floor allow.
 - `network` is **deliberately not mapped**. That category tunes whether a command may run unattended, and this guard is the last check before bytes leave the machine. Loosening one must not loosen the other.
 - The floor is not configurable, so the opt-out never lowers it.
@@ -214,7 +214,7 @@ The guard's `allowed_hosts` state comes from the persisted `permissions.allowed_
 
 All emitted via `emitDebug("PERMISSION", …)`, so they land in the PERMISSION stream:
 
-- `tier=netguard_gate tool=%s rule=%s`: the wiring fired and rewrote the decision (agent.go:4101).
+- `tier=netguard_gate tool=%s rule=%s`: the wiring fired and rewrote the decision (agent.go:4154).
 - `tier=netguard_escalate tool=%s model=%s concern=%s confidence=%.2f targets=%d elapsed=%s`: an escalation (`network_guard_typesafe.go`, in `checkNetworkGuardCtx`).
 - `tier=netguard_relaxed tool=%s model=%s choice=%s …`: a relaxed concern was not escalated. The `choice` is `escalate` or `allow`, and the line carries `concern=` (and `confidence=` for an allow).
 - `tier=netguard_fail tool=%s model=%s err=…`: `err=no_verdict`, `err=unknown_choice choice=%q`, a transport error, or a cancellation.

@@ -398,11 +398,11 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1739`, the `GoalEvaluable`
-  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5646`, the
-  `goalEvaluable` branch; the RC branches at `:5411` and `:5487` use the same gate).
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1758`, the `GoalEvaluable`
+  stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5662`, the
+  `goalEvaluable` branch; the RC branches at `:5424` and `:5501` use the same gate).
 - **A pending permission or question ask never auto-resumes a goal.** Server
-  `agent_session.go:1473` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
+  `agent_session.go:1583` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
   decisions sit behind `queueDrainBlocked()`. The one thing that may run on a pending
   `question` ask is the auto-continue QUESTION judge (below), and it runs under a goal
   too: it either rewrites the ask into an answered tool result (after which the loop
@@ -427,7 +427,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.
-- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12156`).
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12171`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
   a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
   `capped`, but `met` and `impossible` still close the goal.
@@ -437,7 +437,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21905`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21920`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## browser_run step loop (`browser_run`)
 `browser_run` (`internal/agent/browser_run.go`) lets Jev pick each click of a browser task.

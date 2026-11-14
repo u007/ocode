@@ -5,7 +5,7 @@ description: Persistent, disk-backed cron engine + headless agent dispatcher for
 tags: [scheduler, cron, dispatch, agent, automation]
 status: active
 created: 2026-07-17
-timestamp: 2026-11-08T17:30:00Z
+timestamp: 2026-11-14T18:37:27Z
 ---
 # Scheduled Jobs / Cron Dispatch
 
@@ -59,13 +59,13 @@ fire unless a long-lived host is running. Document this in user-facing docs.
   ```
 - Constructs a per-job agent via `agent.NewAgent(client, tools, cfg, lspMgr)`
   and runs `ag.Step(msgs)` — the same entry the server SSE and TUI stream paths
-  use (`internal/server/handler_sse.go:201-232`, `internal/tui/model.go:11774`).
+  use (`internal/server/handler_sse.go:298`, `internal/tui/model.go:16639`).
 - Uses a **persistent per-job session** `cron:<id>` so context accumulates
   across firings. Retention: `capMessages(result, 80)` keeps the seeded context
   + the 79 most recent turns so the transcript never grows unbounded
   (`session.Save` overwrites the full transcript and never prunes).
 - Per-job permission mode is bound via `ag.Permissions().SetMode(...)` (the
-  runtime mutation point in `internal/agent/permissions.go:5845`). Safe default
+  runtime mutation point in `internal/agent/permissions.go:5848`). Safe default
   is `normal`; `yolo`/`locked` are explicit opt-in.
 
 ### Dispatch semantics (mirroring Claude Code)
@@ -302,14 +302,14 @@ per-firing cleanup — is shared rather than forked (below).
   (checklist item; due date OPTIONAL — `DueAtMs == 0` means "no due date",
   never "due now").
 - **`Status`** — `pending | in_progress | completed | cancelled`.
-  `ValidStatus` (`types.go:179`) is the ONLY definition of the set: an
+  `ValidStatus` (`types.go:184`) is the ONLY definition of the set: an
   unrecognised value is rejected, never coerced to a default.
 - **`Action`** — `notify` (desktop/in-app notification, no LLM: the agent
   runner is invoked only when `Action == agent`, `internal/reminders/fire.go:85`)
   or `agent` (a real agent turn through the injected `AgentRunner` seam,
   `fire.go:26-28`).
 - **`AutoComplete`** (task + `agent` only) — on validate it is normalised to
-  `false` for every other shape (`types.go:278-280`), so a stored flag always
+  `false` for every other shape (`types.go:283-285`), so a stored flag always
   means something. When set, a task whose agent turn returns **without error**
   settles on `completed` (`fire.go:125`); there is deliberately **no** parsing
   of the model's output for a magic completion marker — completion is derived
@@ -353,15 +353,15 @@ HTTP behaviour:
 
 - **Illegal transition → 409.** The PATCH handler pre-validates the requested
   status against the CURRENT status and answers `http.StatusConflict`
-  (`internal/server/reminders.go:170-175`); `statusForErr`
-  (`reminders.go:343-351`) maps `ErrNotFound → 404`, `ErrTransition → 409`,
+  (`internal/server/reminders.go:201-205`); `statusForErr`
+  (`reminders.go:385-394`) maps `ErrNotFound → 404`, `ErrTransition → 409`,
   everything else → 400.
 - **Unknown status values → rejected, never coerced to a default:**
   - create (`POST`) with any status other than `pending` → **400**
-    (`reminders.go:117-119`, "a new item is always created pending; set
+    (`reminders.go:129-135`, "a new item is always created pending; set
     status with PATCH");
-  - list filter `?status=archived` → **400** (`reminders.go:69-72`);
-  - `PATCH` with an unknown status → **400** (`reminders.go:170-175`). The
+  - list filter `?status=archived` → **400** (`reminders.go:73-78`);
+  - `PATCH` with an unknown status → **400** (`reminders.go:197-200`). The
     handler checks `ValidStatus` BEFORE consulting `Transition`, because both
     an unknown value and an illegal move come back from `Transition` wrapped in
     the same `ErrTransition` sentinel: an unknown value is a malformed request
@@ -372,13 +372,13 @@ HTTP behaviour:
     caught — the two are now checked separately and the whole
     `internal/server` package is green.
 - **PATCH validates the transition BEFORE applying field edits**
-  (`reminders.go:149-193`): the body's status is checked first, then field
+  (`reminders.go:164-225`): the body's status is checked first, then field
   edits via `Service.Update`, then `SetStatus` — so a rejected status change
   cannot half-apply the rest of the PATCH (pinned by
-  `TestRejectedStatusChangeLeavesFieldsUnapplied`, `reminders_test.go:179`).
+  `TestRejectedStatusChangeLeavesFieldsUnapplied`, `reminders_test.go:186`).
 
 ### One-shot firing and the `FiredAtMs` re-arm rule
-The firing gate is one predicate, `Item.Due(now)` (`types.go:225-226`):
+The firing gate is one predicate, `Item.Due(now)` (`types.go:230`):
 active (pending/in_progress) AND `DueAtMs > 0 && <= now` AND **`FiredAtMs == 0`**.
 
 - **Claim before run:** `fireOnce` stamps `FiredAtMs = now` while still
@@ -406,7 +406,7 @@ no new plumbing:
   `internal/reminders/fire.go:191-207`.
 - `scheduler.RunHistory` (`runs.jsonl`) — `appendRunRecord`,
   `fire.go:215-240`; the `GET .../{id}/runs` route is literally wired to
-  cron's `handleCronRuns` handler (`reminders.go:321`).
+  cron's `handleCronRuns` handler (`internal/server/scheduler.go:279`).
 - Both records key their `JobID` with the prefix **`<kind>:<id>`**
   (`fire.go:198` and `fire.go:221`, e.g. `reminder:3f2a9c01`). That prefix
   is what lets the shared drainer tell a routable reminder delivery from a
@@ -432,7 +432,7 @@ exactly the same rule as a job, with no resolver contract change. Note:
 **`deliver_to` does NOT exist on an `Item`** — there is no per-item delivery
 target; routing is by `Owner`/workdir only.
 
-### REST surface (`internal/server/reminders.go`, registered by `attachReminders` at `:296`)
+### REST surface (`internal/server/reminders.go`, registered by `attachReminders` at `:338`)
 One handler is parameterised by kind, so the identical set is mounted under
 both collections:
 
@@ -444,7 +444,7 @@ both collections:
   via `effectiveLimit`, `reminders.go:433`), `offset`, optional `status`
   filter. Response shape `{items,total,limit,offset}`
   (`reminderListResponse`, `reminders.go:53`). A malformed `limit`/`offset`
-  is a **400**, never a silent `0` (`reminders.go:76-84`).
+  is a **400**, never a silent `0` (`reminders.go:81-89`).
 - `POST   /api/reminders` — create (title required; the kind comes from the
   route, not the body).
 - `GET    /api/reminders/{id}` — read one.
@@ -459,19 +459,19 @@ both collections:
 
 **Cross-kind ids are 404s, not edits:** a task id presented under
 `/api/reminders` (or vice versa) is reported as 404 — `lookup` enforces the
-kind (`reminders.go:249`) so one collection cannot be read or mutated
+kind (`reminders.go:279`) so one collection cannot be read or mutated
 through the other's route.
 
 ### Host wiring
 `Server.AttachReminders(workDir, cfg, notifier)`
-(`internal/server/reminders_host.go:72`) starts the engine and mounts the
+(`internal/server/reminders_host.go:76`) starts the engine and mounts the
 routes. When the cron service is attached it reuses that service's
 `Outbox`/`RunHistory` instances, so the drainer fan-out (Telegram, TUI bridge,
 web Outbox panel) applies to reminder deliveries too. A `busNotifier`
-(`reminders_host.go:32`) publishes a project-level **`reminder_fired`** SSE
+(`reminders_host.go:31`) publishes a project-level **`reminder_fired`** SSE
 event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
 `internal/desktop/scheduler.go:69` and `main.go`'s `schedulerSetup()`
-(`main.go:116`).
+(`main.go:95`).
 
 ### Frontend (web/desktop Cron tab)
 - `web/src/components/Cron/CronSubTabs.tsx` — the `Jobs | Reminders | Tasks`
@@ -518,7 +518,7 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
   set as grow-only/sticky within a session.
 - **No exported `Agent.SetPermissions`**: `SetMode` is workflow mode, not
   permission mode. Per-job permission mode is set on the `PermissionManager`
-  after `NewAgent` (`internal/agent/permissions.go:5845`).
+  after `NewAgent` (`internal/agent/permissions.go:5848`).
 - **Persistent session trade-off**: a recurring `cron:<id>` session
   accumulates context across firings (good for jobs that need history) but
   must be capped — `session.Save` never prunes. The current cap is 80 messages;
