@@ -287,6 +287,26 @@ func verifyMessengerSignature(secret string, body []byte, header string) bool {
 	return hmac.Equal(mac.Sum(nil), got)
 }
 
+func messengerSignatureValid(body []byte, header string) bool {
+	messengerMu.Lock()
+	secrets := make([]string, 0, len(messengerByPage))
+	for _, pp := range messengerByPage {
+		if pp.appSecret != "" {
+			secrets = append(secrets, pp.appSecret)
+		}
+	}
+	messengerMu.Unlock()
+	if len(secrets) == 0 {
+		return false
+	}
+	for _, sec := range secrets {
+		if verifyMessengerSignature(sec, body, header) {
+			return true
+		}
+	}
+	return false
+}
+
 // HandleMessengerWebhook serves the Facebook Messenger webhook (GET verify + POST events).
 func HandleMessengerWebhook(w http.ResponseWriter, r *http.Request) {
 	mgr := DefaultManager
@@ -312,6 +332,11 @@ func HandleMessengerWebhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// Signature is verified before parsing the body.
+		if !messengerSignatureValid(body, r.Header.Get("X-Hub-Signature-256")) {
+			http.Error(w, "invalid signature", http.StatusForbidden)
 			return
 		}
 		var payload struct {
@@ -363,11 +388,6 @@ func HandleMessengerWebhook(w http.ResponseWriter, r *http.Request) {
 		if prov != nil {
 			if prov.appSecret == "" {
 				http.Error(w, "app secret required", http.StatusForbidden)
-				return
-			}
-			sig := r.Header.Get("X-Hub-Signature-256")
-			if !verifyMessengerSignature(prov.appSecret, body, sig) {
-				http.Error(w, "invalid signature", http.StatusForbidden)
 				return
 			}
 		} else {

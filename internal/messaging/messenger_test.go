@@ -190,7 +190,7 @@ func TestMessengerPostUnknownPage(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/messaging/messenger/webhook", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 	HandleMessengerWebhook(rr, req)
-	if rr.Code != 200 {
+	if rr.Code != 403 {
 		t.Fatalf("unknown page: %d", rr.Code)
 	}
 }
