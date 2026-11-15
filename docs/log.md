@@ -12,6 +12,9 @@
 
 ## 2026-11-15
 
+* **Update**: Speech summary is fail-open: skip while the turn holds as.mu, cancellable summariser, unlocked config write ([gotchas/speech-summary-turn-lock-wait.md](/gotchas/speech-summary-turn-lock-wait.md))
+* **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
+* **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
 * **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
 * **Update**: SKILL.md Frontmatter Fields ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))
 * **Update**: SKILL.md Frontmatter Fields ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))

@@ -310,8 +310,8 @@ behaviour change that must be visible.
 `permissions.auto.model` and `auto_continue_model` stay exactly where they are,
 untouched and still authoritative for their two judges. Five new small blocks
 mirror the existing top-level file layout (`Permissions permissionConfigFile` at
-`internal/config/ocodeconfig.go:1164` and `Discovery discoveryConfigFile` at
-`internal/config/ocodeconfig.go:1172` are the precedents):
+`internal/config/ocodeconfig.go:1642` and `Discovery discoveryConfigFile` at
+`internal/config/ocodeconfig.go:1654` are the precedents):
 
 ```json
 "discovery":     { "judge_model": "typesafe/jev-latest" },

@@ -16,7 +16,7 @@ ocode takes a **snapshot/backup of a file immediately before any modifying tool 
 
 ## Where the snapshots live
 - Package: `internal/snapshot`.
-- `Store.Backup(path, toolCallID)` reads the file's current bytes and writes a copy to the global **`<GlobalDataDir>/project/{slug}/snapshots/`** dir (ocode's global data dir, scoped per project by the git-root SHA-256 slug) on disk. Only metadata lives in RAM, so large files are safe (`internal/snapshot/snapshot.go:154-209`).
+- `Store.Backup(path, toolCallID)` reads the file's current bytes and writes a copy to the global **`<GlobalDataDir>/project/{slug}/snapshots/`** dir (ocode's global data dir, scoped per project by the git-root SHA-256 slug) on disk. Only metadata lives in RAM, so large files are safe (`internal/snapshot/snapshot.go:344-404`).
 - Each `Snapshot` records `OriginalPath`, `BackupPath` (empty = file was new → undo = delete), `ToolCallID`, and `AgentStep`.
 
 ## What triggers a snapshot
@@ -24,13 +24,13 @@ Every modifying tool backs up *before* mutating:
 - Write/edit/multi_edit/multi_file_edit/replace_lines/delete — `internal/tool/file.go` reads `prev` then calls `store.Backup(safe, tcID)` before `os.WriteFile`, and `store.RegisterWrite` after success (see `file.go:996-1030`, `:1135-1145`; RegisterWrite call sites at lines 1030, 1145, 1209, 1295, 1424, 1580).
 - Patch tool — `internal/tool/patch.go:464` calls `snapshot.Backup` before applying.
 - Formatter — `internal/tool/formatter.go:149` backs up before formatting.
-- Config write-back — `internal/config/ocodeconfig.go:2680`.
+- Config write-back — `internal/config/ocodeconfig.go:3470`.
 
 ## Undo
 - `internal/tool/undo.go` exposes **`undo_file_change`** (name `undo_file_change`). Pass the original `tool_call_id` of a write/edit/multi_edit/multi_file_edit/replace_lines/delete; it restores all affected files to their pre-edit state via `Store.UndoByToolCallID`.
 - `undoMaxAgeDelta = 2`: undo is refused once the snapshot is **more than 2 agent steps old** (`internal/tool/undo.go:14`).
 - Conflict guards in `UndoByToolCallID` (`internal/snapshot/snapshot.go:522-547`): refuses if **another agent wrote the file after this agent's write**, or if **this agent made a newer still-active write** to the same file (within the undo window).
-- A package-level `globalStore` powers backward-compatible **TUI undo/redo** and config backup (`internal/snapshot/snapshot.go:137-149`).
+- A package-level `globalStore` powers backward-compatible **TUI undo/redo** and config backup (`internal/snapshot/snapshot.go:321`).
 
 ## Gotchas
 - Snapshots are per-agent and expire by agent-step count, not wall-clock time. After 2 steps the backup is still on disk but can no longer be undone via the tool.

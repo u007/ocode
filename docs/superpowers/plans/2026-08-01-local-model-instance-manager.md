@@ -32,7 +32,7 @@ timestamp: 2026-10-01T21:28:09Z
 - "Max serving N" (N ∈ {1, 2}) means concurrent request slots on ONE process (`llama-server --parallel N` / `mlx_lm.server --max-sequences N`), never multiple OS processes per model.
 - No wiring of a registered local chat model into the agent's active chat provider/model list — `/localmodel` only starts/stops/queries the server process directly.
 - No config field, function, or slash-command subcommand beyond what a task below specifies — do not add flags, dry-run modes, or extra subcommands.
-- Every new persisted config field goes through `withOcodeConfigLock` (load-modify-write) — never `SaveOcodeConfig(in-memory snapshot)` (see `internal/config/ocodeconfig.go:1111-1129` for the existing pattern).
+- Every new persisted config field goes through `withOcodeConfigLock` (load-modify-write) — never `SaveOcodeConfig(in-memory snapshot)` (see `internal/config/ocodeconfig.go:3191-3209` for the existing pattern).
 - Follow existing package conventions exactly: `internal/discovery` has no test-framework beyond stdlib `testing`; `internal/tui/commands.go`'s `commandSpec` registration pattern; `internal/config/ocodeconfig.go`'s `*ConfigFile` mirror-struct + `apply*Config` + `writeOcodeConfigFile` payload pattern (see `ExternalPlugins` for the map[string]struct precedent at lines 125, 312, 643-649, 1167).
 
 ---
@@ -860,7 +860,7 @@ git commit -m "feat(config): add LocalModels map + SaveLocalModelConfig/DeleteLo
 - Test: `internal/tui/command_test.go`
 
 **Interfaces:**
-- Consumes: `discovery.ChatManifestsForHost()`, `discovery.ManifestForModel()`, `discovery.AssignChatPort()`, `discovery.StartModelInstance()`, `discovery.StopModelInstance()`, `discovery.GetModelInstance()`, `discovery.SetModelInstanceProcessID()` (Task 3); `config.SaveLocalModelConfig()`, `config.DeleteLocalModelConfig()` (Task 4); `m.config.Ocode.LocalModels` (Task 4); `m.agent.Procs()` (`internal/agent/agent.go:6361`).
+- Consumes: `discovery.ChatManifestsForHost()`, `discovery.ManifestForModel()`, `discovery.AssignChatPort()`, `discovery.StartModelInstance()`, `discovery.StopModelInstance()`, `discovery.GetModelInstance()`, `discovery.SetModelInstanceProcessID()` (Task 3); `config.SaveLocalModelConfig()`, `config.DeleteLocalModelConfig()` (Task 4); `m.config.Ocode.LocalModels` (Task 4); `m.agent.Procs()` (`internal/agent/agent.go:6476`).
 - Produces: `/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]`.
 
 - [ ] **Step 1: Register the command**

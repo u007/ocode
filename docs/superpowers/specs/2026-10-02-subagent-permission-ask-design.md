@@ -53,7 +53,7 @@ child asks.
 Two more facts close the remaining gaps:
 
 - The sentinel path in `Agent.Step` is only taken when `a.OnPermissionAsk` is
-  nil (`internal/agent/agent.go:4157`).
+  nil (`internal/agent/agent.go:4287`).
 - `SetSubAgentPermAsker` has exactly one real install site in the whole tree,
   `internal/tui/model.go:18917`. The server never installs one; `subagent.go:552`
   and `advisor_tool.go:358` merely propagate the parent's (nil) asker.
@@ -82,7 +82,7 @@ Two more facts close the remaining gaps:
    live outside it.
 2. **The child blocks.** That is what delivers the answer to the goroutine that
    needs it, without inventing a re-`Step` protocol that must survive
-   `shutdownTransient` (`agent.go:6532`). It mirrors the TUI's asker line for
+   `shutdownTransient` (`agent.go:6704`). It mirrors the TUI's asker line for
    line.
 3. **`livePendingAsks` merges rather than replaces.** The registry is read
    unconditionally; the existing message-scan keeps its current `TryLock`
@@ -227,7 +227,7 @@ RC-bridged sessions.
 ## Known limits (deliberate)
 
 - **Parent cancellation does not reach an executing synchronous sub-agent.**
-  `Step` snapshots its own `a.StopCh()` (`agent.go:1571`), and `runSyncDispatch`
+  `Step` snapshots its own `a.StopCh()` (`agent.go:1649`), and `runSyncDispatch`
   consults the parent's channel only for queue admission (`subagent.go:899`,
   `:905`). So after an auto-deny the child keeps running its own loop until it
   finishes on its own. Today that window is "however long the child takes";

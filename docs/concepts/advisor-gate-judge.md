@@ -10,7 +10,7 @@ tags:
   - agent-loop
   - checkpoints
   - commit
-timestamp: 2026-11-15T10:08:36Z
+timestamp: 2026-11-15T10:39:56Z
 status: active
 ---
 # Advisor gate judge (`advisor_gate`)
@@ -42,7 +42,7 @@ The plan checkpoint (a review after the first edit batch) no longer fires. A sto
 - `config.NormalizeAdvisorCheckpoints` (`internal/config/ocodeconfig.go:889`) maps `"plan"` to `"done"` case-insensitively, drops blank entries, dedupes, leaves `nil` as `nil`, and leaves an explicit empty list empty.
 - It is called from `agent.AdvisorConfigFromConfig` (`internal/agent/advisor_config.go:37`), `Agent.SetAdvisorConfig` (`internal/agent/advisor_config.go:57`) and `advisorCheckpointsFromMeta` (`internal/server/advisor_session.go:215`), so the process-wide default, an in-session config change and a stored session pin all migrate.
 - The `AdvisorConfig.Checkpoints` field comment (`internal/config/ocodeconfig.go:862`) states that `"done"` gates BOTH moments — the end-of-turn review and the before-commit hold — and that an empty list disables both.
-- The default checkpoint list is `["done"]` (`internal/config/ocodeconfig.go:1839`). The web AdvisorForm offers only `"done"`. Regression: `TestAdvisorCheckpoint_PlanValueMigrates` (`internal/agent/advisor_checkpoint_test.go:531`).
+- The default checkpoint list is `["done"]` (`internal/config/ocodeconfig.go:1847`). The web AdvisorForm offers only `"done"`. Regression: `TestAdvisorCheckpoint_PlanValueMigrates` (`internal/agent/advisor_checkpoint_test.go:531`).
 
 ## The two moments
 

@@ -13,7 +13,7 @@ tags:
   - fail-open
   - timeout
   - server
-timestamp: 2026-09-29T03:03:32Z
+timestamp: 2026-11-15T10:40:57Z
 ---
 # Speech summary is fail-open: skip while the turn holds `as.mu`, cancellable summariser, unlocked config write
 
@@ -36,7 +36,7 @@ side task into a stall for unrelated code:
    short-lived map lock, never a work lock"
    (`internal/server/agent_session.go:40-47`). `SaveOcodeSpeechSummary` does a
    cross-process read-modify-write bounded at ~5s on a contended lock file
-   (`lockOcodeConfig`, `internal/config/ocodeconfig.go:2269-2299`). Holding
+   (`lockOcodeConfig`, `internal/config/ocodeconfig.go:3142-3151`). Holding
    `h.mu` across it stalls every other session's send, the run-state polls and
    the config endpoints — the original "session doesn't run while another
    session is running" bug class.
