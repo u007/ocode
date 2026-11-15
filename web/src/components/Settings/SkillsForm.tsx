@@ -122,10 +122,18 @@ export default function SkillsForm() {
         ) : (
           <div className="divide-y divide-border">
             {orderedSkills.map((s) => (
-              <label
+              <div
                 key={s.name}
                 className="flex items-center justify-between gap-2 cursor-pointer rounded px-3 py-2 hover:bg-muted"
                 title={s.description || s.name}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (!s.source) return;
+                  void api.revealInFileManager?.(s.source).catch((e) => {
+                    console.error("reveal skill folder error", e);
+                  });
+                }}
               >
                 <div className="flex min-w-0 items-center gap-3">
                   <span
@@ -168,9 +176,10 @@ export default function SkillsForm() {
                   checked={s.enabled}
                   disabled={skillBusy === s.name}
                   onChange={() => toggleSkill(s.name)}
+                  onClick={(e) => e.stopPropagation()}
                   className="w-8 h-4 shrink-0 cursor-pointer rounded-full appearance-none bg-muted-foreground/30 checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-              </label>
+              </div>
             ))}
           </div>
         )}

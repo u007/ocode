@@ -263,3 +263,15 @@ moves another window's page. Rules recorded only here:
 
 ### Editor file-access grants (see `docs/concepts/file-editor-grants.md`)
 The editor/preview opens files outside the active project via an EDITOR-ONLY in-memory grant (internal/server/handler_file_grants.go), separate from extra_allowed_paths — which feeds the agent scope. resolveEditorFilePath (scopeEditorRoots, handler_files.go:992) uses it; the DB browser (scopeProjectRoots) excludes grants (handler_db.go:46). See file-editor-grants.md for the LFI-shaped hole (handler_files.go:1007) and verified anchors.
+
+## Skill directory reveal (web/desktop)
+
+`POST /api/files/open` with `mode:"reveal"` is additionally allowed for paths that
+fall under ocode's skill-discovery directories (global skill roots, project-local
+skill dirs, and plugin skill roots), even when they lie outside the project root.
+This is a user-initiated, read-only "open in file manager" affordance for the
+web/desktop Skills list; it does not widen the agent's file roots or normal
+file read/write containment. The allowance is restricted to reveal mode and uses
+lexical containment so symlinked skill directories (common under
+`~/.claude/skills`) still open; reveal only selects the path in the OS file
+manager and does not read file contents.

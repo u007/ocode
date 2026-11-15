@@ -35,11 +35,16 @@ func foldTopLevelCds(command, workDir string, inScope func(string) bool) (folded
 	if command == "" || workDir == "" || inScope == nil {
 		return command, workDir, false
 	}
-	// Quotes and newlines are left alone entirely: a quoted token's boundaries
-	// are not something splitShellFields is relied on to reproduce here, and a
-	// wrong fold is an ask that became an allow. Newlines are refused for the
-	// whole command because they make statement boundaries ambiguous.
-	if strings.Contains(command, "\n") {
+	// Quotes are left alone entirely: a quoted token's boundaries are not
+	// something splitShellFields is relied on to reproduce here, and a wrong
+	// fold is an ask that became an allow. A newline INSIDE a quoted token is
+	// data within one statement, which scanShellStatement already keeps whole, so
+	// it does not block the fold: the 2026-11-14 deferral was a
+	// `python3 -c "<multi-line>"` whose cross-project cd was never folded. Any
+	// other newline shape, and any comment, backtick, ANSI-C/locale quote or
+	// here-doc that appears alongside one, refuses the whole command (see
+	// newlineBlocksFold).
+	if newlineBlocksFold(command) {
 		return command, workDir, false
 	}
 	// Bare ( ) { } are group/subshell syntax and change what a cd affects. The
@@ -168,6 +173,70 @@ func statementHasControlFlow(stmt string) bool {
 		}
 	}
 	return false
+}
+
+// newlineBlocksFold reports whether a command containing a newline must be left
+// unfolded (true) because the quote walker might not agree with bash about where
+// its statements end. A command with no newline is never blocked here.
+//
+// With a newline present, each of these returns true:
+//   - a newline outside quotes: a statement boundary, or a here-doc body;
+//   - a backslash outside single quotes followed by a newline: a continuation;
+//   - a string that ends inside an open quote;
+//   - a '#' outside quotes: bash starts a comment there, and the comment ends at
+//     the newline, but the walker is comment-blind and would keep reading quotes
+//     inside it. `ls # "\ncd /etc && rm -rf x # "` is one walker string yet two
+//     bash lines, the second running in /etc;
+//   - a backtick outside single quotes, including inside double quotes: a
+//     substitution body is a fresh parse the walker does not model;
+//   - `$'` or `$"` outside single quotes: ANSI-C and locale quoting, where \'
+//     does not close the string the way the walker assumes;
+//   - `$(` outside single quotes, unquoted or inside double quotes: it opens a
+//     fresh parsing context in which a `"` re-opens a quote and a newline is a
+//     command separator, so the walker's double-quote state is wrong there.
+//     `echo "$(ls "a"\ncd /etc && rm -rf x)"` runs the second line in /etc;
+//   - `<<` outside quotes: a here-document or here-string body.
+//
+// A '#' inside double quotes, or a newline inside double quotes, is data and does
+// not block. Quote and escape tracking mirrors scanShell so both agree on what is
+// quoted.
+func newlineBlocksFold(s string) bool {
+	if !strings.Contains(s, "\n") {
+		return false
+	}
+	r := []rune(s)
+	inSingle, inDouble := false, false
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case c == '\\':
+			if i+1 < len(r) && r[i+1] == '\n' {
+				return true
+			}
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = true
+		case c == '"':
+			inDouble = !inDouble
+		case c == '`':
+			return true
+		case c == '$' && i+1 < len(r) && (r[i+1] == '\'' || r[i+1] == '"' || r[i+1] == '('):
+			return true
+		case c == '\n':
+			if !inDouble {
+				return true
+			}
+		case c == '#' && !inDouble:
+			return true
+		case c == '<' && !inDouble && i+1 < len(r) && r[i+1] == '<':
+			return true
+		}
+	}
+	return inSingle || inDouble
 }
 
 // stripSubstitutions blanks out $(…) and `…` spans so a caller can test for bare

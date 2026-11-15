@@ -475,7 +475,7 @@ func SkillSearchPathsForRoot(root string) []string {
 // globalSkillSearchPaths is SkillSearchPathsForRoot without any project layer:
 // the user-global dirs and the bundled set only. It never consults the process
 // cwd, which for a multi-project server is some unrelated directory.
-func globalSkillSearchPaths() []string {
+func GlobalSkillSearchPaths() []string {
 	return skillSearchPathsWith(nil)
 }
 
@@ -485,7 +485,7 @@ func globalSkillSearchPaths() []string {
 // the process was started in, so it is safe for a surface shared by every
 // project.
 func LoadGlobalSkills() []Skill {
-	return loadSkillsFromPaths(globalSkillSearchPaths())
+	return loadSkillsFromPaths(GlobalSkillSearchPaths())
 }
 
 func skillSearchPathsWith(projectDirs []string) []string {

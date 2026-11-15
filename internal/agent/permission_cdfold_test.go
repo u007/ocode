@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/tool"
 )
 
 // scopeOf builds an inScope predicate over a fixed set of root prefixes.
@@ -75,6 +78,11 @@ func TestFoldTopLevelCds_RefusesAmbiguous(t *testing.T) {
 		{"inside for loop", "for d in a b; do cd $d; done"},
 		{"inside if", "if true; then cd /Users/james/www/kakiit; fi"},
 		{"multi-line", "cd /Users/james/www/kakiit\nls"},
+		{"newline inside $() outside quotes", "cd /Users/james/www/kakiit && echo $(ls\npwd)"},
+		{"here-document", "cd /Users/james/www/kakiit && cat <<EOF\nhello\nEOF"},
+		{"line continuation", "cd /Users/james/www/kakiit && ls \\\n-la"},
+		{"unterminated quote", "cd /Users/james/www/kakiit && echo \"a\nb"},
+		{"quoted newline then top-level cd on a new line", "cd /Users/james/www/kakiit && echo \"a\nb\"\ncd /etc && ls"},
 		{"quoted target", `cd "/Users/james/www/kakiit" && ls`},
 		{"cd only, nothing to keep", "cd /Users/james/www/kakiit"},
 		{"no cd at all", "ls drizzle | wc -l"},
@@ -90,6 +98,156 @@ func TestFoldTopLevelCds_RefusesAmbiguous(t *testing.T) {
 			}
 			if cwd != "/Users/james/www/ocode" {
 				t.Errorf("cwd = %q, want the original workdir on a refused fold", cwd)
+			}
+		})
+	}
+}
+
+// TestFoldTopLevelCds_QuotedNewlineDoesNotBlockFold pins the 2026-11-14 deferral:
+// a multi-line `python3 -c "..."` made the whole command refuse, so the
+// cross-project cd was never folded and the judge deferred at 0.60. A newline
+// inside a quoted token is data within one statement, so the leading cd folds and
+// the quoted newlines survive byte-for-byte.
+func TestFoldTopLevelCds_QuotedNewlineDoesNotBlockFold(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	const wantCwd = "/Users/james/www/kakiit"
+	for _, cmd := range []string{
+		"cd /Users/james/www/kakiit && git mv a.sql b.sql && python3 -c \"\nimport json\nd=json.load(open('p'))\nfor e in d['entries']:\n    print(e)\n\" && grep x drizzle/meta/_journal.json",
+		"cd /Users/james/www/kakiit && node -e '\nconsole.log(1)\n' && ls",
+	} {
+		want := strings.TrimPrefix(cmd, "cd /Users/james/www/kakiit && ")
+		if want == cmd {
+			t.Fatalf("test setup: leading cd prefix not found in %q", cmd)
+		}
+		folded, cwd, ok := foldTopLevelCds(cmd, "/Users/james/www/ocode", in)
+		if !ok {
+			t.Errorf("fold refused a command whose newline is inside quotes: %q", cmd)
+			continue
+		}
+		if cwd != wantCwd {
+			t.Errorf("cwd = %q, want %q", cwd, wantCwd)
+		}
+		if folded != want {
+			t.Errorf("folded command wrong:\n got %q\nwant %q", folded, want)
+		}
+	}
+}
+
+// TestFoldTopLevelCds_QuotedNewlineStillRefusesUnsafeCd checks that accepting
+// quoted newlines does not loosen the cd rules: an out-of-scope cd, or a cd after
+// a pipe, still refuses the whole command.
+func TestFoldTopLevelCds_QuotedNewlineStillRefusesUnsafeCd(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	for _, cmd := range []string{
+		"cd /etc && echo \"a\nb\"",
+		"cd /Users/james/www/kakiit && echo \"a\nb\" | cat && cd /Users/james/www/prop && ls",
+	} {
+		folded, cwd, ok := foldTopLevelCds(cmd, "/Users/james/www/ocode", in)
+		if ok {
+			t.Errorf("fold accepted an unsafe command: %q -> %q (cwd %q)", cmd, folded, cwd)
+		}
+		if folded != cmd {
+			t.Errorf("command modified on a refused fold:\n got %q\nwant %q", folded, cmd)
+		}
+	}
+}
+
+// TestFoldTopLevelCds_NewlineWithWalkerBlindSpotsRefuses covers constructs the
+// quote walker cannot model (comments, ANSI-C quotes, backticks, here-docs). Each
+// one, combined with a newline, can hide a real statement boundary, so the whole
+// command must refuse and be left exactly as it was.
+func TestFoldTopLevelCds_NewlineWithWalkerBlindSpotsRefuses(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	const workDir = "/Users/james/www/ocode"
+	for _, cmd := range []string{
+		"cd /Users/james/www/kakiit && ls # \"\ncd /etc && rm -rf important # \"",
+		"cd /Users/james/www/kakiit && echo $'a\\'\ncd /etc && ls #'",
+		"cd /Users/james/www/kakiit && echo \"`echo x`\nb\"",
+		"cd /Users/james/www/kakiit && cat <<'E' \"\nx\nE\n\"",
+		"cd /Users/james/www/kakiit && echo \"a\nb\" # trailing comment",
+		"cd /Users/james/www/kakiit && echo \"$(ls \"a\"\ncd /etc && rm -rf x)\"",
+		"cd /Users/james/www/kakiit && echo \"$(ls # x\ncd /etc && rm -rf x)\"",
+	} {
+		folded, cwd, ok := foldTopLevelCds(cmd, workDir, in)
+		if ok {
+			t.Errorf("fold accepted a walker-blind command: %q -> %q (cwd %q)", cmd, folded, cwd)
+		}
+		if folded != cmd {
+			t.Errorf("command modified on a refused fold:\n got %q\nwant %q", folded, cmd)
+		}
+		if cwd != workDir {
+			t.Errorf("cwd = %q, want the original workdir %q on a refused fold", cwd, workDir)
+		}
+	}
+}
+
+// TestFoldTopLevelCds_HashInsideQuotedBodyFolds: a '#' inside a multi-line quoted
+// body is data, not a comment, so the leading cd still folds.
+func TestFoldTopLevelCds_HashInsideQuotedBodyFolds(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	cmd := "cd /Users/james/www/kakiit && python3 -c \"\n# comment\nprint(1)\n\" && ls"
+	want := strings.TrimPrefix(cmd, "cd /Users/james/www/kakiit && ")
+	if want == cmd {
+		t.Fatalf("test setup: leading cd prefix not found in %q", cmd)
+	}
+	folded, cwd, ok := foldTopLevelCds(cmd, "/Users/james/www/ocode", in)
+	if !ok {
+		t.Fatalf("fold refused a '#' that is inside a quoted body: %q", cmd)
+	}
+	if cwd != "/Users/james/www/kakiit" {
+		t.Errorf("cwd = %q, want /Users/james/www/kakiit", cwd)
+	}
+	if folded != want {
+		t.Errorf("folded command wrong:\n got %q\nwant %q", folded, want)
+	}
+}
+
+// TestNewlineBlocksFold pins which commands the newline gate refuses.
+func TestNewlineBlocksFold(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		// Newline shapes.
+		{"no newline", "ls -la", false},
+		{"newline in double quotes", "echo \"a\nb\"", false},
+		{"newline in single quotes", "echo 'a\nb'", false},
+		{"bare newline", "ls\npwd", true},
+		{"newline inside unquoted $()", "echo $(ls\npwd)", true},
+		{"backslash-newline", "ls \\\n-la", true},
+		{"unterminated double quote", "echo \"a\nb", true},
+		{"escaped quote outside quotes", "echo \\\"a\nb", true},
+		// '#' outside quotes starts a comment bash ends at the newline.
+		{"hash outside quotes", "ls # x\npwd", true},
+		{"hash inside double quotes is data", "echo \"# x\nb\"", false},
+		{"hash inside single quotes is data", "echo '# x\nb'", false},
+		// Backtick outside single quotes, including inside double quotes.
+		{"backtick outside quotes", "echo `ls`\npwd", true},
+		{"backtick inside double quotes", "echo \"`ls`\"\npwd", true},
+		{"backtick inside single quotes is data", "echo '`ls`\nb'", false},
+		// $' and $" outside single quotes.
+		{"ANSI-C $' outside quotes", "echo $'a'\npwd", true},
+		{"locale $\" outside quotes", "echo $\"a\"\npwd", true},
+		{"$' inside single quotes is data", "echo '$\"\nx'", false},
+		// << outside quotes: here-doc / here-string.
+		{"here-doc outside quotes", "cat <<E\nx\nE", true},
+		{"<< inside double quotes is data", "echo \"<<\nx\"", false},
+		// Single-line commands are never blocked, whatever they contain.
+		{"single line with hash", "ls # x", false},
+		{"single line with backtick", "echo `ls`", false},
+		{"single line with ANSI-C quote", "echo $'a'", false},
+		{"single line with here-doc", "cat <<E", false},
+		// $( opens a fresh parse context: blocks outside single quotes.
+		{"$( inside double quotes with newline", "echo \"$(ls \"a\"\ncd /etc)\"", true},
+		{"$( unquoted with quoted newline elsewhere", "echo $(pwd) \"a\nb\"", true},
+		{"single line $( inside double quotes", "echo \"$(pwd)\"", false},
+		{"$( inside single quotes with quoted newline", "echo '$(x)' \"a\nb\"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newlineBlocksFold(tc.in); got != tc.want {
+				t.Errorf("newlineBlocksFold(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -267,4 +425,57 @@ func TestStripSubstitutions_DoubleQuoteEdgeCases(t *testing.T) {
 			t.Errorf("%s: ContainsAny(stripSubstitutions(%q)) = %v, want %v", c.name, c.in, got, c.wantGroup)
 		}
 	}
+}
+
+// A folded cd must move the whole judge view, not just working_directory.
+// project_context names the session's own work dir, so a cross-project cd left
+// it contradicting working_directory, and the judge hesitated (2026-11-15).
+func TestTypesafeStateFoldedCdRewritesProjectContext(t *testing.T) {
+	a, origCwd := newConsultAgent(t)
+	otherDir := t.TempDir()
+	otherCwd, err := filepath.EvalSymlinks(otherDir)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(otherCwd) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", otherCwd)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(otherCwd) })
+
+	t.Run("cd across projects", func(t *testing.T) {
+		args, err := json.Marshal(map[string]string{"command": "cd " + otherCwd + " && ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := a.buildTypesafePermissionState("bash", args, nil)
+		wd, _ := state["working_directory"].(string)
+		if wd != otherCwd {
+			t.Fatalf("working_directory = %q, want %q", wd, otherCwd)
+		}
+		if rc, _ := state["resolved_cd"].(string); rc != otherCwd {
+			t.Fatalf("resolved_cd = %q, want %q", rc, otherCwd)
+		}
+		pc, _ := state["project_context"].(string)
+		if !strings.Contains(pc, "Working directory:\n"+otherCwd+"\n") {
+			t.Errorf("project_context does not name the folded cwd %q:\n%s", otherCwd, pc)
+		}
+		if strings.Contains(pc, "Working directory:\n"+origCwd+"\n") {
+			t.Errorf("project_context still names the original cwd %q:\n%s", origCwd, pc)
+		}
+	})
+
+	t.Run("no cd keeps the session cwd", func(t *testing.T) {
+		args, err := json.Marshal(map[string]string{"command": "ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := a.buildTypesafePermissionState("bash", args, nil)
+		if _, ok := state["resolved_cd"]; ok {
+			t.Errorf("resolved_cd set without a cd: %v", state["resolved_cd"])
+		}
+		pc, _ := state["project_context"].(string)
+		if !strings.Contains(pc, "Working directory:\n"+origCwd+"\n") {
+			t.Errorf("project_context does not name the session cwd %q:\n%s", origCwd, pc)
+		}
+	})
 }

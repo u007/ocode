@@ -213,3 +213,37 @@ func TestTypesafeJudgeInstructionsLocalSQLRule(t *testing.T) {
 		t.Fatal("verdict rubric contains a backtick; it is a Go raw string literal and an unescaped ` would terminate it")
 	}
 }
+
+// Changing project files is ordinary assistant work, so the rubric must not make
+// a file create, edit or rename hesitate. The rule exists because Jev deferred a
+// `cd <root> && git mv a b && python3 -c ...` line at 0.60 with enforced concern
+// system_or_git_history (2026-11-14). The exception keeps content-discarding
+// restores asking a human: they replace a file's current content with a stored
+// version, so they stay denied unless replaced_files_backup says all_saved_first.
+// Each fragment is checked against that one rule line, not the whole rubric.
+func TestTypesafeRubric_FileChangesAreOrdinary(t *testing.T) {
+	const marker = "Changing project files is the assistant's job"
+	var rule string
+	for _, l := range strings.Split(typesafeJudgeInstructions, "\n") {
+		if strings.Contains(l, marker) {
+			rule = l
+			break
+		}
+	}
+	if rule == "" {
+		t.Fatalf("rubric has no line containing %q", marker)
+	}
+	for _, frag := range []string{
+		"never by itself a reason to deny or to hesitate",
+		"git mv",
+		"never name system_or_git_history",
+		"git checkout -- <path>",
+		"git restore <path>",
+		"git reset --hard",
+		"must still be denied",
+	} {
+		if !strings.Contains(rule, frag) {
+			t.Errorf("file-change rule lost fragment %q:\n%s", frag, rule)
+		}
+	}
+}

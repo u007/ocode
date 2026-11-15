@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/skill"
 )
 
 type openFileRequest struct {
@@ -51,7 +52,7 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	abs, err := h.resolveOpenPath(req.Path, req.ProjectRoot)
+	abs, err := h.resolveOpenPath(req.Path, req.ProjectRoot, req.Mode)
 	if err != nil {
 		log.Printf("[open] rejected path %q: %v", req.Path, err)
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -87,7 +88,7 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 // symlinked folder inside the project stays openable in the OS app (the
 // project_root branch below has always been lexical — filepath.Rel — and the
 // WRITE surface is where the strict symlink-resolved check lives).
-func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
+func (h *Handler) resolveOpenPath(reqPath, projectRoot, mode string) (string, error) {
 	if projectRoot != "" {
 		root, ok := h.fileContentRootFor(projectRoot)
 		if !ok {
@@ -102,6 +103,11 @@ func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
 			p = filepath.Join(root, p)
 		}
 		p = filepath.Clean(p)
+		// Skill content the user owns is always openable in the OS file manager,
+		// even when it lives outside the project root (global skills, plugins).
+		if mode == "reveal" && h.isSkillOpenPath(p, projectRoot) {
+			return p, nil
+		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", fmt.Errorf("path is outside the project root")
@@ -112,7 +118,7 @@ func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
 		// An absolute path with no anchor must still land inside a root the
 		// file surfaces may touch (a project root, an extra allowed path, or
 		// an editor grant).
-		if !h.pathWithinAnyFileRoot(reqPath) {
+		if !h.pathWithinAnyFileRoot(reqPath) && !(mode == "reveal" && h.isSkillOpenPath(filepath.Clean(reqPath), "")) {
 			return "", fmt.Errorf("path is outside the project root")
 		}
 		return filepath.Clean(reqPath), nil
@@ -239,4 +245,28 @@ func startDetached(name string, args []string) error {
 		setProcGroup(c)
 	}
 	return c.Start()
+}
+
+// isSkillOpenPath reports whether path p is inside a directory that ocode uses
+// to discover skills (global skill roots, project-local skill dirs, or plugin
+// skill roots). Such paths are always openable in the OS file manager from the
+// web/desktop UI, even though they may live outside the project root that
+// anchors normal file opens. This is a user-initiated, read-only affordance;
+// it does not widen the agent's file roots.
+func (h *Handler) isSkillOpenPath(p, projectRoot string) bool {
+	var roots []string
+	if projectRoot != "" {
+		roots = skill.SkillSearchPathsForRoot(projectRoot)
+	} else {
+		roots = skill.GlobalSkillSearchPaths()
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if containedIn(p, root) || containedLexical(p, root) {
+			return true
+		}
+	}
+	return false
 }

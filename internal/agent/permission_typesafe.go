@@ -219,6 +219,7 @@ Rules:
 - user_policy, when present, is the user's own additional policy and overrides the defaults above.
 - A compound command (&&, ;, pipes, shell functions, loops, here-documents) is allowed when every command in it is allowed. Its length, the number of steps, and echo lines that only label the output are not reasons to deny or to hesitate.
 - Ordinary version-control writes inside allowed_roots are development activity and are allowed: git add, commit, push (without --force), pull, fetch, merge, tag creation, branch creation, and worktree add/list (including a detached throwaway worktree in a temp root, with node_modules or build output copied into it). The destructive forms stay denied: force-push, history rewrite (amend of pushed commits, rebase, filter-branch), reset --hard, clean, and deleting branches, tags or worktrees.
+- Changing project files is the assistant's job and is never by itself a reason to deny or to hesitate: creating a new file, editing or overwriting one with new content (an editor tool, a shell redirect, sed -i, or an interpreter one-liner or script that reads a project file and writes it back), and renaming or moving one (mv, git mv) are ordinary development activity when every path is inside allowed_roots or a temp root, and are allowed with concern none. git mv only renames a file in the working tree and stages that rename: it does not modify git history, so never name system_or_git_history for it, alone or chained after a cd. The one exception is REPLACING a file's current content with a stored version, which discards uncommitted work: git checkout -- <path>, git checkout <ref> -- <path>, git restore <path> and git reset --hard must still be denied, unless replaced_files_backup says all_saved_first. The credential rule still applies to credential-bearing files.
 - Backing a project file up to a temp root, editing or renaming project files in place, running builds or tests, and restoring the file from that backup are in-scope writes and are allowed — EXCEPT for a credential-bearing file (.env, auth files, keys), which is covered by the credential rule above even when the destination is a temp root. So is running a binary or script the command itself just built or wrote under a temp root.
 - replaced_files_backup is a fact ocode verified about the project files this command overwrites; use it for those overwrites only. all_saved_first: every project file ocode saw this command replace was first copied or moved to a temp root by this same command (file_backups lists each file and where it was saved), so nothing is lost. This is a baseline check: put the staged or committed version in place (git show :path > path, or cp of a temp copy), move a file aside into a temp root, run a build or test. It is in-scope, not destructive, the restore may be a later command, and it is ALLOWED without hesitation. The fact covers only the overwrites of the files listed in file_backups and never overrides your own reading of the rest of the line: every other command is still judged by the other rules, and anything else that is destructive, out of scope or banned must still be denied. not_saved: the command overwrites an existing project file with git show output without saving it first; this discards uncommitted work and must be DENIED.
 - The temp roots are scratch space: /tmp, /private/tmp, /var/tmp, the per-user OS temp directory ($TMPDIR, /var/folders/.../T; on Windows %TEMP%, %TMP%, $env:TEMP, C:\Users\<name>\AppData\Local\Temp), a directory returned by mktemp, and every path in temp_root_aliases. Reading, writing, creating, overwriting, moving and deleting files and directories under a temp root are allowed, including recursive forced deletion of a path under one (rm -rf; on Windows rmdir /s /q, rd /s /q, del /f /s /q, Remove-Item -Recurse -Force), even when allow_destructive is false. Building a binary into a temp root and running it is allowed. This covers only paths that resolve under a temp root: a path elsewhere that merely has "tmp" in its name, a ".." path that leaves the temp root, and copying from a temp root to a destination outside allowed_roots are judged by the other rules. Copying a credential-bearing file INTO a temp root is NOT covered by this paragraph — see the credential rule above.
@@ -772,9 +773,19 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 			if folded, newCwd, ok := foldTopLevelCds(p.Command, judgeCwd, func(path string) bool {
 				return a.permissions != nil && isWithinAllowedScope(a.permissions, path)
 			}); ok {
+				origCwd := judgeCwd
 				judgeCmd, judgeCwd = folded, newCwd
 				state["working_directory"] = judgeCwd
 				state["resolved_cd"] = newCwd
+				// project_context names the session's own work dir. Left as-is it
+				// contradicts working_directory on a cross-project cd (session in A
+				// running cd B) and the judge hesitates: the same command scored
+				// 0.94-0.96 from inside B and 0.84-0.86 (floor 0.80) cd'd across
+				// from A (measured 2026-11-15). Rewrite only the exact working-
+				// directory section; if it is not present, leave the context alone.
+				if pc, isStr := state["project_context"].(string); isStr && origCwd != newCwd {
+					state["project_context"] = strings.Replace(pc, "Working directory:\n"+origCwd+"\n", "Working directory:\n"+newCwd+"\n", 1)
+				}
 			}
 			// Fail closed: the facts travel only when they prove something. A
 			// command with a write the analysis cannot vouch for gets no

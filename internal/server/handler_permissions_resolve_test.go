@@ -13,6 +13,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -937,5 +938,83 @@ func TestPersistAlwaysAllow_OutOfScopePathKeptInHandlerConfig(t *testing.T) {
 	tool.InitBuiltinTools(nil, h.cfg, nil)
 	if !tool.HasExtraAllowedPath(root) {
 		t.Fatalf("grant for %s dropped by session build", root)
+	}
+}
+
+// TestHandleResolvePermissionUsesModelPickedWhilePaused pins that a model
+// switched while the session is paused on a permission ask (turnActive false)
+// takes effect on the live agent BEFORE the user answers: the continuation
+// re-Steps on as.agent, so without the idle reconcile in HandleSetSessionModel
+// it would keep running on the previous model.
+func TestHandleResolvePermissionUsesModelPickedWhilePaused(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	seedLoopbackCredential(t, "anthropic")
+
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+
+	h.cfg.Model = "opencode-go/deepseek-v4.1-flash"
+	as := newTestSession(h, id, instantClient{})
+	as.model = "opencode-go/deepseek-v4.1-flash"
+	as.messages = []agent.Message{
+		{Role: "user", Content: "clean the build"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+		{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, samplePermissionRequest())},
+	}
+	if err := session.SaveForDir(proj, id, "project session", as.messages, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	h.agents[agentKey(id)] = as
+
+	if h.sessions.IsTurnActive(id) {
+		t.Fatalf("session should not be turn-active while paused on an ask")
+	}
+
+	if rec := setSessionModel(t, h, id, "anthropic/claude-sonnet-5-5"); rec.Code != http.StatusOK {
+		t.Fatalf("pick model: %d (%s)", rec.Code, rec.Body.String())
+	}
+	rebuilt := h.lookupAgentSession(id)
+	if rebuilt == nil || rebuilt == as || rebuilt.model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("resident agent not rebuilt to picked model: %+v", rebuilt)
+	}
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	body := `{"request_id":"call-1","approved":false}`
+	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResolvePermission(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	waitForAskContinuation(t, rebuilt)
+
+	resolvedAsk := false
+	for _, m := range rebuilt.messages {
+		if strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			resolvedAsk = true
+		}
+	}
+	if resolvedAsk {
+		t.Fatalf("permission ask was not resolved after model pick: %+v", rebuilt.messages)
+	}
+	hasDenied := false
+	for _, m := range rebuilt.messages {
+		if strings.Contains(m.Content, "denied") {
+			hasDenied = true
+		}
+	}
+	if !hasDenied {
+		t.Fatalf("expected a denied tool result after resolve, got %+v", rebuilt.messages)
+	}
+	if rebuilt.model != "anthropic/claude-sonnet-5-5" {
+		t.Fatalf("continuation model = %q, want picked model", rebuilt.model)
 	}
 }

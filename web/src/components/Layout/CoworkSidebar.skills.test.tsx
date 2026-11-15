@@ -26,9 +26,9 @@ vi.mock("../../stores/projectStore", () => ({
 
 const SKILLS: ManageableSkill[] = [
   // Deliberately unordered: the component must put enabled ones on top.
-  { name: "alpha", description: "disabled one", enabled: false },
-  { name: "gamma", description: "enabled one", enabled: true },
-  { name: "beta", description: "enabled one", enabled: true },
+  { name: "alpha", description: "disabled one", enabled: false, source: "/tmp/skills/alpha/SKILL.md" },
+  { name: "gamma", description: "enabled one", enabled: true, source: "/tmp/skills/gamma/SKILL.md" },
+  { name: "beta", description: "enabled one", enabled: true, source: "/tmp/skills/beta/SKILL.md" },
 ];
 
 vi.mock("../../api/client", () => ({
@@ -73,6 +73,7 @@ vi.mock("../../api/client", () => ({
     setSkillEnabled: vi.fn(() =>
       Promise.resolve({ name: "alpha", enabled: true, project_root: "" }),
     ),
+    revealInFileManager: vi.fn(() => Promise.resolve({ path: "", status: "opened" })),
   },
   apiPath: (p: string) => p,
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
@@ -140,8 +141,8 @@ describe("CoworkSidebar Skills toggle", () => {
     expect(alpha.checked).toBe(false);
     expect(beta.checked).toBe(true);
     // Disabled rows are visually de-emphasised (dimmed), not hidden.
-    expect(alpha.closest("label")?.className).toContain("opacity-60");
-    expect(beta.closest("label")?.className).not.toContain("opacity-60");
+    expect(alpha.closest("div")?.className).toContain("opacity-60");
+    expect(beta.closest("div")?.className).not.toContain("opacity-60");
   });
 
   it("queries the list for the active project", async () => {
@@ -192,5 +193,22 @@ describe("CoworkSidebar Skills toggle", () => {
     });
     // A failed toggle must not reload the slash list into a wrong state.
     expect(reloadDynamicCommands).not.toHaveBeenCalled();
+  });
+
+  it("opens the skill folder when the row is clicked but keeps the toggle working", async () => {
+    renderSidebar();
+    await openSkillsSection();
+    const beta = screen.getByText("beta");
+    fireEvent.click(beta);
+    await waitFor(() => {
+      expect(api.revealInFileManager).toHaveBeenCalledWith("/tmp/skills/beta/SKILL.md", undefined);
+    });
+    const checkbox = screen.getByLabelText("Skill beta") as HTMLInputElement;
+    const callsBefore = (api.revealInFileManager as any).mock.calls.length;
+    fireEvent.click(checkbox);
+    await waitFor(() => {
+      expect(api.setSkillEnabled).toHaveBeenCalled();
+    });
+    expect((api.revealInFileManager as any).mock.calls.length).toBe(callsBefore);
   });
 });

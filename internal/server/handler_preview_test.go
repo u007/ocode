@@ -165,15 +165,15 @@ func TestResolveOpenPathProjectRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Unknown project root is rejected.
-	if _, err := h.resolveOpenPath("a.txt", t.TempDir()); err == nil {
+	if _, err := h.resolveOpenPath("a.txt", t.TempDir(), ""); err == nil {
 		t.Error("expected rejection for unknown project root")
 	}
 	// Escape from the project root is rejected.
-	if _, err := h.resolveOpenPath("../outside.txt", dir); err == nil {
+	if _, err := h.resolveOpenPath("../outside.txt", dir, ""); err == nil {
 		t.Error("expected rejection for path outside project root")
 	}
 	// Inside the root resolves.
-	got, err := h.resolveOpenPath("a.txt", dir)
+	got, err := h.resolveOpenPath("a.txt", dir, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

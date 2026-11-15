@@ -794,6 +794,16 @@ func (h *Handler) HandleSetSessionModel(w http.ResponseWriter, r *http.Request, 
 			log.Printf("save recent model: %v", err)
 		}
 	}
+	// Reconcile a resident session while it is idle so a model picked while
+	// paused on a permission/question ask (turnActive false) takes effect on
+	// the live agent before the user answers it. A mid-turn pick is a no-op
+	// (reconcileProfileAgent returns the running agent unchanged) and lands
+	// on the next turn, matching the documented mid-turn contract.
+	if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+		if _, err := h.reconcileProfileAgent(id, as, effective); err != nil {
+			log.Printf("serve: reconcile after model pick for %s: %v", id, err)
+		}
+	}
 	h.pushSessionStatusSnapshot(id)
 	writeJSON(w, http.StatusOK, map[string]string{"model": effective, "session_id": id})
 }
@@ -805,6 +815,13 @@ func (h *Handler) HandleClearSessionModel(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
+	}
+	// Reconcile while idle so a paused ask continuation picks up the new
+	// (default) model.
+	if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+		if _, err := h.reconcileProfileAgent(id, as, effective); err != nil {
+			log.Printf("serve: reconcile after clear model for %s: %v", id, err)
+		}
 	}
 	h.pushSessionStatusSnapshot(id)
 	writeJSON(w, http.StatusOK, map[string]string{"model": effective, "session_id": id})
