@@ -63,6 +63,8 @@ var expectedBuiltinTools = []string{
 	"github_workflow",
 	"ocr",
 	"imagegen",
+	"videogen",
+	"audiogen",
 	"preview_open",
 	"viewer_control",
 }

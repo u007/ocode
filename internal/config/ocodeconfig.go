@@ -1263,6 +1263,8 @@ type OcodeConfig struct {
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
 	Ocr         ocr.OcrConfig     `json:"ocr"`
 	ImageGen    ImageGenConfig    `json:"imagegen"`
+	VideoGen    VideoGenConfig    `json:"videogen"`
+	AudioGen    AudioGenConfig    `json:"audiogen"`
 	ComputerUse ComputerUseConfig `json:"computer_use"`
 	// SystemPermissions is the persisted on/off intent for the settings UI's
 	// System Permissions section (macOS TCC grants + custom paths). Live grant
@@ -1387,10 +1389,12 @@ type PermissionConfig struct {
 	Tools map[string]string     `json:"tools,omitempty"`
 	Bash  BashPermissionConfig  `json:"bash,omitempty"`
 	Auto  *AutoPermissionConfig `json:"auto,omitempty"`
-	// AllowedHosts is the user-maintained list of hosts the agent may reach
-	// (fetch or open) without a permission prompt; the outbound-request judge
-	// still sees the request and treats the host as vouched for. Entries are
-	// normalised hostnames; a leading "*." entry covers every subdomain.
+	// AllowedHosts is the user-maintained list of hosts or URL prefixes the agent
+	// may reach (fetch or open) without a permission prompt. A listed request is
+	// not sent to the outbound-request judge and its page is not content-scanned.
+	// Entries are normalised: a hostname, a leading "*." entry for every
+	// subdomain, or a host with a path prefix such as "example.com/docs" that
+	// covers only that path and below. Only the host part is lower-cased.
 	AllowedHosts []string `json:"allowed_hosts,omitempty"`
 }
 
@@ -1709,6 +1713,8 @@ type ocodeConfigFile struct {
 	FakeAgent                  string                      `json:"fake_agent,omitempty"`
 	Ocr                        *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                   *ImageGenConfig             `json:"imagegen,omitempty"`
+	VideoGen                   *VideoGenConfig             `json:"videogen,omitempty"`
+	AudioGen                   *AudioGenConfig             `json:"audiogen,omitempty"`
 	ComputerUse                *ComputerUseConfig          `json:"computer_use,omitempty"`
 	SystemPermissions          *sysperm.Config             `json:"system_permissions,omitempty"`
 	Profiles                   map[string]ProfileDelta     `json:"profiles,omitempty"`
@@ -1793,6 +1799,8 @@ func defaultOcodeConfig() OcodeConfig {
 		Ocr:                      ocr.DefaultOcrConfig(),
 		Extra:                    make(map[string]json.RawMessage),
 		ImageGen:                 DefaultImageGenConfig(),
+		VideoGen:                 DefaultVideoGenConfig(),
+		AudioGen:                 DefaultAudioGenConfig(),
 		ComputerUse:              DefaultComputerUseConfig(),
 		SystemPermissions:        sysperm.DefaultConfig(),
 	}
@@ -2591,6 +2599,26 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "imagegen")
 	}
 
+	if rawVid, ok := raw["videogen"]; ok && rawVid != nil {
+		var vidCfg VideoGenConfig
+		if data, err := json.Marshal(rawVid); err == nil {
+			if json.Unmarshal(data, &vidCfg) == nil {
+				cfg.VideoGen = vidCfg
+			}
+		}
+		delete(raw, "videogen")
+	}
+
+	if rawAud, ok := raw["audiogen"]; ok && rawAud != nil {
+		var audCfg AudioGenConfig
+		if data, err := json.Marshal(rawAud); err == nil {
+			if json.Unmarshal(data, &audCfg) == nil {
+				cfg.AudioGen = audCfg
+			}
+		}
+		delete(raw, "audiogen")
+	}
+
 	if rawCU, ok := raw["computer_use"]; ok && rawCU != nil {
 		var cuCfg ComputerUseConfig
 		if data, err := json.Marshal(rawCU); err == nil {
@@ -3386,6 +3414,8 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["ocr"] = cfg.Ocr
 	payload["imagegen"] = cfg.ImageGen
+	payload["videogen"] = cfg.VideoGen
+	payload["audiogen"] = cfg.AudioGen
 	payload["computer_use"] = cfg.ComputerUse
 	payload["system_permissions"] = cfg.SystemPermissions
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
@@ -4996,10 +5026,11 @@ func SaveOcodeAutoPermissionConfig(cfg AutoPermissionConfig) error {
 }
 
 // SaveOcodeAllowedHosts replaces permissions.allowed_hosts via load-modify-write.
-// Entries are trimmed, lower-cased, de-duplicated, empty entries dropped and the
-// result sorted. Nothing else in the permissions block is touched. Hostname
-// validation (scheme, port, path stripping) lives in the agent package, which
-// callers run before saving.
+// Entries are trimmed, normalised by NormalizeAllowedHostList (host lower-cased,
+// path case kept), de-duplicated, empty entries dropped and the result sorted.
+// Nothing else in the permissions block is touched. Entry validation (scheme,
+// port, query, path cleaning) lives in the agent package, which callers run
+// before saving.
 func SaveOcodeAllowedHosts(hosts []string) error {
 	normalised := NormalizeAllowedHostList(hosts)
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
@@ -5008,14 +5039,21 @@ func SaveOcodeAllowedHosts(hosts []string) error {
 	})
 }
 
-// NormalizeAllowedHostList trims, lower-cases, de-duplicates and sorts a host
-// list, dropping empty entries. It returns nil for an empty result. It is
-// idempotent, so the server can reply with the same list the saver writes.
+// NormalizeAllowedHostList trims, de-duplicates and sorts an allowed-hosts list,
+// dropping empty entries. Only the host part of each entry (before the first
+// "/") is lower-cased. A path prefix keeps its case, because URL paths are
+// case-sensitive. It returns nil for an empty result. It is idempotent, so the
+// server can reply with the same list the saver writes.
 func NormalizeAllowedHostList(hosts []string) []string {
 	seen := make(map[string]struct{}, len(hosts))
 	out := make([]string, 0, len(hosts))
 	for _, h := range hosts {
-		h = strings.ToLower(strings.TrimSpace(h))
+		h = strings.TrimSpace(h)
+		if i := strings.Index(h, "/"); i >= 0 {
+			h = strings.ToLower(h[:i]) + h[i:]
+		} else {
+			h = strings.ToLower(h)
+		}
 		if h == "" {
 			continue
 		}

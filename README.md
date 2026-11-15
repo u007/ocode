@@ -243,7 +243,9 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo; PDF responses are returned as extracted text |
 | `github_pr`, `github_issue`, `github_workflow` | GitHub PR / issue / workflow inspection |
 | `ocr` | Extract text from images (openai-compat, LM Studio native chat, or paddle); reuses stored `auth.json` creds |
-| `imagegen` | Generate images via configured provider |
+| `imagegen` | Generate images via configured provider (Gemini Nano Banana, OpenAI, Novita, DeepInfra) |
+| `videogen` | Generate short videos (3–15 s, native audio) with Gemini Omni Flash; `/video` configures model, aspect ratio, resolution and output path |
+| `audiogen` | Generate speech WAV files with Gemini TTS, single- or multi-speaker; `/audio` configures model, voice and output path |
 | `computer` | Opt-in host desktop screenshots and input actions; enable with `/computer enable` (takes effect in new sessions) |
 | `browser` | Drive the embedded Chrome tabs of sessions served by an ocode server that starts the embedded browser (desktop, `ocode serve`, the TUI's `/rc` server): list, screenshot, read, click, fill, pick, fill-form, upload, wait, console, network. Mutating actions ask. The TUI's own chat agent does not get it |
 | `cron` | Manage scheduled jobs from the agent (create/list/remove) |
@@ -341,7 +343,8 @@ Changes persist to `ocodeconfig.json` and apply live.
 ### 🧩 MCP Client
 
 - **Local + Remote MCP servers** with full lifecycle management
-- **OAuth support** for remote server authentication (`/mcp-auth`)
+- **Streamable HTTP transport** (`type: "http"`) with the MCP initialize handshake, session id and SSE-or-JSON responses, alongside the legacy POST/SSE remote servers
+- **OAuth support** for remote server authentication (`/mcp-auth`). **ElevenLabs** is a one-click preset in Settings → MCP Servers (`POST /api/mcp/elevenlabs/connect`): it installs the server entry, starts the browser sign-in and reloads the tool set. ElevenLabs accepts OAuth only (an API key is rejected) and uses a Client ID Metadata Document from this repo as its OAuth client id
 - **CLI:** `/mcp list`, `/mcp enable`, `/mcp disable`, `/mcp-auth`; headless `ocode mcp [add|list|ls|auth]`
 - **Configurable timeouts** per server (`mcp` in `ocodeconfig.json` / `opencode.json`)
 
@@ -423,7 +426,7 @@ A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by th
 | **Assets / Uploads** | Drag-and-drop uploads, upload dir, image preview | `AssetsPanel`; `POST /api/uploads`, `/api/files/open` |
 | **Agents** | Parallel agent monitoring, runs stream | `AgentsPanel`; `GET /api/agents/runs/stream` |
 | **Logs** | SSE-backed live log streaming with reconnection, retention cap, background buffering toggle | `LogPanel`, `LogsForm`; `GET /api/logs/stream`, `GET /api/logs` |
-| **Settings** | 30+ section settings overlay (backend, browser, passwords, speech, connectors, profiles, compact, permissions, security, terminal, logs, OCR, discovery, TUI, editor, paths, features, limits, imagegen, plugins, themes, MCP, …) | `SettingsPanel`; `GET/PUT /api/config/ocode/*`, `/api/config/*` |
+| **Settings** | 30+ section settings overlay (backend, browser, passwords, speech, connectors, profiles, compact, permissions, security, terminal, logs, OCR, discovery, TUI, editor, paths, features, limits, imagegen, videogen, audiogen, plugins, themes, MCP, …) | `SettingsPanel`; `GET/PUT /api/config/ocode/*`, `/api/config/*` |
 | **Model Selection** | Model dialog with main/small/advisor tabs, display names | `ModelDialog`; `GET /api/models` |
 | **Permissions / Questions** | Interactive allow/deny + question prompts, server-bridged | `PermissionDialog`, `QuestionDialog`; `POST /api/permissions`, `/api/questions` |
 | **Remote Control** | `/rc` mirrors a TUI session to the browser in real time (multiproject event bus) | `POST /api/rc/*`, `GET /api/events` |
@@ -700,6 +703,8 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/secret` | `<init|encrypt|decrypt|rekey> [path]` | Encrypt/decrypt a file or dir, or change the project passphrase |
 | `/ocr` | `[status|enable|disable|model [name]]` | OCR status / toggle / model selection (from LM Studio) |
 | `/image` | `[status|enable|disable|model [provider/model]]` | Image generation status / toggle / model selection |
+| `/video` | `[status|enable|disable|model <id>|aspect 16:9\|9:16|resolution 360p\|720p\|1080p\|4k|timeout <s>]` | Video generation (Gemini Omni Flash) status / toggle / settings |
+| `/audio` | `[status|enable|disable|model <id>|voice <name>|timeout <s>]` | Speech generation (Gemini TTS) status / toggle / settings |
 | `/computer` | `[status|enable|disable]` | Show computer-use status or enable/disable desktop control for new sessions |
 | `/localmodel` | | Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve |
 | `/localserver` | | Inspect or repair the cached local embed server (llama-server) binary; `fix` reinstalls it |
@@ -861,7 +866,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 - **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
 - **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `GET|POST /api/git/conflict/chunks`, `POST /api/git/fetch|pull|push|reset-remote|conflict/resolve|operation`, `GET /api/changes`, `POST /api/changes/undo-*`
 - **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
-- **Config:** `GET/PUT /api/config/ocode/*` (recap, commit-msg, compact, permissions-auto, permissions-mode, discovery, tui, editor, imagegen, paths, limits, features, autocontinue, browser, local-models, tts, fake-agent, …) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
+- **Config:** `GET/PUT /api/config/ocode/*` (recap, commit-msg, compact, permissions-auto, permissions-mode, discovery, tui, editor, imagegen, videogen, audiogen, paths, limits, features, autocontinue, browser, local-models, tts, fake-agent, …) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
 - **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`
 - **MCP / plugins / skills / commands:** `GET /api/mcp`, `GET /api/plugins`, `GET /api/skills`, `GET /api/commands`
 - **Events & logs:** `GET /api/events` (SSE, multiproject tagged bus), `GET /api/logs/stream`, `GET /api/tui-status`, `GET /api/spending`, `GET /api/lsp/statuses`
@@ -945,7 +950,7 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`, `sandbo
 - **`commit_msg_model`** config for AI commit message generation
 - **Safe built-in deny rules** for `git push --force` and `rm -rf`
 - **Progressive file preview** with binary detection
-- **OCR & Image generation** tools (`/ocr`, `/image`)
+- **OCR, image, video and audio generation** tools (`/ocr`, `/image`, `/video`, `/audio`)
 - **Local model instance manager** (`/localmodel`) for models LM Studio can't serve
 - **Secret redaction** (`/mask`) with tier-1 regex + tier-2 local LLM scanning, lenient/full modes, local-only endpoint guard
 - **Telegram bot** bridge

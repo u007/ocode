@@ -7050,7 +7050,7 @@ func LoadMCPToolsForConfig(cfg *config.Config) mcpLoadResult {
 		var err error
 		if mcpCfg.Type == "local" {
 			client, err = mcp.NewLocalClient(name, mcpCfg)
-		} else if mcpCfg.Type == "remote" {
+		} else if mcpCfg.Type == "remote" || mcpCfg.Type == "http" {
 			client, err = mcp.NewRemoteClient(name, mcpCfg)
 		}
 		if err != nil {

@@ -228,7 +228,8 @@ type PermissionManager struct {
 	webfetchDomains    cowMap[string, PermissionLevel]
 	// allowedHosts is the persisted permissions.allowed_hosts list, stored in
 	// normalised form (see NormalizeAllowedHost). A "*.example.com" key matches
-	// every subdomain of example.com but not example.com itself.
+	// every subdomain of example.com but not example.com itself. A key with a
+	// path, "example.com/docs", covers only that URL path (see URLAllowed).
 	allowedHosts cowMap[string, bool]
 	// autoPermissionEnabled and autoConfig are atomics because the auto-permission
 	// layer is process-wide policy that the Settings UI can change while a turn is
@@ -1998,7 +1999,7 @@ func NewPermissionManager() *PermissionManager {
 		defaultRules[name] = PermissionAllow
 	}
 	pm.rules.set(defaultRules)
-	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen", "browser_run"} {
+	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen", "videogen", "audiogen", "browser_run"} {
 		pm.SetRule(name, PermissionAllow)
 	}
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "browser", "sqlite_exec"} {
@@ -2450,8 +2451,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// cached deny: a session deny click is narrower than the whitelist.
 			// An explicit tools.webfetch deny is narrower still and wins over the
 			// list, the same way the browser branch guards its allow.
-			if pm.HostAllowed(domain) && pm.Check(toolName) != PermissionDeny {
-				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch allowed host): tool=%s domain=%s", toolName, domain))
+			if pm.URLAllowed(path) && pm.Check(toolName) != PermissionDeny {
+				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch allowed url): tool=%s domain=%s", toolName, domain))
 				return PermissionDecision{Level: PermissionAllow}
 			}
 			if level, exists := pm.webfetchDomains.get(domain); exists {
@@ -2523,8 +2524,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// scheme or metadata address never reaches this allow. An explicit
 		// tools.browser deny still wins over the host list.
 		if (params.Action == "navigate" || params.Action == "open") && level != PermissionDeny {
-			if host := extractDomainFromURL(params.URL); host != "" && pm.HostAllowed(host) {
-				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (browser allowed host): action=%s host=%s", params.Action, host))
+			if host := extractDomainFromURL(params.URL); host != "" && pm.URLAllowed(params.URL) {
+				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (browser allowed url): action=%s host=%s", params.Action, host))
 				return PermissionDecision{Level: PermissionAllow}
 			}
 		}
@@ -6091,18 +6092,36 @@ func (pm *PermissionManager) AllowedWebfetchDomains() []string {
 }
 
 // NormalizeAllowedHost reduces a user-entered host, or a full URL, to the form
-// HostAllowed compares against: lower-case, with no scheme, userinfo, port,
-// path, query, fragment or trailing dot. A leading "*." is kept so a wildcard
-// entry stays a wildcard. It returns "" when nothing usable remains, including
-// a bare "*" or "*.", which would otherwise allow every host.
+// the allowed-hosts list stores: a lower-case host, with no scheme, userinfo,
+// port, query, fragment or trailing dot, optionally followed by a path prefix
+// such as "example.com/docs". A leading "*." is kept so a wildcard entry stays
+// a wildcard. The path keeps its case and is cleaned with path.Clean; a path of
+// "/" or none gives a host-only entry. It returns "" when nothing usable
+// remains: a bare "*" or "*." (which would allow every host), a path containing
+// "*", or no host at all.
 func NormalizeAllowedHost(s string) string {
-	h := strings.ToLower(strings.TrimSpace(s))
-	if i := strings.Index(h, "://"); i >= 0 {
-		h = h[i+3:]
+	raw := strings.TrimSpace(s)
+	// A scheme is stripped only when nothing before "://" is a path, query or
+	// fragment delimiter. Otherwise a URL inside an entry's query, such as
+	// "example.com/docs?next=https://evil.com", would replace the host.
+	if i := strings.Index(raw, "://"); i >= 0 && !strings.ContainsAny(raw[:i], "/?#") {
+		raw = raw[i+3:]
 	}
-	if i := strings.IndexAny(h, "/?#"); i >= 0 {
-		h = h[:i]
+	// The host ends at the first "/", "?" or "#". Userinfo and the port are read
+	// from the host part only, so an "@" in the path ("evil.com/@good.com")
+	// cannot move the host to the path's side.
+	hostPart, rest := raw, ""
+	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
+		hostPart, rest = raw[:i], raw[i:]
 	}
+	pathPart := ""
+	if strings.HasPrefix(rest, "/") {
+		pathPart = rest
+		if i := strings.IndexAny(pathPart, "?#"); i >= 0 {
+			pathPart = pathPart[:i]
+		}
+	}
+	h := strings.ToLower(hostPart)
 	if i := strings.LastIndex(h, "@"); i >= 0 {
 		h = h[i+1:]
 	}
@@ -6121,13 +6140,51 @@ func NormalizeAllowedHost(s string) string {
 		h = h[:strings.Index(h, ":")]
 	}
 	h = strings.TrimSuffix(h, ".")
-	if h == "" || strings.Contains(h, "*") {
+	if h == "" || strings.Contains(h, "*") || strings.Contains(pathPart, "*") {
 		return ""
 	}
+	entry := h
 	if wildcard {
-		return "*." + h
+		entry = "*." + h
 	}
-	return h
+	if p := cleanAllowedPath(pathPart); p != "" {
+		entry += p
+	}
+	return entry
+}
+
+// cleanAllowedPath returns the canonical form of an allowed-hosts path prefix:
+// path.Clean, so "/docs/" and "/docs" are one entry and "/a/../b" is "/b". It
+// returns "" for no path or for the root, which make a host-only entry.
+func cleanAllowedPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	c := path.Clean(p)
+	if c == "/" || c == "." {
+		return ""
+	}
+	return c
+}
+
+// splitAllowedEntry splits a normalised allowed-hosts entry into its host and
+// path parts. The path is "" for a host-only entry, and otherwise starts with "/".
+func splitAllowedEntry(entry string) (host, p string) {
+	host, rest, found := strings.Cut(entry, "/")
+	if !found {
+		return host, ""
+	}
+	return host, "/" + rest
+}
+
+// allowedHostMatches reports whether the normalised host h matches an entry's
+// host part: exactly, or as any subdomain for a "*." wildcard.
+func allowedHostMatches(entryHost, h string) bool {
+	if strings.HasPrefix(entryHost, "*.") {
+		suffix := entryHost[1:] // ".example.com"
+		return len(h) > len(suffix) && strings.HasSuffix(h, suffix)
+	}
+	return h == entryHost
 }
 
 // SetAllowedHosts replaces the allowed-hosts list. Entries are normalised, and
@@ -6166,24 +6223,59 @@ func (pm *PermissionManager) AllowedHosts() []string {
 // HostAllowed reports whether host is on the allowed-hosts list. Matching is
 // case-insensitive and ignores any port. A "*.example.com" entry matches any
 // subdomain, such as a.example.com or a.b.example.com, but not example.com.
-// A nil manager allows nothing.
+// Only host-only entries count: a path entry such as "example.com/docs" does
+// not allow the bare host (see URLAllowed). A nil manager allows nothing.
 func (pm *PermissionManager) HostAllowed(host string) bool {
 	if pm == nil {
 		return false
 	}
 	h := NormalizeAllowedHost(host)
-	if h == "" || strings.HasPrefix(h, "*.") {
+	if h == "" || strings.Contains(h, "/") || strings.HasPrefix(h, "*.") {
 		return false
 	}
 	for entry := range pm.allowedHosts.load() {
-		if strings.HasPrefix(entry, "*.") {
-			suffix := entry[1:] // ".example.com"
-			if len(h) > len(suffix) && strings.HasSuffix(h, suffix) {
-				return true
-			}
+		entryHost, entryPath := splitAllowedEntry(entry)
+		if entryPath == "" && allowedHostMatches(entryHost, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// URLAllowed reports whether rawURL is covered by the allowed-hosts list. A
+// host-only entry covers every path on that host. A path entry such as
+// "example.com/docs" covers that path and anything below it, on a segment
+// boundary: /docs, /docs/ and /docs/a/b match, while /docsx, /doc and
+// /Docs do not. The path is compared after percent-decoding and path.Clean, so
+// /docs/%2e%2e/admin is /admin and is not covered. Only http and https URLs
+// are covered. A URL that does not parse, has no host, or contains a backslash
+// is not: a browser reads "\" as "/", so such a URL could name one path to this
+// check and another to the server. A nil manager allows nothing.
+func (pm *PermissionManager) URLAllowed(rawURL string) bool {
+	if pm == nil {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	if strings.Contains(rawURL, `\`) || strings.Contains(u.Path, `\`) {
+		return false
+	}
+	h := NormalizeAllowedHost(u.Hostname())
+	if h == "" {
+		return false
+	}
+	reqPath := "/"
+	if u.Path != "" {
+		reqPath = path.Clean(u.Path)
+	}
+	for entry := range pm.allowedHosts.load() {
+		entryHost, entryPath := splitAllowedEntry(entry)
+		if !allowedHostMatches(entryHost, h) {
 			continue
 		}
-		if h == entry {
+		if entryPath == "" || reqPath == entryPath || strings.HasPrefix(reqPath, entryPath+"/") {
 			return true
 		}
 	}

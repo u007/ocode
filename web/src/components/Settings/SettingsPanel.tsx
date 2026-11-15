@@ -24,6 +24,8 @@ import FeaturesForm from "./FeaturesForm";
 import AutoShareForm from "./AutoShareForm";
 import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
+import VideoGenForm from "./VideoGenForm";
+import AudioGenForm from "./AudioGenForm";
 import OcodePluginsForm from "./OcodePluginsForm";
 import ThemeForm from "./ThemeForm";
 import OpencodeMcpForm from "./OpencodeMcpForm";
@@ -77,6 +79,8 @@ export type SettingsGroupId =
   | "tui"
   | "editor"
   | "imagegen"
+  | "videogen"
+  | "audiogen"
   | "paths"
   | "limits"
   | "features"
@@ -113,6 +117,8 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "stt", label: "Speech to text", category: "Voice & Media" },
   { id: "ocr", label: "OCR", category: "Voice & Media" },
   { id: "imagegen", label: "Image Generation", category: "Voice & Media" },
+  { id: "videogen", label: "Video Generation", category: "Voice & Media" },
+  { id: "audiogen", label: "Audio Generation", category: "Voice & Media" },
   // Permissions & Security
   { id: "permissions", label: "Permissions", category: "Permissions & Security" },
   { id: "system-permissions", label: "System Permissions", category: "Permissions & Security" },
@@ -236,6 +242,10 @@ function renderGroup(id: SettingsGroupId) {
       return <LimitsForm />;
     case "imagegen":
       return <ImageGenForm />;
+    case "videogen":
+      return <VideoGenForm />;
+    case "audiogen":
+      return <AudioGenForm />;
     case "plugins":
       return <OcodePluginsForm />;
     case "skills":

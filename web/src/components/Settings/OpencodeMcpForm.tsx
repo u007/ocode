@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { MCPStatus } from "../../api/types";
+import { Button } from "../ui/button";
 import { Loader2, RefreshCw } from "lucide-react";
 
 export default function OpencodeMcpForm() {
@@ -9,6 +10,9 @@ export default function OpencodeMcpForm() {
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectNote, setConnectNote] = useState<string | null>(null);
+  const connected = servers.some((m) => m.name === "elevenlabs");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -41,6 +45,40 @@ export default function OpencodeMcpForm() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setReloading(false);
+    }
+  };
+
+  // connectElevenLabs installs the preset and starts a browser OAuth flow. The
+  // flow's own timeout is 2 minutes; poll slightly longer so its error lands.
+  const connectElevenLabs = async () => {
+    setConnecting(true);
+    setError(null);
+    setConnectNote(null);
+    try {
+      const start = await api.connectElevenLabs();
+      setConnectNote(start.browser_note ?? "Waiting for the browser sign-in…");
+      const startedAt = Date.now();
+      let status: { status: string; error?: string };
+      for (;;) {
+        status = await api.getMCPAuthStatus(start.job_id);
+        if (status.status === "done" || status.status === "error") break;
+        if (Date.now() - startedAt > 130_000) throw new Error("authorization timed out after 130s");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (status.status !== "done") throw new Error(status.error || "authorization failed");
+      const res = await api.reloadMCPAndWait();
+      await load();
+      if (res.errors.length) setError(res.errors.join("; "));
+      setConnectNote("Connected. ElevenLabs tools are attached to new turns.");
+    } catch (err) {
+      // The preset is written before the flow starts, so refresh the list: the
+      // card must show the entry even when authorization failed. load() clears
+      // the error first, so set the message after it.
+      await load();
+      setError(err instanceof Error ? err.message : String(err));
+      setConnectNote(null);
+    } finally {
+      setConnecting(false);
     }
   };
 
@@ -78,6 +116,23 @@ export default function OpencodeMcpForm() {
           <RefreshCw className={`w-3 h-3 ${reloading ? "animate-spin" : ""}`} />
           Reload all
         </button>
+      </div>
+      <div className="rounded-md border border-border p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-foreground">ElevenLabs</span>
+          <span className={`text-xs ${connected ? "text-emerald-400" : "text-muted-foreground"}`}>
+            {connected ? "configured" : "not connected"}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Speech, music, image and video generation through ElevenLabs. Signs in with your ElevenLabs account
+          (OAuth); the callback reaches this machine only.
+        </p>
+        <Button size="sm" onClick={connectElevenLabs} disabled={connecting} className="h-8 text-xs">
+          {connecting && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
+          {connecting ? "Waiting for browser…" : connected ? "Reconnect ElevenLabs" : "Connect ElevenLabs"}
+        </Button>
+        {connectNote && <div className="text-xs text-muted-foreground">{connectNote}</div>}
       </div>
       {error && <div className="text-xs text-red-400">{error}</div>}
       {servers.length === 0 ? (

@@ -65,6 +65,11 @@ type TUIStatus struct {
 	ImageGenEnabled  bool   `json:"image_gen_enabled"`
 	ImageGenProvider string `json:"image_gen_provider,omitempty"`
 	ImageGenModel    string `json:"image_gen_model,omitempty"`
+	// Video and audio generation tools: enabled state + selected model.
+	VideoGenEnabled bool   `json:"video_gen_enabled"`
+	VideoGenModel   string `json:"video_gen_model,omitempty"`
+	AudioGenEnabled bool   `json:"audio_gen_enabled"`
+	AudioGenModel   string `json:"audio_gen_model,omitempty"`
 	// IDE integration: mode is "off" | "claude" | ...; status is a short
 	// human-readable string for the status bar.
 	IDEMode   string `json:"ide_mode,omitempty"`

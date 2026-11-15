@@ -269,6 +269,11 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 	// images via Gemini (default), OpenAI, Novita, DeepInfra, or any
 	// OpenAI-compatible endpoint.
 	builtins = append(builtins, &ImageGenTool{Config: cfg})
+	// Video and audio generation tools — Gemini Omni Flash and Gemini TTS.
+	// Always registered so the model knows they exist; each Execute refuses
+	// with a NoticedError until the user enables it with /video or /audio.
+	builtins = append(builtins, &VideoGenTool{Config: cfg})
+	builtins = append(builtins, &AudioGenTool{Config: cfg})
 	// Sidebar preview activation — lets the model open a file in the web
 	// PreviewHost (pdf/docx/pptx/mermaid/image/text). The result carries a
 	// PREVIEW_OPEN sentinel the SPA auto-opens; no server push needed.

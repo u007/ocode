@@ -9296,6 +9296,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/ocr" ||
 		cmd == "/computer" ||
 		cmd == "/image" ||
+		cmd == "/video" ||
+		cmd == "/audio" ||
 		cmd == "/cron" ||
 		// /localmodel and /autocontinue are synchronous local config/inspection
 		// commands like /mask and /small-model: they never start an agent request.
@@ -17002,6 +17004,10 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.ImageGenEnabled = imgCfg.Enabled
 		snap.ImageGenProvider = imgCfg.Provider
 		snap.ImageGenModel = imgCfg.Model
+		snap.VideoGenEnabled = m.config.Ocode.VideoGen.Enabled
+		snap.VideoGenModel = m.config.Ocode.VideoGen.Model
+		snap.AudioGenEnabled = m.config.Ocode.AudioGen.Enabled
+		snap.AudioGenModel = m.config.Ocode.AudioGen.Model
 	}
 	snap.SessionID = m.sessionID
 	snap.SessionTitle = m.sessionTitle

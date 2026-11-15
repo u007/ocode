@@ -207,7 +207,7 @@ func mcpNewClientForConfig(name string, serverCfg config.MCPConfig) (*mcp.MCPCli
 	switch serverCfg.Type {
 	case "local":
 		return mcp.NewLocalClient(name, serverCfg)
-	case "remote":
+	case "remote", "http":
 		return mcp.NewRemoteClient(name, serverCfg)
 	}
 	return nil, nil

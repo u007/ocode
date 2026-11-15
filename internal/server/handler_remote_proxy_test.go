@@ -838,6 +838,8 @@ func TestMCPAuthRestPathMatching(t *testing.T) {
 	}{
 		{"mcp/linear/auth", true},
 		{"mcp/auth/job-123", true},
+		{"mcp/elevenlabs/connect", true},
+		{"mcp/elevenlabs/enable", false},
 		{"mcp", false},
 		{"mcp/linear/enable", false},
 		{"mcp/linear/disable", false},

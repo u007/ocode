@@ -660,6 +660,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/editor", s.authMiddleware(s.handleSetEditorConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/imagegen", s.authMiddleware(s.handleGetImageGenConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/imagegen", s.authMiddleware(s.handleSetImageGenConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/videogen", s.authMiddleware(s.handleGetVideoGenConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/videogen", s.authMiddleware(s.handleSetVideoGenConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/audiogen", s.authMiddleware(s.handleGetAudioGenConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/audiogen", s.authMiddleware(s.handleSetAudioGenConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/paths", s.authMiddleware(s.handleGetPathsConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/paths", s.authMiddleware(s.handleSetPathsConfig))
 	s.mux.HandleFunc("POST /api/config/ocode/paths/request", s.authMiddleware(s.handleRequestOfficeAddinAccess))
@@ -763,6 +767,7 @@ func (s *Server) registerRoutes() {
 	// MCP OAuth (the `/mcp-auth <server>` command). The handler itself refuses
 	// non-loopback callers — the browser callback only reaches a server running
 	// on the caller's own machine (see handler_mcp_auth.go).
+	s.mux.HandleFunc("POST /api/mcp/elevenlabs/connect", s.authMiddleware(s.handleConnectElevenLabs))
 	s.mux.HandleFunc("POST /api/mcp/{name}/auth", s.authMiddleware(s.handleStartMCPAuth))
 	s.mux.HandleFunc("GET /api/mcp/auth/{id}", s.authMiddleware(s.handleGetMCPAuthStatus))
 
@@ -3119,6 +3124,18 @@ func (s *Server) handleGetImageGenConfig(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleSetImageGenConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetImageGenConfig(w, r)
 }
+func (s *Server) handleGetVideoGenConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetVideoGenConfig(w, r)
+}
+func (s *Server) handleSetVideoGenConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetVideoGenConfig(w, r)
+}
+func (s *Server) handleGetAudioGenConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAudioGenConfig(w, r)
+}
+func (s *Server) handleSetAudioGenConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAudioGenConfig(w, r)
+}
 func (s *Server) handleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPathsConfig(w, r)
 }
@@ -3356,6 +3373,10 @@ func (s *Server) handleReloadMCP(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleGetMCPReload(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetMCPReload(w, r)
+}
+
+func (s *Server) handleConnectElevenLabs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleConnectElevenLabs(w, r)
 }
 
 func (s *Server) handleStartMCPAuth(w http.ResponseWriter, r *http.Request) {

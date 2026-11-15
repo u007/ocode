@@ -437,8 +437,10 @@ func isAppearanceRestPath(rest string) bool {
 
 // isMCPAuthRestPath reports whether a proxied sub-path ("api/" is already
 // stripped) is one of the MCP OAuth routes that must not run on a remote SSH
-// host: POST /api/mcp/{name}/auth and GET /api/mcp/auth/{id}. Mutating MCP
-// routes (enable/disable) and the listing are not matched.
+// host: POST /api/mcp/{name}/auth, GET /api/mcp/auth/{id} and
+// POST /api/mcp/elevenlabs/connect. Every one of them launches a browser and
+// waits for a callback that can only reach the machine that opened it.
+// Mutating MCP routes (enable/disable) and the listing are not matched.
 func isMCPAuthRestPath(rest string) bool {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 || parts[0] != "mcp" {
@@ -446,6 +448,10 @@ func isMCPAuthRestPath(rest string) bool {
 	}
 	// GET /api/mcp/auth/{id}
 	if parts[1] == "auth" {
+		return true
+	}
+	// POST /api/mcp/elevenlabs/connect
+	if parts[1] == "elevenlabs" && len(parts) >= 3 && parts[2] == "connect" {
 		return true
 	}
 	// POST /api/mcp/{name}/auth

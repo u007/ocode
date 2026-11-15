@@ -172,6 +172,17 @@ type MCPClient struct {
 	mu sync.Mutex
 	id int
 
+	// Streamable HTTP transport (config type "http"): a remote server that
+	// accepts only POST at the MCP URL. streamMu guards the negotiated
+	// session/protocol state; initMu serializes the one-time handshake.
+	streamable      bool
+	streamMu        sync.Mutex
+	initMu          sync.Mutex
+	sessionID       string
+	protocolVersion string
+	streamReady     bool
+	streamID        int
+
 	// uiMu guards toolMeta, which ListTools replaces wholesale.
 	uiMu     sync.Mutex
 	toolMeta map[string]toolUIMeta
@@ -276,14 +287,15 @@ func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 	}
 
 	mc := &MCPClient{
-		name:     name,
-		isLocal:  false,
-		url:      cfg.URL,
-		headers:  cfg.Headers,
-		sse:      client,
-		timeout:  timeout,
-		httpCli:  httpCli,
-		oauthCfg: cfg.OAuth,
+		name:       name,
+		isLocal:    false,
+		url:        cfg.URL,
+		headers:    cfg.Headers,
+		sse:        client,
+		timeout:    timeout,
+		httpCli:    httpCli,
+		oauthCfg:   cfg.OAuth,
+		streamable: strings.EqualFold(cfg.Type, "http"),
 	}
 
 	token, err := mc.loadOrRefreshToken()
@@ -478,6 +490,11 @@ func (c *MCPClient) requestRemote(method string, params any) (json.RawMessage, e
 	if err := c.ensureValidToken(); err != nil {
 		return nil, err
 	}
+	if c.streamable {
+		if err := c.ensureStreamable(); err != nil {
+			return nil, err
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -500,13 +517,20 @@ func (c *MCPClient) requestRemote(method string, params any) (json.RawMessage, e
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
-		return decodeRemoteResponse(c.name, resp)
+		return decodeRemoteResponse(c.name, resp, c.id)
 	}
 	challenge := strings.Join(resp.Header.Values("WWW-Authenticate"), ", ")
 	_ = resp.Body.Close()
 
 	if err := c.refreshAfterUnauthorized(challenge); err != nil {
 		return nil, err
+	}
+	if c.streamable {
+		// A refreshed token starts a fresh MCP session on streamable servers.
+		c.resetStreamable()
+		if err := c.ensureStreamable(); err != nil {
+			return nil, err
+		}
 	}
 	retry, err := c.sendRemoteRequest(data)
 	if err != nil {
@@ -519,7 +543,7 @@ func (c *MCPClient) requestRemote(method string, params any) (json.RawMessage, e
 			Reason:     "the refreshed credential was rejected",
 		}
 	}
-	return decodeRemoteResponse(c.name, retry)
+	return decodeRemoteResponse(c.name, retry, c.id)
 }
 
 func (c *MCPClient) sendRemoteRequest(data []byte) (*http.Response, error) {
@@ -528,6 +552,19 @@ func (c *MCPClient) sendRemoteRequest(data []byte) (*http.Response, error) {
 		return nil, fmt.Errorf("remote MCP server %q could not create a request", c.name)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.streamable {
+		// Streamable HTTP requires the client to advertise both response
+		// shapes; the server picks JSON or an SSE frame.
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		c.streamMu.Lock()
+		if c.sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", c.sessionID)
+		}
+		if c.protocolVersion != "" {
+			req.Header.Set("MCP-Protocol-Version", c.protocolVersion)
+		}
+		c.streamMu.Unlock()
+	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -542,7 +579,7 @@ func (c *MCPClient) sendRemoteRequest(data []byte) (*http.Response, error) {
 	return resp, nil
 }
 
-func decodeRemoteResponse(serverName string, resp *http.Response) (json.RawMessage, error) {
+func decodeRemoteResponse(serverName string, resp *http.Response, wantID int) (json.RawMessage, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, &RemoteHTTPError{
@@ -551,6 +588,9 @@ func decodeRemoteResponse(serverName string, resp *http.Response) (json.RawMessa
 			Status:                 http.StatusText(resp.StatusCode),
 			AuthenticationRequired: resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden,
 		}
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		return decodeSSEJSONRPC(serverName, resp.Body, wantID)
 	}
 
 	var response struct {

@@ -632,7 +632,7 @@ func TestDecodeRemoteResponseReturnsTypedRPCError(t *testing.T) {
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad"}}`)),
 	}
-	_, err := decodeRemoteResponse("docs", resp)
+	_, err := decodeRemoteResponse("docs", resp, 0)
 	var rpcErr *RPCError
 	if !errors.As(err, &rpcErr) {
 		t.Fatalf("error %T %v is not a *RPCError", err, err)

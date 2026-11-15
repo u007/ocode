@@ -1,0 +1,10 @@
+{
+  "client_id": "https://cdn.jsdelivr.net/gh/u007/ocode@main/client-metadata.json",
+  "client_name": "ocode",
+  "client_uri": "https://github.com/u007/ocode",
+  "redirect_uris": ["http://localhost:8085/mcp-callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "scope": "text_to_speech image_video_generation flows voice_generation speech_history_read user_read"
+}

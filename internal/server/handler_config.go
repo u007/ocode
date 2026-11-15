@@ -1675,14 +1675,16 @@ func (h *Handler) HandleSetAutoPermissionConfig(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, req)
 }
 
-// allowedHostsDTO carries permissions.allowed_hosts over the wire.
+// allowedHostsDTO carries permissions.allowed_hosts over the wire. Each entry is
+// a host or a URL prefix (host plus path, such as example.com/docs).
 type allowedHostsDTO struct {
 	Hosts []string `json:"hosts"`
 }
 
-// HandleGetAllowedHostsConfig reports the persisted host whitelist: hosts the
-// agent may fetch or open without a permission prompt. The outbound-request
-// judge still sees those requests.
+// HandleGetAllowedHostsConfig reports the persisted whitelist: hosts or URL
+// prefixes the agent may fetch or open without a permission prompt. A listed
+// request is not sent to the outbound-request judge and its page is not
+// content-scanned.
 func (h *Handler) HandleGetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	hosts := []string{}
@@ -1693,10 +1695,12 @@ func (h *Handler) HandleGetAllowedHostsConfig(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, allowedHostsDTO{Hosts: hosts})
 }
 
-// HandleSetAllowedHostsConfig replaces the persisted host whitelist. Each entry
-// is normalised with agent.NormalizeAllowedHost. An entry that normalises to
-// nothing is rejected by name, so a typo cannot silently drop out of the list.
-// The saved list is pushed to every live agent, as the auto-permission config is.
+// HandleSetAllowedHostsConfig replaces the persisted whitelist. Each entry, a
+// host or a URL prefix, is normalised with agent.NormalizeAllowedHost. An entry
+// that normalises to nothing is rejected by name, so a typo cannot silently drop
+// out of the list. A listed host or URL prefix is fetched or opened with no
+// permission prompt, no outbound judge call and no content scan. The saved list
+// is pushed to every live agent, as the auto-permission config is.
 func (h *Handler) HandleSetAllowedHostsConfig(w http.ResponseWriter, r *http.Request) {
 	var req allowedHostsDTO
 	if err := readBodyJSON(r, &req); err != nil {
@@ -1707,7 +1711,7 @@ func (h *Handler) HandleSetAllowedHostsConfig(w http.ResponseWriter, r *http.Req
 	for _, raw := range req.Hosts {
 		host := agent.NormalizeAllowedHost(raw)
 		if host == "" {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid allowed host %q: expected a hostname such as app.example.com or *.example.com", raw))
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid allowed host %q: expected a host or URL prefix such as app.example.com, *.example.com or example.com/docs", raw))
 			return
 		}
 		normalised = append(normalised, host)
@@ -1947,6 +1951,66 @@ func (h *Handler) HandleSetImageGenConfig(w http.ResponseWriter, r *http.Request
 	h.mu.Lock()
 	if h.cfg != nil {
 		h.cfg.Ocode.ImageGen = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}
+
+// HandleGetVideoGenConfig reports the video-generation settings.
+func (h *Handler) HandleGetVideoGenConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.VideoGenConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.VideoGen
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetVideoGenConfig persists the video-generation settings.
+func (h *Handler) HandleSetVideoGenConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.VideoGenConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveVideoGenConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.VideoGen = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}
+
+// HandleGetAudioGenConfig reports the audio-generation settings.
+func (h *Handler) HandleGetAudioGenConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.AudioGenConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.AudioGen
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetAudioGenConfig persists the audio-generation settings.
+func (h *Handler) HandleSetAudioGenConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.AudioGenConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveAudioGenConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.AudioGen = req
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)

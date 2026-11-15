@@ -180,6 +180,8 @@ func init() {
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/computer", usage: "/computer [status|enable|disable]", help: "Show computer-use status or enable/disable desktop control for new sessions", handler: runComputerCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
+		{name: "/video", usage: "/video [status|enable|disable|model <id>|aspect 16:9|9:16|resolution 360p|720p|1080p|4k|timeout <s>]", help: "Show videogen status, toggle video generation (Gemini Omni Flash), or set its model/aspect/resolution/timeout", handler: runVideoCmd},
+		{name: "/audio", usage: "/audio [status|enable|disable|model <id>|voice <name>|timeout <s>]", help: "Show audiogen status, toggle speech generation (Gemini TTS), or set its model/voice/timeout", handler: runAudioCmd},
 		{name: "/cron", usage: "/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]", help: "Manage scheduled jobs (see docs/scheduled-jobs.md). Jobs fire in the long-lived serve/web/desktop host, not the TUI.", handler: runCronCmd},
 		{name: "/fake-agent", usage: "/fake-agent [name|status]", help: "Show or switch the harness identity the LLM loop presents (ocode, opencode, claude-code, cline, kilo-code, codex); default ocode", handler: runFakeAgentCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
@@ -2122,4 +2124,12 @@ func runContextModelCmd(m *model, args []string) tea.Cmd {
 
 func runImageCmd(m *model, args []string) tea.Cmd {
 	return m.handleImageCmd(args)
+}
+
+func runVideoCmd(m *model, args []string) tea.Cmd {
+	return m.handleVideoCmd(args)
+}
+
+func runAudioCmd(m *model, args []string) tea.Cmd {
+	return m.handleAudioCmd(args)
 }

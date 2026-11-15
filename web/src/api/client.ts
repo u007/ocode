@@ -245,6 +245,25 @@ export interface ImageGenConfig {
   timeout?: number;
 }
 
+// VideoGenConfig / AudioGenConfig mirror the Go structs behind
+// /api/config/ocode/{videogen,audiogen}.
+export interface VideoGenConfig {
+  enabled: boolean;
+  model: string;
+  output_path?: string;
+  timeout?: number;
+  aspect_ratio?: string;
+  resolution?: string;
+}
+
+export interface AudioGenConfig {
+  enabled: boolean;
+  model: string;
+  voice?: string;
+  output_path?: string;
+  timeout?: number;
+}
+
 // HtrStatus is the managed `htrcli serve` daemon snapshot (Settings > Browser).
 // Field names mirror the Go `htrStatusResponse` tags exactly — a mismatch here
 // renders as `undefined` in the UI rather than as a type error, because the
@@ -2153,6 +2172,20 @@ export const api = {
     fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen"),
   setImageGenConfig: (cfg: ImageGenConfig) =>
     fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  getVideoGenConfig: () =>
+    fetchJSON<VideoGenConfig>("/api/config/ocode/videogen"),
+  setVideoGenConfig: (cfg: VideoGenConfig) =>
+    fetchJSON<VideoGenConfig>("/api/config/ocode/videogen", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  getAudioGenConfig: () =>
+    fetchJSON<AudioGenConfig>("/api/config/ocode/audiogen"),
+  setAudioGenConfig: (cfg: AudioGenConfig) =>
+    fetchJSON<AudioGenConfig>("/api/config/ocode/audiogen", {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
@@ -4292,6 +4325,17 @@ export const api = {
       status: string;
       error?: string;
     }>(`/api/mcp/auth/${encodeURIComponent(jobId)}`, undefined, host),
+  /** Install the ElevenLabs MCP preset (Streamable HTTP + OAuth via a hosted
+   *  client-metadata document) and start the browser sign-in. Poll
+   *  getMCPAuthStatus with the returned job id. Loopback-only: the OAuth
+   *  callback must reach the machine running ocode. */
+  connectElevenLabs: (host?: string) =>
+    fetchJSON<{
+      job_id: string;
+      server: string;
+      status: string;
+      browser_note?: string;
+    }>("/api/mcp/elevenlabs/connect", { method: "POST" }, host),
 
   // ── Plugins ──
   listPlugins: () => fetchJSON<PluginInfo[]>("/api/plugins"),
