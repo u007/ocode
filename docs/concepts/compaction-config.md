@@ -12,7 +12,7 @@ tags:
   - web
   - cancellation
   - failure-handling
-timestamp: 2026-11-09T09:56:59Z
+timestamp: 2026-11-15T16:57:42Z
 ---
 # Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification
 
@@ -138,7 +138,7 @@ Because a failed pass leaves the transcript untouched (§2 property 4), the cont
 ### Backend latch (`internal/agent`)
 
 - `Agent.compactFailed` (atomic.Bool, `internal/agent/agent.go:806`) latches **ON** when a pass returns a non-nil `CompactResult.Err` and **OFF** when a pass returns `OK: true` — both recorded by `recordCompactOutcome` (`agent.go:2671-2681`). A pass with `OK=false, Err=nil` (the "nothing to compact" short-circuit, §4's 422 row) does **not** touch the latch — otherwise a session that briefly had no compactible middle would silently lose auto-compaction forever. A user-initiated cancel (`ErrCompactionCanceled`) also leaves the latch alone — see `concepts/compaction-cancellation.md` §6.
-- While latched, `MaybeCompactAsync` (`agent.go:2580`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2592`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:16409`), the TUI post-turn stream-done check (`model.go:5568`), the server's post-turn checks (`internal/server/agent_session.go:1527`, `handler_sse.go:333`), and the permission/question continuations (`handler_permissions_resolve.go:478`, `handler_questions.go:365`).
+- While latched, `MaybeCompactAsync` (`agent.go:2580`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2592`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:16411`), the TUI post-turn stream-done check (`model.go:5568`), the server's post-turn checks (`internal/server/agent_session.go:1527`, `handler_sse.go:333`), and the permission/question continuations (`handler_permissions_resolve.go:478`, `handler_questions.go:365`).
 - `Agent.CompactFailed() bool` (`agent.go:2686-2688`) exposes the latch so a UI can explain why the session stopped compacting instead of leaving the user to guess.
 - **Re-arm:** any successful pass clears the latch (`recordCompactOutcome`, called from the async result path `agent.go:2740`, the panic/abort fallback `agent.go:2734`, and the synchronous manual paths `Compact`/`CompactWithFocus` at `agent.go:2782`/`:2795`). A manual `/compact` additionally re-arms unconditionally: `CompactAsync` → `startCompactAsync(force=true)` stores `false` (`agent.go:2711`) **after** the "no LLM client" and `compactMu.TryLock` guards (`agent.go:2696-2703`) — deliberately after them, so a `/compact` that could not start does not resume the loop it was meant to escape. The panic/abort fallback inside `startCompactAsync` (`agent.go:2725-2737`) latches instead, since that pass did not shrink the context either. The web/desktop HTTP path (`CompactWithFocus`, `agent.go:2795-2803`) records its outcome the same way, so a successful manual pass clears the latch there too.
 
