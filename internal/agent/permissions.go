@@ -6245,12 +6245,17 @@ func (pm *PermissionManager) HostAllowed(host string) bool {
 // URLAllowed reports whether rawURL is covered by the allowed-hosts list. A
 // host-only entry covers every path on that host. A path entry such as
 // "example.com/docs" covers that path and anything below it, on a segment
-// boundary: /docs, /docs/ and /docs/a/b match, while /docsx, /doc and
-// /Docs do not. The path is compared after percent-decoding and path.Clean, so
-// /docs/%2e%2e/admin is /admin and is not covered. Only http and https URLs
-// are covered. A URL that does not parse, has no host, or contains a backslash
-// is not: a browser reads "\" as "/", so such a URL could name one path to this
-// check and another to the server. A nil manager allows nothing.
+// boundary: /docs, /docs/ and /docs/a/b match, while /docsx, /doc and /Docs do
+// not. A path entry matches only a plain path: one with no percent-encoding,
+// ";", "\", dot segments or doubled slashes. Any other path is not covered by a
+// path entry, because a server may parse it differently from Go and route
+// /docs/..;/admin or /docs/%252e%252e/admin to another path. Such a URL takes
+// the normal permission and judge path. This rejects legitimately
+// percent-encoded paths under a prefix too, by design. A host-only entry still
+// covers them. Only http and https URLs are covered. A URL that does not parse,
+// has no host, or contains a backslash is not: a browser reads "\" as "/", so
+// such a URL could name one path to this check and another to the server. A nil
+// manager allows nothing.
 func (pm *PermissionManager) URLAllowed(rawURL string) bool {
 	if pm == nil {
 		return false
@@ -6270,16 +6275,37 @@ func (pm *PermissionManager) URLAllowed(rawURL string) bool {
 	if u.Path != "" {
 		reqPath = path.Clean(u.Path)
 	}
+	plain := urlPathIsPlain(u.EscapedPath())
 	for entry := range pm.allowedHosts.load() {
 		entryHost, entryPath := splitAllowedEntry(entry)
 		if !allowedHostMatches(entryHost, h) {
 			continue
 		}
-		if entryPath == "" || reqPath == entryPath || strings.HasPrefix(reqPath, entryPath+"/") {
+		if entryPath == "" {
+			return true
+		}
+		if plain && (reqPath == entryPath || strings.HasPrefix(reqPath, entryPath+"/")) {
 			return true
 		}
 	}
 	return false
+}
+
+// urlPathIsPlain reports whether an escaped URL path is plain enough for a path
+// entry to match: empty or "/", or a path with no "%", ";" or "\", no "." or
+// ".." segment and no doubled slash. One trailing slash is allowed.
+func urlPathIsPlain(raw string) bool {
+	if raw == "" {
+		return true
+	}
+	if strings.ContainsAny(raw, `%;\`) || strings.Contains(raw, "//") {
+		return false
+	}
+	trimmed := raw
+	if len(trimmed) > 1 {
+		trimmed = strings.TrimSuffix(trimmed, "/")
+	}
+	return path.Clean(trimmed) == trimmed
 }
 
 func (pm *PermissionManager) Mode() PermissionMode {

@@ -93,7 +93,7 @@ func TestHostAllowedMatching(t *testing.T) {
 
 func TestURLAllowed(t *testing.T) {
 	pm := NewPermissionManager()
-	pm.SetAllowedHosts([]string{"*.example.com", "api.test", "example.com/docs", "*.wild.test/api/v1"})
+	pm.SetAllowedHosts([]string{"*.example.com", "api.test", "example.com/docs", "*.wild.test/api/v1", "host-only.test"})
 	cases := []struct {
 		url  string
 		want bool
@@ -119,6 +119,21 @@ func TestURLAllowed(t *testing.T) {
 		{"https://example.com/docs/../admin", false},
 		{"https://example.com/docs/%2e%2e/admin", false},
 		{"https://example.com/docs/%2F..%2Fadmin", false},
+
+		// A path entry matches only a plain path. A server may parse these
+		// differently from path.Clean, so they are not covered.
+		{"https://example.com/docs/..;/admin", false},
+		{"https://example.com/docs/%252e%252e/admin", false},
+		{"https://example.com/docs;x/a", false},
+		{"https://example.com/docs/a%20b", false},
+		{"https://example.com/docs//a", false},
+		{"https://example.com/docs/./a", false},
+
+		// A percent-encoded query does not make a plain path non-plain.
+		{"https://example.com/docs/a/b?x=%20y", true},
+
+		// A host-only entry covers every path, including non-plain ones.
+		{"https://host-only.test/a%20b/..;/c", true},
 
 		// A wildcard host combined with a path prefix.
 		{"https://a.wild.test/api/v1/items", true},
