@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/u007/ocode/internal/auth"
@@ -332,5 +333,132 @@ func TestGeminiInteractionErrorStatus(t *testing.T) {
 	if _, err := (&VideoGenTool{Config: newMediaTestConfig()}).Execute(args); err == nil ||
 		!strings.Contains(err.Error(), "gemini interactions error (400)") {
 		t.Fatalf("error = %v, want a 400 error", err)
+	}
+}
+
+// storedKeyEnv gives every provider key source a stored value and a private,
+// empty home. A leak then has a real key to send, and no earlier failure
+// (missing key, missing profile) can mask it.
+func storedKeyEnv(t *testing.T) {
+	t.Helper()
+	setHomeTree(t, t.TempDir())
+	t.Setenv("OPENCODE_AUTH_TOKEN", "")
+	t.Setenv("OCODE_PROFILE", "")
+	t.Setenv("GOOGLE_API_KEY", "stored-google-secret")
+	t.Setenv("OPENAI_API_KEY", "stored-openai-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "stored-anthropic-secret")
+}
+
+// countingServer counts every request it receives. A stored key on the wire
+// shows up as a header value starting with "stored-". When location is set, the
+// server answers with status and that Location instead of 200.
+func countingServer(t *testing.T, hits *atomic.Int32, status int, location string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		for name, vals := range r.Header {
+			for _, v := range vals {
+				if strings.Contains(v, "stored-") {
+					t.Errorf("stored key sent in header %s", name)
+				}
+			}
+		}
+		if location != "" {
+			w.Header().Set("Location", location)
+			w.WriteHeader(status)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newGenTool returns the named generative tool with its enable flag set.
+func newGenTool(t *testing.T, name string) interface {
+	Execute(json.RawMessage) (string, error)
+} {
+	t.Helper()
+	switch name {
+	case "imagegen":
+		return &ImageGenTool{}
+	case "videogen":
+		return &VideoGenTool{Config: newMediaTestConfig()}
+	case "audiogen":
+		return &AudioGenTool{Config: newMediaTestConfig()}
+	}
+	t.Fatalf("unknown generative tool %q", name)
+	return nil
+}
+
+// TestBaseURLWithoutAPIKeyNeverSendsStoredKey: a caller-chosen base_url with no
+// api_key is refused before any key is resolved, so the stored key never reaches
+// the model-chosen host. The anthropic row is not in imgRegistry but is a real
+// auth provider: before the fix its stored key went to the base_url.
+func TestBaseURLWithoutAPIKeyNeverSendsStoredKey(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"videogen", "videogen", map[string]any{"prompt": "x"}},
+		{"audiogen", "audiogen", map[string]any{"text": "hello"}},
+		{"imagegen gemini", "imagegen", map[string]any{"prompt": "x", "provider": "gemini"}},
+		{"imagegen openai", "imagegen", map[string]any{"prompt": "x", "provider": "openai"}},
+		{"imagegen anthropic", "imagegen", map[string]any{"prompt": "x", "provider": "anthropic"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			storedKeyEnv(t)
+			var hits atomic.Int32
+			srv := countingServer(t, &hits, http.StatusOK, "")
+			args := tc.args
+			args["base_url"] = srv.URL
+			raw, _ := json.Marshal(args)
+
+			_, err := newGenTool(t, tc.tool).Execute(raw)
+			var noticed *NoticedError
+			if !errors.As(err, &noticed) || !strings.Contains(noticed.Notice, "custom base_url requires an explicit api_key") {
+				t.Fatalf("error = %v, want the explicit-api_key refusal", err)
+			}
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("%d request(s) reached the custom base_url", n)
+			}
+		})
+	}
+}
+
+// TestCredentialedRequestsDoNotFollowRedirects: with an explicit api_key the
+// request goes out, but a 302 from the endpoint must not be followed, because Go
+// copies custom headers such as x-goog-api-key onto the redirect target.
+func TestCredentialedRequestsDoNotFollowRedirects(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"videogen interactions", "videogen", map[string]any{"prompt": "x"}},
+		{"audiogen interactions", "audiogen", map[string]any{"text": "hello"}},
+		{"imagegen gemini generateContent", "imagegen", map[string]any{"prompt": "x", "provider": "gemini"}},
+		{"imagegen openai images", "imagegen", map[string]any{"prompt": "x", "provider": "openai"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			storedKeyEnv(t)
+			var landed atomic.Int32
+			target := countingServer(t, &landed, http.StatusOK, "")
+			redirector := countingServer(t, new(atomic.Int32), http.StatusFound, target.URL+"/landed")
+			args := tc.args
+			args["base_url"] = redirector.URL
+			args["api_key"] = "explicit-test-key"
+			raw, _ := json.Marshal(args)
+
+			if _, err := newGenTool(t, tc.tool).Execute(raw); err == nil {
+				t.Fatal("Execute succeeded on a 302; want an error")
+			}
+			if n := landed.Load(); n != 0 {
+				t.Fatalf("redirect target received %d request(s); credentialed requests must not follow redirects", n)
+			}
+		})
 	}
 }

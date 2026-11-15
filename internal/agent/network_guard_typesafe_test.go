@@ -216,6 +216,49 @@ func TestExtractEgressTargetsIgnoresUnrelatedTools(t *testing.T) {
 	}
 }
 
+// TestExtractEgressTargetsGenerativeBaseURL pins that a caller-named base_url on
+// the generative tools is judged as a URL target, while the configured endpoint
+// (no base_url) is not. The key is matched the way encoding/json matches it for
+// the tool, so a mixed-case "Base_URL" is judged too.
+func TestExtractEgressTargetsGenerativeBaseURL(t *testing.T) {
+	type egressCase struct {
+		name     string
+		tool     string
+		args     string
+		wantURL  string
+		wantHost string
+		loopback bool
+	}
+	var cases []egressCase
+	for _, tool := range []string{"imagegen", "videogen", "audiogen"} {
+		cases = append(cases,
+			egressCase{tool + " remote base_url", tool, `{"base_url":"https://evil.example/x","api_key":"k"}`, "https://evil.example/x", "evil.example", false},
+			egressCase{tool + " loopback base_url", tool, `{"base_url":"http://127.0.0.1:8080","api_key":"k"}`, "http://127.0.0.1:8080", "127.0.0.1", true},
+			egressCase{tool + " no base_url", tool, `{"prompt":"x","api_key":"k"}`, "", "", false},
+		)
+	}
+	cases = append(cases, egressCase{"mixed-case Base_URL is judged", "videogen", `{"Base_URL":"https://evil.example/x"}`, "https://evil.example/x", "evil.example", false})
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractEgressTargets(tc.tool, json.RawMessage(tc.args))
+			if tc.wantURL == "" {
+				if got != nil {
+					t.Fatalf("want no target, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("want one target, got %+v", got)
+			}
+			g := got[0]
+			if g.Tool != tc.tool || g.Kind != egressKindURL || g.Value != tc.wantURL || g.Host != tc.wantHost || g.Loopback != tc.loopback {
+				t.Fatalf("target = %+v, want url %q host %q loopback %v", g, tc.wantURL, tc.wantHost, tc.loopback)
+			}
+		})
+	}
+}
+
 func TestHasNonLoopbackEgressTarget(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1243,10 +1286,14 @@ func TestNetworkGuardAllowedHostIsStillJudged(t *testing.T) {
 
 // TestNetworkGuardEscalatesDestructiveActionOnAllowedHost pins that the
 // destructive_action concern still escalates on a host the user vouched for.
+// It uses a shell command, not webfetch: a webfetch to a listed URL is never
+// sent to the judge (TestNetworkGuardAllowedHostWebfetchRunsWithoutJudge), so
+// the judge's escalation is only reachable through bash.
 func TestNetworkGuardEscalatesDestructiveActionOnAllowedHost(t *testing.T) {
 	a, h := newNetworkGuardAgent(t, networkGuardChoiceReply("escalate", "destructive_action", 0.99), 0)
-	fetch := &networkGuardProbeTool{name: "webfetch", result: "PURGED"}
-	a.AddTools([]tool.Tool{fetch})
+	sh := &networkGuardProbeTool{name: "bash", result: "PURGED"}
+	a.AddTools([]tool.Tool{sh})
+	a.Permissions().SetBashPrefixRule("curl", PermissionAllow)
 	a.Permissions().SetAllowedHosts([]string{"api.example.com"})
 
 	var asked *PermissionRequest
@@ -1254,7 +1301,7 @@ func TestNetworkGuardEscalatesDestructiveActionOnAllowedHost(t *testing.T) {
 		asked = &req
 		return PermissionResponse{Level: PermissionDeny}
 	}
-	if _, err := a.HandleToolCall("webfetch", json.RawMessage(`{"url":"https://api.example.com/v1/users/purge-all"}`)); err != nil {
+	if _, err := a.HandleToolCall("bash", json.RawMessage(`{"command":"curl -X DELETE https://api.example.com/v1/users/purge-all"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if h.count() != 1 {
@@ -1266,14 +1313,15 @@ func TestNetworkGuardEscalatesDestructiveActionOnAllowedHost(t *testing.T) {
 	if !strings.Contains(asked.DenyReason, "irreversible") {
 		t.Fatalf("ask reason = %q, want the destructive_action label", asked.DenyReason)
 	}
-	if fetch.calls != 0 {
-		t.Fatalf("the escalated request must not run, tool ran %d times", fetch.calls)
+	if sh.calls != 0 {
+		t.Fatalf("the escalated request must not run, bash ran %d times", sh.calls)
 	}
 }
 
-// TestNetworkGuardAllowedHostRoutineRequestRunsWithoutAsk pins that an allow
-// verdict on a listed host runs the tool with no human prompt.
-func TestNetworkGuardAllowedHostRoutineRequestRunsWithoutAsk(t *testing.T) {
+// TestNetworkGuardAllowedHostWebfetchRunsWithoutJudge pins that a webfetch to a
+// listed host runs with no judge call and no human prompt. The user's
+// allowed-hosts entry is the decision, so the outbound judge is not consulted.
+func TestNetworkGuardAllowedHostWebfetchRunsWithoutJudge(t *testing.T) {
 	a, h := newNetworkGuardAgent(t, networkGuardChoiceReply("allow", "none", 0.95), 0)
 	fetch := &networkGuardProbeTool{name: "webfetch", result: "FETCHED"}
 	a.AddTools([]tool.Tool{fetch})
@@ -1289,13 +1337,52 @@ func TestNetworkGuardAllowedHostRoutineRequestRunsWithoutAsk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if asked {
-		t.Fatal("an allow verdict on a listed host must not ask a human")
+		t.Fatal("a webfetch to a listed host must not ask a human")
 	}
 	if fetch.calls != 1 || res != "FETCHED" {
 		t.Fatalf("tool calls = %d result = %q, want the fetch to run", fetch.calls, res)
 	}
+	if h.count() != 0 {
+		t.Fatalf("judge requests = %d, want 0: a listed URL is not judged", h.count())
+	}
+}
+
+// TestNetworkGuardAllowedURLPrefixSkipsJudgeOnlyForItsPath pins the path-prefix
+// rule for the outbound judge: a webfetch or browser URL under a listed prefix
+// is not judged, a URL outside it is, and a shell command is always judged.
+// A path entry never marks a host host_allowed, and never reaches the judge's
+// allowed_hosts list, which names hosts only.
+func TestNetworkGuardAllowedURLPrefixSkipsJudgeOnlyForItsPath(t *testing.T) {
+	a, h := newNetworkGuardAgent(t, networkGuardChoiceReply("allow", "none", 0.95), 0)
+	a.Permissions().SetAllowedHosts([]string{"example.com/docs"})
+
+	a.checkNetworkGuard("webfetch", json.RawMessage(`{"url":"https://example.com/docs/x"}`))
+	a.checkNetworkGuard("browser", json.RawMessage(`{"action":"navigate","url":"https://example.com/docs/y"}`))
+	if h.count() != 0 {
+		t.Fatalf("judge requests for listed prefix = %d, want 0", h.count())
+	}
+
+	a.checkNetworkGuard("webfetch", json.RawMessage(`{"url":"https://example.com/other"}`))
 	if h.count() != 1 {
-		t.Fatalf("judge requests = %d, want 1", h.count())
+		t.Fatalf("judge requests after an unlisted webfetch = %d, want 1", h.count())
+	}
+
+	a.checkNetworkGuard("bash", json.RawMessage(`{"command":"curl https://example.com/docs/z"}`))
+	if h.count() != 2 {
+		t.Fatalf("judge requests after a bash curl = %d, want 2: shell commands are never skipped by the list", h.count())
+	}
+	targets := networkGuardWireTargets(t, h)
+	if len(targets) != 1 {
+		t.Fatalf("wire targets = %#v, want the bash target only", targets)
+	}
+	if _, present := targets[0]["host_allowed"]; present {
+		t.Fatalf("a path entry must not mark its host host_allowed: %#v", targets[0])
+	}
+	h.mu.Lock()
+	state, _ := h.body["state"].(map[string]any)
+	h.mu.Unlock()
+	if _, present := state["allowed_hosts"]; present {
+		t.Fatalf("a path entry must not reach the judge's allowed_hosts: %#v", state["allowed_hosts"])
 	}
 }
 

@@ -561,11 +561,10 @@ export default function PermissionsForm() {
         <div className="border-t border-border pt-4 space-y-2">
           <div className="text-xs font-semibold text-foreground">Allowed hosts</div>
           <p className="text-xs text-muted-foreground">
-            Hosts the agent may fetch or open without asking. Fetches and page opens on a listed host run
-            without asking; the outbound-request judge still sees them and only escalates a credential,
-            on-host data, or a high-impact irreversible action such as a bulk delete or a payment. Routine
-            deletes of test data or temporary files are allowed. <code className="font-mono">*.example.com</code>{" "}
-            covers every subdomain. The judge sees this list for every other host.
+            The agent fetches or opens a listed host or URL prefix without asking, and Jev does not check the
+            request or scan the page. <code className="font-mono">*.example.com</code> covers subdomains;{" "}
+            <code className="font-mono">example.com/docs</code> covers only that path and below. Shell commands
+            (curl) are still checked.
           </p>
           <div className="space-y-1.5">
             {hosts.map((host, i) => (
@@ -589,7 +588,7 @@ export default function PermissionsForm() {
             <Input
               value={newHost}
               aria-label="New allowed host"
-              placeholder="app.example.com or *.example.com"
+              placeholder="app.example.com, *.example.com or example.com/docs"
               onChange={(e) => setNewHost(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {

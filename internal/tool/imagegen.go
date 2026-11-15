@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -363,6 +364,13 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 		prov = imgProvider{id: strings.ToLower(p.Provider), style: "openai", defBaseURL: strings.TrimRight(p.BaseURL, "/")}
 	}
 
+	// A stored key never goes to a base_url the caller chose. This also covers an
+	// unregistered provider id: auth.ResolveKey below would otherwise resolve that
+	// id's stored key for an attacker-chosen endpoint.
+	if err := requireExplicitKeyForBaseURL(p.BaseURL, p.APIKey); err != nil {
+		return "", err
+	}
+
 	// Resolve API key.
 	apiKey := p.APIKey
 	if apiKey == "" {
@@ -501,7 +509,7 @@ func (t *ImageGenTool) generateGemini(ctx context.Context, baseURL, apiKey, mode
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := credentialedHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("gemini request failed: %w", err)
 	}
@@ -601,7 +609,7 @@ func (t *ImageGenTool) generateOpenAI(ctx context.Context, baseURL, apiKey, mode
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := credentialedHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("image API request failed: %w", err)
 	}
@@ -618,11 +626,13 @@ func (t *ImageGenTool) generateOpenAI(ctx context.Context, baseURL, apiKey, mode
 		return nil, "", fmt.Errorf("image API error (%d): %s", resp.StatusCode, truncateErr(respBody))
 	}
 
-	return parseOpenAIResponse(respBody)
+	return parseOpenAIResponse(respBody, baseURL)
 }
 
-// parseOpenAIResponse extracts base64 images and revised prompts.
-func parseOpenAIResponse(body []byte) ([]generatedImage, string, error) {
+// parseOpenAIResponse extracts base64 images and revised prompts. baseURL is
+// the API endpoint that produced body; it bounds which URL-form images may be
+// downloaded (see fetchBytes).
+func parseOpenAIResponse(body []byte, baseURL string) ([]generatedImage, string, error) {
 	var parsed struct {
 		Data []struct {
 			B64JSON       string `json:"b64_json"`
@@ -656,7 +666,7 @@ func parseOpenAIResponse(body []byte) ([]generatedImage, string, error) {
 		}
 		if d.URL != "" {
 			// Some providers return a URL instead of base64; fetch it.
-			data, ferr := fetchBytes(d.URL)
+			data, ferr := fetchBytes(d.URL, baseURL)
 			if ferr != nil {
 				return nil, "", fmt.Errorf("download image from url: %w", ferr)
 			}
@@ -784,8 +794,31 @@ func readImageFile(ctx context.Context, path string) ([]byte, string, error) {
 	return raw, mime, nil
 }
 
-func fetchBytes(url string) ([]byte, error) {
-	resp, err := http.Get(url) //nolint:gosec // provider-supplied image URL
+// maxImageRedirects bounds the redirect chain followed for a provider-returned
+// image URL.
+const maxImageRedirects = 5
+
+// fetchBytes downloads an image URL that a provider returned. baseURL is the
+// API endpoint that produced the response. The image URL and every redirect hop
+// are checked by imageURLRefusal, so a hostile endpoint cannot make ocode read
+// metadata, local-only, or non-http targets.
+func fetchBytes(rawURL, baseURL string) ([]byte, error) {
+	baseLocal := false
+	if bu, err := url.Parse(baseURL); err == nil {
+		baseLocal = isLoopbackOrPrivateHost(bu.Hostname())
+	}
+	if err := imageURLRefusal(rawURL, baseLocal); err != nil {
+		return nil, err
+	}
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxImageRedirects {
+				return fmt.Errorf("image download stopped after %d redirects", maxImageRedirects)
+			}
+			return imageURLRefusal(req.URL.String(), baseLocal)
+		},
+	}
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -803,6 +836,42 @@ func fetchBytes(url string) ([]byte, error) {
 		return nil, fmt.Errorf("image exceeds the %d-byte embed limit during download", maxImageBytes)
 	}
 	return body, nil
+}
+
+// imageURLRefusal returns an error when raw must not be fetched as an image.
+// BrowserURLDenyReason covers the scheme, the host and the metadata and
+// link-local addresses. A loopback or private target is refused unless the API
+// base that produced the URL is loopback or private too (baseLocal).
+func imageURLRefusal(raw string, baseLocal bool) error {
+	if reason := BrowserURLDenyReason(raw); reason != "" {
+		return fmt.Errorf("image url refused: %s", reason)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("image url refused: not parseable")
+	}
+	// shortcut: literal hosts only, a public name resolving to a private address is not caught; upgrade to a dial-time control if this fetch ever carries credentials.
+	if !baseLocal && isLoopbackOrPrivateHost(u.Hostname()) {
+		return fmt.Errorf("image url refused: loopback or private address, and the API base URL is not local")
+	}
+	return nil
+}
+
+// isLoopbackOrPrivateHost reports whether host, a hostname or IP literal with
+// no port, names localhost, a loopback address, a private network address or
+// the unspecified address. IP literals are read with parseHostIP, so decimal,
+// hex and octal forms are covered.
+func isLoopbackOrPrivateHost(host string) bool {
+	host = strings.TrimRight(strings.ToLower(host), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip, ok := parseHostIP(host)
+	if !ok {
+		return false
+	}
+	ip = ip.Unmap()
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified()
 }
 
 // maxAPIResponseBytes bounds how much of any provider response body is read.

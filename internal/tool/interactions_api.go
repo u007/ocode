@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -47,7 +48,7 @@ func callGeminiInteraction(ctx context.Context, baseURL, apiKey string, body map
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := credentialedHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("gemini interactions request failed: %w", err)
 	}
@@ -150,9 +151,34 @@ func saveMediaFile(ctx context.Context, outputPath, defaultName, ext string, dat
 	return path, nil
 }
 
+// credentialedHTTPClient sends every request that carries a provider API key.
+// It refuses redirects: the stored key rides in a custom header (x-goog-api-key,
+// or a bearer token), and Go copies custom headers onto the redirect target, so
+// a 3xx from the endpoint would hand the key to whatever host it names. The 3xx
+// is returned as the response and fails each caller's status check.
+var credentialedHTTPClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// requireExplicitKeyForBaseURL keeps a stored provider key away from a base_url
+// the caller chose. Naming a base_url without an api_key is refused: the stored
+// key is only ever sent to the configured endpoint (or the provider default).
+func requireExplicitKeyForBaseURL(baseURL, apiKey string) error {
+	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(apiKey) != "" {
+		return nil
+	}
+	msg := "custom base_url requires an explicit api_key: the stored key is only sent to the configured endpoint"
+	return &NoticedError{Err: errors.New(msg), Notice: msg}
+}
+
 // geminiGenerativeCredentials resolves the Gemini API key and base URL from the
 // same sources imagegen uses (param > stored credential base URL > default).
 func geminiGenerativeCredentials(apiKey, baseURL string) (string, string, error) {
+	if err := requireExplicitKeyForBaseURL(baseURL, apiKey); err != nil {
+		return "", "", err
+	}
 	_ = auth.LoadStore()
 	// The auth provider id is "google" (GOOGLE_API_KEY); imagegen normalizes
 	// "gemini" to the same id. Resolving "gemini" directly finds no provider

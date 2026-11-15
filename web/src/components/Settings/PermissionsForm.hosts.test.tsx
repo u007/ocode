@@ -66,7 +66,7 @@ describe("PermissionsForm allowed hosts", () => {
 
     expect(screen.getByLabelText("Allowed host api.example.com")).toBeTruthy();
     expect(screen.getByLabelText("Allowed host *.docs.example.org")).toBeTruthy();
-    expect(screen.getByText(/the outbound-request judge still sees them/)).toBeTruthy();
+    expect(screen.getByText(/Jev does not check the request or scan the page/)).toBeTruthy();
   });
 
   it("adding a host and clicking Save sends the new list", async () => {

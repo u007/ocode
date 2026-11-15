@@ -242,7 +242,7 @@ func TestContentGuardJudgeEval(t *testing.T) {
 			if src == nil {
 				t.Fatalf("%s: not in the guardrail's scope, so production would never judge it", c.ID)
 			}
-			state := a.buildContentGuardState(src, contentGuardScanView(c.Tool, args, c.Output))
+			state := a.buildContentGuardState(src, contentGuardScanView(a.permissions, c.Tool, args, c.Output))
 			if c.Tool == "bash" && v.bashState != nil {
 				state = v.bashState(c, state)
 			}

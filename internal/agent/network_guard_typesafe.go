@@ -224,14 +224,40 @@ func isSeparatorWord(t string) bool {
 // never user-controlled, so the query string is the whole of the egress.
 const webSearchEndpoint = "html.duckduckgo.com"
 
+// urlEgressTarget is the egress target for one URL a tool will request. webfetch
+// and the base_url of imagegen, videogen and audiogen both build it here, so
+// they share one host and loopback derivation.
+func urlEgressTarget(toolName, raw string) egressTarget {
+	// extractDomainFromURL, not normalizeNetworkEffectHost: this is already
+	// a URL, and the shell-oriented normalizer would hand a bare
+	// "not a url at all" back as if it were a hostname. An unparseable URL
+	// yields an empty Host and stays non-loopback, so the judge still sees
+	// it — the tool will reject it downstream, and inventing a destination
+	// for it would only cost a round trip.
+	host := extractDomainFromURL(raw)
+	// Loopback here means "local network", not strictly this machine: a LAN
+	// host counts as Loopback only for a plain request. Even so, a literal
+	// query or path on a LAN host can still carry data, which is accepted.
+	// The URL's query and path must be literal text, so a secret cannot ride along.
+	return egressTarget{
+		Tool:     toolName,
+		Kind:     egressKindURL,
+		Value:    raw,
+		Host:     host,
+		Loopback: host != "" && (isLocalhostDomain(host) || (isPrivateLANHost(host) && lanTargetIsPlain(raw))),
+	}
+}
+
 // extractEgressTargets reports what a tool call would send off-host, or nil when
 // the call cannot egress at all. It is pure, so the scope rules are unit-testable
 // independently of the judge.
 //
-// The net is deliberately narrow. Only the three tools that can genuinely
-// perform a web fetch are considered: a URL in a `read` path or a `write` body
-// is content on this machine, not a request, and treating it as egress would
-// put a network round trip in front of ordinary file work.
+// The net is deliberately narrow. Only tools that can genuinely reach a URL or
+// search endpoint the model chose are considered: webfetch, browser, websearch,
+// bash, and the base_url of imagegen, videogen and audiogen (the configured
+// provider endpoint there is not judged). A URL in a `read` path or a `write`
+// body is content on this machine, not a request, and treating it as egress
+// would put a network round trip in front of ordinary file work.
 func extractEgressTargets(toolName string, args json.RawMessage) []egressTarget {
 	switch toolName {
 	case "webfetch":
@@ -248,24 +274,23 @@ func extractEgressTargets(toolName string, args json.RawMessage) []egressTarget 
 		if raw == "" {
 			return nil
 		}
-		// extractDomainFromURL, not normalizeNetworkEffectHost: this is already
-		// a URL, and the shell-oriented normalizer would hand a bare
-		// "not a url at all" back as if it were a hostname. An unparseable URL
-		// yields an empty Host and stays non-loopback, so the judge still sees
-		// it — the tool will reject it downstream, and inventing a destination
-		// for it would only cost a round trip.
-		host := extractDomainFromURL(raw)
-		// Loopback here means "local network", not strictly this machine: a LAN
-		// host counts as Loopback only for a plain request. Even so, a literal
-		// query or path on a LAN host can still carry data, which is accepted.
-		// The URL's query and path must be literal text, so a secret cannot ride along.
-		return []egressTarget{{
-			Tool:     toolName,
-			Kind:     egressKindURL,
-			Value:    raw,
-			Host:     host,
-			Loopback: host != "" && (isLocalhostDomain(host) || (isPrivateLANHost(host) && lanTargetIsPlain(raw))),
-		}}
+		return []egressTarget{urlEgressTarget(toolName, raw)}
+	case "imagegen", "videogen", "audiogen":
+		// The stored provider key rides to base_url, so a caller-named base_url is a
+		// request the guard must see. The tool refuses a base_url without an api_key,
+		// but it is judged here regardless. The decode uses the same struct tag as
+		// the tool, so both read the same value.
+		var p struct {
+			BaseURL string `json:"base_url"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return nil
+		}
+		raw := strings.TrimSpace(p.BaseURL)
+		if raw == "" {
+			return nil
+		}
+		return []egressTarget{urlEgressTarget(toolName, raw)}
 	case "browser":
 		// Only navigate and open send a request to a URL the model chose. Other
 		// browser actions act on a page that is already loaded.
@@ -804,6 +829,18 @@ func hasNonLoopbackEgressTarget(targets []egressTarget) bool {
 	return false
 }
 
+// allEgressTargetsAllowedURL reports whether every target that leaves the host
+// is a URL the allowed-hosts list covers (PermissionManager.URLAllowed). Loopback
+// targets never leave the machine, so they do not count against the list.
+func allEgressTargetsAllowedURL(pm *PermissionManager, targets []egressTarget) bool {
+	for _, t := range targets {
+		if !t.Loopback && !pm.URLAllowed(t.Value) {
+			return false
+		}
+	}
+	return true
+}
+
 // networkGuardResult is the guardrail's verdict for one tool call.
 type networkGuardResult struct {
 	// Applies is true when the call was in scope (a non-loopback egress
@@ -848,6 +885,14 @@ func (a *Agent) checkNetworkGuard(toolName string, args json.RawMessage) network
 func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args json.RawMessage) networkGuardResult {
 	targets := extractEgressTargets(toolName, args)
 	if !hasNonLoopbackEgressTarget(targets) {
+		return networkGuardResult{}
+	}
+	// A URL the user whitelisted (permissions.allowed_hosts, path prefixes
+	// included) is fetched or opened with no judge call. Only webfetch and
+	// browser are skipped. A shell command or a search query names its target
+	// inside text the list does not vouch for, so bash and websearch are judged.
+	if (toolName == "webfetch" || toolName == "browser") && a != nil && a.permissions != nil && allEgressTargetsAllowedURL(a.permissions, targets) {
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_allowed_url tool=%s", toolName))
 		return networkGuardResult{}
 	}
 	// A disabled catalog prompt turns this guardrail off. The call keeps the
@@ -1042,11 +1087,12 @@ func (a *Agent) buildNetworkGuardState(toolName string, targets []egressTarget) 
 	// The hosts a human has vouched for: the persisted allowed-hosts list plus
 	// this session's webfetch "always allow" clicks. A target on this list has
 	// already been vouched for by a human; saying so lets the judge stop
-	// re-litigating it on every call.
+	// re-litigating it on every call. A path entry ("example.com/docs") is a URL
+	// prefix, not a host, so it is left out: the judge reads hosts only.
 	seenHost := make(map[string]bool)
 	hosts := []string{}
 	for _, h := range append(a.permissions.AllowedHosts(), a.permissions.AllowedWebfetchDomains()...) {
-		if !seenHost[h] {
+		if !seenHost[h] && !strings.Contains(h, "/") {
 			seenHost[h] = true
 			hosts = append(hosts, h)
 		}

@@ -15,7 +15,7 @@ tags:
   - desktop
   - htr
   - htrcli
-timestamp: 2026-11-10T13:56:43Z
+timestamp: 2026-11-15T10:45:00Z
 ---
 # Browser agent tool
 
@@ -194,9 +194,9 @@ ask is what gates that network access, as it does for bash.
   loopback rules as `webfetch`. The guard judges each non-loopback target. It escalates
   only on an `escalate` verdict, or on an `allow` below its 0.80 floor, and it names the
   concern in the prompt. See [the outbound-network guardrail](webfetch-websearch-guardrails.md).
-- **Allowed hosts.** A `navigate` or `open` to a host on `permissions.allowed_hosts` is an
+- **Allowed hosts.** A `navigate` or `open` to a URL on `permissions.allowed_hosts` (a host, or a path prefix such as `example.com/docs`) is an
   `allow` in `Decide`. It is checked after the `browserURLRefusal` hard refusal, and only when
-  `permissions.tools.browser` is not `deny`. The guard still judges the request. See
+  `permissions.tools.browser` is not `deny`. A covered URL skips the outbound-network guard, but a bash `curl` to the same host is still judged. See
   [the allowed-hosts list](permissions-allowed-hosts.md).
 - **Sandbox mode does not apply.** Sandbox confines bash writes and checks bash
   commands statically. The browser tool is not a shell, so sandbox mode leaves it
@@ -225,7 +225,7 @@ ask is what gates that network access, as it does for bash.
 | `fill_form` | `fields`, `frame` | fill fields in order, then read every field back into a report; an `@eN` selector resolves in the snapshot's ref table | ask |
 | `upload` | `target`, `files`, `frame` | set files on an `<input type=file>` | ask |
 | `key` | `key` | a named key, down then up | ask |
-| `navigate` | `url` | `Page.navigate` to an http(s) URL | ask (allow for a host on `permissions.allowed_hosts`) |
+| `navigate` | `url` | `Page.navigate` to an http(s) URL | ask (allow for a URL on `permissions.allowed_hosts`) |
 | `open` | optional `url` | a new headless tab | ask (allow for a listed host in `url`) |
 | `close` | `tab` (required) | close a tab and detach it; a tab this agent opened closes without asking, any other tab asks | ask (allow for an agent-opened tab) |
 | `back`, `forward`, `reload` | none | history or reload | ask |

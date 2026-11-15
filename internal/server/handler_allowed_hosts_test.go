@@ -47,7 +47,8 @@ func TestHandleAllowedHostsPutThenGetRoundTrips(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, body=%s", w.Code, w.Body.String())
 	}
-	want := []string{"*.example.org", "app.example.com", "docs.site"}
+	// The URL keeps its path prefix, so it is "docs.site/guide", not the bare host.
+	want := []string{"*.example.org", "app.example.com", "docs.site/guide"}
 	var reply struct {
 		Hosts []string `json:"hosts"`
 	}
@@ -99,6 +100,19 @@ func TestHandleAllowedHostsRejectsInvalidEntry(t *testing.T) {
 
 	if got := getAllowedHosts(t, h); !reflect.DeepEqual(got, []string{"keep.example.com"}) {
 		t.Fatalf("rejected PUT changed the saved list: %#v", got)
+	}
+}
+
+// TestHandleAllowedHostsKeepsURLPathCase pins that a URL prefix is saved and
+// returned as its normalised form: scheme, query and trailing slash dropped, the
+// host lower-cased, and the path case kept.
+func TestHandleAllowedHostsKeepsURLPathCase(t *testing.T) {
+	h := testConfigHandler(t)
+	if w := putAllowedHosts(t, h, `{"hosts":["https://Example.com/Docs/"]}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if got, want := getAllowedHosts(t, h), []string{"example.com/Docs"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("saved allowed hosts = %#v, want %#v", got, want)
 	}
 }
 

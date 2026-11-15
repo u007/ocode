@@ -10,7 +10,7 @@ tags:
   - network
   - guardrail
   - allowed-hosts
-timestamp: 2026-11-08T08:40:00Z
+timestamp: 2026-11-15T10:45:00Z
 ---
 # Jev guard hesitates on unfamiliar hosts, and a non-empty allowed list made it suspicious of the rest
 
@@ -66,4 +66,4 @@ The tests that guard this are rubric-text checks, not live judge checks: `TestNe
 ## Where it is documented
 
 - [Outbound-network guardrail](../concepts/webfetch-websearch-guardrails.md): the current rubric and its allow and escalate rules.
-- [Permissions allowed-hosts list](../concepts/permissions-allowed-hosts.md): how the list reaches the judge, and what it does not skip.
+- [Permissions allowed-hosts list](../concepts/permissions-allowed-hosts.md): how the list reaches the judge, which URL prefixes skip it (webfetch and browser only), and what it does not skip.

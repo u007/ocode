@@ -38,6 +38,27 @@ func TestAllowedHostsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAllowedHostsRoundTripKeepsPathCase pins that only the host of an entry is
+// lower-cased on save: a URL path prefix keeps its case, since paths are
+// case-sensitive, and the host part is still normalised.
+func TestAllowedHostsRoundTripKeepsPathCase(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+	chdirTempForConfigTest(t)
+
+	if err := SaveOcodeAllowedHosts([]string{"Example.COM/Docs/Guide", "example.com/docs"}); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	want := []string{"example.com/Docs/Guide", "example.com/docs"}
+	if got := cfg.Ocode.Permissions.AllowedHosts; !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowed_hosts path case: got %#v want %#v", got, want)
+	}
+}
+
 // TestAllowedHostsSaveLeavesOtherPermissionsAlone pins that the targeted saver
 // touches only allowed_hosts: the mode, tool rules, bash prefixes and the auto
 // block written before it must all survive.

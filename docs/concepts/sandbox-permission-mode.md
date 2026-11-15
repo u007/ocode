@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-08T17:30:00Z
+timestamp: 2026-11-15T17:17:52Z
 ---
 ## Decision
 
@@ -65,7 +65,7 @@ In `PermissionManager.Decide` (`internal/agent/permissions.go`), three guards fi
 
 Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Normal mode is unchanged (already Ask via `IsHarmfulBashCommand`); YOLO remains the promptless escape hatch.
 
-Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:704`) and still auto-allow.
+Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:705`) and still auto-allow.
 
 ## Sensitive-path carve-outs
 
@@ -73,7 +73,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Predicate split
 
-`isSensitivePath` (`permissions.go:3625`) is the OR of two named predicates:
+`isSensitivePath` (`permissions.go:3626`) is the OR of two named predicates:
 
 - **`isSecretMaterialPath()`** (line 3628) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
 
@@ -81,11 +81,11 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Per-target write classification
 
-`sandboxSensitiveTargets` (`permissions.go:3764`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+`sandboxSensitiveTargets` (`permissions.go:3765`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3926`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3927`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -112,19 +112,19 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 ## Code references
 
 - Mode constants: `internal/agent/permissions.go:42-52`
-- `Decide` (whole function): `internal/agent/permissions.go:2090-2596`
+- `Decide` (whole function): `internal/agent/permissions.go:2091-2597`
 - `persistPermissions`: `internal/tui/model.go:15691`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1112`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
-- `isHarmfulForceCommand`: `internal/agent/permissions.go:901`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1567`
-- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:704`
-- `isSensitivePath`: `internal/agent/permissions.go:3625`
-- `isSecretMaterialPath`: `internal/agent/permissions.go:3634`
-- `isRepoMetadataPath`: `internal/agent/permissions.go:3687`
-- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3764`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3926`
+- `isHarmfulForceCommand`: `internal/agent/permissions.go:902`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1568`
+- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:705`
+- `isSensitivePath`: `internal/agent/permissions.go:3626`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:3635`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:3688`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3765`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3927`
 
 ## Enforcement details (moved from CLAUDE.md)
 
@@ -206,7 +206,7 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
   on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go:4753`),
   and a line that does not parse is checked from every word position. This is the escalation
-  rule (`isPermissionEscalation`, `internal/agent/permissions.go:3997`), and two more cases feed it.
+  rule (`isPermissionEscalation`, `internal/agent/permissions.go:3998`), and two more cases feed it.
   A network client (curl, wget, http, https) asks when a positional argument is a whole-word
   shell expansion (`curl "$U"`, `curl -s $A https://…`), even beside a literal URL, because curl
   and wget fetch every positional URL and the guard cannot see through the variable. The value
@@ -222,15 +222,15 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   `loopbackAuthoritySafe`, `permissions.go:4679`). The loopback test behind this guard also reads
   the unspecified addresses (`0.0.0.0`, `::`, and the inet_aton zero forms), `localhost.` and any
   `*.localhost` name as loopback (`isLoopbackHostForPermissionGuard`,
-  `internal/agent/permissions.go:1340`). Four more rules apply to a network segment. (b) A segment
+  `internal/agent/permissions.go:1341`). Four more rules apply to a network segment. (b) A segment
   with a destination-shaping option (a proxy, `--connect-to`, `--resolve`, a socks, interface, DNS
   or unix-socket option) is judged by `segmentRedirectsURLs` (`permissions.go:4280`): every URL on
   it has its path checked for a permission or config route, or for a glob or expansion character,
   whatever its host. (c) A config or input-source option asks unconditionally: curl `-K` and
   `--config`, and wget `-i`, `--input-file`, `-e`, `--execute` and `--config`, in any spelling,
   including getopt-style abbreviations of four or more characters with the dashes
-  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:619` and
-  `:599`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
+  (`configSourceFlag` and `longOptionMatch`, `internal/agent/network_guard_typesafe.go:644` and
+  `:624`). (d) Redirect state is line-wide and order-independent. If a line contains a network client
   and anywhere on it (any segment, loop, function or group) there is a redirecting environment
   assignment (prefix or standalone), a `source`, `.` or `eval`, a state-setting builtin or declaration
   aimed at a redirect name, a `${NAME:=…}` expansion of one, or `set -a` (or `set -o allexport`),

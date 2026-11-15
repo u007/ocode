@@ -301,6 +301,12 @@ func contentGuardSourceFor(a *Agent, toolName, toolArgs string) *contentGuardSou
 	case "webfetch":
 		label := "webfetch"
 		if u := extractPathFromArgs(toolName, []byte(toolArgs)); u != "" {
+			// A URL the user whitelisted (permissions.allowed_hosts) is delivered
+			// unscanned, the same as a request the permission layer allowed.
+			if a != nil && a.permissions.URLAllowed(u) {
+				emitDebug("PERMISSION", "tier=contentguard_allowed_url tool=webfetch")
+				return nil
+			}
 			label = "webfetch " + u
 		}
 		return &contentGuardSource{Tool: toolName, Label: label, Full: label}
@@ -514,16 +520,27 @@ func isContentGuardLoopbackHost(host string) bool {
 // network are never exempted on the page URL either: their logs span navigations,
 // so a remote page can log an injection and then redirect the tab to localhost.
 //
+// A page whose URL the allowed-hosts list covers (pm.URLAllowed) is exempt by the
+// same narrow rule: the list vouches for that page, so the same reads are
+// delivered unjudged. pm may be nil, which exempts nothing beyond loopback.
+//
 // Accepted residual: the trust extends to the loopback top document itself. A
 // local app that renders third-party text into its own top-level DOM has that text
 // delivered unjudged.
-func contentGuardExemptLocalPage(action, rawURL string) bool {
+func contentGuardExemptLocalPage(pm *PermissionManager, action, rawURL string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil || !isContentGuardLoopbackHost(u.Hostname()) {
+	if err != nil {
 		return false
 	}
-	emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_local_page action=%s host=%s", action, u.Hostname()))
-	return true
+	if isContentGuardLoopbackHost(u.Hostname()) {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_local_page action=%s host=%s", action, u.Hostname()))
+		return true
+	}
+	if pm.URLAllowed(rawURL) {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_allowed_url action=%s host=%s", action, u.Hostname()))
+		return true
+	}
+	return false
 }
 
 // contentGuardEntryLines keeps only the entry lines of a list read (console,
@@ -585,7 +602,7 @@ func contentGuardQuotedSpans(content string) string {
 // are sub-step controls reads. Each went through the content guard when it ran
 // (handleToolCallWithContext). controls is never exempt, so each was judged on its
 // own read. So the labels carry no bytes the guard did not see.
-func contentGuardBrowserRunView(body string) string {
+func contentGuardBrowserRunView(pm *PermissionManager, body string) string {
 	status, rest, _ := strings.Cut(body, "\n")
 	m := contentGuardBrowserRunStatus.FindStringSubmatch(status)
 	if m == nil {
@@ -598,7 +615,7 @@ func contentGuardBrowserRunView(body string) string {
 		return body
 	}
 	pageURL := m[1]
-	if contentGuardExemptLocalPage("browser_run", pageURL) {
+	if contentGuardExemptLocalPage(pm, "browser_run", pageURL) {
 		return ""
 	}
 	var b strings.Builder
@@ -628,7 +645,8 @@ func contentGuardBrowserRunView(body string) string {
 // judges only the page URL, title and quoted labels, for the same reason. A list
 // read (console, network, find) and tabs keep only their entry lines. pick and
 // select keep only their quoted runs. A text or frame-less find read of a loopback
-// page yields an empty view (see contentGuardExemptLocalPage). Every other result
+// page, or of a page the allowed-hosts list pm covers, yields an empty view (see
+// contentGuardExemptLocalPage). Every other result
 // is judged as it is. The delivered content is never this view; see
 // scanContentGuard.
 //
@@ -640,13 +658,13 @@ func contentGuardBrowserRunView(body string) string {
 //
 // The wrapper, not the page text, pulled the judge into doubt. The url line is
 // kept: it is page-authored and can carry text, and dropping it gains little.
-func contentGuardScanView(toolName, toolArgs, content string) string {
+func contentGuardScanView(pm *PermissionManager, toolName, toolArgs, content string) string {
 	if toolName == "browser_run" {
 		// browser_run's own result starts with the host's untrusted-content notice,
 		// the same clause the measurement above shows pulls a clean verdict below
 		// the floor. It is host text, not page content, so it is never judged.
 		if line, rest, found := strings.Cut(content, "\n"); found && strings.HasPrefix(line, browserRunUntrustedNotice) {
-			return contentGuardBrowserRunView(rest)
+			return contentGuardBrowserRunView(pm, rest)
 		}
 		// intentionally not logged: the host writes the notice on every result, so
 		// one without it is judged as it arrived.
@@ -697,7 +715,7 @@ func contentGuardScanView(toolName, toolArgs, content string) string {
 		// navigations.
 		switch p.Action {
 		case "text", "find":
-			if rawURL := contentGuardHeaderTabURL(header); p.Frame == "" && rawURL != "" && contentGuardExemptLocalPage(p.Action, rawURL) {
+			if rawURL := contentGuardHeaderTabURL(header); p.Frame == "" && rawURL != "" && contentGuardExemptLocalPage(pm, p.Action, rawURL) {
 				return ""
 			}
 		}
@@ -756,7 +774,11 @@ func (a *Agent) scanContentGuard(ctx context.Context, toolName, toolArgs, conten
 		// state for every user without a TypeSafe key.
 		return contentGuardResult{}
 	}
-	chunks, truncated := chunkContentGuard(contentGuardScanView(toolName, toolArgs, content))
+	var pm *PermissionManager
+	if a != nil {
+		pm = a.permissions
+	}
+	chunks, truncated := chunkContentGuard(contentGuardScanView(pm, toolName, toolArgs, content))
 	if len(chunks) == 0 {
 		return contentGuardResult{}
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -102,7 +103,7 @@ func TestParseOpenAIResponse(t *testing.T) {
 			{"b64_json": "` + tinyPNG + `"}
 		]
 	}`
-	imgs, revised, err := parseOpenAIResponse([]byte(body))
+	imgs, revised, err := parseOpenAIResponse([]byte(body), "https://api.example.com")
 	if err != nil {
 		t.Fatalf("parseOpenAIResponse error: %v", err)
 	}
@@ -306,5 +307,111 @@ func TestImageGenToolNotice(t *testing.T) {
 	tool2 := &ImageGenTool{}
 	if notice2 := tool2.recordCost(imgGenParams{Provider: "mystery"}, "x", 1); !strings.Contains(notice2, "unknown") {
 		t.Errorf("expected unknown-price notice, got %q", notice2)
+	}
+}
+
+// TestOpenAIURLImageFetchGuard drives provider-returned image URLs through
+// parseOpenAIResponse, the real call path, and checks which ones fetchBytes
+// downloads for a given API base. Refused URLs must never reach the server.
+func TestOpenAIURLImageFetchGuard(t *testing.T) {
+	pngBytes := "\x89PNG\r\n\x1a\nfake-image"
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "http://169.254.169.254/x", http.StatusFound)
+			return
+		}
+		io.WriteString(w, pngBytes)
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name     string
+		base     string // "" means the test server itself
+		image    string // "{srv}" is replaced by the test server URL
+		wantErr  string // substring of the error; "" means success
+		wantHits int32
+	}{
+		{
+			name:     "public base refuses loopback image",
+			base:     "https://api.example.com",
+			image:    "{srv}/img.png",
+			wantErr:  "loopback or private address",
+			wantHits: 0,
+		},
+		{
+			name:     "public base refuses localhost name",
+			base:     "https://api.example.com",
+			image:    strings.Replace("{srv}/img.png", "127.0.0.1", "localhost", 1),
+			wantErr:  "loopback or private address",
+			wantHits: 0,
+		},
+		{
+			name:     "loopback base fetches its own image",
+			image:    "{srv}/img.png",
+			wantHits: 1,
+		},
+		{
+			name:     "metadata refused under loopback base",
+			image:    "http://169.254.169.254/latest/meta-data/",
+			wantErr:  "link-local or cloud-metadata",
+			wantHits: 0,
+		},
+		{
+			name:     "decimal-form metadata refused",
+			image:    "http://2852039166/latest/meta-data/",
+			wantErr:  "link-local or cloud-metadata",
+			wantHits: 0,
+		},
+		{
+			name:     "file scheme refused",
+			image:    "file:///etc/passwd",
+			wantErr:  "only http and https",
+			wantHits: 0,
+		},
+		{
+			name:     "redirect to metadata refused",
+			image:    "{srv}/redirect",
+			wantErr:  "link-local or cloud-metadata",
+			wantHits: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits.Store(0)
+			base := tc.base
+			if base == "" {
+				base = srv.URL
+			}
+			image := strings.ReplaceAll(tc.image, "{srv}", srv.URL)
+			body, err := json.Marshal(map[string]interface{}{
+				"data": []map[string]string{{"url": image}},
+			})
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+
+			imgs, _, err := parseOpenAIResponse(body, base)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(imgs) != 1 || string(imgs[0].data) != pngBytes {
+					t.Fatalf("expected the served bytes back, got %d image(s)", len(imgs))
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got none", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+				}
+			}
+			if got := hits.Load(); got != tc.wantHits {
+				t.Fatalf("server received %d request(s), want %d", got, tc.wantHits)
+			}
+		})
 	}
 }
