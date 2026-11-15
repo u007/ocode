@@ -341,7 +341,7 @@ func setGlobalAdvisorDefault(t *testing.T, h *Handler, provider, model string, c
 // chat: a session-scoped PUT must move only that session's live agent, pin only
 // its metadata, and leave other sessions and the new-chat default alone.
 func TestAdvisorModelPickIsIsolatedToItsSession(t *testing.T) {
-	h, agents, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, agents, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"done"})
 	seedAdvisorAgents(t, h, agents, ids)
 	a, b := ids[0], ids[1]
 
@@ -378,7 +378,7 @@ func TestAdvisorModelPickIsIsolatedToItsSession(t *testing.T) {
 	if !ok || cfgA.Model != "openai/gpt-5.1" {
 		t.Fatalf("A metadata pin = (%+v, %v), want openai/gpt-5.1", cfgA, ok)
 	}
-	if got := getAdvisorConfigFor(t, h, a)["checkpoints"]; !reflect.DeepEqual(got, []any{"plan"}) {
+	if got := getAdvisorConfigFor(t, h, a)["checkpoints"]; !reflect.DeepEqual(got, []any{"done"}) {
 		t.Fatalf("A partial PUT must not clear its triggers, got %v", got)
 	}
 }
@@ -387,7 +387,7 @@ func TestAdvisorModelPickIsIsolatedToItsSession(t *testing.T) {
 // a chat has resolved its advisor, changing the default leaves that chat alone,
 // and only a chat that has not resolved yet takes the new value.
 func TestChangingDefaultAffectsOnlyNewChats(t *testing.T) {
-	h, _, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, _, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"done"})
 
 	existing := ids[0]
 	if got := getAdvisorConfigFor(t, h, existing)["model"]; got != "deepseek-v4-pro" {
@@ -400,7 +400,7 @@ func TestChangingDefaultAffectsOnlyNewChats(t *testing.T) {
 	if got := getAdvisorConfigFor(t, h, existing)["model"]; got != "deepseek-v4-pro" {
 		t.Fatalf("existing chat followed the new default: %v", got)
 	}
-	if got := getAdvisorConfigFor(t, h, existing)["checkpoints"]; !reflect.DeepEqual(got, []any{"plan"}) {
+	if got := getAdvisorConfigFor(t, h, existing)["checkpoints"]; !reflect.DeepEqual(got, []any{"done"}) {
 		t.Fatalf("existing chat's triggers changed: %v", got)
 	}
 	// A chat first seen after the change takes the new default.
@@ -416,7 +416,7 @@ func TestChangingDefaultAffectsOnlyNewChats(t *testing.T) {
 // live agent, resolution must come from the pin, and a rebuilt agent must be
 // seeded from it rather than from the (now different) process default.
 func TestAdvisorPinSurvivesEvictionAndRebuild(t *testing.T) {
-	h, _, ids := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, _, ids := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"done"})
 	id := ids[0]
 
 	if rec := putAdvisorConfig(t, h, id, map[string]any{"provider": "openai", "model": "gpt-5.1"}); rec.Code != http.StatusOK {
@@ -446,7 +446,7 @@ func TestAdvisorPinSurvivesEvictionAndRebuild(t *testing.T) {
 // default" pick is a real value. The session must keep resolving to the
 // built-in default, not to the process-wide model, which may since have changed.
 func TestAdvisorPinPinnedToDefaultDoesNotFollowGlobal(t *testing.T) {
-	h, agents, ids := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, agents, ids := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"done"})
 	seedAdvisorAgents(t, h, agents, ids)
 	id := ids[0]
 
@@ -454,7 +454,7 @@ func TestAdvisorPinPinnedToDefaultDoesNotFollowGlobal(t *testing.T) {
 	if rec := putAdvisorConfig(t, h, id, map[string]any{"model": "", "provider": ""}); rec.Code != http.StatusOK {
 		t.Fatalf("clear model: %d (%s)", rec.Code, rec.Body.String())
 	}
-	setGlobalAdvisorDefault(t, h, "openai", "gpt-5.1", []string{"plan"})
+	setGlobalAdvisorDefault(t, h, "openai", "gpt-5.1", []string{"done"})
 
 	if got := agents[0].AdvisorModel(); got != "" {
 		t.Fatalf("agent model = %q, want empty (pinned to the built-in default)", got)
@@ -463,7 +463,7 @@ func TestAdvisorPinPinnedToDefaultDoesNotFollowGlobal(t *testing.T) {
 		t.Fatalf("resolved model = %q, want empty", got)
 	}
 	// Its triggers are still its own, not the default's.
-	if got := agents[0].AdvisorCheckpoints(); !reflect.DeepEqual(got, []string{"plan"}) {
+	if got := agents[0].AdvisorCheckpoints(); !reflect.DeepEqual(got, []string{"done"}) {
 		t.Fatalf("triggers = %v, want [plan]", got)
 	}
 }
@@ -472,7 +472,7 @@ func TestAdvisorPinPinnedToDefaultDoesNotFollowGlobal(t *testing.T) {
 // does not resolve must 404 and write nothing, so a typo cannot persist an
 // orphan pin.
 func TestAdvisorConfigUnknownSession404(t *testing.T) {
-	h, agents, _ := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, agents, _ := advisorIsolationHandler(t, 1, "deepseek/deepseek-v4-pro", []string{"done"})
 	before := agents[0].AdvisorModel()
 
 	rec := putAdvisorConfig(t, h, "does-not-exist", map[string]any{"model": "x/y"})
@@ -503,16 +503,18 @@ func TestSessionAdvisorConfigForDirRoundTrip(t *testing.T) {
 		t.Fatal("expected no pin initially")
 	}
 	want := agent.AdvisorConfig{
-		Model:       "openai/gpt-5.1",
-		ClaudeCode:  true,
+		Model:      "openai/gpt-5.1",
+		ClaudeCode: true,
+		// The stored list carries the retired "plan" checkpoint; reading it
+		// back must migrate it to "done" rather than drop the session's review.
 		Checkpoints: []string{"plan", "done"},
 	}
 	if err := h.persistSessionAdvisorConfig(id, want); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 	got, ok := sessionAdvisorConfigForDir(proj, id)
-	if !ok || got.Model != want.Model || got.ClaudeCode != want.ClaudeCode || !reflect.DeepEqual(got.Checkpoints, want.Checkpoints) {
-		t.Fatalf("round trip = (%+v, %v), want %+v", got, ok, want)
+	if !ok || got.Model != want.Model || got.ClaudeCode != want.ClaudeCode || !reflect.DeepEqual(got.Checkpoints, []string{"done"}) {
+		t.Fatalf("round trip = (%+v, %v), want model/claude_code as sent and checkpoints [done]", got, ok)
 	}
 
 	// An empty model with no triggers is a PIN, not an absence.
@@ -532,7 +534,7 @@ func TestSessionAdvisorConfigForDirRoundTrip(t *testing.T) {
 // must not reach another chat's completion checkpoints, which is what
 // advisorCheckpointEnabled reads.
 func TestPerSessionAdvisorTriggersAreIndependent(t *testing.T) {
-	h, agents, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, agents, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"done"})
 	seedAdvisorAgents(t, h, agents, ids)
 	a, b := ids[0], ids[1]
 	getAdvisorConfigFor(t, h, a)
@@ -544,7 +546,7 @@ func TestPerSessionAdvisorTriggersAreIndependent(t *testing.T) {
 	if got := agents[0].AdvisorCheckpoints(); !reflect.DeepEqual(got, []string{"done"}) {
 		t.Fatalf("A triggers = %v, want [done]", got)
 	}
-	if got := agents[1].AdvisorCheckpoints(); !reflect.DeepEqual(got, []string{"plan"}) {
+	if got := agents[1].AdvisorCheckpoints(); !reflect.DeepEqual(got, []string{"done"}) {
 		t.Fatalf("B triggers changed to %v, want [plan]", got)
 	}
 }
@@ -569,7 +571,7 @@ func advisorStatusSnapshot(t *testing.T, h *Handler, id string) TUIStatus {
 // and triggers; buildStatusSnapshot's process-wide default would otherwise make
 // one chat's pick look like it applied everywhere.
 func TestSessionStatusReportsPerSessionAdvisorModel(t *testing.T) {
-	h, _, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"plan"})
+	h, _, ids := advisorIsolationHandler(t, 2, "deepseek/deepseek-v4-pro", []string{"done"})
 	a, b := ids[0], ids[1]
 	// Resolve both so neither is reading the bare default by accident.
 	getAdvisorConfigFor(t, h, a)
@@ -595,7 +597,7 @@ func TestSessionStatusReportsPerSessionAdvisorModel(t *testing.T) {
 	if snapB.AdvisorModel != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("B snapshot model = %q, want its own deepseek/deepseek-v4-pro", snapB.AdvisorModel)
 	}
-	if !reflect.DeepEqual(snapB.AdvisorCheckpoints, []string{"plan"}) {
+	if !reflect.DeepEqual(snapB.AdvisorCheckpoints, []string{"done"}) {
 		t.Fatalf("B snapshot triggers = %v, want [plan]", snapB.AdvisorCheckpoints)
 	}
 }

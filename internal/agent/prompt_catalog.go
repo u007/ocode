@@ -48,6 +48,13 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     claudeCodeAdvisorPrompt,
 		},
 		{
+			Key:         "advisor_gate",
+			Label:       "Advisor gate",
+			Description: "Rubric the advisor gate judge uses to decide whether a second-model review is worth running before a commit or at the end of a turn.",
+			Kind:        PromptKindJudge,
+			Builtin:     advisorGateInstructions,
+		},
+		{
 			Key:         "auto_continue_judge",
 			Label:       "Auto-continue judge",
 			Description: "Triage rubric the auto-continue judge uses to pick the single next action after an assistant reply ends.",

@@ -116,12 +116,14 @@ export default function AdvisorForm() {
 
       <div className="space-y-1.5">
         <div className="text-xs text-muted-foreground">Checkpoints</div>
-        {["done", "plan"].map((cp) => (
-          <label key={cp} className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input type="checkbox" checked={checkpoints.includes(cp)} onChange={() => toggleCheckpoint(cp)} />
-            {cp}
-          </label>
-        ))}
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={checkpoints.includes("done")}
+            onChange={() => toggleCheckpoint("done")}
+          />
+          Review at end of turn and before a commit (&quot;done&quot;)
+        </label>
       </div>
 
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

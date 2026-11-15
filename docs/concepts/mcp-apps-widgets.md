@@ -47,11 +47,11 @@ A tool whose visibility lacks `"model"` is not registered for the model at all
    a tool with a UI resource, `recordCallOutcome` stores the raw result under that
    call ID (`internal/mcp/client.go:1261`).
 3. **Attach to the tool message.** `handleToolCallWithContext` calls
-   `keepMCPAppRef` (`internal/agent/agent.go:4033`). `keepMCPAppRef` keeps a
+   `keepMCPAppRef` (`internal/agent/agent.go:4052`). `keepMCPAppRef` keeps a
    `MCPAppRef` only when the call ran (`internal/agent/mcp_app.go:17`).
    `takeMCPAppRef` then puts it on the tool message as `Message.MCPApp`, and gives
    none when the result is a pending ask (`internal/agent/mcp_app.go:54`). The
-   message is built at `internal/agent/agent.go:2175`.
+   message is built at `internal/agent/agent.go:2197`.
 4. **Stream.** The live path broadcasts a `tool_result` event carrying the ref
    (`internal/server/handler.go:1227`). Stream replay sends the same
    `ToolResultEvent` (`internal/server/handler_sse.go:286`; the type is at
@@ -97,8 +97,8 @@ An MCP tool result that contains an image block keeps its first decodable image
 under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1230`) and
 `recordCallOutcome` stores it (`internal/mcp/client.go:1261`).
 `handleToolCallWithImages` takes that image on every path, so nothing is kept
-(`internal/agent/agent.go:3902`). It attaches the image to the tool message only
-when the current model supports vision (`internal/agent/agent.go:3914`). Otherwise
+(`internal/agent/agent.go:3921`). It attaches the image to the tool message only
+when the current model supports vision (`internal/agent/agent.go:3933`). Otherwise
 the text result alone is returned.
 
 Which provider builders carry the image, verified in `internal/agent/client.go`:

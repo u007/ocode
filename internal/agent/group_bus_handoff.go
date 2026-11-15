@@ -124,7 +124,7 @@ func extractTouchFilePaths(toolName, args string) []string {
 // isWriteTool returns true for the write-class tools that the
 // bus should observe. The list centralizes mutating-tool
 // classification used by both the note bus and the advisor
-// checkpoints (plan/done). Read-class tools (read, glob, grep,
+// checkpoint (done). Read-class tools (read, glob, grep,
 // list, lsp, bash, webfetch, websearch, agent_status,
 // task_status, …) are never logged — the design explicitly
 // forbids read-touches.

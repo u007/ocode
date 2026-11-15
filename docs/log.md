@@ -12,6 +12,19 @@
 
 ## 2026-11-15
 
+* **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
+* **Update**: SKILL.md Frontmatter Fields ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))
+* **Update**: SKILL.md Frontmatter Fields ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))
+* **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
+* **Update**: Advisor checkpoints must wait for a pending permission/question ask ([gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md](/gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md))
+* **Update**: Pending ask suppresses advisor, auto-continue, and goal-resume ([concepts/pending-ask-suppresses-advisor-auto-continue-goal.md](/concepts/pending-ask-suppresses-advisor-auto-continue-goal.md))
+* **Update**: SKILL.md Frontmatter Fields ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Ask-dialog "Explain this call" digest ([concepts/ask-dialog-tool-call-digest.md](/concepts/ask-dialog-tool-call-digest.md))
+* **Update**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
 * **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
 * **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
 * **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
@@ -29,6 +42,11 @@
 * **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
 * **Update**: MCP Apps widgets and plugin MCP servers ([concepts/mcp-apps-widgets.md](/concepts/mcp-apps-widgets.md))
 * **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Creation**: Advisor gate judge (advisor_gate) ([concepts/advisor-gate-judge.md](/concepts/advisor-gate-judge.md))
+* **Update**: SKILL.md Frontmatter Fields: plan checkpoint removed, done checkpoint and before-commit gate stand down, code anchors re-derived ([concepts/skill-frontmatter.md](/concepts/skill-frontmatter.md))
+* **Update**: Pending ask suppresses advisor checkpoints: plan checkpoint removed, done checkpoint and before-commit gate both stand down ([concepts/pending-ask-suppresses-advisor-auto-continue-goal.md](/concepts/pending-ask-suppresses-advisor-auto-continue-goal.md))
+* **Update**: Advisor checkpoints must wait for a pending ask: plan checkpoint removed, done checkpoint and before-commit gate both stand down ([gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md](/gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md))
+
 ## 2026-11-14
 
 * **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))

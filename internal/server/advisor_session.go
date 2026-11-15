@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -208,7 +209,9 @@ func sessionAdvisorConfigForDir(projectRoot, sessionID string) (agent.AdvisorCon
 
 // advisorCheckpointsFromMeta normalizes the stored trigger list. JSON gives
 // back []any of strings, and a nil/empty list is a real "no triggers" value
-// rather than an absent pin.
+// rather than an absent pin. Retired names are migrated ("plan" becomes
+// "done"), so a session pinned before the plan checkpoint was removed keeps a
+// review instead of silently losing every checkpoint.
 func advisorCheckpointsFromMeta(raw any) []string {
 	arr, ok := raw.([]any)
 	if !ok {
@@ -220,7 +223,7 @@ func advisorCheckpointsFromMeta(raw any) []string {
 			out = append(out, s)
 		}
 	}
-	return out
+	return config.NormalizeAdvisorCheckpoints(out)
 }
 
 // sessionAdvisorConfig resolves the owning project root for sessionID and

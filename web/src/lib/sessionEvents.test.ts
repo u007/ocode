@@ -401,11 +401,21 @@ describe("routeBusEnvelope", () => {
 
   it("advisor_checkpoint surfaces and clears a status live part", () => {
     const { router, getState } = makeRouter(["s1"]);
-    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "plan", active: true } }), router);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "done", active: true } }), router);
     expect(getState().sessions["s1"].live).toEqual([
-      { kind: "status", text: "Advisor plan checkpoint — reviewing…" },
+      { kind: "status", text: "Advisor done checkpoint — reviewing…" },
     ]);
-    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "plan", active: false } }), router);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "done", active: false } }), router);
+    expect(getState().sessions["s1"].live).toEqual([]);
+  });
+
+  it("advisor_checkpoint shows the before-commit review", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "commit", active: true } }), router);
+    expect(getState().sessions["s1"].live).toEqual([
+      { kind: "status", text: "Advisor commit checkpoint — reviewing…" },
+    ]);
+    routeBusEnvelope(env("advisor_checkpoint", { data: { kind: "commit", active: false } }), router);
     expect(getState().sessions["s1"].live).toEqual([]);
   });
 

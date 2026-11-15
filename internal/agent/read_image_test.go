@@ -259,7 +259,7 @@ func TestModelSupportsVision_FallbackFamilies(t *testing.T) {
 }
 
 // TestBuildAnthropicMessages_ToolResultThenUserText covers the shape the
-// advisor plan checkpoint produces: a tool-result batch immediately followed by
+// advisor completion checkpoint produces: a tool-result batch immediately followed by
 // an injected plain user message (the advisor's review). The two must stay in
 // separate user turns — mixing tool_result and text blocks in one user message
 // is rejected by strict providers (e.g. Minimax, which routes through this
@@ -272,7 +272,7 @@ func TestBuildAnthropicMessages_ToolResultThenUserText(t *testing.T) {
 		{Role: "user", Content: "patch it"},
 		asst,
 		{Role: "tool", ToolID: "tc1", Content: "Success."},
-		{Role: "user", Content: "[advisor plan checkpoint] review"},
+		{Role: "user", Content: "[advisor completion checkpoint] review"},
 	}
 
 	out, err := c.buildAnthropicMessages(msgs)
@@ -294,7 +294,7 @@ func TestBuildAnthropicMessages_ToolResultThenUserText(t *testing.T) {
 		t.Fatalf("review turn must not carry tool_result blocks, got %+v", reviewContent)
 	}
 	block, _ := reviewContent[0].(map[string]interface{})
-	if block["type"] != "text" || !strings.Contains(block["text"].(string), "advisor plan checkpoint") {
+	if block["type"] != "text" || !strings.Contains(block["text"].(string), "advisor completion checkpoint") {
 		t.Fatalf("review turn must carry the review text, got %+v", block)
 	}
 }

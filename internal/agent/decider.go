@@ -27,6 +27,9 @@ const (
 	// slotBrowserRun is the decision judge for the browser_run tool's step loop
 	// (config key browser_run.judge_model).
 	slotBrowserRun judgeSlot = "browser_run"
+	// slotAdvisorGate decides whether an advisor review is worth running
+	// (config key advisor_gate.judge_model).
+	slotAdvisorGate judgeSlot = "advisor_gate"
 )
 
 // defaultJudgeModel is what every slot resolves to when nothing is configured.
@@ -113,6 +116,8 @@ func (a *Agent) slotModel(slot judgeSlot) string {
 		v = oc.Goal.JudgeModel
 	case slotBrowserRun:
 		v = oc.BrowserRun.JudgeModel
+	case slotAdvisorGate:
+		v = oc.AdvisorGate.JudgeModel
 	case slotPulseActivation:
 		v = oc.PulseActivationModel
 	}

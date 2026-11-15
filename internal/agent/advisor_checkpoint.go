@@ -3,17 +3,33 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"slices"
 	"strings"
 
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
 )
 
-// Advisor checkpoint names, matching cfg.Ocode.Advisor.Checkpoints values.
-const (
-	checkpointPlan = "plan"
-	checkpointDone = "done"
-)
+// checkpointDone is the advisor checkpoint name, matching the
+// cfg.Ocode.Advisor.Checkpoints value. A configured "plan" is no longer a
+// checkpoint and is ignored.
+const checkpointDone = "done"
+
+// advisorReviewEntry is one completed advisor review in the in-memory ledger.
+type advisorReviewEntry struct {
+	Moment string
+	// Files is every file the session had changed when the review ran. It backs
+	// the state shown to the judge and the "not covered by a review" rule.
+	Files   []string
+	Verdict string
+	// Seq is the snapshot store's write watermark at review time. A file whose
+	// recorded write is newer than Seq is unreviewed, whatever tool wrote it.
+	Seq uint64
+}
+
+// advisorLedgerMax bounds the review ledger. Only the newest entries are read.
+const advisorLedgerMax = 20
 
 // doneCheckpointMinToolCalls sets the threshold for the "done" checkpoint: a
 // turn must have at least this many total tool calls OR at least one write-class
@@ -27,13 +43,24 @@ const doneCheckpointMinToolCalls = 5
 
 // advisorCheckpointState tracks per-Step checkpoint bookkeeping. Each Step
 // invocation gets a fresh state, so every checkpoint fires at most once per
-// user turn.
+// Step. A turn may span several Steps (a permission or question ask pauses the
+// loop and the answer continues it), so a continuation can consult a checkpoint
+// again; that is intended, because the continuation starts from new state.
 type advisorCheckpointState struct {
 	userGoal    string
-	planChecked bool
 	doneChecked bool
 	toolCalls   int
 	writeCalls  int
+	// toolCallsByName, filesWritten and bashCommands feed the advisor gate's
+	// turn summary. They cover every batch of this Step.
+	toolCallsByName map[string]int
+	filesWritten    []string
+	bashCommands    []string
+	// commitAsked is set once the before-commit gate has been consulted in this
+	// Step, so a batch's commit is considered at most once per Step.
+	commitAsked bool
+	// commitReviewed is set when a before-commit review ran this turn.
+	commitReviewed bool
 
 	// pendingAsk records that this Step began while the client was showing an
 	// unanswered permission or question dialog. Both checkpoints stand down
@@ -86,9 +113,14 @@ func (a *Agent) blockedByPendingAsk(st *advisorCheckpointState, kind string) boo
 	return true
 }
 
-func lastUserContent(messages []Message) string {
+// lastHumanUserContent returns the most recent message a person typed. Synthetic
+// user-role messages ([ocode:*] notices, an auto-continue resume, the
+// step-limit notice) are skipped: a turn started by a background-job notice has
+// no human message at all, and the advisor gate must never read background
+// output as a user request it can treat as declining a review.
+func lastHumanUserContent(messages []Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
+		if isHumanPromptMessage(messages[i]) {
 			return messages[i].Content
 		}
 	}
@@ -96,12 +128,23 @@ func lastUserContent(messages []Message) string {
 }
 
 // countBatch records an executed tool batch toward the "done" checkpoint's
-// non-triviality threshold.
+// non-triviality threshold and the advisor gate's turn summary.
 func (st *advisorCheckpointState) countBatch(calls []ToolCall) {
 	st.toolCalls += len(calls)
 	for _, tc := range calls {
-		if isWriteTool(tc.Function.Name) {
+		name := tc.Function.Name
+		if st.toolCallsByName == nil {
+			st.toolCallsByName = map[string]int{}
+		}
+		st.toolCallsByName[name]++
+		if isWriteTool(name) {
 			st.writeCalls++
+			if p := extractTouchFilePath(name, tc.Function.Arguments); p != "" {
+				st.filesWritten = append(st.filesWritten, p)
+			}
+		}
+		if name == "bash" {
+			st.bashCommands = append(st.bashCommands, bashCommand(json.RawMessage(tc.Function.Arguments)))
 		}
 	}
 }
@@ -176,6 +219,9 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 		return "", false
 	}
 	advice = strings.TrimSpace(advice)
+	// Mask secrets before the advice reaches a transcript: the advisor reads repo
+	// files, and both callers persist what it returns.
+	advice = redactText(advice, a.redactionRegistry)
 	if advice == "" {
 		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint returned empty advice (continuing)", kind))
 		return "", false
@@ -183,66 +229,10 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	return advice, true
 }
 
-// advisorPlanCheckpoint fires once per Step, immediately after the first
-// executed tool batch that contained a write-class call. The batch is NOT
-// deferred: the writes are already applied, so the model never regenerates
-// them. The review comes back as a user message injected into the loop, which
-// the model acts on next iteration (correcting the applied change if the
-// advisor found a problem). Returns nil when the checkpoint does not apply, or
-// when the advisor is unavailable, in which case the loop continues unchanged.
-func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message) *Message {
-	if st.planChecked || len(resp.ToolCalls) == 0 || !a.advisorCheckpointEnabled(checkpointPlan) {
-		return nil
-	}
-	if a.blockedByPendingAsk(st, checkpointPlan) {
-		return nil
-	}
-	if st.skillSuppressed {
-		return nil
-	}
-	hasWrite := false
-	for _, tc := range resp.ToolCalls {
-		if isWriteTool(tc.Function.Name) {
-			hasWrite = true
-			break
-		}
-	}
-	if !hasWrite {
-		return nil
-	}
-	st.planChecked = true
-
-	var plan strings.Builder
-	for _, tc := range resp.ToolCalls {
-		fmt.Fprintf(&plan, "- %s %s\n", tc.Function.Name, summarizeToolArgs(tc.Function.Name, tc.Function.Arguments))
-	}
-	prompt := fmt.Sprintf(`PLAN CHECKPOINT: the executor has just made its first code changes for this task. Review the approach now, while it is still cheap to correct.
-
-User goal:
-%s
-
-Executor's reasoning:
-%s
-
-Tool calls just applied:
-%s
-Advise: is this the right approach? Wrong files, missing prior exploration, simpler alternative, risks? Answer with either "proceed" plus cautions, or a corrected approach. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
-		st.userGoal, resp.Content, plan.String())
-
-	advice, ok := a.runAdvisorCheckpoint(checkpointPlan, prompt)
-	if !ok {
-		return nil
-	}
-
-	return &Message{
-		Role: "user",
-		Content: "[advisor plan checkpoint] An advisor reviewed the changes you just made:\n\n" + advice +
-			"\n\nIf the review confirms your approach, carry on. Otherwise correct the changes now — they are already applied, so fix them in place rather than re-issuing the same calls. This checkpoint fires only once per turn.",
-	}
-}
-
 // advisorDoneCheckpoint fires once per Step when the model produces a final
-// message (no tool calls) after non-trivial work: at least one write-class
+// message (no tool calls) and the session has changes to review. The
+// advisor_gate judge decides whether a review is worth running. If the judge
+// gives no usable answer, the threshold rule applies: at least one write-class
 // call or doneCheckpointMinToolCalls total tool calls this turn. It returns a
 // user message carrying the advisor's completion review, or nil to let the
 // turn end.
@@ -256,8 +246,22 @@ func (a *Agent) advisorDoneCheckpoint(st *advisorCheckpointState, resp *Message)
 	if st.skillSuppressed {
 		return nil
 	}
-	if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls {
+	if a.advisorNoSessionChanges(st) {
 		return nil
+	}
+	v := a.advisorGateDecide(st, advisorMomentEndOfTurn, resp.Content)
+	if v.Decided {
+		if !v.Review {
+			st.doneChecked = true
+			return nil
+		}
+	} else {
+		if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls {
+			return nil
+		}
+		if st.commitReviewed && len(a.advisorChangedSinceLastReview()) == 0 {
+			return nil
+		}
 	}
 	st.doneChecked = true
 
@@ -279,26 +283,176 @@ Check: does the report satisfy the full goal? Any unvalidated claims (tests not 
 	if !ok {
 		return nil
 	}
+	a.recordAdvisorReview(advisorMomentEndOfTurn, advice)
 	return &Message{
 		Role: "user",
 		Content: "[advisor completion checkpoint] Before finishing, an advisor reviewed your final report:\n\n" + advice +
-			"\n\nIf gaps were identified, address them now. If the review confirms completion, restate your final answer. This checkpoint fires only once per turn.",
+			"\n\nIf gaps were identified, address them now. If the review confirms completion, restate your final answer. This checkpoint fires only once per step.",
 	}
 }
 
-// summarizeToolArgs renders a compact one-line description of a tool call's
-// arguments for the plan prompt: the target file path when extractable,
-// otherwise the raw args whitespace-collapsed and truncated.
-func summarizeToolArgs(toolName, args string) string {
-	if p := extractTouchFilePath(toolName, args); p != "" {
-		return p
+// advisorNoSessionChanges reports whether there is nothing for an advisor review
+// to look at: a snapshot store is attached, it tracks no changed file, and this
+// Step wrote nothing. Without a snapshot store the answer is always false, so
+// the gate is still consulted.
+func (a *Agent) advisorNoSessionChanges(st *advisorCheckpointState) bool {
+	return a.snapshotStore != nil && st.writeCalls == 0 && len(a.ChangedFiles()) == 0
+}
+
+// advisorCommitHold is consulted before any tool in a batch is dispatched. When
+// the batch contains a git commit and the advisor_gate judge confidently asks
+// for a review, it runs the review and returns a tool message for each commit
+// call, so that call is withheld and not executed. It returns nil in every other
+// case, and the batch runs untouched. Calls the duplicate check rejected are
+// skipped, because they already carry their own rejection message.
+func (a *Agent) advisorCommitHold(st *advisorCheckpointState, resp *Message, rejected map[int]int) map[int]Message {
+	if st.commitAsked || !a.advisorCheckpointEnabled(checkpointDone) || st.skillSuppressed {
+		return nil
 	}
-	const max = 160
-	s := strings.Join(strings.Fields(args), " ")
-	if len(s) > max {
-		s = s[:max] + "…"
+	if a.advisorNoSessionChanges(st) {
+		return nil
 	}
-	return s
+	var commits []int
+	for j, tc := range resp.ToolCalls {
+		if _, bad := rejected[j]; bad || tc.Function.Name != "bash" {
+			continue
+		}
+		if bashRunsGitCommit(bashCommand(json.RawMessage(tc.Function.Arguments))) {
+			commits = append(commits, j)
+		}
+	}
+	if len(commits) == 0 {
+		return nil
+	}
+	if a.blockedByPendingAsk(st, "commit") {
+		return nil
+	}
+	st.commitAsked = true
+
+	command := bashCommand(json.RawMessage(resp.ToolCalls[commits[0]].Function.Arguments))
+	v := a.advisorGateDecide(st, advisorMomentBeforeCommit, command)
+	if !v.Decided || !v.Review {
+		return nil
+	}
+
+	prompt := fmt.Sprintf(`PRE-COMMIT CHECKPOINT: the executor is about to commit. Review the work before it is committed.
+
+User goal:
+%s
+
+Files changed this session:
+%s
+
+Commit command:
+%s
+
+Executor's reasoning:
+%s
+
+Check: does the work satisfy the user goal, and are there gaps, unvalidated claims or missed requirements that the commit would lock in? Answer "complete" if the work is ready to commit, otherwise enumerate the specific gaps to fix before committing. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
+		st.userGoal, formatChangedFiles(a.ChangedFiles()), command, resp.Content)
+
+	advice, ok := a.runAdvisorCheckpoint("commit", prompt)
+	if !ok {
+		return nil
+	}
+	a.recordAdvisorReview(advisorMomentBeforeCommit, advice)
+	st.commitReviewed = true
+
+	text := "Commit not run yet: an advisor reviewed the work before the commit:\n\n" + advice +
+		"\n\nIf the review found gaps, fix them first. If it confirms the work, re-issue the commit command. This review happens at most once per step."
+	held := make(map[int]Message, len(commits))
+	for _, j := range commits {
+		held[j] = Message{Role: "tool", ToolID: resp.ToolCalls[j].ID, Content: text}
+	}
+	return held
+}
+
+// bashRunsGitCommit reports whether any simple command in a shell line runs
+// `git commit`, after launcher wrappers are stripped. Global git options such as
+// `-C dir` and `-c key=val` are skipped before the subcommand.
+func bashRunsGitCommit(command string) bool {
+	for _, seg := range splitCommandSegments(splitShellFields(spaceOutOperators(command))) {
+		for _, words := range effectiveCommandWords(seg) {
+			if gitWordsRunCommit(words) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gitWordsRunCommit reports whether one simple command is `git ... commit`.
+func gitWordsRunCommit(words []string) bool {
+	if len(words) == 0 || path.Base(words[0]) != "git" {
+		return false
+	}
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		switch w {
+		case "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--exec-path":
+			i++ // the option's value is the next word
+			continue
+		}
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		return w == "commit"
+	}
+	return false
+}
+
+// recordAdvisorReview stores a completed review with the session's changed files
+// and the store's write watermark at that moment.
+func (a *Agent) recordAdvisorReview(moment, verdict string) {
+	files := slices.Clone(a.ChangedFiles())
+	var seq uint64
+	if a.snapshotStore != nil {
+		seq = a.snapshotStore.LastWriteSeq()
+	}
+	a.advisorLedgerMu.Lock()
+	defer a.advisorLedgerMu.Unlock()
+	a.advisorReviews = append(a.advisorReviews, advisorReviewEntry{
+		Moment:  moment,
+		Files:   files,
+		Verdict: truncateRunes(verdict, advisorGateVerdictRunes),
+		Seq:     seq,
+	})
+	if n := len(a.advisorReviews); n > advisorLedgerMax {
+		a.advisorReviews = slices.Clone(a.advisorReviews[n-advisorLedgerMax:])
+	}
+}
+
+// advisorChangedSinceLastReview returns the changed files no review has covered.
+// It unions two sources, because neither alone is complete:
+//
+//   - the store's writes newer than the last review's watermark, which catches
+//     every tracked write whatever tool made it (apply_patch, a formatter, a
+//     bash edit) and a rewrite of a file an earlier review already covered;
+//   - the session's changed files absent from the last review's list, which
+//     covers a backup the store never sequenced.
+//
+// With no review yet, that is every changed file.
+func (a *Agent) advisorChangedSinceLastReview() []string {
+	if a.snapshotStore == nil {
+		return nil
+	}
+	a.advisorLedgerMu.Lock()
+	var seq uint64
+	var prev []string
+	if n := len(a.advisorReviews); n > 0 {
+		seq = a.advisorReviews[n-1].Seq
+		prev = a.advisorReviews[n-1].Files
+	}
+	a.advisorLedgerMu.Unlock()
+	out := a.snapshotStore.ChangedSince(seq)
+	for _, f := range a.ChangedFiles() {
+		if !slices.Contains(prev, f) && !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func formatChangedFiles(files []string) string {

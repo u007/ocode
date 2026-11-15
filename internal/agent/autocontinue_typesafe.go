@@ -652,13 +652,14 @@ func typesafeTranscriptEntries(messages []Message) []map[string]any {
 	return entries
 }
 
-// typesafeCapContent cuts content to 4000 runes and marks the cut, so one huge
-// message cannot dominate a judge request.
+// typesafeContentRunes is the per-message cap shared by the TypeSafe judges.
+const typesafeContentRunes = 4000
+
+// typesafeCapContent cuts content to the judge cap and marks the cut, so one
+// huge message cannot dominate a judge request. It delegates to advisorGateClip
+// so the judge-state truncation marker has one implementation.
 func typesafeCapContent(content string) string {
-	if cut := truncateRunes(content, 4000); cut != content {
-		return cut + "…(truncated)"
-	}
-	return content
+	return advisorGateClip(content, typesafeContentRunes)
 }
 
 // typesafeTurnEnded describes how a turn ended, so a TypeSafe judge does not have

@@ -15487,7 +15487,7 @@ func (m *model) anyAskPending() bool {
 // sentinel in the LLM input is a malformed tool-call/tool-result pairing the
 // model cannot recover from. That strip also hid the ask from the AGENT's own
 // "is a dialog open" scan, so the advisor checkpoint gate was inert here: a
-// plan/done checkpoint could start a second model (minutes, for the Claude Code
+// advisor checkpoint could start a second model (minutes, for the Claude Code
 // backend) underneath a permission dialog the user was still looking at.
 //
 // The flag is the host's explicit statement, and it covers every live ask:

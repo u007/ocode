@@ -43,7 +43,7 @@ type Skill struct {
 	// with (or shadows) a same-named user or project skill.
 	Plugin string
 	// SkipAdvisor, when true, marks this skill as one that must run without
-	// ocode's advisor plan/done checkpoints (and without the model invoking
+	// ocode's advisor checkpoints (and without the model invoking
 	// the advisor tool). Parsed from frontmatter `skip_advisor: true` or
 	// `advisor: false`.
 	SkipAdvisor bool
@@ -567,7 +567,7 @@ func parseSkillMetadata(content string) Skill {
 		)
 		skill.Stack = cleanMetadataValue(frontmatter["stack"])
 		// Advisor checkpoint opt-out. A skill that declares skip_advisor: true
-		// (or advisor: false) runs without the loop's plan/done advisor
+		// (or advisor: false) runs without the loop's advisor
 		// checkpoints.
 		skill.SkipAdvisor = parseSkipAdvisor(frontmatter)
 	}

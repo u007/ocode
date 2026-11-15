@@ -53,7 +53,7 @@ func messagesHavePendingAsk(msgs []Message) bool {
 // that the model cannot recover from (see buildAgentMessagesSnapshot in
 // internal/tui/model.go). That strip is correct for the LLM, but it means the
 // agent's own transcript scan (messagesHavePendingAsk) can no longer see the
-// ask, so the advisor checkpoint gate was INERT in the TUI: a plan/done
+// ask, so the advisor checkpoint gate was INERT in the TUI: an advisor
 // checkpoint could start a second model underneath a permission dialog the user
 // was still looking at.
 //

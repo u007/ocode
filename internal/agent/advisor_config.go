@@ -44,7 +44,7 @@ func AdvisorConfigFromConfig(cfg *config.Config) AdvisorConfig {
 		ClaudeCode: ac.ClaudeCode,
 	}
 	if len(ac.Checkpoints) > 0 {
-		out.Checkpoints = append([]string(nil), ac.Checkpoints...)
+		out.Checkpoints = config.NormalizeAdvisorCheckpoints(ac.Checkpoints)
 	}
 	return out
 }
@@ -52,8 +52,10 @@ func AdvisorConfigFromConfig(cfg *config.Config) AdvisorConfig {
 // SetAdvisorConfig installs the session's advisor configuration. The handler
 // calls this at agent-build time (seeded from the session's own pinned value)
 // and again whenever the user changes the model or triggers in that chat, so a
-// resident agent and the UI never disagree.
+// resident agent and the UI never disagree. A retired checkpoint name in the
+// stored list is migrated here, so no session silently loses its review.
 func (a *Agent) SetAdvisorConfig(cfg AdvisorConfig) {
+	cfg.Checkpoints = config.NormalizeAdvisorCheckpoints(cfg.Checkpoints)
 	a.advisorConfig.Store(&cfg)
 }
 

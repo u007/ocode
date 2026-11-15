@@ -1,16 +1,17 @@
 ---
 type: Concept
 title: Pending ask suppresses advisor, auto-continue, and goal-resume
-description: A permission or question ask (local dialog, queued multi-ask round, parked sub-agent ask, or RC/Telegram remote approval) now suppresses the advisor checkpoints, the auto-continue resume judge, and the /goal resume judge, except that the auto-continue question judge may answer a structured question ask first (see the Exception section). The suppression relies on an explicit host-declared flag (Agent.SetPendingAsk) OR'd with the transcript scan, and a server-side sessionHasOutstandingAsk() that checks both the transcript tail and the child-ask registry.
+description: A permission or question ask (local dialog, queued multi-ask round, parked sub-agent ask, or RC/Telegram remote approval) now suppresses the advisor checkpoints, the auto-continue resume judge, and the /goal resume judge, except that the auto-continue question judge may answer a structured question ask first (see the Exception section). "done" is the single trigger gating both advisor moments, and a stored "plan" migrates to "done". The suppression relies on an explicit host-declared flag (Agent.SetPendingAsk) OR'd with the transcript scan, and a server-side sessionHasOutstandingAsk() that checks both the transcript tail and the child-ask registry.
 tags: [permissions, asks, agent-loop, advisor, auto-continue, goal, server, tui, gotcha]
-timestamp: 2026-11-06T17:21:36Z
+timestamp: 2026-11-15T08:01:52Z
 ---
-
 # Pending ask suppresses advisor, auto-continue, and goal-resume
 
 ## What changed
 
-A behavioral fix prevents the advisor plan/done checkpoints, the auto-continue resume judge (`autoContinueShouldResume`), and the goal-resume judge (`goalShouldResume`) from firing while any permission or question ask is open — whether it is shown in the TUI dialog slot, queued behind a multi-ask round, parked as a sub-agent ask, or pending as a remote (RC/Telegram) approval.
+A behavioral fix prevents the advisor checkpoints (the done checkpoint and the before-commit gate), the auto-continue resume judge (`autoContinueShouldResume`), and the goal-resume judge (`goalShouldResume`) from firing while any permission or question ask is open — whether it is shown in the TUI dialog slot, queued behind a multi-ask round, parked as a sub-agent ask, or pending as a remote (RC/Telegram) approval.
+
+Both advisor moments are gated by the single checkpoint name `"done"`; there is no separate plan checkpoint, and a stored `plan` is migrated to `done` when the checkpoint list is loaded, so an older session keeps a review instead of silently losing every checkpoint.
 
 Once the ask is answered, all three resume normally; there is no permanent disablement.
 
@@ -24,7 +25,7 @@ The gap was wider for queued asks and sub-agent asks: a queued ask (not yet show
 
 - `Agent.SetPendingAsk(bool)` and `Agent.PendingAsk()` declare the ask explicitly from the host.
 - The TUI calls the setter at every ask-state change (`showPermDialog` clear/enqueue/promote, queued permission ask enqueue/promote (`permAskQueue`), queued question prompt enqueue/promote (`questionAskQueue`), parked sub-agent ask (`pendingSubAgentResp`), and RC/Telegram remote-approval ask (`rcPendingPerm`, `rcPendingQuestion`)) and before every `Step` (`askAgent`, `sendCustomCommandPrompt`).
-- The agent's checkpoint gate (`newAdvisorCheckpointState`) ORs the transcript scan with the live host flag; `blockedByPendingAsk` checks the live flag at checkpoint time (not only at `Step` start), so a dialog raised mid-turn also stands the checkpoint down.
+- The agent's checkpoint gate (`newAdvisorCheckpointState`) ORs the transcript scan with the live host flag; `blockedByPendingAsk` checks the live flag at checkpoint time (not only at `Step` start), so a dialog raised mid-turn also stands the checkpoint down. `advisorDoneCheckpoint` and `advisorCommitHold` both call it, so the before-commit gate neither asks the judge nor holds a commit under an open dialog.
 - The flag does NOT consume the checkpoint — a skipped checkpoint stays armed for the next continuation `Step`.
 
 ## The fix — widened blocking predicates

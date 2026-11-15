@@ -787,9 +787,18 @@ func TestAutoPermissionConfigLoadAppliesExplicitFalseOverrides(t *testing.T) {
 	}
 }
 
+// TestAdvisorCheckpointsDefaultIsDoneOnly pins the default: the plan checkpoint
+// is retired, so an unconfigured install runs only the done checkpoint.
+func TestAdvisorCheckpointsDefaultIsDoneOnly(t *testing.T) {
+	cfg := defaultOcodeConfig()
+	if got := cfg.Advisor.Checkpoints; len(got) != 1 || got[0] != "done" {
+		t.Fatalf("default advisor checkpoints = %v, want [done]", got)
+	}
+}
+
 // TestAdvisorCheckpointsRoundTrip verifies that the checkpoints field
 // round-trips through save and load correctly:
-//   - omitted key → default ["plan","done"]
+//   - omitted key → default ["done"]
 //   - explicit []   → [] (all checkpoints disabled)
 //   - explicit list → that exact list
 func TestAdvisorCheckpointsRoundTrip(t *testing.T) {
@@ -2569,5 +2578,40 @@ func TestSaveTerminalConfigFailureWritesNothing(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatalf("a failed save modified the config file:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// TestNormalizeAdvisorCheckpoints pins the retired-name migration: a stored
+// "plan" becomes "done" (so the session keeps a review), duplicates collapse,
+// and an explicitly empty list still disables the checkpoints.
+func TestNormalizeAdvisorCheckpoints(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"absent", nil, nil},
+		{"explicitly empty", []string{}, []string{}},
+		{"retired plan", []string{"plan"}, []string{"done"}},
+		{"retired plan with done", []string{"plan", "done"}, []string{"done"}},
+		{"plan is case-insensitive", []string{"PLAN"}, []string{"done"}},
+		{"keep done", []string{"done"}, []string{"done"}},
+		{"blank entries dropped", []string{"  ", "done"}, []string{"done"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeAdvisorCheckpoints(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("NormalizeAdvisorCheckpoints(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("NormalizeAdvisorCheckpoints(%v) = %v, want %v", tc.in, got, tc.want)
+				}
+			}
+			if tc.want == nil && got != nil {
+				t.Fatalf("absent list must stay nil, got %v", got)
+			}
+		})
 	}
 }

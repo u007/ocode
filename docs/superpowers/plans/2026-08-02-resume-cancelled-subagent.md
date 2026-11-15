@@ -218,7 +218,7 @@ In `internal/agent/agent.go`, add immediately after `ResetCancellation` (after t
 // shutdownTransient permanently closed via sync.Once-guarded shutdowns. Used
 // when resuming a previously cancelled-or-completed subagent, whose
 // shutdownTransient already ran once via the dispatch goroutine's defer.
-// Mirrors the channel/goroutine setup in NewAgent (see agent.go:1284-1446).
+// Mirrors the channel/goroutine setup in NewAgent (see agent.go:1290-1452).
 func (a *Agent) RearmMaintenance() {
 	a.docMaintMu.Lock()
 	a.docMaintClosing = false
@@ -671,7 +671,7 @@ git commit -m "refactor(agent): extract TaskTool background/sync dispatch into s
 - Modify: `internal/agent/subagent.go`
 
 **Interfaces:**
-- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:1049`).
+- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:1055`).
 - Produces: `resume_task_id` task-tool schema param; `TaskTool.Execute` resume branch; `taskToolParams` (named type replacing the previous anonymous params struct — needed so `executeResume` can take it as a parameter).
 
 - [x] **Step 1: Name the params struct and add `resume_task_id`**

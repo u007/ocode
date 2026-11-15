@@ -47,6 +47,7 @@ func TestJudgeModelConfigDefaults(t *testing.T) {
 		{"NetworkGuard.JudgeModel", cfg.NetworkGuard.JudgeModel},
 		{"ContentGuard.JudgeModel", cfg.ContentGuard.JudgeModel},
 		{"BrowserRun.JudgeModel", cfg.BrowserRun.JudgeModel},
+		{"AdvisorGate.JudgeModel", cfg.AdvisorGate.JudgeModel},
 	}
 	for _, c := range checks {
 		if c.got != "typesafe/jev-latest" {
@@ -69,7 +70,8 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 	  "search":        {"judge_model": "typesafe/jev-latest"},
 	  "network_guard": {"judge_model": "cloudflare-workers/@cf/cloudflare/clef"},
 	  "content_guard": {"judge_model": "typesafe/jev-1.13.0"},
-	  "browser_run":   {"judge_model": "cloudflare-workers/@cf/cloudflare/clef-flash"}
+	  "browser_run":   {"judge_model": "cloudflare-workers/@cf/cloudflare/clef-flash"},
+	  "advisor_gate":  {"judge_model": "cloudflare-workers/@cf/cloudflare/clef-pro"}
 	}`
 	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -86,6 +88,7 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 		"NetworkGuard.JudgeModel": "cloudflare-workers/@cf/cloudflare/clef",
 		"ContentGuard.JudgeModel": "typesafe/jev-1.13.0",
 		"BrowserRun.JudgeModel":   "cloudflare-workers/@cf/cloudflare/clef-flash",
+		"AdvisorGate.JudgeModel":  "cloudflare-workers/@cf/cloudflare/clef-pro",
 	}
 	got := map[string]string{
 		"Discovery.JudgeModel":    cfg.Ocode.Discovery.JudgeModel,
@@ -94,6 +97,7 @@ func TestJudgeModelConfigLoadsIndependently(t *testing.T) {
 		"NetworkGuard.JudgeModel": cfg.Ocode.NetworkGuard.JudgeModel,
 		"ContentGuard.JudgeModel": cfg.Ocode.ContentGuard.JudgeModel,
 		"BrowserRun.JudgeModel":   cfg.Ocode.BrowserRun.JudgeModel,
+		"AdvisorGate.JudgeModel":  cfg.Ocode.AdvisorGate.JudgeModel,
 	}
 	for k, w := range want {
 		if got[k] != w {

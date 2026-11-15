@@ -574,3 +574,47 @@ func TestRedoKeepsOriginalProjectBaseDir(t *testing.T) {
 		t.Fatalf("redo snapshot base dir = %q, want %q", s.snapshots[0].BaseDir, dirA)
 	}
 }
+
+// TestChangedSinceReportsOnlyNewerWrites pins the advisor ledger's watermark
+// contract: a write registered after the watermark is reported, a write at or
+// before it is not, and a backup the store could not sequence is always
+// reported because it cannot be dated.
+func TestChangedSinceReportsOnlyNewerWrites(t *testing.T) {
+	s, _ := newTempStore(t)
+	for _, f := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(f, []byte("x\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+	seq := s.LastWriteSeq()
+	if seq == 0 {
+		t.Fatal("LastWriteSeq = 0 after a registered write")
+	}
+	if got := s.ChangedSince(seq); len(got) != 0 {
+		t.Fatalf("ChangedSince(own watermark) = %v, want nothing", got)
+	}
+
+	if err := s.Backup("b.txt", "tc2"); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("b.txt", "tc2")
+	got := s.ChangedSince(seq)
+	if len(got) != 1 || got[0] != "b.txt" {
+		t.Fatalf("ChangedSince = %v, want [b.txt]", got)
+	}
+
+	// An unsequenced backup (a caller that never registered the write) must be
+	// reported even at the current watermark.
+	if err := s.Backup("c.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	got = s.ChangedSince(s.LastWriteSeq())
+	if len(got) != 1 || got[0] != "c.txt" {
+		t.Fatalf("ChangedSince after an unsequenced backup = %v, want [c.txt]", got)
+	}
+}

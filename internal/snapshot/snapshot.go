@@ -712,6 +712,44 @@ func (s *Store) ChangedFiles() []string {
 	return files
 }
 
+// LastWriteSeq returns the highest write sequence recorded by this store, or 0
+// when it has none. It is the watermark callers compare against to ask what has
+// been written since a point in time.
+func (s *Store) LastWriteSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var max uint64
+	for _, snap := range s.snapshots {
+		if snap.WriteSeq > max {
+			max = snap.WriteSeq
+		}
+	}
+	return max
+}
+
+// ChangedSince returns the deduplicated sorted paths whose recorded write is
+// newer than seq. A snapshot with no assigned sequence (a backup taken by a
+// caller that never registered the write) is always reported: it cannot be
+// dated, so a caller must never treat it as reviewed.
+func (s *Store) ChangedSince(seq uint64) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]struct{}, len(s.snapshots))
+	files := make([]string, 0, len(s.snapshots))
+	for _, snap := range s.snapshots {
+		if snap.WriteSeq != 0 && snap.WriteSeq <= seq {
+			continue
+		}
+		if _, ok := seen[snap.OriginalPath]; ok {
+			continue
+		}
+		seen[snap.OriginalPath] = struct{}{}
+		files = append(files, snap.OriginalPath)
+	}
+	sort.Strings(files)
+	return files
+}
+
 // Reset clears all snapshot and redo state and removes this agent's entries
 // from the global file-write registry.
 func (s *Store) Reset() {

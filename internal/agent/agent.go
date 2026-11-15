@@ -816,6 +816,10 @@ type Agent struct {
 	goalGen     uint64
 	goalMu      sync.Mutex
 	goalJudgeMu sync.Mutex
+	// advisorLedgerMu guards the advisor review ledger: advisorReviews, the
+	// newest advisorLedgerMax completed reviews. In-memory only.
+	advisorLedgerMu sync.Mutex
+	advisorReviews  []advisorReviewEntry
 	// subagentDispatchGuard tracks consecutive identical task-tool dispatches
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion
@@ -1656,11 +1660,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	}
 
 	preLen := len(messages)
-	// Capture the user's goal before tail injectors run. The last user-role
-	// message in the original input is the actual request; tail injectors
-	// (discovery context, attached markdown) append user-role messages that
-	// would mask the real goal if derived from the final message list.
-	userGoal := lastUserContent(messages)
+	// Capture the user's goal before tail injectors run. The last human message
+	// in the original input is the actual request; tail injectors (discovery
+	// context, attached markdown) append user-role messages that would mask the
+	// real goal, and a synthetic notice is not a request at all.
+	userGoal := lastHumanUserContent(messages)
 	// Snapshot the pre-injection transcript for the skill scan below. The tail
 	// injectors append user-role messages, which would become the scan's
 	// "current turn" boundary and hide a "Run the **name** skill." prompt.
@@ -1716,7 +1720,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// guaranteed gone — we're in a new Step invocation).
 	messages = a.recoverOrphanedToolCalls(messages, stopCh)
 	// Advisor checkpoints (cfg advisor.checkpoints): fresh per-Step state so
-	// "plan" and "done" each fire at most once per user turn.
+	// the "done" checkpoint fires at most once per user turn.
 	// Pass the pre-injection user goal explicitly — the tail may contain
 	// user-role discovery content that would mask the real request.
 	//
@@ -1942,7 +1946,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		// A skill this response itself loads (skill/load_skill) opts the turn out
 		// the same way a pre-loaded one does. Its tool call lives in resp, not in
 		// the transcript the pre-loop scan read, so it is checked here: before the
-		// plan checkpoint consults the flag for this same batch. Sticky once set.
+		// done checkpoint and the commit gate consult the flag. Sticky once set.
 		ckpt.skillSuppressed = ckpt.skillSuppressed || a.toolCallsDisableAdvisor(ckpt, resp.ToolCalls)
 		ckpt.countBatch(resp.ToolCalls)
 
@@ -1994,20 +1998,23 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		if len(rejected) > 0 {
 			// Remove rejected indices from the dispatch lists so they never
 			// execute. Both lists keep original ordering.
-			keepParallel := parallelTCs[:0]
-			for _, i := range parallelTCs {
-				if _, bad := rejected[i]; !bad {
-					keepParallel = append(keepParallel, i)
-				}
+			parallelTCs = withoutTCIndices(parallelTCs, rejected)
+			sequentialTCs = withoutTCIndices(sequentialTCs, rejected)
+		}
+
+		// Before-commit gate: a git commit in this batch may be withheld for an
+		// advisor review. Withheld calls get their tool message now and are
+		// removed from dispatch, like the rejected duplicates above.
+		if held := a.advisorCommitHold(ckpt, resp, rejected); len(held) > 0 {
+			for j, m := range held {
+				results[j] = m
 			}
-			parallelTCs = keepParallel
-			keepSeq := sequentialTCs[:0]
-			for _, i := range sequentialTCs {
-				if _, bad := rejected[i]; !bad {
-					keepSeq = append(keepSeq, i)
-				}
-			}
-			sequentialTCs = keepSeq
+			parallelTCs = withoutTCIndices(parallelTCs, held)
+			sequentialTCs = withoutTCIndices(sequentialTCs, held)
+		}
+		if ckpt.commitAsked && isCancelled() {
+			// The gate was consulted and the user cancelled: answer the round.
+			return a.finishCancelledRound(newMsgs, messages, resp, results, 0)
 		}
 
 		// Group-bus detection: a "group" exists when 2+ subagent
@@ -2374,21 +2381,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			return newMsgs, nil
 		}
 
-		// "plan" checkpoint: the first write-tool batch has now been applied.
-		// The advisor reviews what was done and its review is injected as a
-		// user message the next loop acts on. The batch is deliberately NOT
-		// deferred — deferring made the model regenerate the whole write
-		// (a full apply_patch diff) after the review, doubling the wait.
-		if advice := a.advisorPlanCheckpoint(ckpt, resp); advice != nil {
-			if isCancelled() {
-				return newMsgs, nil
-			}
-			newMsgs = append(newMsgs, *advice)
-			messages = append(messages, *advice)
-			if a.OnMessage != nil {
-				a.OnMessage(*advice)
-			}
-		}
 	}
 
 	{
@@ -2396,6 +2388,18 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		a.maybePostTaskDiscoveryOptimization(sig, userGoal)
 	}
 	return newMsgs, nil
+}
+
+// withoutTCIndices returns idx with every index that is a key of drop removed.
+// The order of the remaining indices is kept.
+func withoutTCIndices[V any](idx []int, drop map[int]V) []int {
+	keep := idx[:0]
+	for _, i := range idx {
+		if _, bad := drop[i]; !bad {
+			keep = append(keep, i)
+		}
+	}
+	return keep
 }
 
 // finishCancelledRound closes out a tool-call round that the user interrupted

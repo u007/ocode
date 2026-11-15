@@ -37,7 +37,7 @@ func stubOrphanedBash(a *Agent) {
 // The agent-side transcript scan (messagesHavePendingAsk) is only sound when the
 // ask SENTINEL is still in the slice the agent was handed. The TUI strips it
 // before Step, so the scan sees nothing and the advisor checkpoint gate was
-// INERT there: a plan/done checkpoint could start a second model (minutes, for
+// INERT there: a done checkpoint could start a second model (minutes, for
 // the Claude Code backend) while the user was still looking at the dialog.
 //
 // The fix is a host-declared flag (Agent.SetPendingAsk). This test drives a
@@ -45,7 +45,7 @@ func stubOrphanedBash(a *Agent) {
 // advisor did NOT run.
 func TestAdvisorCheckpointsDoNotFireOnHostDeclaredPendingAsk(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	a.tools["write"] = &checkpointFakeWrite{}
 	stubOrphanedBash(a)
 	// Three scripted responses so the assertion below is reached either way:
@@ -85,7 +85,7 @@ func TestAdvisorCheckpointsDoNotFireOnHostDeclaredPendingAsk(t *testing.T) {
 // review normally happens.
 func TestAdvisorCheckpointsFireAfterHostClearsPendingAsk(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	a.tools["write"] = &checkpointFakeWrite{}
 	stubOrphanedBash(a)
 	a.client = &scriptedClient{msgs: []*Message{
@@ -112,8 +112,8 @@ func TestAdvisorCheckpointsFireAfterHostClearsPendingAsk(t *testing.T) {
 // session's open dialog mute another session's advisor.
 func TestPendingAskFlagIsPerAgent(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a1, _ := checkpointTestAgent(t, []string{"plan"})
-	a2, _ := checkpointTestAgent(t, []string{"plan"})
+	a1, _ := checkpointTestAgent(t, []string{"done"})
+	a2, _ := checkpointTestAgent(t, []string{"done"})
 
 	a1.SetPendingAsk(true)
 	if !a1.PendingAsk() {
@@ -138,7 +138,7 @@ func TestPendingAskFlagIsPerAgent(t *testing.T) {
 // dialog the user is about to be shown.
 func TestHostDeclaredPendingAskAlsoBlocksAskRaisedByTheStepItself(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	a.tools["write"] = &checkpointFakeWrite{}
 	a.client = &scriptedClient{msgs: []*Message{
 		{Role: "assistant", Content: "writing the fix", ToolCalls: []ToolCall{newToolCall("call-w", "write", `{"path":"a.go","content":"x"}`)}},
@@ -153,9 +153,9 @@ func TestHostDeclaredPendingAskAlsoBlocksAskRaisedByTheStepItself(t *testing.T) 
 	}
 	st.countBatch(resp.ToolCalls)
 
-	// The flag is still false at this point, so the plan checkpoint may fire.
-	if review := a.advisorPlanCheckpoint(st, resp); review == nil {
-		t.Fatal("expected the plan checkpoint to fire when no ask is pending")
+	// The flag is still false at this point, so the done checkpoint may fire.
+	if review := a.advisorDoneCheckpoint(st, resp); review == nil {
+		t.Fatal("expected the done checkpoint to fire when no ask is pending")
 	}
 	if fake.calls != 1 {
 		t.Fatalf("expected 1 advisor call, got %d", fake.calls)
@@ -166,8 +166,8 @@ func TestHostDeclaredPendingAskAlsoBlocksAskRaisedByTheStepItself(t *testing.T) 
 	a.SetPendingAsk(true)
 	st2 := a.newAdvisorCheckpointState("fix the build", false, false)
 	st2.countBatch(resp.ToolCalls)
-	if review := a.advisorPlanCheckpoint(st2, resp); review != nil {
-		t.Fatal("expected the plan checkpoint to stand down once the host declared a pending ask")
+	if review := a.advisorDoneCheckpoint(st2, resp); review != nil {
+		t.Fatal("expected the done checkpoint to stand down once the host declared a pending ask")
 	}
 	if fake.calls != 1 {
 		t.Fatalf("advisor ran again (%d calls) despite a declared pending ask", fake.calls)
@@ -179,7 +179,7 @@ func TestHostDeclaredPendingAskAlsoBlocksAskRaisedByTheStepItself(t *testing.T) 
 // the sentinel in as.messages) must still be protected by the scan.
 func TestPendingAskFlagDoesNotMaskTheTranscriptScan(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	a.tools["write"] = &checkpointFakeWrite{}
 	a.client = &scriptedClient{msgs: []*Message{
 		{Role: "assistant", Content: "writing the fix", ToolCalls: []ToolCall{newToolCall("call-w", "write", `{"path":"a.go","content":"x"}`)}},
@@ -222,7 +222,7 @@ func TestStrippedSnapshotHidesTheAskFromTheScan(t *testing.T) {
 // sentinel is stripped).
 func TestAdvisorCheckpointStateOrsBothPendingAskSources(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, _ := checkpointTestAgent(t, []string{"plan"})
+	a, _ := checkpointTestAgent(t, []string{"done"})
 
 	cases := []struct {
 		name        string
@@ -254,7 +254,7 @@ func TestAdvisorCheckpointStateOrsBothPendingAskSources(t *testing.T) {
 // model in exactly the case where a dialog is up.
 func TestAdvisorCheckpointBlockedByEitherPendingAskSource(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 
 	resp := &Message{
 		Role:      "assistant",
@@ -266,7 +266,7 @@ func TestAdvisorCheckpointBlockedByEitherPendingAskSource(t *testing.T) {
 		a.SetPendingAsk(false)
 		st := a.newAdvisorCheckpointState("goal", true, false)
 		st.countBatch(resp.ToolCalls)
-		if review := a.advisorPlanCheckpoint(st, resp); review != nil {
+		if review := a.advisorDoneCheckpoint(st, resp); review != nil {
 			t.Fatal("the snapshot's pending-ask state must block the checkpoint")
 		}
 	})
@@ -276,7 +276,7 @@ func TestAdvisorCheckpointBlockedByEitherPendingAskSource(t *testing.T) {
 		defer a.SetPendingAsk(false)
 		st := a.newAdvisorCheckpointState("goal", false, false)
 		st.countBatch(resp.ToolCalls)
-		if review := a.advisorPlanCheckpoint(st, resp); review != nil {
+		if review := a.advisorDoneCheckpoint(st, resp); review != nil {
 			t.Fatal("the live pending-ask flag must block the checkpoint")
 		}
 	})

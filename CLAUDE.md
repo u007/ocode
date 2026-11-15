@@ -77,9 +77,9 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   compaction, small-model or interpreter-effects paths. `*TypesafeClient`
   satisfies it unchanged; `isDecisionModel` is the single place that decides
   which ids route to a decision backend. `resolveDecider(slot)` resolves one of
-  ten `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  eleven `judgeSlot`s (permission, auto_continue, discovery, doc_search,
   code_search, network_guard, content_guard, goal, pulse_activation,
-  browser_run); all currently default to `typesafe/jev-latest`. Auto-continue
+  browser_run, advisor_gate); all currently default to `typesafe/jev-latest`. Auto-continue
   selection is not a slot: it scores with the verdict's own Decider. Judges label
   their requests with `deciderLabel(client)`
   — provider-qualified, never a hardcoded prefix — so the usage ledger does not
@@ -438,6 +438,43 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
   `internal/tui/model.go:21920`), so the TUI's carry-forward copy cannot overwrite it.
+
+## Advisor reviews are decided by the advisor gate (`advisor_gate`)
+
+The advisor (second model) is consulted by the loop at two moments, and at both the
+`advisor_gate` decision judge (`internal/agent/advisor_gate_typesafe.go`) decides whether a
+review runs. There is no plan checkpoint: the model works uninterrupted after an edit, and a
+stored `"plan"` migrates to `"done"` when the list is loaded (`config.NormalizeAdvisorCheckpoints`,
+called from `AdvisorConfigFromConfig`, `Agent.SetAdvisorConfig` and the server's metadata reader),
+so an existing session keeps a review. Concept: `docs/concepts/advisor-gate-judge.md`.
+
+- **End of turn** (`advisorDoneCheckpoint`): with no changes in the session the judge is not
+  asked and nothing is reviewed. Otherwise the judge decides. Only when it gives no usable
+  answer (no backend, error, rejected answer, an answer below `advisorGateChoiceFloor`) does the
+  old threshold rule apply.
+- **Before a commit** (`advisorCommitHold`): a `git commit` in a tool batch only triggers the
+  QUESTION. The commit is withheld for a review solely on a decided `review_now`; every other
+  outcome, an unavailable judge included, runs the commit untouched. Never add a fallback rule
+  that holds a commit without the judge.
+- **`checkpointDone` enables both moments.** A session whose list lacks `"done"` (or is `[]`)
+  gets neither the completion review nor the commit hold; there is no separate key.
+- **A withheld commit call still gets its tool message** (the review text, plain prose, no
+  sentinel prefix), the same orphan rule as "Cancelling a turn".
+- **The judge decides from facts, so keep them explicit.** `facts.review_count`,
+  `facts.unreviewed_file_count` and `facts.files_written_this_turn` exist because Jev misread
+  the bare lists (it took "fix and commit" as declining a review, and post-review fixes as
+  already reviewed). `user_request` comes from `lastHumanUserContent`, never from a synthetic
+  `[ocode:event]` notice. Re-run `TestAdvisorGateLiveScenarios` (gated on `TYPESAFE_API_KEY`)
+  after any change to the rubric, criteria or state.
+- **The review ledger is in-memory per agent** (`advisorReviews`) and "unreviewed" means a
+  SNAPSHOT WRITE newer than the last review's watermark (`Store.LastWriteSeq` /
+  `Store.ChangedSince`). Never go back to extracting paths from tool arguments: `apply_patch`
+  carries only `patchText`, and a formatter or bash edit carries no path at all, which made
+  post-review fixes look reviewed. `recordAdvisorWrites`/`advisorWritesSinceReview` are gone.
+- **`slotAdvisorGate` has its own answer floor** (`advisorGateChoiceFloor`, 0.6 chosen-option
+  probability) applied to EVERY answer, `review_now` included; a missing probability for the
+  chosen option is not a decision. Never reuse the permission floor, and never fall back to
+  another backend.
 
 ## browser_run step loop (`browser_run`)
 `browser_run` (`internal/agent/browser_run.go`) lets Jev pick each click of a browser task.

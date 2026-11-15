@@ -7099,3 +7099,7 @@ Now a read-only Univer sheet fed by an ExcelJS/SheetJS -> `IWorkbookData` conver
 - Server-side LLM tools (session_read incl. goal/todo, session_send with queue) generalized to all non-Pulse sessions.
 - NOT DONE: bare TUI session discovery/registry for external agents; CLI (`ocode session status|send|queue`); dedicated cross-session /btw-style side query (session_read + reasoning covers the non-interrupting case).
 - Queue drain is best-effort polling (60s cap) via crashguard.Go; consider event-driven drain later.
+
+## Open: docs/log.md duplicate audit lines (2026-11-15)
+
+- The 2026-11-15 block repeats `* **Update**: …` lines for `advisor-gate-judge`, `auto-permission-enforced-categories`, `inbound-content-guardrail`, `skill-frontmatter`, `mcp-apps-widgets` (4×), `per-chat-mcp-toggle` (4×) and `scheduled-jobs` (3×). They record real write attempts from retried and corrected bundle writes, not a logger fault. The store rejects `log.md` as a reserved path (`internal/knowledge/store.go:364`) and `AppendLog` only appends, so no agent can compact them without breaking the sole-automated-writer invariant — and a hand edit would risk deleting genuine same-day repeats, because an `Update` line carries no body text to tell them apart. The user can edit `docs/log.md` directly if it matters; review with `git diff docs/log.md`.

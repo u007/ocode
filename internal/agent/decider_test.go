@@ -30,6 +30,7 @@ func TestDecider_SlotModelDefaults(t *testing.T) {
 		slotGoal,
 		slotPulseActivation,
 		slotBrowserRun,
+		slotAdvisorGate,
 	}
 	for _, s := range slots {
 		if got := a.slotModel(s); got != defaultJudgeModel {
@@ -146,5 +147,24 @@ func TestDecider_SlotModelBrowserRunReadsConfig(t *testing.T) {
 	cfg.Ocode.BrowserRun.JudgeModel = "  "
 	if got := a.slotModel(slotBrowserRun); got != defaultJudgeModel {
 		t.Errorf("blank browser_run judge_model: slotModel = %q, want %q", got, defaultJudgeModel)
+	}
+}
+
+// TestDecider_SlotModelAdvisorGateReadsConfig pins the advisor_gate slot to its
+// own advisor_gate.judge_model key: a configured value wins, a blank one falls
+// back to the default, and it does not move the goal slot.
+func TestDecider_SlotModelAdvisorGateReadsConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ocode.AdvisorGate.JudgeModel = "clef/x"
+	a := &Agent{config: cfg}
+	if got := a.slotModel(slotAdvisorGate); got != "clef/x" {
+		t.Errorf("slotModel(advisor_gate) = %q, want clef/x", got)
+	}
+	if got := a.slotModel(slotGoal); got != defaultJudgeModel {
+		t.Errorf("advisor_gate judge_model leaked into goal: slotModel(goal) = %q, want %q", got, defaultJudgeModel)
+	}
+	cfg.Ocode.AdvisorGate.JudgeModel = "  "
+	if got := a.slotModel(slotAdvisorGate); got != defaultJudgeModel {
+		t.Errorf("blank advisor_gate judge_model: slotModel = %q, want %q", got, defaultJudgeModel)
 	}
 }

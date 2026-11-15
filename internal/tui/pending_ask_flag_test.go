@@ -13,7 +13,7 @@ import (
 // the transcript BEFORE handing it to Agent.Step — a raw sentinel in the LLM
 // input is a malformed tool-call/tool-result pairing the model cannot recover
 // from. That strip also hid the ask from the AGENT's own "is a dialog open"
-// scan, so the advisor checkpoint gate was INERT in the TUI: a plan/done
+// scan, so the advisor checkpoint gate was INERT in the TUI: an advisor
 // checkpoint could start a second model (minutes, for the Claude Code backend)
 // underneath a permission dialog the user was still looking at.
 //
@@ -196,7 +196,7 @@ func TestSyncPendingAskFlagIsSafeWithoutAnAgent(t *testing.T) {
 // queueDrainBlocked from the dialog slots alone to every outstanding ask.
 //
 // queueDrainBlocked gates the RESUME paths — the auto-continue judge, the goal
-// judge, the advisor's plan/done checkpoint, the queued-input drain, the
+// judge, the advisor checkpoint, the queued-input drain, the
 // background-job resume. Before this widening it read only the two dialog
 // slots, so a QUEUED ask (a round can raise several) or a parked sub-agent ask
 // did NOT block a resume: the second model would start underneath a dialog the

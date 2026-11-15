@@ -52,14 +52,14 @@ func resolvedAskTranscript() []Message {
 // suppressed for that Step — starting a second model (minutes for the Claude
 // Code backend) underneath an unanswered dialog is the reported bug.
 //
-// Note the plan checkpoint is the one that slipped through: its guard is the
+// Note the done checkpoint is the one that slipped through: its guard is the
 // `pauseAfterResults` early return in Step, which only sees asks raised by the
 // batch THIS iteration executed. A continuation Step appends its own results
 // after the pending row, so the pending ask is no longer in the trailing tool
-// run and the plan checkpoint fired with the dialog still open.
+// run and the done checkpoint fired with the dialog still open.
 func TestAdvisorCheckpointsDoNotFireWhileAskPending(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	writeTool := &checkpointFakeWrite{}
 	a.tools["write"] = writeTool
 	// Three scripted responses so the assertions below are reached either way:
@@ -97,10 +97,10 @@ func TestAdvisorCheckpointsDoNotFireWhileAskPending(t *testing.T) {
 // normally happens.
 func TestAdvisorCheckpointsFireOnceAsksResolved(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	a.tools["write"] = &checkpointFakeWrite{}
 	// Three responses: the write batch, then the loop running once more because the
-	// plan checkpoint injected its review as a user message, then the final answer
+	// done checkpoint injected its review as a user message, then the final answer
 	// the done checkpoint reviews.
 	a.client = &scriptedClient{msgs: []*Message{
 		{Role: "assistant", Content: "writing the fix", ToolCalls: []ToolCall{newToolCall("call-w", "write", `{"path":"a.go","content":"x"}`)}},
@@ -123,7 +123,7 @@ func TestAdvisorCheckpointsFireOnceAsksResolved(t *testing.T) {
 // turn that finally gets to run.
 func TestAdvisorCheckpointSkipsDoNotConsumeTheCheckpoint(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	a, fake := checkpointTestAgent(t, []string{"done"})
 	st := a.newAdvisorCheckpointState("fix the build", true, false)
 
 	resp := &Message{
@@ -132,11 +132,11 @@ func TestAdvisorCheckpointSkipsDoNotConsumeTheCheckpoint(t *testing.T) {
 		ToolCalls: []ToolCall{newToolCall("call-w", "write", `{"path":"a.go","content":"x"}`)},
 	}
 	st.pendingAsk = true
-	if review := a.advisorPlanCheckpoint(st, resp); review != nil {
-		t.Fatal("expected the plan checkpoint to stay silent while an ask is pending")
+	if review := a.advisorDoneCheckpoint(st, resp); review != nil {
+		t.Fatal("expected the done checkpoint to stay silent while an ask is pending")
 	}
-	if st.planChecked {
-		t.Fatal("a skipped plan checkpoint must stay armed for a later Step")
+	if st.doneChecked {
+		t.Fatal("a skipped done checkpoint must stay armed for a later Step")
 	}
 	if fake.calls != 0 {
 		t.Fatalf("advisor ran %d time(s) while an ask was pending", fake.calls)
@@ -145,8 +145,8 @@ func TestAdvisorCheckpointSkipsDoNotConsumeTheCheckpoint(t *testing.T) {
 	// Dialog answered — the same state now fires.
 	st.pendingAsk = false
 	st.countBatch(resp.ToolCalls)
-	if review := a.advisorPlanCheckpoint(st, resp); review == nil {
-		t.Fatal("expected the plan checkpoint to fire once the ask was answered")
+	if review := a.advisorDoneCheckpoint(st, resp); review == nil {
+		t.Fatal("expected the done checkpoint to fire once the ask was answered")
 	}
 	if fake.calls != 1 {
 		t.Fatalf("expected exactly 1 advisor call after the ask cleared, got %d", fake.calls)

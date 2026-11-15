@@ -394,7 +394,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 - **Bash prefix rules:** Granular two-word subcommand control (e.g. `git push` allowed, `git push --force` always asks); managed via `/ban` (deny list) and `/permissions`
 - **Path scope confinement** with tilde expansion and temp-directory auto-allow; project-scoped `extra_allowed_paths` in `.ocode/settings.json`
 - **LLM auto-permission** — configure a fast model to handle allow/deny decisions autonomously (`permissions.auto_permission_model`)
-- **Advisor module** — catches risky operations with configurable strictness and `advisor.checkpoints` (`["plan","done"]` by default)
+- **Advisor module** — catches risky operations with configurable strictness and `advisor.checkpoints` (`["done"]` by default)
 - **`/permissions`** to view/set rules interactively; **`/ban`** is a shortcut for the bash deny list (supports multi-word prefixes, `list`/`add`/`remove`/`clear` with confirmation)
 - **Web parity:** `PermissionsForm` + `PermissionDialog` + `POST /api/permissions/resolve` + `POST /api/rc/permission/resolve`
 
@@ -631,7 +631,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | Command | Aliases | Purpose |
 |---------|---------|---------|
 | `/model` | `/models`, `/m` | List and switch LLM provider/model with fuzzy search |
-| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan","done"]`, set `[]` to disable) enforces advisor review of the first write batch (reviewed *after* it is applied, so the model never regenerates the write) and of completion claims. A checkpoint shows as a transcript line while it runs, and Escape cancels it |
+| `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["done"]`, set `[]` to disable) lets the `advisor_gate` judge decide whether a review runs at the end of a turn and before a git commit executes. A checkpoint shows as a transcript line while it runs, and Escape cancels it |
 | `/agents` | | Show active/queued subagents and the concurrency limit, or set it with `/agents limit <n>` (0 = unlimited; persisted to `ocodeconfig.json`) |
 | `/agent` | | Switch agent definition (`build`, `plan`, `review`, `debug`, `docs`, …) |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |

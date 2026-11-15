@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -859,11 +860,12 @@ type AdvisorConfig struct {
 	// name (e.g. "claude-sonnet-4-6") passed to claude --model.
 	ClaudeCode bool `json:"claude_code,omitempty"`
 	// Checkpoints lists loop-enforced advisor consultations, applied by the
-	// agent loop (not left to the model's discretion). Supported values:
-	//   "done" — before the agent's final answer on a non-trivial turn, the
-	//            loop injects an advisor verification of the completion claim.
-	//   "plan" — the first write-tool batch of a turn is deferred until the
-	//            advisor has reviewed the proposed changes.
+	// agent loop (not left to the model's discretion). The only value is:
+	//   "done" — the advisor_gate judge decides whether a review is worth
+	//            running, both before the agent's final answer and before a
+	//            git commit executes. An empty list disables both.
+	// A stored "plan" (the retired first-write-batch checkpoint) is migrated to
+	// "done" when the list is loaded, so an existing session keeps its review.
 	// Checkpoints only fire when the advisor is enabled and the checkpoint
 	// is listed. The advisor model is resolved with a built-in default
 	// fallback, so absence of an explicit model does not disable checkpoints.
@@ -877,6 +879,29 @@ type PluginsConfig struct {
 	// shells out to the ast-grep CLI). The LSP-backed semantic "ast" tool is
 	// registered separately and is always on when a language server is present.
 	AST bool `json:"ast"`
+}
+
+// NormalizeAdvisorCheckpoints migrates a stored trigger list. "plan" was the
+// checkpoint that reviewed the first write batch; it no longer fires, so it is
+// mapped to "done", which still reviews the turn's work (at the end of the turn
+// and before a commit). Other names pass through unchanged, so an explicitly
+// empty list still disables the checkpoints.
+func NormalizeAdvisorCheckpoints(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		name = strings.TrimSpace(name)
+		if strings.EqualFold(name, "plan") {
+			name = "done"
+		}
+		if name == "" || slices.Contains(out, name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // SkillsConfig records which discovered skills the user switched off.
@@ -1058,6 +1083,9 @@ type OcodeConfig struct {
 	ContentGuard JudgeModelConfig
 	// Goal selects the decision-judge model that decides whether a /goal condition is met.
 	Goal JudgeModelConfig
+	// AdvisorGate selects the decision-judge model that decides whether an advisor
+	// review is worth running (end of turn and before a commit).
+	AdvisorGate JudgeModelConfig
 	// BrowserRun selects the decision-judge model for the browser_run tool's step loop.
 	BrowserRun JudgeModelConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
@@ -1564,6 +1592,10 @@ type goalConfigFile struct {
 	JudgeModel string `json:"judge_model,omitempty"`
 }
 
+type advisorGateConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
 type browserRunConfigFile struct {
 	JudgeModel string `json:"judge_model,omitempty"`
 }
@@ -1622,6 +1654,7 @@ type ocodeConfigFile struct {
 	NetworkGuard               networkGuardConfigFile      `json:"network_guard"`
 	ContentGuard               contentGuardConfigFile      `json:"content_guard"`
 	Goal                       goalConfigFile              `json:"goal"`
+	AdvisorGate                advisorGateConfigFile       `json:"advisor_gate"`
 	BrowserRun                 browserRunConfigFile        `json:"browser_run"`
 	MemoryEnabled              *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled           *bool                       `json:"doc_prompt_enabled,omitempty"`
@@ -1748,6 +1781,7 @@ func defaultOcodeConfig() OcodeConfig {
 		NetworkGuard:             defaultJudgeModelConfig(),
 		ContentGuard:             defaultJudgeModelConfig(),
 		Goal:                     defaultJudgeModelConfig(),
+		AdvisorGate:              defaultJudgeModelConfig(),
 		BrowserRun:               defaultJudgeModelConfig(),
 		RecapTimeoutSeconds:      120,
 		UndoMaxAgeDelta:          10,
@@ -1800,10 +1834,9 @@ func defaultAdvisorConfig() AdvisorConfig {
 		Enabled:  true,
 		Provider: "deepseek",
 		Model:    "deepseek-v4-pro",
-		// Both on by default: "plan" vets the first write batch before any
-		// mutation, "done" verifies completion claims. Set "checkpoints": []
-		// in ocode.json to disable.
-		Checkpoints: []string{"plan", "done"},
+		// "done" verifies completion claims, gated by the advisor_gate judge.
+		// Set "checkpoints": [] in ocode.json to disable.
+		Checkpoints: []string{"done"},
 	}
 }
 
@@ -2087,6 +2120,10 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["goal"]; ok {
 		applyJudgeModelConfig(&cfg.Goal.JudgeModel, file.Goal.JudgeModel)
 		delete(raw, "goal")
+	}
+	if _, ok := raw["advisor_gate"]; ok {
+		applyJudgeModelConfig(&cfg.AdvisorGate.JudgeModel, file.AdvisorGate.JudgeModel)
+		delete(raw, "advisor_gate")
 	}
 	if _, ok := raw["browser_run"]; ok {
 		applyJudgeModelConfig(&cfg.BrowserRun.JudgeModel, file.BrowserRun.JudgeModel)
@@ -4242,7 +4279,7 @@ func SaveAdvisorModel(providerModel string) error {
 		if providerModel == "" {
 			// Reset only the model/provider fields, not the entire advisor
 			// block. Resetting the whole struct would silently restore the
-			// default checkpoints (["plan","done"]) and re-enable the advisor,
+			// default checkpoints (["done"]) and re-enable the advisor,
 			// which couples unrelated policy state to the model-picker command.
 			def := defaultAdvisorConfig()
 			cfg.Advisor.Provider = def.Provider
