@@ -1,7 +1,7 @@
 # ocode Mobile Companion — Design
 
 - **Date:** 2026-11-16
-- **Status:** Revised after advisor review
+- **Status:** Revised after advisor review; primary sources in 21.1
 - **Scope:** Mobile-first companion for controlling ocode sessions from a phone
 - **Platform:** Android browser/PWA first; Trusted Web Activity later
 - **Related:** `docs/superpowers/specs/2026-11-08-offline-capable-web-client-design.md`,
@@ -132,7 +132,7 @@ has a hosted origin or a native shell with a server URL setup.
            ▼                                                  │ ocode process           │
 ┌──────────────────────────┐        outbound HTTPS             │  companion listener     │
 │ Browser push service     │ ◄──────────────────────────────── │   ├─ mobile entry at /  │
-│ FCM / Mozilla / Apple    │        (Web Push + VAPID)          │   ├─ scoped /api        │
+│ Browser push services    │        (Web Push + VAPID)          │   ├─ scoped /api        │
 └──────────────────────────┘                                   │   ├─ pair / push        │
                                                                │  main listener          │
                                                                │   ├─ desktop SPA        │
@@ -142,8 +142,8 @@ has a hosted origin or a native shell with a server URL setup.
 ```
 
 The ocode server sends Web Push directly to the browser vendor's push endpoint,
-signed with its own VAPID key. "FCM" in the diagram is Chrome's browser push
-transport, not a Firebase app dependency: ocode never holds Firebase
+signed with its own VAPID key. The browser push service may be Chrome's
+FCM-backed service, Mozilla's, or Apple's. ocode never holds Firebase
 credentials. There is no ocode relay.
 
 ### 6.1 Components
@@ -344,6 +344,40 @@ Device management lives on the **main listener** and requires the launch token:
 `POST /api/companion/pair/start`, `GET /api/companion/devices`,
 `PATCH /api/companion/devices/{id}` (project scope, name),
 `DELETE /api/companion/devices/{id}`, and `GET /api/companion/audit`.
+
+### 8.4 Repo invariants this design must preserve
+
+The companion listener is a new surface on existing server state. These
+`CLAUDE.md` rules are scope, not optional:
+
+- **Session-scoped SSE is a two-part change.** The existing `sessionScopedEvents`
+  set and the replayable `liveFrameEvents` set must both classify any new event.
+  The companion filter must keep session-scoped frames and must not invent a
+  second SSE surface. A new event type that the phone needs goes through both
+  lists.
+- **`Handler.mu` is a map lock, never a work lock.** Ask-journal writes, Web Push
+  sends, and audit appends happen outside `h.mu`. Lock order is
+  `agentSession.mu` -> `h.mu`; live transcript reads from a request path use
+  `TryLock`. Never hold `h.mu` across a push, a file write, or `Step`.
+- **A pending ask must be recoverable from live state.** The durable ask journal
+  reconciles with `livePendingAsks` / `pending_asks`, not a second pending-ask
+  model. Resolution goes through the existing permission and question handlers;
+  do not add a parallel answer path. Do not re-`Step()` until every ask in the
+  trailing tool round is resolved.
+- **`?host=` proxy rules stay intact.** The main listener keeps the existing
+  remote-proxy behaviour. The companion listener rejects `host`/`hosts` and never
+  relays remote events. The remote-host registry is not a companion transport.
+- **Project roots are per-session, not per-process.** Resolve a session's owning
+  project through the session registry; never use `h.workDir` for a
+  session-scoped companion request. Device project scope is a subset of
+  `allowedProjectRoots()`.
+- **Storage uses `GlobalDataDir` and file locks.** Companion stores live under
+  `<GlobalDataDir>/companion/` with the existing lock/atomic-write pattern. Logs
+  resolve through `paths.LogsDir()`.
+- **VAPID configuration belongs in deployment docs.** The VAPID private-key path
+  and any companion port override must be documented in `.env.example` and set
+  in the deployment environment. The spec does not create the variables or the
+  `.env*` files; that is part of the implementation plan.
 
 ## 9. Pairing and authentication
 
@@ -825,6 +859,35 @@ does not start for the self-hosted product; the PWA is installed directly.
 | Server list while multi-server is deferred | Removed the Servers screen; one PWA install is one server. |
 | Offline IndexedDB | Removed offline transcript cache; the app shell may be cached, session data is not. |
 | Turn-finished push | Removed; push is asks and questions only. |
+
+### 21.1 Primary sources and verification status
+
+Verified against primary sources on 2026-11-16:
+
+- Web Push is delivered to a service worker by a browser push service. The
+  subscribe/send flow uses the Push API and a service worker:
+  - https://developer.mozilla.org/en-US/docs/Web/API/Push_API
+  - https://www.w3.org/TR/push-api/
+- VAPID lets an application server identify itself to a push service with its
+  own key pair; it does not require a shared Firebase project:
+  - https://www.rfc-editor.org/rfc/rfc8292
+- iOS and iPadOS 16.4 added Web Push for web apps added to the Home Screen. The
+  permission request must follow direct user interaction:
+  - https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/
+- A Trusted Web Activity opens a URL declared in the Android manifest
+  `meta-data`; the URL is fixed at build time:
+  - https://developer.chrome.com/docs/android/trusted-web-activity/integration-guide/
+  - https://developer.android.com/develop/ui/views/layout/webapps/trusted-web-activities
+
+Not verified against a primary source:
+
+- **Android WebView Push API support.** No official Android WebView support
+  matrix was found. The design does not depend on WebView push: Web Push runs
+  in Chrome or a TWA, not in a WebView.
+- **Google Play review of a TWA or Custom Tabs shell.** Phase 2 is conditional
+  and must be validated with an internal testing track.
+- **The exact Go Web Push library and its key-rotation behavior.** That is an
+  implementation choice, not a design assumption.
 
 ## 22. Risks
 
