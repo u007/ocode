@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useEffect, useState } from "react";
-import { renderHook, waitFor } from "@testing-library/react";
+import { useEffect, useRef, useState } from "react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "../stores/projectStore";
 import type { Tab } from "../stores/projectStore";
 import type { Project } from "../api/types";
@@ -51,6 +51,9 @@ const localProject: Project = {
 interface Seed {
   activeProject?: Project;
   tabs?: Tab[];
+  /** Cold-start cache paint: dispatched while the first list request is still
+   *  pending, so `projects` is non-empty but `projectsStatus` is "loading". */
+  hydrate?: Project[];
 }
 
 /**
@@ -62,12 +65,20 @@ interface Seed {
 function SeededProvider({ seed, children }: { seed: Seed; children: React.ReactNode }) {
   const { state, dispatch } = useProjectState();
   const [ready, setReady] = useState(false);
+  const hydrated = useRef(false);
   useEffect(() => {
+    // Reproduce the cold-start window: the provider's mount effect has raised
+    // `loading`, and the cached list is painted before the request settles.
+    if (seed.hydrate && !hydrated.current && state.loading && state.projects.length === 0) {
+      hydrated.current = true;
+      dispatch({ type: "HYDRATE_CACHED_PROJECTS", projects: seed.hydrate });
+      return;
+    }
     if (state.projects.length === 0) return;
     if (seed.activeProject) dispatch({ type: "SET_ACTIVE_PROJECT", project: seed.activeProject });
     for (const tab of seed.tabs ?? []) dispatch({ type: "ADD_TAB", tab });
     setReady(true);
-  }, [state.projects.length, seed, dispatch]);
+  }, [state.loading, state.projects.length, seed, dispatch]);
   return ready ? <>{children}</> : null;
 }
 
@@ -100,6 +111,37 @@ describe("useAgentRuns remote host routing", () => {
     // ...and never seeded the local server for the remote session.
     expect(hoisted.listAgentRuns).not.toHaveBeenCalledWith("sess-remote", undefined);
     await waitFor(() => expect(result.current.loaded).toBe(true));
+  });
+
+  it("does not seed a run tree from a cache-hydrated project the server has not confirmed", async () => {
+    let resolveList!: (projects: unknown[]) => void;
+    hoisted.listProjects.mockReturnValueOnce(new Promise((r) => { resolveList = r; }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { result } = renderSeeded("sess-cached", {
+        hydrate: [{ ...remoteProject, path: "/cached", host: "deadbox" }],
+        tabs: [{ id: "sess-cached", projectPath: "/cached", title: "Cached", activeSubTab: "chat" }],
+      });
+
+      // The tab is bound and the hook mounted, but the snapshot is untrusted:
+      // it must defer instead of seeding a run fetch against the cached host.
+      await waitFor(() =>
+        expect(warn).toHaveBeenCalledWith(
+          "useAgentRuns: deferring seed for unresolved project",
+          expect.objectContaining({ sessionId: "sess-cached", projectPath: "/cached" }),
+        ),
+      );
+      expect(hoisted.listAgentRuns).not.toHaveBeenCalled();
+      expect(result.current.loaded).toBe(false);
+
+      // Once the server confirms the same entry, routing resumes from it.
+      await act(async () => resolveList([{ ...remoteProject, path: "/cached", host: "deadbox" }]));
+      await waitFor(() =>
+        expect(hoisted.listAgentRuns).toHaveBeenCalledWith("sess-cached", "deadbox"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("seeds a local session without a host (byte-identical local URL)", async () => {

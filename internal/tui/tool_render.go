@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
@@ -19,6 +20,19 @@ const (
 	toolOutputPreviewLines = 20
 	readToolPreviewLines   = 5
 )
+
+// formatToolDuration renders a tool-call elapsed time for transcript headers:
+// "850ms" under a second, then formatDuration's "45s" / "2m3s". Zero means
+// "not timed" and renders as "".
+func formatToolDuration(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return formatDuration(time.Duration(ms) * time.Millisecond)
+}
 
 // formatToolCallHint returns a single-line summary of a tool call,
 // pulling the most informative argument (path, command, pattern) into the line.

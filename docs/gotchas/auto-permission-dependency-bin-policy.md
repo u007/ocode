@@ -7,7 +7,7 @@ tags:
   - gotcha
   - security
   - policy-decision
-timestamp: 2026-11-14T18:21:35Z
+timestamp: 2026-11-15T16:31:57Z
 ---
 ## 1. THE POLICY
 
@@ -15,7 +15,7 @@ The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:91`) di
 
 ## 2. THREAT MODEL / RESIDUAL RISK (accepted)
 
-(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:249` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:4832`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
+(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:249` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:4859`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
 
 (b) Judge-ALLOW removes the human prompt but adds **no confinement** — the write-wall exists only in sandbox mode; network egress is always open (sandbox is write-integrity only — cite `architecture/shell-sandbox-integrity-only-mode.md`), so a judged-allowed binary can read global files and POST anywhere.
 
@@ -23,7 +23,7 @@ The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:91`) di
 
 ## 3. MITIGATIONS THAT MAKE IT DELIBERATE
 
-Package installs are human-gated (npm/pnpm/bun `install`/`ci`/`dlx`/`exec` require human approval in the same prose — `auto_permission_prompt.go:85-89`). The v1.9.1 fail-closed rule: *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* (version bump to `BundledAutoPermissionPromptVersion = "1.9.1"`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not the prose: `classifyInterpreterExecution` basename-matches in `internal/agent/permissions.go:5355`. The code layer stays **narrower** than the prose: auto-allow only for runnerSafeTools basenames `{tsc,tsgo,eslint,prettier,biome,vitest,jest,stylelint}` under canonical workDir containment — `runnerSafeTools` (list at `internal/agent/permissions.go:5073`) with `shimUnderWorkDir` at `internal/agent/permissions.go:4898` and `nodeModulesBinTool` at `internal/agent/permissions.go:4941` — the prose expansion is judge-mediated only.
+Package installs are human-gated (npm/pnpm/bun `install`/`ci`/`dlx`/`exec` require human approval in the same prose — `auto_permission_prompt.go:85-89`). The v1.9.1 fail-closed rule: *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* (version bump to `BundledAutoPermissionPromptVersion = "1.9.1"`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not the prose: `classifyInterpreterExecution` basename-matches in `internal/agent/permissions.go:5356`. The code layer stays **narrower** than the prose: auto-allow only for runnerSafeTools basenames `{tsc,tsgo,eslint,prettier,biome,vitest,jest,stylelint}` under canonical workDir containment — `runnerSafeTools` (list at `internal/agent/permissions.go:5074`) with `shimUnderWorkDir` at `internal/agent/permissions.go:4899` and `nodeModulesBinTool` at `internal/agent/permissions.go:4942` — the prose expansion is judge-mediated only.
 
 ## 4. WHY ACCEPTED
 

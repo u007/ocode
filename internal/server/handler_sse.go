@@ -43,6 +43,9 @@ type ToolResultEvent struct {
 	// (agent.Message.ToolID). See ToolStartEvent.CallID.
 	CallID string `json:"call_id,omitempty"`
 	Output string `json:"output"`
+	// DurationMs is the wall-clock time the tool call took, measured by the
+	// agent that executed it. 0/absent = not timed.
+	DurationMs int64 `json:"duration_ms,omitempty"`
 	// MCPApp is set when the tool declares an MCP Apps UI resource; the web
 	// chat renders that widget next to the call. It is display state only.
 	MCPApp *agent.MCPAppRef `json:"mcp_app,omitempty"`
@@ -284,10 +287,11 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		if m.Role == "tool" {
 			sendSSE(w, flusher, "tool_result", ToolResultEvent{
-				Tool:   "tool",
-				CallID: m.ToolID,
-				Output: m.Content,
-				MCPApp: m.MCPApp,
+				Tool:       "tool",
+				CallID:     m.ToolID,
+				Output:     m.Content,
+				DurationMs: m.ToolDurationMs,
+				MCPApp:     m.MCPApp,
 			})
 		}
 	}

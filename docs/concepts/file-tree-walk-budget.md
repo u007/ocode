@@ -11,7 +11,7 @@ tags:
   - server
   - web
   - budget
-timestamp: 2026-11-10T02:53:39Z
+timestamp: 2026-11-16T02:34:00Z
 ---
 # File tree walk: node budget, symlink budget, and truncation
 
@@ -115,9 +115,9 @@ into** (`handler_files.go:2191-2203`). Before the fix the walk recursed to depth
 
 The server has always sent `truncated`; the picker only did `console.warn`.
 `web/src/components/Files/FilePicker.tsx` now stores it in `treeTruncated`
-(`FilePicker.tsx:109`, set at `FilePicker.tsx:150`) and appends
+(`FilePicker.tsx:137`, set at `FilePicker.tsx:178`) and appends
 " — results may be incomplete (truncated)" to the `CommandGroup` heading
-(`FilePicker.tsx:291`) — the same wording as the Files-tab hint
+(`FilePicker.tsx:338`) — the same wording as the Files-tab hint
 (`web/src/components/Files/FileTree.tsx` ~line 2632).
 
 ## The remote (SSH/WSL) path is unchanged

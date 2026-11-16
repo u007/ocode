@@ -7,6 +7,13 @@
 # internal/version/version.go so the About panel always matches `ocode --version`.
 set -euo pipefail
 
+# macOS-only tooling (codesign, Info.plist semantics). Fail before `rm -rf` on
+# another host, where the target app path is meaningless.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "error: bundle-macos.sh is macOS only" >&2
+  exit 1
+fi
+
 if [[ $# -lt 2 || $# -gt 4 ]]; then
   echo "usage: $0 <binary> <output.app> [remote-binaries/<version>] [version]" >&2
   exit 1
@@ -109,10 +116,63 @@ PLIST_EOF
 # A linker-signed Go binary is treated as unsigned by TCC: macOS lists the app
 # in Privacy & Security and the toggle reads ON, but the grant never matches, so
 # Accessibility, Screen Recording and Microphone stay denied. Re-sign the
-# finished bundle ad-hoc with the bundle identifier baked in, which puts a real
+# finished bundle with the bundle identifier baked in, which puts a real
 # CodeDirectory and the Info.plist hash in the signature. `set -e` makes a
 # signing failure stop the build instead of shipping an app whose grants are
 # silently inert.
-codesign --force --sign - --identifier com.u007.ocode "$APP"
+#
+# TCC stores a grant as the code's DESIGNATED REQUIREMENT. An ad-hoc signature
+# makes that requirement `cdhash H"…"`, which changes on every build, so each
+# rebuild silently orphans Accessibility / Screen Recording / Files & Folders
+# while the Privacy toggles keep reading ON. A certificate-anchored requirement
+# (`identifier "com.u007.ocode" and certificate leaf = H"…"`) is stable across
+# rebuilds, so use one whenever it exists. Resolution is deliberate: only the
+# dedicated `ocode-dev` identity is auto-detected, so installing an unrelated
+# certificate never changes ocode's signature behind the user's back.
+#
+# Detection omits `-v` on purpose: that flag lists only identities chaining to a
+# trusted root, and a self-signed identity reports CSSMERR_TP_NOT_TRUSTED even
+# though codesign and TCC both accept it. Trust is not required.
+IDENTITY="${OCODE_CODESIGN_IDENTITY:-}"
+# Capture first, then match. `security … | grep -q` can report "not found" when
+# it did match: grep exits at the first hit and closes the pipe, and under
+# `set -o pipefail` the producer's SIGPIPE (141) fails the whole pipeline.
+IDENTITIES="$(security find-identity -p codesigning 2>/dev/null || true)"
+if [[ -z "$IDENTITY" ]] && [[ "$IDENTITIES" == *'"ocode-dev"'* ]]; then
+  IDENTITY="ocode-dev"
+fi
+if [[ -n "$IDENTITY" ]]; then
+  codesign --force --sign "$IDENTITY" --identifier com.u007.ocode "$APP"
+else
+  codesign --force --sign - --identifier com.u007.ocode "$APP"
+fi
 
+# codesign reports the designated requirement on stderr; keep it so the caller
+# can tell whether the OS grant will survive the next rebuild.
+# Ad-hoc signatures have no STORED requirement; codesign synthesizes one and
+# marks it with a leading "# ". Strip that too, or the cdhash check misses.
+REQUIREMENT="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^#* *designated => //p')"
 echo "bundled: $APP"
+echo "signed with: ${IDENTITY:-ad-hoc}"
+echo "designated requirement: $REQUIREMENT"
+case "$REQUIREMENT" in
+  cdhash*)
+    cat <<'WARN'
+warning: ad-hoc signature — macOS keys TCC grants to the cdhash, so every
+         rebuild orphans Accessibility, Screen Recording and Files & Folders
+         (the Privacy toggles keep reading ON). Fix once with
+         `make signing-cert`, then `make desktop-app` and re-grant once;
+         later rebuilds keep the grants.
+WARN
+    ;;
+esac
+
+# The requirement above is what TCC keys the grant to; this note covers the
+# other half — whether macOS considers the identity trusted. A self-signed
+# identity reports CSSMERR_TP_NOT_TRUSTED and is deliberately accepted here, so
+# say so instead of letting "console reads fine, grants stay dead" recur.
+if [[ -n "$IDENTITY" ]] && [[ "$(security find-identity -v -p codesigning 2>/dev/null || true)" != *"\"$IDENTITY\""* ]]; then
+  echo "note: $IDENTITY is not a macOS-trusted identity (expected for a self-signed one)."
+  echo "      If a grant still does not stick after re-granting, trust the"
+  echo "      certificate in Keychain Access, or re-run \`make signing-cert\`."
+fi

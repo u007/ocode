@@ -10,13 +10,18 @@ const VIEW_KEY = "ocode.ui.filetree_view.v1";
 
 const mocks = vi.hoisted(() => ({
   getPathsConfig: vi.fn(),
+  revealInFileManager: vi.fn(),
 }));
 
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
   return {
     ...actual,
-    api: { ...actual.api, getPathsConfig: mocks.getPathsConfig },
+    api: {
+      ...actual.api,
+      getPathsConfig: mocks.getPathsConfig,
+      revealInFileManager: mocks.revealInFileManager,
+    },
     apiPath: (p: string) => p,
     authHeaders: () => ({}),
   };
@@ -112,6 +117,8 @@ describe("FileTree reveal in file tree", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getPathsConfig.mockResolvedValue({ extra_allowed_paths: [], upload_dir: "", platform: "darwin" });
+    mocks.revealInFileManager.mockReset();
+    mocks.revealInFileManager.mockResolvedValue({ path: "", status: "opened" });
     // The expansion set is persisted; a reveal writes to it, so each test must
     // start from "nothing expanded" or it would pass without expanding.
     window.localStorage.removeItem(FILE_TREE_EXPANSION_STORAGE_KEY);
@@ -240,11 +247,46 @@ describe("FileTree reveal in file tree", () => {
     expect(scrollIntoView).toHaveBeenCalled();
   });
 
-  it("says so instead of failing silently when the file is outside the root", async () => {
+  it("reveals a file outside the root in the OS file manager instead of refusing", async () => {
+    mocks.revealInFileManager.mockResolvedValue({ path: "/elsewhere/deep.ts", status: "opened" });
+
+    reveal({ request: { path: "/elsewhere/src/app/deep.ts", root: "/proj", nonce: 1 } });
+
+    // The row cannot exist, but the file is on this machine: the reveal ends in
+    // the OS file manager, the same action the tree's own context menu offers.
+    await screen.findByText(/Opened in /);
+    // An absolute path is handed over unanchored, so the server checks it
+    // against every root the file surfaces may touch.
+    expect(mocks.revealInFileManager).toHaveBeenCalledWith("/elsewhere/src/app/deep.ts", undefined);
+    expect(row("src/app/deep.ts")).toBeNull();
+    expect(screen.queryByText(/outside the folder this tree is browsing/)).toBeNull();
+  });
+
+  it("hands over a root-relative path with the root the tab came from", async () => {
+    // The shape an out-of-project tab has: a path relative to its own root
+    // (a dead editor grant is the common case). Only that root can resolve it.
+    reveal({ request: { path: "qa-screenshots/00-home.png", root: "/elsewhere", nonce: 1 } });
+
+    await screen.findByText(/Opened in /);
+    expect(mocks.revealInFileManager).toHaveBeenCalledWith("qa-screenshots/00-home.png", "/elsewhere");
+  });
+
+  it("still says why when the OS file manager refuses the path too", async () => {
+    mocks.revealInFileManager.mockRejectedValue(new Error("path is outside the project root"));
+
     reveal({ request: { path: "/elsewhere/src/app/deep.ts", root: "/proj", nonce: 1 } });
 
     await screen.findByText(/outside the folder this tree is browsing/);
-    expect(row("src/app/deep.ts")).toBeNull();
+  });
+
+  it("keeps the explanation for a remote project, which has no OS reveal", async () => {
+    reveal({
+      request: { path: "/elsewhere/src/app/deep.ts", root: "/proj", nonce: 1 },
+      projectHost: "remote-host",
+    });
+
+    await screen.findByText(/outside the folder this tree is browsing/);
+    expect(mocks.revealInFileManager).not.toHaveBeenCalled();
   });
 
   it("says so when the file sits under a directory the walk hides", async () => {

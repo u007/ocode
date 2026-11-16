@@ -5333,12 +5333,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Relay streaming events to the /rc web UI if active
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				select {
-				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content}}:
+				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content, DurationMs: msg.msg.ToolDurationMs}}:
 				default:
 				}
 			}
 			// Mirror tool result to all connected /rc web clients.
-			m.broadcastRC("tool_result", server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content})
+			m.broadcastRC("tool_result", server.ToolResultEvent{Tool: "tool", CallID: msg.msg.ToolID, Output: msg.msg.Content, DurationMs: msg.msg.ToolDurationMs})
 		} else if msg.msg.Role == "assistant" {
 			m.appendAgentMessage(msg.msg)
 			if m.activeTab != tabChat {
@@ -18792,13 +18792,16 @@ const (
 // resized" — expensive Chroma/markdown renders are identical and can be reused;
 // only the box-border layout step needs to run again.
 type msgRenderRawKey struct {
-	role      role
-	kind      int    // block kind; disambiguates compaction-summary vs plain assistant (same role/content otherwise)
-	content   string // msg.text, or msg.raw.Content for tool/compaction blocks
-	toolName  string
-	expanded  bool
-	showThink bool
-	themeGen  int
+	role     role
+	kind     int    // block kind; disambiguates compaction-summary vs plain assistant (same role/content otherwise)
+	content  string // msg.text, or msg.raw.Content for tool/compaction blocks
+	toolName string
+	// toolDuration is the stamped wall-clock duration of the tool call (tool
+	// blocks only); part of the key so a finalized result re-renders with it.
+	toolDuration int64
+	expanded     bool
+	showThink    bool
+	themeGen     int
 }
 
 type msgRenderKey struct {
@@ -18837,6 +18840,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 	kind := blockKindPlain
 	content := msg.text
 	toolName := ""
+	var toolDuration int64
 	expanded := false
 	switch msg.role {
 	case roleThinking:
@@ -18855,6 +18859,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 				kind = blockKindTool
 				content = msg.raw.Content
 				expanded = m.expandedToolOutputs[i]
+				toolDuration = msg.raw.ToolDurationMs
 				toolName = toolNames[msg.raw.ToolID]
 				if toolName == "" {
 					toolName = "tool"
@@ -18868,13 +18873,14 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 	}
 
 	rawKey := msgRenderRawKey{
-		role:      msg.role,
-		kind:      kind,
-		content:   content,
-		toolName:  toolName,
-		expanded:  expanded,
-		showThink: m.showThinking,
-		themeGen:  m.themeGen,
+		role:         msg.role,
+		kind:         kind,
+		content:      content,
+		toolName:     toolName,
+		toolDuration: toolDuration,
+		expanded:     expanded,
+		showThink:    m.showThinking,
+		themeGen:     m.themeGen,
 	}
 	key := msgRenderKey{msgRenderRawKey: rawKey, width: width}
 	if hit, ok := m.msgRenderCache[i]; ok && hit.key == key {
@@ -18888,7 +18894,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		switch {
 		case hit.kind == blockKindTool && hit.innerContent != "":
 			// Tool blocks: Chroma output is cached in innerContent; only redo box borders.
-			block = m.buildToolOutputBox(toolName, hit.innerContent, hit.rawLineCount, expanded)
+			block = m.buildToolOutputBox(toolName, hit.innerContent, hit.rawLineCount, expanded, toolDuration)
 		case hit.kind == blockKindPlain && msg.role != roleUser:
 			// Assistant text blocks have no width-baked borders; re-wrap the cached block.
 			wrapped, cont := wrapViewMarked(hit.block, width)
@@ -18957,7 +18963,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
 			block = m.renderOrphanWarningBox(msg.raw.Content, expanded)
 		} else {
-			innerContent, rawLineCount, block = m.renderToolOutputBoxWithInner(toolName, msg.raw.Content, expanded)
+			innerContent, rawLineCount, block = m.renderToolOutputBoxWithInner(toolName, msg.raw.Content, expanded, toolDuration)
 		}
 	case kind == blockKindCompaction:
 		block = m.renderCompactionSummaryBox(msg.raw.Content, expanded)
@@ -19353,7 +19359,7 @@ func (m *model) renderUserText(text string) string {
 // text before boxing; rawLineCount is the total source-line count (for footer
 // reconstruction on resize). These two values are stored in the cache entry so
 // a later width-only miss can call buildToolOutputBox instead of re-running Chroma.
-func (m *model) renderToolOutputBoxWithInner(toolName, content string, expanded bool) (innerContent string, rawLineCount int, block string) {
+func (m *model) renderToolOutputBoxWithInner(toolName, content string, expanded bool, durationMs int64) (innerContent string, rawLineCount int, block string) {
 	content = sanitizeForTUI(stripTruncationFooter(content))
 	content = strings.TrimRight(content, "\n")
 	lines := strings.Split(content, "\n")
@@ -19367,14 +19373,14 @@ func (m *model) renderToolOutputBoxWithInner(toolName, content string, expanded 
 	} else {
 		innerContent = renderToolResult(toolName, boxContent, m.styles)
 	}
-	block = m.buildToolOutputBox(toolName, innerContent, rawLineCount, expanded)
+	block = m.buildToolOutputBox(toolName, innerContent, rawLineCount, expanded, durationMs)
 	return innerContent, rawLineCount, block
 }
 
 // buildToolOutputBox assembles the tool-output box from a pre-rendered
 // innerContent string. This is the cheap layout step: it only runs Chroma
 // if called from the full-miss path; the resize fast-path calls it directly.
-func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount int, expanded bool) string {
+func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount int, expanded bool, durationMs int64) string {
 	vWidth := m.viewport.Width() - 4
 	if vWidth < 1 {
 		vWidth = 1
@@ -19390,7 +19396,11 @@ func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount i
 			icon = "▸ "
 		}
 	}
-	header := m.styles.Hint.Render("  " + icon + toolName + " output")
+	headerText := "  " + icon + toolName + " output"
+	if d := formatToolDuration(durationMs); d != "" {
+		headerText += " · " + d
+	}
+	header := m.styles.Hint.Render(headerText)
 	if expanded {
 		footer := m.styles.Hint.Render("  ▲ click to collapse")
 		return header + "\n" + box + "\n" + footer
@@ -19403,8 +19413,8 @@ func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount i
 }
 
 // renderToolOutputBox is a thin wrapper kept for call sites that don't need the inner parts.
-func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
-	_, _, block := m.renderToolOutputBoxWithInner(toolName, content, expanded)
+func (m *model) renderToolOutputBox(toolName, content string, expanded bool, durationMs int64) string {
+	_, _, block := m.renderToolOutputBoxWithInner(toolName, content, expanded, durationMs)
 	return block
 }
 

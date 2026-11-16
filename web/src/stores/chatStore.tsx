@@ -588,9 +588,11 @@ export type ChatAction =
       tool: string;
       callId?: string;
       command?: string;
+      /** Client clock at frame receipt, for the live elapsed display. */
+      startedAt?: number;
     }
   | { type: "LIVE_TOOL_OUTPUT"; sessionId: string; callId?: string; chunk: string }
-  | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string; mcpApp?: McpAppRef }
+  | { type: "LIVE_TOOL_RESULT"; sessionId: string; callId?: string; output: string; durationMs?: number; mcpApp?: McpAppRef }
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
   | { type: "LIVE_ADVISOR_CHECKPOINT"; sessionId: string; kind: string; active: boolean }
@@ -990,6 +992,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             tool: action.tool,
             callId: action.callId,
             command: action.command,
+            startedAt: action.startedAt,
           },
         ],
       }));
@@ -1010,7 +1013,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const part = s.live[idx];
         if (part.kind !== "tool") return s;
         const live = [...s.live];
-        live[idx] = { ...part, output: action.output, mcpApp: action.mcpApp ?? part.mcpApp };
+        live[idx] = {
+          ...part,
+          output: action.output,
+          durationMs:
+            action.durationMs ??
+            (part.startedAt !== undefined ? Date.now() - part.startedAt : undefined),
+          mcpApp: action.mcpApp ?? part.mcpApp,
+        };
         return { ...s, live };
       });
     case "LIVE_RESET":

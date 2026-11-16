@@ -143,6 +143,9 @@ func TestBuiltinEntriesShape(t *testing.T) {
 			if e.Supported {
 				t.Errorf("entry %q supported on %s, want unsupported", e.ID, runtime.GOOS)
 			}
+			if e.Status != StatusNotRequired {
+				t.Errorf("entry %q status on %s = %q, want %q", e.ID, runtime.GOOS, e.Status, StatusNotRequired)
+			}
 		}
 	}
 }

@@ -158,7 +158,7 @@ describe("usePulseTail", () => {
           { event: "thinking", data: { delta: "hmm" }, seq: 2 },
           { event: "tool_start", data: { tool: "bash", command: '{"command":"ls -la"}', call_id: "c1" }, seq: 3 },
           { event: "tool_output", data: { call_id: "c1", chunk: "noise" }, seq: 4 },
-          { event: "tool_result", data: { call_id: "c1", output: "ok" }, seq: 5 },
+          { event: "tool_result", data: { call_id: "c1", output: "ok", duration_ms: 4200 }, seq: 5 },
           { event: "text", data: { delta: "\ngamma" }, seq: 6 },
         ],
       });
@@ -169,7 +169,7 @@ describe("usePulseTail", () => {
         expect(result.current.entries).toEqual([
           { kind: "text", text: "alpha" },
           { kind: "text", text: "beta" },
-          { kind: "tool", text: "▸ bash ls -la ✓" },
+          { kind: "tool", text: "▸ bash ls -la ✓ · 4.2s" },
           { kind: "text", text: "gamma" },
         ]),
       );
@@ -395,7 +395,7 @@ describe("usePulseTail", () => {
             content: "looking",
             tool_calls: [call("c1", "bash", '{"command":"ls -la"}'), call("c2", "read", '{"path":"x"}')],
           },
-          { role: "tool", tool_call_id: "c1", content: "total 0" },
+          { role: "tool", tool_call_id: "c1", content: "total 0", tool_duration_ms: 2400 },
           { role: "tool", tool_call_id: "c2", content: "Error: no such file" },
           { role: "assistant", content: "done\nall good" },
         ],
@@ -406,7 +406,7 @@ describe("usePulseTail", () => {
       await waitFor(() =>
         expect(result.current.entries).toEqual([
           { kind: "text", text: "looking" },
-          { kind: "tool", text: "▸ bash ls -la ✓" },
+          { kind: "tool", text: "▸ bash ls -la ✓ · 2.4s" },
           { kind: "tool", text: "▸ read x ✗" },
           { kind: "text", text: "done" },
           { kind: "text", text: "all good" },

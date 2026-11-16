@@ -346,6 +346,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
           tc: import("../../api/types").ToolCall;
           resultContent?: string;
           resultIdx?: number;
+          /** Wall-clock duration stamped on the tool-result message. */
+          durationMs?: number;
           /** Images the tool result carried (see MessageImage). */
           resultImages?: import("../../api/types").MessageImage[];
           /** The unanswered `question` prompt this call is paused on, so the
@@ -411,7 +413,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
   const renderEntries: RenderEntry[] = useMemo(() => {
     const resultById = new Map<
       string,
-      { content: string; idx: number; images?: import("../../api/types").MessageImage[]; mcpApp?: import("../../api/types").McpAppRef }
+      { content: string; idx: number; durationMs?: number; images?: import("../../api/types").MessageImage[]; mcpApp?: import("../../api/types").McpAppRef }
     >();
     const pendingQuestionById = new Map<string, QuestionRequest>();
     const pendingPermissionById = new Map<string, PermissionRequest>();
@@ -420,7 +422,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
     const lastMcpAppIdx = new Map<string, number>();
     messages.forEach((m, idx) => {
       if (m.role === "tool" && m.tool_call_id && !isSentinelToolContent(m.content)) {
-        resultById.set(m.tool_call_id, { content: m.content, idx, images: m.images, mcpApp: m.mcp_app });
+        resultById.set(m.tool_call_id, { content: m.content, idx, durationMs: m.tool_duration_ms, images: m.images, mcpApp: m.mcp_app });
       }
       if (m.role === "tool" && m.mcp_app && !isSentinelToolContent(m.content)) {
         lastMcpAppIdx.set(mcpAppKey(m.mcp_app), idx);
@@ -462,6 +464,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
               tc,
               resultContent: hit.content,
               resultIdx: hit.idx,
+              durationMs: hit.durationMs,
               resultImages: hit.images,
               resultMcpApp: hit.mcpApp,
               mcpAppActive: hit.mcpApp !== undefined && lastMcpAppIdx.get(mcpAppKey(hit.mcpApp)) === hit.idx,
@@ -1981,12 +1984,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             data-testid="parallel-tool-calls"
                             className={inlineParallelToolCalls ? PARALLEL_TOOL_CALLS_INLINE_CLASS : PARALLEL_TOOL_CALLS_STACKED_CLASS}
                           >
-                            {entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                            {entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission, durationMs }) => (
                               <ToolBlock
                                 key={tc.id}
                                 tool={tc.function.name}
                                 command={tc.function.arguments}
                                 output={resultContent}
+                                durationMs={durationMs}
                                 images={resultImages}
                                 mcpApp={resultMcpApp}
                                 mcpAppActive={mcpAppActive && !isLiveMcpApp(resultMcpApp)}
@@ -2029,12 +2033,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                             ))}
                           </div>
                         ) : (
-                          entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission }) => (
+                          entry.calls.map(({ tc, resultContent, resultImages, resultMcpApp, mcpAppActive, pendingQuestion, dismissedQuestion, pendingPermission, durationMs }) => (
                             <ToolBlock
                               key={tc.id}
                               tool={tc.function.name}
                               command={tc.function.arguments}
                               output={resultContent}
+                              durationMs={durationMs}
                               images={resultImages}
                               mcpApp={resultMcpApp}
                               mcpAppActive={mcpAppActive && !isLiveMcpApp(resultMcpApp)}
@@ -2149,6 +2154,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeight
                   command={part.command}
                   stream={part.stream}
                   output={part.output}
+                  startedAt={part.startedAt}
+                  durationMs={part.durationMs}
                   toolCallId={part.callId}
                   sessionId={sessionId}
                   mcpApp={part.mcpApp}

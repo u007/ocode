@@ -69,7 +69,15 @@ export function useAgentRuns(sessionId: string | null): AgentRunsState {
       // leave the agents rail empty — fall back to the pre-change local seed.
       return { host: undefined, unresolved: projectState.projectsStatus !== "ready", projectPath };
     }
-    const trusted = getTrustedTerminalProject(projectState.projects, projectPath);
+    // A trust check reads the project snapshot, so it is only meaningful once
+    // one has SUCCEEDED. A cold start can hold a cache-hydrated list while the
+    // list request is still in flight; routing from it would seed a run tree
+    // for a project (and host) the server has not confirmed yet. Defer like an
+    // absent path and let the effect re-run when the snapshot becomes ready.
+    const trusted =
+      projectState.projectsStatus === "ready"
+        ? getTrustedTerminalProject(projectState.projects, projectPath)
+        : ({ known: false } as const);
     if (!trusted.known) return { host: undefined, unresolved: true, projectPath };
     return { host: trusted.host, unresolved: false, projectPath };
   }, [realSessionId, projectState]);

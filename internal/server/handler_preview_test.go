@@ -50,6 +50,44 @@ func TestHandleFileRawServesPreviewable(t *testing.T) {
 	}
 }
 
+// TestHandleFileRawServesImageUnderProjectRoot pins the contract the markdown
+// viewer's image resolution relies on: a RELATIVE path anchored to
+// project_root, and an absolute path inside it, both serve the image bytes.
+func TestHandleFileRawServesImageUnderProjectRoot(t *testing.T) {
+	dir := t.TempDir()
+	h := NewHandler()
+	h.SetWorkDir(dir)
+	shot := filepath.Join(dir, "preview-screenshots", "home_1440.png")
+	if err := os.MkdirAll(filepath.Dir(shot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("\x89PNG\r\n\x1a\n")
+	if err := os.WriteFile(shot, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, file := range map[string]string{
+		"relative": "preview-screenshots/home_1440.png",
+		"absolute": shot,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			query := "/api/files/raw?path=" + url.QueryEscape(file) + "&project_root=" + url.QueryEscape(dir)
+			h.HandleFileRaw(rec, httptest.NewRequest("GET", query, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+				t.Errorf("content-type = %q, want image/png", ct)
+			}
+			if rec.Body.String() != string(payload) {
+				t.Error("body bytes mismatch")
+			}
+		})
+	}
+}
+
 func TestHandleFileRawRejects(t *testing.T) {
 	dir := t.TempDir()
 	h := NewHandler()

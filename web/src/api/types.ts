@@ -46,6 +46,10 @@ export interface Message {
    *  Dedup identity for the snapshot-before-SSE race; absent/0 on legacy
    *  messages, which are never deduplicated. */
   user_seq?: number;
+  /** Wall-clock duration of the tool call, stamped by the agent on the
+   *  tool-result message. UI-only; providers never see it. Absent on
+   *  legacy transcripts and on calls that never ran. */
+  tool_duration_ms?: number;
   /** The follow-up options the agent proposed at the end of this reply.
    *  The raw machine-readable block is stripped from `content` server-side, so
    *  the transcript shows only the human-readable reply. */
@@ -88,6 +92,11 @@ export type LivePart =
        *  only — `output` carries the authoritative result. */
       stream?: string;
       output?: string;
+      /** Client clock at the tool_start frame, for the live elapsed tick. */
+      startedAt?: number;
+      /** Wall-clock duration reported by the agent (tool_result frame), or
+       *  measured client-side when the frame omits it. */
+      durationMs?: number;
       /** MCP Apps widget metadata, from the `tool_result` event. */
       mcpApp?: McpAppRef;
     }

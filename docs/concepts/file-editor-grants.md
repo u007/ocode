@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: File Editor Grants — Editor-Only Out-of-Project Access
-description: The editor/preview opens files outside the active project through per-request, in-memory grants separated from the agent's file scope; records the LFI-shaped hole the scope split fixed.
+description: The editor/preview opens files outside the active project through per-request, in-memory grants separated from the agent's file scope; records the LFI-shaped hole the scope split fixed and the three grant entry points, including the ⌘P picker's lexically decided "Outside this project" row.
 resource: internal/server/handler_file_grants.go, internal/server/handler_files.go, internal/server/handler_open.go, web/src/lib/outOfProjectFiles.ts
 tags:
   - security
@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-11-09T17:22:16Z
+timestamp: 2026-11-16T02:34:00Z
 ---
 # File Editor Grants — Editor-Only Out-of-Project Access
 
@@ -27,7 +27,7 @@ different thing from every other allowlist this server keeps.
 | `cfg.Ocode.ExtraAllowedPaths` | the file surfaces **and the agent's tool scope** | global config, persistent |
 | **editor grants** (`fileGrantStore`) | the file editor/preview surfaces **only** | in-memory, per server process |
 
-`handler.go:319` carries the field; `handler_file_grants.go:44` defines the
+`handler.go:342` carries the field; `handler_file_grants.go:44` defines the
 store; `handler_file_grants.go:151` lazily creates it.
 
 ### Why grants are NOT `extra_allowed_paths`
@@ -52,7 +52,7 @@ question.
 
 ## Endpoints
 
-Registered in `Server.registerRoutes()` (`server.go:419-421`), all behind `authMiddleware`:
+Registered in `Server.registerRoutes()` (`server.go:487-489`), all behind `authMiddleware`:
 
 - `POST /api/files/grant` — body `{"path": "..."}` → `{"root","path","granted","roots"}`.
   `path` is the requested file spelled under the canonical `root` (symlinks resolved;
@@ -69,12 +69,12 @@ response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:23
 
 ### Access probe (`GET /api/files/access`)
 
-`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:411`;
+`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:479`;
 `Server.handleFileAccess` calls `Handler.HandleFileAccess`, `handler_files.go:1333`)
 answers one question: would the editor serve this path? It is **containment
 only**. A local path runs the same resolver as the raw endpoint
 (`resolveEditorFilePath`, `handler_files.go:992`), so it honors the same grants. A
-remote path (`host=`) runs `remoteRawContainment` (`handler_remote_files.go:466`),
+remote path (`host=`) runs `remoteRawContainment` (`handler_remote_files.go:523`),
 the helper `remoteFileRaw` also uses. The response is `200 {"ok":true}`, or `400`
 with the resolver's message. The probe never stats, reads or type-checks the file.
 
@@ -88,7 +88,7 @@ returns true only for an outside-root refusal.
 ## One resolver, two scopes
 
 `resolveProjectFilePath` (`handler_files.go:981`) delegates to
-`resolveProjectFilePathScoped` (`:971`) with a `filePathScope`
+`resolveProjectFilePathScoped` (`:996`) with a `filePathScope`
 (`handler_files.go:943`):
 
 - **`scopeProjectRoots`** — the SQLite browser. `resolveDBPath`
@@ -96,14 +96,14 @@ returns true only for an outside-root refusal.
   (`handler_db.go:50`) check and must **not** accept grants: the DB surface gains
   write capability later, so its blast radius is different.
 - **`scopeEditorRoots`** — `resolveEditorFilePath` (`handler_files.go:992`), used
-  by `HandleFileContent` (`:1125`), `HandleFileRaw` (`:1240`),
-  `HandleSaveFileContent` (via `writeScopeRoot`, `:1070`) and
-  `HandleMediaToken` (`:1367`). `resolveOpenPath` shares the rules
-  (`handler_open.go:95`, `:115`).
+  by `HandleFileContent` (`:1150`), `HandleFileRaw` (`:1266`),
+  `HandleSaveFileContent` (via `writeScopeRoot`, `:1095`) and
+  `HandleMediaToken` (`:1500`). `resolveOpenPath` shares the rules
+  (`handler_open.go:96`, `:121`).
 
-`grantedRootFor` (`:1025`) is the only way a request may name a directory outside
-every project root. `fileAccessRoots` (`:1044`) = project roots + extra allowed
-paths + grants; `pathWithinAnyFileRoot` (`:1113`) checks resolved **or** lexical
+`grantedRootFor` (`:1050`) is the only way a request may name a directory outside
+every project root. `fileAccessRoots` (`:1069`) = project roots + extra allowed
+paths + grants; `pathWithinAnyFileRoot` (`:1138`) checks resolved **or** lexical
 containment (the Files tab browses symlinked folders).
 
 `HandleFileRaw` used to carry an **inline duplicate** of the containment logic;
@@ -158,8 +158,18 @@ stronger action than browsing it.
   to the absolute path. A `null` from `relativeToRoot` throws
   `Cannot open <typed>: it is not inside the granted folder <root>.`, which
   `App.tsx` surfaces through `reportActionErrorMessage`.
-- `OpenPathDialog` is the single entry point (Files-tab header + a chat file link
-  whose absolute path the server refused, pre-filled).
+- `OpenPathDialog` is where a typed path is granted, and it now has three entry
+  points: the Files-tab header button, a chat file link whose absolute path the
+  server refused (pre-filled), and the ⌘P picker's **"Outside this project"** row
+  (seeded with the typed path).
+- The picker row is decided **lexically** by `outsideProjectPath` in
+  `FilePicker.tsx`, never from a stat: `GET /api/files/stat` answers
+  `exists:false` both for a path that is missing and for one outside the project
+  root, so a stat-driven affordance could never appear for an outside path. An
+  absolute path *inside* the project is never listed twice. A pasted **folder**
+  takes the same grant and ends as an `ocode:open-folder` root switch (see
+  "Opening a folder" below), not an editor tab. Test:
+  `web/src/components/Files/FilePicker.grantRow.test.tsx`.
 
 Remote (SSH/WSL) grants route through `remoteApiBase(host)`, so they land in the
 **remote** server's own grant list.

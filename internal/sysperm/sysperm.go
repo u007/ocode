@@ -3,10 +3,12 @@
 //
 // On macOS the grants it tracks are TCC (Transparency, Consent, and Control)
 // permissions — Full Disk Access, Files & Folders, Accessibility, Screen
-// Recording, and Automation. TCC grants are keyed to the application's code
-// signature, so every rebuild produces a new cdhash and macOS forgets the
-// grant; the persisted on/off intent plus Reconcile exist to re-request what
-// the user already approved after a rebuild.
+// Recording, and Automation. TCC stores a grant as the app's designated
+// requirement: an ad-hoc signature makes that requirement the cdhash, so every
+// rebuild orphans the grant, while a certificate-anchored requirement
+// (scripts/create-dev-signing-cert.sh) survives rebuilds. The persisted on/off
+// intent plus Reconcile remain the fallback for ad-hoc builds and for grants
+// the user has not re-approved yet.
 //
 // On Windows and Linux there is no per-application consent gate, so the
 // catalog is informational (Supported=false, Status=not_required) and the

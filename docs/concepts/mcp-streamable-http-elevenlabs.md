@@ -29,7 +29,7 @@ hosted server is the first preset shipped on it.
 - `decodeRemoteResponse` routes a `text/event-stream` body to
   `decodeSSEJSONRPC`, which matches the request id and skips notifications and
   non-JSON-RPC frames; anything else is plain JSON-RPC.
-- Both agent switches accept `"http"`: `internal/agent/agent.go:7053` and
+- Both agent switches accept `"http"`: `internal/agent/agent.go:7090` and
   `internal/agent/mcp_clients.go:210`.
 
 ## ElevenLabs CIMD

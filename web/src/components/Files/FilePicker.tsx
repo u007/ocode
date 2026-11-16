@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Eye, EyeOff, Folder } from "lucide-react";
+import { Eye, EyeOff, Folder, FolderOpen } from "lucide-react";
 import { useEffect, useState, useMemo, useRef } from "react";
 import {
   Command,
@@ -14,6 +14,7 @@ import { apiPath, authHeaders } from "../../api/client";
 import { parseKeywords, matchesKeywords, scoreMatch } from "../../lib/keywordFilter";
 import { compareByShortestPath } from "../../lib/filePathOrder";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
+import { isAbsoluteTreePath, isWindowsTreePath, normalizeTreePath } from "./fileTreeReveal";
 
 interface FileNode {
   name: string;
@@ -43,6 +44,11 @@ interface Props {
   /** When set, folders are listed alongside files and selecting one calls
    *  this instead of `onOpenFile`. Left unset, the picker lists files only. */
   onOpenFolder?: (path: string, projectRoot?: string) => void;
+  /** When set, typed text naming a path OUTSIDE the project gets an "open
+   *  outside the project" row. That row hands the path back untouched: the
+   *  server confines every file surface to the project root, so an outside
+   *  path exists only after the editor grant the caller opens next. */
+  onOpenOutsideProject?: (path: string) => void;
 }
 
 interface FlatTree {
@@ -101,7 +107,29 @@ function flattenTree(nodes: FileNode[], out: FlatTree = { files: [], folders: []
   return out;
 }
 
-export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, projectPath, projectHost, initialQuery }: Props) {
+/**
+ * The typed text when it names a path OUTSIDE the project root, else null.
+ *
+ * The server's stat can never resolve such a path — containment rejects it
+ * before the disk is read, so it answers "does not exist" — which used to end
+ * a pasted path in a silent "No files found". This is lexical on purpose: the
+ * row appears without waiting for a round trip, and an absolute path INSIDE
+ * the project is never offered twice.
+ */
+function outsideProjectPath(typed: string, projectRoot?: string): string | null {
+  const path = normalizeTreePath(typed);
+  const root = normalizeTreePath(projectRoot ?? "");
+  if (!root || !isAbsoluteTreePath(path)) return null;
+  // Windows drive paths are case-insensitive, so compare folded there.
+  if (isWindowsTreePath(path) || isWindowsTreePath(root)) {
+    const p = path.toLowerCase();
+    const r = root.toLowerCase();
+    return p === r || p.startsWith(r + "/") ? null : path;
+  }
+  return path === root || path.startsWith(root + "/") ? null : path;
+}
+
+export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, onOpenOutsideProject, projectPath, projectHost, initialQuery }: Props) {
   const [tree, setTree] = useState<FlatTree>({ files: [], folders: [] });
   const [query, setQuery] = useState("");
   // True when the server's tree walk hit its node cap, so the index is
@@ -173,6 +201,9 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
     open && directHitState && directHitState.query === typedPath && directHitState.scope === directHitScope(projectPath, projectHost)
       ? directHitState.hit
       : null;
+  // A typed absolute path outside the project: the tree index and the stat can
+  // never reach it, so offer the editor grant instead of an empty list.
+  const outsidePath = open && onOpenOutsideProject ? outsideProjectPath(typedPath, projectPath) : null;
   useEffect(() => {
     if (!open) {
       setDirectHitState(null);
@@ -287,6 +318,22 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
           <CommandInput placeholder="Filter by keywords..." value={query} onValueChange={setQuery} />
           <CommandList ref={scrollContainerRef}>
             <CommandEmpty>{keywords.length > 0 ? "No matching files" : "No files found"}</CommandEmpty>
+            {outsidePath && (
+              <CommandGroup heading="Outside this project">
+                <CommandItem
+                  value={`outside:${outsidePath}`}
+                  onSelect={() => {
+                    onOpenOutsideProject?.(outsidePath);
+                    onClose();
+                  }}
+                >
+                  <FolderOpen className="shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 truncate font-mono text-sm" title={outsidePath}>
+                    Open outside the project: {outsidePath}
+                  </span>
+                </CommandItem>
+              </CommandGroup>
+            )}
             <CommandGroup
               heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== entries.length ? ` of ${entries.length}` : ""}` : ""}${treeTruncated ? " — results may be incomplete (truncated)" : ""}`}
             >

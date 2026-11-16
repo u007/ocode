@@ -22,6 +22,12 @@ describe("formatToolArgsHint", () => {
     expect(hint).not.toContain("SECRET_BODY");
   });
 
+  it("summarizes grep and rgrep as the quoted pattern", () => {
+    expect(formatToolArgsHint("grep", '{"pattern":"fooBar","intent":"find it"}')).toBe('grep "fooBar"');
+    expect(formatToolArgsHint("rgrep", '{"pattern":"a.*b","path":"src","intent":"find it"}')).toBe('rgrep "a.*b"');
+    expect(formatToolArgsHint("grep", "{}")).toBe("");
+  });
+
   it("returns empty for tools without a summary", () => {
     expect(formatToolArgsHint("glob", '{"pattern":"**/*.ts"}')).toBe("");
     expect(formatToolArgsHint("edit", '{"path":"/src/app.ts"}')).toBe("edit /src/app.ts");

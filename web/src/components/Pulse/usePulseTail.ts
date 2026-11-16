@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { eventBus } from "../../lib/eventBus";
 import type { Message, PulseStatus } from "../../api/types";
+import { humanizeDuration } from "../../lib/humanize";
 
 /**
  * usePulseTail — the "what is this session doing right now" activity feed a
@@ -98,6 +99,12 @@ function stringField(data: unknown, key: string): string | undefined {
   if (data === null || typeof data !== "object") return undefined;
   const value = (data as Record<string, unknown>)[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function numberField(data: unknown, key: string): number | undefined {
+  if (data === null || typeof data !== "object") return undefined;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /** Argument keys that name what a tool call is acting on, in preference order. */
@@ -212,7 +219,8 @@ class Feed {
     this.byCallId.delete(callId);
     entry.done = true;
     const output = (stringField(data, "output") ?? "").trimStart();
-    entry.text += /^(Error|error:)/.test(output) ? " ✗" : " ✓";
+    const durationMs = numberField(data, "duration_ms");
+    entry.text += `${/^(Error|error:)/.test(output) ? " ✗" : " ✓"}${durationMs !== undefined ? ` · ${humanizeDuration(durationMs)}` : ""}`;
   }
 
   private trim(): void {
@@ -268,7 +276,7 @@ function feedFromTranscript(messages: Message[] | undefined): PulseTailEntry[] {
         });
       }
     } else if (m.role === "tool" && m.tool_call_id) {
-      feed.apply("tool_result", { call_id: m.tool_call_id, output: m.content });
+      feed.apply("tool_result", { call_id: m.tool_call_id, output: m.content, duration_ms: m.tool_duration_ms });
     }
   }
   return feed.snapshot();

@@ -1964,6 +1964,57 @@ func TestAgentToolExecution(t *testing.T) {
 	}
 }
 
+type sleepTool struct{}
+
+func (s *sleepTool) Name() string        { return "sleep_tool" }
+func (s *sleepTool) Description() string { return "" }
+func (s *sleepTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": "sleep_tool"}
+}
+func (s *sleepTool) Execute(args json.RawMessage) (string, error) {
+	time.Sleep(5 * time.Millisecond)
+	return "slept", nil
+}
+func (s *sleepTool) Parallel() bool { return true }
+
+func TestAgentStampsToolDurationOnResult(t *testing.T) {
+	step1 := &Message{
+		Role: "assistant",
+		ToolCalls: []ToolCall{{
+			ID:   "call-sleep",
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "sleep_tool", Arguments: "{}"},
+		}},
+	}
+	step2 := &Message{Role: "assistant", Content: "Done!"}
+
+	mock := &MockToolClient{responses: []*Message{step1, step2}}
+	a := NewAgent(mock, nil, nil, nil)
+	a.Permissions().SetRule("sleep_tool", PermissionAllow)
+	a.AddTools([]tool.Tool{&sleepTool{}})
+
+	msgs, err := a.Step([]Message{{Role: "user", Content: "do tool"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolMsg *Message
+	for i := range msgs {
+		if msgs[i].Role == "tool" {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("no tool result message")
+	}
+	if toolMsg.ToolDurationMs < 4 {
+		t.Errorf("expected a stamped elapsed time >= ~5ms, got %d", toolMsg.ToolDurationMs)
+	}
+}
+
 func TestAgentSkipsDuplicateKeyToolArguments(t *testing.T) {
 	// Models sometimes emit the same argument key twice inside one object —
 	// {"path":"a.py","end_line":120,"path":"b.md"} — 60 such calls sit in local

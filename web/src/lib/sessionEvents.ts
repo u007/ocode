@@ -764,6 +764,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           tool,
           callId: (data as { call_id?: string }).call_id,
           command: args,
+          startedAt: Date.now(),
         });
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         return;
@@ -794,6 +795,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           sessionId,
           callId: (data as { call_id?: string }).call_id,
           output: (data as { output: string }).output,
+          durationMs: (data as { duration_ms?: number }).duration_ms,
           mcpApp: (data as { mcp_app?: McpAppRef }).mcp_app,
         });
         return;

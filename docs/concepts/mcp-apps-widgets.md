@@ -8,7 +8,7 @@ tags:
   - mcp-apps
   - plugins
   - web
-timestamp: 2026-11-14T18:54:12Z
+timestamp: 2026-11-15T16:33:41Z
 ---
 # MCP Apps widgets and plugin MCP servers
 
@@ -26,7 +26,7 @@ summarises them and links to the code.
 A tool whose `tools/list` entry carries `_meta.ui.resourceUri` declares a widget.
 The URI must start with `ui://` to be served (`internal/server/handler_mcp_app.go:93`).
 ocode also reads the flat `ui/resourceUri` spelling some servers use
-(`internal/mcp/client.go:1068`).
+(`internal/mcp/client.go:1108`).
 
 `_meta.ui.visibility` lists the audiences of the tool:
 
@@ -35,26 +35,26 @@ ocode also reads the flat `ui/resourceUri` spelling some servers use
 - `"app"`: a widget may call the tool through the host.
 
 A tool whose visibility lacks `"model"` is not registered for the model at all
-(`internal/mcp/client.go:1132`). It can be called only from a widget.
+(`internal/mcp/client.go:1172`). It can be called only from a widget.
 
 ## End-to-end flow
 
 1. **Listing.** `MCPClient.ListTools` records each listed tool's UI resource and
-   visibility (`internal/mcp/client.go:1097`), then keeps only the model-visible
+   visibility (`internal/mcp/client.go:1137`), then keeps only the model-visible
    tools.
 2. **Model call.** The agent runs a model-visible tool through `ExecuteCtx`, which
    carries the tool call ID (`internal/mcp/client.go:90`). For a successful call of
    a tool with a UI resource, `recordCallOutcome` stores the raw result under that
-   call ID (`internal/mcp/client.go:1261`).
+   call ID (`internal/mcp/client.go:1301`).
 3. **Attach to the tool message.** `handleToolCallWithContext` calls
-   `keepMCPAppRef` (`internal/agent/agent.go:4037`). `keepMCPAppRef` keeps a
+   `keepMCPAppRef` (`internal/agent/agent.go:4074`). `keepMCPAppRef` keeps a
    `MCPAppRef` only when the call ran (`internal/agent/mcp_app.go:17`).
    `takeMCPAppRef` then puts it on the tool message as `Message.MCPApp`, and gives
    none when the result is a pending ask (`internal/agent/mcp_app.go:54`). The
-   message is built at `internal/agent/agent.go:2196`.
+   message is built at `internal/agent/agent.go:2200`.
 4. **Stream.** The live path broadcasts a `tool_result` event carrying the ref
    (`internal/server/handler.go:1227`). Stream replay sends the same
-   `ToolResultEvent` (`internal/server/handler_sse.go:286`; the type is at
+   `ToolResultEvent` (`internal/server/handler_sse.go:289`; the type is at
    `internal/server/handler_sse.go:40`).
 5. **Web card.** `ToolBlock` renders `McpAppView` under the block when the tool
    message has an `mcp_app` ref (`web/src/components/Chat/TurnParts.tsx:630`).
@@ -94,24 +94,24 @@ Any other request gets `-32601`. Unknown notifications are ignored.
 ## Image results
 
 An MCP tool result that contains an image block keeps its first decodable image
-under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1230`) and
-`recordCallOutcome` stores it (`internal/mcp/client.go:1261`).
+under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1270`) and
+`recordCallOutcome` stores it (`internal/mcp/client.go:1301`).
 `handleToolCallWithImages` takes that image on every path, so nothing is kept
-(`internal/agent/agent.go:3911`). It attaches the image to the tool message only
-when the current model supports vision (`internal/agent/agent.go:3918`). Otherwise
+(`internal/agent/agent.go:3948`). It attaches the image to the tool message only
+when the current model supports vision (`internal/agent/agent.go:3955`). Otherwise
 the text result alone is returned.
 
 Which provider builders carry the image, verified in `internal/agent/client.go`:
 
-- **Anthropic** (`buildAnthropicMessages`, `internal/agent/client.go:4337`): the image
+- **Anthropic** (`buildAnthropicMessages`, `internal/agent/client.go:4326`): the image
   is an image block inside the `tool_result`, when the client supports vision.
-- **OpenAI chat completions** (`convertToOpenAIMessages`, `internal/agent/client.go:2847`):
+- **OpenAI chat completions** (`convertToOpenAIMessages`, `internal/agent/client.go:2852`):
   the images are queued and sent in one user message after the run of tool messages.
   That message starts with the preface `Image(s) returned by the preceding read tool
-  call(s):` (`internal/agent/client.go:2866`), which is the read tool's wording and is
+  call(s):` (`internal/agent/client.go:2871`), which is the read tool's wording and is
   used for MCP images too.
-- **OpenAI Responses** (`internal/agent/client.go:3115`) and **Gemini Interactions**
-  (`internal/agent/client.go:1740`): the tool result is text only. An MCP image does not
+- **OpenAI Responses** (`internal/agent/client.go:3120`) and **Gemini Interactions**
+  (`internal/agent/client.go:1745`): the tool result is text only. An MCP image does not
   reach the model on these paths.
 
 Other providers were not checked against this list.
@@ -146,17 +146,17 @@ Other providers were not checked against this list.
 
 ## Stdio transport
 
-- `NewLocalClient` starts the process (`internal/mcp/client.go:300`). The stdout reader
-  `readStdout` (`internal/mcp/client.go:347`) is the only reader.
-- Replies are routed by JSON-RPC id (`routeLocalLine`, `internal/mcp/client.go:932`).
+- `NewLocalClient` starts the process (`internal/mcp/client.go:312`). The stdout reader
+  `readStdout` (`internal/mcp/client.go:359`) is the only reader.
+- Replies are routed by JSON-RPC id (`routeLocalLine`, `internal/mcp/client.go:972`).
   Notifications, server-initiated requests, stale and unsolicited lines are dropped.
 - The handshake is `initialize` with protocol `2025-06-18` (`internal/mcp/client.go:99`).
   It advertises the `io.modelcontextprotocol/ui` extension with `text/html;profile=mcp-app`
-  (`internal/mcp/client.go:852`). A server that answers `initialize` with `-32601` is
-  treated as having no handshake (`handshakeLocked`, `internal/mcp/client.go:844`).
+  (`internal/mcp/client.go:892`). A server that answers `initialize` with `-32601` is
+  treated as having no handshake (`handshakeLocked`, `internal/mcp/client.go:884`).
 - Per-call side channels (images, MCP Apps results) are keyed by tool call ID in a
   bounded map of 64 entries (`internal/mcp/callside.go:20`, `internal/mcp/callside.go:39`).
-  The fields are at `internal/mcp/client.go:181`.
+  The fields are at `internal/mcp/client.go:192`.
 - `MCPTool.Definition` returns only name, description and parameters
   (`internal/mcp/client.go:74`), so the tools array does not change with `_meta`.
 
@@ -169,11 +169,11 @@ Other providers were not checked against this list.
 - **Self-navigation.** The first `load` is the srcdoc document. A later `load` tears the
   host down and closes the view (`web/src/components/Chat/mcpApp/McpAppView.tsx:288`).
 - **Widget tool calls.** `AppToolAllowed` admits only tools the server listed with
-  `"app"` in visibility (`internal/mcp/client.go:1155`). Both `/mcp-app/` endpoints refuse a
+  `"app"` in visibility (`internal/mcp/client.go:1195`). Both `/mcp-app/` endpoints refuse a
   locked session with 403 (`internal/server/handler_mcp_app.go:67`). Widget calls go straight
   to the MCP server. They do not pass through the agent's permission prompt, and they keep no
   image or app result under a call ID, because `CallToolRaw` records nothing
-  (`internal/mcp/client.go:1200`).
+  (`internal/mcp/client.go:1240`).
 - **Links.** `ui/open-link` waits for the user's confirmation, as every URL surface does.
 
 ## Known limits
@@ -185,7 +185,7 @@ Other providers were not checked against this list.
   (`web/src/components/Chat/mcpApp/McpAppView.tsx:219`), because an opaque-origin frame
   cannot be targeted by origin. A message sent in that window reaches whatever the frame
   now shows.
-- **Client lifetime.** `MCPClient.Close` (`internal/mcp/client.go:1024`) is called by the
+- **Client lifetime.** `MCPClient.Close` (`internal/mcp/client.go:1064`) is called by the
   shared loader (`internal/agent/mcp_clients.go`) when a client's config changed, its
   server was removed, or its `ListTools` failed; `CloseAllMCPClients` closes every cached
   client at server shutdown (`internal/server/handler_shutdown.go:28`). Per-session

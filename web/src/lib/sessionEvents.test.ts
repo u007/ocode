@@ -318,12 +318,12 @@ describe("routeBusEnvelope", () => {
       // Order must already be correct without waiting for the flush timer.
       expect(getState().sessions["s1"].live).toEqual([
         { kind: "text", text: "…and desktop." },
-        { kind: "tool", tool: "bash", callId: "c1", command: "ls" },
+        { kind: "tool", tool: "bash", callId: "c1", command: "ls", startedAt: expect.any(Number) },
       ]);
       vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS * 2);
       expect(getState().sessions["s1"].live).toEqual([
         { kind: "text", text: "…and desktop." },
-        { kind: "tool", tool: "bash", callId: "c1", command: "ls" },
+        { kind: "tool", tool: "bash", callId: "c1", command: "ls", startedAt: expect.any(Number) },
       ]);
     });
 
@@ -337,7 +337,7 @@ describe("routeBusEnvelope", () => {
       routeBusEnvelope(env("text", { data: { delta: "after the tool" } }), router);
       vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
       expect(getState().sessions["s1"].live).toEqual([
-        { kind: "tool", tool: "bash", callId: "c1" },
+        { kind: "tool", tool: "bash", callId: "c1", startedAt: expect.any(Number) },
         { kind: "text", text: "after the tool" },
       ]);
     });
@@ -1017,7 +1017,7 @@ describe("reconcileOpenSessions", () => {
     await reconcileOpenSessions(new Set(["s1"]), router);
 
     const live = getState().sessions["s1"].live;
-    expect(live).toEqual([{ kind: "tool", tool: "bash", callId: "c1", command: undefined }]);
+    expect(live).toEqual([{ kind: "tool", tool: "bash", callId: "c1", command: undefined, startedAt: expect.any(Number) }]);
   });
 });
 

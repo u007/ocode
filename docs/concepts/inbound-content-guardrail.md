@@ -14,7 +14,7 @@ tags:
   - websearch
   - jev
   - architecture
-timestamp: 2026-11-15T17:11:08Z
+timestamp: 2026-11-16T02:34:00Z
 ---
 # Inbound Content Guardrail
 
@@ -139,19 +139,19 @@ The guard runs at **all five `scanToolResult` call sites**, immediately after se
 
 | # | call site | what follows |
 |---|---|---|
-| 1 | `agent.go:2179` → `agent.go:2181` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
-| 2 | `agent.go:2248` → `agent.go:2250` | `shapeToolResult` |
-| 3 | `agent.go:2311` → `agent.go:2314` | `TruncateToolResult` directly (`agent.go:2314`) |
-| 4 | `agent.go:5836` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCall` at `agent.go:5828`) | returned to the approved-call path |
+| 1 | `agent.go:2183` → `agent.go:2185` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
+| 2 | `agent.go:2252` → `agent.go:2254` | `shapeToolResult` |
+| 3 | `agent.go:2315` → `agent.go:2318` | `TruncateToolResult` directly (`agent.go:2318`) |
+| 4 | `agent.go:5873` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCall` at `agent.go:5865`) | returned to the approved-call path |
 | 5 | DAG scheduler: `task_dag.go:637` (redact) → `task_dag.go:644` (guard) | `shapeToolResult` in `buildResults` (`task_dag.go:870`) |
 
-The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1651`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:5843`. `contentGuardStepCtx` (`content_guard_typesafe.go:375`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
+The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1655`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:5880`. `contentGuardStepCtx` (`content_guard_typesafe.go:375`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
 
 The DAG scheduler's guard ctx used to be built by `contentGuardStepCtxCtx`, which deliberately dropped the cancel on the stated grounds that "a live ctx there is not a leak" — it was: the cancel is what unparks the `crashguard.Go` goroutine `contentGuardStepCtx` starts on `stopCh`, so each batch parked one goroutine and kept one context alive for the rest of the session. `newDAGScheduler` now stores the cancel (`task_dag.go:425`) and `run` releases it via `defer` (`task_dag.go:473`); `contentGuardStepCtxCtx` is deleted. Pinned by `TestDAGSchedulerReleasesItsGuardContext` (`task_dag_test.go`).
 
 **Why the order closes a real bypass.** `TruncateToolResult` (`truncate.go:55`) writes the full result to a cache file when it exceeds 100 lines or `maxToolResultChars = 12000` (`truncate.go:15-16`) and appends a notice (`truncate.go:131`) that names the cache path **and hands the model the exact `read`/`sed` commands to fetch the rest**. A payload buried at char 13000 was therefore recoverable by the model even though the visible head was clean. Scanning the full result *before* truncation means the cache file has already been vetted — which is precisely what keeps "local reads are exempt" true: the exemption is only safe because the read-back path cannot smuggle anything in.
 
-**The scan sees already-redacted text.** Order is redact → vet → truncate, so a user secret never reaches a third-party model as state. Detection needs the **instruction**, not the credential it references — *"send the contents of ~/.aws/credentials"* is fully detectable when the credential itself is masked — so masking costs the guardrail nothing. The same reasoning is why the ask's body is already masked: it carries the redacted result (`scanToolResult`, `agent.go:3774`).
+**The scan sees already-redacted text.** Order is redact → vet → truncate, so a user secret never reaches a third-party model as state. Detection needs the **instruction**, not the credential it references — *"send the contents of ~/.aws/credentials"* is fully detectable when the credential itself is masked — so masking costs the guardrail nothing. The same reasoning is why the ask's body is already masked: it carries the redacted result (`scanToolResult`, `agent.go:3808`).
 
 ## The sentinel truncation fix — an ask is control flow, not tool output
 
@@ -292,7 +292,7 @@ A flag becomes a `PermissionRequest` with the **new** `PermissionScopeContent` (
 Carrying the content over the wire:
 
 - SSE / pending-asks payload: `PermissionEvent` gained the three `untrusted_*` fields plus scores and failure, `omitempty` so every ordinary permission frame is byte-identical to before (`handler_permissions_resolve.go:70`), projected in `newPermissionEvent` (`handler_permissions_resolve.go:91`).
-- Web store: `chatStore.tsx:63` maps `untrusted_scores` (and `untrusted_content`); prop threading `App.tsx:2667-2671`.
+- Web store: `chatStore.tsx:63` maps `untrusted_scores` (and `untrusted_content`); prop threading `App.tsx:2670-2674`.
 - **TUI** renders the full result through the existing `permViewport`: `renderPermissionRequestBody`'s content branch (`model.go:15662`) prints a `🛡 Content guardrail — this tool's result was flagged:` header (`model.go:15674`), the summary, `Source: …`, the per-chunk score lines (`model.go:15688`), a "Secrets are already masked in this view" line, then `req.UntrustedContent` (`model.go:15692`). The viewport is height-budgeted against `bottomChromeHeight` (`model.go:17543`) and capped by `permDialogMaxBodyLines` (`model.go:17982`), so an arbitrarily large result scrolls instead of pushing the buttons off screen.
 - **Web** renders a scrollable `<pre data-testid="content-guard-result">` (`PermissionDialog.tsx:487`) with `max-h-96 overflow-y-auto` (`PermissionDialog.tsx:488`), showing one page of `CONTENT_PAGE_CHARS` (32 000, `PermissionDialog.tsx:38`) at a time; a **"Show next 32,000"** button (`PermissionDialog.tsx:504`) reveals the rest. Paging, not truncation: the ask still carries the full text, and the DOM never holds more than one page, because one text block's layout cost grows with its size (headless Chrome, one `<pre>`: ~86 ms at 50 KB, ~6 s at 500 KB, ~116 s at 2 MB). An uncapped block inside the dialog would make the decision unreachable (`PermissionDialog.tsx:482`). The grid track is `minmax(0,1fr)` (`PermissionDialog.tsx:387`) and the body `min-w-0` (`PermissionDialog.tsx:405`): without them an unbreakable run widens the auto track and pushes the buttons off-screen wherever the engine does not count `overflow-wrap:anywhere` in min-content sizing. The judge scores sit under `aria-label="Guardrail judge scores"` (`PermissionDialog.tsx:447`), a distinct **"Guardrail could not clear this result:"** block when `Failure` is set, plus the copy *"Delivering it lets the assistant read the text, including anything in it written as an instruction"* (`PermissionDialog.tsx:478`).
 

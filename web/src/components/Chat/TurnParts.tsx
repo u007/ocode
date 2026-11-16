@@ -1,5 +1,7 @@
 import { memo, useRef, useSyncExternalStore, type ComponentProps } from "react";
 import { CheckCircle2 } from "lucide-react";
+import { useNow } from "../../hooks/useNow";
+import { humanizeDuration } from "../../lib/humanize";
 import type { McpAppRef, MessageImage, QuestionAnswerPayload } from "@/api/types";
 import { isInlineSafeMediaType } from "../Preview/blobPreview";
 import { highlightMatches } from "./ChatSearchBar";
@@ -311,6 +313,13 @@ export function QuestionAnswerBlock({
   );
 }
 
+// LiveElapsed renders the "running… · 1.2s" suffix while a tool is in flight.
+// Mounted only for the pending state so completed blocks never tick.
+function LiveElapsed({ startedAt }: { startedAt: number }) {
+  const now = useNow(1000);
+  return <> · {humanizeDuration(Math.max(0, now - startedAt))}</>;
+}
+
 // ToolBlock renders a single tool call and (optionally) its result. Call
 // details and output use independent policy-controlled disclosure gates.
 //
@@ -331,9 +340,16 @@ const PlainToolBlock = memo(function PlainToolBlock({
   callKey = "tool-call",
   outputKey = "tool-output",
   forceOpen = false,
+  durationMs,
+  startedAt,
 }: {
   tool: string;
   command?: string;
+  /** Wall-clock duration of the call: shown once the result is in, or live-
+   *  ticking from `startedAt` while pending. */
+  durationMs?: number;
+  /** Client clock at tool_start; drives the live tick while pending. */
+  startedAt?: number;
   output?: string;
   /** Images the tool result carried (a browser or computer screenshot). Shown
    *  inside the output region, so the output disclosure governs them. Only
@@ -468,7 +484,14 @@ const PlainToolBlock = memo(function PlainToolBlock({
             <span>{open ? "▾" : "▸"}</span>
             <span className="min-w-0 truncate" data-copy-content="" title={argsHint || undefined}>🔧 {argsHint || tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
             {pending && !(onOpenQuestion || onOpenPermission) && (
-              <span className="ml-1 animate-pulse text-amber-400/70">running…</span>
+              <span className="ml-1 shrink-0 animate-pulse text-amber-400/70">
+                running…{startedAt !== undefined ? <LiveElapsed startedAt={startedAt} /> : null}
+              </span>
+            )}
+            {!pending && durationMs !== undefined && (
+              <span className="ml-1 shrink-0 font-mono text-[10px] tabular-nums text-amber-400/60">
+                {humanizeDuration(durationMs)}
+              </span>
             )}
             {(onOpenQuestion || onOpenPermission) && (
               <span className="ml-1 text-amber-400/70">

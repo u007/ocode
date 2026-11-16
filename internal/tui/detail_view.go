@@ -212,7 +212,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 				}
 			case "tool":
 				regionID := fmt.Sprintf("%s/tool-result:%d", runPath, i)
-				appendExpandableRegion(regionID, renderDetailToolResultBox(toolNames[msg.ToolID], msg.Content, innerWidth, expanded[regionID]))
+				appendExpandableRegion(regionID, renderDetailToolResultBox(toolNames[msg.ToolID], msg.Content, innerWidth, expanded[regionID], msg.ToolDurationMs))
 			}
 		}
 		if systemHidden {
@@ -350,7 +350,7 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 	return header + "\n" + box
 }
 
-func renderDetailToolResultBox(toolName, content string, width int, expanded bool) string {
+func renderDetailToolResultBox(toolName, content string, width int, expanded bool, durationMs int64) string {
 	if toolName == "" {
 		toolName = "tool"
 	}
@@ -365,7 +365,11 @@ func renderDetailToolResultBox(toolName, content string, width int, expanded boo
 	}
 	visible, footer := collapsePreviewBlock(content, previewLines, expanded, tail)
 	box := toolBoxStyle.Width(max(1, width)).Render(renderToolResult(toolName, visible, currentStyles()))
-	header := hintStyle.Render("tool result · " + toolName)
+	headerText := "tool result · " + toolName
+	if d := formatToolDuration(durationMs); d != "" {
+		headerText += " · " + d
+	}
+	header := hintStyle.Render(headerText)
 	if footer != "" {
 		return header + "\n" + box + "\n" + hintStyle.Render(footer)
 	}

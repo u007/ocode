@@ -4,7 +4,7 @@ title: Preview Print / Save as PDF
 description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path. Markdown ```mermaid fences render in place in the viewer and as inline SVG (pre-rendered in the browser) in print."
 resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/MarkdownViewer.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-06T04:11:19Z
+timestamp: 2026-11-16T02:30:29Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -50,7 +50,11 @@ the `source` prop of `PrintPreviewButton`:
 Per kind:
 
 - **markdown:** `renderToStaticMarkup` of `ReactMarkdown` with `remarkGfm`,
-  wrapped in `<article class="prose max-w-none">`. The app CSS is inlined by
+  wrapped in `<article class="prose max-w-none">`. It gets no `components`
+  override, so the viewer's local-image handling does not apply (see
+  [Known gaps](#known-gaps)), and no `rehype-raw`/`rehype-sanitize` either, so
+  raw HTML in a printed markdown document comes out as escaped text.
+  The app CSS is inlined by
   `collectAppStyles`, see [Style collection](#style-collection). It is inlined,
   not linked, because the desktop print window has no origin to resolve a
   relative `href` against. The `<html>` tag has no `dark` class. Embedded
@@ -121,17 +125,18 @@ A ```mermaid fence in a Markdown preview is a diagram in place, both on screen
 and on paper. The viewer and the print builder each handle it independently,
 and neither prints the fence as code.
 
-**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:153`)
-overrides ReactMarkdown's `pre` component in one memoized `components` object,
-with `a: MarkdownLink` merged into the same object. `mermaidFenceSource`
-(`web/src/components/Preview/MarkdownViewer.tsx:28`) reads the
+**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:220`)
+overrides ReactMarkdown's `pre` component in one memoized `components` object
+(`:345`), with `a: MarkdownLink` and the image override (`img: MarkdownImage`)
+merged into the same object. `mermaidFenceSource`
+(`web/src/components/Preview/MarkdownViewer.tsx:32`) reads the
 `language-mermaid` code child, so every fence renders as the interactive
 `MermaidViewer` where the author wrote it. A non-mermaid fenced block still
 renders as `<pre>{children}</pre>`. There is no longer an `extractMermaid`
 helper or a separate `diagram` memo hoisting the first fence into a strip above
 the prose: all fences render in document order, and a document with no fence
 renders no viewer. `components` is passed to `ReactMarkdown`
-(`web/src/components/Preview/MarkdownViewer.tsx:327`).
+(`web/src/components/Preview/MarkdownViewer.tsx:543`).
 
 **Print.** `buildPrintDocument`'s markdown branch renders the prose with
 `renderToStaticMarkup`, then calls
@@ -326,7 +331,10 @@ The desktop print window's bridge rules apply to the toolbar path:
 - **Sanitizing is a removal list, not a proof.** DOMPurify's defaults decide what
   survives, and the config adds `link` (html), `foreignObject` plus its HTML
   integration point (mermaid). `img` `data:` URLs and inline `style` attributes are
-  kept, so an `<img>` loads whatever its URL points at, as it does in the viewer.
+  kept, so an `<img>` in a PRINTED document loads whatever URL that document
+  carries. It does not resolve a path on disk. The viewer is different only for
+  local files: it fetches their bytes itself and shows a blob URL, see
+  [Markdown preview: local images via /api/files/raw](markdown-local-images.md).
   The docx hyperlinks are also filtered (see [Content, not DOM](#content-not-dom)).
 - **Mermaid and SVG print on a fixed theme.** Mermaid prints on the light theme
   whatever the app theme, and mermaid's own HTML labels are printed as the
@@ -340,8 +348,18 @@ The desktop print window's bridge rules apply to the toolbar path:
 - **Font CORS unverified.** Fonts reached through the rewritten `url()` are
   fetched by the desktop print window. Whether they load across origin there
   is not checked.
-- **Relative image paths.** Markdown images with relative paths will not
-  resolve in the desktop print window, because it has no origin.
+- **Relative image paths print as written.** The VIEWER resolves a local
+  markdown image — a relative source against the markdown file's directory, an
+  absolute path, or `~/…` — through `GET /api/files/raw` and a blob URL (see
+  [Markdown preview: local images via /api/files/raw](markdown-local-images.md)).
+  PRINT does not: the builder re-renders the source with plain `ReactMarkdown`
+  and no `img` override (`printPreview.tsx:345`), so the viewer's resolution
+  never runs. A relative or local image is printed as an `<img>` whose `src` the
+  print window cannot resolve: it has no origin, so there is nothing to resolve
+  a relative path against, and it never fetches a disk path. `http(s)` sources
+  still print; `data:` sources do not — react-markdown's `defaultUrlTransform`
+  blanks any scheme outside `http(s)`/`irc(s)`/`mailto`/`xmpp`, and print passes
+  no `urlTransform` override.
 - **Document shares the bridge's JS world.** Scripts in a desktop print window
   run in the same JS world as the Wails bridge bootstrap. The sanitizer removes
   the author's scripts from every previewed document, so only the app's own

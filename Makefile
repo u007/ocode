@@ -1,4 +1,4 @@
-.PHONY: restart-app test-judges test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets htrcli-bundle up-patch up-minor
+.PHONY: signing-cert restart-app test-judges test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets htrcli-bundle up-patch up-minor version-up
 -include .env
 
 APP      := ocode
@@ -64,6 +64,11 @@ up-minor:
 	$(MAKE) install
 	$(MAKE) desktop-app
 
+# Bump only: update internal/version/version.go and the [Unreleased] changelog
+# entry. Use this when the binaries are rebuilt separately.
+version-up:
+	./scripts/bump-version.sh patch
+
 # ── Desktop (Wails v3 shell) ────────────────────────────────────────────────
 # Build the ocode-desktop binary. Requires cgo and native platform SDKs:
 #   macOS: Xcode Command Line Tools
@@ -125,6 +130,11 @@ desktop-remote-binaries: web-build prepare-htr-assets models-snapshot
 ## desktop-app: build and bundle ocode.app with remote CLIs (macOS only)
 desktop-app: desktop desktop-remote-binaries
 	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app "$(DESKTOP_REMOTE_DIR)" "$(VERSION)"
+
+## signing-cert: create the one-time self-signed signing identity (macOS only).
+## Without it every rebuild re-signs ad-hoc, which orphans TCC grants.
+signing-cert:
+	./scripts/create-dev-signing-cert.sh
 
 # prepare-htr-assets creates the archive consumed by internal/browse/cdp's
 # go:embed. It builds the sibling daemon for the selected target and copies the

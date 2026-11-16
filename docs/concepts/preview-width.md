@@ -10,7 +10,7 @@ tags:
   - paper width
   - localStorage
   - typography
-timestamp: 2026-11-03T15:00:00Z
+timestamp: 2026-11-16T02:57:20Z
 ---
 # Markdown preview: persisted paper-width reading column
 
@@ -28,7 +28,7 @@ Implementation lives in `web/src/lib/previewWidth.ts`, with the control in
 `web/src/components/Preview/PreviewWidthMenu.tsx`.
 
 The toolbar row that holds the width control now also carries the shared
-`"Find in document"` button (`MarkdownViewer.tsx:303`), so above the scroller
+`"Find in document"` button (`MarkdownViewer.tsx:532`), so above the scroller
 there is one slim header row of per-document actions (width menu, find, and the
 host-supplied print/preview buttons). Find itself — engine, overlay and shortcut
 gate — is documented in [preview-find.md](preview-find.md); it does not affect
@@ -81,7 +81,7 @@ Files-tab SPLIT view renders the same column in a pane the user can drag down to
 F4/folio is 210 mm wide — identical to A4 — and US folio shares Letter's
 width. With width-only presets, a separate Folio entry would render
 pixel-identically to A4, so F4 is folded into the A4 entry instead. The menu
-label reads `A4 / F4 (210 mm)` (`previewWidth.ts:149`). A page-height /
+label reads `A4 / F4 (210 mm)` (`previewWidth.ts:151`). A page-height /
 page-break rendering was considered and explicitly declined by the user; it is
 the only way to tell F4 apart from A4, and it was not built.
 
@@ -89,21 +89,21 @@ the only way to tell F4 apart from A4, and it was not built.
 
 1. **`.prose` keeps `max-w-none`; the measure lives on a child wrapper.**
    `@tailwindcss/typography` sets `.prose { max-width: 65ch }`. The scroller
-   must stay neutralised (`MarkdownViewer.tsx:324`:
+   must stay neutralised (`MarkdownViewer.tsx:553`:
    `relative prose prose-sm max-w-none …`), and the 816/794 px measure is
    carried by `previewColumnClass()` on the inner wrapper
-   (`MarkdownViewer.tsx:326`). Don't merge the two: a 65ch cap on the scroller
+   (`MarkdownViewer.tsx:555`). Don't merge the two: a 65ch cap on the scroller
    wins over any child width. The original `max-w-none` existed to fix a 65ch
    right-gutter bug and that guard stays.
 
-   The scroller is also `relative` + `tabIndex={0}` (`MarkdownViewer.tsx:323-324`)
+   The scroller is also `relative` + `tabIndex={0}` (`MarkdownViewer.tsx:549-565`)
    because the find overlay is an absolutely positioned child of it — see
    [preview-find.md](preview-find.md). Any restructure of this element must keep
    both: `relative` for the overlay's containing block, `tabIndex` so a click
    focuses the reader and the find shortcut gate recognises it.
 
 2. **Control appears only for markdown.** `PreviewWidthMenu` is rendered only
-   when `doc.kind === "markdown"` (`PreviewHost.tsx:431`) and
+   when `doc.kind === "markdown"` (`PreviewHost.tsx:434`) and
    `selected?.kind === "markdown"` (`PreviewTabPage.tsx:155`). Every other kind
    either ignores it (PDF/deck/image) or is code, which stays full width.
 

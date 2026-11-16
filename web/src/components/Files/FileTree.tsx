@@ -65,6 +65,7 @@ import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, sho
 import {
   ancestorDirs,
   hiddenTreeSegment,
+  isAbsoluteTreePath,
   normalizeTreePath,
   sameTreeRoot,
   treeDirOf,
@@ -1758,7 +1759,8 @@ export default function FileTree({
   // and a visible row, and each is resolved up front rather than left to fail:
   //
   //   1. the browsed root is a different folder  → switch to the tab's root
-  //      when it is one of the roots the tree can browse, otherwise say so;
+  //      when it is one of the roots the tree can browse, otherwise hand the
+  //      file to the OS file manager (it is open, so it is on this machine);
   //   2. a filter / content-search view is showing → clear the path filter and
   //      return to the plain tree (the filtered branch force-expands every node
   //      and renders a different surface, so the row is not the same element);
@@ -1773,16 +1775,48 @@ export default function FileTree({
   // into view and reports back (onRevealed), or its parent reports the miss
   // (onRevealMiss). The timeout below is only a backstop for the case where the
   // parent's node never appears at all.
+  const cancelReveal = useCallback(() => {
+    if (revealTimeoutRef.current) {
+      clearTimeout(revealTimeoutRef.current);
+      revealTimeoutRef.current = null;
+    }
+    setRevealTarget(null);
+  }, []);
+
   const failReveal = useCallback(
     (message: string) => {
-      if (revealTimeoutRef.current) {
-        clearTimeout(revealTimeoutRef.current);
-        revealTimeoutRef.current = null;
-      }
-      setRevealTarget(null);
+      cancelReveal();
       showNotice(message);
     },
-    [showNotice],
+    [cancelReveal, showNotice],
+  );
+
+  // A target this tree cannot browse is not a dead end: the file has a tab
+  // open, so it is on the local machine. Hand it to the OS file manager
+  // instead of refusing — the same action the tree's own context menu offers.
+  // Reveal is local-only (see `canReveal`), so a remote project keeps the
+  // explanation rather than opening an unrelated local path.
+  const revealOutsideTree = useCallback(
+    (req: TreeRevealRequest, root: string, message: string) => {
+      cancelReveal();
+      if (projectHost) {
+        showNotice(message);
+        return;
+      }
+      // An absolute path needs no anchor: the server then checks it against
+      // every root the file surfaces may touch (project roots, extra paths,
+      // editor grants). A root-relative one is only resolvable against the
+      // root the tab came from.
+      const projectRoot = isAbsoluteTreePath(normalizeTreePath(req.path)) ? undefined : (req.root ?? root);
+      void api
+        .revealInFileManager(req.path, projectRoot)
+        .then(() => showNotice(`Opened in ${fileManagerLabel(serverPlatform)}`))
+        .catch((err) => {
+          console.warn("[file-tree] reveal outside the tree failed:", err);
+          showNotice(message);
+        });
+    },
+    [cancelReveal, projectHost, serverPlatform, showNotice],
   );
 
   const completeReveal = useCallback((path: string) => {
@@ -1830,8 +1864,13 @@ export default function FileTree({
       if (!rootsConfigLoaded) return;
       const target = rootOptions.find((o) => sameTreeRoot(o.path, req.root));
       if (!target) {
+        // intentional: this fallback is not one-shot. A later change to any of
+        // this effect's dependencies re-runs it, so "Show in file tree" can
+        // open the file manager twice. Accepted (an extra window beats a dead
+        // end); hoist the nonce check above this branch if it becomes a
+        // nuisance.
         revealNonceRef.current = req.nonce;
-        failReveal(`${req.path} is outside the folder this tree is browsing`);
+        revealOutsideTree(req, root, `${req.path} is outside the folder this tree is browsing`);
         return;
       }
       setActiveRoot(target.path);
@@ -1844,7 +1883,7 @@ export default function FileTree({
 
     const rel = treeRelativePath(req.path, root);
     if (!rel) {
-      failReveal(`${req.path} is outside the folder this tree is browsing`);
+      revealOutsideTree(req, root, `${req.path} is outside the folder this tree is browsing`);
       return;
     }
 
@@ -1891,6 +1930,7 @@ export default function FileTree({
     treeRootKey,
     rootsConfigLoaded,
     failReveal,
+    revealOutsideTree,
     completeReveal,
   ]);
 

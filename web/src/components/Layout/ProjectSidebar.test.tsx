@@ -903,6 +903,46 @@ describe("ProjectSidebar remote hover cold-connect guard", () => {
   });
 });
 
+// ── Progressive loading ─────────────────────────────────────────────────────
+// A refresh (reconnect, focus, profile change) must never replace a list the
+// user can already see with a full spinner; only a cold start shows one.
+
+describe("ProjectSidebar progressive loading", () => {
+  const renderSidebar = () => render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+  it("keeps the loaded list visible and shows a mini indicator while refreshing", () => {
+    stateFake.projects = [project("/one", ""), project("/two", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.loading = true;
+    renderSidebar();
+    expect(screen.getByText("one")).toBeDefined();
+    expect(screen.getByText("two")).toBeDefined();
+    expect(screen.getByTestId("projects-refreshing")).toBeDefined();
+    expect(screen.queryByTestId("projects-loading")).toBeNull();
+  });
+
+  it("shows the centered spinner only before the first list arrives", () => {
+    stateFake.projects = [];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.loading = true;
+    renderSidebar();
+    expect(screen.getByTestId("projects-loading")).toBeDefined();
+    expect(screen.queryByTestId("projects-refreshing")).toBeNull();
+  });
+
+  it("drops the mini indicator once the refresh settles", () => {
+    stateFake.projects = [project("/one", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.loading = false;
+    renderSidebar();
+    expect(screen.getByText("one")).toBeDefined();
+    expect(screen.queryByTestId("projects-refreshing")).toBeNull();
+  });
+});
+
 // ── Mobile off-canvas drawer ─────────────────────────────────────────────────
 // On phones the sidebar is a fixed left drawer with a scrim, not an inline
 // column and not the 40px collapsed rail — otherwise it permanently eats a

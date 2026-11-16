@@ -11,7 +11,7 @@ tags:
   - file picker
   - truncation
   - index
-timestamp: 2026-11-10T02:53:57Z
+timestamp: 2026-11-16T02:34:00Z
 ---
 # File search result ordering: shortest path first
 
@@ -45,6 +45,8 @@ An unfiltered/empty-query list is ordered shortest-path first (segments asc, the
 
 An exact typed path that exists is pinned first (`directHit` → `filteredFiles`). It comes from `GET /api/files/stat` (`HandleFileStat`), not from the tree index, so it appears even while the index is loading or truncated. Full flow: [web-keyboard-shortcuts.md](web-keyboard-shortcuts.md) (⌘P section).
 
+The picker's **"Outside this project"** row is a SEPARATE `CommandGroup`, outside both `rankedFiles` and the `directHit` pin, and it is decided lexically (not by a score). So the shortest-path and direct-hit ordering rules on this page are unchanged by it; the grant flow is [file-editor-grants.md](file-editor-grants.md).
+
 ### Web/Desktop Files tab path filter
 `filterTreeNodes` (`web/src/components/Files/FileTree.tsx`) — keeps `scoreMatch` desc and adds a `pathSegmentCount` tiebreak. Siblings share a depth, so this is normally a no-op and preserves the dirs-first order.
 
@@ -57,8 +59,8 @@ Content-search results (TUI Ctrl+F `startContentSearchCmd`; web Content mode `co
 The web/desktop picker filters a **server-built index**, not the filesystem
 directly. `FilePicker` fetches `GET /api/files/tree?path=<project>&depth=0` once
 on open and flattens the returned tree into `tree.files` / `tree.folders`
-(`FilePicker.tsx:142`, flattened at `:151`); `rankedFiles` then filters that in-memory list
-(`FilePicker.tsx:227-239`), and `filteredFiles` pins the direct hit (`:242-245`). So the "N matches" heading counts matches *against the
+(`FilePicker.tsx:170`, flattened at `:179`); `rankedFiles` then filters that in-memory list
+(`FilePicker.tsx:258-270`), and `filteredFiles` pins the direct hit (`:273-276`). So the "N matches" heading counts matches *against the
 index*, and the index can legitimately be smaller than the project on disk for
 two independent reasons:
 
@@ -68,18 +70,18 @@ two independent reasons:
    (`handler_files.go:2026`). Once the cap is hit the walk stops, everything
    not-yet-visited is dropped, and the server sets `Truncated: true`. The picker
    then appends " — results may be incomplete (truncated)" to the heading
-   (`FilePicker.tsx:291`), and `filteredFiles` only ever sees the truncated
+   (`FilePicker.tsx:338`), and `filteredFiles` only ever sees the truncated
    subset. This is **not pagination** — there is no "next page" to scroll into;
    the missing files are simply absent from the index.
 
 2. **A row-height/virtualizer mismatch clips the rendered tail.** The virtualizer's
    `estimateSize` was `42` while the real row is `44` (`FILE_ROW_HEIGHT`,
-   `FilePicker.tsx:90`), and `virtualizer.measureElement` is *not* wired here, so
+   `FilePicker.tsx:96`), and `virtualizer.measureElement` is *not* wired here, so
    `getTotalSize()` was shorter than the real content: the last matches existed
    in the DOM but could never be scrolled into view. Fixed by making
    `estimateSize` equal the exact row height and giving the path span
    `min-w-0 truncate` so a long path can't wrap the row to 64px
-   (`FilePicker.tsx:326`).
+   (`FilePicker.tsx:373`).
 
 So a heading that says "18 matches" while scrolling reveals fewer is usually
 **reason 2** (the tail is clipped), and "18 matches" while the user believes 30

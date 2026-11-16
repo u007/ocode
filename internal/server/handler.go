@@ -1224,7 +1224,7 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			h.broadcastEvent(SSEEvent{
 				SessionID: sessionID,
 				Event:     "tool_result",
-				Data:      ToolResultEvent{Tool: "tool", CallID: m.ToolID, Output: m.Content, MCPApp: m.MCPApp},
+				Data:      ToolResultEvent{Tool: "tool", CallID: m.ToolID, Output: m.Content, DurationMs: m.ToolDurationMs, MCPApp: m.MCPApp},
 			})
 			if prompts, ok := parseQuestionAsk(m.Content); ok {
 				h.broadcastEvent(SSEEvent{

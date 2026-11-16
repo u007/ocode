@@ -891,9 +891,12 @@ function HomeApp() {
         reportActionErrorMessage(`Could not open ${path}. The server refused the path (it may not exist, or it is outside the allowed roots - try an absolute path under your home, e.g. ~/Downloads/...).`);
         return;
       }
+      // A granted FOLDER re-roots the tree, and the file case lands in this
+      // view too: a collapsed tree would hide what was just opened.
+      fileTreePane.setCollapsed(false);
       setActiveView("files");
     },
-    [openOutsideProject, projectState.activeProject],
+    [openOutsideProject, projectState.activeProject, fileTreePane.setCollapsed],
   );
 
   // Open the dialog, optionally pre-filled with a path the user clicked.
@@ -2703,6 +2706,7 @@ function HomeApp() {
         onClose={closeFilePicker}
         onOpenFile={openFileAndShow}
         onOpenFolder={(path, root) => revealPathInTree({ path, projectRoot: root, isDir: true })}
+        onOpenOutsideProject={requestOpenOutsideProject}
         projectPath={projectState.activeProject?.path}
         projectHost={projectState.activeProject?.host}
         initialQuery={filePickerQuery}

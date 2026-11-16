@@ -493,10 +493,14 @@ type Agent struct {
 	lspSeenMu   sync.Mutex
 	permissions *PermissionManager
 	activity    *ActivityTracker
-	procs       *tool.ProcessRegistry
-	runs        *AgentRunRegistry
-	stopCh      chan struct{}
-	stopMu      sync.Mutex
+	// toolStarts records when each in-flight tool call began, keyed by
+	// tool-call ID. Consulted once at tool-message stamping time; entries are
+	// consumed (LoadAndDelete) so a stale ID can never leak into a later call.
+	toolStarts sync.Map
+	procs      *tool.ProcessRegistry
+	runs       *AgentRunRegistry
+	stopCh     chan struct{}
+	stopMu     sync.Mutex
 	// toolBatchDelay is the minimum time between the model's tool-call batch
 	// being surfaced (OnMessage) and any tool in that batch actually
 	// executing, so the user can read what the model is about to call. Time
@@ -2346,6 +2350,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 		}
 
+		// Stamp elapsed times before any publishing happens: every exit
+		// path below (normal publish, or finishCancelledRound) reads the
+		// stamped results, and stamping consumes the recorded start times.
+		a.stampToolDurations(results)
 		pauseAfterResults := false
 		for ri, toolMsg := range results {
 			// Secret redaction already ran on each result's raw content at
@@ -2388,6 +2396,28 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		a.maybePostTaskDiscoveryOptimization(sig, userGoal)
 	}
 	return newMsgs, nil
+}
+
+// stampToolDurations fills ToolDurationMs on every tool-result message whose
+// call executed through handleToolCallWithImages. It consumes the recorded
+// start times, so calling it twice (publish loop + finishCancelledRound)
+// stamps each message exactly once.
+func (a *Agent) stampToolDurations(results []Message) {
+	for i := range results {
+		if results[i].Role != "tool" || results[i].ToolID == "" {
+			continue
+		}
+		// Ask-sentinel results (permission/question) carry a meaningless
+		// wall-clock: the tool is a stand-in for a human decision. Leave
+		// them unstamped so no renderer shows a bogus elapsed.
+		if tool.UnansweredAsk(results[i].Content) {
+			a.toolStarts.LoadAndDelete(results[i].ToolID)
+			continue
+		}
+		if start, ok := a.toolStarts.LoadAndDelete(results[i].ToolID); ok {
+			results[i].ToolDurationMs = time.Since(start.(time.Time)).Milliseconds()
+		}
+	}
 }
 
 // withoutTCIndices returns idx with every index that is a key of drop removed.
@@ -2437,6 +2467,10 @@ func withoutTCIndices[V any](idx []int, drop map[int]V) []int {
 // ask/permission round is unaffected because those results are produced by the
 // pauseAfterResults path, which returns through its own exit.
 func (a *Agent) finishCancelledRound(newMsgs, messages []Message, resp *Message, results []Message, published int) ([]Message, error) {
+	// Stamp here too: cancellation exits before the publish loop (or before
+	// stamping for a batch that was abandoned wholesale) still need their
+	// elapsed times. LoadAndDelete makes the second stamp a no-op.
+	a.stampToolDurations(results)
 	// published counts entries the caller already appended, so it is bounded by
 	// len(results) by construction (the only non-zero caller passes ri+1 from a
 	// range over that same slice). Clamp defensively rather than slicing out of
@@ -3904,6 +3938,9 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 // tool.ToolCancelledResult with a nil error, so the round still gets a tool
 // message for it (see finishCancelledRound).
 func (a *Agent) handleToolCallWithImages(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
+	if toolCallID != "" {
+		a.toolStarts.Store(toolCallID, time.Now())
+	}
 	text, err := a.handleToolCallWithContext(ctx, name, args, b, toolCallID)
 	// An MCP tool's image belongs to this call alone. It is taken on every
 	// path, so nothing is retained, and it is used only when the model can see

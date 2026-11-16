@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,6 +146,41 @@ func TestHandleOpenFileRevealAllowsDirectory(t *testing.T) {
 			t.Fatalf("reveal called with (%q, isDir=%v), want (%q, false)", gotPath, gotIsDir, filepath.Join(dir, "a.ts"))
 		}
 	})
+}
+
+// The Files-tab fallback for a path the tree cannot browse sends an ABSOLUTE
+// path with NO project_root. That shape must be admitted when another file
+// root still contains it (here an editor grant — the same list that carries
+// extra_allowed_paths), because no single root could anchor it.
+func TestHandleOpenFileRevealAcceptsUnanchoredAbsolutePath(t *testing.T) {
+	outside := t.TempDir()
+	file := filepath.Join(outside, "shot.png")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler()
+	h.SetWorkDir(t.TempDir())
+	h.fileGrants().add(outside, outside)
+
+	var gotPath string
+	var gotIsDir bool
+	orig := revealPathFn
+	revealPathFn = func(absPath string, isDir bool) error {
+		gotPath, gotIsDir = absPath, isDir
+		return nil
+	}
+	t.Cleanup(func() { revealPathFn = orig })
+
+	body := fmt.Sprintf(`{"path":%q,"mode":"reveal"}`, file)
+	rec := httptest.NewRecorder()
+	h.HandleOpenFile(rec, httptest.NewRequest("POST", "/api/files/open", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if gotPath != file || gotIsDir {
+		t.Fatalf("reveal called with (%q, isDir=%v), want (%q, false)", gotPath, gotIsDir, file)
+	}
 }
 
 // Regression guard: the reveal mode must not loosen the LFI containment or the

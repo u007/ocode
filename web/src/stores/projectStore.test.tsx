@@ -42,6 +42,17 @@ vi.mock("../api/client", () => ({
   },
 }));
 
+// Warm-start hydration reads the offline cache on mount; stub it so tests
+// control exactly what a cold start paints before the request settles.
+const offlineFake = vi.hoisted(() => ({ loadCachedProjects: vi.fn() }));
+vi.mock("../lib/offlineSync", () => ({
+  loadCachedProjects: offlineFake.loadCachedProjects,
+  projectCacheKey: (p: { path: string; host?: string }) =>
+    p.host ? `${p.host}::${p.path}` : p.path,
+  pruneProjectCache: vi.fn(),
+  removeProjectFromCache: vi.fn(),
+}));
+
 // The provider subscribes to the server event bus for cross-window tab sync;
 // capture handlers so tests can fire `tabs_changed` without a real stream.
 const busHandlers = vi.hoisted(() => new Map<string, (env: unknown) => void>());
@@ -81,6 +92,7 @@ beforeEach(() => {
   projectApi.getTabs.mockReset().mockResolvedValue({ projects: {} });
   projectApi.setTabs.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.duplicateProjectAsRemote.mockReset().mockResolvedValue(undefined);
+  offlineFake.loadCachedProjects.mockReset().mockResolvedValue([]);
   busHandlers.clear();
   window.localStorage.clear();
 });
@@ -262,6 +274,39 @@ describe("project metadata readiness", () => {
     await act(async () => resolve([testRemoteProject]));
 
     await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+    expect(result.current.state.projects).toEqual([testRemoteProject]);
+  });
+
+  it("paints the cached list while the first request is still in flight", async () => {
+    let resolveList!: (projects: typeof testProjectA[]) => void;
+    projectApi.listProjects.mockReturnValueOnce(new Promise((r) => { resolveList = r; }));
+    offlineFake.loadCachedProjects.mockResolvedValueOnce([{ ...testProjectA }]);
+
+    const { result } = setup();
+
+    await waitFor(() => expect(result.current.state.projects).toEqual([testProjectA]));
+    // Painted, but not trusted: terminals/agent runs still wait for the answer.
+    expect(result.current.state.loading).toBe(true);
+    expect(result.current.state.projectsStatus).toBe("loading");
+    expect(result.current.state.offline).toBe(false);
+
+    await act(async () => resolveList([{ ...testProjectA, name: "fresh" }]));
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+    expect(result.current.state.projects[0].name).toBe("fresh");
+  });
+
+  it("ignores a late cache hydrate once a trusted list is on screen", async () => {
+    projectApi.listProjects.mockResolvedValueOnce([testRemoteProject]);
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.projectsStatus).toBe("ready"));
+
+    await act(async () => {
+      result.current.dispatch({
+        type: "HYDRATE_CACHED_PROJECTS",
+        projects: [{ ...testProjectA }],
+      });
+    });
+
     expect(result.current.state.projects).toEqual([testRemoteProject]);
   });
 

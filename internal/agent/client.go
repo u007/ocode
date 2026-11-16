@@ -158,6 +158,11 @@ type Message struct {
 	// consecutive user messages. 0 = legacy/no sequence; such messages are
 	// never deduplicated.
 	UserSeq int `json:"user_seq,omitempty"`
+	// ToolDurationMs is the wall-clock time the tool call took, stamped on
+	// the tool-result message when the call finishes. UI-only: provider
+	// payloads are built from explicit fields, so it never reaches a model.
+	// 0 = not timed (e.g. the call never ran).
+	ToolDurationMs int64 `json:"tool_duration_ms,omitempty"`
 	// DisplayContent, when set, carries the FULL (untruncated) tool result for
 	// transcript/UI display. The LLM prompt always uses Content (which may be
 	// truncated by TruncateToolResult to protect the context window). This lets

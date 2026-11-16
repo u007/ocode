@@ -1,6 +1,17 @@
-import { isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  isValidElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import { api } from "../../api/client";
 import MermaidViewer from "./MermaidViewer";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
@@ -32,6 +43,175 @@ function mermaidFenceSource(children: ReactNode): string | null {
   const props = children.props as { className?: string; children?: ReactNode };
   if (!/\blanguage-mermaid\b/.test(props.className ?? "")) return null;
   return String(props.children ?? "").replace(/\n$/, "");
+}
+
+/** Image sources the browser loads itself: remote, or bytes embedded in the
+ *  document. Everything else is a file on the project's disk. */
+const WEB_IMAGE_SRC = /^(?:https?:|data:|blob:)/i;
+
+// Raw HTML in a markdown document is parsed (rehype-raw) and filtered by the
+// GitHub allowlist (rehype-sanitize), which is the default schema. A previewed
+// README is untrusted content, so the sanitizer is not optional: it drops
+// scripts, event handlers and javascript: URLs. Do NOT widen `protocols.src`
+// for `data:` images — react-markdown's urlTransform has already blanked any
+// scheme outside http(s)/irc(s)/mailto/xmpp before the sanitizer runs, so the
+// addition would be inert while reading as support in the docs.
+
+/**
+ * The project file a markdown image points at, or null when the browser can
+ * load the source by itself.
+ *
+ * A relative source resolves against the MARKDOWN FILE's directory (the
+ * CommonMark base), which is what makes `![](./shots/a.png)` work. Absolute,
+ * Windows and `~/…` sources pass through: the server owns $HOME expansion and
+ * containment, and it rejects a `..` segment outright, so the relative join
+ * normalizes those lexically first.
+ */
+export function localImagePath(docPath: string, src: string): string | null {
+  if (!src || src.startsWith("#")) return null;
+  // `//host/x` is protocol-relative (another origin), not a disk path.
+  if (WEB_IMAGE_SRC.test(src) || src.startsWith("//")) return null;
+  const bare = decodePath(src.split(/[?#]/, 1)[0] ?? "");
+  if (/^[a-zA-Z]:[\\/]/.test(bare) || bare.startsWith("\\\\")) return bare;
+  if (bare.startsWith("/") || bare.startsWith("~/")) return bare;
+  // A Windows tab path is backslash-separated; without this the split below
+  // finds no base directory and every image resolves against the project root.
+  const doc = docPath.replace(/\\/g, "/");
+  const slash = doc.lastIndexOf("/");
+  return normalizeJoin(slash === -1 ? "" : doc.slice(0, slash + 1), bare);
+}
+
+/** A markdown image source is a URL, so a space or non-ASCII file name arrives
+ *  percent-escaped. A malformed escape is used as written: the server reports
+ *  the miss instead of the viewer guessing a different path. */
+function decodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // Not a valid escape sequence — nothing was encoded.
+    return path;
+  }
+}
+
+/** Joins two path fragments and resolves "." / ".." lexically, so a request
+ *  never carries a ".." segment the server would refuse. */
+function normalizeJoin(dir: string, rel: string): string {
+  const absolute = dir.startsWith("/");
+  const out: string[] = [];
+  for (const seg of (dir + rel).split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+      else if (!absolute) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return (absolute ? "/" : "") + out.join("/");
+}
+
+/**
+ * One rendered markdown image. A local file is fetched through /api/files/raw
+ * and shown from a blob URL: a plain `<img src="/api/files/raw?…">` cannot send
+ * the Authorization header, so it 401s on /rc and every authenticated server,
+ * and a raw file path is answered by the SPA fallback (an HTML page, not an
+ * image). Foreign and embedded sources are left to the browser.
+ *
+ * A local fetch waits until the image nears the viewport. A screenshot report
+ * carries dozens of images, and the desktop webview allows ~6 concurrent
+ * connections per origin: fetching them all on mount queues the transfers and
+ * starves the session's SSE stream and polls until they drain. This bounds the
+ * proximity, not the concurrency (a band of small images still fetches as a
+ * burst); it just keeps the initial load off the whole document.
+ */
+function MarkdownImage({
+  src,
+  alt,
+  title,
+  width,
+  height,
+  path,
+  projectRoot,
+  projectHost,
+}: {
+  src?: string;
+  alt?: string;
+  title?: string;
+  width?: string | number;
+  height?: string | number;
+  path: string;
+  projectRoot?: string;
+  projectHost?: string;
+}) {
+  const local = src ? localImagePath(path, src) : null;
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const holderRef = useRef<HTMLSpanElement | null>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+
+  // No IntersectionObserver (jsdom, an ancient webview) means "load it now".
+  useEffect(() => {
+    if (local === null) return;
+    const el = holderRef.current;
+    if (el === null || typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setNearViewport(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "400px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [local]);
+
+  useEffect(() => {
+    if (local === null || !nearViewport) return;
+    let cancelled = false;
+    let objectUrl = "";
+    setUrl(null);
+    setError(null);
+    api
+      .fetchFileRaw(local, projectRoot, projectHost)
+      .then((bytes) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(new Blob([bytes]));
+        setUrl(objectUrl);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [local, nearViewport, projectRoot, projectHost]);
+
+  if (local === null) return <img src={src} alt={alt} title={title} width={width} height={height} />;
+  if (error) {
+    return (
+      <span className="text-xs text-red-400" title={local}>
+        {alt || local} (could not load: {error})
+      </span>
+    );
+  }
+  if (!url) {
+    return (
+      <span ref={holderRef} className="text-xs text-muted-foreground">
+        {alt || local}
+      </span>
+    );
+  }
+  return (
+    <span ref={holderRef} className="inline-block">
+      <img src={url} alt={alt} title={title} width={width} height={height} />
+    </span>
+  );
 }
 
 /**
@@ -162,30 +342,55 @@ export default function MarkdownViewer({
     };
   }, [revision, controlled, path, projectRoot, projectHost]);
 
+  // These renderers must keep a stable identity: React remounts a component
+  // whose TYPE changed, and a remount would revoke and refetch every image.
+  // `onOpenFile` is a new function on every PreviewHost render, so it is read
+  // through a ref instead of being a dependency.
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+
+  const renderImage = useCallback(
+    ({ src, alt, title, width, height }: ComponentProps<"img">) => (
+      <MarkdownImage
+        src={typeof src === "string" ? src : undefined}
+        alt={alt}
+        title={title}
+        width={width}
+        height={height}
+        path={path}
+        projectRoot={projectRoot}
+        projectHost={projectHost}
+      />
+    ),
+    [path, projectRoot, projectHost],
+  );
+
   // A ```mermaid fence renders its diagram where it sits in the document.
   // Overriding `pre` (not `code`) lets the diagram replace the whole <pre>
   // instead of nesting a block element inside it.
+  const renderPre = useCallback(
+    ({ children }: ComponentProps<"pre">) => {
+      const code = mermaidFenceSource(children);
+      if (code === null) return <pre>{children}</pre>;
+      return (
+        <div className="not-prose my-4 min-h-[220px] overflow-hidden rounded border border-border">
+          <MermaidViewer
+            path={path}
+            code={code}
+            projectRoot={projectRoot}
+            projectHost={projectHost}
+            onOpenFile={onOpenFileRef.current}
+            appearance={appearance}
+          />
+        </div>
+      );
+    },
+    [path, projectRoot, projectHost, appearance],
+  );
+
   const components = useMemo<Components>(
-    () => ({
-      a: MarkdownLink,
-      pre: ({ children }) => {
-        const code = mermaidFenceSource(children);
-        if (code === null) return <pre>{children}</pre>;
-        return (
-          <div className="not-prose my-4 min-h-[220px] overflow-hidden rounded border border-border">
-            <MermaidViewer
-              path={path}
-              code={code}
-              projectRoot={projectRoot}
-              projectHost={projectHost}
-              onOpenFile={onOpenFile}
-              appearance={appearance}
-            />
-          </div>
-        );
-      },
-    }),
-    [path, projectRoot, projectHost, onOpenFile, appearance],
+    () => ({ a: MarkdownLink, img: renderImage, pre: renderPre }),
+    [renderImage, renderPre],
   );
 
   // ── Tail-following (sidebar auto-scroll) ──
@@ -348,7 +553,13 @@ export default function MarkdownViewer({
         className={cn("relative prose prose-sm max-w-none min-h-0 flex-1 overflow-auto select-text outline-none", appearance !== "light" && "prose-invert")}
       >
         <div ref={columnRef} className={previewColumnClass(columnWidth)} data-preview-column={columnWidth}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{md}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+            components={components}
+          >
+            {md}
+          </ReactMarkdown>
         </div>
         <FindHighlights rects={find.rects} current={find.current} />
       </div>

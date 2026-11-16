@@ -41,6 +41,8 @@ export function bashCommandFromArgs(argsJson?: string): string {
 //   - read  -> `read <path> [offset=..] [limit=..]`
 //   - write -> `write <path>` (the JSON is dominated by the file body, and the
 //     change itself is shown by the FormatDiff result block right below)
+//   - grep/rgrep -> `grep "<pattern>"` (the pattern is the param that matters;
+//     the header's CSS truncation ellipsizes it when it overflows)
 //
 // The header composes this as `🔧 {hint}`, so the hint must not repeat the
 // leading tool glyph the TUI uses (`≫ read`, `✏ write`). Returns "" for any
@@ -111,6 +113,11 @@ export function formatToolArgsHint(tool: string, argsJson?: string): string {
       if (files.length === 0) return "apply_patch";
       if (files.length === 1) return `apply_patch ${files[0]}`;
       return `apply_patch ${files[0]} (+${files.length - 1})`;
+    }
+    case "grep":
+    case "rgrep": {
+      const p = first("pattern");
+      return p ? `${tool} "${p}"` : "";
     }
     case "skill":
     // load_skill is the registered alias (internal/tool/misc.go SkillAliasTool)

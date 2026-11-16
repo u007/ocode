@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Remote MCP OAuth Compatibility
-description: 'Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.'
+description: 'Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged. Notes that config type "http" (Streamable HTTP) uses the same remote rules.'
 tags:
   - mcp
   - oauth
@@ -9,7 +9,8 @@ tags:
   - remote
   - credentials
   - errors
-timestamp: 2026-09-25T06:31:15Z
+timestamp: 2026-11-15T11:24:38Z
+resource: internal/auth/mcp_auth.go
 ---
 # Remote MCP OAuth Compatibility
 
@@ -54,7 +55,7 @@ When a remote request comes back HTTP 401 with a `WWW-Authenticate` challenge:
 3. Perform **one** refresh-token grant with the stored client identity and refresh token (`RefreshMCPAuthTokenForServer` for URL-bound entries, `RefreshMCPAuthToken` for native/static ones).
 4. Persist the rotated token (upstream schema for URL-bound entries — see above), then **retry the original request exactly once**. A second 401 becomes `ReauthorizationRequiredError` ("the refreshed credential was rejected").
 
-Metadata and transport rules: HTTPS only (plain `http` accepted only for loopback), and **no redirects** on the remote MCP client, the metadata fetch, or the refresh grant. A rejected refresh surfaces as `ReauthorizationRequiredError` with a short generic reason — no loop, no retry storm, no dynamic-client-registration workaround. `safeRefreshError` deliberately reports only the server name and reason: never the endpoint, client identity, or any credential. Expiry timing: a URL-bound stored token is attached as-is even when expired and refreshed lazily on the 401 (discovery is required first); a native static-OAuth token refreshes eagerly at client construction when its static token URL/client are configured, and otherwise fails with a reauthorization error instead of sending an expired token.
+Metadata and transport rules: HTTPS only (plain `http` accepted only for loopback), and **no redirects** on the remote MCP client, the metadata fetch, or the refresh grant. A rejected refresh surfaces as `ReauthorizationRequiredError` with a short generic reason — no loop, no retry storm, no dynamic-client-registration workaround. `safeRefreshError` deliberately reports only the server name and reason: never the endpoint, client identity, or any credential. Expiry timing: a URL-bound stored token is attached as-is even when expired and refreshed lazily on the 401 (discovery is required first); a native static-OAuth token refreshes eagerly at client construction when its static token URL/client are configured, and otherwise fails with a reauthorization error instead of sending an expired token. A config `type: "http"` server (Streamable HTTP) is a remote client under these same rules, but it adds a session handshake and SSE reply bodies — see `docs/concepts/mcp-streamable-http-elevenlabs.md`.
 
 ## Safe HTTP errors
 
@@ -81,4 +82,5 @@ All green in `go test ./internal/auth/ ./internal/mcp/ ./internal/mcpcli/ ./inte
 
 - `docs/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md` — the approved design (scope, security rules, non-goals).
 - `docs/concepts/per-chat-mcp-toggle.md` — per-session toggle/override/cache semantics, explicitly unchanged by this fix.
+- `docs/concepts/mcp-streamable-http-elevenlabs.md` — the `type: "http"` Streamable HTTP transport and the ElevenLabs CIMD preset.
 - `docs/plugins.md` — MCP server registration from the plugin side.

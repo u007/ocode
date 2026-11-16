@@ -135,10 +135,10 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   rejected values are logged with the `GOAL` debug kind.
 - Written after every judged turn (`goalShouldResume`, `agent_session.go:1510`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
-  (`sessionSidebarMetadata`, `model.go:21331`).
+  (`sessionSidebarMetadata`, `model.go:21964`).
 - Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads
-  (`restoreSessionMetadata`, `model.go:21365`). The key is listed in `sessionOwnedMetadataKeys`
-  (`model.go:21303`), so the TUI's carry-forward copy never overwrites it.
+  (`restoreSessionMetadata`, `model.go:21998`). The key is listed in `sessionOwnedMetadataKeys`
+  (`model.go:21936`), so the TUI's carry-forward copy never overwrites it.
 
 ## Endpoints
 

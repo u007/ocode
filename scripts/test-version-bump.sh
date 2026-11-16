@@ -144,6 +144,16 @@ assert_eq '1.3.0' "$(version_value "$minor_fixture")" 'up-minor version'
 assert_contains "$minor_fixture/CHANGES.md" '**Version Bump** — 1.2.99 → 1.3.0: automated release metadata.' 'minor changelog'
 assert_eq $'install 1.3.0\ndesktop-app 1.3.0' "$(cat "$minor_fixture/make-trace")" 'up-minor command order'
 
+# version-up bumps the patch component and stops: no recursive make, so the
+# binaries are left for the caller to rebuild.
+bump_only_fixture="$(new_fixture bump-only 1.2.99 '1.2.97 → 1.2.99')"
+write_make_stubs "$bump_only_fixture"
+run_make_target "$bump_only_fixture" version-up > "$TMP/bump-only.log" 2>&1 \
+  || fail "version-up fixture failed: $(cat "$TMP/bump-only.log")"
+assert_eq '1.2.100' "$(version_value "$bump_only_fixture")" 'version-up version'
+assert_contains "$bump_only_fixture/CHANGES.md" '**Version Bump** — 1.2.99 → 1.2.100: automated release metadata.' 'version-up changelog'
+[[ ! -e "$bump_only_fixture/make-trace" ]] || fail 'version-up must not run install or desktop-app'
+
 # Decimal-string increment avoids shell integer overflow for valid large
 # semver components.
 large_version='1.2.999999999999999999999999'

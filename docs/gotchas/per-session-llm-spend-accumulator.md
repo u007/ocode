@@ -39,7 +39,7 @@ the web CoworkSidebar token block, StatusBar row 2, and StatusPanel.
 The session metadata key for spend is `"spend"` — deliberately the same key the
 TUI's `sidebarTelemetry` writes via
 `(*sidebarTelemetry).metadata()` and `telemetryFromSessionMetadata`
-(`internal/tui/model.go:~20041/20076`). An earlier implementation used a
+(`internal/tui/model.go:~20051/20086`). An earlier implementation used a
 private `"spent_usd"` key; do not reintroduce it — it splits the total
 between TUI and server.
 

@@ -437,7 +437,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21920`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21936`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## Advisor reviews are decided by the advisor gate (`advisor_gate`)
 

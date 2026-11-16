@@ -1684,6 +1684,15 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       {/* Header */}
       <div className="flex items-center gap-1 px-2.5 h-12 shrink-0 border-b border-border/60">
         <h2 className="flex-1 min-w-0 px-1 text-[13px] font-semibold tracking-tight text-foreground truncate">Projects</h2>
+        {state.loading && state.projects.length > 0 && (
+          // A refresh (reconnect, focus, profile change) keeps the loaded list
+          // on screen and shows this instead of replacing it with a spinner.
+          <Loader2
+            data-testid="projects-refreshing"
+            aria-label="Refreshing projects"
+            className="w-3.5 h-3.5 shrink-0 text-muted-foreground animate-spin"
+          />
+        )}
         {onOpenDashboard && (
           // The Pulse dashboard is GLOBAL — it spans every project — so it is a
           // sibling of the project list, not an action inside it. A hamburger
@@ -1720,8 +1729,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
 
       {/* Project list */}
       <ScrollArea className="flex-1 [&_[data-radix-scroll-area-viewport]>div]:w-full [&_[data-radix-scroll-area-viewport]>div]:table-fixed">
-        {state.loading ? (
-          <div className="flex items-center justify-center py-12">
+        {state.loading && state.projects.length === 0 ? (
+          <div data-testid="projects-loading" className="flex items-center justify-center py-12">
             <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
           </div>
         ) : state.projects.length === 0 ? (

@@ -281,6 +281,7 @@ function MessageBubble({
       <ToolBlock
         tool={toolName || "result"}
         output={message.content}
+        durationMs={message.tool_duration_ms}
         images={message.images}
         highlight={highlight}
         callKey={`${baseKey}:call:${message.tool_call_id ?? "result"}`}

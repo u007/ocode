@@ -16,7 +16,7 @@ tags:
   - postmessage
   - keyboard
   - shortcuts
-timestamp: 2026-11-04T07:46:00Z
+timestamp: 2026-11-16T02:56:47Z
 ---
 # Preview find: shared FindBar, DOM and PDF engines, iframe agent
 
@@ -38,7 +38,7 @@ Preview tab can search its **rendered** text — not the raw source.
 | plain text / code / media / office-deck | no | no find bar is rendered |
 
 Find is **not** part of `FileTabContent`'s toolbar (which holds Print at `FileTabContent.tsx:305` and the
-light/dark toggle at `FileTabContent.tsx:220`). Each viewer owns its own header row
+light/dark toggle at `FileTabContent.tsx:218`). Each viewer owns its own header row
 with a visible **Find** button (`aria-label="Find in document"`), so availability
 follows the viewer, not the routing layer. See
 [../gotchas/files-tab-preview-only-routing.md](../gotchas/files-tab-preview-only-routing.md)
@@ -65,19 +65,19 @@ everywhere so the toolbar, shortcuts and tests stay uniform
 - Keys owned by the input (`FindBar.tsx:46-55`): `Enter` → next, `Shift+Enter` →
   previous, `Escape` → close. `F3`/`Shift+F3` are handled by the viewer-level
   window listener.
-- Walking wraps at both ends (`useDomFind.ts:63`; the frame agent mirrors it).
+- Walking wraps at both ends (`useDomFind.ts:66`; the frame agent mirrors it).
 
 The bar is rendered only while `find.active`. **Closing keeps the query**, so
 reopening re-searches immediately: `hide()` clears only active/rects/matches
-(`useDomFind.ts:50-56`) and active/pageRects (`usePdfFind.ts:64-68`) while
+(`useDomFind.ts:50-56`) and active/pageRects (`usePdfFind.ts:65-68`) while
 leaving `query` intact; the search effect is keyed on `active`, so reopening
 re-runs it. Nothing here is persisted — see Limits.
 
 Each viewer also puts a slim header row above its scroller with a
 `"Find in document"` button (`title="Find (Ctrl/⌘ F)"`), because the keyboard
 shortcut is not discoverable on its own and may be claimed by another surface:
-`MarkdownViewer.tsx:267`, `DocxViewer.tsx:80`, `HtmlViewer.tsx:57`,
-`PdfViewer.tsx:1130`.
+`MarkdownViewer.tsx:532`, `DocxViewer.tsx:101`, `HtmlViewer.tsx:64`,
+`PdfViewer.tsx:1164`.
 
 ## Engine A — DOM text (Markdown and Word)
 
@@ -86,7 +86,7 @@ Three pieces, all in `web/src/components/Preview/`:
 1. **`findDom.ts` — pure index/range math; never mutates the DOM.**
    - `buildTextIndex(root)` (`findDom.ts:70`) flattens the rendered tree into one
      string plus a `{node, start, len}` map back to every `Text` node
-     (`findDom.ts:16-19`).
+     (`findDom.ts:17-19`).
    - **Block boundaries emit `\n`** before and after the element
      (`findDom.ts:87`, `findDom.ts:89`), and `SCRIPT`/`STYLE`/`NOSCRIPT`/`TEMPLATE`
      are skipped (`SKIP_TAGS`, `findDom.ts:63`). A query therefore cannot match
@@ -124,24 +124,24 @@ Because the layer is inside the scroller and the rects are content-relative, the
 overlay scrolls with the document and needs **no scroll handler**. That is why
 the scroller must be `relative` and also gets `tabIndex={0}` so a click focuses
 it (focus feeds the shortcut gate): Markdown
-`MarkdownViewer.tsx:323-324`, Word `DocxViewer.tsx:115`.
+`MarkdownViewer.tsx:549-565`, Word `DocxViewer.tsx:118`.
 
 Both scrollers are `position: relative` + `tabIndex={0}`:
 
-- Markdown: `MarkdownViewer.tsx:86` (`useDomFind` with `textRootRef =
-  columnRef`, `version = md`), scroller `MarkdownViewer.tsx:320-324`, column
-  wrapper `:326`, highlights `:329`.
-- Word: `DocxViewer.tsx:29` (`version = docVersion`), scroller
-  `DocxViewer.tsx:115`, highlights `DocxViewer.tsx:119`.
+- Markdown: `MarkdownViewer.tsx:268` (`useDomFind` with `textRootRef =
+  columnRef`, `version = md`), scroller `MarkdownViewer.tsx:549-565`, column
+  wrapper `:555`, highlights `:564`.
+- Word: `DocxViewer.tsx:30` (`version = docVersion`), scroller
+  `DocxViewer.tsx:118`, highlights `DocxViewer.tsx:122`.
 
 **Word gotcha:** `docx-preview` writes the body asynchronously. `docVersion`
-(`DocxViewer.tsx:25`) is bumped only after `renderAsync` resolves
-(`DocxViewer.tsx:62`), and `useDomFind` keys its index on it — without that bump
+(`DocxViewer.tsx:26`) is bumped only after `renderAsync` resolves
+(`DocxViewer.tsx:65`), and `useDomFind` keys its index on it — without that bump
 the first find indexes an empty body and reports 0 matches.
 
 `useDomFind` is told to stay out of the way of non-document modes via
 `enabled` — e.g. Markdown passes `!forceEdit && !isBinary`
-(`MarkdownViewer.tsx:75`), so raw-source editing and binary files do not search
+(`MarkdownViewer.tsx:268`), so raw-source editing and binary files do not search
 rendered prose.
 
 ## Engine B — PDF (`usePdfFind.ts`)
@@ -155,7 +155,7 @@ over all pages, and `runRef` generation guards (`usePdfFind.ts:29`,
 (`renderTick`) and falls back to `onPageChange` when the current match is on an
 unrendered page.
 
-`PdfViewer` renders the shared `FindBar` (`PdfViewer.tsx:1133`) and imports
+`PdfViewer` renders the shared `FindBar` (`PdfViewer.tsx:1167`) and imports
 `isEditableTarget` from `findDom.ts` (`PdfViewer.tsx:10`). Full detail of the PDF
 engine, zoom and print/download lives in
 [pdf-viewer-zoom-find.md](pdf-viewer-zoom-find.md).
@@ -163,14 +163,14 @@ engine, zoom and print/download lives in
 ## Engine C — HTML iframe (postMessage agent)
 
 The HTML preview renders in `sandbox="allow-scripts"`
-(`HtmlViewer.tsx:78`) **without** `allow-same-origin`, so it is an opaque origin
+(`HtmlViewer.tsx:85`) **without** `allow-same-origin`, so it is an opaque origin
 and the parent cannot read its DOM (`useIframeFind.ts:11-16`). Find therefore
 travels inside the document:
 
 - `htmlFindAgent()` (`htmlFindAgent.ts:29`) installs the agent;
   `buildHtmlFindSrcDoc` (`htmlFindAgent.ts:319`) serializes it with
   `htmlFindAgent.toString()` and injects it before `</body>` into the `srcDoc`
-  (`HtmlViewer.tsx:29`).
+  (`HtmlViewer.tsx:31`).
 - **The agent must be fully self-contained.** `htmlFindAgent.toString()` is the
   entire program that runs in the frame: any module-scope identifier (a shared
   constant, an imported helper) survives typechecking and becomes an undefined
@@ -181,8 +181,8 @@ travels inside the document:
 - Protocol constants are module exports for the parent and duplicated literals
   inside the agent: `__ocodeFind` (request), `__ocodeFindResult`
   (`{count, current}`), `__ocodeFindReady` (`htmlFindAgent.ts:21-23`, documented
-  `:11-15`). Actions are `search` (query + both toggles), `step` (dir ±1) and
-  `close` (`useIframeFind.ts:47-54`).
+  `:11-15`). Actions are `search` (query + both toggles, `useIframeFind.ts:67-72`),
+  `step` (dir ±1, `:112`) and `close` (`:100`).
 - `useIframeFind` (`useIframeFind.ts:18`) owns the bar state. One effect re-sends
   the search whenever the bar opens, the query/options change, or the frame
   regenerates (`useIframeFind.ts:62-73`), because every debounced `srcDoc` edit
@@ -206,7 +206,7 @@ production check.
 ## Highlight overlay contract
 
 All four surfaces use the same colour language: **yellow = every match, orange =
-the current match**. PDF paints page-relative divs (`PdfViewer.tsx:1240`);
+the current match**. PDF paints page-relative divs (`PdfViewer.tsx:1270`);
 Markdown/Word paint content-relative divs inside the scroller; HTML paints
 document-coordinate divs inside the frame. Only one engine ever owns a surface,
 so the layers never stack.
@@ -228,8 +228,8 @@ open **both** bars — and hidden keep-alive panes would all react at once. Two
 gate shapes prevent that:
 
 - **PDF: only the visible viewer attaches the listener.** The effect returns
-  early unless the `active` prop (`PdfViewer.tsx:180`) says this viewer is
-  the visible one (`PdfViewer.tsx:914`), so N mounted-but-hidden PDF panes cannot
+  early unless the `active` prop (`PdfViewer.tsx:181`) says this viewer is
+  the visible one (`PdfViewer.tsx:948`), so N mounted-but-hidden PDF panes cannot
   race on F3. PDF is the documented exception: it does **not** use
   `previewWantsFindShortcut` because a hidden pane is already known from the
   host. It still guards editable targets.
@@ -241,8 +241,8 @@ gate shapes prevent that:
      inside it, **or** `root.matches(":hover")` (the `:hover` probe is wrapped in
      try/catch — hover is a bonus, not a gate).
 
-  Call sites: `MarkdownViewer.tsx:264-280` (gate `:268`), `DocxViewer.tsx:77-93`
-  (gate `:81`), `HtmlViewer.tsx:36-52` (gate `:40`).
+  Call sites: `MarkdownViewer.tsx:484-500` (gate `:488`), `DocxViewer.tsx:80-96`
+  (gate `:84`), `HtmlViewer.tsx:43-59` (gate `:47`).
 
 `isEditableTarget` (`findDom.ts:158`) keeps native browser find inside
 `input`/`textarea`/`select`/contenteditable. The visible per-viewer **Find**

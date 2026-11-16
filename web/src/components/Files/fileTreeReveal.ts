@@ -53,12 +53,12 @@ export function normalizeTreePath(path: string): string {
 }
 
 /** True for `/abs/path` and `C:/abs/path` (post-normalization forms). */
-function isAbsoluteTreePath(path: string): boolean {
+export function isAbsoluteTreePath(path: string): boolean {
   return path.startsWith("/") || isWindowsTreePath(path);
 }
 
 /** True for a Windows drive-rooted path (`C:/proj`). */
-function isWindowsTreePath(path: string): boolean {
+export function isWindowsTreePath(path: string): boolean {
   return /^[a-z]:\//i.test(path);
 }
 

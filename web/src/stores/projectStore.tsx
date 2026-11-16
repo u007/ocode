@@ -94,6 +94,7 @@ export type ProjectAction =
    *  host, since a local and a remote project can share a path. */
   | { type: "REMOVE_PROJECT"; path: string; host?: string }
   | { type: "SET_CACHED_PROJECTS"; projects: Project[]; offline?: boolean }
+  | { type: "HYDRATE_CACHED_PROJECTS"; projects: Project[] }
   | { type: "SET_PROJECTS_ERROR"; offline?: boolean }
   | { type: "SET_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_PROJECT"; project: Project | null }
@@ -244,6 +245,15 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         projectsStatus: state.projectsStatus === "ready" ? "ready" : "error",
         offline: action.offline ?? true,
       };
+    case "HYDRATE_CACHED_PROJECTS":
+      // Paint the last-known list from the offline cache while the first
+      // request is still in flight, so a cold start never blanks the sidebar.
+      // Only before any list is on screen: a server answer (even an empty one)
+      // always wins, so a late cache read cannot resurrect a deleted project or
+      // roll back a fresher list. `loading`/`projectsStatus` stay untouched so
+      // terminals and agent runs still wait for trusted metadata.
+      if (!state.loading || state.projects.length > 0) return state;
+      return { ...state, projects: action.projects };
     case "SET_PROJECTS_ERROR":
       return {
         ...state,
@@ -933,10 +943,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   // Load the saved project list once on mount so the sidebar is populated on
   // startup (previously only add/remove re-fetched, leaving the list empty).
+  // The offline cache is painted as soon as it is read, so a cold start shows
+  // the last-known list instead of a spinner while the request is in flight.
   useEffect(() => {
+    void loadCachedProjects().then((cached) => {
+      if (cached.length > 0) {
+        dispatch({ type: "HYDRATE_CACHED_PROJECTS", projects: cached });
+      }
+    });
     refreshProjects();
     refreshGroups();
-  }, [refreshProjects, refreshGroups]);
+  }, [refreshProjects, refreshGroups, dispatch]);
 
   // Retry project loading when connectivity returns, so the offline banner
   // clears after the server comes back.

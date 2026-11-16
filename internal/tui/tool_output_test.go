@@ -242,7 +242,7 @@ func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
 		styles:   ApplyThemeColors("tokyonight"),
 	}
 
-	collapsed := m.renderToolOutputBox("read", content, false)
+	collapsed := m.renderToolOutputBox("read", content, false, 0)
 	if got := strings.Count(collapsed, "alpha line"); got != toolOutputPreviewLines {
 		t.Fatalf("expected collapsed read output box to show %d lines, got %d:\n%s", toolOutputPreviewLines, got, collapsed)
 	}
@@ -250,7 +250,7 @@ func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
 		t.Fatalf("expected collapsed read output box to show only the last %d lines:\n%s", toolOutputPreviewLines, collapsed)
 	}
 
-	expanded := m.renderToolOutputBox("read", content, true)
+	expanded := m.renderToolOutputBox("read", content, true, 0)
 	if got := strings.Count(expanded, "alpha line"); got != len(lines) {
 		t.Fatalf("expected expanded read output box to show %d lines, got %d:\n%s", len(lines), got, expanded)
 	}

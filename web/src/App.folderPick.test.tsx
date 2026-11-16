@@ -174,15 +174,24 @@ vi.mock("./components/ui/dialog", () => ({
   DialogClose: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
 }));
 
-// The picker's own UI is stubbed: it only exposes the one callback this suite
-// drives, exactly as the real picker calls it (a root-relative path plus the
-// project root). Opening goes through the REAL global ctrl/cmd+P keydown.
+// The picker's own UI is stubbed: it only exposes the callbacks this suite
+// drives, exactly as the real picker calls them. Opening goes through the REAL
+// global ctrl/cmd+P keydown.
 vi.mock("./components/Files/FilePicker", () => ({
-  default: (props: { open: boolean; onOpenFolder?: (path: string, root?: string) => void }) =>
+  default: (props: {
+    open: boolean;
+    onOpenFolder?: (path: string, root?: string) => void;
+    onOpenOutsideProject?: (path: string) => void;
+  }) =>
     props.open ? (
-      <button type="button" onClick={() => props.onOpenFolder?.("src/app", "/local")}>
-        pick folder
-      </button>
+      <>
+        <button type="button" onClick={() => props.onOpenFolder?.("src/app", "/local")}>
+          pick folder
+        </button>
+        <button type="button" onClick={() => props.onOpenOutsideProject?.("/private/tmp/x/scratchpad")}>
+          pick outside
+        </button>
+      </>
     ) : null,
 }));
 
@@ -255,5 +264,25 @@ describe("ctrl/cmd+P folder pick (App wiring)", () => {
     expect(
       (document.querySelector('[role="tabpanel"]') as HTMLElement | null)?.dataset.state,
     ).toBe("active");
+  });
+
+  // The picker's outside-project row is the ONLY entry point that can reach a
+  // path the tree does not index, so the wiring between that row and the grant
+  // dialog is worth an App-level test: a dropped or mis-seeded callback leaves
+  // the row inert and the pasted path unreachable again. The picker and the
+  // dialog are stubbed/real respectively; the picker is stubbed above.
+  it("ctrl/cmd+P outside-project row seeds the grant dialog with the typed path", async () => {
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(row("src")).toBeTruthy());
+
+    fireEvent.keyDown(window, { key: "p", ctrlKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "pick outside" }));
+
+    const input = (await screen.findByLabelText("File path")) as HTMLInputElement;
+    expect(input.value).toBe("/private/tmp/x/scratchpad");
   });
 });
