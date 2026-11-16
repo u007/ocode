@@ -38,6 +38,14 @@ import (
 // tag and xpath), and every later use re-finds the daemon ref and refuses the
 // action when the element differs. See htrRefStore.
 
+// htrLoadMaxWait bounds AwaitLoad's wait for a load to finish, and
+// htrLoadSameURLWait is how long it waits for the URL to change before it accepts
+// a complete page as the same one. Both are vars so tests can shorten them.
+var (
+	htrLoadMaxWait     = 5 * time.Second
+	htrLoadSameURLWait = time.Second
+)
+
 const (
 	// htrDefaultTimeoutMs is the daemon's own command timeout when the caller's
 	// context has no deadline. It matches the daemon's default.
@@ -49,6 +57,8 @@ const (
 	htrRefStoreCap = 20000
 	// htrFieldsMax caps the fields in one fill_form call.
 	htrFieldsMax = 50
+	// htrLoadPollInterval is how often AwaitLoad reads the page.
+	htrLoadPollInterval = 100 * time.Millisecond
 	// htrNetworkWindowMs is the longest network capture window the client's
 	// extension arms for a tab. Capture stops when the window closes.
 	htrNetworkWindowMs = 120000
@@ -987,6 +997,71 @@ func (s htrSurface) Forward(ctx context.Context) error {
 func (s htrSurface) Reload(ctx context.Context) error {
 	_, err := s.command(ctx, htrCommand{Action: "reload"})
 	return err
+}
+
+// DocumentID is the page URL: the daemon has no document id, so the URL is the only identity, and it cannot see a same-URL replacement.
+func (s htrSurface) DocumentID(ctx context.Context) (string, error) {
+	p, err := s.page(ctx)
+	if err != nil {
+		return "", err
+	}
+	return p.URL, nil
+}
+
+// htrPageChanged reports whether url is a different page from before. An empty
+// URL is no page yet, and a new tab's about:blank is not a load.
+func htrPageChanged(url, before string) bool {
+	if url == "" || url == before {
+		return false
+	}
+	return before != "" || url != "about:blank"
+}
+
+// AwaitLoad polls the tab until the load it started has finished. A reload keeps
+// the URL, so it waits only for readyState "complete": that is LoadUnconfirmed,
+// because the daemon has no document identity. Any other action waits for the URL
+// to change from before; a complete page after that is LoadSettled. A complete page
+// whose URL has not changed by htrLoadSameURLWait is LoadUnconfirmed, a same-URL
+// navigation or a slow commit. Past htrLoadMaxWait, a URL that changed but is not
+// complete is LoadPending, and so is a URL that never changed and never completed.
+func (s htrSurface) AwaitLoad(ctx context.Context, before string, mustReplace bool) (cdp.LoadState, error) {
+	start := time.Now()
+	deadline := start.Add(htrLoadMaxWait)
+	sameURLDeadline := start.Add(htrLoadSameURLWait)
+	changed := false
+	for {
+		page, err := s.page(ctx)
+		if err != nil {
+			return cdp.LoadPending, err
+		}
+		now := time.Now()
+		if mustReplace {
+			if page.ReadyState == "complete" {
+				return cdp.LoadUnconfirmed, nil
+			}
+		} else {
+			// One read gives the URL and readyState together, so a complete state is
+			// always the state of the page whose URL was just checked.
+			if !changed && htrPageChanged(page.URL, before) {
+				changed = true
+			}
+			if changed {
+				if page.ReadyState == "complete" {
+					return cdp.LoadSettled, nil
+				}
+			} else if page.ReadyState == "complete" && !now.Before(sameURLDeadline) {
+				return cdp.LoadUnconfirmed, nil
+			}
+		}
+		if !now.Before(deadline) {
+			return cdp.LoadPending, nil
+		}
+		select {
+		case <-ctx.Done():
+			return cdp.LoadPending, ctx.Err()
+		case <-time.After(htrLoadPollInterval):
+		}
+	}
 }
 
 // Snapshot renders frame's tree in the CDP path's line format, with the refs that

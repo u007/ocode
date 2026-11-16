@@ -83,6 +83,7 @@ export default function ExcelViewer({
   const [savedRevision, setSavedRevision] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const baseBytesRef = useRef<ArrayBuffer | null>(null);
   const baseHashRef = useRef<string>("");
@@ -417,6 +418,39 @@ export default function ExcelViewer({
         <div ref={containerRef} className="absolute inset-0" />
         {sheet.isEmpty && <div className="absolute inset-0 bg-background p-4 text-xs text-muted-foreground">(empty sheet)</div>}
       </div>
+      {book.images.length > 0 && (
+        <div className="shrink-0 border-t border-border px-2 py-1">
+          <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+            Images in this workbook (workaround: the grid cannot render them in place)
+          </div>
+          <div className="flex flex-wrap gap-2 overflow-y-auto" style={{ maxHeight: 160 }}>
+            {book.images
+              .filter((img) => img.sheetName === sheet.name)
+              .map((img, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  title={`Image anchored at column ${img.fromCol + 1}, row ${img.fromRow + 1}`}
+                  onClick={() => setEnlargedImage(img.dataUrl)}
+                  className="shrink-0 rounded border border-border p-0.5 hover:bg-muted"
+                >
+                  <img src={img.dataUrl} alt="" style={{ maxHeight: 120, maxWidth: 200 }} />
+                </button>
+              ))}
+            {book.images.filter((img) => img.sheetName === sheet.name).length === 0 && (
+              <span className="text-[10px] text-muted-foreground">No images on this sheet.</span>
+            )}
+          </div>
+        </div>
+      )}
+      {enlargedImage !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setEnlargedImage(null)}
+        >
+          <img src={enlargedImage} alt="" style={{ maxHeight: "90vh", maxWidth: "90vw" }} />
+        </div>
+      )}
       <ConfirmDialog
         open={confirmOpen}
         title="Save spreadsheet?"

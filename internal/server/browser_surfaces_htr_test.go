@@ -24,8 +24,11 @@ import (
 // htrStub is a stand-in for the htrcli daemon. answer decides each command's
 // result: a non-empty error text makes the command fail the way the daemon does.
 type htrStub struct {
-	tabs   []htrTab
-	page   htrPage
+	tabs []htrTab
+	page htrPage
+	// pages, when non-empty, are the answers the next /api/page reads return, in
+	// order, before page. A test scripts a load by queuing the page as it changes.
+	pages  []htrPage
 	png    []byte
 	answer func(cmd htrCommand) (any, string)
 	// events answers GET /api/events by kind: the whole envelope data of each.
@@ -102,7 +105,13 @@ func (st *htrStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		st.mu.Unlock()
 		st.reply(envelope, body.Command)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/page":
-		envelope(st.page)
+		st.mu.Lock()
+		p := st.page
+		if len(st.pages) > 0 {
+			p, st.pages = st.pages[0], st.pages[1:]
+		}
+		st.mu.Unlock()
+		envelope(p)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/screenshot":
 		envelope(base64.StdEncoding.EncodeToString(st.png))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/events":
@@ -726,6 +735,124 @@ func TestHTRSurface_TypeWithoutTargetSendsNoTarget(t *testing.T) {
 	if len(got) != 1 || got[0].Command.Action != "type" || got[0].Command.Target != nil || got[0].Command.Value != "hello" {
 		t.Fatalf("type request = %+v; want one type with no target and value hello", got)
 	}
+}
+
+// TestHTRSurface_AwaitLoadReportsUnconfirmedWhenReadyStateIsComplete: the daemon
+// has no document id, so the page URL is the identity. A reload keeps the URL, so
+// a complete readyState cannot be tied to the document the action started from.
+// It is LoadUnconfirmed, never settled.
+func TestHTRSurface_AwaitLoadReportsUnconfirmedWhenReadyStateIsComplete(t *testing.T) {
+	stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: "https://a.example/", ReadyState: "complete"}}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	ctx := context.Background()
+	if id, err := surf.DocumentID(ctx); err != nil || id != "https://a.example/" {
+		t.Fatalf("DocumentID = %q, %v; want the page URL and no error", id, err)
+	}
+	state, err := surf.AwaitLoad(ctx, "https://a.example/", true)
+	if err != nil || state != cdp.LoadUnconfirmed {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadUnconfirmed", state, err)
+	}
+}
+
+// TestHTRSurface_DocumentIDIsThePageURL pins the htr identity: the page URL, read
+// from the daemon's page state.
+func TestHTRSurface_DocumentIDIsThePageURL(t *testing.T) {
+	stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: "https://shop.example/cart", ReadyState: "loading"}}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	if id, err := surf.DocumentID(context.Background()); err != nil || id != "https://shop.example/cart" {
+		t.Fatalf("DocumentID = %q, %v; want the page URL", id, err)
+	}
+}
+
+// TestHTRSurface_AwaitLoadSettlesAfterTheURLChanges scripts a navigation: the page
+// is still the old URL and complete, then the new URL is loading, then complete.
+// Only the complete new page is settled.
+func TestHTRSurface_AwaitLoadSettlesAfterTheURLChanges(t *testing.T) {
+	const before = "https://a.example/"
+	stub := &htrStub{
+		tabs: []htrTab{{ID: 7, Browser: "firefox"}},
+		pages: []htrPage{
+			{URL: before, ReadyState: "complete"},
+			{URL: "https://b.example/", ReadyState: "loading"},
+		},
+		page: htrPage{URL: "https://b.example/", ReadyState: "complete"},
+	}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	state, err := surf.AwaitLoad(context.Background(), before, false)
+	if err != nil || state != cdp.LoadSettled {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadSettled", state, err)
+	}
+}
+
+// TestHTRSurface_AwaitLoadUnconfirmedWhenTheURLNeverChanges: a complete page whose
+// URL has not changed after the one-second wait is LoadUnconfirmed, a same-URL
+// navigation or a slow commit. The wait is the real one, so the test takes a second.
+func TestHTRSurface_AwaitLoadUnconfirmedWhenTheURLNeverChanges(t *testing.T) {
+	const same = "https://a.example/"
+	stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: same, ReadyState: "complete"}}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	start := time.Now()
+	state, err := surf.AwaitLoad(context.Background(), same, false)
+	elapsed := time.Since(start)
+	if err != nil || state != cdp.LoadUnconfirmed {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadUnconfirmed", state, err)
+	}
+	if elapsed < htrLoadSameURLWait {
+		t.Fatalf("AwaitLoad returned after %v, before the %v same-URL wait", elapsed, htrLoadSameURLWait)
+	}
+}
+
+// TestHTRSurface_AwaitLoadPendingWhenTheURLChangedButNeverCompletes shortens the
+// bound through its var, then checks that a new URL still loading at the bound is
+// LoadPending: the new page was seen, but it did not finish.
+func TestHTRSurface_AwaitLoadPendingWhenTheURLChangedButNeverCompletes(t *testing.T) {
+	prev := htrLoadMaxWait
+	htrLoadMaxWait = 300 * time.Millisecond
+	t.Cleanup(func() { htrLoadMaxWait = prev })
+	stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: "https://b.example/", ReadyState: "loading"}}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	start := time.Now()
+	state, err := surf.AwaitLoad(context.Background(), "https://a.example/", false)
+	elapsed := time.Since(start)
+	if err != nil || state != cdp.LoadPending {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadPending", state, err)
+	}
+	if elapsed < htrLoadMaxWait {
+		t.Fatalf("AwaitLoad returned after %v, before the %v bound", elapsed, htrLoadMaxWait)
+	}
+}
+
+// TestHTRSurface_AwaitLoadReloadWaitsForCompleteOnly: a reload keeps the URL, so
+// the wait ignores the URL and reports LoadUnconfirmed once the page is complete.
+func TestHTRSurface_AwaitLoadReloadWaitsForCompleteOnly(t *testing.T) {
+	stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, pages: []htrPage{{URL: "https://a.example/", ReadyState: "loading"}}, page: htrPage{URL: "https://a.example/", ReadyState: "complete"}}
+	surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+	state, err := surf.AwaitLoad(context.Background(), "https://a.example/", true)
+	if err != nil || state != cdp.LoadUnconfirmed {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadUnconfirmed", state, err)
+	}
+}
+
+// TestHTRSurface_AwaitLoadFromANewTab: a new tab has no earlier document. Its
+// about:blank is not a load, so a complete about:blank is LoadUnconfirmed after
+// the same-URL wait, and the first real URL that completes is LoadSettled.
+func TestHTRSurface_AwaitLoadFromANewTab(t *testing.T) {
+	t.Run("blank page is not a load", func(t *testing.T) {
+		stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: "about:blank", ReadyState: "complete"}}
+		surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+		state, err := surf.AwaitLoad(context.Background(), "", false)
+		if err != nil || state != cdp.LoadUnconfirmed {
+			t.Fatalf("AwaitLoad = %v, %v; want LoadUnconfirmed", state, err)
+		}
+	})
+	t.Run("first real URL settles", func(t *testing.T) {
+		stub := &htrStub{tabs: []htrTab{{ID: 7, Browser: "firefox"}}, page: htrPage{URL: "https://new.example/", ReadyState: "complete"}}
+		surf := htrSurface{h: newHTRTestSurfaces(t, stub), tab: 7, browser: "firefox"}
+		state, err := surf.AwaitLoad(context.Background(), "", false)
+		if err != nil || state != cdp.LoadSettled {
+			t.Fatalf("AwaitLoad = %v, %v; want LoadSettled", state, err)
+		}
+	})
 }
 
 func TestHTRSurface_ScrollPageSendsScrollByFromTheViewport(t *testing.T) {

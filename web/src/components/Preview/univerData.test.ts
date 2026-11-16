@@ -356,3 +356,34 @@ describe("assertWithinFileLimit", () => {
     expect(() => assertWithinFileLimit(MAX_FILE_BYTES + 1)).toThrow(/refuses files above 15 MiB/);
   });
 });
+
+describe("workbookFromExcelJs images", () => {
+  it("extracts floating images", async () => {
+    const wb = new Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    // 1x1 transparent PNG
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const conv = workbookFromExcelJs(wb);
+    expect(conv.images.length).toBe(1);
+    expect(conv.images[0].sheetName).toBe("Sheet1");
+    expect(conv.images[0].dataUrl.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("returns no images for a workbook without drawings", async () => {
+    const wb = new Workbook();
+    wb.addWorksheet("Sheet1");
+    const conv = workbookFromExcelJs(wb);
+    expect(conv.images).toEqual([]);
+  });
+
+  it("SheetJS path returns no images", () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([["a", "b"], [1, 2]]);
+    XLSX.utils.book_append_sheet(wb, sheet, "Sheet1");
+    const conv = workbookFromSheetJs(wb, true);
+    expect(conv.images).toEqual([]);
+  });
+});

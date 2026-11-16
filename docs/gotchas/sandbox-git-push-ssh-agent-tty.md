@@ -9,7 +9,7 @@ tags:
   - seatbelt
   - security
   - macOS
-timestamp: 2026-09-16T17:00:39Z
+timestamp: 2026-11-16T07:28:44Z
 ---
 # Sandbox git push — SSH agent inheritance and fail-closed TTY prompts
 
@@ -34,7 +34,7 @@ timestamp: 2026-09-16T17:00:39Z
 
 - **(b) Launch context env**: desktop `.app` (launchd), RC bridge, or web server processes may be launched WITHOUT `SSH_AUTH_SOCK` in their environment. `buildBashCmd`
   `internal/tool/bash_build.go:38` never scrubs env (foreground
-  `exec.go:222` and background `process.go:294` inherit `os.Environ()`), so if the PARENT lacks `SSH_AUTH_SOCK` the sandboxed ssh sees no agent. Diagnose by checking `SSH_AUTH_SOCK` inside the failing ocode process, not just the interactive terminal.
+  `exec.go:228` and background `process.go:294` inherit `os.Environ()`), so if the PARENT lacks `SSH_AUTH_SOCK` the sandboxed ssh sees no agent. Diagnose by checking `SSH_AUTH_SOCK` inside the failing ocode process, not just the interactive terminal.
 
 **5. User-facing fixes**: `ssh-add --apple-use-keychain ~/.ssh/<key>` in the user's own terminal before the session (agent socket IS reachable from the sandbox — verified); use a passphrase-free default key; or run the push via the unsandboxed `!` shell path (interactive PTY terminal and web `!shell` run unsandboxed per
 `CLAUDE.md`).

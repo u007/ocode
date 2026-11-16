@@ -11,7 +11,7 @@ tags:
   - tools
   - permissions
   - design-spec
-timestamp: 2026-11-01T01:00:00Z
+timestamp: 2026-11-16T07:48:45Z
 ---
 # browser_run — a Jev-driven step loop over the browser tool
 
@@ -163,8 +163,8 @@ starting points copied from fastbrowse and are to be re-tuned on that corpus.
 
 ## Code anchors (verified 2026-11-01, re-verify before commit)
 
-- `internal/server/browser_tool.go`: `browserActions` (line 57), `browserSurface` interface (74),
-  `browserArgs` (152), `ExecuteCtx` (332), `perform` (405), `PageContext` (559).
+- `internal/server/browser_tool.go`: `browserActions` (line 62), `browserSurface` interface (79),
+  `browserArgs` (171), `ExecuteCtx` (361), `perform` (464), `PageContext` (621).
 - `internal/browse/cdp/pagedom_read.go`: `Snapshot` (89), `snapshotWriter.walk` (134),
   `snapshotStates` (85). `refs.go`: `RefTable.Mint` (38). `target_agent.go`: `ReadyState` (142).
 - `internal/agent/agent.go`: `handleToolCallWithContext` (3965), `a.tools["task"]` registration

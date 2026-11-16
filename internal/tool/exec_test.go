@@ -332,3 +332,59 @@ func TestBashTool_BoundsRunawayOutput(t *testing.T) {
 			out[max(0, len(out)-200):])
 	}
 }
+
+// TestFinalizeExecResult_StopTexts pins the two stop texts: the exec timeout
+// keeps its original wording, and a caller cancellation says it was stopped
+// (not that it timed out), both followed by the processes still running.
+func TestFinalizeExecResult_StopTexts(t *testing.T) {
+	live := []string{"- pid 42, 00:05 elapsed: lsof -ti:8099"}
+
+	timedOut := finalizeExecResult("out\n", context.DeadlineExceeded,
+		&execStop{timedOut: true, timeout: 5 * time.Minute}, true)
+	if want := "Command timed out after 5m0s. Output so far:\nout\n"; timedOut != want {
+		t.Fatalf("timeout text = %q, want %q", timedOut, want)
+	}
+
+	cancelled := finalizeExecResult("out\n", context.Canceled,
+		&execStop{elapsed: 12 * time.Second, live: live}, true)
+	want := "Command was stopped after 12s, before it finished (the turn was cancelled or the server shut down; it did not time out). Output so far:\nout\n" +
+		"\n\nStill running when stopped:\n- pid 42, 00:05 elapsed: lsof -ti:8099"
+	if cancelled != want {
+		t.Fatalf("cancel text = %q, want %q", cancelled, want)
+	}
+	if strings.Contains(cancelled, "timed out") {
+		t.Fatalf("cancelled command must not claim a timeout: %q", cancelled)
+	}
+
+	if got := finalizeExecResult("out\n", nil, nil, true); got != "out\n" {
+		t.Fatalf("completed command text = %q, want its output unchanged", got)
+	}
+}
+
+// TestBashTool_ForegroundCancelListsStillRunning drives a real cancelled
+// command through the registry path and checks the result names the stop and
+// lists the sleep that was still running.
+func TestBashTool_ForegroundCancelListsStillRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c and ps")
+	}
+	reg := NewProcessRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(300*time.Millisecond, cancel)
+	args, _ := json.Marshal(map[string]interface{}{"command": "sleep 30"})
+
+	out, err := (BashTool{Procs: reg}).ExecuteStreamCtx(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx returned error: %v", err)
+	}
+	if !strings.Contains(out, "was stopped after") {
+		t.Fatalf("cancel result missing stop text: %q", out)
+	}
+	if strings.Contains(out, "timed out") {
+		t.Fatalf("cancel result claims a timeout: %q", out)
+	}
+	if !strings.Contains(out, "Still running when stopped:") || !strings.Contains(out, "sleep 30") {
+		t.Fatalf("cancel result does not list the running sleep: %q", out)
+	}
+}

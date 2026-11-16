@@ -691,3 +691,147 @@ func controlNamed(t *testing.T, page ControlsPage, label string) Control {
 	t.Fatalf("no control labelled %q in %+v", label, page.Controls)
 	return Control{}
 }
+
+// loadHandler answers the document-identity reads from docs, one per call; the
+// last entry repeats. An entry starting with "!" is a CDP error message. Every
+// other evaluation, the settle script included, answers settled.
+func loadHandler(docs []string, settled bool) func(method string, params json.RawMessage) (any, string) {
+	reads := 0
+	return func(method string, params json.RawMessage) (any, string) {
+		var p struct {
+			Expression string `json:"expression"`
+		}
+		_ = json.Unmarshal(params, &p)
+		if !strings.Contains(p.Expression, "performance.timeOrigin") {
+			return evalReplyValue(map[string]any{"settled": settled}), ""
+		}
+		doc := docs[min(reads, len(docs)-1)]
+		reads++
+		if msg, ok := strings.CutPrefix(doc, "!"); ok {
+			return nil, msg
+		}
+		return evalReplyValue(doc), ""
+	}
+}
+
+// TestAwaitLoadWaitsForNewDocumentThenSettles: the wait ends on the first identity
+// that differs from the one read before the action, then the page is settled.
+func TestAwaitLoadWaitsForNewDocumentThenSettles(t *testing.T) {
+	tgt, s := newPageTarget(t, loadHandler([]string{"doc1", "doc1", "doc2"}, true))
+	state, err := tgt.AwaitLoad(context.Background(), "doc1", false)
+	if err != nil || state != LoadSettled {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadSettled", state, err)
+	}
+	if n := s.callCount("Runtime.evaluate"); n != 4 {
+		t.Fatalf("Runtime.evaluate calls = %d, want 3 identity reads and one settle", n)
+	}
+}
+
+// TestAwaitLoadKeepsPollingThroughNavigation: a read that finds the evaluated
+// context destroyed is not an error; the next read sees the new document.
+func TestAwaitLoadKeepsPollingThroughNavigation(t *testing.T) {
+	tgt, s := newPageTarget(t, loadHandler([]string{"!Execution context was destroyed, most likely because of a navigation.", "doc2"}, true))
+	state, err := tgt.AwaitLoad(context.Background(), "doc1", true)
+	if err != nil || state != LoadSettled {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadSettled", state, err)
+	}
+	if n := s.callCount("Runtime.evaluate"); n != 3 {
+		t.Fatalf("Runtime.evaluate calls = %d, want 2 identity reads and one settle", n)
+	}
+}
+
+// TestAwaitLoadReturnsOtherErrors: an identity read that fails for any other reason
+// stops the wait with that error.
+func TestAwaitLoadReturnsOtherErrors(t *testing.T) {
+	tgt, _ := newPageTarget(t, loadHandler([]string{"!Target closed"}, true))
+	if _, err := tgt.AwaitLoad(context.Background(), "doc1", false); err == nil || !strings.Contains(err.Error(), "Target closed") {
+		t.Fatalf("AwaitLoad err = %v, want the CDP error", err)
+	}
+}
+
+// TestAwaitLoadNewDocumentNotQuietIsPending: a document that replaced the old one but
+// never goes quiet is LoadPending, and the settle ran once on the new document.
+func TestAwaitLoadNewDocumentNotQuietIsPending(t *testing.T) {
+	tgt, s := newPageTarget(t, loadHandler([]string{"doc2"}, false))
+	state, err := tgt.AwaitLoad(context.Background(), "doc1", false)
+	if err != nil || state != LoadPending {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadPending", state, err)
+	}
+	if n := s.callCount("Runtime.evaluate"); n != 2 {
+		t.Fatalf("Runtime.evaluate calls = %d, want one identity read and one settle", n)
+	}
+}
+
+// TestAwaitLoadUnchangedDocumentIsNoNewDocument: a navigation or history step that
+// never replaces the document within its 1 s wait reports LoadNoNewDocument, and
+// the old page is never settled as if it were the result of the action.
+func TestAwaitLoadUnchangedDocumentIsNoNewDocument(t *testing.T) {
+	settleCalls := 0
+	tgt, _ := newPageTarget(t, func(method string, params json.RawMessage) (any, string) {
+		var p struct {
+			Expression string `json:"expression"`
+		}
+		_ = json.Unmarshal(params, &p)
+		if strings.Contains(p.Expression, "performance.timeOrigin") {
+			return evalReplyValue("doc1"), ""
+		}
+		settleCalls++
+		return evalReplyValue(map[string]any{"settled": true}), ""
+	})
+	start := time.Now()
+	state, err := tgt.AwaitLoad(context.Background(), "doc1", false)
+	elapsed := time.Since(start)
+	if err != nil || state != LoadNoNewDocument {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadNoNewDocument", state, err)
+	}
+	if settleCalls != 0 {
+		t.Fatalf("settle ran %d times on an unchanged document, want 0", settleCalls)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("AwaitLoad without replacement took %v, want about the 1 s bound", elapsed)
+	}
+}
+
+// TestLoadStateZeroValueIsNotSettled: a LoadState that was never assigned must not
+// read as a finished load.
+func TestLoadStateZeroValueIsNotSettled(t *testing.T) {
+	var zero LoadState
+	if zero == LoadSettled || zero == LoadUnconfirmed {
+		t.Fatalf("zero LoadState = %d reads as a finished load", zero)
+	}
+}
+
+// TestAwaitLoadReplacementNeverSeenDoesNotSettle: after a reload the document must
+// change; one that never does is LoadNoNewDocument without settling the old page.
+// It waits out settleMaxWait (5 s).
+func TestAwaitLoadReplacementNeverSeenDoesNotSettle(t *testing.T) {
+	settleCalls := 0
+	tgt, _ := newPageTarget(t, func(method string, params json.RawMessage) (any, string) {
+		var p struct {
+			Expression string `json:"expression"`
+		}
+		_ = json.Unmarshal(params, &p)
+		if strings.Contains(p.Expression, "performance.timeOrigin") {
+			return evalReplyValue("doc1"), ""
+		}
+		settleCalls++
+		return evalReplyValue(map[string]any{"settled": true}), ""
+	})
+	state, err := tgt.AwaitLoad(context.Background(), "doc1", true)
+	if err != nil || state != LoadNoNewDocument {
+		t.Fatalf("AwaitLoad = %v, %v; want LoadNoNewDocument with no error", state, err)
+	}
+	if settleCalls != 0 {
+		t.Fatalf("settle ran %d times on an unchanged document, want 0", settleCalls)
+	}
+}
+
+// TestDocumentIDReadsTimeOrigin: the identity is the page's performance.timeOrigin
+// as a string.
+func TestDocumentIDReadsTimeOrigin(t *testing.T) {
+	tgt, _ := newPageTarget(t, loadHandler([]string{"1700000000123.5"}, true))
+	id, err := tgt.DocumentID(context.Background())
+	if err != nil || id != "1700000000123.5" {
+		t.Fatalf("DocumentID = %q, %v", id, err)
+	}
+}

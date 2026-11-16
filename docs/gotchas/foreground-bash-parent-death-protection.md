@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Foreground Bash Commands — Parent-Death Protection Before Start
-description: Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
+description: Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time. Also covers the stop result text after a timeout or cancel, which lists still-running processes in the command's group.
 tags:
   - bash-tool
   - process-supervisor
@@ -9,7 +9,8 @@ tags:
   - foreground-promotion
   - parent-monitor
   - WrapWithParentMonitor
-timestamp: 2026-08-26T15:28:56Z
+  - stop-result
+timestamp: 2026-11-16T07:28:44Z
 ---
 ## Foreground commands can be promoted to background mid-flight
 
@@ -17,16 +18,15 @@ timestamp: 2026-08-26T15:28:56Z
 
 ### The promotion window
 
-A bash command started in the foreground can be moved to background mid-flight through two paths:
+A bash command started in the foreground can be moved to background mid-flight through `bgRequestCh`. The only sender is `ProcessRegistry.RequestBackgroundLatest`, which closes the channel and is called only by the TUI when the user presses ctrl+b (`backgroundLatestForegroundBash` in `internal/tui/model.go`). The foreground handler then fires `<-proc.bgRequestCh`, stops streaming, and returns the background ID. No model tool and no timer sends on it.
 
-1. **Timeout promotion** — the command exceeds its timeout; the foreground handler fires `<-ctx.Done()`, kills the process group, and the command is re-registered as a background process.
-2. **`bgRequestCh` promotion** — the model explicitly requests backgrounding via `bgRequestCh`; the foreground handler fires `<-proc.bgRequestCh`, stops streaming, and returns the background ID.
+A timeout is not a promotion. When the exec timeout or a cancel fires `<-ctx.Done()`, the handler freezes the process group, lists it, kills it and returns a stop result (see "Stop result" below). Nothing re-registers the command as a background process.
 
-In both cases the command is already `cmd.Start()`ed — the process is running before the promotion decision is made.
+In the promotion case the command is already `cmd.Start()`ed — the process is running before the promotion decision is made.
 
 ### The orphan risk
 
-Before this fix, `WrapWithParentMonitor` was only applied to commands started via `run_in_background: true` (the background path at `exec.go:150`). Foreground commands were started raw:
+Before this fix, `WrapWithParentMonitor` was only applied to commands started via `run_in_background: true` (the background branch, `params.RunInBackground` at `exec.go:171`). Foreground commands were started raw:
 
 ```go
 // BEFORE — no parent-death protection for foreground commands
@@ -75,6 +75,31 @@ After wrapping, `setProcGroup(cmd)` puts the wrapped process in its own process 
 - **Parent monitor** handles ocode death detection (the polling loop).
 
 Both are needed. A process group without a parent monitor protects against ocode sending signals but not against ocode dying. A parent monitor without a process group protects against ocode death but not against orphaned grandchild processes when the direct child is killed.
+
+### Stop result: what the model is told
+
+`finalizeExecResult` (`internal/tool/exec.go`) formats the result of a stop. The `ctx.Done()` branch of the foreground handler runs on the exec timeout or on a cancel (Stop, or server shutdown), and the two read differently:
+
+- **Timeout** (`ctx.Err() == context.DeadlineExceeded`): `Command timed out after <timeout>. Output so far:` followed by the captured output.
+- **Cancel**: `Command was stopped after <elapsed>, before it finished (the turn was cancelled or the server shut down; it did not time out).` The branch used to pass `timedOut=true` unconditionally, so a cancelled command was reported as a timeout.
+
+Both append `Still running when stopped:` with one line per process still alive in the command's process group, `- pid N, <etime> elapsed: <command>`, sorted by pid, at most 8 lines, then `- and N more` if there are more.
+
+The stop branch works in a fixed order, and the order is the point:
+
+1. `freezeProcessGroup` (`internal/tool/proc_unix.go`) sends SIGSTOP to the whole group, so a runaway command cannot make progress while the list is taken.
+2. `liveGroupProcesses` lists the group with `ps -axww -o pid=,ppid=,pgid=,etime=,args=`, on its own 1 s deadline because the caller's ctx is already done. A ps failure is logged (never printed, the TUI owns the terminal) and yields no list.
+3. `killProcessGroup` sends SIGKILL. That ends the listed processes, stopped ones included.
+
+Membership is decided by parentage, not by command text. `parseLiveGroupProcesses` drops the group leader (pid equal to pgid). The monitor is the wrapper-shaped row (`( ppid=`) whose parent is the leader, because no user process is a direct child of the leader. A poll sleep is dropped only when its parent is that monitor and its argv is one of the two spellings `ParentMonitorWrap` uses, `sleep 0.50` and `sleep 0.20`. The wrapper spells them that way so a user's own `sleep 0.5` stays listed. `TestParentMonitorWrap_PollSleepSpellings` keeps the spellings and the filter in step. Each command is clipped at 200 runes. Windows (`proc_windows.go`) has no process groups: the freeze is a no-op and nothing is listed.
+
+Known limits of the list:
+- busybox `ps` accepts `args=` but rejects `-axww`. On a busybox host the list is empty (the failure is logged) and the kill still happens.
+- The filter assumes the monitor is the leader's direct child. A runner that interposes a process above the leader (a sandbox binary that forks rather than execs) moves the wrapped shell one level down, so the list then names that shell as the monitor. This is not verified on the Linux bwrap sandbox backend.
+
+On the registry path `cmd.Cancel` is a no-op (set in `BashTool.ExecuteStreamCtx` inside the `t.Procs != nil` branch). exec's default Cancel SIGKILLed only the leader the instant ctx was done. That raced the stop branch and orphaned the group before it could be frozen and listed, so the stop branch owns the whole-group kill. A command moved to background (`bgRequestCh`) keeps the old "killed when its ctx ends" behaviour through an explicit `killProcessGroup` in the goroutine that waits for it.
+
+The agent always builds a process registry (`a.procs` in `internal/agent/agent.go`), so the stop branch is the production path. A `BashTool` without a registry runs `cmd.Run` with no stop branch: a timeout is reported without the process list, and a cancel is a plain `Command failed`, because `deadlineStop` reports only the deadline.
 
 ### Integration test
 

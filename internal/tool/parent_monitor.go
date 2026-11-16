@@ -27,7 +27,10 @@ func ParentMonitorWrap(cmdline string, parentPID int) string {
 	//  - if parent dies → kill child and exit
 	//  - if child dies first → propagate its exit code
 	// The trap forwards supervisor Shutdown's SIGTERM/SIGHUP to the child.
-	return fmt.Sprintf("( ppid=%d; ( %s ) & child=$!; trap 'kill $child 2>/dev/null; sleep 0.2; kill -9 $child 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP; while kill -0 $ppid 2>/dev/null; do if ! kill -0 $child 2>/dev/null; then wait $child; exit $?; fi; sleep 0.5; done; kill $child 2>/dev/null; sleep 0.5; kill -9 $child 2>/dev/null; wait $child 2>/dev/null; exit 0 )", parentPID, cmdline)
+	// The poll sleeps are spelled "0.50"/"0.20", not "0.5"/"0.2": the process
+	// lister (monitorPollSleeps in proc_unix.go) identifies them by that exact
+	// argv, so a user's own "sleep 0.5" stays listed. Same duration.
+	return fmt.Sprintf("( ppid=%d; ( %s ) & child=$!; trap 'kill $child 2>/dev/null; sleep 0.20; kill -9 $child 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP; while kill -0 $ppid 2>/dev/null; do if ! kill -0 $child 2>/dev/null; then wait $child; exit $?; fi; sleep 0.50; done; kill $child 2>/dev/null; sleep 0.50; kill -9 $child 2>/dev/null; wait $child 2>/dev/null; exit 0 )", parentPID, cmdline)
 }
 
 // WrapWithParentMonitor is ParentMonitorWrap with parentPID = current process.

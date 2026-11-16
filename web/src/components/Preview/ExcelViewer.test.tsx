@@ -660,4 +660,79 @@ describe("ExcelViewer agent control", () => {
     expect(controller.scroll?.({ line: 1 })).toBe(false);
     expect(handle.activateRange).not.toHaveBeenCalled();
   });
+  it("shows an image thumbnail when the workbook has a drawing on the active sheet", async () => {
+    const { Workbook } = await import("exceljs");
+    const wb = new Workbook();
+    const ws = wb.addWorksheet("Stock");
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const bytes = await wb.xlsx.writeBuffer();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(bytes as ArrayBuffer);
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="img.xlsx" projectRoot="/tmp" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByAltText("")).toBeDefined());
+  });
+
+  it("shows 'No images on this sheet' when drawings are on another sheet", async () => {
+    const { Workbook } = await import("exceljs");
+    const wb = new Workbook();
+    wb.addWorksheet("Stock");
+    const ws2 = wb.addWorksheet("Cities");
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws2.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const bytes = await wb.xlsx.writeBuffer();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(bytes as ArrayBuffer);
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="img.xlsx" projectRoot="/tmp" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByText(/No images on this sheet/i)).toBeDefined());
+  });
+
+
+  it("shows an image thumbnail when the workbook has a drawing on the active sheet", async () => {
+    const { Workbook } = await import("exceljs");
+    const wb = new Workbook();
+    const ws = wb.addWorksheet("Stock");
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const bytes = await wb.xlsx.writeBuffer();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(bytes as ArrayBuffer);
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="img.xlsx" projectRoot="/tmp" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByAltText("")).toBeDefined());
+  });
+
+  it("shows 'No images on this sheet' when drawings are on another sheet", async () => {
+    const { Workbook } = await import("exceljs");
+    const wb = new Workbook();
+    wb.addWorksheet("Stock");
+    const ws2 = wb.addWorksheet("Cities");
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws2.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const bytes = await wb.xlsx.writeBuffer();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(bytes as ArrayBuffer);
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="img.xlsx" projectRoot="/tmp" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByText(/No images on this sheet/i)).toBeDefined());
+  });
+
 });

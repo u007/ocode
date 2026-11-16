@@ -194,6 +194,77 @@ func isNavigatedAway(err error) bool {
 	return false
 }
 
+// DocumentID identifies the top document. performance.timeOrigin is fixed for one
+// document, so it changes when a navigation replaces the document.
+func (t *Target) DocumentID(ctx context.Context) (string, error) {
+	var id string
+	if err := t.topValue(ctx, `String(performance.timeOrigin)`, &id); err != nil {
+		return "", fmt.Errorf("document id: %w", err)
+	}
+	return id, nil
+}
+
+// LoadState is what AwaitLoad could establish about a page load.
+type LoadState int
+
+const (
+	// LoadPending: a new document was seen, but it did not go quiet within the
+	// wait. It is the zero value, so a state that was never set reads as not
+	// finished rather than as loaded.
+	LoadPending LoadState = iota
+	// LoadSettled: a new document was seen and it went quiet.
+	LoadSettled
+	// LoadNoNewDocument: no new document was seen within the wait.
+	LoadNoNewDocument
+	// LoadUnconfirmed: the page reads as loaded, but the surface cannot tell which
+	// document it is.
+	LoadUnconfirmed
+)
+
+// AwaitLoad waits for the top document to be replaced after a navigation the
+// caller started, then for the new document to settle. before is the DocumentID
+// read before the action. A document that is still before when the wait ends is
+// LoadNoNewDocument, and the old page is never settled as if it were the new one.
+// mustReplace says the action always replaces the document (reload), so it waits
+// up to settleMaxWait for the replacement. Other actions wait 1 s, so a navigation
+// or history step that commits later is reported as LoadNoNewDocument.
+func (t *Target) AwaitLoad(ctx context.Context, before string, mustReplace bool) (LoadState, error) {
+	bound := settleMaxWait
+	if !mustReplace {
+		bound = time.Second
+	}
+	deadline := time.Now().Add(bound)
+	changed := false
+	for {
+		id, err := t.DocumentID(ctx)
+		if err != nil && !isNavigatedAway(err) {
+			return LoadPending, err
+		}
+		if err == nil && id != before {
+			changed = true
+		}
+		if changed || !time.Now().Before(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return LoadPending, ctx.Err()
+		case <-time.After(waitPollInterval):
+		}
+	}
+	if !changed {
+		return LoadNoNewDocument, nil
+	}
+	settled, err := t.Settle(ctx)
+	if err != nil {
+		return LoadPending, err
+	}
+	if settled {
+		return LoadSettled, nil
+	}
+	return LoadPending, nil
+}
+
 // Controls settles the top document, then reads its interactive controls from
 // the accessibility tree. The tree read and its refusal are the same as
 // Snapshot's. Each control gets a ref from refs, and only the kept controls mint

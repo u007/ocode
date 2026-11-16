@@ -37,6 +37,12 @@ type fakeSurfaces struct {
 	loadNote     string           // returned by Surface as the page-load note
 	closeKeys    []string         // stateKeys passed to Close, in call order
 	closeErrs    map[string]error // Close fails for these stateKeys
+	clientTabs   []htrTab         // the client browser's tabs, listed by Tabs
+}
+
+// Tabs lists the client browser's tabs, so the fake is a browserTabLister.
+func (f *fakeSurfaces) Tabs(ctx context.Context) ([]htrTab, error) {
+	return f.clientTabs, nil
 }
 
 func (f *fakeSurfaces) Close(ctx context.Context, stateKey string) error {
@@ -100,7 +106,23 @@ type fakeSurface struct {
 	uploadMsg string
 	// refSeen is the ref table each element action was handed, in call order.
 	refSeen []*cdp.RefTable
+	// docID is what DocumentID reports; docIDErr is returned by it when set.
+	// docIDHook runs inside DocumentID before it returns, and docIDBlock makes it
+	// wait for its context to end, as a stuck page's evaluate does. awaitState is
+	// the LoadState AwaitLoad reports (nil means LoadSettled), and awaitErr is
+	// returned by AwaitLoad when set.
+	docID      string
+	docIDErr   error
+	docIDHook  func()
+	docIDBlock bool
+	awaitState *cdp.LoadState
+	awaitErr   error
+	// clientTabs are the client browser's tabs, which Tabs lists.
+	clientTabs []htrTab
 }
+
+// loadStateOf points at a LoadState for fakeSurface.awaitState.
+func loadStateOf(s cdp.LoadState) *cdp.LoadState { return &s }
 
 func (f *fakeSurface) refTables() []*cdp.RefTable {
 	f.mu.Lock()
@@ -178,6 +200,29 @@ func (f *fakeSurface) Navigate(ctx context.Context, url string) error {
 func (f *fakeSurface) Back(ctx context.Context) error    { f.record("back"); return nil }
 func (f *fakeSurface) Forward(ctx context.Context) error { f.record("forward"); return nil }
 func (f *fakeSurface) Reload(ctx context.Context) error  { f.record("reload"); return nil }
+
+// DocumentID records the read and returns the configured document id.
+func (f *fakeSurface) DocumentID(ctx context.Context) (string, error) {
+	f.record("documentid")
+	if f.docIDHook != nil {
+		f.docIDHook()
+	}
+	if f.docIDBlock {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return f.docID, f.docIDErr
+}
+
+// AwaitLoad records its arguments, so a test sees which document the wait started
+// from and whether the action had to replace it.
+func (f *fakeSurface) AwaitLoad(ctx context.Context, before string, mustReplace bool) (cdp.LoadState, error) {
+	f.record(fmt.Sprintf("awaitload before=%q mustReplace=%t", before, mustReplace))
+	if f.awaitState == nil {
+		return cdp.LoadSettled, f.awaitErr
+	}
+	return *f.awaitState, f.awaitErr
+}
 
 func (f *fakeSurface) Snapshot(ctx context.Context, frame string, refs *cdp.RefTable) (string, []cdp.RefElement, error) {
 	if err := f.elementAction(refs, "snapshot frame="+frame); err != nil {
@@ -411,8 +456,9 @@ func TestBrowserTool_DefaultsToActiveTabAndRejectsForeignTab(t *testing.T) {
 	if _, err := browserCall(t, b, `{"action":"back"}`); err != nil {
 		t.Fatalf("back on active tab: %v", err)
 	}
-	if got := surf.got(); len(got) != 1 || got[0] != "back" {
-		t.Fatalf("calls = %v, want [back]", got)
+	want := []string{"documentid", "back", `awaitload before="" mustReplace=false`, "url"}
+	if got := surf.got(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", got, want)
 	}
 
 	_, err := browserCall(t, b, `{"action":"back","tab":"x1"}`)
@@ -585,7 +631,7 @@ func TestBrowserTool_TypeAndKeyAndNavigateValidation(t *testing.T) {
 	if _, err := browserCall(t, b, `{"action":"key","key":"Enter"}`); err != nil {
 		t.Errorf("key: %v", err)
 	}
-	want := []string{"type hi", "navigate https://example.com/", "key Enter"}
+	want := []string{"type hi", "documentid", "navigate https://example.com/", `awaitload before="" mustReplace=false`, "url", "key Enter"}
 	if got := surf.got(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %v, want %v", got, want)
 	}
@@ -1629,5 +1675,428 @@ func TestBrowserConsoleLineCarriesOriginOnlyWhenValid(t *testing.T) {
 		if lines[i+1] != w {
 			t.Errorf("console line %d = %q, want %q", i, lines[i+1], w)
 		}
+	}
+}
+
+// TestBrowserTool_NavigateReportsSettledLoad pins the wait around a navigate: the
+// document is read before the navigation, and the load is awaited after it.
+func TestBrowserTool_NavigateReportsSettledLoad(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/"}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	if want := "navigated tab b1 to https://example.com/. The page finished loading. The tab is at the requested URL."; out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	want := []string{"documentid", "navigate https://example.com/", `awaitload before="doc1" mustReplace=false`, "url"}
+	if got := surf.got(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+}
+
+// TestBrowserTool_NavigateReportsUnsettledLoad: a page still loading at the bound
+// is reported as such, and the navigation still counts as done.
+func TestBrowserTool_NavigateReportsUnsettledLoad(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/", awaitState: loadStateOf(cdp.LoadPending)}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	want := "navigated tab b1 to https://example.com/. The page did not finish loading within the wait: it may still be loading, so check with screenshot or text. The tab is at the requested URL."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+}
+
+// TestBrowserTool_NavigateLoadStateTexts pins the result line for every load state
+// a navigate can report, and for a load state that cannot be read.
+func TestBrowserTool_NavigateLoadStateTexts(t *testing.T) {
+	const head = "navigated tab b1 to https://example.com/"
+	cases := []struct {
+		name  string
+		state *cdp.LoadState
+		err   error
+		want  string
+	}{
+		{"settled", nil, nil, head + ". The page finished loading. The tab is at the requested URL."},
+		{"pending", loadStateOf(cdp.LoadPending), nil, head + ". The page did not finish loading within the wait: it may still be loading, so check with screenshot or text. The tab is at the requested URL."},
+		{"no new document", loadStateOf(cdp.LoadNoNewDocument), nil, head + ". No new page was seen within the wait: the tab may still show the previous page, so check with screenshot or text. The tab is at the requested URL."},
+		{"unconfirmed", loadStateOf(cdp.LoadUnconfirmed), nil, head + ". The page reads as loaded, but this browser cannot confirm it is the new page: check with screenshot or text. The tab is at the requested URL."},
+		{"unreadable", nil, errors.New("evaluate failed"), head + ". The load state could not be read: evaluate failed. The tab is at the requested URL."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			surf := &fakeSurface{docID: "doc1", url: "https://example.com/", awaitState: tc.state, awaitErr: tc.err}
+			b, _ := newTestBrowserTool(t, surf, 1568)
+			out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+			if err != nil {
+				t.Fatalf("navigate: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("result = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestBrowserTool_AwaitLoadErrorKeepsActionSuccessful: a load state that cannot
+// be read after the navigation succeeded does not fail the action.
+func TestBrowserTool_AwaitLoadErrorKeepsActionSuccessful(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/", awaitErr: errors.New("evaluate failed")}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("navigate failed after the navigation succeeded: %v", err)
+	}
+	want := "navigated tab b1 to https://example.com/. The load state could not be read: evaluate failed. The tab is at the requested URL."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if got := surf.got(); !slices.Contains(got, "navigate https://example.com/") {
+		t.Fatalf("navigation did not reach the surface: %v", got)
+	}
+}
+
+// TestBrowserTool_PreReadFailureStillNavigates: a document read that fails while the
+// action is live does not stop the navigation, which is the way out of a page that
+// is stuck. There is no baseline, so no wait runs and the line says the load state
+// is unknown.
+func TestBrowserTool_PreReadFailureStillNavigates(t *testing.T) {
+	surf := &fakeSurface{docIDErr: errors.New("target gone"), url: "https://example.com/"}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("navigate failed on a live action: %v", err)
+	}
+	want := "navigated tab b1 to https://example.com/. The load state could not be read: target gone. The tab is at the requested URL."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if got := surf.got(); strings.Join(got, "|") != "documentid|navigate https://example.com/|url" {
+		t.Fatalf("calls = %v, want the document read then the navigation, with no load wait", got)
+	}
+}
+
+// TestBrowserTool_PreReadBlockedIsBounded: a document read on a stuck page is cut
+// off at browserPreReadTimeout, and the navigation runs anyway.
+func TestBrowserTool_PreReadBlockedIsBounded(t *testing.T) {
+	surf := &fakeSurface{docIDBlock: true, url: "https://example.com/"}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	start := time.Now()
+	out, err := browserCall(t, b, `{"action":"navigate","tab":"b1","url":"https://example.com/"}`)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	want := "navigated tab b1 to https://example.com/. The load state could not be read: context deadline exceeded. The tab is at the requested URL."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if elapsed < browserPreReadTimeout || elapsed > browserPreReadTimeout+3*time.Second {
+		t.Fatalf("navigate took %v, want about the %v pre-read bound", elapsed, browserPreReadTimeout)
+	}
+	if got := surf.got(); strings.Join(got, "|") != "documentid|navigate https://example.com/|url" {
+		t.Fatalf("calls = %v, want the document read then the navigation", got)
+	}
+}
+
+// TestBrowserTool_PreReadFailureOnDoneActionDoesNotNavigate: when the action's own
+// context ends during the document read, the action returns that error and sends
+// no navigation.
+func TestBrowserTool_PreReadFailureOnDoneActionDoesNotNavigate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	surf := &fakeSurface{docIDHook: cancel, docIDErr: context.Canceled}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	_, err := b.ExecuteCtx(ctx, json.RawMessage(`{"action":"navigate","tab":"b1","url":"https://example.com/"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("navigate error = %v, want the cancelled action context", err)
+	}
+	if got := surf.got(); strings.Join(got, "|") != "documentid" {
+		t.Fatalf("calls = %v, want only the document read", got)
+	}
+}
+
+// TestBrowserTool_NavigateWithoutTabSkipsFallbackWhenClientTabsExist: with no tab
+// named and the client's browser holding tabs, navigate returns the no-tab error
+// that lists them. It does not open a tab the model never asked for.
+func TestBrowserTool_NavigateWithoutTabSkipsFallbackWhenClientTabsExist(t *testing.T) {
+	surfaces := &fakeSurfaces{surf: &fakeSurface{}, openKey: "tab:agent1", clientTabs: []htrTab{{ID: 7, Browser: "firefox"}}}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	_, err := browserCall(t, b, `{"action":"navigate","url":"https://example.com/"}`)
+	if !errors.Is(err, errNoBrowserTab) || !strings.Contains(err.Error(), "open tabs: 7") {
+		t.Fatalf("navigate error = %v, want the no-tab error listing client tab 7", err)
+	}
+	if len(surfaces.openURLs) != 0 {
+		t.Fatalf("navigate opened %v although the client has tabs", surfaces.openURLs)
+	}
+}
+
+// TestBrowserTool_HistoryAwaitsLoadAndOnlyReloadRequiresReplacement pins the
+// mustReplace flag: reload always replaces the document, back and forward need not.
+func TestBrowserTool_HistoryAwaitsLoadAndOnlyReloadRequiresReplacement(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/"}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	for _, action := range []string{"back", "forward", "reload"} {
+		out, err := browserCall(t, b, `{"action":"`+action+`","tab":"b1"}`)
+		if err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		if want := action + " on tab b1. The page finished loading. The tab is now on https://example.com."; out != want {
+			t.Fatalf("%s result = %q, want %q", action, out, want)
+		}
+	}
+	want := []string{
+		"documentid", "back", `awaitload before="doc1" mustReplace=false`, "url",
+		"documentid", "forward", `awaitload before="doc1" mustReplace=false`, "url",
+		"documentid", "reload", `awaitload before="doc1" mustReplace=true`, "url",
+	}
+	if got := surf.got(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+}
+
+// TestBrowserTool_OpenWithURLAwaitsLoad pins that open waits for the URL's load on
+// the new tab.
+func TestBrowserTool_OpenWithURLAwaitsLoad(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/"}
+	surfaces := &fakeSurfaces{surf: surf, openKey: "tab:agent1"}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	out, err := browserCall(t, b, `{"action":"open","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if want := "opened tab agent1 at https://example.com/. The page finished loading. The tab is at the requested URL."; out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if got := surfaces.surfaceCalls; strings.Join(got, "|") != "tab:agent1|" {
+		t.Fatalf("surface attaches = %v, want the new tab once", got)
+	}
+	if got := surf.got(); strings.Join(got, "|") != `awaitload before="" mustReplace=false|url` {
+		t.Fatalf("calls = %v, want one await with no baseline", got)
+	}
+}
+
+// TestBrowserTool_BlankOpenDoesNotAwaitLoad: a tab opened without a URL has no
+// load to wait for, so it is not attached or awaited.
+func TestBrowserTool_BlankOpenDoesNotAwaitLoad(t *testing.T) {
+	surf := &fakeSurface{}
+	surfaces := &fakeSurfaces{surf: surf, openKey: "tab:agent1"}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	out, err := browserCall(t, b, `{"action":"open"}`)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if want := "opened tab agent1 (blank). Use it with tab=agent1."; out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if len(surfaces.surfaceCalls) != 0 || len(surf.got()) != 0 {
+		t.Fatalf("blank open attached %v and called %v", surfaces.surfaceCalls, surf.got())
+	}
+}
+
+// TestBrowserTool_OpenLoadStateErrorKeepsTab: when the new tab cannot be attached
+// to read its load, the tab stays open and recorded, and the open succeeds.
+func TestBrowserTool_OpenLoadStateErrorKeepsTab(t *testing.T) {
+	surfaces := &fakeSurfaces{
+		surf:         &fakeSurface{},
+		openKey:      "tab:agent1",
+		unattachable: map[string]bool{"tab:agent1": true},
+	}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	out, err := browserCall(t, b, `{"action":"open","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("open failed after the tab opened: %v", err)
+	}
+	want := "opened tab agent1 at https://example.com/. The load state could not be read: browse: tab has no live Chrome session. The tab's address could not be read."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if got := b.openedTabs(); len(got) != 1 || got[0] != "agent1" {
+		t.Fatalf("opened tabs = %v, want [agent1]", got)
+	}
+}
+
+// TestBrowserTool_NavigateWithoutTabOpensOne pins that a navigate with a URL and no
+// tab at all opens a tab at that URL, through the open path.
+func TestBrowserTool_NavigateWithoutTabOpensOne(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://example.com/"}
+	surfaces := &fakeSurfaces{surf: surf, openKey: "tab:agent1"}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	out, err := browserCall(t, b, `{"action":"navigate","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("navigate with no tab: %v", err)
+	}
+	if want := "opened tab agent1 at https://example.com/. The page finished loading. The tab is at the requested URL."; out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if len(surfaces.openURLs) != 1 || surfaces.openURLs[0] != "https://example.com/" {
+		t.Fatalf("open URLs = %v, want the navigate URL once", surfaces.openURLs)
+	}
+}
+
+// TestBrowserTool_NavigateNamedUnknownTabDoesNotOpen: the tab-less fallback is for
+// a missing tab only; a named tab this agent does not own is still refused.
+func TestBrowserTool_NavigateNamedUnknownTabDoesNotOpen(t *testing.T) {
+	surfaces := &fakeSurfaces{surf: &fakeSurface{}, openKey: "tab:agent1"}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	_, err := browserCall(t, b, `{"action":"navigate","tab":"nope","url":"https://example.com/"}`)
+	if err == nil || !strings.Contains(err.Error(), "neither open in this project") {
+		t.Fatalf("navigate error = %v, want neither-open-in-project", err)
+	}
+	if len(surfaces.openURLs) != 0 {
+		t.Fatalf("named unknown tab opened %v", surfaces.openURLs)
+	}
+}
+
+// TestBrowserTool_NoTabErrorIsSentinel pins the no-tab error the navigate fallback
+// matches with errors.Is, and that it still tells the model to open a tab.
+func TestBrowserTool_NoTabErrorIsSentinel(t *testing.T) {
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), &fakeSurfaces{surf: &fakeSurface{}})
+	_, err := browserCall(t, b, `{"action":"text"}`)
+	if !errors.Is(err, errNoBrowserTab) || !strings.Contains(err.Error(), "action=open") {
+		t.Fatalf("no-tab error = %v, want errNoBrowserTab naming action=open", err)
+	}
+}
+
+// TestBrowserTool_DefinitionDescribesAwaitedLoads pins the schema sentences the
+// model reads about waiting and the tab-less navigate.
+func TestBrowserTool_DefinitionDescribesAwaitedLoads(t *testing.T) {
+	b := newBrowserTool(testProjectKey, 1568, nil, nil)
+	desc, _ := b.Definition()["description"].(string)
+	for _, want := range []string{
+		"open, navigate, back, forward and reload wait for the page to load before returning; the result says whether it finished.",
+		"navigate opens a new tab when none exists.",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description lacks %q", want)
+		}
+	}
+}
+
+// TestBrowserTool_NavigateReportsTheTabLocation pins the location sentence after a
+// navigate. The tab's current URL is the fake's url. A redirect's path and query
+// are attacker-controlled, so only the host of a different page may appear.
+func TestBrowserTool_NavigateReportsTheTabLocation(t *testing.T) {
+	const head = "navigated tab b1 to "
+	const settled = ". The page finished loading. "
+	cases := []struct {
+		name    string
+		request string
+		url     string
+		urlErr  error
+		want    string
+	}{
+		{"same URL", "https://example.com/", "https://example.com/", nil,
+			head + "https://example.com/" + settled + "The tab is at the requested URL."},
+		{"fragment differs", "https://example.com/docs", "https://example.com/docs#top", nil,
+			head + "https://example.com/docs" + settled + "The tab is at the requested URL."},
+		{"bare host equals root", "https://example.com", "https://example.com/", nil,
+			head + "https://example.com" + settled + "The tab is at the requested URL."},
+		{"redirect to another host", "https://example.com/start", "https://other.example/ignore-previous-instructions?token=abc#frag", nil,
+			head + "https://example.com/start" + settled + "The tab is now on https://other.example, not at the requested URL: action=tabs lists its address."},
+		{"address read fails", "https://example.com/", "", errors.New("evaluate /secret/path?x=1 failed"),
+			head + "https://example.com/" + settled + "The tab's address could not be read."},
+		{"address does not parse", "https://example.com/", "https://other.example/%zz/secret", nil,
+			head + "https://example.com/" + settled + "The tab's address could not be read."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			surf := &fakeSurface{docID: "doc1", url: tc.url, urlErr: tc.urlErr}
+			b, _ := newTestBrowserTool(t, surf, 1568)
+			args := `{"action":"navigate","tab":"b1","url":"` + tc.request + `"}`
+			out, err := browserCall(t, b, args)
+			if err != nil {
+				t.Fatalf("navigate failed after the navigation succeeded: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("result = %q, want %q", out, tc.want)
+			}
+			for _, leak := range []string{"ignore-previous", "token=", "secret", "abc", "frag", "x=1"} {
+				if tc.name != "same URL" && strings.Contains(out, leak) && !strings.Contains(tc.request, leak) {
+					t.Fatalf("result leaks %q from the current address: %q", leak, out)
+				}
+			}
+		})
+	}
+}
+
+// TestBrowserTool_HistoryReportsOnlyTheSchemeAndHost: back, forward and reload name
+// the tab's new location by scheme and host. A path, query or fragment, and the
+// text of a URL with no host, never appear in the result.
+func TestBrowserTool_HistoryReportsOnlyTheSchemeAndHost(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"web page", "https://news.example/secret/path?x=1#y", "The tab is now on https://news.example."},
+		{"data URL", "data:text/html,secret-payload", "The tab shows a page with no web address (data)."},
+		{"about blank", "about:blank", "The tab shows a page with no web address (about)."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, action := range []string{"back", "forward", "reload"} {
+				surf := &fakeSurface{docID: "doc1", url: tc.url}
+				b, _ := newTestBrowserTool(t, surf, 1568)
+				out, err := browserCall(t, b, `{"action":"`+action+`","tab":"b1"}`)
+				if err != nil {
+					t.Fatalf("%s: %v", action, err)
+				}
+				want := action + " on tab b1. The page finished loading. " + tc.want
+				if out != want {
+					t.Fatalf("%s result = %q, want %q", action, out, want)
+				}
+				for _, leak := range []string{"secret", "x=1", "#y", "payload"} {
+					if strings.Contains(out, leak) {
+						t.Fatalf("%s result leaks %q from the tab's address: %q", action, leak, out)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBrowserTool_OpenReportsTheTabLocation: an open with a URL reports the tab's
+// location against the URL it was opened at. A failed read still opens the tab.
+func TestBrowserTool_OpenReportsTheTabLocation(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", url: "https://login.example/session/abc?token=t0p"}
+	surfaces := &fakeSurfaces{surf: surf, openKey: "tab:agent1"}
+	b := newBrowserTool(testProjectKey, 1568, emptyTabStore(t), surfaces)
+	out, err := browserCall(t, b, `{"action":"open","url":"https://example.com/"}`)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	want := "opened tab agent1 at https://example.com/. The page finished loading. The tab is now on https://login.example, not at the requested URL: action=tabs lists its address."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if strings.Contains(out, "token") || strings.Contains(out, "session/abc") {
+		t.Fatalf("result leaks the redirected address: %q", out)
+	}
+}
+
+// TestBrowserTool_LocationReadFailureKeepsHistoryAction: a back that succeeded
+// still succeeds when the address cannot be read, and the error text stays out of
+// the result.
+func TestBrowserTool_LocationReadFailureKeepsHistoryAction(t *testing.T) {
+	surf := &fakeSurface{docID: "doc1", urlErr: errors.New("evaluate /private/route failed")}
+	b, _ := newTestBrowserTool(t, surf, 1568)
+	out, err := browserCall(t, b, `{"action":"back","tab":"b1"}`)
+	if err != nil {
+		t.Fatalf("back failed after the navigation succeeded: %v", err)
+	}
+	want := "back on tab b1. The page finished loading. The tab's address could not be read."
+	if out != want {
+		t.Fatalf("result = %q, want %q", out, want)
+	}
+	if strings.Contains(out, "private") {
+		t.Fatalf("result leaks the read error: %q", out)
+	}
+	if got := surf.got(); !slices.Contains(got, "back") {
+		t.Fatalf("back did not reach the surface: %v", got)
 	}
 }

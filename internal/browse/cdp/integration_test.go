@@ -480,3 +480,140 @@ func TestIntegrationSelectPickerInPage(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestIntegrationAwaitLoad drives AwaitLoad on real Chrome: a first navigation, a
+// reload whose response takes 1.5 s, and a navigation to a second slow page. It
+// pins that a reload is not reported loaded on the old document, and that a
+// navigation's page text is the new page's. Gated on OCODE_CHROME_PATH like
+// TestIntegrationFindInPage.
+func TestIntegrationAwaitLoad(t *testing.T) {
+	chromePath := os.Getenv("OCODE_CHROME_PATH")
+	if chromePath == "" {
+		t.Skip("OCODE_CHROME_PATH not set; skipping real-Chrome integration test")
+	}
+	var mu sync.Mutex
+	counts := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.URL.Path]++
+		n := counts[r.URL.Path]
+		mu.Unlock()
+		// /slow answers its first request at once and every later one after 1.5 s;
+		// /slow2 is slow from its first request.
+		if (r.URL.Path == "/slow" && n > 1) || r.URL.Path == "/slow2" {
+			time.Sleep(1500 * time.Millisecond)
+		}
+		label := "load"
+		if r.URL.Path == "/slow2" {
+			label = "second"
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!doctype html><html><body>%s %d</body></html>`, label, n)
+	}))
+	defer upstream.Close()
+
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 2 * time.Second})
+	m := NewManager(ManagerOptions{ChromePath: chromePath, Supervisor: sup})
+	defer func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer ccancel()
+		_ = m.Close(cctx)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	target, err := m.Attach(ctx, "tab:await", &recordingSink{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	pageText := func() string {
+		text, _, err := target.PageText(ctx)
+		if err != nil {
+			t.Fatalf("PageText: %v", err)
+		}
+		return strings.TrimSpace(text)
+	}
+
+	// a: a first navigation, answered at once.
+	before, err := target.DocumentID(ctx)
+	if err != nil {
+		t.Fatalf("DocumentID: %v", err)
+	}
+	if err := target.Navigate(ctx, upstream.URL+"/slow"); err != nil {
+		t.Fatalf("Navigate /slow: %v", err)
+	}
+	state, err := target.AwaitLoad(ctx, before, false)
+	if err != nil || state != LoadSettled {
+		t.Fatalf("AwaitLoad after first navigate = %v, %v; want LoadSettled", state, err)
+	}
+	if got := pageText(); got != "load 1" {
+		t.Fatalf("after first navigate, page text = %q, want %q", got, "load 1")
+	}
+
+	// b: a reload whose response takes 1.5 s. The wait must not report the old
+	// document loaded before the new one commits.
+	before, err = target.DocumentID(ctx)
+	if err != nil {
+		t.Fatalf("DocumentID before reload: %v", err)
+	}
+	start := time.Now()
+	if err := target.Reload(ctx); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	state, err = target.AwaitLoad(ctx, before, true)
+	elapsed := time.Since(start)
+	t.Logf("reload: state=%v elapsed=%v", state, elapsed)
+	if err != nil || state != LoadSettled {
+		t.Fatalf("AwaitLoad after reload = %v, %v; want LoadSettled", state, err)
+	}
+	if elapsed < 1400*time.Millisecond {
+		t.Fatalf("reload reported loaded after %v, before the 1.5 s response", elapsed)
+	}
+	if after, err := target.DocumentID(ctx); err != nil || after == before {
+		t.Fatalf("document after reload = %q, %v; want a new id (before %q)", after, err, before)
+	}
+	if got := pageText(); got != "load 2" {
+		t.Fatalf("after reload, page text = %q, want %q", got, "load 2")
+	}
+
+	// c: a navigation from the loaded page to a second slow page.
+	before, err = target.DocumentID(ctx)
+	if err != nil {
+		t.Fatalf("DocumentID before second navigate: %v", err)
+	}
+	start = time.Now()
+	if err := target.Navigate(ctx, upstream.URL+"/slow2"); err != nil {
+		t.Fatalf("Navigate /slow2: %v", err)
+	}
+	navReturned := time.Since(start)
+	state, err = target.AwaitLoad(ctx, before, false)
+	elapsed = time.Since(start)
+	t.Logf("navigate /slow2: navigate returned after %v, AwaitLoad state=%v after %v", navReturned, state, elapsed)
+	if err != nil {
+		t.Fatalf("AwaitLoad after second navigate: %v", err)
+	}
+	if got := pageText(); got != "second 1" {
+		t.Fatalf("after second navigate, page text = %q, want the new page %q (state=%v, navigate returned after %v, AwaitLoad after %v)", got, "second 1", state, navReturned, elapsed)
+	}
+
+	// d: Back on a fresh tab's first page, about:blank with no history before it.
+	// Nothing is navigated to, so Back has no entry: no document is replaced and the
+	// wait reports LoadNoNewDocument. (A navigation first would give Back an entry.)
+	fresh, err := m.Attach(ctx, "tab:await-fresh", &recordingSink{})
+	if err != nil {
+		t.Fatalf("Attach fresh tab: %v", err)
+	}
+	before, err = fresh.DocumentID(ctx)
+	if err != nil {
+		t.Fatalf("DocumentID on fresh tab: %v", err)
+	}
+	start = time.Now()
+	if err := fresh.Back(ctx); err != nil {
+		t.Fatalf("Back on first page: %v", err)
+	}
+	state, err = fresh.AwaitLoad(ctx, before, false)
+	elapsed = time.Since(start)
+	t.Logf("back on first page: state=%v elapsed=%v", state, elapsed)
+	if err != nil || state != LoadNoNewDocument {
+		t.Fatalf("AwaitLoad after back on first page = %v, %v; want LoadNoNewDocument", state, err)
+	}
+}

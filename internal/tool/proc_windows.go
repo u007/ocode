@@ -25,3 +25,9 @@ func terminateProcess(proc *os.Process, _ bool) error {
 func forceKillProcess(proc *os.Process, _ bool) error {
 	return proc.Kill()
 }
+
+// freezeProcessGroup is a no-op on Windows, which has no process groups to stop.
+func freezeProcessGroup(_ *os.Process) error { return nil }
+
+// liveGroupProcesses has nothing to list on Windows, which has no process groups.
+func liveGroupProcesses(_ int) []string { return nil }

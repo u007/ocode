@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -228,6 +229,13 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	if buildErr != nil {
 		return fmt.Sprintf("Command failed: %v", buildErr), nil
 	}
+	if t.Procs != nil {
+		// exec's default Cancel SIGKILLs only the leader, the instant ctx is
+		// done. That orphans the group before the stop branch below can freeze
+		// and list it, so the monitor is no longer under its leader and the
+		// list would show it. The stop branch owns the whole-group kill here.
+		cmd.Cancel = func() error { return nil }
+	}
 
 	// streaming gates live emission. Once the command is moved to the
 	// background we stop emitting so the transcript keeps the output produced
@@ -329,11 +337,18 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			if t.Recorder != nil {
 				t.Recorder.Post(bashBase, params.Command, commandExitCode(err))
 			}
-			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
+			return finalizeExecResult(res, err, deadlineStop(ctx, timeout), !FullOutputRetained(ctx)), nil
 		case <-proc.bgRequestCh:
 			streaming.Store(false)
 			shouldCancel = false
 			go func() {
+				// cmd.Cancel is a no-op on this path, so the ctx kill that used to
+				// end a moved-to-background command is done here.
+				select {
+				case <-waitState.Done():
+				case <-ctx.Done():
+					_ = killProcessGroup(cmd.Process)
+				}
 				err := waitState.Wait()
 				pumpWg.Wait()
 				finalizeManagedProcess(proc, sup, onDone, err)
@@ -353,7 +368,15 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			// process record continues on its own goroutine instead of
 			// blocking this call.
 			shouldCancel = false
+			// Freeze, list, then kill. The freeze stops the group so a runaway
+			// command cannot make progress while ps runs; the kill is what ends
+			// these processes, and SIGKILL still ends stopped ones.
+			var live []string
 			if cmd.Process != nil {
+				if err := freezeProcessGroup(cmd.Process); err != nil {
+					log.Printf("bash: freezing stopped group %d (SIGSTOP) failed: %v", cmd.Process.Pid, err)
+				}
+				live = liveGroupProcesses(cmd.Process.Pid)
 				_ = killProcessGroup(cmd.Process)
 			}
 			streaming.Store(false)
@@ -368,7 +391,13 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			if t.Recorder != nil {
 				t.Recorder.Post(bashBase, params.Command, 124)
 			}
-			return finalizeExecResult(res, ctx.Err(), true, timeout, !FullOutputRetained(ctx)), nil
+			stop := &execStop{
+				timedOut: ctx.Err() == context.DeadlineExceeded,
+				timeout:  timeout,
+				elapsed:  time.Since(startedAt).Round(time.Second),
+				live:     live,
+			}
+			return finalizeExecResult(res, ctx.Err(), stop, !FullOutputRetained(ctx)), nil
 		}
 	}
 
@@ -378,7 +407,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	if t.Recorder != nil {
 		t.Recorder.Post(bashBase, params.Command, commandExitCode(err))
 	}
-	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, !FullOutputRetained(ctx)), nil
+	return finalizeExecResult(res, err, deadlineStop(ctx, timeout), !FullOutputRetained(ctx)), nil
 }
 
 // registerBashWrites records backed-up paths as written in the snapshot
@@ -416,6 +445,32 @@ func joinStdoutStderr(stdoutStr, stderrStr string) string {
 	return stdoutStr + "\n" + stderrStr
 }
 
+// execStop records that the command's context stopped it before it exited.
+// A nil *execStop means the command ran to its own exit.
+type execStop struct {
+	timedOut bool          // the exec timeout fired, not a caller cancellation
+	timeout  time.Duration // the exec timeout, quoted by the timeout text
+	elapsed  time.Duration // run time at the stop, quoted by the cancel text
+	live     []string      // processes still alive in the group at the stop
+}
+
+// deadlineStop reports the exec timeout as a stop, and nil for any other ctx state.
+func deadlineStop(ctx context.Context, timeout time.Duration) *execStop {
+	if ctx.Err() != context.DeadlineExceeded {
+		return nil
+	}
+	return &execStop{timedOut: true, timeout: timeout}
+}
+
+// stoppedProcessesSection lists the processes a stop left running, so the model
+// knows what is still holding a port or file; empty when there are none.
+func stoppedProcessesSection(live []string) string {
+	if len(live) == 0 {
+		return ""
+	}
+	return "\n\nStill running when stopped:\n" + strings.Join(live, "\n")
+}
+
 // finalizeExecResult formats the user-facing output string for a finished
 // shell command, identical for the registry-managed and registry-less paths.
 // When capAtMax is false, the 30000-char hard cap is skipped so the canonical
@@ -428,15 +483,18 @@ func joinStdoutStderr(stdoutStr, stderrStr string) string {
 // questions: the SSE server streams chunks for live progress but receives the
 // authoritative result through a separately-truncated frame, and cannot read
 // DisplayContent at all (json:"-"). See fulloutput_ctx.go.
-func finalizeExecResult(res string, err error, timedOut bool, timeout time.Duration, capAtMax bool) string {
+func finalizeExecResult(res string, err error, stop *execStop, capAtMax bool) string {
 	applyCap := func(s string) string {
 		if capAtMax {
 			return truncateOutput(s)
 		}
 		return s
 	}
-	if timedOut {
-		return fmt.Sprintf("Command timed out after %v. Output so far:\n%s", timeout, applyCap(res))
+	if stop != nil {
+		if stop.timedOut {
+			return fmt.Sprintf("Command timed out after %v. Output so far:\n%s", stop.timeout, applyCap(res)) + stoppedProcessesSection(stop.live)
+		}
+		return fmt.Sprintf("Command was stopped after %v, before it finished (the turn was cancelled or the server shut down; it did not time out). Output so far:\n%s", stop.elapsed, applyCap(res)) + stoppedProcessesSection(stop.live)
 	}
 	if err != nil {
 		code := commandExitCode(err)

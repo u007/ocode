@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-15T16:52:08Z
+timestamp: 2026-11-16T07:48:45Z
 status: active
 ---
 # browser_run step loop
@@ -279,12 +279,12 @@ backend or to the main model.
 
 ## The controls action and the Settle rule
 
-`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:446`).
+`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:472`).
 It returns one JSON object after an untrusted-content header. The object's keys are
 `url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls`, `omitted`,
 `viewport_width`, `viewport_height` (the viewport in CSS pixels), `scroll_x` and `scroll_y`
 (the document's scroll offset in CSS pixels; on the htrcli surface, the snapshot's `scroll`). `text` and `text_truncated` map the cdp layer's viewport text fields. The
-struct is `browserControlsOutput` (`internal/server/browser_tool.go:1078`).
+struct is `browserControlsOutput` (`internal/server/browser_tool.go:1208`).
 
 Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set),
 `operations`, `box` and `in_viewport`. `box` is the control's rectangle in CSS pixels of the
@@ -311,7 +311,7 @@ it because a page can answer an action by changing only text (a validation error
 appearing, a cart total updating, a toast), so a text-only response is not mistaken for
 a stall. Refs are left out, so a re-render that leaves the page the same keeps the
 fingerprint. It is cut to 16 hex digits (`controlsFingerprint`,
-`internal/browse/cdp/pagedom_controls.go:451`).
+`internal/browse/cdp/pagedom_controls.go:522`).
 
 **Settle rule.** `Controls` settles the page first (`Target.Settle`,
 `internal/browse/cdp/pagedom_controls.go:149`). The wait is:
@@ -329,9 +329,9 @@ non-model seconds in its runs went to waits on class names. Waiting for the docu
 quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
-(`internal/agent/permissions.go:6652`), so it is allowed on an agent-opened tab. A user tab
+(`browserObserveActions`, `internal/agent/permissions.go:6678`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:533`). Read-only
-agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:222`).
+agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:232`).
 
 ## Routing the model to browser_run
 
@@ -403,17 +403,17 @@ re-tuned on that corpus.
 - `internal/agent/agent.go`: `handleToolCallWithContext` (4031), the context asker
   (4280), `attributePermAsker` (6882), `withPermissionAsker` (6903).
 - `internal/agent/permissions.go`: `browser_run` allow default (2002-2003), the observe set
-  (6652), `browserAction` (6603) and its `run_step` summary (6767).
+  (6678), `browserAction` (6603) and its `run_step` summary (6767).
 - `internal/agent/decider.go`: `slotBrowserRun` (29). `internal/config/ocodeconfig.go`:
   `BrowserRun` config key `browser_run.judge_model` (1062).
 - `internal/agent/content_guard_typesafe.go`: `browserGuardedOutputs` (284), the
   `browser_run` case (314).
 - `internal/browse/cdp/pagedom_controls.go`: `settleExpr` (29), `Settle` (149),
-  `Controls` (202), `controlsWhereExpr` (261), `controlLayout` (294), `placeControls` (327),
-  `controlsWalker.add` (408), `controlsFingerprint` (451).
+  `Controls` (273), `controlsWhereExpr` (332), `controlLayout` (365), `placeControls` (398),
+  `controlsWalker.add` (479), `controlsFingerprint` (522).
 - `internal/browse/cdp/pagedom_read.go`: the settle and control caps (36 to 45).
-- `internal/server/browser_tool.go`: `browserActions` (58), `browserReadOnlyActions` (222),
-  the `controls` case (446), `browserControlsOutput` (1078), `controls` (1096).
+- `internal/server/browser_tool.go`: `browserActions` (62), `browserReadOnlyActions` (232),
+  the `controls` case (472), `browserControlsOutput` (1208), `controls` (1226).
 
 Related: [browser-agent-tools](browser-agent-tools.md) (the `browser` tool, its actions and
 permissions), [inbound-content-guardrail](inbound-content-guardrail.md).

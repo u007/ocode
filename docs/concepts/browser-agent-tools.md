@@ -15,7 +15,7 @@ tags:
   - desktop
   - htr
   - htrcli
-timestamp: 2026-11-15T10:45:00Z
+timestamp: 2026-11-16T07:48:45Z
 ---
 # Browser agent tool
 
@@ -122,7 +122,19 @@ htrcli token (see Wiring and the htrcli section). The TUI's own chat agent does 
   strip for it. See the TODO for that gap.
 - A tab's Chrome stateKey is `tab:<id>`, the key the SPA uses.
 - Default tab: the strip's `ActiveID`. Failing that, the last tab this agent
-  opened. With neither, the error says to use `action=open`.
+  opened. With neither, the error says to use `action=open`. One exception:
+  `navigate` with a `url` and no `tab` argument, when this agent has no tab at all
+  (`errNoBrowserTab`, matched in `ExecuteCtx`), lists the client browser's tabs
+  first (`clientTabs`). A failed listing is returned as the error. If the client has
+  tabs, the call returns the no-tab error, which names them, and opens nothing: the
+  model picks one with `tab=` or calls `open` itself. Only when the client has no
+  tabs either does `navigate` open a tab at that URL, so the model does not need an
+  `open` first. The URL passes the same checks as `open` before a tab is created. A
+  named `tab` that is neither in the strip nor this agent's still errors, and every
+  other action with no tab still gets the `action=open` error. The
+  permission ask is decided on the `navigate` call before the tool runs. `open` has
+  the same ask and the same allowed-host rule (`internal/agent/permissions.go`, the
+  network guard), so the fallback does not skip one.
 - `action=tabs` lists the strip in order, with the active tab marked, then the
   tabs this agent opened. Titles and URLs are quoted, because they come from web
   pages.
@@ -362,7 +374,13 @@ failures keep their error. The same path cancels the computer tool.
   disconnected, and a ref that resolves to nothing is never acted on.
 - A table grows by the elements each `snapshot` or `find` mints. Each call is
   bounded (a snapshot at 400 elements or 32 KB, a find at 50 entries), so the growth
-  per call is bounded and lasts for the agent's conversation. The table holds at most 2000 live refs per tab (the unexported `maxRefs = 2000` in `internal/browse/cdp/refs.go`); `RefTable.Mint` clears its two internal maps inline once the table holds `maxRefs` live refs (`len(byRef) >= maxRefs`), so held refs become unknown. The `next` counter keeps incrementing so a ref string (`@eN`) is never reused.
+  per call is bounded and lasts for the agent's conversation. The table holds at most 2000 live refs per tab (the unexported `maxRefs` in
+`internal/browse/cdp/refs.go`). At the cap, `RefTable.Mint` evicts one ref per new
+node: the least recently used, where minting or looking up a ref marks it recent. A
+page that re-renders its nodes therefore does not invalidate the refs still in use.
+An evicted ref is unknown rather than stale, so a lookup of it fails with `unknown
+ref`, and the model re-runs `snapshot` or `find`. The `next` counter keeps
+incrementing so a ref string (`@eN`) is never reused.
 
 ## Frames
 
@@ -436,7 +454,7 @@ successful results, as it scans `webfetch`:
 | `select` | the Go-quoted option text only (the target is excluded) | `browser select result` |
 | `fill_form` | the report body after the host wrapper header | `browser fill_form report` |
 
-Not scanned: `screenshot` (an image the text judge cannot read); `open`, `close`, `activate`, `navigate`, `scroll`, `wait` and the element writes (`click`, `fill`, `type`, `check`, `uncheck`, `upload`, `key`), whose results are host status text; and browser errors (an error is not a tool result). The empty tabs listing is guarded but yields an empty view, so the host's own empty-strip line never reaches the judge. A frame's `snapshot` and `find` are guarded like the top document, but a frame read is never exempt as a loopback page. The rules are in [inbound-content-guardrail](inbound-content-guardrail.md#browser-results-what-is-and-is-not-judged-2026-11-09).
+Not scanned: `screenshot` (an image the text judge cannot read); `close`, `scroll`, `wait` and the element writes (`click`, `fill`, `type`, `check`, `uncheck`, `upload`, `key`), whose results are host status text; the load actions `open` (with a URL), `navigate`, `back`, `forward` and `reload`, whose results end with one location sentence naming only the scheme and host of the tab's current URL (see Limits, "Where the tab is"); and browser errors (an error is not a tool result). The empty tabs listing is guarded but yields an empty view, so the host's own empty-strip line never reaches the judge. A frame's `snapshot` and `find` are guarded like the top document, but a frame read is never exempt as a loopback page. The rules are in [inbound-content-guardrail](inbound-content-guardrail.md#browser-results-what-is-and-is-not-judged-2026-11-09).
 
 The judge does not read a browser result raw. The host's wrapper line is removed, and a
 `controls` result is judged as plain lines (title, url, text, then one line per control). The
@@ -538,8 +556,83 @@ open.
 
 ## Limits
 
-- `navigate`, `back`, `forward`, `reload` and `open` do not wait for the load. The
-  result says so, and the model takes a screenshot or text to see the outcome.
+- `open` with a URL, `navigate`, `back`, `forward` and `reload` wait for the page to
+  load before they return. `open` with a URL calls `awaitOpenLoad`; the other four
+  share `browserTool.loadAction`, which reads `DocumentID` before the action (bounded
+  by `browserPreReadTimeout`, 2 s), runs the action, then calls `AwaitLoad` with that
+  baseline. Only `reload` says the document must be replaced. The tool's description
+  promises no number of seconds: `Page.navigate` itself can block up to the 30 s
+  action deadline (`browserActionTimeout`).
+- Pre-read failure. If the read fails while the action's context is still live, the
+  navigation still runs, `AwaitLoad` is skipped, and the result says the load state
+  could not be read. The stuck or mid-navigation page therefore stays leavable by
+  `navigate` and `reload`. If the action's context is itself done, the read error is
+  returned and nothing is sent.
+- On the Chrome path `AwaitLoad` polls `Target.DocumentID`
+  (`String(performance.timeOrigin)`) until the id differs from the baseline. The poll
+  is bounded at `settleMaxWait` (5 s) for `reload` and at 1 s for the others. If the id
+  changes, it calls `Settle`, which is also capped (`settleMaxWait`). If the id never
+  changes within the bound, the state is `LoadNoNewDocument` for every action, reload
+  included, and the old page is never settled as if it were the new one. `open` with a
+  URL has no earlier document, so its first read counts as the change.
+- On the htrcli-backed surface (a remote host's client browser,
+  `internal/server/browser_surfaces_htr.go`) `DocumentID` is the tab's page URL, because
+  the daemon has no document id. A same-URL replacement is therefore invisible to it.
+  `AwaitLoad` waits differently by action:
+  - `reload` keeps the URL, so it returns `LoadUnconfirmed` on the first read whose
+    `readyState` is "complete", with no minimum wait. That may be the page that was
+    there before the reload.
+  - `navigate`, `back` and `forward` wait for the URL to differ from the one read before
+    the action. Once it differs, a complete read is `LoadSettled`. The bound is
+    `htrLoadMaxWait` (5 s), and when it runs out the state is `LoadPending`. `open` with
+    a URL uses an empty baseline, so any non-empty URL other than `about:blank` counts
+    as the change.
+  - If the URL has not changed by `htrLoadSameURLWait` (1 s) and the page reads
+    complete, the state is `LoadUnconfirmed`. That covers a same-URL navigation and a
+    commit slower than 1 s, so a slow `back` or `forward` is reported as unconfirmed,
+    not finished.
+  A result says the page finished loading only when the URL changed first.
+- `AwaitLoad` returns a `cdp.LoadState`, not a bool. The states, in order, are
+  `LoadPending` (the zero value, so an unset state reads as not finished),
+  `LoadSettled`, `LoadNoNewDocument` and `LoadUnconfirmed`. `loadLine` builds the result
+  line: the action's own head comes first (for example "reload on tab 3"), then
+  `loadResult` adds the load sentence for the state, then `tabLocation` adds the location
+  sentence (below). The five load texts are:
+  - settled: "The page finished loading."
+  - pending: "The page did not finish loading within the wait: it may still be loading, so check with screenshot or text."
+  - no new page seen: "No new page was seen within the wait: the tab may still show the previous page, so check with screenshot or text."
+  - unconfirmed: "The page reads as loaded, but this browser cannot confirm it is the new page: check with screenshot or text."
+  - load state could not be read: "The load state could not be read: <err>."
+  The last one does not fail the action: the navigation already happened, and the
+  error is logged.
+- Where the tab is. `tabLocation` adds one sentence after the load sentence, so the
+  model can see a redirect or a navigation that did not land where it was sent:
+  - the tab is at the requested URL (`navigate`, and `open` with a URL). The fragment is
+    ignored, and a bare host equals the same host with `/` (`sameTabURL`):
+    "The tab is at the requested URL."
+  - the tab is elsewhere after a request: "The tab is now on <scheme>://<host>, not at
+    the requested URL: action=tabs lists its address."
+  - `back`, `forward` and `reload` (no requested URL): "The tab is now on
+    <scheme>://<host>."
+  - a page with no web address, such as `about:blank`: "The tab shows a page with no web
+    address (<scheme>)."
+  - the address cannot be read or does not parse: "The tab's address could not be read."
+  The read of the current URL is bounded by `browserPreReadTimeout` (2 s). `open` with no
+  URL returns "opened tab <id> (blank). Use it with tab=<id>." and has no location sentence.
+  **Invariant:** the location sentence carries only the scheme and host (with any port)
+  of the CURRENT url, never its path, query or fragment. These results are not scanned
+  by the inbound content guard, and a redirect's path is attacker-controlled text. The
+  `navigate` and `open` heads still echo the URL the model asked for; that is the model's
+  own argument, not page output. The current path is readable through `action=tabs`,
+  which is guarded; its redaction drops only the query and fragment. Pinned by
+  `TestBrowserTool_NavigateReportsTheTabLocation` (a redirect to
+  `/ignore-previous-instructions?token=…#frag` must not appear in the result) and
+  `TestBrowserTool_HistoryReportsOnlyTheSchemeAndHost`.
+- Limits of the wait. A `back` or `forward` that commits after the 1 s bound is
+  reported as "No new page was seen within the wait", which is a false negative: the
+  tab may have moved on. The result tells the model to check with a screenshot or
+  text. On the htrcli surface, "finished" is said only after the URL has changed, so a
+  reload or a same-URL navigation never reads as finished.
 - A tab this agent opened is closed when its run ends: `Agent.closeSessionTools`
   runs at `Shutdown` and when a subagent run finishes, under a 15 s bound, and a
   close that fails is logged and the rest still close. A subagent resumed after
@@ -599,14 +692,14 @@ open.
 - `internal/browse/server.go`: `AgentTarget`, `waitForLoad`, `OpenAgentTab`,
   `CloseAgentTab`, `headlessAttacher`.
 - `internal/server/browser_surfaces_htr.go`: `htrAgentSurfaces` (the client's htrcli
-  daemon), `htrSurface` (one client tab), `htrRefStore` (ref identity),
+  daemon), `htrSurface` (one client tab; `DocumentID` is the page URL, and `AwaitLoad` settles only after the URL changes, see Limits), `htrRefStore` (ref identity),
   `wireRemoteHTRSurfaces` (the boot choice on a remote host). Its tests are
   `internal/server/browser_surfaces_htr_test.go`, which drive a stub daemon.
   `internal/browse/cdp/surface_exports.go`: the caps, control operations,
   fingerprint and snapshot line format the htrcli surface shares with the CDP path.
 - `internal/server/browser_tool.go`: the tool (the action enum, `checkShape`, tab
   resolution, the screenshot cache, per-tab `RefTable`s, `checkUploadFiles`,
-  `ForAgent`, `Refusal`, `closeTab`, `removeFromStrip`, `browserStripWithout`).
+  `ForAgent`, `Refusal`, `closeTab`, `removeFromStrip`, `browserStripWithout`, `open`, `navigate`, `loadAction`, `awaitOpenLoad`, `loadResult`, `loadLine`, `tabLocation`, `sameTabURL`, `normalizeTabURL`).
   `internal/server/browser_redact.go`: `redactBrowserURL`,
   `redactBrowserURLsInText`. `internal/server/browser_strip.go`: `stripPublisher`,
   the strip store that publishes `browser_tabs_changed` on each write.
@@ -630,7 +723,7 @@ open.
   `internal/agent/permission_typesafe.go`: `browserDecision`,
   `browserUserTabReadDecision` (the consult-time read gate).
 - `internal/agent/browser_run.go` (the step loop), `internal/browse/cdp/pagedom_controls.go`
-  (`Settle`, `Controls`, `controlsFingerprint`), `internal/browse/cdp/pagedom_read.go` (the
+  (`Settle`, `DocumentID`, `AwaitLoad`, `Controls`, `controlsFingerprint`), `internal/browse/cdp/pagedom_read.go` (the
   `controls` caps), `internal/server/browser_tool.go` (the `controls` action).
 - **Page-exposed callable surface.** Installing the vendored bundle exposes `window.__htrcliDom` on the page's main world (`window`), providing `exec`, `evaluate`, `getLocalStorage`, and `fetchFromCS` (the last can make a credentialed POST carrying a page JWT). The ocode Go layer sends only the closed DOM/form action set (`browser` actions), so the model cannot reach the rest; page scripts can. This is a documented limit, not a protected boundary — the guard is the scope of the tool definition, not a sandbox around the page.
 

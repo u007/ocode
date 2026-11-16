@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { Cell, Workbook, Worksheet } from "exceljs";
+import type { Cell, Workbook, Worksheet, Image as ExcelJsImage, IAnchor as ExcelJsAnchor } from "exceljs";
 import {
   BooleanNumber,
   BorderStyleTypes,
@@ -26,6 +26,13 @@ import {
 } from "./xlsxStyle";
 import { isDelimitedTextPath } from "../../lib/previewKind";
 
+/** Loose type for an ExcelJS worksheet (adds getImages, which the typings omit). */
+type ExcelJsWorksheet = Worksheet;
+/** Loose type for an entry returned by Worksheet.getImages(). */
+interface ExcelJsImageRef {
+  imageId: number | string;
+  range?: { tl?: ExcelJsAnchor; br?: ExcelJsAnchor };
+}
 /**
  * Converts parsed spreadsheets into Univer `IWorkbookData`. No Univer runtime
  * is loaded here: only the data shapes and enum values, so this module is
@@ -74,6 +81,17 @@ export interface ConvertedSheet {
 export interface ConvertedWorkbook {
   sheets: ConvertedSheet[];
   data: IWorkbookData;
+  /** Floating images (drawings) extracted from the workbook. Rendered by the
+   *  viewer as thumbnails; Univer's OSS grid does not paint Excel drawings. */
+  images: WorkbookImage[];
+}
+
+export interface WorkbookImage {
+  sheetId: string;
+  sheetName: string;
+  dataUrl: string;
+  fromCol: number;
+  fromRow: number;
 }
 
 /** Throws when a file is above MAX_FILE_BYTES. The message is shown in the viewer. */
@@ -130,7 +148,7 @@ function atCell<T>(sheetName: string, address: string, build: () => T): T {
   }
 }
 
-function assemble(sheets: BuiltSheet[], styles: StyleRegistry): ConvertedWorkbook {
+function assemble(sheets: BuiltSheet[], styles: StyleRegistry, images: WorkbookImage[]): ConvertedWorkbook {
   const sheetData: Record<string, Partial<IWorksheetData>> = {};
   const summaries: ConvertedSheet[] = sheets.map((sheet, i) => {
     const id = `sheet-${i + 1}`;
@@ -148,6 +166,7 @@ function assemble(sheets: BuiltSheet[], styles: StyleRegistry): ConvertedWorkboo
       sheetOrder: summaries.map((s) => s.id),
       sheets: sheetData,
     },
+    images,
   };
 }
 
@@ -303,7 +322,78 @@ export function workbookFromExcelJs(wb: Workbook): ConvertedWorkbook {
   const date1904 = wb.properties.date1904 === true;
   const ctx: ExcelJsContext = { palette, date1904, styles };
   const sheets = wb.worksheets.map((ws) => excelJsSheet(ws, ctx));
-  return assemble(sheets, styles);
+ // Extract floating images (drawings) so the viewer can show them; Univer's
+ // OSS grid does not paint Excel drawings itself. ExcelJS exposes these via
+ // Worksheet.getImages() and Workbook.getImage(); both are typed loosely, so
+ // validate the shape before use and log (never swallow) failures.
+ const images: WorkbookImage[] = [];
+ const sheetIds = new Map(wb.worksheets.map((ws, idx) => [ws.name, "sheet-" + (idx + 1)]));
+ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+ for (const ws of wb.worksheets) {
+   const sheetId = sheetIds.get(ws.name);
+   if (sheetId === undefined) {
+     console.error("workbookFromExcelJs: missing sheet id for " + ws.name);
+     continue;
+   }
+   let imgs: ExcelJsImageRef[];
+   try {
+     imgs = (ws as ExcelJsWorksheet).getImages?.() ?? [];
+   } catch (e) {
+     console.error("workbookFromExcelJs: getImages failed for sheet " + ws.name + ":", e);
+     continue;
+   }
+   for (const img of imgs) {
+     let image: ExcelJsImage | undefined;
+     try {
+       image = wb.getImage(Number(img.imageId));
+     } catch (e) {
+       console.error("workbookFromExcelJs: getImage failed for imageId " + img.imageId + ":", e);
+       continue;
+     }
+     if (!image) {
+       console.error("workbookFromExcelJs: no image for imageId " + img.imageId);
+       continue;
+     }
+     const buffer = image.buffer;
+     const hasBase64 = typeof image.base64 === "string" && image.base64.length > 0;
+     if (!buffer && !hasBase64) {
+       console.error("workbookFromExcelJs: image " + img.imageId + " has no buffer or base64");
+       continue;
+     }
+     if (buffer && (buffer as unknown as { length: number }).length > MAX_IMAGE_BYTES) {
+       console.warn("workbookFromExcelJs: skipping image " + img.imageId + " (" + (buffer as unknown as { length: number }).length + " bytes exceeds " + MAX_IMAGE_BYTES + ")");
+       continue;
+     }
+     const ext = (image.extension || "png").toLowerCase();
+     const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : "image/png";
+     let b64 = "";
+     if (typeof buffer === "string") b64 = buffer;
+     else if (hasBase64) b64 = image.base64 as string;
+     else if (buffer) {
+       const bytes = buffer instanceof Uint8Array
+         ? buffer
+         : buffer instanceof ArrayBuffer
+           ? new Uint8Array(buffer)
+           : Uint8Array.from(buffer as unknown as ArrayLike<number>);
+       let bin = "";
+       for (let j = 0; j < bytes.length; j++) bin += String.fromCharCode(bytes[j]);
+       b64 = btoa(bin);
+     }
+     if (!b64) {
+       console.error("workbookFromExcelJs: failed to encode image " + img.imageId);
+       continue;
+     }
+     const tl = img.range && img.range.tl;
+     images.push({
+       sheetId,
+       sheetName: ws.name,
+       dataUrl: "data:" + mime + ";base64," + b64,
+       fromCol: typeof (tl && tl.col) === "number" ? (tl as ExcelJsAnchor).col : 0,
+       fromRow: typeof (tl && tl.row) === "number" ? (tl as ExcelJsAnchor).row : 0,
+     });
+   }
+ }
+ return assemble(sheets, styles, images);
 }
 
 /** Header-row style for CSV/TSV: bold, lightly filled, with a rule under it. */
@@ -330,7 +420,7 @@ export function workbookFromSheetJs(wb: XLSX.WorkBook, firstRowIsHeader: boolean
   const styles = new StyleRegistry();
   const headerId = firstRowIsHeader ? styles.idFor(csvHeaderStyle()) : undefined;
   const sheets = wb.SheetNames.map((name) => sheetJsSheet(name, wb.Sheets[name], styles, headerId));
-  return assemble(sheets, styles);
+  return assemble(sheets, styles, []);
 }
 
 function isCellObject(value: unknown): value is XLSX.CellObject {

@@ -8,7 +8,7 @@ tags:
   - anthropic
   - tools
   - discovery
-timestamp: 2026-11-10T13:59:39Z
+timestamp: 2026-11-16T07:28:44Z
 ---
 # Prompt Cache Stability
 
@@ -29,8 +29,8 @@ so it is cache-safe and re-cached the prefix once when it shipped.
 - **The `browser` tool's schema text changed.** `browserTool.Definition`'s
   `description` went from `"Drive browser tabs (Chrome, on the machine running
   this session). …"` to the backend-neutral `"Drive browser tabs on the machine
-  running this session. …"` (`internal/server/browser_tool.go:257`).
-  `Description()` (`browser_tool.go:251`) is already neutral. This is a tools
+  running this session. …"` (`internal/server/browser_tool.go:267`).
+  `Description()` (`browser_tool.go:260`) is already neutral. This is a tools
   array change, so it invalidated the **whole** cached prefix once — `tools`,
   then `system`, then `messages` — for every session that carries the tool. It is
   a one-time re-cache, not a per-turn cost. Leaving a backend name in the schema

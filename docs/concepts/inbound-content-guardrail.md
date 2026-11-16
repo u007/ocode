@@ -14,7 +14,7 @@ tags:
   - websearch
   - jev
   - architecture
-timestamp: 2026-11-16T02:34:00Z
+timestamp: 2026-11-16T07:48:45Z
 ---
 # Inbound Content Guardrail
 
@@ -49,7 +49,7 @@ Absent, not disabled: with no TypeSafe key, `scanContentGuard` returns `contentG
 | `websearch` | tool name | `websearch <query>` (`content_guard_typesafe.go:313`) |
 | MCP | membership in the **`a.mcpTools` map** — the same map `discoveryAllows` reads (`content_guard_typesafe.go:347`) | `MCP <name>` |
 | `bash` | `bashHasNetworkSubcommand` (`content_guard_typesafe.go:353`) | `bash: <command>` |
-| `browser` | tool name **and** an action in `browserGuardedOutputs`: `console`, `controls`, `fill_form`, `find`, `network`, `pick`, `select`, `snapshot`, `tabs`, `text` (ten actions; see [browser-agent-tools](browser-agent-tools.md)). Screenshots, tab-management/write actions (`open`, `close`, `activate`, `navigate`, `scroll`, `wait`, the element writes), other actions and browser errors are not scanned (see the browser section below) | `browser console`, `browser controls index`, `browser fill_form report`, `browser find results`, `browser network log`, `browser pick result`, `browser select result`, `browser snapshot`, `browser tabs list`, `browser page text` |
+| `browser` | tool name **and** an action in `browserGuardedOutputs`: `console`, `controls`, `fill_form`, `find`, `network`, `pick`, `select`, `snapshot`, `tabs`, `text` (ten actions; see [browser-agent-tools](browser-agent-tools.md)). Screenshots, tab-management/write actions (`open`, `close`, `scroll`, `wait`, the element writes), other actions and browser errors are not scanned, and neither are the load actions (`open` with a URL, `navigate`, `back`, `forward`, `reload`) (see the browser section below) | `browser console`, `browser controls index`, `browser fill_form report`, `browser find results`, `browser network log`, `browser pick result`, `browser select result`, `browser snapshot`, `browser tabs list`, `browser page text` |
 | `browser_run` | tool name: its own result, which quotes the page title and control labels (judged as a labels view; see the browser section below) | `browser_run result` |
 | everything else | — | **nil, never scanned** |
 
@@ -85,7 +85,7 @@ the view by `contentGuardScanView`, both in `internal/agent/content_guard_typesa
 
 The rules are recorded per action below. The delivered content and the ask dialog still carry the raw result; only the judge's input changes.
 
-**A. Every page-derived action is guarded, on a narrowed view.** `browserGuardedOutputs` (`var browserGuardedOutputs`, `internal/agent/content_guard_typesafe.go`) holds ten actions: `console`, `controls`, `fill_form`, `find`, `network`, `pick`, `select`, `snapshot`, `tabs` and `text`. Only `screenshot` (an image the text judge cannot read) and the actions whose result is host status — tab management, `scroll`, `wait` and the element writes — are outside the map. `contentGuardScanView` then narrows each guarded action so host sentences around a page-authored value are not judged as page content:
+**A. Every page-derived action is guarded, on a narrowed view.** `browserGuardedOutputs` (`var browserGuardedOutputs`, `internal/agent/content_guard_typesafe.go`) holds ten actions: `console`, `controls`, `fill_form`, `find`, `network`, `pick`, `select`, `snapshot`, `tabs` and `text`. Only `screenshot` (an image the text judge cannot read) and the actions whose result is host status — tab management, `scroll`, `wait` and the element writes — are outside the map. The load actions (`open`, `navigate`, `back`, `forward` and `reload`) are outside it too. Their result ends with one location sentence from `tabLocation`, which names only the scheme and host (with any port) of the tab's current URL, never its path, query or fragment. A redirect's path is attacker-controlled text, and the path is readable only through `action=tabs`, which is guarded. The `navigate` and `open` heads echo the URL the model asked for, which is the model's own argument, not page output. `contentGuardScanView` then narrows each guarded action so host sentences around a page-authored value are not judged as page content:
 
 - `tabs` keeps only its `- ` entry lines (`contentGuardEntryLines`). The host header is dropped. The host's empty-strip line (`no browser tabs are open in this project; use action=open to open one`) has no `- ` line, so the view is empty and no judge call happens. A tab's title and URL are page-authored, so they ARE judged on a non-empty listing.
 - `pick` and `select` keep only their Go-quoted runs (`contentGuardQuotedSpans`), unquoted. The host sentence around the selected label — including the `)`-terminated pick line and select's wrapper-less line — is dropped, and select's target (an agent argument) is excluded. A result with no quoted run is judged raw, so a host-format change fails toward judging, not toward silence.
