@@ -204,6 +204,18 @@ func (a *Agent) ClearElevationSecrets() {
 	a.elevation.ClearAll()
 }
 
+// StoreElevationSecret hands a human-typed password to this agent's elevation
+// store, keyed by the ask's request id (the paused tool-call id). Callers must
+// invoke it only after an explicit approval; automatic grants never reach this
+// method. The store copies the bytes and consumes them once when the approved
+// call re-executes (see HandleApprovedToolCall). Nil-safe for test agents.
+func (a *Agent) StoreElevationSecret(requestID string, secret []byte) {
+	if a == nil || a.elevation == nil {
+		return
+	}
+	a.elevation.Store(requestID, secret)
+}
+
 // sessionIDValue returns the debug-log session id set by SetSessionID, or ""
 // when this agent was not built for a server session (the TUI). Locked read —
 // the field is otherwise only accessed directly at construction / by emitDebug.

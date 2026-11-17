@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -15,15 +16,23 @@ type PermissionModalConfig struct {
 	TermHeight    int
 	MaxBodyHeight int
 	OnChoice      func(choice string) // called with "allow"/"deny"/"always-allow"/"always-tool"
+	// NeedsPassword shows a masked password field (elevation asks only). On
+	// Windows the caller leaves it false: UAC authenticates, no field is shown.
+	NeedsPassword bool
+	// OnPassword receives a copy of the typed password on explicit approval,
+	// before OnChoice("allow"). It is never called on deny/escape.
+	OnPassword func(secret []byte)
 }
 
 // PermissionModal is a Modal that wraps a Dialog for permission requests.
 // It handles keyboard shortcuts (y/n/a/esc/enter) and delegates to OnChoice.
 type PermissionModal struct {
-	Dialog   *Dialog
-	config   PermissionModalConfig
-	callback func(string)
-	done     bool // set to true after a choice is made
+	Dialog      *Dialog
+	config      PermissionModalConfig
+	callback    func(string)
+	done        bool // set to true after a choice is made
+	password    textinput.Model
+	hasPassword bool
 }
 
 // NewPermissionModal creates a new PermissionModal.
@@ -33,14 +42,23 @@ func NewPermissionModal(cfg PermissionModalConfig) *PermissionModal {
 	}
 
 	pm := &PermissionModal{
-		config:   cfg,
-		callback: cfg.OnChoice,
+		config:      cfg,
+		callback:    cfg.OnChoice,
+		hasPassword: cfg.NeedsPassword,
+	}
+	if pm.hasPassword {
+		pm.password = newPermPasswordInput()
 	}
 
 	pm.Dialog = NewDialog(cfg.Title, cfg.Body, cfg.Buttons, cfg.TermWidth-4, cfg.TermHeight-2)
 	pm.Dialog.TermWidth = cfg.TermWidth
 	pm.Dialog.TermHeight = cfg.TermHeight
 	pm.Dialog.SetMaxBodyHeight(cfg.MaxBodyHeight)
+	if pm.hasPassword {
+		// View() renders password echo (bullets) only — never the typed value.
+		pm.Dialog.body = cfg.Body + "\n\nPassword: " + pm.password.View()
+		pm.Dialog.layout()
+	}
 
 	return pm
 }
@@ -59,6 +77,33 @@ func (pm *PermissionModal) Handle(msg tea.Msg) bool {
 	// Map keyboard shortcuts to choices.
 	key := keyMsg.Key()
 	var choice string
+
+	if pm.hasPassword {
+		switch key.Code {
+		case tea.KeyEnter:
+			choice = "allow"
+		case tea.KeyEsc:
+			choice = "deny"
+		default:
+			// Every printable key belongs to the password (including y/n/a/t),
+			// so a password character can never accidentally choose an option.
+			pm.password, _ = pm.password.Update(msg)
+			pm.Dialog.body = pm.config.Body + "\n\nPassword: " + pm.password.View()
+			pm.Dialog.layout()
+			return true
+		}
+		pm.done = true
+		if choice == "allow" && pm.config.OnPassword != nil {
+			secret := []byte(pm.password.Value())
+			pm.config.OnPassword(secret)
+			clear(secret)
+		}
+		pm.password.Reset()
+		if pm.callback != nil {
+			pm.callback(choice)
+		}
+		return true
+	}
 
 	switch key.Code {
 	case 'y', 'Y':

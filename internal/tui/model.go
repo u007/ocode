@@ -1818,6 +1818,7 @@ type model struct {
 	pendingSubAgentResp  chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
 	permConfirm          string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
 	permChosenPrefix     string                        // bash prefix picked in the always-rule confirmation ("" = the ask's narrowest candidate)
+	permPassword         textinput.Model               // masked password field for an elevation ask; value lives only here until an explicit approval stores it
 	lastClickTime        time.Time
 	lastClickX           int
 	lastClickY           int
@@ -6646,6 +6647,41 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 	return false, m, nil
 }
 
+// handleElevationPasswordKey drives the masked field on an elevation ask. Enter
+// is the explicit approval (the store happens in answerPermAsk before the
+// approved call re-executes); Esc denies. Every other printable key belongs to
+// the password, so the ordinary y/n/a/t shortcuts are intentionally not
+// available while the field is active — otherwise a password containing 'y'
+// would approve the ask mid-typing.
+func (m model) handleElevationPasswordKey(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		m.showPermDialog = false
+		cmd := m.handlePermissionChoice("y")
+		m.layout()
+		m.rerenderTranscriptAndMaybeScroll()
+		m.saveSession()
+		return m, cmd
+	case "esc":
+		m.showPermDialog = false
+		cmd := m.handlePermissionChoice("n")
+		m.layout()
+		m.rerenderTranscriptAndMaybeScroll()
+		m.saveSession()
+		return m, cmd
+	case "up":
+		m.permViewport.ScrollUp(m.scrollSpeed)
+		return m, nil
+	case "down":
+		m.permViewport.ScrollDown(m.scrollSpeed)
+		return m, nil
+	default:
+		// textinput owns editing (runes, backspace, paste) and masks on View().
+		m.permPassword, _ = m.permPassword.Update(msg)
+		return m, nil
+	}
+}
+
 // handleChatKeys handles all chat-tab-specific key bindings. tiCmd and vpCmd
 // are forwarded from the outer Update so chat's "enter" (empty input) batch
 // can still flush textarea/viewport updates.
@@ -6665,6 +6701,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	}
 
 	if m.showPermDialog {
+		// An elevation ask with a masked field captures its own keys: every
+		// printable character (including y/n/a/t) is a password character, so
+		// the ordinary decision shortcuts must not fire and truncate it.
+		if elevationNeedsPasswordField(m.pendingPermission) && m.permConfirm == "" {
+			return m.handleElevationPasswordKey(msg, tiCmd, vpCmd)
+		}
 		switch keyStr {
 		case "y", "Y", "n", "N", "a", "A", "t", "T", "e", "E":
 			cmd, closed := m.permDialogInput(strings.ToLower(keyStr))
@@ -15521,6 +15563,14 @@ func (m *model) showPermAsk(q queuedPermAsk) {
 	m.pendingToolArgs = q.req.Args
 	m.pendingToolCallID = q.toolCallID
 	m.pendingSubAgentResp = q.subResp
+	// An elevation ask gets a fresh masked field; a normal ask gets an empty,
+	// unfocused one so no stale password can survive into an unrelated dialog.
+	if elevationNeedsPasswordField(q.req) {
+		m.permPassword = newPermPasswordInput()
+	} else {
+		m.permPassword.Reset()
+		m.permPassword.Blur()
+	}
 	// A new ask gets a fresh explanation slot: showing the previous command's
 	// digest under a different command would be actively misleading.
 	m.resetPermDigest()
@@ -15588,6 +15638,10 @@ func (m *model) clearPendingPermAskSlot() {
 	m.pendingToolCallID = ""
 	m.pendingSubAgentResp = nil
 	m.rcPendingPerm = nil
+	// The password lives only in the input widget; drop it as soon as the dialog
+	// closes so it is never held past the ask that produced it.
+	m.permPassword.Reset()
+	m.permPassword.Blur()
 	m.resetPermDigest()
 	// The slot is empty, but the round may still have queued asks — re-sync
 	// rather than clearing blindly, so the flag reflects every live ask.
@@ -15769,6 +15823,40 @@ func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {
 	}
 	lines = append(lines, "")
 	return lines
+}
+
+// storeElevationSecret is indirection so elevation-dialog tests can assert the
+// store is called with the exact typed bytes, keyed by request id, at approval
+// time without driving a live PTY. Production delegates to the owning agent's
+// per-request store.
+var storeElevationSecret = func(a *agent.Agent, requestID string, secret []byte) {
+	a.StoreElevationSecret(requestID, secret)
+}
+
+// elevationNeedsPasswordField reports whether req should show a masked password
+// field. Windows authenticates through UAC (Task 1 sets NeedsPassword=false
+// there), so the flag alone is sufficient in production; the OS check keeps
+// the field off even for a hand-built request carrying the flag so the Windows
+// behaviour cannot drift.
+func elevationNeedsPasswordField(req agent.PermissionRequest) bool {
+	return elevationNeedsPasswordFieldOnOS(req, runtime.GOOS)
+}
+
+func elevationNeedsPasswordFieldOnOS(req agent.PermissionRequest, goos string) bool {
+	return req.NeedsPassword && goos != "windows"
+}
+
+// newPermPasswordInput builds the masked single-line field. EchoPassword makes
+// textinput.View() render bullets, so the typed value never reaches a rendered
+// frame, a log line, or the transcript.
+func newPermPasswordInput() textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = "sudo password"
+	ti.EchoMode = textinput.EchoPassword
+	ti.EchoCharacter = '•'
+	ti.CharLimit = 512
+	ti.Focus()
+	return ti
 }
 
 func renderPermissionPrompt(req agent.PermissionRequest) string {
@@ -16005,6 +16093,20 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 	// cannot re-execute the tool call after the local user already decided.
 	if m.rcPendingPerm != nil && m.rcPendingPerm.requestID == m.pendingToolCallID {
 		m.rcPendingPerm = nil
+	}
+
+	// Elevation approvals: hand the typed password to the per-request store
+	// BEFORE the approved call re-executes. Only an explicit approval reaches
+	// this switch with an "allow" choice; deny/escape never store. The store
+	// rejects an empty secret, so approving without typing fails closed in the
+	// bash tool rather than running the command unprivileged.
+	if elevationNeedsPasswordField(req) {
+		switch choice {
+		case "y", "yes", "allow", "once", "a", "always", "always allow", "t":
+			secret := []byte(m.permPassword.Value())
+			storeElevationSecret(m.agent, m.pendingToolCallID, secret)
+			clear(secret)
+		}
 	}
 
 	switch choice {
@@ -17849,6 +17951,11 @@ var permConfirmBtnDefs = []permBtnDef{
 // offered for req. Delegates to the shared agent helper so the web/desktop
 // permission dialog cannot drift from the TUI's rules.
 func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
+	// An elevation ask is human-only (no auto path satisfies it), so a
+	// persisted "always" rule must not be offered as a bypass in the UI.
+	if agent.IsElevationRequest(req) {
+		return false
+	}
 	return agent.AlwaysRuleChoiceAvailable(req)
 }
 
@@ -17857,6 +17964,9 @@ func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
 // excluded: a tool-level allow blanket-approves every future shell command
 // from one prompt, which is too broad to surface here).
 func permAlwaysToolAvailable(req agent.PermissionRequest) bool {
+	if agent.IsElevationRequest(req) {
+		return false
+	}
 	return agent.AlwaysToolChoiceAvailable(req)
 }
 
@@ -18246,7 +18356,15 @@ func (m *model) renderPermissionDialog(width int) string {
 
 	hintRow := m.renderPermHintRow()
 
-	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+	rendered := lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth)
+	if elevationNeedsPasswordField(req) && m.permConfirm == "" {
+		// The field's View() uses password echo (bullets), so the typed value
+		// never appears in a rendered frame. Keep the ordinary dialog string
+		// byte-identical for non-elevation asks.
+		passwordRow := "Password: " + m.permPassword.View() + "   [Enter] approve  [Esc] deny"
+		return rendered.Render(header + "\n\n" + bodyView + "\n\n" + passwordRow + "\n\n" + buttonRow + "\n" + hintRow)
+	}
+	return rendered.Render(
 		header + "\n\n" + bodyView + "\n\n" + buttonRow + "\n" + hintRow,
 	)
 }
@@ -18275,6 +18393,11 @@ func (m *model) updatePermButtonRegions() {
 	// above the button row. The button rendering itself is 3 lines tall
 	// (individual RoundedBorder per button: top, content, bottom), so the clickable region starts at the first of those 3 lines.
 	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
+	if elevationNeedsPasswordField(m.pendingPermission) && m.permConfirm == "" {
+		// renderPermissionDialog inserts a masked-field row plus a blank line
+		// between the body and the buttons for an elevation ask.
+		buttonTopY += 2
+	}
 
 	m.permButtonRegions = nil
 	x := 2 // border(1) + padding(1) of the bordered input area
