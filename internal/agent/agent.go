@@ -752,6 +752,12 @@ type Agent struct {
 	// Sub-agents run in their own goroutines and never reach the TUI's
 	// tool-result handling, so the sentinel path is invisible to them.
 	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// noInteractivePasswordPrompt is set by headless entry points (`run` / `acp`)
+	// that have no UI to collect an elevation password. When set, a leading
+	// sudo/su is refused with a clear error instead of parking an unanswerable
+	// PERMISSION_ASK (or, under --yolo, running without a secret). TUI, web and
+	// desktop agents leave it false and keep the normal masked ask.
+	noInteractivePasswordPrompt bool
 	// OnPermissionCheck, if set, is invoked around an auto-permission LLM
 	// judge consult (consultPermissionModel): once with active=true right
 	// before the consult starts, and once with active=false when it returns
@@ -4108,6 +4114,11 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 	return text, err
 }
 
+// headlessElevationErrorText is the user-facing refusal for a leading sudo/su
+// in a headless entry point (run / acp), where there is no UI to collect the
+// password the elevated command needs.
+const headlessElevationErrorText = "root elevation requires an interactive password prompt; not supported in headless mode"
+
 // runToolCallWithContext is the body of handleToolCallWithContext.
 func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	// A tool that doesn't exist here was never advertised to the model and is
@@ -4309,6 +4320,12 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 			req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
 			if decision.Request != nil {
 				req = *decision.Request
+			}
+			// A headless run/acp has no UI to collect an elevation password. Refuse a
+			// leading sudo/su here — before any asker (including --yolo's auto-allow)
+			// or the unanswerable PERMISSION_ASK sentinel — with a clear error.
+			if a.noInteractivePasswordPrompt && IsElevationRequest(req) {
+				return "", errors.New(headlessElevationErrorText)
 			}
 			// Elevation asks are human-only: no judge may satisfy them.
 			if autoEnabled && !guardEscalated && !IsElevationRequest(req) {
@@ -6983,6 +7000,14 @@ func (a *Agent) autoPermissionConfig() *config.AutoPermissionConfig {
 // PERMISSION_ASK: sentinel handled by the TUI's message pipeline.
 func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionResponse) {
 	a.subAgentPermAsker = f
+}
+
+// SetNoInteractivePasswordPrompt marks the agent as running in a headless entry
+// point (`run` / `acp`) with no UI to collect an elevation password. A leading
+// sudo/su is then refused with a clear error instead of parking an unanswerable
+// ask. TUI, web and desktop agents never call this.
+func (a *Agent) SetNoInteractivePasswordPrompt() {
+	a.noInteractivePasswordPrompt = true
 }
 
 // attributePermAsker wraps a sub-agent permission-ask callback so every request

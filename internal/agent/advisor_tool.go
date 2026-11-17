@@ -324,6 +324,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 
 	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
 	advisorAgent.toolBatchDelay = 0
+	advisorAgent.noInteractivePasswordPrompt = t.mainAgent.noInteractivePasswordPrompt
 	// The advisor is a helper: its advice is injected into the PARENT's context
 	// as a user-role message, not shown to the user. A raw <ocode:suggestions>
 	// block would land in the parent's prompt and could prompt another one, and

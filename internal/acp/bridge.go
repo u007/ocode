@@ -59,6 +59,10 @@ func newSessionBridge(cfg *config.Config, cwd string) (*sessionBridge, error) {
 	sessionCfg := *cfg
 	plugins.MergeMCPServers(&sessionCfg, cwd)
 	ag := agent.NewAgent(client, tools, &sessionCfg, lspMgr)
+	// ACP's permission callback can only return allow/deny — it has no password
+	// channel — so a leading sudo/su is a headless elevation: refuse it with a
+	// clear error instead of parking an ask no client can satisfy.
+	ag.SetNoInteractivePasswordPrompt()
 	ag.LoadExternalToolsWithMCP(&sessionCfg)
 
 	return &sessionBridge{

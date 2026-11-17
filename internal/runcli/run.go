@@ -258,6 +258,9 @@ func Run(args []string) error {
 	}
 	tools = filtered
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
+	// Headless `run` has no UI to collect an elevation password; a leading
+	// sudo/su is refused with a clear error instead of parking an unanswerable ask.
+	ag.SetNoInteractivePasswordPrompt()
 	if opts.timeout > 0 {
 		ag.RequestTimeout = time.Duration(opts.timeout) * time.Second
 	}

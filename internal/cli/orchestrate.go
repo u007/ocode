@@ -125,6 +125,8 @@ func Run(args []string) error {
 
 	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
 	parent := agent.NewAgent(client, tools, cfg, lspMgr)
+	// The orchestrator is headless: no UI can collect an elevation password.
+	parent.SetNoInteractivePasswordPrompt()
 	parent.LoadExternalToolsWithMCP(cfg)
 	if opts.YOLO {
 		parent.OnPermissionAsk = func(req agent.PermissionRequest) agent.PermissionResponse {

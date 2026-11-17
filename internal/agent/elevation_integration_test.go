@@ -180,6 +180,54 @@ func TestElevationEndToEnd_AskStorePTYNoSecretLeak(t *testing.T) {
 	}
 }
 
+// TestHeadlessRefusesElevationWithClearError pins the headless clear-error guard:
+// a headless `run`/`acp` agent has no UI to collect an elevation password, so a
+// leading sudo/su must be refused with a user-facing clear error — not parked as
+// an unanswerable PERMISSION_ASK and not (under --yolo) executed without a
+// secret. TUI / web / desktop agents leave the capability flag off and keep the
+// normal masked ask (see TestElevationEndToEnd).
+func TestHeadlessRefusesElevationWithClearError(t *testing.T) {
+	const want = "root elevation requires an interactive password prompt; not supported in headless mode"
+	const marker = "HEADLESS_SHOULD_NOT_RUN"
+
+	dir := t.TempDir()
+	writeFakeSudo(t, dir, "unused-secret", marker)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	call := func(headless bool) (string, error) {
+		a := newTestAgent(&elevationE2EClient{}, []tool.Tool{tool.BashTool{}}, nil, nil)
+		if headless {
+			a.SetNoInteractivePasswordPrompt()
+		}
+		return a.handleToolCall("bash", json.RawMessage(`{"command":"sudo whoami"}`), nil, "call-headless")
+	}
+
+	// Default agent (TUI/web): the normal human-only ask sentinel, no error,
+	// and the command does not run. This is the no-regression baseline.
+	got, err := call(false)
+	if err != nil {
+		t.Fatalf("default agent returned an error for an elevation ask: %v", err)
+	}
+	if !strings.HasPrefix(got, tool.SentinelPermissionAsk) {
+		t.Fatalf("default agent result = %q, want a PERMISSION_ASK sentinel", got)
+	}
+	if strings.Contains(got, marker) {
+		t.Fatal("default agent executed the elevated command at ask time")
+	}
+
+	// Headless agent: the exact clear error, no execution.
+	got, err = call(true)
+	if err == nil {
+		t.Fatalf("headless agent did not refuse elevation; result = %q", got)
+	}
+	if err.Error() != want {
+		t.Fatalf("headless elevation error = %q, want %q", err.Error(), want)
+	}
+	if strings.Contains(got, marker) {
+		t.Fatal("headless agent executed the elevated command")
+	}
+}
+
 // TestElevationSecretClearanceOnResetPaths maps each reset path in the plan to
 // the agent-level hook that zeroes the store, and proves a stored secret does
 // not survive it. /new, /clear and idle eviction all retire the agent through
