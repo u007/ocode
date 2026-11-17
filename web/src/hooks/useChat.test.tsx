@@ -94,7 +94,7 @@ describe("useChat.resolvePermission", () => {
     await act(async () => {
       expect(await result.current.chat.resolvePermission("call-1", "deny")).toEqual({ ok: true });
     });
-    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny", undefined, undefined);
+    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny", undefined, undefined, undefined);
     expect(result.current.chat.pendingPermission).toBeNull();
   });
 
@@ -105,7 +105,7 @@ describe("useChat.resolvePermission", () => {
     await act(async () => {
       expect(await result.current.chat.resolvePermission("call-1", "always_rule", "npm run")).toEqual({ ok: true });
     });
-    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "always_rule", undefined, "npm run");
+    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "always_rule", undefined, "npm run", undefined);
   });
 });
 
