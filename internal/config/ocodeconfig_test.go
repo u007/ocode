@@ -2581,8 +2581,8 @@ func TestSaveTerminalConfigFailureWritesNothing(t *testing.T) {
 	}
 }
 
-// TestNormalizeAdvisorCheckpoints pins the retired-name migration: a stored
-// "plan" becomes "done" (so the session keeps a review), duplicates collapse,
+// TestNormalizeAdvisorCheckpoints pins canonicalization: "plan" stays a valid
+// design trigger (it is no longer folded into "done"), duplicates collapse,
 // and an explicitly empty list still disables the checkpoints.
 func TestNormalizeAdvisorCheckpoints(t *testing.T) {
 	cases := []struct {
@@ -2592,9 +2592,9 @@ func TestNormalizeAdvisorCheckpoints(t *testing.T) {
 	}{
 		{"absent", nil, nil},
 		{"explicitly empty", []string{}, []string{}},
-		{"retired plan", []string{"plan"}, []string{"done"}},
-		{"retired plan with done", []string{"plan", "done"}, []string{"done"}},
-		{"plan is case-insensitive", []string{"PLAN"}, []string{"done"}},
+		{"keep plan", []string{"plan"}, []string{"plan"}},
+		{"plan with done", []string{"plan", "done"}, []string{"plan", "done"}},
+		{"plan is case-insensitive", []string{"PLAN"}, []string{"plan"}},
 		{"keep done", []string{"done"}, []string{"done"}},
 		{"blank entries dropped", []string{"  ", "done"}, []string{"done"}},
 	}

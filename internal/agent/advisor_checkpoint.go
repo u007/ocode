@@ -11,10 +11,11 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// checkpointDone is the advisor checkpoint name, matching the
-// cfg.Ocode.Advisor.Checkpoints value. A configured "plan" is no longer a
-// checkpoint and is ignored.
-const checkpointDone = "done"
+// Advisor checkpoint names, matching cfg.Ocode.Advisor.Checkpoints values.
+const (
+	checkpointPlan = "plan"
+	checkpointDone = "done"
+)
 
 // advisorReviewEntry is one completed advisor review in the in-memory ledger.
 type advisorReviewEntry struct {
@@ -48,6 +49,7 @@ const doneCheckpointMinToolCalls = 5
 // again; that is intended, because the continuation starts from new state.
 type advisorCheckpointState struct {
 	userGoal    string
+	planChecked bool
 	doneChecked bool
 	toolCalls   int
 	writeCalls  int
@@ -227,6 +229,79 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 		return "", false
 	}
 	return advice, true
+}
+
+// summarizeToolArgs renders a compact one-line description of a tool call's
+// arguments for the plan prompt: the target file path when extractable,
+// otherwise the raw args whitespace-collapsed and truncated.
+func summarizeToolArgs(toolName, args string) string {
+	if p := extractTouchFilePath(toolName, args); p != "" {
+		return p
+	}
+	const max = 160
+	s := strings.Join(strings.Fields(args), " ")
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+// advisorPlanCheckpoint fires once per Step, immediately after the first
+// executed tool batch that contained a write-class call. The batch is NOT
+// deferred: the writes are already applied, so the model never regenerates
+// them. The review comes back as a user message injected into the loop, which
+// the model acts on next iteration (correcting the applied change if the
+// advisor found a problem). Returns nil when the checkpoint does not apply, or
+// when the advisor is unavailable, in which case the loop continues unchanged.
+func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message) *Message {
+	if st.planChecked || len(resp.ToolCalls) == 0 || !a.advisorCheckpointEnabled(checkpointPlan) {
+		return nil
+	}
+	if a.blockedByPendingAsk(st, checkpointPlan) {
+		return nil
+	}
+	if st.skillSuppressed {
+		return nil
+	}
+	hasWrite := false
+	for _, tc := range resp.ToolCalls {
+		if isWriteTool(tc.Function.Name) {
+			hasWrite = true
+			break
+		}
+	}
+	if !hasWrite {
+		return nil
+	}
+	st.planChecked = true
+
+	var plan strings.Builder
+	for _, tc := range resp.ToolCalls {
+		fmt.Fprintf(&plan, "- %s %s\n", tc.Function.Name, summarizeToolArgs(tc.Function.Name, tc.Function.Arguments))
+	}
+	prompt := fmt.Sprintf(`PLAN CHECKPOINT: the executor has just made its first code changes for this task. Review the approach now, while it is still cheap to correct.
+
+User goal:
+%s
+
+Executor's reasoning:
+%s
+
+Tool calls just applied:
+%s
+
+Advise: is this the right approach? Wrong files, missing prior exploration, simpler alternative, risks? Answer with either "proceed" plus cautions, or a corrected approach. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
+		st.userGoal, resp.Content, plan.String())
+
+	advice, ok := a.runAdvisorCheckpoint(checkpointPlan, prompt)
+	if !ok {
+		return nil
+	}
+	return &Message{
+		Role: "user",
+		Content: "[advisor plan checkpoint] An advisor reviewed the changes you just made:\n\n" + advice +
+			"\n\nIf the review confirms your approach, carry on. Otherwise correct the changes now — they are already applied, so fix them in place rather than re-issuing the same calls. This checkpoint fires only once per step.",
+	}
 }
 
 // advisorDoneCheckpoint fires once per Step when the model produces a final

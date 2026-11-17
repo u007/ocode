@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Advisor gate judge (advisor_gate)
-description: The advisor_gate decision judge (Jev) decides whether an advisor review runs at end of turn or before a git commit; its one answer floor applying to every choice (including review_now), the fallback when it gives no usable answer or no probability, the watermarked review ledger and its corrected limits, the human-only user_request, the once-per-Step gate, the migrated (not ignored) plan checkpoint, widened commit detection, and the stop-bound judge call.
+description: The advisor_gate decision judge (Jev) decides whether a review runs at end of turn or before a git commit; its one answer floor applying to every choice (including review_now), the fallback when it gives no usable answer or no probability, the watermarked review ledger and its corrected limits, the human-only user_request, the once-per-Step gate, the restored ungated plan checkpoint that reviews the first write batch, the two judge-gated moments, widened commit detection, and the stop-bound judge call.
 resource: internal/agent/advisor_gate_typesafe.go
 tags:
   - advisor
@@ -10,7 +10,7 @@ tags:
   - agent-loop
   - checkpoints
   - commit
-timestamp: 2026-11-15T10:39:56Z
+timestamp: 2026-11-17T06:36:58Z
 status: active
 ---
 # Advisor gate judge (`advisor_gate`)
@@ -20,8 +20,8 @@ Advisor reviews are no longer fired by a fixed rule alone. The `advisor_gate` de
 ## Where it lives
 
 - `internal/agent/advisor_gate_typesafe.go`: the judge. `advisorGateChoiceFloor` (0.6, line 39), `advisorGateInstructions` (the rubric, line 53), `advisorGateQuestions` (line 91), `advisorGateDecide` (line 114), `advisorGateAsk` (line 129), `advisorGateState` (line 177), `advisorGateReviews` (line 223), `advisorGateCommands` (line 243), `advisorGateToolNames` (line 258), `advisorGateCapList` (line 285), `advisorGateClip` (line 295).
-- `internal/agent/advisor_checkpoint.go`: `checkpointDone` (line 17), `advisorReviewEntry` (line 20), `advisorCheckpointState` (line 49), `newAdvisorCheckpointState` (line 87), `lastHumanUserContent` (line 121), `runAdvisorCheckpoint` (line 190; advice redacted at line 224), `advisorDoneCheckpoint` (line 239), `advisorCommitHold` (line 308), `bashRunsGitCommit` (line 374), `gitWordsRunCommit` (line 386), and the ledger helpers `recordAdvisorReview` (line 407) and `advisorChangedSinceLastReview` (line 436). Constants: `advisorLedgerMax` = 20 (line 32), `doneCheckpointMinToolCalls` = 5 (line 42).
-- `internal/agent/agent.go`, `Agent.Step`: `userGoal := lastHumanUserContent(messages)` (line 1667), the per-Step checkpoint state and the skill flag (lines 1732-1733), the end-of-turn call (line 1932), the per-response skill check (line 1950), and the before-commit call (line 2008).
+- `internal/agent/advisor_checkpoint.go`: `checkpointPlan` (line 16), `checkpointDone` (line 17), `advisorReviewEntry` (line 21), `advisorCheckpointState` (line 50), `newAdvisorCheckpointState` (line 89), `lastHumanUserContent` (line 123), `runAdvisorCheckpoint` (line 192; advice redacted at line 226), `advisorPlanCheckpoint` (line 256), `advisorDoneCheckpoint` (line 314), `advisorCommitHold` (line 383), `bashRunsGitCommit` (line 449), `gitWordsRunCommit` (line 461), and the ledger helpers `recordAdvisorReview` (line 482) and `advisorChangedSinceLastReview` (line 511). Constants: `advisorLedgerMax` = 20 (line 33), `doneCheckpointMinToolCalls` = 5 (line 43).
+- `internal/agent/agent.go`, `Agent.Step`: `userGoal := lastHumanUserContent(messages)` (line 1671), the per-Step checkpoint state and the skill flag (lines 1736-1737), the end-of-turn call (line 1936), the per-response skill check (line 1954), the before-commit call (line 2012), and the plan checkpoint call after the write batch is applied (line 2397).
 - `internal/snapshot/snapshot.go`: `LastWriteSeq` (line 718) and `ChangedSince` (line 734), the ledger's write watermark.
 - Slot: `slotAdvisorGate` in `internal/agent/decider.go` (line 32), resolved from `oc.AdvisorGate.JudgeModel` (lines 119-120).
 - Config: `AdvisorGate JudgeModelConfig` in `internal/config/ocodeconfig.go` (line 1088). The JSON key is `advisor_gate` with a nested `judge_model`. The default is `defaultJudgeModel` = `typesafe/jev-latest` (line 978).
@@ -35,16 +35,24 @@ Advisor reviews are no longer fired by a fixed rule alone. The `advisor_gate` de
 - An answer with **no probability entry** for the option it chose is also rejected as not decided (`prob, hasProb := ans.Probabilities[ans.Choice]`). A missing probability is not a confident answer.
 - The check is `!(prob >= advisorGateChoiceFloor) || math.IsInf(prob, 0)`, so NaN and infinity both fail. There is no separate skip floor any more; the old lower bar for skips is gone.
 
-## The plan checkpoint migrated, it is not "ignored"
+## Three advisor moments; the judge gates two
 
-The plan checkpoint (a review after the first edit batch) no longer fires. A stored `"plan"` is **migrated to `"done"`**, not dropped, so a session pinned to `["plan"]` keeps a review instead of silently losing every checkpoint.
+There are three loop-enforced advisor moments, not one. The `"plan"` trigger is a **design review of the first write batch** and is NOT gated by `advisor_gate`; `"done"` (completion) and the before-commit hold ARE gated by it. Normalization keeps both names as valid, independent triggers:
 
-- `config.NormalizeAdvisorCheckpoints` (`internal/config/ocodeconfig.go:889`) maps `"plan"` to `"done"` case-insensitively, drops blank entries, dedupes, leaves `nil` as `nil`, and leaves an explicit empty list empty.
-- It is called from `agent.AdvisorConfigFromConfig` (`internal/agent/advisor_config.go:37`), `Agent.SetAdvisorConfig` (`internal/agent/advisor_config.go:57`) and `advisorCheckpointsFromMeta` (`internal/server/advisor_session.go:215`), so the process-wide default, an in-session config change and a stored session pin all migrate.
-- The `AdvisorConfig.Checkpoints` field comment (`internal/config/ocodeconfig.go:862`) states that `"done"` gates BOTH moments — the end-of-turn review and the before-commit hold — and that an empty list disables both.
-- The default checkpoint list is `["done"]` (`internal/config/ocodeconfig.go:1847`). The web AdvisorForm offers only `"done"`. Regression: `TestAdvisorCheckpoint_PlanValueMigrates` (`internal/agent/advisor_checkpoint_test.go:531`).
+- `config.NormalizeAdvisorCheckpoints` (`internal/config/ocodeconfig.go:889`) canonicalizes `"plan"` as a valid design-trigger name (case-insensitive, lowercased), keeps `"done"`, drops blank and duplicate entries, leaves `nil` as `nil`, and leaves an explicit empty list empty. It no longer rewrites `"plan"` to `"done"`.
+- It is called from `agent.AdvisorConfigFromConfig` (`internal/agent/advisor_config.go:37`), `Agent.SetAdvisorConfig` (`internal/agent/advisor_config.go:57`) and `advisorCheckpointsFromMeta` (`internal/server/advisor_session.go:214`), so the process-wide default, an in-session config change and a stored session pin all keep the two names. The session reader reads back both `"plan"` and `"done"`.
+- The `AdvisorConfig.Checkpoints` field comment (`internal/config/ocodeconfig.go:862`) now documents `"plan"` (first-write review, ungated) alongside `"done"` (judge-gated completion and commit review); an empty list still disables every checkpoint.
+- The default checkpoint list remains `["done"]` (`internal/config/ocodeconfig.go:1847`) and the web AdvisorForm still offers only `"done"`, so enabling the design review needs `"plan"` in the list explicitly (the user config already has `["plan","done"]`). Regression: `TestAdvisorCheckpoint_PlanValueIsValid` (`internal/agent/advisor_checkpoint_test.go:689`); the restored behavior is pinned by `TestAdvisorPlanCheckpoint_*` (`internal/agent/advisor_checkpoint_test.go:140`).
 
-## The two moments
+## The restored plan checkpoint (ungated)
+
+### plan: `advisorPlanCheckpoint`
+
+Fires once per `Step`, immediately after the FIRST executed write-class tool batch (at most one review per Step). The batch is already applied — the model is not asked to regenerate it; the review comes back as a user message prefixed `[advisor plan checkpoint]`, so the next loop iteration corrects the applied writes in place. No judge call: it runs whenever `"plan"` is in the session's trigger set and the advisor is available. It stands down on a pending ask (`blockedByPendingAsk`), on `skillSuppressed` (a skill's `skip_advisor`, including per-response detection), on a read-only batch (no write-class tool), and once `planChecked` is set after the first write batch of the Step. A failed advisor call returns nil and the loop continues unchanged.
+
+## The two judge-gated moments
+
+The `advisor_gate` judge is consulted only at these two moments.
 
 ### end_of_turn: `advisorDoneCheckpoint`
 
@@ -77,7 +85,7 @@ The rubric is `advisorGateInstructions`. The per-choice criteria are built in `a
 ## The state the judge sees
 
 - `moment`, and `subject`: `commit_command` (before_commit) or `final_report` (end_of_turn).
-- `user_request`, clipped to 1500 runes. It comes from `lastHumanUserContent` (`advisor_checkpoint.go:121`), which uses `isHumanPromptMessage`: synthetic `[ocode:*]` notices, auto-continue resumes and the step-limit notice are skipped. A turn started by a background-job `[ocode:event]` notice therefore has an EMPTY `user_request`; background output can never read as the user declining a review.
+- `user_request`, clipped to 1500 runes. It comes from `lastHumanUserContent` (`advisor_checkpoint.go:123`), which uses `isHumanPromptMessage`: synthetic `[ocode:*]` notices, auto-continue resumes and the step-limit notice are skipped. A turn started by a background-job `[ocode:event]` notice therefore has an EMPTY `user_request`; background output can never read as the user declining a review.
 - `todo_plan`, the first 30 lines.
 - `session_changed_files` and `changed_since_last_review`, each capped at 100 entries with a "more not shown" marker.
 - `reviews`: the last 5 ledger entries, oldest first, each with moment, files and verdict (verdict clipped to 600 runes).
@@ -88,7 +96,7 @@ The rubric is `advisorGateInstructions`. The per-choice criteria are built in `a
 
 The ledger lives in memory on the agent and keeps at most 20 entries. Each entry stores the session's changed files at review time, a clipped verdict, and `Seq` — the snapshot store's write watermark at review time (`LastWriteSeq`, `snapshot.go:718`).
 
-`changed_since_last_review` (`advisorChangedSinceLastReview`, `advisor_checkpoint.go:436`) unions two sources:
+`changed_since_last_review` (`advisorChangedSinceLastReview`, `advisor_checkpoint.go:511`) unions two sources:
 
 - `snapshot.Store.ChangedSince(seq)` (`snapshot.go:734`): every tracked write newer than the last review's watermark, whatever tool made it. A post-review `apply_patch` (which carries only `patchText`), a formatter, or a bash edit therefore counts as unreviewed.
 - The session's changed files that the last review's `Files` list did not cover. This catches a backup the store never sequenced.
@@ -116,7 +124,7 @@ After the explicit counts were added, plus rubric lines defining "declined" (a c
 - `advisorGateDecide` recovers a panic and returns not decided. It never reaches the agent loop.
 - Every decision writes one `ADVISOR` debug line: moment, choice, probability, decided, review and detail.
 - Usage is booked with `deciderLabel`, so the ledger does not mix backends.
-- Advisor advice is passed through `redactText` before either caller persists it (`advisor_checkpoint.go:224`), in addition to the guardrail's redact → vet → truncate ordering.
+- Advisor advice is passed through `redactText` before either caller persists it (`advisor_checkpoint.go:226`), in addition to the guardrail's redact → vet → truncate ordering.
 - `typesafeCapContent` now delegates to `advisorGateClip`, so every judge-state truncation shares one marker.
 - Never falls back to another backend. An unconfigured judge leaves the caller on the threshold rule (before_commit: the commit runs).
 
@@ -128,6 +136,7 @@ The AdvisorForm checkbox is labelled "Review at end of turn and before a commit 
 
 - `go test ./internal/agent/ -run TestAdvisorGateLiveScenarios -v` runs the 12 live scenarios (`internal/agent/advisor_gate_live_test.go`, line 37). It is gated on `TYPESAFE_API_KEY`.
 - Stubbed unit tests are in `internal/agent/advisor_gate_typesafe_test.go`. They cover end-of-turn skip and review, the undecided fallback, the below-floor review_now fallback, the no-session-changes case not asking the judge, the panic case, the commit hold, `bashRunsGitCommit`, the ledger (including `ChangedSince`), and the turn summary.
+- The restored plan checkpoint is covered by `TestAdvisorPlanCheckpoint_*` in `internal/agent/advisor_checkpoint_test.go` (first write batch injected without deferral, read-only batch, advisor failure, write-tool-only trigger, skill suppression), with `"plan"` normalization pinned by `TestAdvisorCheckpoint_PlanValueIsValid`.
 - Not verified: a full live agent turn end to end. The loop is covered only by stubbed tests, and the live judge only by synthetic states.
 
 ## Related

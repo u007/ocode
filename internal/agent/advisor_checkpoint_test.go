@@ -75,7 +75,10 @@ func namedToolCall(id, name, args string) ToolCall {
 func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 
-	a, _ := checkpointTestAgent(t, []string{"done"})
+	a, _ := checkpointTestAgent(t, []string{"plan", "done"})
+	if !a.advisorCheckpointEnabled(checkpointPlan) || !a.advisorCheckpointEnabled(checkpointDone) {
+		t.Fatal("expected both plan and done checkpoints enabled")
+	}
 	if !a.advisorCheckpointEnabled(checkpointDone) {
 		t.Fatal("expected the done checkpoint enabled")
 	}
@@ -110,6 +113,9 @@ func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	// PROCESS-WIDE config must not move a session's triggers.
 	a.config.Ocode.Advisor.Checkpoints = []string{"done"}
 	a.SetAdvisorConfig(AdvisorConfig{Model: "deepseek/deepseek-v4-pro", Checkpoints: []string{"done"}})
+	if a.advisorCheckpointEnabled(checkpointPlan) {
+		t.Fatal("expected plan checkpoint disabled when not in the session's triggers")
+	}
 	if !a.advisorCheckpointEnabled(checkpointDone) {
 		t.Fatal("expected done checkpoint still enabled")
 	}
@@ -128,6 +134,135 @@ func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	a.SetAdvisorConfig(AdvisorConfig{Checkpoints: []string{"done"}})
 	if !a.advisorCheckpointEnabled(checkpointDone) {
 		t.Fatal("expected session triggers to still fire with a nil process config")
+	}
+}
+
+func TestAdvisorPlanCheckpoint_InjectsReviewWithoutDeferring(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	st := &advisorCheckpointState{userGoal: "add feature X"}
+
+	resp := &Message{
+		Role:    "assistant",
+		Content: "I will edit two files.",
+		ToolCalls: []ToolCall{
+			writeToolCall("tc1", "a.go"),
+			writeToolCall("tc2", "b.go"),
+		},
+	}
+	review := a.advisorPlanCheckpoint(st, resp)
+	if review == nil {
+		t.Fatal("expected the plan checkpoint to return an advisor review")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected 1 advisor call, got %d", fake.calls)
+	}
+	// The review is injected as a user message: the write batch already ran,
+	// so no synthetic tool results are produced and the model never has to
+	// regenerate the writes.
+	if review.Role != "user" {
+		t.Fatalf("expected the review to be injected as a user message, got role %q", review.Role)
+	}
+	if review.ToolID != "" {
+		t.Fatalf("review must not impersonate a tool result, got ToolID %q", review.ToolID)
+	}
+	if !strings.Contains(review.Content, fake.advice) {
+		t.Fatal("review must carry the advisor advice")
+	}
+	if !strings.Contains(fake.lastPrompt, "add feature X") || !strings.Contains(fake.lastPrompt, "a.go") {
+		t.Fatalf("plan prompt missing goal or file: %q", fake.lastPrompt)
+	}
+
+	// Second batch in the same Step must NOT re-fire.
+	if again := a.advisorPlanCheckpoint(st, resp); again != nil {
+		t.Fatal("plan checkpoint fired twice in one Step")
+	}
+}
+
+func TestAdvisorPlanCheckpoint_SkipsReadOnlyBatch(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	st := &advisorCheckpointState{}
+
+	resp := &Message{
+		Role: "assistant",
+		ToolCalls: []ToolCall{
+			namedToolCall("tc1", "read", `{"path":"a.go"}`),
+		},
+	}
+	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+		t.Fatal("plan checkpoint must not fire on read-only batches")
+	}
+	if fake.calls != 0 {
+		t.Fatal("advisor must not be called for read-only batches")
+	}
+	if st.planChecked {
+		t.Fatal("read-only batch must not consume the plan checkpoint")
+	}
+}
+
+func TestAdvisorPlanCheckpoint_AdvisorFailureExecutesNormally(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	fake.err = assertAnError("advisor down")
+	st := &advisorCheckpointState{}
+
+	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
+	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+		t.Fatal("advisor failure must not inject a review")
+	}
+	if !st.planChecked {
+		t.Fatal("failed checkpoint still counts as checked (no retry loop)")
+	}
+}
+
+// A write batch still gets its design review, and the completion checkpoint
+// still fires when the model stops — both triggers are independent.
+func TestAdvisorDoneCheckpoint_FiresAfterPlanCheckpointOnSameTurn(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
+	st := &advisorCheckpointState{userGoal: "fix the bug"}
+
+	planResp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
+	// The Step loop counts the batch (it executed) before the plan checkpoint runs.
+	st.countBatch(planResp.ToolCalls)
+	if review := a.advisorPlanCheckpoint(st, planResp); review == nil {
+		t.Fatal("expected plan checkpoint to review the first write batch")
+	}
+
+	finalResp := &Message{Role: "assistant", Content: "Done, fixed."}
+	followUp := a.advisorDoneCheckpoint(st, finalResp)
+	if followUp == nil {
+		t.Fatal("expected done checkpoint to fire after a write batch")
+	}
+	if fake.calls != 2 {
+		t.Fatalf("expected two advisor calls (plan + done), got %d", fake.calls)
+	}
+	if !strings.Contains(followUp.Content, fake.advice) {
+		t.Fatal("follow-up must carry the advisor advice")
+	}
+}
+
+// Only write-class tools trigger the design review; read-only tools never do.
+func TestAdvisorPlanCheckpoint_OnlyWriteToolsTrigger(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+
+	readOnlyTools := []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch"}
+	for _, toolName := range readOnlyTools {
+		st := &advisorCheckpointState{userGoal: "read-only check"}
+		resp := &Message{Role: "assistant", ToolCalls: []ToolCall{
+			namedToolCall("tc1", toolName, `{}`),
+		}}
+		if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+			t.Fatalf("plan checkpoint fired for read-only tool %q", toolName)
+		}
+		if fake.calls != 0 {
+			t.Fatalf("advisor called for read-only tool %q", toolName)
+		}
+		if st.planChecked {
+			t.Fatalf("planChecked set by read-only tool %q", toolName)
+		}
 	}
 }
 
@@ -333,6 +468,29 @@ func TestAdvisorToggleKeepsToolListStable(t *testing.T) {
 	}
 }
 
+func TestAdvisorPlanCheckpoint_SkillSuppressedStandsDown(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	st := &advisorCheckpointState{skillSuppressed: true}
+
+	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}
+	if d := a.advisorPlanCheckpoint(st, resp); d != nil {
+		t.Fatal("plan checkpoint must stand down when skillSuppressed")
+	}
+	if fake.calls != 0 {
+		t.Fatal("advisor must not be called when skillSuppressed")
+	}
+	if st.planChecked {
+		t.Fatal("suppressed checkpoint must not consume planChecked")
+	}
+
+	// Without suppression it fires.
+	st2 := &advisorCheckpointState{}
+	if d := a.advisorPlanCheckpoint(st2, resp); d == nil {
+		t.Fatal("plan checkpoint should fire when not suppressed")
+	}
+}
+
 func TestAdvisorDoneCheckpoint_SkillSuppressedStandsDown(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"done"})
@@ -526,24 +684,31 @@ func TestSkillDisablesAdvisor_ResolvesEachNameOncePerStep(t *testing.T) {
 	}
 }
 
-// A stored "plan" value is retired. It migrates to "done", so a session pinned
-// to it keeps a review instead of silently losing every checkpoint.
-func TestAdvisorCheckpoint_PlanValueMigrates(t *testing.T) {
+// A stored "plan" value stays a valid design trigger; it is no longer folded
+// into "done". A session pinned to it must still get its first-write review.
+func TestAdvisorCheckpoint_PlanValueIsValid(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
-	a, _ := checkpointTestAgent(t, []string{"plan"})
-	if !a.advisorCheckpointEnabled(checkpointDone) {
-		t.Fatal("a stored plan checkpoint must migrate to done, not disable the review")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	if !a.advisorCheckpointEnabled(checkpointPlan) {
+		t.Fatal("a stored plan checkpoint must still enable the design review")
 	}
-	a.SetAdvisorConfig(AdvisorConfig{Checkpoints: []string{"plan", "done"}})
-	if !a.advisorCheckpointEnabled(checkpointDone) {
-		t.Fatal("a configured plan value must not disable done")
-	}
-	if got := a.AdvisorCheckpoints(); len(got) != 1 || got[0] != checkpointDone {
-		t.Fatalf("checkpoints = %v, want [done]", got)
+	if got := a.AdvisorCheckpoints(); len(got) != 1 || got[0] != checkpointPlan {
+		t.Fatalf("checkpoints = %v, want [plan]", got)
 	}
 	st := &advisorCheckpointState{userGoal: "fix it"}
 	st.countBatch([]ToolCall{writeToolCall("tc1", "a.go")})
-	if f := a.advisorDoneCheckpoint(st, &Message{Role: "assistant", Content: "Done."}); f == nil {
-		t.Fatal("done should still fire on a non-trivial turn when plan is also configured")
+	if f := a.advisorPlanCheckpoint(st, &Message{Role: "assistant", ToolCalls: []ToolCall{writeToolCall("tc1", "a.go")}}); f == nil {
+		t.Fatal("plan should fire on the first write batch")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected one advisor call, got %d", fake.calls)
+	}
+
+	a.SetAdvisorConfig(AdvisorConfig{Checkpoints: []string{"plan", "done"}})
+	if !a.advisorCheckpointEnabled(checkpointPlan) || !a.advisorCheckpointEnabled(checkpointDone) {
+		t.Fatal("both plan and done must be enabled when configured")
+	}
+	if !a.advisorCheckpointEnabled(checkpointDone) {
+		t.Fatal("a configured plan value must not disable done")
 	}
 }

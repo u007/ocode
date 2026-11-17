@@ -209,9 +209,8 @@ func sessionAdvisorConfigForDir(projectRoot, sessionID string) (agent.AdvisorCon
 
 // advisorCheckpointsFromMeta normalizes the stored trigger list. JSON gives
 // back []any of strings, and a nil/empty list is a real "no triggers" value
-// rather than an absent pin. Retired names are migrated ("plan" becomes
-// "done"), so a session pinned before the plan checkpoint was removed keeps a
-// review instead of silently losing every checkpoint.
+// rather than an absent pin. Both "plan" (first-write design review) and
+// "done" (completion/commit review) stay valid when read back from a session.
 func advisorCheckpointsFromMeta(raw any) []string {
 	arr, ok := raw.([]any)
 	if !ok {

@@ -860,12 +860,12 @@ type AdvisorConfig struct {
 	// name (e.g. "claude-sonnet-4-6") passed to claude --model.
 	ClaudeCode bool `json:"claude_code,omitempty"`
 	// Checkpoints lists loop-enforced advisor consultations, applied by the
-	// agent loop (not left to the model's discretion). The only value is:
+	// agent loop (not left to the model's discretion). The values are:
+	//   "plan" — review the first write batch, while the approach is still
+	//            cheap to correct. Not gated by the advisor_gate judge.
 	//   "done" — the advisor_gate judge decides whether a review is worth
 	//            running, both before the agent's final answer and before a
-	//            git commit executes. An empty list disables both.
-	// A stored "plan" (the retired first-write-batch checkpoint) is migrated to
-	// "done" when the list is loaded, so an existing session keeps its review.
+	//            git commit executes. An empty list disables every checkpoint.
 	// Checkpoints only fire when the advisor is enabled and the checkpoint
 	// is listed. The advisor model is resolved with a built-in default
 	// fallback, so absence of an explicit model does not disable checkpoints.
@@ -881,11 +881,11 @@ type PluginsConfig struct {
 	AST bool `json:"ast"`
 }
 
-// NormalizeAdvisorCheckpoints migrates a stored trigger list. "plan" was the
-// checkpoint that reviewed the first write batch; it no longer fires, so it is
-// mapped to "done", which still reviews the turn's work (at the end of the turn
-// and before a commit). Other names pass through unchanged, so an explicitly
-// empty list still disables the checkpoints.
+// NormalizeAdvisorCheckpoints canonicalizes a stored trigger list. "plan" is
+// the design trigger (a review of the first write batch) and "done" is the
+// completion trigger; both are valid and fire at their respective moments.
+// Blanks and duplicates are dropped. A nil list stays nil (unset) and an
+// explicitly empty list stays empty (all checkpoints off).
 func NormalizeAdvisorCheckpoints(in []string) []string {
 	if in == nil {
 		return nil
@@ -894,7 +894,7 @@ func NormalizeAdvisorCheckpoints(in []string) []string {
 	for _, name := range in {
 		name = strings.TrimSpace(name)
 		if strings.EqualFold(name, "plan") {
-			name = "done"
+			name = "plan"
 		}
 		if name == "" || slices.Contains(out, name) {
 			continue

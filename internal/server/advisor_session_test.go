@@ -505,16 +505,16 @@ func TestSessionAdvisorConfigForDirRoundTrip(t *testing.T) {
 	want := agent.AdvisorConfig{
 		Model:      "openai/gpt-5.1",
 		ClaudeCode: true,
-		// The stored list carries the retired "plan" checkpoint; reading it
-		// back must migrate it to "done" rather than drop the session's review.
+		// "plan" is the design trigger; it stays alongside "done" so both
+		// the first-write and completion reviews fire for this session.
 		Checkpoints: []string{"plan", "done"},
 	}
 	if err := h.persistSessionAdvisorConfig(id, want); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 	got, ok := sessionAdvisorConfigForDir(proj, id)
-	if !ok || got.Model != want.Model || got.ClaudeCode != want.ClaudeCode || !reflect.DeepEqual(got.Checkpoints, []string{"done"}) {
-		t.Fatalf("round trip = (%+v, %v), want model/claude_code as sent and checkpoints [done]", got, ok)
+	if !ok || got.Model != want.Model || got.ClaudeCode != want.ClaudeCode || !reflect.DeepEqual(got.Checkpoints, []string{"plan", "done"}) {
+		t.Fatalf("round trip = (%+v, %v), want model/claude_code as sent and checkpoints [plan done]", got, ok)
 	}
 
 	// An empty model with no triggers is a PIN, not an absence.

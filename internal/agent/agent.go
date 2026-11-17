@@ -2389,6 +2389,22 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			return newMsgs, nil
 		}
 
+		// "plan" checkpoint: the first write-tool batch has now been applied.
+		// The advisor reviews what was done and its review is injected as a
+		// user message the next loop acts on. The batch is deliberately NOT
+		// deferred — deferring made the model regenerate the whole write
+		// (a full apply_patch diff) after the review, doubling the wait.
+		if advice := a.advisorPlanCheckpoint(ckpt, resp); advice != nil {
+			if isCancelled() {
+				return newMsgs, nil
+			}
+			newMsgs = append(newMsgs, *advice)
+			messages = append(messages, *advice)
+			if a.OnMessage != nil {
+				a.OnMessage(*advice)
+			}
+		}
+
 	}
 
 	{

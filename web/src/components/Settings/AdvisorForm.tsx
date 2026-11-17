@@ -119,6 +119,14 @@ export default function AdvisorForm() {
         <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
+            checked={checkpoints.includes("plan")}
+            onChange={() => toggleCheckpoint("plan")}
+          />
+          Review the first write batch, while the approach is cheap to change (&quot;plan&quot;)
+        </label>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
             checked={checkpoints.includes("done")}
             onChange={() => toggleCheckpoint("done")}
           />

@@ -441,13 +441,17 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 
 ## Advisor reviews are decided by the advisor gate (`advisor_gate`)
 
-The advisor (second model) is consulted by the loop at two moments, and at both the
-`advisor_gate` decision judge (`internal/agent/advisor_gate_typesafe.go`) decides whether a
-review runs. There is no plan checkpoint: the model works uninterrupted after an edit, and a
-stored `"plan"` migrates to `"done"` when the list is loaded (`config.NormalizeAdvisorCheckpoints`,
-called from `AdvisorConfigFromConfig`, `Agent.SetAdvisorConfig` and the server's metadata reader),
-so an existing session keeps a review. Concept: `docs/concepts/advisor-gate-judge.md`.
+The advisor (second model) is consulted by the loop at three moments. The `advisor_gate`
+decision judge (`internal/agent/advisor_gate_typesafe.go`) decides the completion and commit
+reviews; the first-write design review is ungated. A stored `"plan"` stays a valid design
+trigger and does NOT migrate to `"done"` (`config.NormalizeAdvisorCheckpoints`, called from
+`AdvisorConfigFromConfig`, `Agent.SetAdvisorConfig` and the server's metadata reader).
+Concept: `docs/concepts/advisor-gate-judge.md`.
 
+- **First write batch** (`advisorPlanCheckpoint`): once per Step, after the first executed
+  write-class batch, the advisor reviews the approach while it is cheap to correct. The batch
+  is already applied — the review is injected as a user message and the loop fixes in place.
+  It stands down for a pending ask, a skill `skip_advisor`, or a read-only batch.
 - **End of turn** (`advisorDoneCheckpoint`): with no changes in the session the judge is not
   asked and nothing is reviewed. Otherwise the judge decides. Only when it gives no usable
   answer (no backend, error, rejected answer, an answer below `advisorGateChoiceFloor`) does the
@@ -456,8 +460,9 @@ so an existing session keeps a review. Concept: `docs/concepts/advisor-gate-judg
   QUESTION. The commit is withheld for a review solely on a decided `review_now`; every other
   outcome, an unavailable judge included, runs the commit untouched. Never add a fallback rule
   that holds a commit without the judge.
-- **`checkpointDone` enables both moments.** A session whose list lacks `"done"` (or is `[]`)
-  gets neither the completion review nor the commit hold; there is no separate key.
+- **`checkpointPlan` and `checkpointDone` are independent names.** A session whose list lacks
+  `"plan"` gets no design review; one that lacks `"done"` (or is `[]`) gets neither the
+  completion review nor the commit hold.
 - **A withheld commit call still gets its tool message** (the review text, plain prose, no
   sentinel prefix), the same orphan rule as "Cancelling a turn".
 - **The judge decides from facts, so keep them explicit.** `facts.review_count`,
