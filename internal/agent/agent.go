@@ -166,6 +166,9 @@ func (a *Agent) RekeySession(oldID, newID string) {
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
 	}
+	// /reset-id starts a new conversation identity: drop any elevation secret
+	// gathered under the old id so it cannot be consumed after the rekey.
+	a.ClearElevationSecrets()
 }
 
 // RekeyOpenCodeSession is the TUI's rekey entry point: like RekeySession it
@@ -186,6 +189,19 @@ func (a *Agent) RekeyOpenCodeSession(oldID, newID string) {
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
 	}
+	a.ClearElevationSecrets()
+}
+
+// ClearElevationSecrets zeroes and drops every elevation password held for
+// this agent. Session reset (/new, /clear), /reset-id and idle eviction call
+// it (via Shutdown / the rekey methods) so a secret never outlives the
+// conversation that supplied it. Nil-safe: directly-constructed agents in
+// tests carry no store, and there is nothing to allocate on a no-op clear.
+func (a *Agent) ClearElevationSecrets() {
+	if a == nil || a.elevation == nil {
+		return
+	}
+	a.elevation.ClearAll()
 }
 
 // sessionIDValue returns the debug-log session id set by SetSessionID, or ""
@@ -449,9 +465,13 @@ type Agent struct {
 	// turn end scores only messages it has not seen (autocontinue_select_typesafe.go).
 	selectScores typesafeScoreCache
 	mcpErrors    []string
-	config       *config.Config
-	mode         Mode
-	spec         *AgentSpec
+	// elevation holds single-use elevation passwords for pending asks, keyed by
+	// request id. Per Agent (not global) so a subagent never reads its parent's
+	// secrets; see elevation.go. Never serialized into a transcript or frame.
+	elevation *ElevationManager
+	config    *config.Config
+	mode      Mode
+	spec      *AgentSpec
 	// workDir, when set, overrides os.Getwd() for the environment prompt.
 	// This is used by the /cd command to update the working directory shown
 	// to the LLM without changing the process working directory.
@@ -1366,6 +1386,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		tools:          toolMap,
 		mcpTools:       make(map[string]struct{}),
 		mcpServers:     make(map[string]string),
+		elevation:      NewElevationManager(),
 		config:         cfg,
 		mode:           ModeBuild,
 		lspMgr:         lspMgr,
@@ -5864,14 +5885,30 @@ func extractFilesFromCommand(command string) []string {
 // re-executes and returns its result through this path, so without the guard a
 // user who approved a *tool* call would still receive an unvetted remote result.
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCallID string) (string, error) {
-	result, err := a.executeToolCall(name, args, nil, toolCallID)
+	// The original call's context is not available to a host approval handler,
+	// so build one that carries this ask's elevation getter (keyed by the same
+	// tool-call id the store used). Ordinary approvals attach no getter.
+	ctx := context.Background()
+	if a.elevation != nil && toolCallID != "" {
+		reqID := toolCallID
+		ctx = tool.WithElevationSecret(ctx, func() []byte { return a.elevation.Take(reqID) })
+	}
+	return a.HandleApprovedToolCallCtx(ctx, name, args, toolCallID)
+}
+
+// HandleApprovedToolCallCtx is HandleApprovedToolCall with the caller's
+// context threaded through to the tool. Re-execution must see the same context
+// values as the original call — executeToolCall's context.Background() would
+// drop them (including the elevation-secret getter) before the tool runs.
+func (a *Agent) HandleApprovedToolCallCtx(ctx context.Context, name string, args json.RawMessage, toolCallID string) (string, error) {
+	result, err := a.executeToolCallWithContext(ctx, name, args, nil, toolCallID)
 	if err != nil {
 		return result, err
 	}
 	result = a.scanToolResult(name, string(args), result)
-	ctx, cancel := contextGuardBackground()
+	guardCtx, cancel := contextGuardBackground()
 	defer cancel()
-	return a.guardExecutedToolResult(ctx, toolCallID, name, string(args), result), nil
+	return a.guardExecutedToolResult(guardCtx, toolCallID, name, string(args), result), nil
 }
 
 // contextGuardBackground is a non-turn-bound guard context.
@@ -6663,6 +6700,9 @@ func (a *Agent) emitJob(ev JobEvent) {
 // Shutdown cancels the agent and async subagent runs. Shared process teardown
 // is owned by the session supervisor, not the agent registries.
 func (a *Agent) Shutdown() {
+	// /new, /clear and idle eviction all tear the agent down here. Zero any
+	// elevation password before the store becomes garbage so it does not linger.
+	a.ClearElevationSecrets()
 	a.Cancel()
 	if a.runs != nil {
 		a.runs.CancelAll()
