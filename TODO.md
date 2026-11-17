@@ -1,3 +1,14 @@
+## Open: root elevation — live verification gaps (2026-11-18)
+
+Root elevation (leading `sudo`/`su` with a masked human password) is implemented on branch `feature/root-elevation` and verified by unit and integration tests against FAKE sudo/su scripts. The following real-world paths were NEVER exercised:
+
+- **Real `sudo` and `su` through the PTY on macOS and Linux.** The fake-sudo tests prove secret delivery, echo suppression, scrubbing and fail-closed behavior — not real OS authentication. Re-test with an actual password prompt on both OSes. `SUDO_ASKPASS` over an inherited fd is already rejected (2026-11-17 spike: macOS sudo closes fd 3 to the helper).
+- **Windows native elevation.** `Start-Process -Verb RunAs` is cross-compiled and branch-tested only; no live UAC desktop run. UAC cannot accept a programmatic password, so the human must approve on the secure desktop.
+- **WSL.** The Unix PTY path is expected to work under WSL, but no WSL project was driven end to end.
+- **Remote SSH resolve on the execution host.** Proxy body-forwarding is unit-tested; no live remote host was exercised with an elevation ask.
+
+To close: run each path with a throwaway account/host, record the result, and add live tests where a fake executable is insufficient.
+
 ## Open: Excel preview shows floating images in a side panel, not in the grid (2026-11-16)
 
 - What shipped. workbookFromExcelJs now extracts floating drawings (ExcelJS getImages/getImage) and ExcelViewer renders them as thumbnails in a panel below the grid, with a lightbox. Verified against ~/Downloads/09nov-leave.xlsx (2 images). Unit tests cover extraction and the per-sheet filter.
