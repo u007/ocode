@@ -212,15 +212,23 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	}()
 
 	command := params.Command
-	// An approved elevation carries a single-use secret via the context getter.
-	// Ordinary approvals attach the same getter but it yields nil, so they keep
-	// the normal path byte-for-byte. A non-nil (possibly empty-on-Windows)
-	// result marks this call as an elevation and must go through executeElevated.
+	// The elevation FLAG — not the yielded secret — is the elevation marker.
+	// The getter is attached to every approved call; a leading sudo/su whose
+	// secret is missing must fail closed, never fall through to the ordinary
+	// path and run the command unprivileged. Consume the getter only for a
+	// flagged elevation.
+	elevated := ElevationFlagFromContext(ctx)
 	var elevationSecret []byte
-	if getter := ElevationSecretFromContext(ctx); getter != nil {
-		elevationSecret = getter()
+	if elevated {
+		if getter := ElevationSecretFromContext(ctx); getter != nil {
+			elevationSecret = getter()
+		}
+		// Unix types the password into sudo/su; Windows uses UAC and collects
+		// none. On Unix a missing secret fails closed before any command runs.
+		if elevatedSecretRequired() && len(elevationSecret) == 0 {
+			return fmt.Sprintf("Command failed: %s", elevationNoSecretMessage), nil
+		}
 	}
-	elevated := elevationSecret != nil
 	// Elevated commands must run the ORIGINAL string unchanged: the parent
 	// monitor wrap backgrounds the command with stdin=/dev/null, which would
 	// starve the password read. executeElevated owns process lifecycle.
@@ -249,10 +257,9 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		cmd.Cancel = func() error { return nil }
 	}
 
-	// An approved leading sudo/su carries a single-use elevation secret in the
-	// context. Route that call through the PTY executor which types the secret
-	// and scrubs it from all output/errors. Without a yielded secret the normal
-	// path below is unchanged, byte for byte.
+	// A flagged leading sudo/su runs on the PTY executor, which types the secret
+	// and scrubs it from all output/errors. An unflagged (ordinary) call keeps
+	// the normal path below unchanged, byte for byte.
 	if elevated {
 		out, elevErr := executeElevated(ctx, cmd, elevationSecret)
 		registerBashWrites(ctx, tcID, backedUpPaths)

@@ -207,11 +207,11 @@ func TestBashElevationIntegration(t *testing.T) {
 	elevatePath(t, dir)
 
 	stored := []byte(secret)
-	ctx := WithElevationSecret(context.Background(), func() []byte {
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte {
 		got := stored
 		stored = nil
 		return got
-	})
+	}), true)
 	args, _ := json.Marshal(map[string]string{"command": "sudo whoami"})
 	res, err := (BashTool{}).ExecuteStreamCtx(ctx, args, nil)
 	if err != nil {
@@ -238,11 +238,11 @@ func TestBashElevationWithProcessRegistry(t *testing.T) {
 	elevatePath(t, dir)
 
 	stored := []byte(wantSecret)
-	ctx := WithElevationSecret(context.Background(), func() []byte {
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte {
 		got := stored
 		stored = nil
 		return got
-	})
+	}), true)
 	args, _ := json.Marshal(map[string]string{"command": "sudo whoami"})
 	res, err := (BashTool{Procs: NewProcessRegistry()}).ExecuteStreamCtx(ctx, args, nil)
 	if err != nil {
@@ -302,7 +302,7 @@ func TestBashElevationEmptySecretFailsClosed(t *testing.T) {
 	}
 	elevatePath(t, dir)
 
-	ctx := WithElevationSecret(context.Background(), func() []byte { return []byte{} })
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte { return []byte{} }), true)
 	args, _ := json.Marshal(map[string]string{"command": "sudo whoami"})
 	res, _ := (BashTool{}).ExecuteStreamCtx(ctx, args, nil)
 	if !strings.Contains(res, "refusing to run the command unprivileged") {
@@ -310,5 +310,87 @@ func TestBashElevationEmptySecretFailsClosed(t *testing.T) {
 	}
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("command ran despite an empty elevation secret")
+	}
+}
+
+// BLOCKER regression: an approved leading sudo/su whose secret is missing (store
+// reset, denied ask, wrong tool-call id, double Take) must fail closed. The flag
+// is the elevation marker; a nil-yielding getter must NOT fall through to the
+// ordinary path and run the command unprivileged.
+func TestBashElevationMissingSecretFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "RAN")
+	// Writes the marker as soon as it starts, regardless of stdin, so the old
+	// fail-open behaviour is unmistakable.
+	body := fmt.Sprintf("#!/bin/sh\nprintf ran > %s\nprintf 'ELEV_OK\\n'\n", marker)
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake sudo: %v", err)
+	}
+	elevatePath(t, dir)
+
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte { return nil }), true)
+	args, _ := json.Marshal(map[string]string{"command": "sudo whoami"})
+	res, err := (BashTool{}).ExecuteStreamCtx(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx: %v", err)
+	}
+	if !strings.Contains(res, "refusing to run the command unprivileged") {
+		t.Fatalf("expected a fail-closed error; res=%q", res)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("command ran unprivileged despite a missing elevation secret")
+	}
+}
+
+// A wrong exit code from an elevated command must survive scrubbing: flattening
+// the error to a plain fmt.Errorf makes commandExitCode report 1 for every
+// elevated nonzero exit.
+func TestBashElevationPreservesExitCode(t *testing.T) {
+	const secret = "exitcode-secret"
+	dir := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+IFS= read -r pw
+if [ "$pw" = '%s' ]; then
+  printf 'ELEV_OK\n'
+  exit 7
+fi
+printf 'ELEV_BAD\n'
+exit 1
+`, secret)
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake sudo: %v", err)
+	}
+	elevatePath(t, dir)
+
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte { return []byte(secret) }), true)
+	args, _ := json.Marshal(map[string]string{"command": "sudo whoami"})
+	res, err := (BashTool{}).ExecuteStreamCtx(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("ExecuteStreamCtx: %v", err)
+	}
+	if !strings.Contains(res, "exit code 7") {
+		t.Fatalf("real exit code was lost (flattened to 1?): res=%q", res)
+	}
+	if strings.Contains(res, secret) {
+		t.Fatalf("secret leaked in result: %q", res)
+	}
+}
+
+// scrubElevationBuffer must remove the secret from the returned string and
+// zero every byte of the caller's backing buffer (no residual unzeroed copies).
+func TestScrubElevationBufferZeroesBytes(t *testing.T) {
+	secret := []byte("s3cr3t")
+	buf := []byte("before-s3cr3t-after")
+	got := scrubElevationBuffer(buf, secret)
+	if strings.Contains(got, "s3cr3t") {
+		t.Fatalf("secret left in output: %q", got)
+	}
+	if got != "before--after" {
+		t.Fatalf("unexpected scrubbed output: %q", got)
+	}
+	for i, b := range buf {
+		if b != 0 {
+			t.Fatalf("buffer byte %d not zeroed: %d", i, b)
+		}
 	}
 }

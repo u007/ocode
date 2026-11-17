@@ -9,6 +9,10 @@ import "context"
 // it, and the bytes never enter a transcript, log or SSE frame.
 type elevationSecretKey struct{}
 
+// elevationNoSecretMessage is the fail-closed message shared by the exec.go
+// guard and the Unix PTY executor.
+const elevationNoSecretMessage = "elevation approved but no password is available; refusing to run the command unprivileged"
+
 // WithElevationSecret returns a context carrying getter as the source of the
 // elevation password for re-executing an approved tool call. Passing a nil
 // getter is equivalent to attaching nothing (ElevationSecretFromContext
@@ -29,4 +33,28 @@ func ElevationSecretFromContext(ctx context.Context) func() []byte {
 	}
 	getter, _ := ctx.Value(elevationSecretKey{}).(func() []byte)
 	return getter
+}
+
+// elevationFlagKey is the private key for the independent elevation marker.
+// It is deliberately separate from the secret getter: the getter is attached
+// to every approved call, but only a leading sudo/su approval sets this flag.
+type elevationFlagKey struct{}
+
+// WithElevationFlag marks ctx as an approved elevation (a leading sudo/su),
+// independent of whether a password is available. On Windows no password is
+// collected (UAC authenticates), yet the call must still run on the elevated
+// path; on Unix a missing password must fail closed instead of falling through
+// to the ordinary path and running the command unprivileged.
+func WithElevationFlag(ctx context.Context, isElevation bool) context.Context {
+	return context.WithValue(ctx, elevationFlagKey{}, isElevation)
+}
+
+// ElevationFlagFromContext reports whether WithElevationFlag marked this call
+// as an elevation. False means an ordinary call and the normal execution path.
+func ElevationFlagFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	flag, _ := ctx.Value(elevationFlagKey{}).(bool)
+	return flag
 }

@@ -72,3 +72,8 @@ func hasInteractiveDesktop() bool {
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
+
+// elevatedSecretRequired reports whether this platform needs a collected
+// password to elevate. Windows uses UAC on the secure desktop, so no password
+// is collected and a missing secret must not fail closed.
+func elevatedSecretRequired() bool { return false }

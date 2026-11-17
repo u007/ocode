@@ -243,3 +243,97 @@ func TestHandleApprovedToolCallAttachesElevationGetter(t *testing.T) {
 		t.Fatalf("secret survived consumption: second result %q", got2)
 	}
 }
+
+// elevationFlagProbe records the elevation flag and secret a ContextualTool sees
+// on its execution context, so HandleApprovedToolCall's flag wiring is testable.
+type elevationFlagProbe struct {
+	name      string
+	gotFlag   bool
+	gotSecret string
+}
+
+func (p *elevationFlagProbe) Name() string               { return p.name }
+func (p *elevationFlagProbe) Description() string        { return "" }
+func (p *elevationFlagProbe) Definition() map[string]any { return map[string]any{"name": p.Name()} }
+func (p *elevationFlagProbe) Execute(json.RawMessage) (string, error) {
+	return "", nil
+}
+func (p *elevationFlagProbe) Parallel() bool { return false }
+func (p *elevationFlagProbe) ExecuteCtx(ctx context.Context, _ json.RawMessage) (string, error) {
+	p.gotFlag = tool.ElevationFlagFromContext(ctx)
+	if getter := tool.ElevationSecretFromContext(ctx); getter != nil {
+		p.gotSecret = string(getter())
+	}
+	return "", nil
+}
+
+func newElevationFlagAgent(t *testing.T, name string) (*Agent, *elevationFlagProbe) {
+	t.Helper()
+	a := NewAgent(nil, nil, nil, nil)
+	probe := &elevationFlagProbe{name: name}
+	a.tools[name] = probe
+	return a, probe
+}
+
+// A leading sudo/su approval carries the flag AND the secret. The flag is what
+// makes the tool take the elevated path; the secret only supplies the password.
+func TestHandleApprovedToolCallSetsElevationFlagForSudo(t *testing.T) {
+	a, probe := newElevationFlagAgent(t, "bash")
+	a.elevation.Store("tc-elev", []byte("s3cr3t"))
+	args := json.RawMessage(`{"command":"sudo whoami"}`)
+	if _, err := a.HandleApprovedToolCall("bash", args, "tc-elev"); err != nil {
+		t.Fatalf("HandleApprovedToolCall: %v", err)
+	}
+	if !probe.gotFlag {
+		t.Fatal("elevation flag not set for a leading sudo approval")
+	}
+	if probe.gotSecret != "s3cr3t" {
+		t.Fatalf("secret not attached: got %q", probe.gotSecret)
+	}
+}
+
+// The flag is independent of the secret: even a lost/never-stored secret must
+// be marked as an elevation so the tool fails closed instead of running the
+// command unprivileged on the ordinary path.
+func TestHandleApprovedToolCallSetsElevationFlagWithoutSecret(t *testing.T) {
+	a, probe := newElevationFlagAgent(t, "bash")
+	args := json.RawMessage(`{"command":"su -c whoami"}`)
+	if _, err := a.HandleApprovedToolCall("bash", args, "tc-lost"); err != nil {
+		t.Fatalf("HandleApprovedToolCall: %v", err)
+	}
+	if !probe.gotFlag {
+		t.Fatal("elevation flag not set for a leading su approval with no secret")
+	}
+	if probe.gotSecret != "" {
+		t.Fatalf("unexpected secret: %q", probe.gotSecret)
+	}
+}
+
+// An ordinary approval must NOT carry the flag, or it would be routed through
+// the elevated executor.
+func TestHandleApprovedToolCallNoElevationFlagForOrdinary(t *testing.T) {
+	a, probe := newElevationFlagAgent(t, "bash")
+	for _, args := range []json.RawMessage{
+		json.RawMessage(`{"command":"echo ordinary-ok"}`),
+		json.RawMessage(`{"command":"echo sudo is data"}`),
+	} {
+		probe.gotFlag = false
+		if _, err := a.HandleApprovedToolCall("bash", args, "tc-ordinary"); err != nil {
+			t.Fatalf("HandleApprovedToolCall: %v", err)
+		}
+		if probe.gotFlag {
+			t.Fatalf("elevation flag set for ordinary command %s", args)
+		}
+	}
+}
+
+// A non-bash tool is never an elevation, whatever its args look like.
+func TestHandleApprovedToolCallNoElevationFlagForNonBash(t *testing.T) {
+	a, probe := newElevationFlagAgent(t, "other_tool")
+	if _, err := a.HandleApprovedToolCall("other_tool", json.RawMessage(`{"command":"sudo whoami"}`), "tc-other"); err != nil {
+		t.Fatalf("HandleApprovedToolCall: %v", err)
+	}
+	if probe.gotFlag {
+		t.Fatal("elevation flag set for a non-bash tool")
+	}
+}

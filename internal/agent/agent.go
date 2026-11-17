@@ -5872,6 +5872,22 @@ func extractFilesFromCommand(command string) []string {
 	return files
 }
 
+// isElevationApproval reports whether an approved call is a leading sudo/su.
+// It reconstructs the original PermissionRequest's elevation fields from the
+// call args using the same detection the permission layer used, so the flag is
+// set from IsElevationRequest(req) exactly as at ask time — independent of
+// whether a password was stored.
+func isElevationApproval(name string, args json.RawMessage) bool {
+	if name != "bash" {
+		return false
+	}
+	elevCmd, elevated := leadingElevationCommand(bashCommand(args))
+	if !elevated {
+		return false
+	}
+	return IsElevationRequest(PermissionRequest{ToolName: name, ElevationCommand: elevCmd})
+}
+
 // HandleApprovedToolCall runs a tool call that already cleared a human
 // permission Ask (TUI's executeApprovedTool, server's
 // executeApprovedWithTempPath) and applies the same secret-redaction gate the
@@ -5892,6 +5908,16 @@ func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCa
 	if a.elevation != nil && toolCallID != "" {
 		reqID := toolCallID
 		ctx = tool.WithElevationSecret(ctx, func() []byte { return a.elevation.Take(reqID) })
+	}
+	// The flag is independent of the getter: the getter is attached to every
+	// approval, but only a leading sudo/su is an elevation. Set it here so both
+	// the server resolve and TUI approval paths (which both call this method)
+	// carry it, even when the secret is missing — the tool then fails closed
+	// rather than running the command unprivileged. On Windows no password is
+	// collected (NeedsPassword=false), yet the flag still routes to native
+	// elevation.
+	if isElevationApproval(name, args) {
+		ctx = tool.WithElevationFlag(ctx, true)
 	}
 	return a.HandleApprovedToolCallCtx(ctx, name, args, toolCallID)
 }

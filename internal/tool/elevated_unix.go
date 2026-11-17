@@ -14,6 +14,11 @@ import (
 	"golang.org/x/term"
 )
 
+// elevatedSecretRequired reports whether this platform needs a collected
+// password to elevate. Unix types it into sudo/su; Windows uses UAC and needs
+// none, so a missing secret must NOT fail closed there.
+func elevatedSecretRequired() bool { return true }
+
 // executeElevated runs an already-built command on a new pseudo-terminal and
 // types secret into it once, without ever placing the secret in argv, env, a
 // log line, or the returned output. It is used only for human-approved
@@ -28,7 +33,7 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	// Fail closed: an approved elevation with no secret may never fall through
 	// to running the command unprivileged or partially.
 	if len(secret) == 0 {
-		return "", fmt.Errorf("elevation approved but no password is available; refusing to run the command unprivileged")
+		return "", fmt.Errorf("%s", elevationNoSecretMessage)
 	}
 	// The secret is single-use: destroy our copy on every exit path. The return
 	// paths below scrub output/errors before this deferred zero runs.
@@ -104,11 +109,41 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	case <-readDone:
 	case <-time.After(2 * time.Second):
 		_ = ptmx.Close()
-		<-readDone
+		// A leaked slave fd can keep io.Copy blocked even after Close. Never
+		// wait forever on it: return the partial capture after a short bound.
+		select {
+		case <-readDone:
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 
-	out := scrubElevationSecret(captured.String(), secret)
+	// scrubElevationBuffer removes the secret and zeroes the whole capture
+	// buffer, so no unzeroed copy of the password survives in the bounded sink.
+	out := scrubElevationBuffer(captured.buf, secret)
 	return out, scrubElevationError(cmdErr, secret)
+}
+
+// scrubElevationBuffer removes every occurrence of secret from buf and returns
+// the scrubbed string, zeroing the entire backing buffer before returning. The
+// repeated ReplaceAll matches scrubElevationSecret's overlap semantics.
+func scrubElevationBuffer(buf []byte, secret []byte) string {
+	if len(secret) == 0 {
+		out := string(buf)
+		clear(buf)
+		return out
+	}
+	b := buf
+	for {
+		next := bytes.ReplaceAll(b, secret, nil)
+		if len(next) == len(b) {
+			break
+		}
+		copy(buf, next)
+		b = buf[:len(next)]
+	}
+	out := string(b)
+	clear(buf)
+	return out
 }
 
 // scrubElevationSecret removes every occurrence of secret from s. Replacing
@@ -123,7 +158,9 @@ func scrubElevationSecret(s string, secret []byte) string {
 	for bytes.Contains(b, secret) {
 		b = bytes.ReplaceAll(b, secret, nil)
 	}
-	return string(b)
+	out := string(b)
+	clear(b)
+	return out
 }
 
 // scrubElevationError scrubs the secret from an error string without changing
@@ -132,5 +169,12 @@ func scrubElevationError(err error, secret []byte) error {
 	if err == nil || len(secret) == 0 {
 		return err
 	}
-	return fmt.Errorf("%s", scrubElevationSecret(err.Error(), secret))
+	msg := err.Error()
+	scrubbed := scrubElevationSecret(msg, secret)
+	if scrubbed == msg {
+		// Common case: nothing to scrub. Keep the original error so *exec.ExitError
+		// survives and commandExitCode reports the real exit status, not 1.
+		return err
+	}
+	return fmt.Errorf("%s", scrubbed)
 }

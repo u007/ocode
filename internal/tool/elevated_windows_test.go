@@ -4,6 +4,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -26,5 +27,19 @@ func TestElevatedWindowsNoDesktopFailsClosed(t *testing.T) {
 func TestPSQuote(t *testing.T) {
 	if got := psQuote("a'b"); got != "'a''b'" {
 		t.Fatalf("psQuote: got %q", got)
+	}
+}
+
+// The elevation flag must route Windows calls to executeElevated (native UAC
+// elevation) even though no password is collected (NeedsPassword=false). With
+// no interactive desktop the native branch yields the clear unsupported error;
+// without the flag the call would silently run on the ordinary path instead.
+func TestElevationFlagRoutesWindowsToNativeElevation(t *testing.T) {
+	t.Setenv("SESSIONNAME", "")
+	ctx := WithElevationFlag(WithElevationSecret(context.Background(), func() []byte { return nil }), true)
+	args, _ := json.Marshal(map[string]string{"command": "whoami"})
+	res, _ := (BashTool{}).ExecuteStreamCtx(ctx, args, nil)
+	if !strings.Contains(res, "not supported on this host") {
+		t.Fatalf("flag did not route to the native-elevation branch: %q", res)
 	}
 }
