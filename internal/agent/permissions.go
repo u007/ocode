@@ -168,6 +168,12 @@ type PermissionRequest struct {
 	// ElevationCommand is the raw bash command that will run elevated. It is
 	// dialog metadata only, never a channel for the password itself.
 	ElevationCommand string `json:"elevation_command,omitempty"`
+	// ElevationKey carries the paused tool-call id on a sub-agent elevation ask
+	// so the host's approval handler can hand the typed secret to the CHILD's
+	// own ElevationManager through the in-process path (see
+	// SetPendingElevationSecret). It is an opaque id, NOT the secret, and is
+	// excluded from every wire, prompt and persisted form. Empty off that path.
+	ElevationKey string `json:"-"`
 }
 
 type PermissionDecision struct {
@@ -197,13 +203,6 @@ type PermissionResponse struct {
 	Level       PermissionLevel
 	PersistRule bool
 	PersistTool bool
-	// ElevationPassword carries a human-typed elevation secret from an approver
-	// back to the SUB-AGENT that raised the ask. It is in-process only and
-	// json:"-" keeps it out of any transcript/SSE serialization. The child
-	// stores it in its OWN ElevationManager keyed by its tool-call id; it is
-	// never written into the parent's store. Empty for ordinary approvals and
-	// on Windows (UAC authenticates, no password is collected).
-	ElevationPassword string `json:"-"`
 }
 
 type pathPatternEntry struct {

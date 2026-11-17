@@ -204,6 +204,41 @@ exit 0
 	}
 }
 
+// TestSnapshotWriterPublishesScrubbedPartial pins breakage 2's mechanism: the
+// buffer-owning reader publishes a scrubbed snapshot of the bytes captured so
+// far, which the 2s+500ms escape path drains instead of returning an empty
+// string. The snapshot must never contain the secret, and non-blocking sends
+// must keep only the latest value without blocking the reader.
+func TestSnapshotWriterPublishesScrubbedPartial(t *testing.T) {
+	partial := make(chan string, 1)
+	secret := []byte("snap-secret")
+	sw := &snapshotWriter{buf: newBoundedBuffer(1024), secret: secret, partial: partial}
+	if _, err := sw.Write([]byte("first snap-secret line\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case got := <-partial:
+		if got != "first  line\n" {
+			t.Fatalf("snapshot = %q, want %q (secret scrubbed)", got, "first  line\n")
+		}
+	default:
+		t.Fatal("no snapshot published after first write")
+	}
+	// A later write replaces the queued snapshot with a fresher one.
+	sw.last = time.Now().Add(-snapshotInterval) // bypass the throttle for the test
+	if _, err := sw.Write([]byte("second line\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case got := <-partial:
+		if !strings.Contains(got, "second line") || strings.Contains(got, "snap-secret") {
+			t.Fatalf("latest snapshot = %q, want fresher scrubbed bytes", got)
+		}
+	default:
+		t.Fatal("no refreshed snapshot published")
+	}
+}
+
 // (d) The original command string reaches the shell unchanged: no wrapper is
 // prepended and argv is preserved verbatim.
 func TestElevatedPTYCommandUnchanged(t *testing.T) {

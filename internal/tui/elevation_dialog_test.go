@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -286,15 +287,19 @@ func TestPermissionModalNonElevationShortcutsUnchanged(t *testing.T) {
 	}
 }
 
-// TestElevationDialogSubAgentApprovalCarriesPassword closes the TUI half of the
+// TestElevationDialogSubAgentApprovalStagesPassword closes the TUI half of the
 // sub-agent elevation gap: the masked password typed for a sub-agent ask must
-// travel in the PermissionResponse to the child, and must NOT be stored on the
-// parent agent's ElevationManager.
-func TestElevationDialogSubAgentApprovalCarriesPassword(t *testing.T) {
+// be staged through the in-process handoff under the ask's ElevationKey (never
+// in the shared PermissionResponse), and must NOT be stored on the parent
+// agent's ElevationManager.
+func TestElevationDialogSubAgentApprovalStagesPassword(t *testing.T) {
 	const password = "sub-dialog-pw"
+	const elevationKey = "sub-elev-handoff-key"
 	m := newPermQueueTestModel(t)
 	respCh := make(chan agent.PermissionResponse, 1)
-	upd, _ := m.Update(subAgentPermAskMsg{req: elevationReqForTest(), respCh: respCh})
+	req := elevationReqForTest()
+	req.ElevationKey = elevationKey
+	upd, _ := m.Update(subAgentPermAskMsg{req: req, respCh: respCh})
 	m = upd.(model)
 	if m.pendingSubAgentResp == nil {
 		t.Fatal("precondition: sub-agent dialog not open")
@@ -306,17 +311,30 @@ func TestElevationDialogSubAgentApprovalCarriesPassword(t *testing.T) {
 	storeElevationSecret = func(*agent.Agent, string, []byte) { storeCalls++ }
 	t.Cleanup(func() { storeElevationSecret = orig })
 
+	var stagedKey, stagedSecret string
+	stageCalls := 0
+	origStage := setPendingElevationSecret
+	setPendingElevationSecret = func(key string, secret []byte) {
+		stageCalls++
+		stagedKey, stagedSecret = key, string(secret)
+	}
+	t.Cleanup(func() { setPendingElevationSecret = origStage })
+
 	_, _ = m.answerPermAsk("y")
 	select {
 	case resp := <-respCh:
 		if resp.Level != agent.PermissionAllow {
 			t.Fatalf("delivered level = %v, want allow", resp.Level)
 		}
-		if resp.ElevationPassword != password {
-			t.Fatalf("delivered elevation password = %q, want %q", resp.ElevationPassword, password)
+		// The shared answer struct must carry no secret at all.
+		if strings.Contains(fmt.Sprintf("%+v", resp), password) {
+			t.Fatalf("password leaked into the delivered PermissionResponse: %+v", resp)
 		}
 	default:
 		t.Fatal("no response delivered to the parked sub-agent")
+	}
+	if stageCalls != 1 || stagedKey != elevationKey || stagedSecret != password {
+		t.Fatalf("in-process handoff = (%d calls, key %q, secret %q), want (1, %q, %q)", stageCalls, stagedKey, stagedSecret, elevationKey, password)
 	}
 	if storeCalls != 0 {
 		t.Fatalf("parent store called %d times for a sub-agent ask; must be 0", storeCalls)

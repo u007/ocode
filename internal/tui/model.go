@@ -15833,6 +15833,11 @@ var storeElevationSecret = func(a *agent.Agent, requestID string, secret []byte)
 	a.StoreElevationSecret(requestID, secret)
 }
 
+// setPendingElevationSecret is indirection so elevation-dialog tests can assert
+// a child ask's password is staged through the in-process handoff (keyed by
+// the ask's ElevationKey) rather than delivered in the shared answer struct.
+var setPendingElevationSecret = agent.SetPendingElevationSecret
+
 // elevationNeedsPasswordField reports whether req should show a masked password
 // field. Windows authenticates through UAC (Task 1 sets NeedsPassword=false
 // there), so the flag alone is sufficient in production; the OS check keeps
@@ -16083,13 +16088,15 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 			return nil, false
 		}
 		// Sub-agent elevation approval: carry the masked password through the
-		// response to the CHILD's own ElevationManager. Never store it on
-		// m.agent (the parent) — the callback is shared by every child, and
-		// spec §4.7.3 forbids parent/subagent store reuse. On Windows the field
-		// is not shown, so this stays empty and the child still routes to UAC
-		// via its own elevation flag.
+		// in-process handoff to the CHILD's own ElevationManager, keyed by the
+		// ask's ElevationKey. It must never ride in PermissionResponse (shared
+		// answer struct) nor be stored on m.agent (the parent) — the callback
+		// is shared by every child. On Windows the field is not shown, so
+		// nothing is staged and the child still routes to UAC via its flag.
 		if resp.Level == agent.PermissionAllow && elevationNeedsPasswordField(req) {
-			resp.ElevationPassword = m.permPassword.Value()
+			secret := []byte(m.permPassword.Value())
+			setPendingElevationSecret(req.ElevationKey, secret)
+			clear(secret)
 			m.permPassword.Reset()
 		}
 		respCh <- resp

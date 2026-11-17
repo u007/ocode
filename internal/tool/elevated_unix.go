@@ -88,12 +88,17 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	// scrubs and zeroes the buffer itself and delivers only the final string
 	// over readResult. The main goroutine never reads or clears captured.buf,
 	// so the timeout escape path cannot race with an in-flight io.Copy write.
+	// snapshotWriter lets that same reader publish a scrubbed snapshot of the
+	// bytes received so far; the escape path reads the latest snapshot instead
+	// of losing the partial output when io.Copy never sees EOF.
 	captured := newBoundedBuffer(bashMaxRetainedBytes)
 	readDone := make(chan struct{})
 	readResult := make(chan string, 1)
+	partial := make(chan string, 1)
 	readerSecret := bytes.Clone(secret)
+	snap := &snapshotWriter{buf: captured, secret: readerSecret, partial: partial}
 	go func() {
-		_, _ = io.Copy(captured, ptmx)
+		_, _ = io.Copy(snap, ptmx)
 		close(readDone)
 		readResult <- scrubElevationBuffer(captured.buf, readerSecret)
 		clear(readerSecret)
@@ -120,16 +125,53 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	case <-time.After(2 * time.Second):
 		_ = ptmx.Close()
 		// A leaked slave fd can keep io.Copy blocked even after Close. Never
-		// wait forever on it: ABANDON the reader instead of scrubbing its buffer
-		// here — only the goroutine that owns the buffer may touch it.
+		// wait forever on it: take the latest snapshot the reader published and
+		// ABANDON the reader — only the goroutine that owns the buffer may
+		// touch it, so the main goroutine must never scrub captured.buf here.
 		select {
 		case <-readDone:
 			out = <-readResult
 		case <-time.After(500 * time.Millisecond):
+			select {
+			case out = <-partial:
+			default:
+			}
 		}
 	}
 
 	return out, scrubElevationError(cmdErr, secret)
+}
+
+// snapshotWriter publishes a scrubbed snapshot of the bytes captured so far
+// into partial (non-blocking, at most once per snapshotInterval) as io.Copy
+// feeds it. It runs only on the reader goroutine that owns buf, so reading
+// buf.buf here cannot race the main goroutine's escape path. The secret is
+// scrubbed out of every snapshot before it leaves this goroutine.
+const snapshotInterval = 100 * time.Millisecond
+
+type snapshotWriter struct {
+	buf     *boundedBuffer
+	secret  []byte
+	partial chan string
+	last    time.Time
+}
+
+func (w *snapshotWriter) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	if now := time.Now(); now.Sub(w.last) >= snapshotInterval {
+		w.last = now
+		// Keep only the newest snapshot queued; the escape path takes whatever
+		// is here when it gives up on the reader.
+		select {
+		case <-w.partial:
+		default:
+		}
+		select {
+		case w.partial <- scrubElevationSecret(string(w.buf.buf), w.secret):
+		default:
+		}
+	}
+	return n, err
 }
 
 // scrubElevationBuffer removes every occurrence of secret from buf and returns

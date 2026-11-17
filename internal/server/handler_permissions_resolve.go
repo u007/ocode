@@ -520,6 +520,11 @@ var storeResolveElevationSecret = func(ag *agent.Agent, requestID, password stri
 	ag.StoreElevationSecret(requestID, []byte(password))
 }
 
+// stageChildElevationSecret is the seam tests replace to assert a sub-agent
+// elevation password is staged through the in-process handoff (keyed by the
+// ask's ElevationKey) before deliverResponse, never in PermissionResponse.
+var stageChildElevationSecret = agent.SetPendingElevationSecret
+
 // executeApprovedWithTempPath wraps HandleApprovedToolCall exactly like the
 // TUI's executeApprovedTool: when the ask was an out-of-workspace path, the
 // path root is temporarily registered as allowed for the duration of this one
@@ -636,13 +641,16 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	if decision == PermDecisionDeny {
 		ask.deliver(agent.PermissionDeny)
 	} else {
-		// Carry the masked password into the sub-agent's approval response.
-		// Elevation asks carry ElevationCommand on every OS; on Windows the
-		// password is empty (UAC authenticates) and the child still routes to
-		// native elevation via its own flag. The parent's store is untouched.
+		// Stage the masked password in the in-process handoff under the child
+		// ask's ElevationKey BEFORE delivering the approval; the child moves it
+		// into its OWN ElevationManager. It must never ride in the shared
+		// PermissionResponse. Elevation asks carry ElevationCommand on every
+		// OS; on Windows the password is empty (UAC authenticates) and the
+		// child still routes to native elevation via its own flag. The parent's
+		// store is untouched.
 		resp := agent.PermissionResponse{Level: agent.PermissionAllow}
 		if agent.IsElevationRequest(ask.req) {
-			resp.ElevationPassword = password
+			stageChildElevationSecret(ask.req.ElevationKey, []byte(password))
 		}
 		ask.deliverResponse(resp)
 	}

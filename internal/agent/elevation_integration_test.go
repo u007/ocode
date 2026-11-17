@@ -213,8 +213,11 @@ func TestElevationEndToEnd_SubAgentAskStorePTYNoParentReuse(t *testing.T) {
 	parent.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
 		askCount++
 		askedReq = req
-		// Simulates the TUI/web sub-agent approval carrying the masked password.
-		return PermissionResponse{Level: PermissionAllow, ElevationPassword: secret}
+		// Simulates the TUI/web sub-agent approval: stage the masked password
+		// through the dedicated in-process handoff (never in the response),
+		// keyed by the ask's ElevationKey, then return a plain allow answer.
+		SetPendingElevationSecret(req.ElevationKey, []byte(secret))
+		return PermissionResponse{Level: PermissionAllow}
 	})
 	var subEmitted []Message
 	parent.OnSubAgentMessage = func(_ *AgentRun, m Message) { subEmitted = append(subEmitted, m) }
@@ -233,6 +236,9 @@ func TestElevationEndToEnd_SubAgentAskStorePTYNoParentReuse(t *testing.T) {
 	}
 	if askedReq.ElevationCommand != "sudo whoami" || !askedReq.NeedsPassword {
 		t.Fatalf("ask lost its elevation metadata: %+v", askedReq)
+	}
+	if askedReq.ElevationKey == "" {
+		t.Fatal("sub-agent elevation ask lost its ElevationKey; the host cannot stage the secret")
 	}
 	// The TaskTool result is the sub-agent's final prose; its tool result (where
 	// the fake sudo marker lives) is in the OnSubAgentMessage stream.
@@ -262,6 +268,11 @@ func TestElevationEndToEnd_SubAgentAskStorePTYNoParentReuse(t *testing.T) {
 	// The parent's store must never have been used for the child's ask.
 	if n := len(parent.elevation.secrets); n != 0 {
 		t.Fatalf("parent elevation store has %d entries; sub-agent must not reuse it", n)
+	}
+	// The in-process handoff entry must have been consumed exactly once by the
+	// child; a second take returns nil.
+	if leftover := takePendingElevationSecret(askedReq.ElevationKey); len(leftover) != 0 {
+		t.Fatalf("elevation handoff still holds the child's secret after delivery: %q", leftover)
 	}
 }
 

@@ -4443,17 +4443,27 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 				if decision.Request != nil {
 					req = *decision.Request
 				}
+				// Stamp the paused tool-call id on an elevation ask so the
+				// host's approval handler can hand the typed secret back through
+				// the in-process path keyed by this same id.
+				if isElevationApproval(name, args) {
+					req.ElevationKey = toolCallID
+				}
 				resp := asker(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
 					execCtx := ctx
 					if isElevationApproval(name, args) {
-						// A sub-agent's elevation ask is answered on THIS agent's
-						// own store, keyed by the paused tool-call id. Never write
-						// the child's secret into the parent's store: the asker
-						// callback is shared by every child, so only the child
-						// that raised this call may consume the secret.
-						a.StoreElevationSecret(toolCallID, []byte(resp.ElevationPassword))
+						// The host staged the human-typed secret in-process under
+						// req.ElevationKey before delivering this approval. Move
+						// it into THIS child's own store keyed by the tool-call
+						// id; never the parent's (the asker callback is shared by
+						// every child, so only this child may consume it).
+						if secret := takePendingElevationSecret(req.ElevationKey); len(secret) > 0 {
+							a.StoreElevationSecret(toolCallID, secret)
+							clear(secret)
+						}
+						clearPendingElevationSecret(req.ElevationKey)
 						execCtx = tool.WithElevationFlag(execCtx, true)
 						if a.elevation != nil {
 							reqID := toolCallID
@@ -4462,6 +4472,7 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 					}
 					return a.executeToolCallWithContext(execCtx, name, args, b, toolCallID)
 				}
+				clearPendingElevationSecret(req.ElevationKey)
 				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
 			payload, err := json.Marshal(decision.Request)
