@@ -2673,6 +2673,8 @@ function HomeApp() {
           untrustedScores={pendingPermission.untrusted_scores}
           untrustedFailure={pendingPermission.untrusted_failure}
           agentName={pendingPermission.agent_name}
+          needsPassword={pendingPermission.needs_password}
+          elevationCommand={pendingPermission.elevation_command}
           context={askContext}
           sessionId={activeTabId ?? undefined}
           host={activeSessionHost}

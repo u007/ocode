@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -982,3 +985,85 @@ type syncCountingWorkspace struct {
 }
 
 func (w *syncCountingWorkspace) SyncConfig(bool) error { w.onSync(); return nil }
+
+// TestHandleRemoteProxy_ElevationPasswordCrossesTunnel pins the security shape
+// of a remote elevation approval. The masked password travels in the request
+// body to the EXECUTION host's own server (remote `ocode serve --remote`),
+// where the agent that owns the pending ask stores it. The local proxy must
+// forward the bytes untouched yet never echo them into a browser-visible
+// response or a local log line. The remote token is injected by the proxy and
+// never reaches the browser; this test reuses its production path unchanged.
+func TestHandleRemoteProxy_ElevationPasswordCrossesTunnel(t *testing.T) {
+	const secret = "elevation-tunnel-secret-9f3a"
+
+	var mu sync.Mutex
+	var gotBody map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/projects", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"ok":true}`)
+	})
+	mux.HandleFunc("/api/permissions/resolve", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			t.Errorf("remote got malformed body: %v", err)
+		}
+		mu.Lock()
+		gotBody = parsed
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		// Echo only non-secret fields: a real resolve endpoint answers with a
+		// ChatResponse, never with the request body.
+		fmt.Fprintf(w, `{"session_id":"ses_1","decision":"%s"}`, parsed["decision"])
+	})
+	remoteSrv := httptest.NewServer(mux)
+	defer remoteSrv.Close()
+
+	ws := &fakeTestWorkspace{apiURL: remoteSrv.URL, token: "remote-tok"}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	injectProxy(t, h.remoteHosts, "user@realhost", ws)
+
+	// Capture local proxy logging for the duration of this one request.
+	var logs bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+
+	body := fmt.Sprintf(
+		`{"request_id":"call-1","session_id":"ses_1","decision":"allow","needs_password":true,"password":%q}`,
+		secret,
+	)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/remote/user@realhost/api/permissions/resolve?project=/home/user/project",
+		strings.NewReader(body))
+	setPathValues(req, map[string]string{"host": "user@realhost", "rest": "permissions/resolve"})
+	rec := httptest.NewRecorder()
+	h.HandleRemoteProxy(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	got := gotBody
+	mu.Unlock()
+	if got == nil {
+		t.Fatal("remote never received a resolve body")
+	}
+	if got["password"] != secret {
+		t.Errorf("remote did not receive the password in the body: got %v", got["password"])
+	}
+	if got["needs_password"] != true {
+		t.Errorf("remote did not receive needs_password=true: got %v", got["needs_password"])
+	}
+
+	browserBody := rec.Body.String()
+	if strings.Contains(browserBody, secret) {
+		t.Errorf("password echoed to the browser response: %s", browserBody)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("password written to a proxy log line: %s", logs.String())
+	}
+}

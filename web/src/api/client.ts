@@ -4680,6 +4680,10 @@ export const api = {
     // For always_rule on a bash ask: the prefix rule the user picked from the
     // ask's candidates. Omitted means "use the narrowest derived rule".
     prefix?: string,
+    // Elevation approval only: the masked password, sent in the body to the
+    // server that owns the pending ask so it can be stored before re-execution.
+    // Omitted for ordinary asks; never echoed back in a response.
+    password?: string,
   ) =>
     fetchJSON<ChatResponse>(
       "/api/permissions/resolve",
@@ -4690,6 +4694,7 @@ export const api = {
           session_id: sessionId ?? undefined,
           decision,
           prefix,
+          ...(password ? { password } : {}),
         }),
       },
       host,

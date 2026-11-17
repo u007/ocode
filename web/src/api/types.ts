@@ -669,6 +669,11 @@ export interface SSEPermissionEvent {
   out_of_scope_path?: string;
   /** Name of the sub-agent that raised the ask; absent for a main-agent ask. */
   agent_name?: string;
+  /** Elevation ask (leading sudo/su): show a masked password field. The server
+   *  sets this false on Windows, where UAC handles elevation. */
+  needs_password?: boolean;
+  /** Raw command that will run elevated, shown next to the password field. */
+  elevation_command?: string;
 }
 
 /** Decisions accepted by POST /api/permissions/resolve (`decision` field). */
