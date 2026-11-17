@@ -180,6 +180,111 @@ func TestElevationEndToEnd_AskStorePTYNoSecretLeak(t *testing.T) {
 	}
 }
 
+// TestElevationEndToEnd_SubAgentAskStorePTYNoParentReuse mirrors the main-agent
+// end-to-end test for a DISPATCHED sub-agent. The child's leading sudo must raise
+// its own ask, the human password carried in the approval must land in the
+// CHILD's own ElevationManager (never the parent's), and re-execution must run
+// on the PTY with the secret while leaking it to no result/transcript/SSE frame.
+func TestElevationEndToEnd_SubAgentAskStorePTYNoParentReuse(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	const (
+		secret = "subElevS3cr3t7x1"
+		marker = "SUB_ELEV_MARKER"
+	)
+	dir := t.TempDir()
+	writeFakeSudo(t, dir, secret, marker)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var tc ToolCall
+	tc.ID, tc.Type = "sub-elev-call", "function"
+	tc.Function.Name = "bash"
+	tc.Function.Arguments = `{"command":"sudo whoami"}`
+	subClient := &scriptedSubagentClient{responses: []*Message{
+		{Role: "assistant", ToolCalls: []ToolCall{tc}},
+		{Role: "assistant", Content: "sub done"},
+	}}
+
+	parent := newTestAgent(subClient, []tool.Tool{tool.BashTool{}}, nil, nil)
+	parent.Permissions().SetRule("task", PermissionAllow)
+
+	var askedReq PermissionRequest
+	askCount := 0
+	parent.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
+		askCount++
+		askedReq = req
+		// Simulates the TUI/web sub-agent approval carrying the masked password.
+		return PermissionResponse{Level: PermissionAllow, ElevationPassword: secret}
+	})
+	var subEmitted []Message
+	parent.OnSubAgentMessage = func(_ *AgentRun, m Message) { subEmitted = append(subEmitted, m) }
+
+	reg := NewAgentRegistry()
+	reg.defs = append(reg.defs, AgentDefinition{
+		Name: "elev-sub", Description: "test", Mode: AgentModeSubagent,
+		Tools: []string{"bash"}, Source: "test",
+	})
+	result, err := (TaskTool{mainAgent: parent, registry: reg, runs: NewAgentRunRegistry()}).Execute(json.RawMessage(`{"prompt":"run sudo whoami","agent":"elev-sub"}`))
+	if err != nil {
+		t.Fatalf("task execute: %v", err)
+	}
+	if askCount != 1 {
+		t.Fatalf("sub-agent elevation ask count = %d, want 1", askCount)
+	}
+	if askedReq.ElevationCommand != "sudo whoami" || !askedReq.NeedsPassword {
+		t.Fatalf("ask lost its elevation metadata: %+v", askedReq)
+	}
+	// The TaskTool result is the sub-agent's final prose; its tool result (where
+	// the fake sudo marker lives) is in the OnSubAgentMessage stream.
+	var toolResult string
+	for _, m := range subEmitted {
+		if m.Role == "tool" {
+			toolResult += m.Content
+		}
+	}
+	if !strings.Contains(toolResult, marker) {
+		t.Fatalf("sub-agent fake sudo did not run on the PTY (no marker): %q; emitted=%+v", toolResult, subEmitted)
+	}
+	if !strings.Contains(toolResult, "ARG=[whoami]") {
+		t.Fatalf("sub-agent result lost the original argv: %q", toolResult)
+	}
+	if strings.Contains(toolResult, secret) || strings.Contains(result, secret) {
+		t.Fatalf("secret leaked into sub-agent result: %q / %q", toolResult, result)
+	}
+	for i, m := range subEmitted {
+		if strings.Contains(m.Content, secret) {
+			t.Fatalf("sub-agent emitted message %d contains the secret", i)
+		}
+	}
+	if data := mustMarshalElevation(t, subEmitted); strings.Contains(string(data), secret) {
+		t.Fatal("sub-agent OnSubAgentMessage JSON (SSE wire form) contains the secret")
+	}
+	// The parent's store must never have been used for the child's ask.
+	if n := len(parent.elevation.secrets); n != 0 {
+		t.Fatalf("parent elevation store has %d entries; sub-agent must not reuse it", n)
+	}
+}
+
+// TestElevationCapTracksMainAgentApprovals covers the host approval path
+// (HandleApprovedToolCall), which does not go through the Step loop: a failed
+// elevated re-execution must still consume a strike so both TUI and web are
+// capped, not just sub-agents.
+func TestElevationCapTracksMainAgentApprovals(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	dir := t.TempDir()
+	writeFakeSudo(t, dir, "the-right-password", "MAIN_CAP_MARKER")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	a := newTestAgent(&elevationE2EClient{}, []tool.Tool{tool.BashTool{}}, nil, nil)
+	a.StoreElevationSecret("call-main", []byte("a-wrong-password"))
+	if _, err := a.HandleApprovedToolCall("bash", json.RawMessage(`{"command":"sudo whoami"}`), "call-main"); err != nil {
+		t.Fatalf("HandleApprovedToolCall: %v", err)
+	}
+	if got := a.elevationFailureCount(); got != 1 {
+		t.Fatalf("main-agent approval failure count = %d, want 1", got)
+	}
+}
+
 // TestHeadlessRefusesElevationWithClearError pins the headless clear-error guard:
 // a headless `run`/`acp` agent has no UI to collect an elevation password, so a
 // leading sudo/su must be refused with a user-facing clear error — not parked as
@@ -187,7 +292,7 @@ func TestElevationEndToEnd_AskStorePTYNoSecretLeak(t *testing.T) {
 // secret. TUI / web / desktop agents leave the capability flag off and keep the
 // normal masked ask (see TestElevationEndToEnd).
 func TestHeadlessRefusesElevationWithClearError(t *testing.T) {
-	const want = "root elevation requires an interactive password prompt; not supported in headless mode"
+	const want = "root elevation requires an interactive session; not supported in headless mode"
 	const marker = "HEADLESS_SHOULD_NOT_RUN"
 
 	dir := t.TempDir()

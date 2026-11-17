@@ -158,6 +158,52 @@ sleep 300
 	}
 }
 
+// TestElevatedPTYEscapePathNoDataRace forces the "leaked slave fd" escape path:
+// the command exits but a background process inherits the pty slave and keeps
+// writing, so io.Copy never sees EOF. The main goroutine must not read or clear
+// the capture buffer while the reader goroutine still owns it. Run with -race.
+func TestElevatedPTYEscapePathNoDataRace(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop")
+	// A child shell holds the slave fd and writes continuously until the test
+	// drops the stop file. The parent exits immediately, so cmd.Wait returns
+	// while the reader is still active -> the 2s+500ms escape path is taken.
+	body := fmt.Sprintf(`#!/bin/sh
+IFS= read -r pw
+sh -c 'echo $$ > "$1"; while [ ! -f "$2" ]; do echo LEAKED_OUTPUT; sleep 0.001; done' sh "%s/writer.pid" "%s/stop" &
+sleep 300 &
+echo $! > "%s/holder.pid"
+exit 0
+`, dir, dir, dir)
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake sudo: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.WriteFile(stopFile, nil, 0o644)
+		if b, err := os.ReadFile(filepath.Join(dir, "holder.pid")); err == nil {
+			var pid int
+			if _, err := fmt.Sscanf(string(b), "%d", &pid); err == nil && pid > 1 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	elevatePath(t, dir)
+
+	secret := []byte("escape-race-secret")
+	out, err := executeElevated(context.Background(), elevateCmd(context.Background(), "sudo whoami"), secret)
+	if err != nil {
+		t.Fatalf("executeElevated: %v (out=%q)", err, out)
+	}
+	if !strings.Contains(out, "LEAKED_OUTPUT") && !strings.Contains(out, "escape-race") {
+		// Either the partial capture arrived before the grace bound, or it was
+		// abandoned on timeout. Both are valid; the point is no race and no leak.
+		t.Logf("escape path returned partial capture: %q", out)
+	}
+	if strings.Contains(out, string(secret)) {
+		t.Fatalf("secret leaked into output: %q", out)
+	}
+}
+
 // (d) The original command string reaches the shell unchanged: no wrapper is
 // prepended and argv is preserved verbatim.
 func TestElevatedPTYCommandUnchanged(t *testing.T) {

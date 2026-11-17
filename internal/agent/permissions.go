@@ -197,6 +197,13 @@ type PermissionResponse struct {
 	Level       PermissionLevel
 	PersistRule bool
 	PersistTool bool
+	// ElevationPassword carries a human-typed elevation secret from an approver
+	// back to the SUB-AGENT that raised the ask. It is in-process only and
+	// json:"-" keeps it out of any transcript/SSE serialization. The child
+	// stores it in its OWN ElevationManager keyed by its tool-call id; it is
+	// never written into the parent's store. Empty for ordinary approvals and
+	// on Windows (UAC authenticates, no password is collected).
+	ElevationPassword string `json:"-"`
 }
 
 type pathPatternEntry struct {

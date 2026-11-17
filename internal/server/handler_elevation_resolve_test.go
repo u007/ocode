@@ -11,6 +11,49 @@ import (
 	"github.com/u007/ocode/internal/agent"
 )
 
+// TestChildPermResolveCarriesPasswordIntoSubAgentResponse proves the web path
+// does not discard a sub-agent elevation password: the write-only body field is
+// delivered to the parked child in its PermissionResponse, and never echoed in
+// the HTTP response or the broadcast SSE frame.
+func TestChildPermResolveCarriesPasswordIntoSubAgentResponse(t *testing.T) {
+	const secret = "childElevSecret-9f3a"
+	h := NewHandler()
+	as := &agentSession{
+		agent:     agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model:     "fake-model",
+		childAsks: newChildPermAsks(),
+	}
+	h.agents["sess-child-elev"] = as
+
+	req := samplePermissionRequest()
+	req.NeedsPassword = true
+	req.ElevationCommand = "sudo whoami"
+	const reqID = "childperm-elev-1"
+	respCh := make(chan agent.PermissionResponse, 1)
+	if !as.childAsks.add(reqID, &childPermAsk{req: req, event: newPermissionEvent(reqID, req), respCh: respCh}) {
+		t.Fatal("could not park child elevation ask")
+	}
+
+	rec := httptest.NewRecorder()
+	if !h.handleChildPermResolve(rec, "sess-child-elev", reqID, PermDecisionAllow, "", secret) {
+		t.Fatal("child perm resolve did not own the request")
+	}
+	select {
+	case resp := <-respCh:
+		if resp.Level != agent.PermissionAllow {
+			t.Fatalf("delivered level = %v, want allow", resp.Level)
+		}
+		if resp.ElevationPassword != secret {
+			t.Fatalf("delivered elevation password = %q, want %q", resp.ElevationPassword, secret)
+		}
+	default:
+		t.Fatal("no response delivered to the parked child")
+	}
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("secret leaked into HTTP response: %q", rec.Body.String())
+	}
+}
+
 // TestResolveElevationStoresSecretBeforeReExecution closes the wiring gap
 // between the write-only password field on /api/permissions/resolve and the
 // agent's per-request elevation store. The bash tool fails closed when the

@@ -253,7 +253,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// The branch is also far simpler than the main-agent path below: there is no
 	// sentinel to rewrite and no continuation to dispatch. The decision goes
 	// straight into the channel the child is already blocked on.
-	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision, bodyReq.Prefix) {
+	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision, bodyReq.Prefix, bodyReq.Password) {
 		return
 	}
 
@@ -553,7 +553,7 @@ func executeApprovedWithTempPath(ag *agent.Agent, toolName string, args json.Raw
 // that is exactly the blanket grant the out-of-scope guard exists to prevent.
 // The TUI sends those flags because it persists through its own dialog path and
 // answers out-of-scope asks separately; here persistAlwaysAllow is that path.
-func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision, requestedPrefix string) bool {
+func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision, requestedPrefix, password string) bool {
 	as, ask := h.findChildPermAsk(sessionID, requestID)
 	if ask == nil {
 		// The id left the registry without this request owning it: already
@@ -636,7 +636,15 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	if decision == PermDecisionDeny {
 		ask.deliver(agent.PermissionDeny)
 	} else {
-		ask.deliver(agent.PermissionAllow)
+		// Carry the masked password into the sub-agent's approval response.
+		// Elevation asks carry ElevationCommand on every OS; on Windows the
+		// password is empty (UAC authenticates) and the child still routes to
+		// native elevation via its own flag. The parent's store is untouched.
+		resp := agent.PermissionResponse{Level: agent.PermissionAllow}
+		if agent.IsElevationRequest(ask.req) {
+			resp.ElevationPassword = password
+		}
+		ask.deliverResponse(resp)
 	}
 	writeJSON(w, http.StatusOK, ChatResponse{})
 	return true

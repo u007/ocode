@@ -51,8 +51,15 @@ type childPermAsk struct {
 // blocks even when the child has already given up (the timeout/cancel arm won the
 // select and returned).
 func (c *childPermAsk) deliver(level agent.PermissionLevel) {
+	c.deliverResponse(agent.PermissionResponse{Level: level})
+}
+
+// deliverResponse hands a full response to the parked child. Elevation
+// approvals use it to carry the human-typed password back to the sub-agent that
+// raised the ask; no parent store is ever written on this path.
+func (c *childPermAsk) deliverResponse(resp agent.PermissionResponse) {
 	select {
-	case c.respCh <- agent.PermissionResponse{Level: level}:
+	case c.respCh <- resp:
 	default:
 	}
 }

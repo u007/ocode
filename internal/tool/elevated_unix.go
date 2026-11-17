@@ -84,11 +84,19 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	}
 
 	// One stream: with the tty on all three fds, stdout and stderr are merged.
+	// The reader goroutine OWNS captured (and its own copy of the secret): it
+	// scrubs and zeroes the buffer itself and delivers only the final string
+	// over readResult. The main goroutine never reads or clears captured.buf,
+	// so the timeout escape path cannot race with an in-flight io.Copy write.
 	captured := newBoundedBuffer(bashMaxRetainedBytes)
 	readDone := make(chan struct{})
+	readResult := make(chan string, 1)
+	readerSecret := bytes.Clone(secret)
 	go func() {
 		_, _ = io.Copy(captured, ptmx)
 		close(readDone)
+		readResult <- scrubElevationBuffer(captured.buf, readerSecret)
+		clear(readerSecret)
 	}()
 
 	waitDone := make(chan error, 1)
@@ -105,21 +113,22 @@ func executeElevated(ctx context.Context, cmd *exec.Cmd, secret []byte) (string,
 	// cmd.Wait returns as soon as the child exits; the kernel-buffered tail of
 	// pty output may still be draining. Bound the wait and force the read to
 	// unblock by closing the master if a stray holder keeps the slave open.
+	var out string
 	select {
 	case <-readDone:
+		out = <-readResult
 	case <-time.After(2 * time.Second):
 		_ = ptmx.Close()
 		// A leaked slave fd can keep io.Copy blocked even after Close. Never
-		// wait forever on it: return the partial capture after a short bound.
+		// wait forever on it: ABANDON the reader instead of scrubbing its buffer
+		// here — only the goroutine that owns the buffer may touch it.
 		select {
 		case <-readDone:
+			out = <-readResult
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 
-	// scrubElevationBuffer removes the secret and zeroes the whole capture
-	// buffer, so no unzeroed copy of the password survives in the bounded sink.
-	out := scrubElevationBuffer(captured.buf, secret)
 	return out, scrubElevationError(cmdErr, secret)
 }
 

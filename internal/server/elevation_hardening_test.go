@@ -131,8 +131,8 @@ func TestPulsePermissionResolveRefusesElevationAsk(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Pulse permission_resolve accepted an elevation ask; out = %s", out)
 	}
-	if !strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "password") {
-		t.Fatalf("refusal error = %q, want it to name the interactive password requirement", err.Error())
+	if !strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "elevation ask") {
+		t.Fatalf("refusal error = %q, want it to name the interactive elevation requirement", err.Error())
 	}
 	if storeCalled {
 		t.Fatal("Pulse reached the elevation secret store; the refusal must happen before it")
@@ -145,7 +145,8 @@ func TestPulsePermissionResolveRefusesElevationAsk(t *testing.T) {
 // TestPulsePermissionResolveStillResolvesOrdinaryAsk pins the no-regression
 // side of the explicit refusal: an ordinary (non-elevation) ask still flows
 // through HandleResolvePermission and re-executes the approved call. The
-// Pulse guard must key on NeedsPassword, not on Pulse acting at all.
+// Pulse guard keys on the elevation command (not NeedsPassword, which is false
+// on Windows), never on Pulse acting at all.
 func TestPulsePermissionResolveStillResolvesOrdinaryAsk(t *testing.T) {
 	ask := samplePermissionRequest() // NeedsPassword = false
 

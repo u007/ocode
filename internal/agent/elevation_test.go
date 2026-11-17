@@ -4,10 +4,91 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/tool"
 )
+
+// TestElevationFailureCapCountsAndResets pins the 3-strike re-ask cap state
+// machine: three consecutive failed elevation executions exhaust the chain;
+// a non-elevation command or a fresh human turn resets it; an ask sentinel is
+// not an execution and must not move the counter.
+func TestElevationFailureCapCountsAndResets(t *testing.T) {
+	a := newTestAgent(nil, []tool.Tool{tool.BashTool{}}, nil, nil)
+	elevArgs := json.RawMessage(`{"command":"sudo whoami"}`)
+
+	for i := 1; i <= 3; i++ {
+		a.trackElevationOutcome("bash", elevArgs, "Command failed (exit code 1). Output: wrong password")
+		if got := a.elevationFailureCount(); got != i {
+			t.Fatalf("after %d failures count = %d, want %d", i, got, i)
+		}
+		if i < 3 && a.ElevationAttemptsExhausted() {
+			t.Fatalf("cap reached early at %d failures", i)
+		}
+	}
+	if !a.ElevationAttemptsExhausted() {
+		t.Fatal("3 consecutive failures must exhaust the cap")
+	}
+
+	// An ask sentinel is not an execution: it must not consume or reset a strike.
+	a.ResetElevationFailures()
+	a.trackElevationOutcome("bash", elevArgs, tool.SentinelPermissionAsk+`{}`)
+	if got := a.elevationFailureCount(); got != 0 {
+		t.Fatalf("ask sentinel changed the counter: %d", got)
+	}
+
+	// A non-elevation command resets the chain.
+	a.NoteElevationFailure()
+	a.NoteElevationFailure()
+	a.trackElevationOutcome("bash", json.RawMessage(`{"command":"echo hello"}`), "hello")
+	if a.ElevationAttemptsExhausted() || a.elevationFailureCount() != 0 {
+		t.Fatalf("non-elevation command did not reset: count=%d", a.elevationFailureCount())
+	}
+}
+
+// TestElevationCapResetsOnNewUserTurn pins the other reset trigger: a fresh
+// human message clears the chain, while a synthetic [ocode:...] resume does not.
+func TestElevationCapResetsOnNewUserTurn(t *testing.T) {
+	a := newTestAgent(nil, []tool.Tool{tool.BashTool{}}, nil, nil)
+	for i := 0; i < 3; i++ {
+		a.NoteElevationFailure()
+	}
+	if !a.ElevationAttemptsExhausted() {
+		t.Fatal("setup: cap not exhausted")
+	}
+	_, _ = a.Step([]Message{{Role: "user", Content: "a fresh request"}})
+	if a.ElevationAttemptsExhausted() {
+		t.Fatal("new human turn must reset the elevation failure chain")
+	}
+	for i := 0; i < 3; i++ {
+		a.NoteElevationFailure()
+	}
+	_, _ = a.Step([]Message{{Role: "user", Content: "[ocode:goal] keep going"}})
+	if !a.ElevationAttemptsExhausted() {
+		t.Fatal("synthetic [ocode:] resume must NOT reset the chain")
+	}
+}
+
+// TestElevationCapDeniesAskAfterThreeFailures proves fail-closed behaviour at
+// the prompt boundary: after three failures, no permission ask is raised at all
+// and the caller gets a clear denial instead.
+func TestElevationCapDeniesAskAfterThreeFailures(t *testing.T) {
+	a := newTestAgent(&elevationE2EClient{}, []tool.Tool{tool.BashTool{}}, nil, nil)
+	for i := 0; i < 3; i++ {
+		a.NoteElevationFailure()
+	}
+	res, err := a.handleToolCall("bash", json.RawMessage(`{"command":"sudo whoami"}`), nil, "call-cap")
+	if err != nil {
+		t.Fatalf("handleToolCall: %v", err)
+	}
+	if strings.HasPrefix(res, tool.SentinelPermissionAsk) {
+		t.Fatalf("elevation ask must not be raised after 3 failures: %q", res)
+	}
+	if !strings.Contains(res, "3 consecutive") {
+		t.Fatalf("denial must explain the cap: %q", res)
+	}
+}
 
 func TestElevationManagerPerRequestIsolation(t *testing.T) {
 	m := NewElevationManager()

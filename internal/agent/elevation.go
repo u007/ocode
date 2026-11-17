@@ -16,8 +16,9 @@ import (
 // tool only through a getter closure attached to the tool call context (see
 // tool.WithElevationSecret).
 type ElevationManager struct {
-	mu      sync.Mutex
-	secrets map[string][]byte
+	mu       sync.Mutex
+	secrets  map[string][]byte
+	failures int // consecutive failed elevation attempts in the current ask-chain
 }
 
 func NewElevationManager() *ElevationManager {
@@ -74,4 +75,27 @@ func (m *ElevationManager) ClearAll() {
 		clear(stored)
 		delete(m.secrets, id)
 	}
+}
+
+// noteFailure records one failed elevation attempt and returns the new
+// consecutive count. resetFailures clears the chain (non-elevation command or
+// new human turn); failureCount is a locked read. All are guarded by the same
+// mutex as the secrets map, so a concurrent approval cannot race the counter.
+func (m *ElevationManager) noteFailure() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failures++
+	return m.failures
+}
+
+func (m *ElevationManager) failureCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failures
+}
+
+func (m *ElevationManager) resetFailures() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failures = 0
 }

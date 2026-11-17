@@ -286,6 +286,48 @@ func TestPermissionModalNonElevationShortcutsUnchanged(t *testing.T) {
 	}
 }
 
+// TestElevationDialogSubAgentApprovalCarriesPassword closes the TUI half of the
+// sub-agent elevation gap: the masked password typed for a sub-agent ask must
+// travel in the PermissionResponse to the child, and must NOT be stored on the
+// parent agent's ElevationManager.
+func TestElevationDialogSubAgentApprovalCarriesPassword(t *testing.T) {
+	const password = "sub-dialog-pw"
+	m := newPermQueueTestModel(t)
+	respCh := make(chan agent.PermissionResponse, 1)
+	upd, _ := m.Update(subAgentPermAskMsg{req: elevationReqForTest(), respCh: respCh})
+	m = upd.(model)
+	if m.pendingSubAgentResp == nil {
+		t.Fatal("precondition: sub-agent dialog not open")
+	}
+	m = typeIntoElevationField(t, m, password)
+
+	storeCalls := 0
+	orig := storeElevationSecret
+	storeElevationSecret = func(*agent.Agent, string, []byte) { storeCalls++ }
+	t.Cleanup(func() { storeElevationSecret = orig })
+
+	_, _ = m.answerPermAsk("y")
+	select {
+	case resp := <-respCh:
+		if resp.Level != agent.PermissionAllow {
+			t.Fatalf("delivered level = %v, want allow", resp.Level)
+		}
+		if resp.ElevationPassword != password {
+			t.Fatalf("delivered elevation password = %q, want %q", resp.ElevationPassword, password)
+		}
+	default:
+		t.Fatal("no response delivered to the parked sub-agent")
+	}
+	if storeCalls != 0 {
+		t.Fatalf("parent store called %d times for a sub-agent ask; must be 0", storeCalls)
+	}
+	for _, msg := range m.messages {
+		if strings.Contains(msg.text, password) {
+			t.Fatalf("password leaked into a transcript message: %q", msg.text)
+		}
+	}
+}
+
 func elevationReqForTest() agent.PermissionRequest {
 	return agent.PermissionRequest{
 		ToolName:         "bash",

@@ -16082,6 +16082,16 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 			return nil, false
 		}
+		// Sub-agent elevation approval: carry the masked password through the
+		// response to the CHILD's own ElevationManager. Never store it on
+		// m.agent (the parent) — the callback is shared by every child, and
+		// spec §4.7.3 forbids parent/subagent store reuse. On Windows the field
+		// is not shown, so this stays empty and the child still routes to UAC
+		// via its own elevation flag.
+		if resp.Level == agent.PermissionAllow && elevationNeedsPasswordField(req) {
+			resp.ElevationPassword = m.permPassword.Value()
+			m.permPassword.Reset()
+		}
 		respCh <- resp
 		// Re-arm the listener so subsequent sub-agent asks are still received.
 		return m.armSubAgentPermListener(), true
