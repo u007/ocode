@@ -83,6 +83,11 @@ type PermissionEvent struct {
 	// which is useless when several are parked at once. omitempty, so every
 	// main-agent frame stays byte-identical to before.
 	AgentName string `json:"agent_name,omitempty"`
+	// NeedsPassword/ElevationCommand mirror the elevation ask so the web dialog
+	// can show the masked field and the command that will run elevated.
+	// omitempty keeps every ordinary permission frame byte-identical.
+	NeedsPassword    bool   `json:"needs_password,omitempty"`
+	ElevationCommand string `json:"elevation_command,omitempty"`
 }
 
 // newPermissionEvent projects a parsed PermissionRequest onto the SSE frame the
@@ -116,6 +121,8 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		UntrustedScores:  req.UntrustedScores,
 		UntrustedFailure: req.UntrustedFailure,
 		AgentName:        req.AgentName,
+		NeedsPassword:    req.NeedsPassword,
+		ElevationCommand: req.ElevationCommand,
 	}
 }
 
@@ -180,6 +187,11 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		// decision. Empty means "use the ask's narrowest derived rule" (older
 		// clients and the RC bridge). Validated against the ask's candidates.
 		Prefix string `json:"prefix,omitempty"`
+		// Password is WRITE-ONLY: accepted from a masked prompt for an elevation
+		// ask, it is never copied into a response, SSE frame, tool result,
+		// transcript, log, argv or environment. This task only declares the wire
+		// field; storing and consuming the secret is owned by later tasks.
+		Password string `json:"password,omitempty"`
 	}
 	if err := readBodyJSON(r, &bodyReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1016,5 +1017,109 @@ func TestHandleResolvePermissionUsesModelPickedWhilePaused(t *testing.T) {
 	}
 	if rebuilt.model != "anthropic/claude-sonnet-5-5" {
 		t.Fatalf("continuation model = %q, want picked model", rebuilt.model)
+	}
+}
+
+// TestNewPermissionEventCarriesElevationFields pins the wire format: the SSE
+// permission frame mirrors NeedsPassword/ElevationCommand, and a plain frame
+// omits both so existing frames stay byte-identical.
+func TestNewPermissionEventCarriesElevationFields(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName:         "bash",
+		Command:          "sudo whoami",
+		Args:             json.RawMessage(`{"command":"sudo whoami"}`),
+		Scope:            agent.PermissionScopeBashPrefix,
+		Rule:             "bash.prefix.permission.elevation",
+		NeedsPassword:    true,
+		ElevationCommand: "sudo whoami",
+	}
+	ev := newPermissionEvent("call-elev", req)
+	if !ev.NeedsPassword || ev.ElevationCommand != "sudo whoami" {
+		t.Fatalf("elevation fields not carried on event: %+v", ev)
+	}
+	wire, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"needs_password":true`) || !strings.Contains(string(wire), `"elevation_command":"sudo whoami"`) {
+		t.Fatalf("elevation fields missing from event JSON: %s", wire)
+	}
+
+	plain, err := json.Marshal(newPermissionEvent("call-1", samplePermissionRequest()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "needs_password") || strings.Contains(string(plain), "elevation_command") || strings.Contains(string(plain), "password") {
+		t.Fatalf("ordinary permission event carries elevation/password fields: %s", plain)
+	}
+}
+
+// TestResolveElevationAskNeverLeaksSecret pins the write-only contract: the
+// resolve body accepts a password, but neither the HTTP response nor any SSE
+// frame (including the mirrored permission ask) may carry the secret or even a
+// password field name.
+func TestResolveElevationAskNeverLeaksSecret(t *testing.T) {
+	h := NewHandler()
+	ag := agent.NewAgent(questionFakeClient{}, nil, nil, nil)
+	elevReq := agent.PermissionRequest{
+		ToolName:         "bash",
+		Command:          "sudo whoami",
+		Args:             json.RawMessage(`{"command":"sudo whoami"}`),
+		Scope:            agent.PermissionScopeBashPrefix,
+		Rule:             "bash.prefix.permission.elevation",
+		NeedsPassword:    true,
+		ElevationCommand: "sudo whoami",
+	}
+	as := &agentSession{
+		agent: ag,
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "elevate"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-elev"}}},
+			{Role: "tool", ToolID: "call-elev", Content: permissionAskContent(t, elevReq)},
+		},
+	}
+	h.agents["sess-elev"] = as
+	h.sessions.Register("sess-elev", t.TempDir())
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	const secret = "SUPERSECRET-PW-123"
+	body := fmt.Sprintf(`{"request_id":"call-elev","decision":"deny","password":%q}`, secret)
+	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResolvePermission(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(strings.ToLower(rec.Body.String()), "password") {
+		t.Fatalf("resolve response leaked the password: %s", rec.Body.String())
+	}
+	waitForAskContinuation(t, as)
+
+	for drained := false; !drained; {
+		select {
+		case ev := <-sub:
+			wire, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(wire), secret) {
+				t.Fatalf("SSE frame leaked the password: %s", wire)
+			}
+			data, err := json.Marshal(ev.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(strings.ToLower(string(data)), "password") {
+				t.Fatalf("SSE frame data carries a password field: %s", data)
+			}
+		default:
+			drained = true
+		}
+	}
+	if strings.Contains(as.messages[2].Content, secret) {
+		t.Fatalf("resolved transcript message leaked the password")
 	}
 }

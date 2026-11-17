@@ -4272,12 +4272,13 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 			return denyToolMessage(name, decision), nil
 		}
 		if decision.Level == PermissionAsk {
-			if autoEnabled && !guardEscalated {
-				// Build the permission request so we can check for harmful ops.
-				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
-				if decision.Request != nil {
-					req = *decision.Request
-				}
+			// Build the permission request so we can check for harmful ops.
+			req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+			if decision.Request != nil {
+				req = *decision.Request
+			}
+			// Elevation asks are human-only: no judge may satisfy them.
+			if autoEnabled && !guardEscalated && !IsElevationRequest(req) {
 				if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
 					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
 					// Fall through to human ask unless destructive auto-permission is enabled.
