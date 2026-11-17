@@ -3681,6 +3681,8 @@ func TestElevationAskSurvivesAutoAllowAndYolo(t *testing.T) {
 		"sudo whoami",
 		"su -c 'whoami'",
 		"FOO=bar sudo whoami", // leading assignment peels off before the head
+		"env sudo whoami",     // transparent wrappers must not hide the sudo head
+		"command sudo whoami",
 	}
 	setups := []struct {
 		name  string
@@ -3730,6 +3732,43 @@ func TestInlineSecretSudoIsHardDenied(t *testing.T) {
 		"echo pw | sudo -S whoami",
 		"sudo -S whoami",
 		"SUDO_ASKPASS=/x sudo whoami",
+		"sudo -kS whoami",                 // -S hidden in a short-flag cluster
+		"sudo -Sk whoami",                 // reversed cluster
+		"sudo --stdin=password whoami",    // long form with a value
+		"env SUDO_ASKPASS=/x sudo whoami", // askpass helper behind a wrapper
+	}
+	for _, cmd := range cases {
+		pm := NewPermissionManager()
+		pm.SetWorkDir("/Users/test/project")
+		args := json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd))
+		dec := pm.Decide("bash", args)
+		if dec.Level != PermissionDeny || !dec.HardDeny {
+			t.Errorf("Decide(%q) = %+v, want HardDeny", cmd, dec)
+		}
+	}
+}
+
+// TestInlineSecretDoesNotHardDenyQuotedText pins the false-positive fix: a
+// quoted "sudo -S" used as data in an argument is not an inline password.
+func TestInlineSecretDoesNotHardDenyQuotedText(t *testing.T) {
+	cmd := `echo "sudo -S" > notes.txt`
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	args := json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd))
+	dec := pm.Decide("bash", args)
+	if dec.HardDeny {
+		t.Fatalf("Decide(%q) = %+v, want not HardDeny", cmd, dec)
+	}
+}
+
+// TestChainedElevationBehindWrappersIsHardDenied pins the chain blocklist: a
+// transparent wrapper after a shell operator cannot hide sudo/su from the
+// hard deny.
+func TestChainedElevationBehindWrappersIsHardDenied(t *testing.T) {
+	cases := []string{
+		"whoami; env sudo whoami",
+		"whoami && command sudo whoami",
+		"whoami | nohup sudo whoami",
 	}
 	for _, cmd := range cases {
 		pm := NewPermissionManager()
@@ -3759,36 +3798,40 @@ func TestElevationFieldsOmittedWhenAbsent(t *testing.T) {
 // agent layer: even with auto-permission configured and a judge that would
 // allow everything, a leading sudo/su reaches the human callback instead.
 func TestElevationAskSkipsAutoPermissionJudge(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
-	a := NewAgent(nil, nil, cfg, nil)
-	a.Permissions().SetRule("bash", PermissionAsk)
-	a.Permissions().SetAutoPermissionEnabled(true)
-	a.AddTools([]tool.Tool{&MockTool{name: "bash", result: "executed"}})
-
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: safe"}}
 	}
 
-	asked := false
-	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
-		asked = true
-		if !req.NeedsPassword || req.ElevationCommand != "sudo whoami" {
-			t.Errorf("human ask lost elevation fields: %+v", req)
-		}
-		return PermissionResponse{Level: PermissionDeny}
-	}
+	for _, cmd := range []string{"sudo whoami", "env sudo whoami", "command sudo whoami"} {
+		t.Run(cmd, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+			a := NewAgent(nil, nil, cfg, nil)
+			a.Permissions().SetRule("bash", PermissionAsk)
+			a.Permissions().SetAutoPermissionEnabled(true)
+			a.AddTools([]tool.Tool{&MockTool{name: "bash", result: "executed"}})
 
-	res, err := a.HandleToolCall("bash", json.RawMessage(`{"command":"sudo whoami"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !asked {
-		t.Fatal("elevation ask never reached the human callback — an auto path satisfied it")
-	}
-	if res == "executed" {
-		t.Fatal("auto-permission judge executed an elevation ask")
+			asked := false
+			a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+				asked = true
+				if !req.NeedsPassword || req.ElevationCommand != cmd {
+					t.Errorf("human ask lost elevation fields: %+v", req)
+				}
+				return PermissionResponse{Level: PermissionDeny}
+			}
+
+			res, err := a.HandleToolCall("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !asked {
+				t.Fatal("elevation ask never reached the human callback — an auto path satisfied it")
+			}
+			if res == "executed" {
+				t.Fatal("auto-permission judge executed an elevation ask")
+			}
+		})
 	}
 }

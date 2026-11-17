@@ -7510,18 +7510,34 @@ func isHardBlockedCommand(command string) bool {
 	return false
 }
 
-// leadingElevationCommand reports the raw command when its first non-assignment
-// word is sudo or su. It deliberately inspects the unpeeled head: sudo is a
-// transparent wrapper (permissions_wrappers.go), so effectiveCommandWords would
-// drop it and let the wrapped command take an automatic allow path.
-func leadingElevationCommand(command string) (string, bool) {
-	words := stripLeadingEnvAssignments(splitShellFields(command))
-	if len(words) == 0 {
-		return "", false
-	}
-	switch path.Base(words[0]) {
+// isElevationHead reports whether a command word invokes sudo or su.
+func isElevationHead(word string) bool {
+	switch path.Base(word) {
 	case "sudo", "su":
+		return true
+	}
+	return false
+}
+
+// leadingElevationCommand reports the raw command when a sudo/su head drives
+// it, either directly or through transparent wrappers (env, command, nohup...).
+// It walks the same peel chain as effectiveCommandWords because those wrappers
+// are transparent to auto-permission: "env sudo whoami" peels to "whoami" and
+// would otherwise take an automatic allow path. The check sits above every
+// auto path in Decide.
+func leadingElevationCommand(command string) (string, bool) {
+	fields := splitShellFields(command)
+	words := stripLeadingEnvAssignments(fields)
+	// Keep the raw-head check.
+	if len(words) > 0 && isElevationHead(words[0]) {
 		return command, true
+	}
+	// Walk the leading transparent-wrapper peel chain: any head in the chain
+	// that is sudo/su is an elevation ask.
+	for _, eff := range effectiveCommandWords(fields) {
+		if len(eff) > 0 && isElevationHead(eff[0]) {
+			return command, true
+		}
 	}
 	return "", false
 }
@@ -7534,15 +7550,35 @@ func IsElevationRequest(req PermissionRequest) bool {
 }
 
 // inlineElevationSecret reports the forms that smuggle a password onto stdin
-// or through an askpass helper instead of the masked prompt.
+// or through an askpass helper instead of the masked prompt. SUDO_ASKPASS is
+// kept as a raw substring (an env assignment name); -S/--stdin are detected
+// by tokenizing flags after a sudo head so a quoted "sudo -S" used as data in
+// an argument is not a false positive.
 func inlineElevationSecret(command string) bool {
-	return strings.Contains(command, "sudo -S") ||
-		strings.Contains(command, "sudo --stdin") ||
-		strings.Contains(command, "SUDO_ASKPASS=")
+	if strings.Contains(command, "SUDO_ASKPASS=") {
+		return true
+	}
+	for _, eff := range effectiveCommandWords(splitShellFields(command)) {
+		for i, w := range eff {
+			if path.Base(w) != "sudo" {
+				continue
+			}
+			for _, flag := range eff[i+1:] {
+				if !strings.HasPrefix(flag, "-") || flag == "-" || flag == "--" {
+					break // reached the wrapped command (or end of flags)
+				}
+				if flag == "--stdin" || strings.HasPrefix(flag, "--stdin=") ||
+					(!strings.HasPrefix(flag, "--") && strings.ContainsRune(flag[1:], 'S')) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
-// chainedElevation reports a `;`, `&&` or `|` immediately followed by sudo/su,
-// extending the long-standing sudo chain blocklist to su.
+// chainedElevation reports a `;`, `&&` or `|` followed by a command driven by
+// sudo/su, including behind transparent wrappers (`; env sudo whoami`).
 func chainedElevation(command string) bool {
 	fields := splitShellFields(command)
 	for i := 0; i+1 < len(fields); i++ {
@@ -7550,8 +7586,7 @@ func chainedElevation(command string) bool {
 		if f != ";" && f != "&&" && f != "|" && !strings.HasSuffix(f, ";") {
 			continue
 		}
-		head := path.Base(fields[i+1])
-		if head == "sudo" || head == "su" {
+		if _, elevated := leadingElevationCommand(strings.Join(fields[i+1:], " ")); elevated {
 			return true
 		}
 	}
