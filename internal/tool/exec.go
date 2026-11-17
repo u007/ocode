@@ -212,12 +212,24 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	}()
 
 	command := params.Command
+	// An approved elevation carries a single-use secret via the context getter.
+	// Ordinary approvals attach the same getter but it yields nil, so they keep
+	// the normal path byte-for-byte. A non-nil (possibly empty-on-Windows)
+	// result marks this call as an elevation and must go through executeElevated.
+	var elevationSecret []byte
+	if getter := ElevationSecretFromContext(ctx); getter != nil {
+		elevationSecret = getter()
+	}
+	elevated := elevationSecret != nil
+	// Elevated commands must run the ORIGINAL string unchanged: the parent
+	// monitor wrap backgrounds the command with stdin=/dev/null, which would
+	// starve the password read. executeElevated owns process lifecycle.
 	// Wrap before Start, rather than when the command is promoted. A
 	// foreground command may become a background command after it has
 	// already started; starting the monitor here means both paths retain
 	// the same parent-death protection without interrupting streaming or
 	// replacing the process that the registry and supervisor track.
-	if t.Procs != nil {
+	if t.Procs != nil && !elevated {
 		command = WrapWithParentMonitor(params.Command)
 	}
 	// Unified construction: GOOS branch + session-workdir cmd.Dir + the
@@ -235,6 +247,19 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		// and list it, so the monitor is no longer under its leader and the
 		// list would show it. The stop branch owns the whole-group kill here.
 		cmd.Cancel = func() error { return nil }
+	}
+
+	// An approved leading sudo/su carries a single-use elevation secret in the
+	// context. Route that call through the PTY executor which types the secret
+	// and scrubs it from all output/errors. Without a yielded secret the normal
+	// path below is unchanged, byte for byte.
+	if elevated {
+		out, elevErr := executeElevated(ctx, cmd, elevationSecret)
+		registerBashWrites(ctx, tcID, backedUpPaths)
+		if t.Recorder != nil {
+			t.Recorder.Post(bashBase, params.Command, commandExitCode(elevErr))
+		}
+		return finalizeExecResult(out, elevErr, deadlineStop(ctx, timeout), !FullOutputRetained(ctx)), nil
 	}
 
 	// streaming gates live emission. Once the command is moved to the
