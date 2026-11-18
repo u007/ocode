@@ -1,6 +1,10 @@
 # Directory Update Log
 
 
+## 2026-11-18
+
+* **Creation**: New page for the UML session sub-tab: the Go AST index (`internal/umlinfo`), the fingerprint-keyed 4-entry cache with single-flight background builds, `GET /api/uml` (200/202/400/403) plus the `?host=` proxy rule that never falls back to a local index, the package-map and class-diagram views with LOD, `ocode.ui.umlViewState.v1` persistence keyed `host::root::sessionId`, the opaque `sub_tab`/`tabs.json` passthrough, and the fixed Monaco line-reveal race. Cross-linked the view-state convention from the PDF viewer page and the line-reveal fix from the chat-file-links gotcha; all anchors re-derived by symbol grep in the `uml-viewer` worktree. ([concepts/uml-viewer.md](/concepts/uml-viewer.md), [concepts/pdf-viewer-zoom-find.md](/concepts/pdf-viewer-zoom-find.md), [gotchas/chat-file-links-silent-noop.md](/gotchas/chat-file-links-silent-noop.md))
+
 ## 2026-11-16
 
 * **Creation**: Per-tool elapsed time — agent-stamped wall clock in `handleToolCallWithImages`/`stampToolDurations`, UI-only `tool_duration_ms`, two-clock rule (committed vs live), web/TUI/Pulse renderers, ask-sentinel suppression ([concepts/tool-call-elapsed-time.md](/concepts/tool-call-elapsed-time.md))

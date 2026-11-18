@@ -4,7 +4,7 @@ title: Chat file links with relative or ~ hrefs silently did nothing
 description: Chat file links to ~/ files and relative paths were prevented and then dropped, so clicks looked broken with no error; authored ~/ hrefs now open in the Files tab, and the prose auto-linkifier keeps the ~ inside its token instead of matching only the root part after it.
 resource: web/src/components/common/MarkdownLink.tsx, web/src/lib/fileLinks.tsx
 tags: [gotcha, web, chat, files, links]
-timestamp: 2026-11-09T17:31:34Z
+timestamp: 2026-11-18T13:19:56Z
 status: active
 ---
 # Chat file links with relative or ~ hrefs silently did nothing
@@ -107,6 +107,16 @@ swallowing the `;`; a sentence-ending `.` dropped from both a `~/` token and a
 Server-side expansion:
 `TestFileGrant_HomeTildePathExpandsThenContained`
 (`internal/server/handler_file_grants_test.go:455`).
+
+## Line-reveal race (fixed 2026-11-18)
+
+A second, unrelated failure of the same surface: a link carrying `:line` opened
+the right file at line 1. `FileEditor` applied the pending highlight on one 50 ms
+timer, but Monaco loads its model lazily, so `revealLineInCenter` could run
+against an empty or short model and clamp. It now polls every 50 ms until the
+model's line count covers the target, capped at 40 attempts (~2 s), then applies
+anyway so a non-line highlight still lands. Background and the UML symbol-list
+caller: [UML viewer](../concepts/uml-viewer.md).
 
 ## Rules for future edits
 
