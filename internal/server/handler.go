@@ -105,8 +105,13 @@ type Handler struct {
 	pluginMCP    map[string]string
 	messaging    *messaging.Manager
 	cloudconnect *cloudconnect.Manager
-	rc           *RCBridge          // set when proxying to a TUI session
-	scheduler    *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// cloudManagers caches one legacy local connector manager per resolved
+	// project root; cloudManagersMu guards the map. The boot-default manager
+	// above stays the fallback for callers that carry no project.
+	cloudManagers   map[string]*cloudconnect.Manager
+	cloudManagersMu sync.Mutex
+	rc              *RCBridge          // set when proxying to a TUI session
+	scheduler       *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// cronServices resolves the cron engine for a project root, per call. It is
 	// installed by the Server (see Server.cronServiceResolver) so the LLM `cron`
 	// tool operates on the SESSION's project instead of the server's boot project.
@@ -786,9 +791,12 @@ func NewHandler() *Handler {
 		messaging.DefaultManager = msgMgr
 	}
 
-	// Cloud storage connectors (Phase 1: framework + Google Drive read-only).
+	// Cloud storage connectors. The legacy boot-default manager is no longer
+	// bound to os.Getwd(): per-project managers are resolved lazily from the
+	// validated project param (cloudManager), so one process never shares a
+	// single keychain blob across projects.
 	var ccMgr *cloudconnect.Manager
-	ccMgr = cloudconnect.NewManager(gd, defaultWorkDir, os.Getenv("OCODE_CLOUD_MASTER_PASSWORD"))
+	ccMgr = cloudconnect.NewManager(gd, "", os.Getenv("OCODE_CLOUD_MASTER_PASSWORD"))
 	cloudconnect.DefaultManager = ccMgr
 
 	monacoStore, err := monaco.NewStore()

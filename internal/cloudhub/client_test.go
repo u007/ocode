@@ -134,7 +134,7 @@ func TestHubClientRejectsIncompleteResponses(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL, "tok")
 
-	if _, err := c.StartOAuth(context.Background(), "dropbox", "c", "cs", "ch"); err == nil {
+	if _, err := c.StartOAuth(context.Background(), "dropbox", "c", "inst", "cs", "ch"); err == nil {
 		t.Fatal("expected error for empty auth_url")
 	}
 	if _, err := c.Redeem(context.Background(), "code", "ver", "cs"); err == nil {

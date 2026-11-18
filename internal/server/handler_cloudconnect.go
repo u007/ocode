@@ -6,16 +6,54 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/u007/ocode/internal/cloudconnect"
+	"github.com/u007/ocode/internal/paths"
 )
 
-func (h *Handler) cloudManager() *cloudconnect.Manager {
+// cloudManager returns the connector manager for a resolved project root.
+// The hub path writes its v2 file directly via config.LoadV2/SaveV2; this
+// cache serves the legacy local-OAuth handlers, which must not share one
+// keychain blob across projects. An empty root keeps the boot-default manager
+// (direct Handler users and pre-project clients).
+func (h *Handler) cloudManager(projectRoot string) *cloudconnect.Manager {
 	if h == nil {
 		return nil
 	}
-	return h.cloudconnect
+	if projectRoot == "" {
+		return h.cloudconnect
+	}
+	h.cloudManagersMu.Lock()
+	defer h.cloudManagersMu.Unlock()
+	if h.cloudManagers == nil {
+		h.cloudManagers = make(map[string]*cloudconnect.Manager)
+	}
+	if mgr := h.cloudManagers[projectRoot]; mgr != nil {
+		return mgr
+	}
+	gd, _ := paths.GlobalDataDir()
+	mgr := cloudconnect.NewManager(gd, projectRoot, os.Getenv("OCODE_CLOUD_MASTER_PASSWORD"))
+	h.cloudManagers[projectRoot] = mgr
+	return mgr
+}
+
+// cloudLegacyProjectRoot validates the optional project param of a legacy
+// local connector route. Only an ALLOWED root is ever used; an absent or
+// unrecognised value falls back to the boot default so pre-hub clients keep
+// working. The new hub routes use the strict kakiitProject validator instead.
+func (h *Handler) cloudLegacyProjectRoot(r *http.Request) string {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		return ""
+	}
+	for _, allowed := range h.allowedProjectRoots() {
+		if allowed == project {
+			return allowed
+		}
+	}
+	return ""
 }
 
 // handleCloudConnectors manages connector instances: list, register, remove.
@@ -23,7 +61,7 @@ func (h *Handler) cloudManager() *cloudconnect.Manager {
 // POST /api/cloud/connectors            -> register {id, provider, root_path, secrets...}
 // DELETE /api/cloud/connectors?id=...  -> remove
 func (h *Handler) handleCloudConnectors(w http.ResponseWriter, r *http.Request) {
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -79,7 +117,7 @@ func (h *Handler) handleCloudConnectors(w http.ResponseWriter, r *http.Request) 
 // handleCloudConnectBrowse lists entries at a path for a connector.
 // GET /api/cloud/browse?id=...&path=...
 func (h *Handler) handleCloudConnectBrowse(w http.ResponseWriter, r *http.Request) {
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -97,7 +135,7 @@ func (h *Handler) handleCloudConnectBrowse(w http.ResponseWriter, r *http.Reques
 // handleCloudConnectRead downloads a file's content.
 // GET /api/cloud/read?id=...&path=...
 func (h *Handler) handleCloudConnectRead(w http.ResponseWriter, r *http.Request) {
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -127,7 +165,7 @@ func (h *Handler) handleCloudConnectRead(w http.ResponseWriter, r *http.Request)
 // handleCloudConnectMetadata returns metadata for a single entry.
 // GET /api/cloud/metadata?id=...&path=...
 func (h *Handler) handleCloudConnectMetadata(w http.ResponseWriter, r *http.Request) {
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -149,7 +187,7 @@ func (h *Handler) handleCloudConnectWrite(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -182,7 +220,7 @@ func (h *Handler) handleCloudConnectUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return
@@ -224,7 +262,7 @@ func (h *Handler) handleCloudConnectDelete(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return

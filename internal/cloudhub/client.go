@@ -163,10 +163,14 @@ func (c *Client) RegisterCallback(ctx context.Context, installID, callbackURL st
 }
 
 // StartOAuth starts a provider OAuth hop and returns the provider auth URL.
-func (c *Client) StartOAuth(ctx context.Context, provider, connectorID, clientState, challenge string) (string, error) {
+// installID selects this machine's registered callback on the hub: the
+// post-review wire contract makes it mandatory so one install cannot redirect
+// another's handoff.
+func (c *Client) StartOAuth(ctx context.Context, provider, connectorID, installID, clientState, challenge string) (string, error) {
 	raw, err := c.do(ctx, http.MethodPost, "/oauth/start", map[string]string{
 		"provider":       provider,
 		"connector_id":   connectorID,
+		"install_id":     installID,
 		"client_state":   clientState,
 		"code_challenge": challenge,
 	})

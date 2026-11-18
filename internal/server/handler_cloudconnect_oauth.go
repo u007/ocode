@@ -221,7 +221,7 @@ func (h *Handler) handleCloudConnectOAuthCallback(w http.ResponseWriter, r *http
 		return
 	}
 
-	mgr := h.cloudManager()
+	mgr := h.cloudManager(h.cloudLegacyProjectRoot(r))
 	if mgr == nil {
 		http.Error(w, "cloud connectors not initialized", http.StatusServiceUnavailable)
 		return

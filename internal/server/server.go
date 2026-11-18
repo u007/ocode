@@ -341,6 +341,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/cloud/delete", s.authMiddleware(s.handler.handleCloudConnectDelete))
 	s.mux.HandleFunc("POST /api/cloud/oauth/start", s.authMiddleware(s.handler.handleCloudConnectOAuthStart))
 	s.mux.HandleFunc("GET /api/cloud/oauth/callback", s.authMiddleware(s.handler.handleCloudConnectOAuthCallback))
+	// Central cloud connectors via kakiit. Every route takes a validated
+	// ?project= root; ?host= binds remote projects to the owning host's server.
+	s.mux.HandleFunc("PUT /api/cloud/oauth/kakiit/callback/register", s.authMiddleware(s.handler.handleKakiitCallbackRegister))
+	s.mux.HandleFunc("POST /api/cloud/oauth/kakiit/start", s.authMiddleware(s.handler.handleKakiitStart))
+	s.mux.HandleFunc("/api/cloud/oauth/kakiit/return", s.authMiddleware(s.handler.handleKakiitReturn))
+	s.mux.HandleFunc("GET /api/cloud/connections", s.authMiddleware(s.handler.handleKakiitConnections))
+	s.mux.HandleFunc("POST /api/cloud/token/refresh", s.authMiddleware(s.handler.handleKakiitTokenRefresh))
+	s.mux.HandleFunc("DELETE /api/cloud/oauth/kakiit/disconnect", s.authMiddleware(s.handler.handleKakiitDisconnect))
 	s.mux.HandleFunc("POST /api/browse/tab-origin", s.authMiddleware(s.handleBrowseTabOrigin))
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
