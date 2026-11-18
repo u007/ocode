@@ -1270,6 +1270,11 @@ function appearanceThemePath(id: string): string {
   return `/api/appearance/theme/${encoded}`;
 }
 
+/** Hub routes read `host` from the query; fetchJSON's host only routes the request. */
+function hubQuery(project: string, host?: string): string {
+  return `project=${encodeURIComponent(project)}${host ? `&host=${encodeURIComponent(host)}` : ""}`;
+}
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
@@ -5249,7 +5254,7 @@ export const api = {
   // routes remote projects to the server that owns them. Both are threaded
   // into every call — dropping either routes token work to the wrong machine.
   listHubCloudConnections: (project: string, host?: string) =>
-    fetchJSON<any>(`/api/cloud/connections?project=${encodeURIComponent(project)}`, undefined, host),
+    fetchJSON<any>(`/api/cloud/connections?${hubQuery(project, host)}`, undefined, host),
   registerHubCloudCallback: (
     project: string,
     installID: string,
@@ -5257,7 +5262,7 @@ export const api = {
     host?: string,
   ) =>
     fetchJSON<any>(
-      `/api/cloud/oauth/kakiit/callback/register?project=${encodeURIComponent(project)}`,
+      `/api/cloud/oauth/kakiit/callback/register?${hubQuery(project, host)}`,
       { method: "PUT", body: JSON.stringify({ install_id: installID, callback_url: callbackURL }) },
       host,
     ),
@@ -5273,7 +5278,7 @@ export const api = {
     host?: string,
   ) =>
     fetchJSON<any>(
-      `/api/cloud/oauth/kakiit/start?project=${encodeURIComponent(project)}`,
+      `/api/cloud/oauth/kakiit/start?${hubQuery(project, host)}`,
       { method: "POST", body: JSON.stringify(payload) },
       host,
     ),
@@ -5283,19 +5288,19 @@ export const api = {
     host?: string,
   ) =>
     fetchJSON<any>(
-      `/api/cloud/oauth/kakiit/return?project=${encodeURIComponent(project)}`,
+      `/api/cloud/oauth/kakiit/return?${hubQuery(project, host)}`,
       { method: "POST", body: JSON.stringify(payload) },
       host,
     ),
   refreshHubCloudToken: (project: string, connectionID: string, host?: string) =>
     fetchJSON<any>(
-      `/api/cloud/token/refresh?project=${encodeURIComponent(project)}`,
+      `/api/cloud/token/refresh?${hubQuery(project, host)}`,
       { method: "POST", body: JSON.stringify({ connection_id: connectionID }) },
       host,
     ),
   disconnectHubCloud: (project: string, connectionID: string, host?: string) =>
     fetchJSON<any>(
-      `/api/cloud/oauth/kakiit/disconnect?project=${encodeURIComponent(project)}&connection_id=${encodeURIComponent(connectionID)}`,
+      `/api/cloud/oauth/kakiit/disconnect?${hubQuery(project, host)}&connection_id=${encodeURIComponent(connectionID)}`,
       { method: "DELETE" },
       host,
     ),

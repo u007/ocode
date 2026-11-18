@@ -28,7 +28,7 @@ describe("hub cloud connector client", () => {
     const { api } = await import("./client");
     await api.listHubCloudConnections("/work/my app", "user@box");
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/connections?project=%2Fwork%2Fmy%20app",
+      "/api/remote/user%40box/api/cloud/connections?project=%2Fwork%2Fmy%20app&host=user%40box",
     );
   });
 
@@ -42,7 +42,7 @@ describe("hub cloud connector client", () => {
       "user@box",
     );
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/oauth/kakiit/callback/register?project=%2Fwork%2Fapp",
+      "/api/remote/user%40box/api/cloud/oauth/kakiit/callback/register?project=%2Fwork%2Fapp&host=user%40box",
     );
     const init = fetchSpy.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("PUT");
@@ -69,7 +69,7 @@ describe("hub cloud connector client", () => {
       "user@box",
     );
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/oauth/kakiit/start?project=%2Fwork%2Fapp",
+      "/api/remote/user%40box/api/cloud/oauth/kakiit/start?project=%2Fwork%2Fapp&host=user%40box",
     );
     const init = fetchSpy.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("POST");
@@ -91,7 +91,7 @@ describe("hub cloud connector client", () => {
       "user@box",
     );
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/oauth/kakiit/return?project=%2Fwork%2Fapp",
+      "/api/remote/user%40box/api/cloud/oauth/kakiit/return?project=%2Fwork%2Fapp&host=user%40box",
     );
     const init = fetchSpy.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("POST");
@@ -107,7 +107,7 @@ describe("hub cloud connector client", () => {
     const { api } = await import("./client");
     await api.refreshHubCloudToken("/work/app", "cx/1", "user@box");
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/token/refresh?project=%2Fwork%2Fapp",
+      "/api/remote/user%40box/api/cloud/token/refresh?project=%2Fwork%2Fapp&host=user%40box",
     );
     const init = fetchSpy.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("POST");
@@ -119,8 +119,25 @@ describe("hub cloud connector client", () => {
     const { api } = await import("./client");
     await api.disconnectHubCloud("/work/app", "cx 1", "user@box");
     expect(fetchSpy.mock.calls[0][0]).toBe(
-      "/api/remote/user%40box/api/cloud/oauth/kakiit/disconnect?project=%2Fwork%2Fapp&connection_id=cx%201",
+      "/api/remote/user%40box/api/cloud/oauth/kakiit/disconnect?project=%2Fwork%2Fapp&host=user%40box&connection_id=cx%201",
     );
     expect((fetchSpy.mock.calls[0][1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("threads the remote host into the URL query and omits it when local", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse([]));
+    const { api } = await import("./client");
+
+    await api.listHubCloudConnections("/work/app", "wsl:Ubuntu-22.04");
+    expect(fetchSpy.mock.calls[0][0]).toBe(
+      "/api/remote/wsl%3AUbuntu-22.04/api/cloud/connections?project=%2Fwork%2Fapp&host=wsl%3AUbuntu-22.04",
+    );
+
+    fetchSpy.mockClear();
+    fetchSpy.mockResolvedValue(jsonResponse([]));
+    await api.listHubCloudConnections("/work/app");
+    expect(fetchSpy.mock.calls[0][0]).toBe(
+      "/api/cloud/connections?project=%2Fwork%2Fapp",
+    );
   });
 });

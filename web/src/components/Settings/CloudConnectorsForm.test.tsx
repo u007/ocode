@@ -55,6 +55,7 @@ const HUB_METHODS = [
 
 let listHub: ReturnType<typeof vi.fn>;
 let listLocal: ReturnType<typeof vi.fn>;
+let register: ReturnType<typeof vi.fn>;
 let start: ReturnType<typeof vi.fn>;
 let refresh: ReturnType<typeof vi.fn>;
 let disconnect: ReturnType<typeof vi.fn>;
@@ -71,6 +72,7 @@ beforeEach(() => {
 
   listHub = vi.fn(async () => HUB_CONNECTIONS);
   listLocal = vi.fn(async () => LOCAL_CONNECTORS);
+  register = vi.fn(async () => ({ ok: true }));
   start = vi.fn(async () => ({ auth_url: "https://example.test/auth" }));
   refresh = vi.fn(async () => ({ ok: true }));
   disconnect = vi.fn(async () => ({ ok: true }));
@@ -79,6 +81,7 @@ beforeEach(() => {
 
   Object.assign(api, {
     listHubCloudConnections: listHub,
+    registerHubCloudCallback: register,
     startHubCloudOAuth: start,
     refreshHubCloudToken: refresh,
     disconnectHubCloud: disconnect,
@@ -234,5 +237,22 @@ describe("CloudConnectorsForm — hub start wiring", () => {
     expect(payload.code_challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(payload.client_state).toContain(encodeURIComponent(PROJECT));
     expect(payload.client_state).toContain(encodeURIComponent(HOST));
+
+    // kakiit now requires a callback registered for this install before it
+    // accepts /oauth/start, so the CTA must register first — and the loopback
+    // callback must carry both the project and the remote host back to ocode.
+    const expectedCallback =
+      `${window.location.origin}/api/cloud/oauth/kakiit/return` +
+      `?project=${encodeURIComponent(PROJECT)}&host=${encodeURIComponent(HOST)}`;
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledWith(
+      PROJECT,
+      payload.install_id,
+      expectedCallback,
+      HOST,
+    );
+    expect(register.mock.invocationCallOrder[0]).toBeLessThan(
+      start.mock.invocationCallOrder[0],
+    );
   });
 });

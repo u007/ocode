@@ -280,12 +280,18 @@ export default function CloudConnectorsForm({
       // client_state in the OAuth handler path; this UI only starts the flow.
       const codeChallenge = await pkceChallenge(verifier);
       const clientState = `${encodeURIComponent(project)}.${host ? encodeURIComponent(host) : ""}.${randomToken(12)}`;
+      const installId = hubInstallId();
+      const callbackURL =
+        `${window.location.origin}/api/cloud/oauth/kakiit/return` +
+        `?project=${encodeURIComponent(project)}` +
+        `${host ? `&host=${encodeURIComponent(host)}` : ""}`;
+      await api.registerHubCloudCallback(project, installId, callbackURL, host);
       const res = await api.startHubCloudOAuth(
         project,
         {
           provider: "dropbox",
           connector_id: HUB_CONNECTOR_ID,
-          install_id: hubInstallId(),
+          install_id: installId,
           client_state: clientState,
           code_challenge: codeChallenge,
         },

@@ -345,7 +345,10 @@ func (s *Server) registerRoutes() {
 	// ?project= root; ?host= binds remote projects to the owning host's server.
 	s.mux.HandleFunc("PUT /api/cloud/oauth/kakiit/callback/register", s.authMiddleware(s.handler.handleKakiitCallbackRegister))
 	s.mux.HandleFunc("POST /api/cloud/oauth/kakiit/start", s.authMiddleware(s.handler.handleKakiitStart))
-	s.mux.HandleFunc("/api/cloud/oauth/kakiit/return", s.authMiddleware(s.handler.handleKakiitReturn))
+	// The provider redirects here from kakiit's popup with a one-time code; the
+	// handler validates client_state and its in-memory flow, so no interactive
+	// credentials are available or needed.
+	s.mux.HandleFunc("/api/cloud/oauth/kakiit/return", s.handler.handleKakiitReturn)
 	s.mux.HandleFunc("GET /api/cloud/connections", s.authMiddleware(s.handler.handleKakiitConnections))
 	s.mux.HandleFunc("POST /api/cloud/token/refresh", s.authMiddleware(s.handler.handleKakiitTokenRefresh))
 	s.mux.HandleFunc("DELETE /api/cloud/oauth/kakiit/disconnect", s.authMiddleware(s.handler.handleKakiitDisconnect))
