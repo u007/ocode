@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,5 +110,24 @@ func TestLoadV2Defaults(t *testing.T) {
 	}
 	if cfg.Central.Connections == nil {
 		t.Error("connections map must be initialized")
+	}
+}
+
+func TestLoadV2RefusesV1File(t *testing.T) {
+	dir := t.TempDir()
+	v1 := &StorageConnectorsFile{
+		Version:       connectorsVersion,
+		Settings:      map[string]ConnectorSettings{"dropbox": {Provider: "dropbox", RootPath: "/docs"}},
+		MaxCacheBytes: 1234,
+	}
+	if err := SaveStorageConnectors(dir, v1); err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+	cfg, err := LoadV2(dir)
+	if !errors.Is(err, ErrV2MigrationRequired) {
+		t.Fatalf("LoadV2 error = %v, want ErrV2MigrationRequired", err)
+	}
+	if cfg != nil {
+		t.Fatalf("LoadV2 returned %+v on a v1 file, want nil", cfg)
 	}
 }

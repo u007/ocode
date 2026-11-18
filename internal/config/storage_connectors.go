@@ -5,6 +5,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,6 +119,10 @@ type ConnectionMeta struct {
 	Status        string `json:"status"`
 }
 
+// ErrV2MigrationRequired means the on-disk connectors file is v1. Hub
+// handlers must migrate before writing, or they would overwrite v1 metadata.
+var ErrV2MigrationRequired = errors.New("connectors file requires v1 to v2 migration")
+
 func LoadV2(projectRoot string) (*StorageConnectorsFileV2, error) {
 	path := connectorsFilePath(projectRoot)
 	data, err := os.ReadFile(path)
@@ -137,6 +142,9 @@ func LoadV2(projectRoot string) (*StorageConnectorsFileV2, error) {
 	var f StorageConnectorsFileV2
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse v2 connectors settings: %w", err)
+	}
+	if f.Version != connectorsVersionV2 {
+		return nil, ErrV2MigrationRequired
 	}
 	if f.Central.Connections == nil {
 		f.Central.Connections = make(map[string]ConnectionMeta)

@@ -127,6 +127,20 @@ func clientStateBinding(state, project, host string) bool {
 	return err == nil && stateHost == host
 }
 
+// loadHubV2File migrates a v1 file exactly once before any hub write. Without
+// this guard LoadV2 would decode v1 metadata as an empty v2 file and SaveV2
+// would destroy root_path/settings/max_cache_bytes.
+func loadHubV2File(root string) (*config.StorageConnectorsFileV2, error) {
+	f, err := config.LoadV2(root)
+	if errors.Is(err, config.ErrV2MigrationRequired) {
+		if migrateErr := cloudconnect.MigrateV1ToV2(root); migrateErr != nil {
+			return nil, fmt.Errorf("migrate v1 connectors: %w", migrateErr)
+		}
+		f, err = config.LoadV2(root)
+	}
+	return f, err
+}
+
 func hubCredentials(f *config.StorageConnectorsFileV2, key []byte) (map[string]cloudconnect.Credentials, error) {
 	creds := map[string]cloudconnect.Credentials{}
 	if f.CredentialsEnvelope == "" {
@@ -309,7 +323,7 @@ func (h *Handler) handleKakiitReturn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resolve connector key: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	f, err := config.LoadV2(root)
+	f, err := loadHubV2File(root)
 	if err != nil {
 		http.Error(w, "load connector settings: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -362,7 +376,7 @@ func (h *Handler) handleKakiitConnections(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	f, err := config.LoadV2(root)
+	f, err := loadHubV2File(root)
 	if err != nil {
 		http.Error(w, "load connector settings: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -456,7 +470,7 @@ func (h *Handler) handleKakiitTokenRefresh(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "hub unavailable: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	f, err := config.LoadV2(root)
+	f, err := loadHubV2File(root)
 	if err != nil {
 		http.Error(w, "load connector settings: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -508,7 +522,7 @@ func (h *Handler) handleKakiitTokenRefresh(w http.ResponseWriter, r *http.Reques
 // refused the token, so keeping a stale cached copy is never an acceptable
 // fallback and the caller is already returning the hub's explicit error.
 func (h *Handler) clearHubConnection(root, connectionID string, key []byte) {
-	f, err := config.LoadV2(root)
+	f, err := loadHubV2File(root)
 	if err != nil {
 		return
 	}
