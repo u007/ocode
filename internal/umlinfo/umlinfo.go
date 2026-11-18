@@ -244,6 +244,11 @@ func collectFiles(ctx context.Context, root, ext string) ([]string, bool, error)
 		if !strings.HasSuffix(rel, ext) {
 			return nil
 		}
+		// Symlinks are listed but never followed: WalkDir reports the link
+		// itself, and os.ReadFile on it would parse a file outside the root.
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		if info, ierr := d.Info(); ierr != nil || info.Size() > MaxFileBytes {
 			return nil
 		}
@@ -451,16 +456,22 @@ func (i *Indexer) Build(ctx context.Context, root, fp string) (*Index, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if err != nil {
-		prev := i.entries[root]
-		if prev == nil {
-			prev = &cacheEntry{}
-		}
-		prev.fail, prev.failAt = err, time.Now()
-		i.entries[root] = prev
+		i.markFailedLocked(root, err)
 		return nil, err
 	}
 	i.entries[root] = &cacheEntry{fp: fp, index: idx}
 	return idx, nil
+}
+
+// markFailedLocked records a build failure without discarding a good cached
+// index: the fingerprint is left stale so Get misses and polls retry.
+func (i *Indexer) markFailedLocked(root string, err error) {
+	prev := i.entries[root]
+	if prev == nil {
+		prev = &cacheEntry{}
+	}
+	prev.fail, prev.failAt = err, time.Now()
+	i.entries[root] = prev
 }
 
 // Fingerprint exposes the fingerprint computation for the HTTP handler.
@@ -503,7 +514,7 @@ func (i *Indexer) StartBuild(root, fp string) {
 		defer i.mu.Unlock()
 		i.evictIfNeededLocked()
 		if err != nil {
-			i.entries[root] = &cacheEntry{fp: fp, fail: err, failAt: time.Now()}
+			i.markFailedLocked(root, err)
 			return
 		}
 		i.entries[root] = &cacheEntry{fp: fp, index: idx}

@@ -232,3 +232,62 @@ func TestBrokenFileIsSkipped(t *testing.T) {
 		t.Fatal("valid file's symbols lost when a sibling file fails to parse")
 	}
 }
+
+func TestSymlinkedGoFileIsNotFollowed(t *testing.T) {
+	root := writeFixture(t)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.go")
+	if err := os.WriteFile(secret, []byte("package secret\n\n// Leaked is outside the root.\ntype Leaked struct{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "escape.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	idx, err := BuildIndex(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range idx.Symbols {
+		if s.Name == "Leaked" || s.File == "escape.go" {
+			t.Fatalf("symlink outside the root was indexed: %+v", s)
+		}
+	}
+}
+
+func TestFailedBuildKeepsPreviousIndex(t *testing.T) {
+	root := writeFixture(t)
+	ctx := context.Background()
+	fp, err := Fingerprint(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := NewIndexer()
+	good, err := idx.Build(ctx, root, fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A cancelled build is the deterministic failure both Build and
+	// StartBuild route through markFailedLocked.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := idx.Build(cancelled, root, "next"); err == nil {
+		t.Fatal("expected the cancelled build to fail")
+	}
+	idx.mu.Lock()
+	kept := idx.entries[root]
+	idx.mu.Unlock()
+	if kept == nil || kept.index != good {
+		t.Fatalf("failed build discarded the previous index (kept=%v)", kept)
+	}
+	// The old index stays valid for the fingerprint it was built from, but
+	// the failed rebuild's fingerprint never reports a hit.
+	if got, fresh := idx.Get(root, fp); !fresh || got != good {
+		t.Fatal("the previous index should still serve its own fingerprint")
+	}
+	if _, fresh := idx.Get(root, "next"); fresh {
+		t.Fatal("a failed rebuild must not report a hit for the new fingerprint")
+	}
+	if _, ok := idx.LastError(root); !ok {
+		t.Fatal("failure was not recorded")
+	}
+}
