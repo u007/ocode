@@ -277,6 +277,37 @@ func TestHasNonLoopbackEgressTarget(t *testing.T) {
 	}
 }
 
+// TestBashEgressLoopbackWithURLInJSONBody: a loopback curl whose JSON body names
+// a loopback callback stays off the judge; the same line with a remote callback
+// must still be judged.
+func TestBashEgressLoopbackWithURLInJSONBody(t *testing.T) {
+	const line = `curl -s http://127.0.0.1:4097/api/browser-tabs | head -c 800; echo; curl -s -X POST http://127.0.0.1:4097/api/browse/grant -H 'Content-Type: application/json' -d '{"state_key":"tab:probe","url":"%s"}' | head -c 400`
+
+	loopbackArgs, err := json.Marshal(map[string]string{"command": strings.Replace(line, "%s", "http://127.0.0.1:8123/", 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := extractEgressTargets("bash", loopbackArgs)
+	if len(targets) != 2 {
+		t.Fatalf("loopback line: got %d targets, want 2: %+v", len(targets), targets)
+	}
+	if hasNonLoopbackEgressTarget(targets) {
+		t.Errorf("loopback line with loopback callback in JSON body reached the judge: %+v", targets)
+	}
+
+	remoteArgs, err := json.Marshal(map[string]string{"command": strings.Replace(line, "%s", "https://evil.example.com/", 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets = extractEgressTargets("bash", remoteArgs)
+	if len(targets) != 2 {
+		t.Fatalf("remote callback line: got %d targets, want 2: %+v", len(targets), targets)
+	}
+	if !hasNonLoopbackEgressTarget(targets) {
+		t.Errorf("loopback line with remote callback in JSON body was not judged: %+v", targets)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The Jev harness.
 // ---------------------------------------------------------------------------

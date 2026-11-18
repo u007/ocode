@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -193,11 +194,51 @@ func loadPermissionJudgeEvalCases(t *testing.T) []permissionJudgeEvalCase {
 	return cases
 }
 
+// permissionJudgeEvalProfile is one relaxed-concern setting that every run is
+// judged under. The two profiles differ only on the secrets category.
+type permissionJudgeEvalProfile struct {
+	Name    string
+	Relaxed []string
+}
+
+// permissionJudgeEvalProfiles derives the two profiles from the user's
+// configured opt-outs, whatever they hold. secrets_enforced is the list without
+// "secrets"; secrets_relaxed is the list with it. Both are sorted so the
+// scorecard header is stable.
+func permissionJudgeEvalProfiles(configured []string) []permissionJudgeEvalProfile {
+	others := make([]string, 0, len(configured)+1)
+	for _, k := range configured {
+		if k != "secrets" {
+			others = append(others, k)
+		}
+	}
+	enforced := append([]string(nil), others...)
+	sort.Strings(enforced)
+	relaxed := append(others, "secrets")
+	sort.Strings(relaxed)
+	return []permissionJudgeEvalProfile{
+		{Name: "secrets_enforced", Relaxed: enforced},
+		{Name: "secrets_relaxed", Relaxed: relaxed},
+	}
+}
+
+// permissionJudgeEvalAgent builds an agent the way NewAgent builds its
+// permissions, without NewAgent's side effects (local-model autostart). An
+// empty workDir leaves the project unset, as a fresh agent has it.
+func permissionJudgeEvalAgent(cfg *config.Config, workDir string) *Agent {
+	a := &Agent{config: cfg, permissions: NewPermissionManager(), tools: map[string]tool.Tool{}}
+	a.permissions.LoadFromConfig(cfg.Permission)
+	a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
+	if workDir != "" {
+		a.SetWorkDir(workDir)
+	}
+	return a
+}
+
 func TestPermissionJudgeEval(t *testing.T) {
 	if os.Getenv("OCODE_JEV_EVAL") != "1" {
 		t.Skip("live judge eval; set OCODE_JEV_EVAL=1 to run")
 	}
-	cases := loadPermissionJudgeEvalCases(t)
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -207,17 +248,42 @@ func TestPermissionJudgeEval(t *testing.T) {
 		t.Fatal("no keyed TypeSafe client; connect the typesafe provider first")
 	}
 
-	// One agent per project, built the way NewAgent builds its permissions,
-	// without NewAgent's side effects (local-model autostart).
+	// Every run judges both profiles, whatever the user's relaxed_concerns hold,
+	// so the secrets fixtures are measured enforced and relaxed alike. The
+	// profiles run one after the other, each with its own agents and one stamp.
+	configured := permissionJudgeEvalAgent(cfg, "").relaxedConcernKeys()
+	stamp := time.Now().UTC().Format("2006-01-02T150405Z")
+	outDir := filepath.Join(permissionJudgeEvalDir, "scores")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range permissionJudgeEvalProfiles(configured) {
+		t.Run(profile.Name, func(t *testing.T) {
+			permissionJudgeEvalRunProfile(t, client, cfg, profile, stamp, outDir)
+		})
+	}
+}
+
+// permissionJudgeEvalRunProfile runs the whole eval once under one profile and
+// writes its scorecard and answers as <stamp>.<profile>.md and .json.
+func permissionJudgeEvalRunProfile(t *testing.T, client *TypesafeClient, cfg *config.Config, profile permissionJudgeEvalProfile, stamp, outDir string) {
+	cases := loadPermissionJudgeEvalCases(t)
+
+	// One agent per project carrying this profile's relaxed concerns. The judge
+	// request, the deterministic guard and the skip filter all read that config,
+	// so each profile needs agents of its own.
 	agents := map[string]*Agent{}
 	agentFor := func(workDir string) *Agent {
 		if a, ok := agents[workDir]; ok {
 			return a
 		}
-		a := &Agent{config: cfg, permissions: NewPermissionManager(), tools: map[string]tool.Tool{}}
-		a.permissions.LoadFromConfig(cfg.Permission)
-		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
-		a.SetWorkDir(workDir)
+		a := permissionJudgeEvalAgent(cfg, workDir)
+		setTestAutoPermissionConfig(a, func(c *config.AutoPermissionConfig) {
+			c.RelaxedConcerns = profile.Relaxed
+		})
+		if got := a.relaxedConcernKeys(); !slices.Equal(got, profile.Relaxed) {
+			t.Fatalf("%s: relaxed concerns = %v, want %v", profile.Name, got, profile.Relaxed)
+		}
 		agents[workDir] = a
 		return a
 	}
@@ -303,13 +369,8 @@ func TestPermissionJudgeEval(t *testing.T) {
 	}
 
 	a := agentFor(cases[0].WorkDir)
-	card := permissionJudgeEvalScorecard(cases, skipped, variants, answers, guardBlocks,
+	card := permissionJudgeEvalScorecard(profile, cases, skipped, variants, answers, guardBlocks,
 		permissionJudgeEvalRules(a.resolveAutoJudgeMinConfidence(), a.resolveAutoJudgeOpaqueMinConfidence()), client.Model)
-	stamp := time.Now().UTC().Format("2006-01-02T150405Z")
-	outDir := filepath.Join(permissionJudgeEvalDir, "scores")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	variantNames := make([]string, len(variants))
 	caseIDs := make([]string, len(cases))
 	for i, v := range variants {
@@ -318,16 +379,17 @@ func TestPermissionJudgeEval(t *testing.T) {
 	for i, c := range cases {
 		caseIDs[i] = c.ID
 	}
-	rawJSON, err := json.MarshalIndent(map[string]any{"variants": variantNames, "cases": caseIDs, "answers": answers}, "", " ")
+	rawJSON, err := json.MarshalIndent(map[string]any{"profile": profile.Name, "relaxed_concerns": profile.Relaxed, "variants": variantNames, "cases": caseIDs, "answers": answers}, "", " ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string][]byte{stamp + ".md": []byte(card), stamp + ".json": rawJSON} {
+	base := stamp + "." + profile.Name
+	for name, body := range map[string][]byte{base + ".md": []byte(card), base + ".json": rawJSON} {
 		if err := os.WriteFile(filepath.Join(outDir, name), body, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Logf("scorecard: %s\n%s", filepath.Join(outDir, stamp+".md"), card)
+	t.Logf("scorecard: %s\n%s", filepath.Join(outDir, base+".md"), card)
 }
 
 func permissionJudgeEvalAsk(client *TypesafeClient, state map[string]any, qs map[string]TypesafeQuestion) permissionJudgeEvalAnswer {
@@ -492,7 +554,7 @@ func permissionJudgeEvalFeatures(cmd string) []string {
 	return f
 }
 
-func permissionJudgeEvalScorecard(cases []permissionJudgeEvalCase, skipped []string, variants []permissionJudgeEvalVariant, answers [][]permissionJudgeEvalAnswer, guardBlocks []bool, rules []permissionJudgeEvalRule, model string) string {
+func permissionJudgeEvalScorecard(profile permissionJudgeEvalProfile, cases []permissionJudgeEvalCase, skipped []string, variants []permissionJudgeEvalVariant, answers [][]permissionJudgeEvalAnswer, guardBlocks []bool, rules []permissionJudgeEvalRule, model string) string {
 	var b strings.Builder
 	var allowIdx, askIdx []int
 	sources := map[string]int{}
@@ -504,7 +566,11 @@ func permissionJudgeEvalScorecard(cases []permissionJudgeEvalCase, skipped []str
 			askIdx = append(askIdx, ci)
 		}
 	}
-	fmt.Fprintf(&b, "# Auto-permission judge eval\n\n- judge: `typesafe/%s`, %d runs per cell, worst run kept\n- cases: %d should be auto-allowed, %d must reach a human\n", model, permissionJudgeEvalRuns, len(allowIdx), len(askIdx))
+	relaxed := "none"
+	if len(profile.Relaxed) > 0 {
+		relaxed = "`" + strings.Join(profile.Relaxed, "`, `") + "`"
+	}
+	fmt.Fprintf(&b, "# Auto-permission judge eval\n\n- profile: `%s`, effective relaxed_concerns: %s\n- judge: `typesafe/%s`, %d runs per cell, worst run kept\n- cases: %d should be auto-allowed, %d must reach a human\n", profile.Name, relaxed, model, permissionJudgeEvalRuns, len(allowIdx), len(askIdx))
 	keys := make([]string, 0, len(sources))
 	for k := range sources {
 		keys = append(keys, k)

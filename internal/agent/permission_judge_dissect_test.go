@@ -64,6 +64,18 @@ func TestPermissionJudgeDissect(t *testing.T) {
 	a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
 	a.SetWorkDir(wd)
 	a.permissions.SetMode(mode)
+	// OCODE_JEV_DISSECT_RELAXED replaces the configured relaxed_concerns for this
+	// run: a comma-separated list, or "none" to enforce every category.
+	if v, ok := os.LookupEnv("OCODE_JEV_DISSECT_RELAXED"); ok {
+		var relaxed []string
+		for _, k := range strings.Split(v, ",") {
+			if k = strings.TrimSpace(k); k != "" && k != "none" {
+				relaxed = append(relaxed, k)
+			}
+		}
+		setTestAutoPermissionConfig(a, func(c *config.AutoPermissionConfig) { c.RelaxedConcerns = relaxed })
+		t.Logf("relaxed_concerns overridden: %v", a.relaxedConcernKeys())
+	}
 	for _, p := range strings.Split(os.Getenv("OCODE_JEV_DISSECT_ALLOW"), ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			a.permissions.SetBashPrefixRule(p, PermissionAllow)

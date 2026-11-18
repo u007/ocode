@@ -1,14 +1,14 @@
 ---
 type: Concept
 title: Prompt Cache Stability
-description: 'Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints, and the one-time busts from the backend-neutral browser schema and the static [ocode:htr_routing] fragment.'
+description: 'Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints, and the one-time busts from the browser tool schema (the backend-neutral rewrite, the wait-for-load and navigate sentences, and the frames and then_text arguments) and the static [ocode:htr_routing] fragment.'
 resource: CLAUDE.md
 tags:
   - prompt-cache
   - anthropic
   - tools
   - discovery
-timestamp: 2026-11-16T07:28:44Z
+timestamp: 2026-11-16T11:28:22Z
 ---
 # Prompt Cache Stability
 
@@ -29,8 +29,8 @@ so it is cache-safe and re-cached the prefix once when it shipped.
 - **The `browser` tool's schema text changed.** `browserTool.Definition`'s
   `description` went from `"Drive browser tabs (Chrome, on the machine running
   this session). …"` to the backend-neutral `"Drive browser tabs on the machine
-  running this session. …"` (`internal/server/browser_tool.go:267`).
-  `Description()` (`browser_tool.go:260`) is already neutral. This is a tools
+  running this session. …"` (`internal/server/browser_tool.go:273`).
+  `Description()` (`browser_tool.go:266`) is already neutral. This is a tools
   array change, so it invalidated the **whole** cached prefix once — `tools`,
   then `system`, then `messages` — for every session that carries the tool. It is
   a one-time re-cache, not a per-turn cost. Leaving a backend name in the schema
@@ -50,6 +50,27 @@ so it is cache-safe and re-cached the prefix once when it shipped.
   does not require the session to have the `browser` tool: the fragment describes
   the machine's shell CLI availability, not this agent's toolset. Pinned by
   `TestHTRRoutingPromptGatedOnConfig` (on, off, nil-config, and `system` role).
+
+## Browser tool schema: two more one-time busts (2026-11-16)
+
+Two later changes to the `browser` tool's schema each invalidated the whole cached
+prefix once, for every session that carries the tool. Neither varies per turn.
+
+- **The wait-for-load sentences (committed in `a2633873`).** The tool description
+  gained "open, navigate, back, forward and reload wait for the page to load before
+  returning; the result says whether it finished." and "navigate opens a new tab
+  when none exists." Nothing else in the schema changed in that commit.
+- **`frames` and `then_text` (uncommitted when this was written).** `Definition`
+  gained two properties: `frames` (an array of 1 to 4 integer millisecond offsets)
+  and `then_text` (a string). It also gained one description sentence ("To see what
+  an action causes, add frames … or then_text … to click, key, type or fill."), and
+  the `timeout` property's description changed from "wait only" to "wait and
+  then_text only". The schema is `browserTool.Definition` in
+  `internal/server/browser_tool.go`; the code is in `internal/server/browser_frames.go`.
+
+Both changes are static text, so the tools array stays byte-stable after each
+re-cache. Keep per-turn facts (open tabs, the current page, a backend name) out of
+the description: that is the rule the neutral rewrite above relies on.
 
 ## Rules for any change that touches tools or the base prompt
 

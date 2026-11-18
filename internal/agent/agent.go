@@ -4724,6 +4724,48 @@ func permissionArgsPayload(toolName string, args json.RawMessage) (payload strin
 	return payload[:cut] + "\n...(truncated)", true
 }
 
+// permissionJudgePromptTemplate is the chat-model permission judge's request text, a
+// fmt template. askPermissionModel fills its ten placeholders for each call with the
+// tool, its arguments, the expanded command, the scope, the allowed roots, the banned
+// prefixes, the relaxed concerns, the truncation note and the project context.
+const permissionJudgePromptTemplate = `You are a permission gatekeeper for an AI coding assistant.
+A tool call is requesting permission. Decide whether to ALLOW or DENY it.
+
+Tool: %s
+Arguments: %s
+%sRule: %s
+Scope: %s
+%s%s%s%s
+Project context:
+%s
+A value written as [[OCSEC:xxxxxx:N]] is a secret ocode masked: treat it exactly
+like the credential it stands for.
+Relative paths in the arguments — including "cd" targets — resolve against the
+"Working directory" above. A "cd" into a subdirectory of a pre-authorized path
+stays inside that path; it is NOT an escape.
+
+You have a read_file tool to explore the codebase before deciding. Use it to:
+- Read the target file being written/edited/deleted
+- Check project configuration files
+- Understand what a bash command would operate on
+
+If a target file does not exist yet, that is normal for a command that creates it
+(e.g. a heredoc/redirect that writes a new path). Do NOT treat a missing file as a
+reason to refuse — decide from the command and arguments.
+
+After gathering enough context, end your response with a verdict line that is
+EXACTLY one of the following — the line must START with the verdict word, with no
+reasoning before it on that line:
+ALLOW: <brief reason>
+DENY: <brief reason>
+Do not bury the words ALLOW or DENY inside a sentence (e.g. "I would ALLOW this");
+the final line must begin with the bare verdict word followed by a colon.
+Keep your reply short. Examples of correctly formatted final lines:
+ALLOW: writes a test file inside the project directory
+ALLOW: read-only listing of project files
+DENY: deletes files outside the working directory
+These are format examples only — decide from THIS request's tool and arguments.`
+
 // askPermissionModel consults the LLM permission judge for a single request.
 // The LLM is given a read_file tool so it can explore the codebase before
 // deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
@@ -4864,43 +4906,7 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		truncationNote = "\n\nNOTE: the arguments above are TRUNCATED — only a prefix of the request is shown, so the full effect is unknown. You must not approve a request you cannot fully see; answer DENY."
 	}
 
-	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
-A tool call is requesting permission. Decide whether to ALLOW or DENY it.
-
-Tool: %s
-Arguments: %s
-%sRule: %s
-Scope: %s
-%s%s%s%s
-Project context:
-%s
-A value written as [[OCSEC:xxxxxx:N]] is a secret ocode masked: treat it exactly
-like the credential it stands for.
-Relative paths in the arguments — including "cd" targets — resolve against the
-"Working directory" above. A "cd" into a subdirectory of a pre-authorized path
-stays inside that path; it is NOT an escape.
-
-You have a read_file tool to explore the codebase before deciding. Use it to:
-- Read the target file being written/edited/deleted
-- Check project configuration files
-- Understand what a bash command would operate on
-
-If a target file does not exist yet, that is normal for a command that creates it
-(e.g. a heredoc/redirect that writes a new path). Do NOT treat a missing file as a
-reason to refuse — decide from the command and arguments.
-
-After gathering enough context, end your response with a verdict line that is
-EXACTLY one of the following — the line must START with the verdict word, with no
-reasoning before it on that line:
-ALLOW: <brief reason>
-DENY: <brief reason>
-Do not bury the words ALLOW or DENY inside a sentence (e.g. "I would ALLOW this");
-the final line must begin with the bare verdict word followed by a colon.
-Keep your reply short. Examples of correctly formatted final lines:
-ALLOW: writes a test file inside the project directory
-ALLOW: read-only listing of project files
-DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, expandedSection, rule, scope, allowedRoots, bannedPrefixes, relaxedSection, truncationNote, context)
+	prompt := fmt.Sprintf(permissionJudgePromptTemplate, toolName, toolArgs, expandedSection, rule, scope, allowedRoots, bannedPrefixes, relaxedSection, truncationNote, context)
 
 	// Insert the user's own local addendum (auto-permission-prompt.local.md)
 	// right after the bundled prompt, before this final prepend step runs.

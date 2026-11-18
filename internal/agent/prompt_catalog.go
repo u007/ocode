@@ -14,23 +14,28 @@ const (
 	PromptKindMainAgent PromptKind = "Main agent prompt"
 )
 
-// PromptCatalogEntry describes one built-in system prompt that the user can
-// refine with a prompt override (see config.ApplyPromptOverride). Key is the
-// stable identifier stored in ocodeconfig.json, and Builtin is the unmodified
-// prompt text the override is appended to. Builtin is read by the override
-// logic only; it is never sent to the settings UI.
+// PromptCatalogEntry describes one built-in system prompt the settings UI shows.
+// Key is the stable identifier stored in ocodeconfig.json. Builtin is the exact
+// Go value the runtime sends, not a copy, so the text the user reviews is the
+// text that is used. An overridable entry has a user override appended to
+// Builtin (see config.ApplyPromptOverride). A ReadOnly entry is shown for review
+// only: the server refuses to override it and no override is applied to it, so
+// a judge rubric cannot be edited through the UI.
 type PromptCatalogEntry struct {
 	Key         string
 	Label       string
 	Description string
 	Kind        PromptKind
 	Builtin     string
+	ReadOnly    bool
 }
 
-// PromptCatalog lists every overridable built-in prompt, sorted by Key. The
-// permission judge (permissions.auto.prompt), the Pulse assistant, the commit
-// message prompt and the provider main prompts are configured elsewhere and
-// are deliberately absent.
+// PromptCatalog lists every built-in prompt the settings UI shows, sorted by
+// Key. Overridable entries take a user override. ReadOnly entries (the
+// permission judge prompts and the provider prompts) are listed for review
+// only. The Pulse assistant prompt and the commit message prompt are configured
+// elsewhere and are deliberately absent. The user's own permissions.auto.prompt
+// addendum is separate from the judge prompts listed here.
 func PromptCatalog() []PromptCatalogEntry {
 	return []PromptCatalogEntry{
 		{
@@ -125,11 +130,115 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     networkGuardInstructions,
 		},
 		{
+			Key:         "permission_judge",
+			Label:       "Permission judge",
+			Description: "Gatekeeper rubric the auto-permission judge sends with each tool call that is waiting for approval, deciding whether it may run unasked.",
+			Kind:        PromptKindJudge,
+			Builtin:     typesafeJudgeInstructions,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "permission_judge_chat",
+			Label:       "Permission judge (chat model)",
+			Description: "Request template the chat-model permission judge fills in with a tool call's arguments, scope and project context before it answers ALLOW or DENY.",
+			Kind:        PromptKindJudge,
+			Builtin:     permissionJudgePromptTemplate,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "permission_judge_concern",
+			Label:       "Permission judge: concern question",
+			Description: "Rubric the auto-permission judge uses to name the single most serious concern with a tool call, and to say what it is unsure about when it leans toward allowing.",
+			Kind:        PromptKindJudge,
+			Builtin:     typesafeConcernInstructions,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "permission_judge_enforced_concern",
+			Label:       "Permission judge: concern with categories off",
+			Description: "Concern question used when the user has switched some concern categories off, which names the most serious concern among the categories still enforced.",
+			Kind:        PromptKindJudge,
+			Builtin:     typesafeEnforcedConcernInstructions,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "permission_judge_interpreter",
+			Label:       "Permission judge (interpreter source)",
+			Description: "Request template the chat-model permission judge fills in to report the concrete effects of an interpreter's source before the run is approved.",
+			Kind:        PromptKindJudge,
+			Builtin:     permissionInterpreterPromptTemplate,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "permission_judge_rulebook",
+			Label:       "Permission judge rulebook",
+			Description: "Shipped default rulebook the chat-model permission judge prepends to every request; an auto-permission-prompt.md installed on disk replaces it while it is present and not superseded by this build.",
+			Kind:        PromptKindJudge,
+			Builtin:     config.BundledAutoPermissionPromptBody,
+			ReadOnly:    true,
+		},
+		{
 			Key:         "plan",
 			Label:       "Plan then execute",
 			Description: "Fragment that asks primary agents to write a todo plan before multi-step work, work it item by item, and delegate self-contained items with task(todo_item).",
 			Kind:        PromptKindMainAgent,
 			Builtin:     planExecutePromptContent,
+		},
+		{
+			Key:         "provider_claude",
+			Label:       "Provider prompt: Claude",
+			Description: "Output-discipline fragment added to the main agent's context for Claude models and the anthropic provider.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     claudePromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_copilot",
+			Label:       "Provider prompt: Copilot",
+			Description: "Output-discipline fragment added to the main agent's context for the copilot and github providers.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     copilotPromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_deepseek",
+			Label:       "Provider prompt: DeepSeek",
+			Description: "Output-discipline fragment added to the main agent's context for DeepSeek models and the deepseek provider.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     deepseekPromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_gemini",
+			Label:       "Provider prompt: Gemini",
+			Description: "Output-discipline fragment added to the main agent's context for Gemini models and the google, gemini and vertex providers.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     geminiPromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_gpt",
+			Label:       "Provider prompt: GPT",
+			Description: "Output-discipline fragment added to the main agent's context for GPT models and the openai, gpt and azure providers.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     gptPromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_kimi",
+			Label:       "Provider prompt: Kimi",
+			Description: "Output-discipline fragment added to the main agent's context for Kimi models and the moonshot and kimi providers.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     kimiPromptText,
+			ReadOnly:    true,
+		},
+		{
+			Key:         "provider_reasoning",
+			Label:       "Provider prompt: reasoning models",
+			Description: "Output-discipline fragment added to the main agent's context for reasoning models (o-series and thinking variants), keeping their chain of thought out of the reply.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     reasoningPromptText,
+			ReadOnly:    true,
 		},
 		{
 			Key:         "recap",
@@ -144,6 +253,14 @@ func PromptCatalog() []PromptCatalogEntry {
 			Description: "Explains the OCSEC redaction token format so the model treats redacted secrets as real values, not placeholders.",
 			Kind:        PromptKindMainAgent,
 			Builtin:     redactionAwarenessPrompt,
+		},
+		{
+			Key:         "small_model",
+			Label:       "Small model guidance",
+			Description: "Intent-analysis guidance added after the provider prompt for small, cheap models.",
+			Kind:        PromptKindMainAgent,
+			Builtin:     smallModelPromptText,
+			ReadOnly:    true,
 		},
 		{
 			Key:         "speech_summary",
@@ -188,6 +305,14 @@ func PromptCatalog() []PromptCatalogEntry {
 			Builtin:     suggestedResponsesPromptContent,
 		},
 		{
+			Key:         "task_verifier",
+			Label:       "Task output verifier",
+			Description: "System prompt for the verifier that checks a sub-agent's result against its expected_output contract; a failed check triggers one in-place retry.",
+			Kind:        PromptKindHelper,
+			Builtin:     taskVerifierPromptText,
+			ReadOnly:    true,
+		},
+		{
 			Key:         "title",
 			Label:       "Session title",
 			Description: "Prompt that generates a concise three to seven word title for a conversation.",
@@ -229,10 +354,10 @@ func SubAgentPromptWithOverride(name, prompt string) string {
 // config.ApplyPromptOverride on the stored value would freeze the override at
 // startup. This helper runs at use time instead, and only when prompt is still
 // the unmodified built-in text for key. A prompt the user replaced in an agent
-// file, or any key not in the catalog, passes through unchanged.
+// file, a ReadOnly entry, or any key not in the catalog, passes through unchanged.
 func overrideBuiltinPrompt(key, prompt string) string {
 	entry, ok := PromptCatalogEntryFor(key)
-	if !ok || prompt != entry.Builtin {
+	if !ok || entry.ReadOnly || prompt != entry.Builtin {
 		return prompt
 	}
 	return config.ApplyPromptOverride(key, prompt)
