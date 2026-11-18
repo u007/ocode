@@ -5244,6 +5244,60 @@ export const api = {
     fetchJSON<any>(`/api/cloud/delete?connector_id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`, { method: "DELETE" }, host),
   startCloudOAuth: (payload: any, host?: string) =>
     fetchJSON<any>("/api/cloud/oauth/start", { method: "POST", body: JSON.stringify(payload) }, host),
+  // ── Central cloud connectors via kakiit ──
+  // `project` is validated server-side against allowedProjectRoots(); `host`
+  // routes remote projects to the server that owns them. Both are threaded
+  // into every call — dropping either routes token work to the wrong machine.
+  listHubCloudConnections: (project: string, host?: string) =>
+    fetchJSON<any>(`/api/cloud/connections?project=${encodeURIComponent(project)}`, undefined, host),
+  registerHubCloudCallback: (
+    project: string,
+    installID: string,
+    callbackURL: string,
+    host?: string,
+  ) =>
+    fetchJSON<any>(
+      `/api/cloud/oauth/kakiit/callback/register?project=${encodeURIComponent(project)}`,
+      { method: "PUT", body: JSON.stringify({ install_id: installID, callback_url: callbackURL }) },
+      host,
+    ),
+  startHubCloudOAuth: (
+    project: string,
+    payload: {
+      provider: string;
+      connector_id: string;
+      client_state: string;
+      code_challenge: string;
+    },
+    host?: string,
+  ) =>
+    fetchJSON<any>(
+      `/api/cloud/oauth/kakiit/start?project=${encodeURIComponent(project)}`,
+      { method: "POST", body: JSON.stringify(payload) },
+      host,
+    ),
+  redeemHubCloudCode: (
+    project: string,
+    payload: { code: string; code_verifier: string; client_state: string },
+    host?: string,
+  ) =>
+    fetchJSON<any>(
+      `/api/cloud/oauth/kakiit/return?project=${encodeURIComponent(project)}`,
+      { method: "POST", body: JSON.stringify(payload) },
+      host,
+    ),
+  refreshHubCloudToken: (project: string, connectionID: string, host?: string) =>
+    fetchJSON<any>(
+      `/api/cloud/token/refresh?project=${encodeURIComponent(project)}`,
+      { method: "POST", body: JSON.stringify({ connection_id: connectionID }) },
+      host,
+    ),
+  disconnectHubCloud: (project: string, connectionID: string, host?: string) =>
+    fetchJSON<any>(
+      `/api/cloud/oauth/kakiit/disconnect?project=${encodeURIComponent(project)}&connection_id=${encodeURIComponent(connectionID)}`,
+      { method: "DELETE" },
+      host,
+    ),
 };
 
 /** Port-forwards route for a target: the project-scoped family when a remote
