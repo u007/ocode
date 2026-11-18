@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/filelock"
 )
 
@@ -329,21 +330,33 @@ func (s *Server) revokeTabOrigins(r *http.Request, stateKey string) {
 
 // forgetTabOrigins drops a panel's live bindings and its persisted ports, because a
 // closed panel's storage is discarded with it. The browse revoke has already closed
-// the sockets, so this only clears bookkeeping.
+// the sockets, so this only clears bookkeeping. The tailnet mounts of the dropped
+// listeners are removed in the background: the tailscale CLI can be slow, and a
+// revoke must not wait on it.
 func (s *Server) forgetTabOrigins(stateKey string) {
 	if s.tabOrigins == nil {
 		return
 	}
 	m := s.tabOrigins
+	var ports []int
 	m.mu.Lock()
 	for k, e := range m.live {
 		if e.StateKey == stateKey {
+			ports = append(ports, e.Port)
 			delete(m.live, k)
 		}
 	}
 	m.mu.Unlock()
 	if err := m.store.DeleteState(stateKey); err != nil {
 		log.Printf("browse revoke: drop persisted tab ports for %s: %v", stateKey, err)
+	}
+	if share := s.tsShare; share != nil && len(ports) > 0 {
+		sort.Ints(ports)
+		crashguard.Go(func() {
+			for _, port := range ports {
+				share.removeTab(port)
+			}
+		})
 	}
 }
 
@@ -400,8 +413,10 @@ func tabBindingHost(u *url.URL) string {
 // project's tab is a forwarding listener on this machine: its requests are answered
 // by the host's own browse origin, which holds the grant and the session (tab_remote.go).
 //
-// Only a client on this machine can use a tab origin, and a remote-mode server never
-// opens one. Those callers get 409: the SPA chooses prefix mode.
+// A client on this machine can use a tab origin, and so can a tailnet client while the
+// Tailscale share with its browse mount is running: its origin is the tab listener's
+// port exposed on the tailnet (exposeTab). Any other client, and a remote-mode server,
+// gets 409: the SPA chooses prefix mode.
 func (s *Server) handleBrowseTabOrigin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StateKey string `json:"state_key"`
@@ -432,7 +447,8 @@ func (s *Server) handleBrowseTabOrigin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "tab origin unavailable: this server runs in remote mode")
 		return
 	}
-	if !browseClientIsLocal(r) {
+	local := browseClientIsLocal(r)
+	if !local && !s.tailnetTabOriginAvailable() {
 		writeError(w, http.StatusConflict, "tab origin unavailable: the client is not on this machine")
 		return
 	}
@@ -465,11 +481,23 @@ func (s *Server) handleBrowseTabOrigin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "tab origin: persist port: "+err.Error())
 		return
 	}
-	// The origin is built per request, not taken from the listener address: the
-	// listener is an IP literal, and a page on localhost must frame a same-site
-	// origin or the per-tab cookie is third-party. requestHostName is loopback
-	// here, because browseClientIsLocal held.
-	origin := s.browseProxyScheme(r) + "://" + net.JoinHostPort(requestHostName(r), strconv.Itoa(entry.Port))
+	var origin string
+	if local {
+		// The origin is built per request, not taken from the listener address: the
+		// listener is an IP literal, and a page on localhost must frame a same-site
+		// origin or the per-tab cookie is third-party. requestHostName is loopback
+		// here, because browseClientIsLocal held.
+		origin = s.browseProxyScheme(r) + "://" + net.JoinHostPort(requestHostName(r), strconv.Itoa(entry.Port))
+	} else {
+		// A tailnet client loads the tab over the share's HTTPS origin instead. A
+		// failed exposure is a 503, not a 409 and not a fallback to the local origin.
+		origin, err = s.tsShare.exposeTab(entry.Port, net.JoinHostPort(s.tabOrigins.bindHost, strconv.Itoa(entry.Port)))
+		if err != nil {
+			log.Printf("browse tab origin: tailnet expose of port %d: %v", entry.Port, err)
+			writeError(w, http.StatusServiceUnavailable, "tab origin unavailable: "+err.Error())
+			return
+		}
+	}
 	grant, ok := s.tabGrant(w, r, projectHost, req.StateKey)
 	if !ok {
 		return
@@ -491,6 +519,17 @@ func (s *Server) handleBrowseTabOrigin(w http.ResponseWriter, r *http.Request) {
 		"grant":  grant,
 		"url":    tabURL,
 	})
+}
+
+// tailnetTabOriginAvailable reports whether a non-local client can get a tab origin:
+// the Tailscale share is running with its browse mount, the same predicate
+// browseOriginFor uses to hand such a client the shared browse URL.
+func (s *Server) tailnetTabOriginAvailable() bool {
+	if s.tsShare == nil || s.handler.tailscaleShareSnapshot == nil {
+		return false
+	}
+	st := s.handler.tailscaleShareSnapshot()
+	return st.Running && st.BrowseURL != ""
 }
 
 // tabGrant mints the one-time grant for stateKey on the browse origin that serves the

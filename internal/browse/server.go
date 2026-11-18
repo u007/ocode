@@ -31,7 +31,9 @@ type NavEvent struct {
 // without navigation (JS document.title), so they travel on a dedicated
 // channel, never inside NavEvent. The SPA renders the title in the tab strip
 // only — never in the address bar (spoofing defense) — and applies it only
-// when URL matches the surface's current URL (stale-event guard).
+// when URL matches the surface's current URL (stale-event guard). An event
+// with no URL is applied unguarded: the per-target title poll emits that way,
+// because it reads the surface's own live document.
 type TitleEvent struct {
 	StateKey string `json:"state_key"`
 	Title    string `json:"title"`

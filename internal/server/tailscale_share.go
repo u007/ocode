@@ -3,11 +3,14 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +94,10 @@ type tailscaleShare struct {
 	browseProc      *exec.Cmd
 	browsePath      string
 
+	// tabPorts is the set of tab-origin listener ports exposed on the tailnet by
+	// exposeTab. stopLocked removes their mounts. Guarded by mu.
+	tabPorts map[int]bool
+
 	// Test seams. Both are nil in production and are only ever set by tests in
 	// this package, so the exposure cannot be faked from outside it. They exist
 	// because the real entry points shell out to the tailscale binary, which a
@@ -111,6 +118,12 @@ type tailscaleShare struct {
 	// shared browse URL (or "" on failure); browseRemoveFn tears the mount down.
 	browseExposeFn func(target string) (url string)
 	browseRemoveFn func()
+
+	// Tab-origin test seams (nil in production). tabExposeFn reports whether
+	// `tailscale serve` exposed target on the HTTPS port; tabRemoveFn tears that
+	// port's mount down.
+	tabExposeFn func(port int, target string) bool
+	tabRemoveFn func(port int)
 }
 
 // setBrowseProxyPort records the local port the browse proxy listener binds,
@@ -345,12 +358,14 @@ func (t *tailscaleShare) stopLocked() bool {
 	t.mu.Lock()
 	had := t.started || t.proc != nil || t.path != ""
 	proc, path := t.proc, t.path
+	tabPorts := t.tabPorts
 	t.proc = nil
 	t.path = ""
 	t.url = ""
 	t.hint = ""
 	t.kind = ""
 	t.started = false
+	t.tabPorts = nil
 	t.mu.Unlock()
 
 	killProc(proc)
@@ -364,6 +379,15 @@ func (t *tailscaleShare) stopLocked() bool {
 	t.mu.Unlock()
 	if browseURL != "" {
 		t.browseRemove()
+	}
+	// Tear down every tab-origin mount, in port order.
+	ports := make([]int, 0, len(tabPorts))
+	for p := range tabPorts {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	for _, p := range ports {
+		t.removeTabPort(p)
 	}
 	return had
 }
@@ -458,22 +482,16 @@ func (s *Server) handleStopTailscaleShare(w http.ResponseWriter, r *http.Request
 // browseHTTPSProxyPort is the Tailscale HTTPS port for the browse-proxy mount.
 const browseHTTPSProxyPort = 8444
 
-// browseExpose exposes the browse proxy on the second Tailscale HTTPS port.
-// It runs `tailscale serve --bg --https=<port> http://localhost:<browseProxyPort>`
-// (root mount, no --set-path) and returns the advertised URL.
-func (t *tailscaleShare) browseExpose(browseProxyPort int) string {
-	if t.browseExposeFn != nil {
-		return t.browseExposeFn(fmt.Sprintf("localhost:%d", browseProxyPort))
-	}
-	if browseProxyPort == 0 {
-		return ""
-	}
+// serveHTTPSPort exposes target on the tailnet at httpsPort with
+// `tailscale serve --bg --https=<httpsPort> <target>`. It returns the first URL
+// tailscale prints, with any trailing "/" trimmed (callers join paths onto it),
+// or "" when the CLI is absent or printed none. Best-effort: a failure is logged.
+func serveHTTPSPort(httpsPort int, target string) string {
 	tailscalePath := tailscale.CLIPath()
 	if tailscalePath == "" {
 		return ""
 	}
-	target := fmt.Sprintf("http://localhost:%d", browseProxyPort)
-	args := []string{"serve", "--bg", fmt.Sprintf("--https=%d", browseHTTPSProxyPort), target}
+	args := []string{"serve", "--bg", fmt.Sprintf("--https=%d", httpsPort), target}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tailscalePath, args...)
@@ -481,21 +499,48 @@ func (t *tailscaleShare) browseExpose(browseProxyPort int) string {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
-		log.Printf("tailscale browse serve failed to start: %v", err)
+		log.Printf("tailscale serve --https=%d failed to start: %v", httpsPort, err)
 		return ""
 	}
 	if err := cmd.Wait(); err != nil {
 		// Best-effort: the mount may still have been created.
-		log.Printf("tailscale browse serve wait: %v (output: %s)", err, out.String())
+		log.Printf("tailscale serve --https=%d wait: %v (output: %s)", httpsPort, err, out.String())
 	}
 	output := out.String()
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			return line
+			return strings.TrimRight(line, "/")
 		}
 	}
 	return ""
+}
+
+// removeHTTPSPort tears down the tailscale serve mount on httpsPort. A failed
+// `off` is logged rather than returned: its callers are teardown paths with
+// nowhere to report it.
+func removeHTTPSPort(httpsPort int) {
+	tailscalePath := tailscale.CLIPath()
+	if tailscalePath == "" {
+		return
+	}
+	cmd := exec.Command(tailscalePath, "serve", fmt.Sprintf("--https=%d", httpsPort), "off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("tailscale serve --https=%d off: %v (output: %s)", httpsPort, err, out)
+	}
+}
+
+// browseExpose exposes the browse proxy on the second Tailscale HTTPS port.
+// It runs `tailscale serve --bg --https=<port> http://localhost:<browseProxyPort>`
+// (root mount, no --set-path) and returns the advertised URL.
+func (t *tailscaleShare) browseExpose(browseProxyPort int) string {
+	if t.browseExposeFn != nil {
+		return strings.TrimRight(t.browseExposeFn(fmt.Sprintf("localhost:%d", browseProxyPort)), "/")
+	}
+	if browseProxyPort == 0 {
+		return ""
+	}
+	return serveHTTPSPort(browseHTTPSProxyPort, fmt.Sprintf("http://localhost:%d", browseProxyPort))
 }
 
 // browseRemove tears down the browse proxy mount.
@@ -504,12 +549,85 @@ func (t *tailscaleShare) browseRemove() {
 		t.browseRemoveFn()
 		return
 	}
-	tailscalePath := tailscale.CLIPath()
-	if tailscalePath == "" {
+	removeHTTPSPort(browseHTTPSProxyPort)
+}
+
+// exposeTab makes one tab-origin listener reachable from the tailnet. target is
+// the listener's host:port on this machine, and the tailnet port is the same
+// number, so no second port is allocated. It runs `tailscale serve` (never
+// funnel), so the origin stays tailnet-only, and returns the https origin a
+// tailnet client loads.
+//
+// Each tab origin is its own browser origin, so it needs its own HTTPS port.
+// It requires a running share with its browse mount: the origin's host is the
+// one that mount advertises. A port already exposed returns its origin without
+// exposing it again. opMu serializes it against start and stop.
+func (t *tailscaleShare) exposeTab(port int, target string) (string, error) {
+	t.opMu.Lock()
+	defer t.opMu.Unlock()
+
+	t.mu.Lock()
+	browseURL := t.browseURL
+	running := t.started && browseURL != ""
+	recorded := t.tabPorts[port]
+	t.mu.Unlock()
+	if !running {
+		return "", errors.New("tailscale share is not running")
+	}
+	u, err := url.Parse(browseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse browse url %q: %w", browseURL, err)
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("browse url %q has no host", browseURL)
+	}
+	origin := "https://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(port))
+	if recorded {
+		return origin, nil
+	}
+	var exposed bool
+	if t.tabExposeFn != nil {
+		exposed = t.tabExposeFn(port, target)
+	} else {
+		exposed = serveHTTPSPort(port, "http://"+target) != ""
+	}
+	if !exposed {
+		return "", fmt.Errorf("tailscale could not expose tab origin port %d", port)
+	}
+	t.mu.Lock()
+	if t.tabPorts == nil {
+		t.tabPorts = map[int]bool{}
+	}
+	t.tabPorts[port] = true
+	t.mu.Unlock()
+	return origin, nil
+}
+
+// removeTab tears down the tailnet mount exposeTab made for port. It is a no-op
+// for a port that was not exposed, so a second call does nothing.
+func (t *tailscaleShare) removeTab(port int) {
+	t.opMu.Lock()
+	defer t.opMu.Unlock()
+
+	t.mu.Lock()
+	if !t.tabPorts[port] {
+		t.mu.Unlock()
 		return
 	}
-	cmd := exec.Command(tailscalePath, "serve", fmt.Sprintf("--https=%d", browseHTTPSProxyPort), "off")
-	_ = cmd.Run()
+	delete(t.tabPorts, port)
+	t.mu.Unlock()
+	t.removeTabPort(port)
+}
+
+// removeTabPort removes one tab-origin mount through the seam or the CLI. Its
+// callers hold opMu and have already dropped the port from tabPorts. It never
+// takes opMu itself, so stopLocked can call it.
+func (t *tailscaleShare) removeTabPort(port int) {
+	if t.tabRemoveFn != nil {
+		t.tabRemoveFn(port)
+		return
+	}
+	removeHTTPSPort(port)
 }
 
 // artifactTailscaleShareStatus reports the Mode A artifact exposure without

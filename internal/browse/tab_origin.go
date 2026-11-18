@@ -274,10 +274,19 @@ func bindingTarget(key tabKey, path, rawQuery string) target {
 	}
 }
 
-// listenerScheme is the scheme the listener that accepted r serves, which its
-// connection's TLS state shows.
+// listenerScheme is the scheme the browser sees for the listener that accepted r.
+// A TLS-terminating proxy (tailscale serve) in front of a tab listener forwards
+// plain HTTP, so the browser-visible scheme is the forwarded one, and
+// X-Forwarded-Proto is trusted here. Trust boundary: the header is credible
+// from the tailscale share in front of a tailnet listener, but any local
+// process reaching a loopback listener can also set it. That is acceptable
+// because the value only recognises a self-route in tabTarget (together with
+// an exact Host match) and never selects an upstream — a spoofed header can at
+// most reclassify a self-route request as the binding instead of foreign,
+// within the tab's own upstream (pinned by TestTabOriginSpoofedForwardedProto
+// staysForeign).
 func listenerScheme(r *http.Request) string {
-	if r.TLS != nil {
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		return "https"
 	}
 	return "http"

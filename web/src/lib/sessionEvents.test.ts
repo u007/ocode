@@ -1140,6 +1140,33 @@ describe("browse_title routing", () => {
     expect(browserStore.state.byKey["tab:x"].pageTitle).toBeNull();
     browserStore.setState(() => ({ byKey: {} }));
   });
+
+  it("applies a URL-less browse_title (the Chrome-mode title poll)", () => {
+    browserStore.setState(() => ({
+      byKey: {
+        "tab:x": {
+          url: "https://done.com/", status: 200, loading: false, mode: "chrome", userMode: null, error: null,
+          history: ["https://done.com/"], historyIndex: 0, panelOpen: true, collapsed: false, reader: false,
+          consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: null, scrollY: 0, scrollByUrl: {},
+          perfMetrics: {}, perfRecording: true, zoom: 1,
+        },
+      },
+    }));
+    const { router } = makeRouter(["s1"]);
+    // The per-target title poll reads the surface's own live document, so it
+    // sends no URL: the event must apply without the stale-event guard (a
+    // typed URL or a fragment would otherwise drop a real title).
+    routeBusEnvelope(
+      env("browse_title", {
+        project: "",
+        session_id: "",
+        data: { state_key: "tab:x", title: "Polled Title" },
+      }),
+      router,
+    );
+    expect(browserStore.state.byKey["tab:x"].pageTitle).toBe("Polled Title");
+    browserStore.setState(() => ({ byKey: {} }));
+  });
 });
 
 describe("browse_newtab routing", () => {

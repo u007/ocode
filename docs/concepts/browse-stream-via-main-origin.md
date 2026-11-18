@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Embedded Browser — Chrome Mode Streams Over the Main Origin for Non-Local Clients
-description: Why the embedded browser tab hung on "Connecting to localhost:3510…" for a phone over Tailscale, and how non-local clients now get the server's Chrome screencast over the main origin (/api/browse/cdp/{stateKey}) instead of the separate browse-proxy listener.
+description: Why the embedded browser tab hung on "Connecting to localhost:3510…" for a phone over Tailscale, and how non-local clients get the server's Chrome screencast over the main origin (/api/browse/cdp/{stateKey}) when no Tailscale share with a browse URL is running, instead of the separate browse-proxy listener. With the share running, a tailnet client uses a tailnet tab origin instead (2026-11-17).
 resource: internal/server/server.go
 tags:
   - browser
@@ -10,16 +10,17 @@ tags:
   - cdp
   - tailscale
   - remote
-timestamp: 2026-10-31T09:38:08Z
+timestamp: 2026-11-17T06:47:28Z
 status: active
 ---
 
 # Embedded Browser — Chrome Mode Streams Over the Main Origin for Non-Local Clients
 
-> **Cross-reference (2026-11-02):** local clients now load their iframe from a root-mounted
-> per-tab origin (`POST /api/browse/tab-origin`). Non-local clients get 409 from that endpoint,
-> and the Chrome-mode flow described here is unchanged. See
-> [browse-per-tab-origin.md](browse-per-tab-origin.md).
+> **Cross-reference (2026-11-02, amended 2026-11-17):** local clients now load their iframe from
+> a root-mounted per-tab origin (`POST /api/browse/tab-origin`). A non-local client gets a tab
+> origin on the Tailscale share's HTTPS host while that share runs with its browse mount; it gets
+> 409 only when no such share runs. The Chrome-mode flow described here is used only for a
+> non-local client with no share browse URL. See [browse-per-tab-origin.md](browse-per-tab-origin.md).
 
 ## Problem
 
@@ -48,8 +49,10 @@ Current flow:
    (`internal/server/server.go`, `browseOriginFor` → `handleBrowseConfig`).
    It is true only when the client is off-machine AND there is no origin it can
    reach: the same-site loopback origin is not available (client not local) and
-   no Tailscale share is running. A tailnet client that can reach the shared
-   HTTPS mount gets `false` and keeps iframe mode.
+   no Tailscale share with a browse URL is running. A tailnet client that can
+   reach the shared HTTPS mount gets `false` and keeps iframe mode, which since
+   2026-11-17 loads its tab from a tailnet tab origin (see
+   [browse-per-tab-origin.md](browse-per-tab-origin.md)).
 2. The SPA stores `streamViaMain` per host in `readBrowseOrigin`
    (`web/src/api/client.ts`). `getBrowseStreamViaMain(host)` reads it.
 3. `BrowserPanel.tsx` `effectiveMode` returns `"chrome"` when the flag is set,
@@ -87,8 +90,10 @@ WebSocket passes that check.
   changes must keep the query token (`token=`) in the browser path and the
   `ocode.bearer.<token>` subprotocol in remote sessions, matching the terminal
   WebSocket.
-- **Stream clients ignore `userMode`.** A non-local client always gets Chrome
-  mode, because the iframe path cannot reach the listener from its origin.
+- **Stream clients ignore `userMode`.** A client with `stream_via_main` set always
+  gets Chrome mode, because the iframe path cannot reach the listener from its
+  origin. A non-local client gets that flag only when no Tailscale share with a
+  browse URL is running.
 
 ## Known limitations and open items
 
@@ -110,7 +115,17 @@ WebSocket passes that check.
   silently. A detached panel stops auto-reconnecting and shows **Take over**,
   which calls `reconnect()` and re-attaches (the other viewer is then detached
   in turn).
-- **Not yet verified live on a phone.** Coverage is unit and route tests only.
+- **A tailnet phone's local project leaves the Chrome stream.** Once the Tailscale share
+  has its browse mount (fixed 2026-11-17: the auto-share now starts after `StartBrowse`,
+  see [browse-per-tab-origin.md](browse-per-tab-origin.md#tailnet-clients-one-tailnet-https-port-per-tab)),
+  `browseOriginFor` returns the share's browse URL with `streamViaMain` false. The
+  local project then loads in iframe mode on a tailnet tab origin, not over the
+  `stream_via_main` Chrome screencast. Before the fix, a share without a browse URL gave
+  the phone the stream, which is why a local project worked there and a remote one did not.
+  The stream is now used only when no share with a browse URL is running.
+- **Not yet verified live on a phone.** Coverage is unit and route tests only. The tailnet
+  tab-origin path that replaces the stream for a phone on a share with a browse mount is
+  unverified live too.
 
 ## Tests
 
@@ -133,5 +148,6 @@ WebSocket passes that check.
 ## Related
 
 - [Browser agent tool](browser-agent-tools.md) - agent-side access to the same Chrome tabs.
+- [Embedded Browser — Tab-Strip Page Titles](browse-tab-titles.md) - how the tab title is fed in this Chrome mode (a per-target `Target.getTargetInfo` poll) and in local mode.
 - [Embedded Browser — Root-Relative Redirect](browse-root-relative-redirect.md) - the other browse-listener redirect path.
 - [Embedded Browser — WebSocket Proxy 404](../gotchas/embedded-browser-websocket-proxy-404.md) - the listener-side WebSocket failure mode this path avoids for stream clients.

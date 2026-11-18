@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Embedded Browser — Per-Tab Root-Mounted Origin for Root-Basepath SPAs
-description: 'Why client routers (TanStack Router SPA mode, React Router, Vue Router) failed inside the embedded browser with "Expected to find a match below the root match", and how local and remote tabs now load on a root-mounted per-tab origin: one loopback listener per (stateKey, scheme, host), a stable persisted port, a per-tab cookie, a reserved route for foreign upstreams, and a root-mode request header for remote projects.'
+description: 'Why client routers (TanStack Router SPA mode, React Router, Vue Router) failed inside the embedded browser with "Expected to find a match below the root match", and how local, remote and tailnet tabs now load on a root-mounted per-tab origin: one loopback listener per (stateKey, scheme, host), a stable persisted port, a per-tab cookie, a reserved route for foreign upstreams, a root-mode request header for remote projects, and one tailnet HTTPS port per tab for non-local clients while the Tailscale share runs.'
 resource: internal/browse/tab_origin.go
 tags:
   - browser
@@ -9,7 +9,8 @@ tags:
   - remote
   - spa
   - routing
-timestamp: 2026-11-05T06:55:29Z
+  - tailscale
+timestamp: 2026-11-17T06:47:28Z
 status: active
 ---
 
@@ -42,8 +43,11 @@ breaks reload, deep links and bare-relative URLs.
 **What changes:** a local client gets a loopback origin of its own for each tab, and
 that origin's root IS the upstream. The document path is the upstream path, so
 `location.pathname` is the upstream path. The SPA calls `POST /api/browse/tab-origin`
-on every load and gets back the origin plus a one-use grant. Clients the endpoint
-refuses (409) keep prefix mode.
+on every load and gets back the origin plus a one-use grant. A non-local client (a
+phone or another tailnet device) gets an origin on the Tailscale share's HTTPS host
+while that share runs with its browse mount (see "Tailnet clients" below). Clients the
+endpoint still refuses (409: a remote-mode server, or a non-local client with no such
+share) keep prefix mode.
 
 ### Local tabs: listener, port, cookie, grant
 
@@ -132,6 +136,56 @@ refuses (409) keep prefix mode.
   `remoteBrowseCall`, `/api/remote/<host>/api/browse/grant`), so the host's own session
   records it. The host's bearer token stays in the proxy.
 
+### Tailnet clients: one tailnet HTTPS port per tab
+
+A non-local client (a phone, or any device on the tailnet) cannot reach a loopback
+listener on this machine. Before 2026-11-17 it got 409 and stayed in prefix mode, where
+root-basepath routers fail. Now it gets a tab origin on the tailnet, when the Tailscale
+share is running with its browse mount.
+
+- **Gate.** `tailnetTabOriginAvailable` (`internal/server/browse_tab_origin.go:527`) is
+  true when the share is running and has a browse URL. It is the same predicate
+  `browseOriginFor` (`internal/server/server.go:1551`) uses to hand such a client the
+  shared browse URL. Without it the endpoint answers the 409 prefix-mode refusal.
+- **Expose.** `tailscaleShare.exposeTab` (`internal/server/tailscale_share.go:565`) runs
+  `tailscale serve --bg --https=<port> http://<bind host>:<port>` through
+  `serveHTTPSPort` (`tailscale_share.go:489`). The tailnet HTTPS port is the local
+  listener's port, so no second port is allocated. It is serve only, never funnel, so
+  the origin is tailnet-only.
+- **Origin.** `exposeTab` does not read the origin from CLI output. It builds
+  `https://<host>:<port>`, where `<host>` is the hostname of the share's browse URL and
+  `<port>` is the tab's port. `serveHTTPSPort` only reports whether tailscale printed a URL,
+  and it trims the trailing `/` from that URL. The trim protects the browse base
+  (`browseExpose`, the 8444 mount), which `/api/remote/<host>/…` and `/b/…` are joined onto.
+- **Choice by client, not project.** Locality decides the origin. A tailnet client gets
+  the tailnet origin for a local project's tab and for a remote project's forwarding tab
+  alike. A local client keeps its loopback origin.
+- **Self-route scheme.** `listenerScheme` (`internal/browse/tab_origin.go:282`) now also
+  reads `X-Forwarded-Proto: https`, because tailscale serve terminates TLS and forwards plain
+  HTTP. It is used only in `tabTarget` (`:201`), to recognise a reserved-route URL that names
+  this origin itself, and only together with an exact Host match. It never chooses an
+  upstream. `TestListenerSchemeFollowsForwardedProto` covers it.
+- **Failure.** An exposure failure is a 503 `tab origin unavailable: …`
+  (`handleBrowseTabOrigin`, `browse_tab_origin.go:494-497`). It never falls back to the
+  loopback origin or to prefix mode.
+- **Bookkeeping.** Each exposed port is recorded in `tailscaleShare.tabPorts`
+  (`tailscale_share.go:99`). `stopLocked` (`tailscale_share.go:357`) removes every
+  recorded mount. A panel's revoke removes the mounts of its dropped listeners in one
+  background goroutine (`forgetTabOrigins`, `browse_tab_origin.go:336`, goroutine at
+  `:355`), so the revoke does not wait on the tailscale CLI. `removeTab` makes a second
+  removal a no-op.
+
+**Boot order.** The auto-share must start after the browse proxy exists. The share reads
+the browse-proxy port that `StartBrowse` records (`setBrowseProxyPort`,
+`internal/server/server.go:1474`). `internal/desktop/boot.go` used to call
+`startAutoShareIfEnabled` before `server.StartBrowse`. The auto-share goroutine could finish `start` while the port was still 0,
+so `browseExpose` returned no URL and the browse mount was never created. `start` is
+first-wins, so the mount was never created later either. The share then had no browse
+URL. A tailnet client got `stream_via_main` for a local project, and for a remote project
+a browse base on the tailnet host with this machine's loopback browse-proxy port, which
+a phone cannot reach. Now `StartBrowse` runs first (`boot.go:176`) and the auto-share
+call follows (`boot.go:197`).
+
 ### POST /api/browse/tab-origin
 
 Request body: `{state_key, url, host}`. `host` may also come as `?host=`. If both are
@@ -145,9 +199,9 @@ where `url` is the origin, the upstream path, the upstream query, and
 |---|---|---|
 | 400 | Bad JSON, empty `state_key`, body and query `host` differ, URL not http(s), no host, or credentials | Tab error |
 | 409 `tab origin unavailable: this server runs in remote mode` | Server runs in remote mode | Capability answer: prefix mode, remembered per host for the session |
-| 409 `tab origin unavailable: the client is not on this machine` | `browseClientIsLocal` is false (tailnet, phone, proxied loopback) | Same as above |
+| 409 `tab origin unavailable: the client is not on this machine` | `browseClientIsLocal` is false AND no Tailscale share with a browse URL is running (`tailnetTabOriginAvailable` is false). A non-local client with a running share does not get this; it gets 200 with a tailnet origin | Same as above |
 | 403 | `host` is not a saved project | Tab error |
-| 503 `tab origin unavailable: …` | Listener bind failed (per-state cap, listen error) | Tab error. Not 409, so no prefix fallback |
+| 503 `tab origin unavailable: …` | Listener bind failed (per-state cap, listen error), or a non-local client's tailnet expose failed (`exposeTab`) | Tab error. Not 409, so no prefix fallback |
 | 503 `tab origin: browse origin not available` | Tab-origin manager or browse server not wired | Tab error |
 | 500 | Persisting the port failed | Tab error |
 | Host's status, wrapped as `tab origin: remote grant: …` | Remote grant refused by the host, e.g. 409 "remote host not connected" | Tab error |
@@ -215,6 +269,9 @@ an error on the tab, and prefix mode is not tried.
 - A remote tab origin exists only for a saved project. The host's bearer token never
   reaches the browser. The one-use grant does, in the tab URL, and the forwarder sends
   only this tab's cookie to the host.
+- A tailnet tab origin is exposed with `tailscale serve` only, never funnel, and only while
+  the Tailscale share with its browse mount runs. An expose failure is a 503, never a
+  fallback to the loopback origin or to prefix mode.
 - A tab's port is persisted before its grant is minted (`bind`, then `persist`, then
   `tabGrant`). The store merges under the file lock and never replaces the whole map.
 - The endpoint answers the capability refusal only as 409 with the `tab origin unavailable`
@@ -289,7 +346,17 @@ and re-checked against the code. Items the code has since overtaken are left out
   treats every binding of a stateKey as belonging to one host. Scope by project host if a
   panel can span hosts.
 - **Grant minted after the listener is bound.** A refused grant leaves the listener and its
-  persisted port in place until the panel is revoked.
+  persisted port in place until the panel is revoked. For a tailnet client the tailnet
+  mount is also left in place (`exposeTab` runs before `tabGrant`).
+- **Tailnet expose: HTTPS-port acceptance verified live (2026-11-18).** `tailscale serve
+  --bg --https=59999 http://127.0.0.1:59999` (tailscale 1.104.2, arbitrary high port) was
+  accepted, exit 0, and the mount answered `HTTP 200` over the tailnet TLS name; the mount
+  was removed after the probe. A full phone tab run has still not been done.
+- **Tailnet tab listeners have no rate limit.** The browse proxy is behind `browseProxyGate`;
+  a tab listener exposed on the tailnet is not. It still needs the one-time grant or its
+  per-tab cookie, and it is reachable only from the tailnet.
+- **`tabPorts` is in memory.** A mount left by a crashed process is not removed by `stop`.
+  The next expose of the same persisted port runs `tailscale serve` for it again.
 - **Capture bundle version skew.** `/__ocode_capture.js` comes from this machine's binary,
   while the bootstrap (`rootMode`, binding) comes from the host. A host on another ocode
   version is not checked.
@@ -349,8 +416,22 @@ Automated, run on 2026-11-02 (macOS) for this page:
   connecting remote host retried after `Retry-After`, a remote origin re-read per load).
   41 tests pass across the two files under vitest.
 
+Added 2026-11-17 (tailnet tab origins), unit tests only:
+
+- `go test ./internal/browse/ ./internal/server/ -count=1 -run 'TestTabOriginTailnet|TestTabOriginForgetRemoves|TestExposeTab|TestStopRemovesEvery|TestRemoveTabRemovesOnce|TestListenerSchemeFollows'`
+  passes. Covered: a tailnet client gets the shared origin (`browse_tab_origin_test.go`), an
+  expose failure is a 503 (`browse_tab_origin_test.go`), revoke removes the tailnet mount
+  (`browse_tab_origin_test.go`), expose needs a running share and returns the origin once,
+  a failed expose records nothing, stop removes every exposed port, remove runs once
+  (`tailscale_share_test.go`), and `listenerScheme` follows `X-Forwarded-Proto` (`tab_origin_test.go`).
+  The server tests arm the `tabExposeFn`/`tabRemoveFn` seams (`armTabShare`), so no
+  `tailscale` CLI runs.
+
 Not done:
 
+- A phone run over the tailnet: whether a tailnet tab loads through the tab origin end to
+  end (`tailscale serve` taking the ephemeral HTTPS port was verified by probe 2026-11-18).
+- A desktop launch with auto-share on, to confirm the boot order in practice.
 - The desktop WKWebView certificate-pin check (an iframe on `https://127.0.0.1:<port>/` against
   the pin in `cmd/ocode-desktop/localcert_darwin.m`). Plan 06 requires it; it has not been run.
 - A real SSH-host end-to-end run (the aimsai2 TanStack SPA through the workspace tunnel),
@@ -365,6 +446,7 @@ Not done:
 
 - [Embedded Browser — Chrome Mode Streams Over the Main Origin](browse-stream-via-main-origin.md)
 - [Embedded Browser — Root-Relative Redirect for Dev-Server Module Graphs](browse-root-relative-redirect.md)
+- [Embedded Browser — Tab-Strip Page Titles](browse-tab-titles.md) - the title channel for local-mode iframes (capture.js) and Chrome mode.
 - [Web/Desktop Server Project Scoping](web-server-project-scoping.md)
 - [Browser agent tool](browser-agent-tools.md)
 - Plan: `plans/2026-11-02-browse-per-tab-origin/INDEX.md`

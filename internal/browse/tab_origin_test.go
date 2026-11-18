@@ -339,3 +339,80 @@ func TestRootModeRewriteEmitsPathForSameUpstream(t *testing.T) {
 		t.Fatalf("root-mode payload missing binding: %s", cap)
 	}
 }
+
+// A TLS-terminating proxy in front of a tab listener forwards plain HTTP, so the
+// forwarded scheme is the browser-visible one; with neither signal it is http.
+func TestListenerSchemeFollowsForwardedProto(t *testing.T) {
+	forwarded := httptest.NewRequest(http.MethodGet, "http://desk.tailnet.ts.net/", nil)
+	forwarded.Header.Set("X-Forwarded-Proto", "https")
+	if got := listenerScheme(forwarded); got != "https" {
+		t.Fatalf("X-Forwarded-Proto https: listenerScheme = %q, want https", got)
+	}
+	plain := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+	if got := listenerScheme(plain); got != "http" {
+		t.Fatalf("no TLS and no forwarded proto: listenerScheme = %q, want http", got)
+	}
+}
+
+// A spoofed X-Forwarded-Proto (any local process reaching the loopback
+// listener can set it) must not turn a self-route DOCUMENT request into the
+// binding: with the header claiming https on an http listener, the route's
+// scheme no longer matches listenerScheme, so the request stays foreign and
+// takes the foreign-document hand-off (204) instead of the self-route 307.
+func TestTabOriginSpoofedForwardedProtoStaysForeign(t *testing.T) {
+	upstream, seen := tabUpstream(t)
+	s := tabNewServer(t)
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	_, base, err := s.ListenTab("tab:spoof", "http", host, "127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatalf("ListenTab: %v", err)
+	}
+	cookie := tabRedeem(t, s, base, "tab:spoof", "/app/dashboard")
+
+	// The self-route names THIS LISTENER (tabAddr(base)), not the upstream:
+	// only a route equal to the binding resolves as the binding.
+	selfRoute := "/__ocode/b/http/" + tabAddr(base) + "/x"
+
+	// Unspoofed: the self-route resolves as the binding (307 to the binding's
+	// own path, selfRouteRedirect), then the redirect is followed and the
+	// upstream serves /x.
+	resp := tabGet(t, base, selfRoute, cookie)
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("unspoofed self-route status = %d, want 307", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/x" {
+		t.Fatalf("unspoofed self-route Location = %q, want /x", loc)
+	}
+	followed := tabGet(t, base, resp.Header.Get("Location"), cookie)
+	if followed.StatusCode != http.StatusOK {
+		t.Fatalf("followed self-route status = %d, want 200", followed.StatusCode)
+	}
+	if got := <-seen; got.path != "/x" {
+		t.Fatalf("followed self-route upstream path = %q, want /x", got.path)
+	}
+
+	// Spoofed: the scheme no longer matches the listener, so the same route
+	// stays foreign; a foreign document is never served here (204 hand-off).
+	req, err := http.NewRequest(http.MethodGet, base+selfRoute, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(cookie)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	spoofed, err := tabNoRedirect().Do(req)
+	if err != nil {
+		t.Fatalf("spoofed GET: %v", err)
+	}
+	spoofed.Body.Close()
+	if spoofed.StatusCode != http.StatusNoContent {
+		t.Fatalf("spoofed self-route status = %d, want 204 (foreign hand-off)", spoofed.StatusCode)
+	}
+
+	// Neither leg may have proxied anything upstream: the 307 redirects before
+	// proxying and the 204 hands off without proxying.
+	select {
+	case got := <-seen:
+		t.Fatalf("upstream received %+v, want no request", got)
+	default:
+	}
+}

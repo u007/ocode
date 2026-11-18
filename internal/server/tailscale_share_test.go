@@ -2,8 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -266,5 +269,143 @@ func TestConcurrentStartsShareOneExposure(t *testing.T) {
 	case <-entered:
 		t.Fatal("start is not idempotent: a second exposure ran after the first finished")
 	default:
+	}
+}
+
+// armTabShare starts share as a running tailnet share with its browse mount
+// advertising desk.tailnet.ts.net. Every CLI seam is stubbed, so exposeTab and
+// removeTab run without tailscale; tabExpose and tabRemove observe the tab-origin
+// mounts. Cleanup stops the share, which calls tabRemove for any port still exposed.
+func armTabShare(t *testing.T, share *tailscaleShare, tabExpose func(port int, target string) bool, tabRemove func(port int)) *tailscaleShare {
+	t.Helper()
+	share.exposeFn = func(string) (string, string) { return "https://desk.tailnet.ts.net/desktop", "serve" }
+	share.removeFn = func(string) {}
+	share.setBrowseProxyPort(8123)
+	share.browseExposeFn = func(string) string { return "https://desk.tailnet.ts.net:8444/" }
+	share.browseRemoveFn = func() {}
+	share.tabExposeFn = tabExpose
+	share.tabRemoveFn = tabRemove
+	t.Cleanup(func() { share.stop() })
+	if st := share.start("serve", 1234); !st.Running || st.BrowseURL == "" {
+		t.Fatalf("precondition: share should be running with a browse url: %+v", st)
+	}
+	return share
+}
+
+// TestExposeTabNeedsRunningShare: a tab origin cannot be handed to a tailnet client
+// while no share runs, nor while the share runs without its browse mount.
+func TestExposeTabNeedsRunningShare(t *testing.T) {
+	noExpose := func(port int, target string) bool {
+		t.Errorf("tab port %d was exposed while the share was not running", port)
+		return false
+	}
+	idle := &tailscaleShare{}
+	idle.tabExposeFn = noExpose
+	idle.tabRemoveFn = func(int) {}
+	if _, err := idle.exposeTab(50123, "127.0.0.1:50123"); err == nil {
+		t.Fatal("exposeTab on a share that is not started returned no error")
+	}
+
+	noBrowse := &tailscaleShare{}
+	noBrowse.exposeFn = func(string) (string, string) { return "https://desk.tailnet.ts.net/desktop", "serve" }
+	noBrowse.removeFn = func(string) {}
+	noBrowse.tabExposeFn = noExpose
+	noBrowse.tabRemoveFn = func(int) {}
+	t.Cleanup(func() { noBrowse.stop() })
+	// No browse proxy port is set, so start runs without a browse mount.
+	if st := noBrowse.start("serve", 1234); !st.Running || st.BrowseURL != "" {
+		t.Fatalf("precondition: share should run without a browse url: %+v", st)
+	}
+	if _, err := noBrowse.exposeTab(50123, "127.0.0.1:50123"); err == nil {
+		t.Fatal("exposeTab without a browse url returned no error")
+	}
+}
+
+// TestExposeTabReturnsTailnetOriginOnce: the origin is the browse mount's host with
+// the tab port, the tab port is exposed once with the local target, and a second
+// call reuses it. The browse URL loses its trailing slash.
+func TestExposeTabReturnsTailnetOriginOnce(t *testing.T) {
+	var exposedPorts []int
+	var exposedTargets []string
+	share := armTabShare(t, &tailscaleShare{}, func(port int, target string) bool {
+		exposedPorts = append(exposedPorts, port)
+		exposedTargets = append(exposedTargets, target)
+		return true
+	}, func(int) {})
+
+	if got := share.status().BrowseURL; got != "https://desk.tailnet.ts.net:8444" {
+		t.Fatalf("browse url = %q, want no trailing slash", got)
+	}
+	origin, err := share.exposeTab(50123, "127.0.0.1:50123")
+	if err != nil {
+		t.Fatalf("exposeTab: %v", err)
+	}
+	if origin != "https://desk.tailnet.ts.net:50123" {
+		t.Fatalf("origin = %q, want https://desk.tailnet.ts.net:50123", origin)
+	}
+	if !reflect.DeepEqual(exposedPorts, []int{50123}) || exposedTargets[0] != "127.0.0.1:50123" {
+		t.Fatalf("exposures = ports %v targets %v, want port 50123 target 127.0.0.1:50123", exposedPorts, exposedTargets)
+	}
+
+	again, err := share.exposeTab(50123, "127.0.0.1:50123")
+	if err != nil || again != origin {
+		t.Fatalf("second exposeTab = %q, %v; want %q", again, err, origin)
+	}
+	if len(exposedPorts) != 1 {
+		t.Fatalf("second exposeTab re-exposed the port; exposures = %v", exposedPorts)
+	}
+}
+
+// TestExposeTabFailureRecordsNothing: a refused exposure is an error and leaves no
+// record, so a later attempt really exposes again.
+func TestExposeTabFailureRecordsNothing(t *testing.T) {
+	share := armTabShare(t, &tailscaleShare{}, func(int, string) bool { return false }, func(int) {})
+
+	_, err := share.exposeTab(50123, "127.0.0.1:50123")
+	if err == nil || !strings.Contains(err.Error(), "50123") {
+		t.Fatalf("exposeTab error = %v, want one naming port 50123", err)
+	}
+	share.mu.Lock()
+	recorded := len(share.tabPorts)
+	share.mu.Unlock()
+	if recorded != 0 {
+		t.Fatalf("a failed exposure was recorded: %v", share.tabPorts)
+	}
+}
+
+// TestStopRemovesEveryExposedTabPort: stop tears down each tab mount, in port order.
+func TestStopRemovesEveryExposedTabPort(t *testing.T) {
+	var removed []int
+	share := armTabShare(t, &tailscaleShare{}, func(int, string) bool { return true }, func(port int) {
+		removed = append(removed, port)
+	})
+	for _, port := range []int{50123, 50001} {
+		if _, err := share.exposeTab(port, fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
+			t.Fatalf("exposeTab(%d): %v", port, err)
+		}
+	}
+	if !share.stop() {
+		t.Fatal("stop() reported nothing was running")
+	}
+	if !reflect.DeepEqual(removed, []int{50001, 50123}) {
+		t.Fatalf("tab mounts removed by stop = %v, want [50001 50123]", removed)
+	}
+}
+
+// TestRemoveTabRemovesOnce: removeTab tears down one tab mount, and a second call
+// (or a later stop) removes nothing more.
+func TestRemoveTabRemovesOnce(t *testing.T) {
+	var removed []int
+	share := armTabShare(t, &tailscaleShare{}, func(int, string) bool { return true }, func(port int) {
+		removed = append(removed, port)
+	})
+	if _, err := share.exposeTab(50123, "127.0.0.1:50123"); err != nil {
+		t.Fatalf("exposeTab: %v", err)
+	}
+	share.removeTab(50123)
+	share.removeTab(50123)
+	share.stop()
+	if !reflect.DeepEqual(removed, []int{50123}) {
+		t.Fatalf("tab mount removals = %v, want exactly [50123]", removed)
 	}
 }

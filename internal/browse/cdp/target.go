@@ -150,6 +150,22 @@ type Target struct {
 
 	// handler cancels
 	cancels []func()
+	// titleStop ends the page-title poll loop (see watchTitle). Closed by
+	// stopHandlers, nil once it has run.
+	titleStop chan struct{}
+	// titleStopped gates emitTitleIfChanged: stopHandlers sets it, so a probe
+	// already in flight when stop ran (revoked tab, Manager.Close) never emits
+	// a title event after teardown.
+	titleStopped bool
+	// lastTitle/lastURL are the last page identity forwarded to the tab strip,
+	// so the poll emits only on a change. The URL is part of the gate because
+	// the SPA drops pageTitle on every URL change: navigating between pages
+	// that share a title ("Dashboard" on most SPA routes) must re-emit that
+	// title or the strip stays on its fallback. Guarded by titleMu, not mu: the
+	// poll must never queue behind a renderer-bound command holding mu.
+	titleMu   sync.Mutex
+	lastTitle string
+	lastURL   string
 
 	// navHost is the canonical host:port of the current top-level page,
 	// registered with the egress proxy (AllowHost) so a user-chosen
@@ -338,6 +354,13 @@ func isLoopbackHostname(h string) bool {
 	return err == nil && ip.IsLoopback()
 }
 
+// titlePollInterval is how often a target's page title is re-read. Chrome no
+// longer emits Target.targetInfoChanged for a document.title change (measured
+// on Chrome 157 headless: the event fires for a URL change, never for a title
+// change, while Target.getTargetInfo still returns the live title), so the
+// poll is the only live source. A var so tests can shorten it.
+var titlePollInterval = 2 * time.Second
+
 func (t *Target) startHandlers() {
 	if t.conn == nil {
 		return
@@ -356,7 +379,16 @@ func (t *Target) startHandlers() {
 	chFinished, c11 := t.conn.Subscribe(t.sessionID, "Network.loadingFinished")
 	chPerf, c12 := t.conn.Subscribe(t.sessionID, "Performance.metrics")
 	chDialog, c13 := t.conn.SubscribeLossless(t.sessionID, "Page.javascriptDialogOpening")
-	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13)
+	// Page.loadEventFired carries no frame id: it is the top document's load,
+	// the first moment a freshly parsed <title> can be read. Probing there makes
+	// a loaded page's title land immediately instead of at the next poll tick.
+	chLoad, c14 := t.conn.Subscribe(t.sessionID, "Page.loadEventFired")
+	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14)
+	stop := make(chan struct{})
+	t.mu.Lock()
+	t.titleStop = stop
+	t.mu.Unlock()
+	go t.watchTitle(stop)
 	t.reqStart = make(map[string]time.Time)
 	t.pendingReqs = make(map[string]*pendingReq)
 	t.completedReqs = make(map[string]*completedReq)
@@ -376,6 +408,7 @@ func (t *Target) startHandlers() {
 	go t.handleAuthRequired(chAuth)
 	go t.handleRequestPaused(chPaused)
 	go t.handleJavaScriptDialog(chDialog)
+	go t.handleLoadEvent(chLoad)
 
 	// Enable Fetch auth handling (proxy 407). Must be after the subscriptions
 	// above so no auth challenge is missed before the handler is live. Also
@@ -1297,10 +1330,106 @@ func (t *Target) stopHandlers() {
 	t.mu.Lock()
 	cancels := t.cancels
 	t.cancels = nil
+	stop := t.titleStop
+	t.titleStop = nil
+	t.titleStopped = true
 	t.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	for _, c := range cancels {
 		c()
 	}
+}
+
+// watchTitle forwards the target's page title to the tab strip: one probe now
+// (a restored tab navigates immediately after Attach) and then one per
+// titlePollInterval. See titlePollInterval for why this is a poll.
+func (t *Target) watchTitle(stop chan struct{}) {
+	if t.conn == nil || t.targetID == "" {
+		return
+	}
+	ticker := time.NewTicker(titlePollInterval)
+	defer ticker.Stop()
+	for {
+		// Only a target with a live panel sink feeds a tab-strip title; agent
+		// headless tabs (EnsureHeadless/OpenHeadless attach with nil) are not
+		// rendered in the strip, so probing them is pure CDP traffic on the
+		// shared browser connection. A sink attached later re-arms the loop at
+		// the next tick, so a panel opened onto an existing tab still gets
+		// titles.
+		t.mu.Lock()
+		hasSink := t.sink != nil
+		t.mu.Unlock()
+		if hasSink {
+			t.probeTitle()
+		}
+		select {
+		case <-stop:
+			return
+		case <-t.conn.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// probeTitle reads Target.getTargetInfo and emits a TitleEvent when the page
+// title changed. An empty title is emitted once as an explicit clear, so the
+// strip falls back to the manual rename instead of sticking on a stale title;
+// the empty title of a fresh about:blank is not emitted at all.
+func (t *Target) probeTitle() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res struct {
+		TargetInfo struct {
+			Type  string `json:"type"`
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		} `json:"targetInfo"`
+	}
+	if err := t.conn.Call(ctx, "", "Target.getTargetInfo", map[string]string{"targetId": t.targetID}, &res); err != nil {
+		return
+	}
+	if res.TargetInfo.Type != "page" {
+		return
+	}
+	// No URL on the emitted event (see emitTitleIfChanged).
+	t.emitTitleIfChanged(res.TargetInfo.Title, res.TargetInfo.URL)
+}
+
+// handleLoadEvent probes the title once per top-document load. A probe at
+// Page.frameNavigated would race the document's own <title> parse, so the load
+// event — after which the title is final — is the one that matters.
+func (t *Target) handleLoadEvent(ch <-chan json.RawMessage) {
+	for range ch {
+		t.probeTitle()
+	}
+}
+
+// emitTitleIfChanged forwards a page identity to the tab strip when it differs
+// from the last one, with its URL for the SPA's stale-event guard. The event carries
+// no URL when url is empty: the SPA drops a title whose URL does not match the
+// surface, and the per-target poll already reads that surface's own live
+// document, so a mismatch (typed URL before the canonical nav event, or a
+// fragment the rendered URL carries and the surface does not) would only lose a
+// real title. A URL-less event is applied without that guard.
+func (t *Target) emitTitleIfChanged(title, url string) {
+	t.mu.Lock()
+	stopped := t.titleStopped
+	t.mu.Unlock()
+	if stopped {
+		return
+	}
+	t.titleMu.Lock()
+	changed := title != t.lastTitle || url != t.lastURL
+	t.lastTitle = title
+	t.lastURL = url
+	t.titleMu.Unlock()
+	if !changed {
+		return
+	}
+	t.manager.emitTitle(TitleEvent{StateKey: t.stateKey, Title: title})
 }
 
 // handleJavaScriptDialog answers alert/confirm/prompt/beforeunload. With the

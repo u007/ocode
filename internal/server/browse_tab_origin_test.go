@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/browse"
 )
@@ -418,5 +419,82 @@ func TestTabOriginRevokeDropsPersistedPort(t *testing.T) {
 	s.tabOrigins.mu.Unlock()
 	if live != 0 {
 		t.Fatalf("live bindings after revoke = %d, want 0", live)
+	}
+}
+
+// tailnetTabRequest sends one tab-origin request the way the Tailscale share delivers
+// it: from loopback, with the proxy's forwarding header and the tailnet Host.
+func tailnetTabRequest(s *Server, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, "/api/browse/tab-origin", strings.NewReader(body))
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Host = "desk.tailnet.ts.net"
+	r.Header.Set("X-Forwarded-For", "100.64.0.9")
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	return w
+}
+
+// A tailnet client gets the tab on the share's HTTPS origin: the tab port exposed on
+// the tailnet, with the same number as the local listener.
+func TestTabOriginTailnetClientGetsSharedOrigin(t *testing.T) {
+	s, _ := tabOriginTestServer(t, tabOriginStorePath(t))
+	var exposedPort int
+	var exposedTarget string
+	armTabShare(t, s.tsShare, func(port int, target string) bool {
+		exposedPort, exposedTarget = port, target
+		return true
+	}, func(int) {})
+
+	body := tabOriginBody(t, map[string]string{"state_key": "tab:tailnet", "url": "http://app.example:3000/"})
+	rep := decodeTabOrigin(t, tailnetTabRequest(s, body))
+	if exposedPort == 0 {
+		t.Fatal("the tab port was never exposed on the tailnet")
+	}
+	if want := fmt.Sprintf("https://desk.tailnet.ts.net:%d", exposedPort); rep.Origin != want {
+		t.Fatalf("origin = %q, want %q", rep.Origin, want)
+	}
+	if want := net.JoinHostPort("127.0.0.1", strconv.Itoa(exposedPort)); exposedTarget != want {
+		t.Fatalf("exposed target = %q, want the local listener %q", exposedTarget, want)
+	}
+	if !strings.HasPrefix(rep.URL, rep.Origin+"/?") || !strings.Contains(rep.URL, "__grant=") {
+		t.Fatalf("url = %q, want the origin, the path and __grant", rep.URL)
+	}
+}
+
+// When the tailnet exposure is refused the answer is 503, never the 409 of a client
+// that has no path at all, and nothing falls back to the local origin.
+func TestTabOriginTailnetExposeFailureIsUnavailable(t *testing.T) {
+	s, _ := tabOriginTestServer(t, tabOriginStorePath(t))
+	armTabShare(t, s.tsShare, func(int, string) bool { return false }, func(int) {})
+
+	body := tabOriginBody(t, map[string]string{"state_key": "tab:tailnet", "url": "http://app.example:3000/"})
+	w := tailnetTabRequest(s, body)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("refused tailnet expose: got %d want 503: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "tab origin unavailable") {
+		t.Fatalf("503 body lacks the reason: %s", w.Body.String())
+	}
+}
+
+// Forgetting a panel removes the tailnet mount of its live tab in the background, so
+// the revoke does not wait on the tailscale CLI.
+func TestTabOriginForgetRemovesTailnetMount(t *testing.T) {
+	s, _ := tabOriginTestServer(t, tabOriginStorePath(t))
+	removed := make(chan int, 4)
+	armTabShare(t, s.tsShare, func(int, string) bool { return true }, func(port int) { removed <- port })
+
+	body := tabOriginBody(t, map[string]string{"state_key": "tab:x", "url": "http://app.example:3000/"})
+	rep := decodeTabOrigin(t, tailnetTabRequest(s, body))
+	port := originPort(t, rep.Origin)
+
+	s.forgetTabOrigins("tab:x")
+	select {
+	case got := <-removed:
+		if got != port {
+			t.Fatalf("removed tailnet port %d, want %d", got, port)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("forgetTabOrigins never removed the tailnet mount")
 	}
 }

@@ -165,22 +165,6 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		log.Printf("desktop: durable share token enabled (%s)", store.Path())
 	}
 
-	// Auto-share: warm the tailscale exposure at boot when the user has opted
-	// in (ocodeconfig auto_share_on_start, default OFF). The exposure itself is
-	// the SAME cached one the Share dialog's status/start read, so the dialog
-	// later reuses this URL instead of starting a second, conflicting mount.
-	//
-	// Runs in its own goroutine because tailscale.StartServeExpose waits on the
-	// `serve --bg` child for up to 2s; blocking StartServer would delay the
-	// window appearing. crashguard.Go (not a bare `go`) so a panic here cannot
-	// kill the process before the TUI resets the terminal.
-	//
-	// Config is read here rather than passed in: StartServer has no config
-	// parameter and auto-share is the only boot-time consumer, so threading one
-	// would touch every caller for no other benefit. A read failure is logged
-	// and treated as OFF — auto-share must never block boot.
-	startAutoShareIfEnabled(srv)
-
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
 	// the panel cannot work at all, so boot fails loudly rather than
@@ -192,6 +176,25 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 	if err := server.StartBrowse(srv, token, url, browseOpts); err != nil {
 		return nil, fmt.Errorf("desktop: %w", err)
 	}
+
+	// Auto-share: warm the tailscale exposure at boot when the user has opted
+	// in (ocodeconfig auto_share_on_start, default OFF). The exposure itself is
+	// the SAME cached one the Share dialog's status/start read, so the dialog
+	// later reuses this URL instead of starting a second, conflicting mount.
+	//
+	// It must run after StartBrowse: the share reads the browse-proxy port that
+	// StartBrowse records, and a share started earlier skips the browse mount.
+	//
+	// Runs in its own goroutine because tailscale.StartServeExpose waits on the
+	// `serve --bg` child for up to 2s; blocking StartServer would delay the
+	// window appearing. crashguard.Go (not a bare `go`) so a panic here cannot
+	// kill the process before the TUI resets the terminal.
+	//
+	// Config is read here rather than passed in: StartServer has no config
+	// parameter and auto-share is the only boot-time consumer, so threading one
+	// would touch every caller for no other benefit. A read failure is logged
+	// and treated as OFF — auto-share must never block boot.
+	startAutoShareIfEnabled(srv)
 
 	go func() {
 		log.Printf("desktop: serving on %s", url)

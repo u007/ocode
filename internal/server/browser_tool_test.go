@@ -119,6 +119,14 @@ type fakeSurface struct {
 	awaitErr   error
 	// clientTabs are the client browser's tabs, which Tabs lists.
 	clientTabs []htrTab
+	// shotFailFrom, when > 0, makes Screenshot fail from its Nth call on (1-based).
+	shotFailFrom int
+	shotCalls    int
+	// waitBlocks makes Wait block for its timeout (or its context's end) and then
+	// return a timeout error, as a text that never appears does. waitStarted, when
+	// set, is closed as Wait starts.
+	waitBlocks  bool
+	waitStarted chan struct{}
 }
 
 // loadStateOf points at a LoadState for fakeSurface.awaitState.
@@ -153,9 +161,16 @@ func (f *fakeSurface) got() []string {
 }
 
 func (f *fakeSurface) Screenshot(ctx context.Context) ([]byte, int, int, error) {
+	f.mu.Lock()
+	f.shotCalls++
+	failNow := f.shotFailFrom > 0 && f.shotCalls >= f.shotFailFrom
+	f.mu.Unlock()
 	f.record("screenshot")
 	if f.shotErr != nil {
 		return nil, 0, 0, f.shotErr
+	}
+	if failNow {
+		return nil, 0, 0, errors.New("capture failed")
 	}
 	return f.png, f.cssW, f.cssH, nil
 }
@@ -247,6 +262,17 @@ func (f *fakeSurface) FindElements(ctx context.Context, frame, selector string, 
 
 func (f *fakeSurface) Wait(ctx context.Context, frame string, spec cdp.WaitSpec) error {
 	f.record(fmt.Sprintf("wait frame=%s selector=%s text=%s gone=%t timeout=%s", frame, spec.Selector, spec.Text, spec.Gone, spec.Timeout))
+	if f.waitStarted != nil {
+		close(f.waitStarted)
+	}
+	if f.waitBlocks {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(spec.Timeout):
+			return fmt.Errorf("wait: timeout after %s", spec.Timeout)
+		}
+	}
 	return f.targetErr
 }
 
@@ -1108,8 +1134,8 @@ func TestBrowserTool_ConsoleAndNetworkBoundsAndUntrustedLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("console: %v", err)
 	}
-	if got := surf.got(); strings.Join(got, "|") != "console max=20" {
-		t.Fatalf("default console calls = %v, want only the console read (no page URL reads)", got)
+	if got := surf.got(); strings.Join(got, "|") != "url|console max=20" {
+		t.Fatalf("default console calls = %v, want the page URL read, then the console read last", got)
 	}
 	for _, want := range []string{"7 older evicted", `- error exception: "boom" at https://x/app.js:1:2`, "untrusted"} {
 		if !strings.Contains(out, want) {
@@ -1355,7 +1381,9 @@ func TestBrowserTool_FillSelectCheckPickSendArguments(t *testing.T) {
 	want := []string{
 		"fill frame= target=#email value=a@b.c",
 		"fill frame= target=#email value=",
+		"url",
 		"select frame= target=#country want=CA",
+		"url",
 		"setChecked frame= target=@e5 checked=true",
 		"setChecked frame= target=@e5 checked=false",
 	}
@@ -1592,9 +1620,9 @@ func TestBrowserReadHeaderOmitsURLWhenSurfaceCannotReportIt(t *testing.T) {
 }
 
 // TestBrowserReadHeaderCarriesRedactedURL pins that each page-URL-judged read
-// (text, snapshot, find) writes the tab's page URL, redacted, right after the
-// tab id. console and network write no URL: their logs span navigations and the
-// guard judges them per entry. The character after the URL differs by action,
+// writes the tab's page URL, redacted, right after the tab id: text, snapshot,
+// find, console and network, and pick, select and fill_form, whose results the
+// guard judges by the same URL. The character after the URL differs by action,
 // so each header is checked as an exact prefix.
 func TestBrowserReadHeaderCarriesRedactedURL(t *testing.T) {
 	surf := &fakeSurface{
@@ -1606,6 +1634,8 @@ func TestBrowserReadHeaderCarriesRedactedURL(t *testing.T) {
 		}},
 		console: []cdp.ConsoleEntry{{Level: "log", Kind: "log", Text: "hi"}},
 		network: []cdp.NetworkEntry{{Method: "GET", URL: "https://shop.example/a", ResourceType: "Fetch", Status: 200}},
+		pickRes: cdp.PickResult{Mode: "combobox", Selected: "Canada"},
+		reports: []cdp.FieldReport{{Selector: "#name", Kind: "text", Status: "ok", Requested: "Ada", Actual: "Ada"}},
 	}
 	b, _ := newTestBrowserTool(t, surf, 1568)
 	const at = " at https://shop.example/cart?…#…"
@@ -1615,8 +1645,11 @@ func TestBrowserReadHeaderCarriesRedactedURL(t *testing.T) {
 		{`{"action":"text"}`, "visible text of tab b1" + at + " (untrusted web content"},
 		{`{"action":"snapshot"}`, "accessibility snapshot of tab b1" + at + ", "},
 		{`{"action":"find","target":"button"}`, `find "button" on tab b1` + at + ": 1 match(es)"},
-		{`{"action":"console"}`, "console of tab b1: 1 newest entries"},
-		{`{"action":"network"}`, "network requests of tab b1: 1 newest"},
+		{`{"action":"console"}`, "console of tab b1" + at + ": 1 newest entries"},
+		{`{"action":"network"}`, "network requests of tab b1" + at + ": 1 newest"},
+		{`{"action":"pick","target":"#cb","text":"Canada"}`, "picked on tab b1" + at + " (mode combobox); the element now shows \"Canada\""},
+		{`{"action":"select","target":"#country","value":"CA"}`, "selected CA (tab b1" + at + ")"},
+		{`{"action":"fill_form","fields":[{"selector":"#name","value":"Ada"}]}`, "fill_form on tab b1" + at + ": 1 field report(s)"},
 	}
 	for _, c := range cases {
 		out, err := browserCall(t, b, c.args)

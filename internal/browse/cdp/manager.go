@@ -665,10 +665,11 @@ func (m *Manager) maybeRegisterNewTab(targetID, targetType, url, browserContextI
 	}
 }
 
-// handleTargetInfoChanged forwards page-title updates (including JS
-// document.title changes, which fire no navigation event) to the owning
-// stateKey. Child targets (iframes — type "iframe") are ignored so embedded
-// frames can never overwrite the tab title.
+// handleTargetInfoChanged forwards target changes (URL, and a title on Chrome
+// builds that still report one there) to the owning stateKey. Child targets
+// (iframes — type "iframe") are ignored so embedded frames can never overwrite
+// the tab title. Title changes are ALSO polled per target (Target.watchTitle),
+// because current Chrome no longer reports document.title through this event.
 func (m *Manager) handleTargetInfoChanged(ch <-chan json.RawMessage) {
 	for raw := range ch {
 		var ev struct {
@@ -909,37 +910,9 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 	}
 	m.mu.Unlock()
 
-	// Best-effort initial title: about:blank has none, but a restored tab may
-	// navigate immediately after Attach; the query covers titles set before
-	// the first targetInfoChanged arrives.
-	m.emitInitialTitle(conn, targetID, stateKey)
-
+	// The target's own title poll (Target.watchTitle) probes immediately, so no
+	// initial TitleEvent is needed here.
 	return t, nil
-}
-
-// emitInitialTitle queries Target.getTargetInfo once and forwards a page
-// title when present. Failures are silent — the event stream is the live
-// source of truth.
-func (m *Manager) emitInitialTitle(conn *Conn, targetID, stateKey string) {
-	if conn == nil || targetID == "" {
-		return
-	}
-	var res struct {
-		TargetInfo struct {
-			Type  string `json:"type"`
-			Title string `json:"title"`
-			URL   string `json:"url"`
-		} `json:"targetInfo"`
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := conn.Call(ctx, "", "Target.getTargetInfo", map[string]string{"targetId": targetID}, &res); err != nil {
-		return
-	}
-	if res.TargetInfo.Type != "page" || res.TargetInfo.Title == "" {
-		return
-	}
-	m.emitTitle(TitleEvent{StateKey: stateKey, Title: res.TargetInfo.Title, URL: res.TargetInfo.URL})
 }
 
 // ErrNoTarget is returned by SetFiles when stateKey has no attached target.
