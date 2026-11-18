@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, the 2026-10-02 executed_scripts source disclosure, and the 2026-11-06 SQL-through-client rule; the `verifyAutoGrant` and `resolveDecider` line anchors re-derived.'
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, the 2026-10-02 executed_scripts source disclosure, and the 2026-11-06 SQL-through-client rule; the `verifyAutoGrant` and `resolveDecider` line anchors re-derived; plus the four deterministic pre-judge guards (unknown-tool rejection, no stat-based access decision, allowed-root creation, read-target gate).'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-11-15T07:47:06Z
+timestamp: 2026-11-18T12:21:17Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -250,13 +250,22 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 - `internal/server/handler_config_test.go` — catalog endpoint and `permissions-auto` PUT round-trip.
 - `web/src/components/Settings/PermissionsForm.concerns.test.tsx` — default-all-ticked, unticking sends the negative set.
 
+## Deterministic guards before any judge (unknown tools, path scope)
+
+Four behaviours in the Go layer sit below the judge and are not relaxable — `relaxed_concerns` cannot move any of them:
+
+1. **An unregistered tool never reaches the permission layer.** `runToolCallWithContext` checks `a.tools[name]` first and returns `tool not found: "<name>"` as an ordinary tool result (`internal/agent/agent.go:4204`, result at `:4206`) — before argument parsing, gating and `PermissionManager.Decide`. Before this guard an unknown name fell through to `Decide` and asked the human about a tool that cannot run. Pin: `TestUnknownToolReturnsNotFoundWithoutPermissionAsk` (`internal/agent/tool_not_found_test.go`).
+2. **No `os.Stat`/`os.Lstat` decides access, except the read-target gate.** The only existence check in the decision path is `targetExists` (`internal/agent/permissions.go:8536`; its `os.Stat` at `:8538`), called from `Decide` at `:2117`. The two other stats in the file are not access decisions: `browserFormFiles` (`:6864`) only lists file inputs for the ask dialog, and `shimUnderWorkDir` (`:4935`, `:4951`) is symlink-escape containment for a `node_modules/.bin` shim.
+3. **A nonexistent path inside an allowed root stays allowed for non-read tools.** Path-scoped decisions are prefix containment only — `isWithinAllowedScope` (`:2746`), `resolveForScopeCheck` (`:2668`), `pathUnderRoot` (`:2699`) — so a `write`/`edit` target a tool is about to create resolves ALLOW (`Decide`'s path-scoped branch, `:2400` → `:2460`). A `read` of the same path is the exception, denied by invariant 4.
+4. **The read-target check runs first, which is what makes it TOCTOU-safe.** It sits at the top of `Decide` (`:2114`, deny at `:2133`, above the locked short-circuit at `:2138`), so a missing read target is denied before locked/YOLO/sandbox shortcuts and before any path-rule evaluation. The result is a short-circuit only: every later decision is derived from configured rules, never from filesystem state observed at this gate.
+
 ## Related
 
 - Judge contract: the TypeSafe/Jev concern answer does **not** decide the verdict — a `deny` still defers to the human. It only selects the confidence floor for an `allow` verdict: `truncated_or_unknown` → opaque floor `0.75` (`min(normal, 0.75)`), every other concern → `permissions.auto.min_confidence` (default `0.80`). Deterministic `verifyAutoGrant` runs after the floor check.
 - Design doc: `docs/superpowers/specs/2026-09-21-auto-permission-enforced-categories-design.md`.
 - Modes and how the auto-permission layer sits among them: [Sandbox Permission Mode](concepts/sandbox-permission-mode.md).
 - Shared Jev/TypeSafe vocabulary and confidence-floor conventions: [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md).
-- Go-side guards referenced above: [permission evaluation and unknown-tool guard](gotchas/permission-evaluation-and-unknown-tool-guard.md), [auto-permission judge withholds credentials](gotchas/auto-permission-judge-withholds-credentials.md).
+- Go-side guards: the four deterministic pre-judge guards are listed above under *Deterministic guards before any judge*; [auto-permission judge withholds credentials](gotchas/auto-permission-judge-withholds-credentials.md).
 
 ## Amendment (2026-09-29): environment enumeration carve-out in the Jev rubric
 

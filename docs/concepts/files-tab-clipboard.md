@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Files Tab Clipboard (Cut / Copy / Paste)
-timestamp: 2026-10-30T02:22:13Z
+timestamp: 2026-11-18T11:41:46Z
 description: Files-tab clipboard, drag-in upload and right-click download concept doc with desktop WKWebView verification caveat
 tags:
   - clipboard
@@ -108,11 +108,11 @@ Both work for local and remote (`host=`) projects; the tree is one component and
 - A dropped folder is refused with "Folders can't be added — drop the files inside instead". The folder check (`transferHasFolder`) is the same one paste uses.
 - While a file drag is over the pane, the pane gets a `ring-accent` outline (`fileDragOver`).
 
-### Right-click Download (`FileTree.tsx` menus, `api.fsDownload`)
+### Right-click Download (`FileTree.tsx` menus, `api.fsDownloadStream`)
 
-- Saves go through `saveBlobAsFile` (`web/src/lib/saveBlob.ts`). In the desktop app the bytes go to the shell's native save panel (`cmd/ocode-desktop/save_file.go`); WKWebView drops blob `<a download>` clicks silently. A file over the 64 MiB desktop save limit fails with a download notice.
+- Saves go through `saveResponseAsFile` (`web/src/lib/saveBlob.ts`). On the desktop shell the Files-tab download now streams end to end — `api.fsDownloadStream` (`web/src/api/client.ts`) returns the raw authenticated Response for `GET /api/fs/download` (auth headers included, parsed error message on `!ok`) without reading the body, and `saveResponseAsFile` forwards `response.body` chunk by coalesced ~8 MiB piece (`getReader()`) through `saveDesktopStream` (`web/src/lib/wails.ts`) when the body is a stream and `Content-Length` is a safe integer — the file is never materialized in the webview; otherwise (missing body or `Content-Length`) it falls back to `saveDesktopBlob` (materialized blob, same chunking), and in a browser it saves via the temporary anchor. In the desktop app the bytes stream to the shell over a chunked bridge (`saveDesktopBlob` in `web/src/lib/wails.ts`; reworked 2026-11-18 from the one-shot base64 bridge `ocode:save-file:` to an 8 MiB-chunk stream). WKWebView drops blob `<a download>` clicks silently, and one bridge string cannot carry a multi-GB file. The SPA sends `ocode:save-file-start:` / `-chunk:` / `-end:` messages (nonce + app-host validated), streaming 8 MiB decoded chunks (`SAVE_CHUNK_BYTES`) via `blob.slice()` + per-chunk `arrayBuffer()`; the whole Blob is never materialized as one buffer or string, chunks go through `bytesToBase64`. The shell (`cmd/ocode-desktop/save_file.go`) creates a temp file on start (`os.CreateTemp("", "ocode-save-*.part")`), appends each decoded chunk in strict `seq` order (32 MiB decoded-chunk cap checked on the base64 length before decoding), and aborts the session on an out-of-order chunk, an over-run or bad base64 — temp file deleted, native error dialog. On `-end:` it verifies received == declared size, then the native save panel (SaveFile dialog) is shown and the temp file is renamed to the chosen path (copy via a sibling temp + rename when rename fails, e.g. cross-volume); cancelling the panel deletes the temp file. Cap is 2 GiB (`MAX_DESKTOP_SAVE_BYTES` = `desktopSaveMaxBytes = 2 << 30`; the keep-equal rule holds). Abandoned or stalled sessions are reaped by `ensurePendingSaveReaper()` (started once at app start, `reapStalePendingSaves`, idle > 10 min), and every chunk/end message is refused when the window is not ready. The shell also sweeps crash-abandoned `ocode-save-*.part` temp files older than 10 minutes at app start (`reapAbandonedSaveTempFiles`, called from `ensurePendingSaveReaper`), covering a previous process that died mid-transfer. Over the 2 GiB cap the save fails with a download notice.
 - A **Download** item appears on file rows in both the tree view and the columns view, and only on files. It runs on the effective selection (`effectivePaths`), so a multi-selection downloads each file in turn; a folder in that selection fails on its own entry and is reported, and the rest still save.
-- Files are fetched one at a time (WebKit allows about six connections per origin). The client fetches a Blob with auth headers and saves it via `saveBlobAsFile` (`web/src/lib/saveBlob.ts`). The object URL is revoked on a 10 s timer, as in `csvExport.ts` and `PdfViewer.tsx`.
+- Files are fetched one at a time (WebKit allows about six connections per origin). On the desktop shell the bytes stream from the network through `saveResponseAsFile` (no Blob is materialized in the webview); in a browser the same helper saves via the temporary anchor, whose object URL is revoked on a 10 s timer, as in `csvExport.ts` and `PdfViewer.tsx`.
 - The progress label reuses the upload progress line (`Downloading 1/3…`); the outcome notice is `Downloaded 2 files` or `Downloaded 0 files — <name>: <error>`.
 
 ### Server endpoint (`internal/server/handler_fs_download.go`; route in `server.go`)
@@ -122,7 +122,7 @@ Both work for local and remote (`host=`) projects; the tree is one component and
 - It is deliberately **not** `GET /api/files/raw`. That endpoint's extension allowlist and per-type caps exist for previews and must not be widened into a general file download.
 - Containment is the tree's existing rule: `mutationProjectDir` plus `resolveFSPath(..., "read")` locally (symlinks resolved, `.git` excluded), and `remoteWorkFor` plus `remoteTargetOf(..., "read")` remotely. Only regular files are served; a directory is a 400.
 - Access matches `/api/files/content`, which returns any readable project file. There is **no secret-file gate** on either route, so a download grants nothing the editor does not already show. If `.env`-style files should be gated, gate both routes together.
-- Local cap: `fsDownloadMaxBytes` (512 MiB), streamed with `io.Copy`, so the cap bounds time, not memory. Over the cap is 413.
+- Local cap: `fsDownloadMaxBytes` (2 GiB), streamed with `io.Copy`, so the cap bounds time, not memory. Over the cap is 413.
 - Remote cap: `fsDownloadRemoteMaxBytes` (100 MiB, the upload cap). The size is stat'ed first (`remoteFileSize`, shared with `remoteReadFileCapped`) so Content-Length is exact and an oversized file is refused before any bytes move. The bytes then stream from `cat -- <quoted path>` through `runBounded(..., remoteExecLongRunning)`, bounded by a 60 s idle timer (`fsDownloadIdleTimeout`) and a 30 min overall backstop (`fsDownloadOverallTimeout`). `remoteReadFile` is NOT used: it base64-buffers the whole file in memory.
 - Headers are written on the first byte (`fsDownloadStream.start`), so a failure before any data still answers with a JSON status: a capacity refusal is 503 with `Retry-After`, a dead transport is 502, anything else is 500. A failure after bytes have gone out cannot change the status; it is logged and the short body tells the client.
 
@@ -130,7 +130,7 @@ Both work for local and remote (`host=`) projects; the tree is one component and
 
 Download tests: `internal/server/handler_fs_download_test.go` (local stream and headers, the Content-Disposition encoding table, directory refusal, traversal and symlink-out refusal, missing file, over-cap 413, route registered through the real mux, remote stream over the fake-ssh shim, remote empty file, remote directory and traversal refusal, remote over-cap 413).
 
-Web: `web/src/components/Files/FileTree.download.test.tsx` (`dropDestination` and `transferHasFolder`; Download on files but not folders, in both views; the download notice and failure notice; drops into a folder row, a file row, and empty space; folder refusal; non-file drags ignored); `web/src/api/client.fsDownload.test.ts` (query args, host threading, error surfacing).
+Web: `web/src/components/Files/FileTree.download.test.tsx` (`dropDestination` and `transferHasFolder`; Download on files but not folders, in both views; the download notice and failure notice; drops into a folder row, a file row, and empty space; folder refusal; non-file drags ignored); `web/src/api/client.fsDownloadStream.test.ts` (query args, host threading, error surfacing).
 
 Upload tests (paste and drop share this path): `internal/server/handler_fs_upload_test.go` (raw bytes, subdirectory, never-overwrites, unsafe names table, out-of-project dest, `.git` dest, file-as-dest, 413 + no partial file, route registered through the real mux, remote stdin over the fake-ssh shim).
 

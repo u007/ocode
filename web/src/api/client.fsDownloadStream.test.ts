@@ -17,13 +17,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("api.fsDownload", () => {
-  it("GETs the file with project and path query args and returns its bytes as a Blob", async () => {
-    const calls = captureFetch(new Response("file-bytes", { status: 200 }));
+describe("api.fsDownloadStream", () => {
+  it("GETs the file with project and path query args and returns the streaming Response", async () => {
+    const calls = captureFetch(new Response("file-bytes", { status: 200, headers: { "Content-Length": "10" } }));
 
-    const blob = await api.fsDownload("src/app.ts", "/proj");
+    const res = await api.fsDownloadStream("src/app.ts", "/proj");
 
-    expect(blob.size).toBe("file-bytes".length);
+    // The body is NOT read into a blob here: callers stream it (saveResponseAsFile).
+    expect(res).toBeInstanceOf(Response);
+    expect(await res.text()).toBe("file-bytes");
     expect(calls).toHaveLength(1);
     const [url, init] = calls[0];
     expect(url).toContain("/api/fs/download?");
@@ -35,7 +37,7 @@ describe("api.fsDownload", () => {
 
   it("carries the host so a remote project's file is read on that host", async () => {
     const calls = captureFetch(new Response("x", { status: 200 }));
-    await api.fsDownload("a.txt", "/home/x/proj", "me@host");
+    await api.fsDownloadStream("a.txt", "/home/x/proj", "me@host");
     expect(calls[0][0]).toContain("host=me%40host");
   });
 
@@ -46,6 +48,11 @@ describe("api.fsDownload", () => {
         headers: { "Content-Type": "application/json" },
       }),
     );
-    await expect(api.fsDownload("folder", "/proj")).rejects.toThrow("only regular files can be downloaded");
+    await expect(api.fsDownloadStream("folder", "/proj")).rejects.toThrow("only regular files can be downloaded");
+  });
+
+  it("surfaces the status text when the error body is not JSON", async () => {
+    captureFetch(new Response("upstream exploded", { status: 502, statusText: "Bad Gateway" }));
+    await expect(api.fsDownloadStream("a.bin", "/proj")).rejects.toThrow();
   });
 });

@@ -2754,10 +2754,11 @@ export const api = {
     if (text.trim() === "") throw new Error("upload returned an empty response");
     return JSON.parse(text) as { success: boolean; path: string };
   },
-  // GET /api/fs/download: one project file as a Blob for a Files-tree save. Auth
-  // headers are required, so the caller saves the Blob itself (saveBlobAsFile)
-  // instead of pointing an <a href> at the URL.
-  fsDownload: async (path: string, project?: string, host?: string): Promise<Blob> => {
+  // GET /api/fs/download: one project file as a stream for a Files-tree save.
+  // Auth headers are required, so the caller saves the body itself
+  // (saveResponseAsFile) instead of pointing an <a href> at the URL. On the
+  // desktop shell the body streams into the native save panel; browsers use a blob.
+  fsDownloadStream: async (path: string, project?: string, host?: string): Promise<Response> => {
     const res = await fetch(apiPath(`/api/fs/download${projQuery(project, host, { path })}`), {
       headers: authHeaders(),
     });
@@ -2765,7 +2766,7 @@ export const api = {
       const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
       throw new Error(err.error || res.statusText);
     }
-    return res.blob();
+    return res;
   },
   // --- Cron (jobs, outbox, runs, targets) + reminders and tasks ------------
   //
@@ -4610,7 +4611,7 @@ export const api = {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     const query = params.toString();
-    return fetchJSON<{ result: string }>(
+    return fetchJSON<{ result: string; cleanup_prompt?: string }>(
       `/api/docs/cleanup${query ? `?${query}` : ""}`,
       {
         method: "POST",

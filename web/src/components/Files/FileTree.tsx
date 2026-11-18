@@ -72,7 +72,7 @@ import {
   treeRelativePath,
 } from "./fileTreeReveal";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
-import { saveBlobAsFile } from "@/lib/saveBlob";
+import { saveResponseAsFile } from "@/lib/saveBlob";
 import { eventBus } from "@/lib/eventBus";
 import { isMutatingTool, mutatedPathsFromToolCall } from "@/lib/previewLiveMutations";
 
@@ -2196,7 +2196,7 @@ export default function FileTree({
         const name = paths[i].split(/[\\/]/).pop() || paths[i];
         setUploadProgress(`Downloading ${i + 1}/${paths.length}…`);
         try {
-          await saveBlobAsFile(await api.fsDownload(anchorPath(paths[i]), requestRoot, projectHost), name);
+          await saveResponseAsFile(await api.fsDownloadStream(anchorPath(paths[i]), requestRoot, projectHost), name);
           done++;
         } catch (err) {
           // Kept as data, not rethrown: one failed file must not stop the rest.

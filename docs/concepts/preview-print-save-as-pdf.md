@@ -4,7 +4,7 @@ title: Preview Print / Save as PDF
 description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path. Markdown ```mermaid fences render in place in the viewer and as inline SVG (pre-rendered in the browser) in print."
 resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/MarkdownViewer.tsx; web/src/components/Preview/localImagePath.ts; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-18T03:56:31Z
+timestamp: 2026-11-18T11:03:37Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -399,7 +399,7 @@ The desktop print window's bridge rules apply to the toolbar path:
   still names a path the print window cannot resolve, because it has no origin,
   so it does not load. The on-screen `HtmlViewer`
   (`web/src/components/Preview/HtmlViewer.tsx`) has the same gap for every
-  relative asset: its `srcDoc` has no base URL (`HtmlViewer.tsx:23`). That
+  relative asset: its `srcDoc` has no base URL (`HtmlViewer.tsx:108`). That
   viewer is unchanged by this print work.
 - **Markdown `data:` image sources do not print.** react-markdown's
   `defaultUrlTransform` blanks any scheme outside `http(s)`/`irc(s)`/`mailto`/`xmpp`,

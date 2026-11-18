@@ -8,7 +8,7 @@ tags:
   - knowledge
   - context-agent
   - docs
-timestamp: 2026-09-30T07:37:10Z
+timestamp: 2026-11-18T13:09:57Z
 ---
 # Knowledge System (OKF Bundle): Agents, Tools and Maintenance
 
@@ -36,8 +36,11 @@ for why/decision/playbook questions; when the bundle is active use `context` (wh
 
 **Sole-automated-writer invariant:** no agent path outside the `context`
 subagent may write to the bundle — the main agent's tool set never includes
-`doc_write`/`doc_deprecate`. Deletion happens only via `/docs cleanup`
-(per-file confirmation required).
+`doc_write`/`doc_deprecate`, and no doc tool deletes at all. Removal is a
+two-step, human-gated flow: `/docs cleanup` is one `context` audit turn that may
+only `doc_deprecate`; `/docs cleanup --yes` then deletes every doc already marked
+`status: deprecated` in a single batch. That is one human confirmation for the
+batch, not a per-file prompt.
 
 **OKF docs access scope:** OKF documentation (the `docs/` bundle, including
 `index.md`) is NOT loaded into the main agent's system context. The main
@@ -66,12 +69,19 @@ toolkit directly.
 | `status` | Bundle presence, doc counts (conforming/non-conforming/deprecated), last log entry, active state |
 | `init` | Bootstrap `docs/` into an OKF bundle — add frontmatter, generate index + log, emit staleness report; dispatches the `context` subagent to scan & annotate existing docs. Non-destructive, idempotent (re-run re-audits without clobbering). |
 | `update [focus]` | Force a maintenance pass (scan for staleness, duplicates, orphans). Queued asynchronously. |
-| `cleanup [--yes]` | List deprecated docs with path and reason; `--yes` deletes them under lock, logs deletions, regenerates index. |
+| `cleanup [--yes]` | An LLM audit, not a preset deprecation list: without `--yes` it dispatches the `context` subagent to find duplicated, stale (staleness verified against the source), superseded and orphaned docs, merge duplicates with `doc_write` first, then `doc_deprecate` each removal with a one-line reason. The audit never deletes. With `--yes` it deterministically deletes every doc already marked `status: deprecated` under lock, appends `Deletion` log entries and regenerates the index. No bundle → hints `/docs init`. |
+
+Both surfaces carry the same audit prompt: the TUI runs `/docs cleanup` on a
+returned `tea.Cmd` (off the update loop, like `/docs init`) and sends the prompt
+through `dispatchContextAgent`; the web client receives it as `cleanup_prompt`
+from `POST /api/docs/cleanup` and sends it as a normal turn, the same pattern as
+`/docs init`'s `annotate_prompt`. `--yes` maps to `confirm: true` and stays a
+local, deterministic delete.
 
 ### Maintenance
 A post-job doc maintenance worker mirrors memory maintenance:
 1. **Triage (small model):** Decides if the last turn produced durable knowledge (decisions, gotchas, playbooks, schema changes). Q&A and routine edits are noops.
-2. **Execute:** Dispatches the `context` sub-agent to apply create/update/deprecate actions.
+2. **Execute:** Dispatches the `context` sub-agent to apply create/update/deprecate actions — the same action set `/docs cleanup`'s audit uses, except that the audit can only deprecate; deletion stays in `/docs cleanup --yes`.
 3. All mutations go through `knowledge.WithBundleLock` (`docs/.okf.lock`, flock-style).
 4. Worker drains on `Agent.Shutdown()` — drops queued items, finishes the current one.
 

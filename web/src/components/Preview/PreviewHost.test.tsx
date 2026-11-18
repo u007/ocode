@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../api/client";
 import PreviewHost from "./PreviewHost";
-import { loadSidebarPreviewState } from "./sidebarPreviewState";
+import { loadSidebarPreviewState, saveSidebarPreviewState } from "./sidebarPreviewState";
 import { isOutsideProjectRoot } from "./outsideRootAccess";
 import { readViewerState, resetViewerStates } from "../../lib/viewerContext";
 
@@ -61,14 +61,16 @@ vi.mock("../Files/FileEditor", () => ({ default: () => <div data-testid="file-ed
 vi.mock("./PreviewSurface", () => ({
   default: ({
     path,
+    kind,
     page,
     projectRoot,
     revision,
     followTail,
-  }: { path: string; page: number; projectRoot?: string; revision?: number; followTail?: boolean }) => (
+  }: { path: string; kind?: string; page: number; projectRoot?: string; revision?: number; followTail?: boolean }) => (
     <div
       data-testid="preview-surface"
       data-path={path}
+      data-kind={kind ?? ""}
       data-root={projectRoot ?? ""}
       data-page={String(page)}
       data-revision={revision === undefined ? "none" : String(revision)}
@@ -598,5 +600,37 @@ describe("PreviewHost viewer report", () => {
 
     view.unmount();
     expect(readViewerState("v1")).toBeNull();
+  });
+});
+
+describe("PreviewHost restored doc kind", () => {
+  // A doc persisted by an older build carries the kind it resolved THEN. `.html`
+  // was stored as "text" (the mapping was missing the extension), so restoring
+  // it verbatim kept showing the markup as source until the file was reopened.
+  it("re-resolves the kind from the path instead of trusting the stored one", async () => {
+    saveSidebarPreviewState("side:chat:html", {
+      surface: "preview",
+      path: "mockups/page.html",
+      kind: "text",
+      projectRoot: "/proj",
+    });
+    render(<PreviewHost stateKey="side:chat:html" projectRoot="/proj" request={null} nonce={0} />);
+    const surface = await screen.findByTestId("preview-surface");
+    expect(surface.getAttribute("data-path")).toBe("mockups/page.html");
+    expect(surface.getAttribute("data-kind")).toBe("html");
+  });
+
+  // The stored kind is still the fallback for a path the resolver cannot
+  // classify, so an unusual persisted entry does not lose its renderer.
+  it("keeps the stored kind when the path is non-previewable", async () => {
+    saveSidebarPreviewState("side:chat:bin", {
+      surface: "preview",
+      path: "assets/blob.bin",
+      kind: "image",
+      projectRoot: "/proj",
+    });
+    render(<PreviewHost stateKey="side:chat:bin" projectRoot="/proj" request={null} nonce={0} />);
+    const surface = await screen.findByTestId("preview-surface");
+    expect(surface.getAttribute("data-kind")).toBe("image");
   });
 });

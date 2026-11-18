@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-15T17:17:52Z
+timestamp: 2026-11-18T12:21:17Z
 ---
 ## Decision
 
@@ -99,6 +99,8 @@ These route through the auto-permission judge when `auto` is on, else a human pr
 
 Sandbox is **write-integrity only**, not confidentiality. Reads, exec, and network egress stay open. A sandboxed `python`/`node` can still read `.env`, `~/.ssh`, `auth.json` and POST them anywhere. See `architecture/shell-sandbox-integrity-only-mode.md` for the full security model.
 
+The deterministic guards every mode shares (unknown-tool rejection before the permission layer, no stat-based access decision outside the read-target gate, a nonexistent path inside an allowed root staying allowed for non-read tools, and the read-target check running first) are anchored on [Auto-Permission Enforced Categories → Deterministic guards before any judge](concepts/auto-permission-enforced-categories.md#deterministic-guards-before-any-judge-unknown-tools-path-scope).
+
 ## Platform support
 
 | Platform | Backend | Status |
@@ -112,7 +114,7 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 ## Code references
 
 - Mode constants: `internal/agent/permissions.go:42-52`
-- `Decide` (whole function): `internal/agent/permissions.go:2091-2597`
+- `Decide` (whole function): `internal/agent/permissions.go:2104-2622`
 - `persistPermissions`: `internal/tui/model.go:15691`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
 - `runSandboxCmd`: `internal/tui/commands.go:1112`

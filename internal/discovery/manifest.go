@@ -335,6 +335,15 @@ var localManifests = []ServerManifest{
 	qwen38Manifest("linux", "amd64",
 		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-ubuntu-x64.tar.gz",
 		"f1994e1d9904f318c8347b000e7ef5dfd49fa4a24de044887da85d9bbfe84811"),
+	qwen06bManifest("darwin", "arm64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-macos-arm64.tar.gz",
+		"3784919bd0ebde85854d16efbf8b2240403358965d61ae8f7e2743cf4763a818"),
+	qwen06bManifest("darwin", "amd64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-macos-x64.tar.gz",
+		"6271bffb4aa142351f63fff1cb8e42bd16e7b9877f2b5bc5e49037f91f3f0897"),
+	qwen06bManifest("linux", "amd64",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-ubuntu-x64.tar.gz",
+		"f1994e1d9904f318c8347b000e7ef5dfd49fa4a24de044887da85d9bbfe84811"),
 }
 
 // qwen38Manifest builds the per-platform Qwen3.8-4B-Distill manifest (Q4_K_M GGUF).
@@ -353,6 +362,34 @@ func qwen38Manifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
 		},
 		LaunchArgv: []string{"{bin}/llama-b9777/llama-server",
 			"-m", "{bin}/qwen3.8-4b-distill-q4_k_m.gguf",
+			"--port", "{port}",
+			"--parallel", "{parallel}",
+			"--ctx-size", "{ctx}",
+			"--host", "127.0.0.1"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
+	}
+}
+
+// qwen06bManifest builds the per-platform Qwen3-0.6B manifest (Q8_0 GGUF).
+// Shared helper so SHA or LaunchArgv bumps require one edit, not three.
+// The model artifact is Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.gguf; the SHA is
+// the Hugging Face LFS oid of the file. llama.cpp reports the GGUF path in
+// /v1/models, so ExpectedServeID() resolves to the Dest basename.
+func qwen06bManifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
+	return ServerManifest{
+		OS: goos, Arch: goarch,
+		ModelID: "local/qwen3-0.6b-q8", Kind: "chat", Backend: BackendLlamaCpp,
+		Artifacts: []Artifact{
+			{URL: llamaURL, SHA256: llamaSHA, Dest: "llama-server", Exec: true, Archive: ArchiveGZ},
+			{
+				URL:    "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+				SHA256: "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+				Dest:   "qwen3-0.6b-q8_0.gguf",
+			},
+		},
+		LaunchArgv: []string{"{bin}/llama-b9777/llama-server",
+			"-m", "{bin}/qwen3-0.6b-q8_0.gguf",
 			"--port", "{port}",
 			"--parallel", "{parallel}",
 			"--ctx-size", "{ctx}",

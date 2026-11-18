@@ -11,6 +11,20 @@ if (typeof HTMLElement !== "undefined" && !HTMLElement.prototype.scrollIntoView)
   });
 }
 
+// jsdom's Blob has no arrayBuffer(), but the desktop save path slices a Blob and
+// awaits arrayBuffer() (web/src/lib/wails.ts). Real browsers have it; without
+// this, any save test that materializes a Blob throws instead of chunking it.
+if (typeof Blob !== "undefined" && typeof Blob.prototype.arrayBuffer !== "function") {
+  Blob.prototype.arrayBuffer = function arrayBuffer(this: Blob): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error ?? new Error("Blob read failed"));
+      reader.readAsArrayBuffer(this);
+    });
+  };
+}
+
 // jsdom ships no matchMedia, but real code calls it on first render (the
 // `useIsMobile` breakpoint hook used by App and the Pulse assistant window, and
 // media-query reads in theme/speech code). Without a default, mounting any of

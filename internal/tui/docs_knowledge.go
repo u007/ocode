@@ -51,9 +51,19 @@ func (m *model) docsUpdate(focus string) string {
 	return "Maintenance pass queued. Check /docs status for updates."
 }
 
-// docsCleanup delegates to the shared commandctx.DocsCleanup.
+// docsCleanup delegates to the shared commandctx.DocsCleanup. With confirm=false
+// it dispatches the LLM cleanup audit to the context agent (the same pass the
+// server returns as `cleanup_prompt` for the web client); confirm=true deletes
+// the docs already marked deprecated.
 func (m *model) docsCleanup(confirm bool) string {
-	return commandctx.DocsCleanup(m.workDirWithDefault(), confirm)
+	if m.agent == nil {
+		return "Error: no active agent"
+	}
+	text, prompt := commandctx.DocsCleanup(m.workDirWithDefault(), confirm)
+	if prompt != "" {
+		return text + "\n" + m.dispatchContextAgent(prompt)
+	}
+	return text
 }
 
 // docsStatus delegates to the shared commandctx.DocsStatus.

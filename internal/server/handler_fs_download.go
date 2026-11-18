@@ -19,9 +19,11 @@ import (
 )
 
 // fsDownloadMaxBytes caps one locally-downloaded file. The bytes are streamed,
-// so the cap bounds transfer time rather than memory; it mirrors the local
-// upload cap. A var so a test can lower it.
-var fsDownloadMaxBytes int64 = 512 << 20
+// so the cap bounds transfer time rather than memory; 2 GiB matches the
+// desktop save cap so a desktop download of a large file is not refused
+// server-side. Upload and remote caps are unchanged. A var so a test can
+// lower it.
+var fsDownloadMaxBytes int64 = 2 << 30
 
 // fsDownloadRemoteMaxBytes mirrors the remote upload cap: the bytes cross an ssh
 // stdout pipe and occupy one long-running exec slot for their duration. A var
@@ -91,6 +93,8 @@ func (h *Handler) fsDownloadLocal(w http.ResponseWriter, r *http.Request) {
 	}()
 	writeDownloadHeaders(w, filepath.Base(filepath.Clean(p)), info.Size())
 	w.WriteHeader(http.StatusOK)
+	// Streaming contract: the 2 GiB cap bounds transfer time, never memory.
+	// Do not reintroduce ReadAll / a bytes.Buffer here.
 	if _, copyErr := io.Copy(w, f); copyErr != nil {
 		// Headers are already out, so the status cannot change; the short body
 		// is what tells the client the transfer failed.

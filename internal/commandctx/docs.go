@@ -95,17 +95,40 @@ func docsReAudit(bundle *knowledge.Bundle) string {
 	return fmt.Sprintf("Knowledge bundle re-audited at `%s`.\n- Conforming docs: %d\n- Non-conforming: %d\n- Deprecated: %d\n\nIndex has been regenerated.", bundle.Root, conforming, unclassified, deprecated)
 }
 
-// DocsCleanup lists deprecated docs; with confirm=true it deletes them under
-// the bundle lock, appends deletion log entries, and regenerates the index.
-func DocsCleanup(workDir string, confirm bool) string {
+// docsCleanupPrompt is the context-agent audit prompt for /docs cleanup. The
+// agent decides what is stale, duplicated, superseded or orphaned; it only
+// deprecates, because deleting stays a human-confirmed step.
+const docsCleanupPrompt = `Audit this project's OKF knowledge bundle (docs/) for cleanup. If you are the main agent, dispatch this audit to the "context" sub-agent (task agent=context) and report its result.
+
+1. Read docs/index.md, then use doc_search and doc_get to review the bundle.
+2. Find documents that are:
+   - duplicated: two or more docs cover the same topic or decision
+   - stale: describes code, files or behavior that no longer exists — verify against the source first
+   - superseded: replaced by a newer doc or decision
+   - orphaned: no longer about anything in the current codebase
+3. Do not deprecate a document unless you are confident it is redundant or obsolete. When in doubt, keep it.
+4. For each document to remove, call doc_deprecate with a one-line reason: what supersedes it or why it is stale. If duplicates should be merged, write the surviving doc with doc_write first, then deprecate the others.
+5. Never delete a file and never use a shell rm. Deletion happens afterwards via "/docs cleanup --yes".
+6. Report the deprecated docs (path + reason), any candidates you kept, and remind the user to run "/docs cleanup --yes" to delete them.`
+
+// DocsCleanup returns the human-readable result plus, when confirm is false,
+// the context-agent cleanup-audit prompt the caller should dispatch (the TUI
+// sends it through dispatchContextAgent; the server returns it as
+// `cleanup_prompt` so the web client can send it as a normal turn).
+//
+// The audit itself is an LLM pass, never a preset list: the context agent
+// reviews the bundle and deprecates what is stale, duplicated, superseded or
+// orphaned. With confirm=true it deletes every doc already marked deprecated
+// under the bundle lock, appends deletion log entries, and regenerates the index.
+func DocsCleanup(workDir string, confirm bool) (text string, cleanupPrompt string) {
 	bundle, ok := knowledge.DetectBundle(workDir)
 	if !ok {
-		return "No OKF knowledge bundle found. Run /docs init first."
+		return "No OKF knowledge bundle found. Run /docs init first.", ""
 	}
 
 	allDocs, err := bundle.Docs()
 	if err != nil {
-		return fmt.Sprintf("Error reading bundle: %v", err)
+		return fmt.Sprintf("Error reading bundle: %v", err), ""
 	}
 
 	var deprecated []*knowledge.Doc
@@ -118,24 +141,13 @@ func DocsCleanup(workDir string, confirm bool) string {
 		return deprecated[i].Path < deprecated[j].Path
 	})
 
-	if len(deprecated) == 0 {
-		return "No deprecated documents to clean up."
-	}
-
-	// Build a summary for display.
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Found %d deprecated document(s):\n\n", len(deprecated)))
-	for _, d := range deprecated {
-		b.WriteString(fmt.Sprintf("- `%s`", d.Path))
-		if d.DeprecatedReason != "" {
-			b.WriteString(fmt.Sprintf(" — %s", d.DeprecatedReason))
-		}
-		b.WriteString("\n")
-	}
-
 	if !confirm {
-		b.WriteString(fmt.Sprintf("\nRun `/docs cleanup --yes` to delete these %d file(s). This cannot be undone.", len(deprecated)))
-		return b.String()
+		// The LLM decides what to deprecate; deletion stays human-gated.
+		return "Auditing the knowledge bundle for cleanup candidates...", docsCleanupPrompt
+	}
+
+	if len(deprecated) == 0 {
+		return "No deprecated documents to clean up.", ""
 	}
 
 	// Perform deletion under lock.
@@ -160,10 +172,10 @@ func DocsCleanup(workDir string, confirm bool) string {
 		return nil
 	})
 	if err != nil {
-		return fmt.Sprintf("Error during cleanup: %v", err)
+		return fmt.Sprintf("Error during cleanup: %v", err), ""
 	}
 
-	return fmt.Sprintf("Deleted %d deprecated document(s). Index and log updated.", deleted)
+	return fmt.Sprintf("Deleted %d deprecated document(s). Index and log updated.", deleted), ""
 }
 
 // DocsStatus returns rich status about the knowledge system, mirroring the

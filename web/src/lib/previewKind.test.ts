@@ -22,6 +22,12 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("flow.mmd")).toBe("mermaid");
     expect(previewKindForPath("notes.md")).toBe("markdown");
     expect(previewKindForPath("docs/page.mdx")).toBe("markdown");
+    // HTML keeps its own kind (HtmlViewer) rather than degrading to text: the
+    // sidebar PreviewHost / PreviewTabPage have no editor and no live content
+    // prop, so "text" showed the source instead of a rendered preview.
+    expect(previewKindForPath("index.html")).toBe("html");
+    expect(previewKindForPath("mockups/page.htm")).toBe("html");
+    expect(previewKindForPath("PAGE.HTML")).toBe("html");
     expect(previewKindForPath("main.go")).toBe("text");
     expect(previewKindForPath("photo.PNG")).toBe("image");
     expect(previewKindForPath("budget.xlsx")).toBe("excel");
@@ -248,6 +254,7 @@ describe("resolvePreviewDoc", () => {
     expect(resolvePreviewDoc("report.pdf")).toEqual({ kind: "pdf", unsupported: null });
     expect(resolvePreviewDoc("budget.xlsx")).toEqual({ kind: "excel", unsupported: null });
     expect(resolvePreviewDoc("macros.xlsm")).toEqual({ kind: "excel", unsupported: null });
+    expect(resolvePreviewDoc("mockups/page.html")).toEqual({ kind: "html", unsupported: null });
   });
 
   it("falls unknown-but-textual requests through to the text editor", () => {

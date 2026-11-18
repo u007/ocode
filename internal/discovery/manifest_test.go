@@ -140,6 +140,55 @@ func TestBonsaiManifestResolvesOnEveryDeclaredPlatform(t *testing.T) {
 	}
 }
 
+// TestQwen06BQ8ManifestResolvesOnEveryDeclaredPlatform pins the bundled
+// Qwen3-0.6B catalog entry: three llama.cpp rows, the HF LFS-pinned GGUF SHA,
+// and the llama-server argv referencing the same Dest the downloader writes.
+func TestQwen06BQ8ManifestResolvesOnEveryDeclaredPlatform(t *testing.T) {
+	const wantSHA = "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+	cases := []struct{ os, arch string }{
+		{"darwin", "arm64"},
+		{"darwin", "amd64"},
+		{"linux", "amd64"},
+	}
+	for _, c := range cases {
+		found := false
+		for _, m := range localManifests {
+			if m.ModelID != "local/qwen3-0.6b-q8" || m.OS != c.os || m.Arch != c.arch {
+				continue
+			}
+			found = true
+			if m.Kind != "chat" {
+				t.Errorf("%s/%s: Kind = %q, want \"chat\"", c.os, c.arch, m.Kind)
+			}
+			if m.Backend != BackendLlamaCpp {
+				t.Errorf("%s/%s: Backend = %q, want %q", c.os, c.arch, m.Backend, BackendLlamaCpp)
+			}
+			if m.ExpectedServeID() != "qwen3-0.6b-q8_0.gguf" {
+				t.Errorf("%s/%s: ExpectedServeID = %q, want qwen3-0.6b-q8_0.gguf", c.os, c.arch, m.ExpectedServeID())
+			}
+			var modelOK bool
+			for _, a := range m.Artifacts {
+				if a.Dest == "qwen3-0.6b-q8_0.gguf" {
+					modelOK = true
+					if a.SHA256 != wantSHA {
+						t.Errorf("%s/%s: model SHA256 = %q, want HF LFS oid %q", c.os, c.arch, a.SHA256, wantSHA)
+					}
+				}
+			}
+			if !modelOK {
+				t.Errorf("%s/%s: no qwen3-0.6b-q8_0.gguf model artifact", c.os, c.arch)
+			}
+			argv := strings.Join(m.LaunchArgv, " ")
+			if !strings.Contains(argv, "qwen3-0.6b-q8_0.gguf") || !strings.Contains(argv, "{ctx}") {
+				t.Errorf("%s/%s: LaunchArgv missing model filename or {ctx}: %v", c.os, c.arch, m.LaunchArgv)
+			}
+		}
+		if !found {
+			t.Errorf("no local/qwen3-0.6b-q8 manifest for %s/%s", c.os, c.arch)
+		}
+	}
+}
+
 // TestManifestForModelIgnoresHostForDivergentBackends documents the exact bug
 // ChatManifestForHost was added to fix: ManifestForModel does a bare ModelID
 // match with no OS/Arch filter, so for a model id with per-platform entries
@@ -218,4 +267,77 @@ func TestModelMatches(t *testing.T) {
 	if modelMatches(nil, "anything") {
 		t.Fatalf("empty served list must not match")
 	}
+}
+
+// The llama-server artifact is shared by every llama.cpp chat model on a given
+// platform: one b9777 tarball and SHA per (os, arch). A copy/paste slip in a row
+// (an arm64 URL on the amd64 row) is otherwise caught only at download time by
+// the SHA check, so pin the platform pairing and cross-check it against the
+// sibling model that already ships that build.
+func TestQwen06BQ8ManifestPinsLlamaServerArtifact(t *testing.T) {
+	wantTarball := map[string]string{
+		"darwin/arm64": "llama-b9777-bin-macos-arm64.tar.gz",
+		"darwin/amd64": "llama-b9777-bin-macos-x64.tar.gz",
+		"linux/amd64":  "llama-b9777-bin-ubuntu-x64.tar.gz",
+	}
+	sibling := map[string]Artifact{}
+	for _, m := range localManifests {
+		if m.ModelID != "local/qwen3.8-4b-distill" {
+			continue
+		}
+		if a, ok := llamaServerArtifact(m); ok {
+			sibling[m.OS+"/"+m.Arch] = a
+		}
+	}
+	if len(sibling) == 0 {
+		t.Fatal("no local/qwen3.8-4b-distill llama-server artifact to compare against")
+	}
+	seen := map[string]bool{}
+	for _, m := range localManifests {
+		if m.ModelID != "local/qwen3-0.6b-q8" {
+			continue
+		}
+		plat := m.OS + "/" + m.Arch
+		seen[plat] = true
+		want, known := wantTarball[plat]
+		if !known {
+			t.Errorf("%s: unexpected platform", plat)
+			continue
+		}
+		a, ok := llamaServerArtifact(m)
+		if !ok {
+			t.Errorf("%s: no llama-server artifact", plat)
+			continue
+		}
+		if !strings.HasSuffix(a.URL, "/"+want) {
+			t.Errorf("%s: llama-server URL = %q, want the %s tarball", plat, a.URL, want)
+		}
+		if !a.Exec || a.Archive != ArchiveGZ {
+			t.Errorf("%s: llama-server artifact must be an executable gz archive (Exec=%v, Archive=%q)", plat, a.Exec, a.Archive)
+		}
+		if len(a.SHA256) != 64 || strings.Trim(a.SHA256, "0123456789abcdef") != "" {
+			t.Errorf("%s: llama-server SHA256 = %q, want 64 lowercase hex chars", plat, a.SHA256)
+		}
+		if sib, ok := sibling[plat]; ok && sib != a {
+			t.Errorf("%s: llama-server artifact %+v differs from the qwen3.8 row %+v; the same b9777 build must be shared", plat, a, sib)
+		}
+		if argv := strings.Join(m.LaunchArgv, " "); !strings.Contains(argv, "--parallel {parallel}") {
+			t.Errorf("%s: LaunchArgv must pass --parallel {parallel}: %v", plat, m.LaunchArgv)
+		}
+	}
+	for plat := range wantTarball {
+		if !seen[plat] {
+			t.Errorf("no local/qwen3-0.6b-q8 row for %s", plat)
+		}
+	}
+}
+
+// llamaServerArtifact returns the manifest's llama-server binary artifact.
+func llamaServerArtifact(m ServerManifest) (Artifact, bool) {
+	for _, a := range m.Artifacts {
+		if a.Dest == "llama-server" {
+			return a, true
+		}
+	}
+	return Artifact{}, false
 }

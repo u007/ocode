@@ -460,7 +460,7 @@ export interface CommandContext {
     getDocsStatus?: (project?: string, host?: string) => Promise<{ enabled: boolean; text: string }>;
     docsInit?: (project?: string, host?: string) => Promise<{ result: string; annotate_prompt?: string }>;
     docsUpdate?: (sessionId: string, focus: string, project?: string, host?: string) => Promise<{ result: string }>;
-    docsCleanup?: (confirm: boolean, project?: string, host?: string) => Promise<{ result: string }>;
+    docsCleanup?: (confirm: boolean, project?: string, host?: string) => Promise<{ result: string; cleanup_prompt?: string }>;
     getImageGenConfig?: () => Promise<import("../../api/client").ImageGenConfig>;
     setImageGenConfig?: (cfg: import("../../api/client").ImageGenConfig) => Promise<unknown>;
     getDiscoveryConfig?: (host?: string) => Promise<import("../../api/client").DiscoveryConfig>;
@@ -2686,7 +2686,17 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
     if (!ctx.api.docsCleanup) return unsupported("/docs cleanup");
     const confirm = parts.slice(1).some((a) => a === "--yes" || a === "-y");
     try {
-      return ok((await ctx.api.docsCleanup(confirm, ctx.projectPath, ctx.host)).result);
+      const r = await ctx.api.docsCleanup(confirm, ctx.projectPath, ctx.host);
+      if (r.cleanup_prompt) {
+        // The audit is an LLM pass: dispatch it as a normal turn, mirroring the
+        // TUI's dispatchContextAgent. `--yes` stays a local, deterministic delete.
+        return {
+          handled: true,
+          messages: [ok(r.result).messages![0]],
+          prompt: r.cleanup_prompt,
+        };
+      }
+      return ok(r.result);
     } catch (err) {
       return fail("/docs", err);
     }

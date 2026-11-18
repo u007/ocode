@@ -54,9 +54,9 @@ export interface PreviewSurfaceProps {
   slide?: number;
   onSlideChange?: (s: number) => void;
   onOpenFile?: (p: string) => void;
-  /** Live editor source for a markdown preview: the Files tab's Split view
-   *  passes the current editor content so the rendered pane tracks unsaved
-   *  edits. Only `markdown` consumes it; every other kind reads from disk. */
+  /** Live editor source: the Files tab's Split view passes the current editor
+   *  content so the rendered pane tracks unsaved edits. Consumed by `markdown`
+   *  and `html`; every other kind reads from disk. */
   content?: string;
   /** False while the owning pane is hidden. Passed to viewers that must react
    *  to visibility (PDF finds/rendered window, media playback). Defaults to
@@ -65,8 +65,8 @@ export interface PreviewSurfaceProps {
   active?: boolean;
   /** Live-refresh revision from the sidebar PreviewHost: bumped whenever the
    *  active session's tool stream mutates this file. Text-surface viewers
-   *  (markdown/text/mmd) refetch when it changes; other viewers ignore it.
-   *  Omitted (undefined) by hosts without live refresh (Files tab, Preview
+   *  (markdown/text/mmd) plus html refetch when it changes; other viewers ignore
+   *  it. Omitted (undefined) by hosts without live refresh (Files tab, Preview
    *  tab page) — those keep the fetch-once behaviour. */
   revision?: number;
   /** True while the driving chat turn is running. Text-surface viewers use
@@ -124,7 +124,9 @@ export default function PreviewSurface({
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}
         {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
-        {kind === "html" && <HtmlViewer path={path} content={content ?? ""} />}
+        {/* `content` stays undefined for the sidebar/Preview-tab hosts: HtmlViewer
+            then fetches the file itself (the Files tab always passes live text). */}
+        {kind === "html" && <HtmlViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} revision={revision} />}
         {kind === "json" && <JsonViewer content={content ?? ""} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
         {kind === "sqlite" && <SQLiteViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}

@@ -562,7 +562,7 @@ An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that the
 | `/docs init` | Create bundle marker (`docs/index.md` + `docs/log.md`) + dispatch the `context` subagent to annotate existing docs |
 | `/docs status` | Show bundle presence, doc counts, last log entry |
 | `/docs update [focus]` | Force a maintenance pass (scan for staleness, duplicates) |
-| `/docs cleanup [--yes]` | List deprecated docs; `--yes` confirms deletion |
+| `/docs cleanup [--yes]` | Dispatch the `context` subagent to audit for stale/duplicate/orphan docs and deprecate them; `--yes` then deletes the deprecated files |
 
 Knowledge curation happens via the dedicated `context` subagent (the sole automated writer), which verifies doc claims against code before writing and deprecates rather than deletes. The main agent never gains `doc_write` or `doc_deprecate` tools. Docs: `docs/knowledge-bundle.md`, `docs/log.md`.
 

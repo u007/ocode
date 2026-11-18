@@ -13,9 +13,11 @@ import { apiPath } from "../api/client";
 // A narrow text allowlist used to make `.sql`, `.java`, `.sh`, `Makefile`, …
 // render as "Format Not Supported"; that was the bug.
 //
-// The specialized entries must stay in sync with HandleFileRaw.previewRawTypes
-// and the preview_open tool's previewOpenKinds (the renderers that read raw
-// bytes).
+// The specialized entries must stay in sync with the preview_open tool's
+// previewOpenKinds and with HandleFileRaw.previewRawTypes, but only the
+// renderers that read RAW BYTES belong in previewRawTypes: it is served as a
+// document at the ocode origin, so `html` (and `text`) are deliberately absent
+// — they render from a sandboxed srcDoc iframe instead.
 
 export const PREVIEW_OPEN_SENTINEL = "PREVIEW_OPEN:";
 export const OPEN_PREVIEW_EVENT = "ocode:open-preview";
@@ -77,6 +79,12 @@ const kindByExt: Record<string, PreviewKind> = {
   ".ogv": "video",
   ".mov": "video",
   ".mmd": "mermaid",
+  // HTML is a split-preview format in the Files tab (Edit/Preview/Split, see
+  // FileTabContent) AND a specialized sidebar renderer (HtmlViewer). It must be
+  // listed here or every non-Files-tab host (sidebar PreviewHost, PreviewTabPage,
+  // the preview_open directive) falls back to TextViewer and shows the source.
+  ".html": "html",
+  ".htm": "html",
   ".md": "markdown",
   ".markdown": "markdown",
   // MDX is markdown-source-plus-JSX. The preview renders it as Markdown
@@ -203,7 +211,8 @@ export function isMarkdownPath(path: string): boolean {
  * True for an HTML document (`.html` / `.htm`). HTML is NOT preview-only —
  * it stays editable in Monaco — but the Files tab gives it an Edit/Preview/Split
  * mode switch (default: Edit) because a rendered preview is useful alongside
- * the source. See `FileTabContent`.
+ * the source. See `FileTabContent`. It is also in `kindByExt`, so the sidebar
+ * PreviewHost / PreviewTabPage render it through HtmlViewer.
  */
 export function isHtmlPath(path: string): boolean {
   const ext = extensionOf(path);

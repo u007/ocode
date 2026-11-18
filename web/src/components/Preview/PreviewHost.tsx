@@ -38,6 +38,18 @@ interface Doc {
 type PendingGrant = Doc & { page: number };
 
 /**
+ * The kind a restored sidebar doc should render as. It is re-resolved from the
+ * path because a doc persisted by an older build can carry a kind the current
+ * mapping disagrees with: `.html` was stored as `"text"`, so restoring it
+ * verbatim showed the markup as source until the file was reopened. The stored
+ * kind is only a fallback for a path the resolver cannot classify.
+ */
+function restoredPreviewKind(initial: SidebarPreviewState | null | undefined): Doc["kind"] | null {
+  if (!initial || initial.surface !== "preview" || !initial.path) return null;
+  return previewKindForPath(initial.path) ?? initial.kind ?? null;
+}
+
+/**
  * Sidebar PreviewHost: the side panel's two-tab shell.
  * - Browser tab: the existing BrowserPanel (side mode) untouched — web
  *   browsing keeps working exactly like before.
@@ -87,12 +99,13 @@ export default function PreviewHost({
   const initial = initialRef.current;
 
   const [surface, setSurface] = useState<Surface>(initial?.surface === "preview" ? "preview" : "browser");
-  const restoringDoc = initial?.surface === "preview" && !!initial.path && !!initial.kind;
+  const restoredKind = restoredPreviewKind(initial);
+  const restoringDoc = restoredKind !== null;
   const [doc, setDoc] = useState<Doc | null>(() =>
-    initial?.surface === "preview" && initial.path && initial.kind
+    restoredKind && initial?.path
       ? {
           path: initial.path,
-          kind: initial.kind,
+          kind: restoredKind,
           projectRoot: initial.projectRoot,
           projectHost: initial.projectHost,
           grantedFrom: initial.grantedFrom,
@@ -120,8 +133,8 @@ export default function PreviewHost({
   const [osOpenState, setOsOpenState] = useState<string | null>(null);
   const lastNonceRef = useRef(0);
   // Live-refresh revision: bumped whenever the active session's tool stream
-  // mutates the previewed file. Viewers (markdown/text/mmd) refetch on change;
-  // PDF/office viewers re-render from their own sources downstream.
+  // mutates the previewed file. Viewers (markdown/text/mmd/html) refetch on
+  // change; PDF/office viewers re-render from their own sources downstream.
   const [revision, setRevision] = useState(0);
   const revisionRef = useRef(0);
   // Whether a turn is running (tool activity implies one) — viewers use this

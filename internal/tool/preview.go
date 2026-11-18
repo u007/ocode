@@ -33,6 +33,10 @@ var previewOpenKinds = map[string]string{
 	".webp": "image",
 	".svg":  "image",
 	".mmd":  "mermaid",
+	// HTML: rendered by HtmlViewer in the sidebar (sandboxed iframe). It reads
+	// through the TEXT content endpoint, so it needs no previewRawTypes entry.
+	".html": "html",
+	".htm":  "html",
 	".md":   "text",
 	// Markdown family (the client resolves the preview kind from the extension;
 	// .mdx renders through MarkdownViewer and highlights as Monaco `mdx`).

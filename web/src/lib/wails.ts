@@ -1,3 +1,5 @@
+import { uuidv4 } from "./dbIds";
+
 type WailsWindow = Window & {
   _wails?: {
     invoke?: (message: string) => void;
@@ -101,9 +103,17 @@ export function printDesktopDocument(html: string, target: Window = window): boo
 /**
  * Largest file saved through the desktop shell, in decoded bytes. The shell
  * enforces the same limit (cmd/ocode-desktop/save_file.go, desktopSaveMaxBytes);
- * this is the SPA's guard before the bytes are base64-encoded into one bridge string.
+ * keep them equal. The shell streams the bytes to a temp file in bounded
+ * chunks, so this cap does not multiply the webview's memory.
  */
-export const MAX_DESKTOP_SAVE_BYTES = 64 * 1024 * 1024;
+export const MAX_DESKTOP_SAVE_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * Decoded bytes per save chunk. Each chunk message lands on the bridge as
+ * ~11 MB of JSON, small enough for the webview's IPC path; the shell writes
+ * each chunk to the temp file as it arrives.
+ */
+export const SAVE_CHUNK_BYTES = 8 * 1024 * 1024;
 
 /** Throws when a desktop save of `bytes` decoded bytes would exceed MAX_DESKTOP_SAVE_BYTES. */
 export function assertDesktopSaveSize(name: string, bytes: number): void {
@@ -118,25 +128,133 @@ export function isDesktopShell(target: Window = window): boolean {
 }
 
 /**
- * Save bytes through the desktop shell's native save panel. WKWebView drops a
- * blob `<a download>` click without any error, so a desktop save has to go
- * through the shell (cmd/ocode-desktop/save_file.go). The shell sends no reply:
- * a return means the request was posted, while a refusal or a failed write is
- * logged and shown by the shell.
+ * Send a Blob to the desktop shell as a stream of start → chunk* → end
+ * messages; the shell appends the chunks to a temp file and shows the native
+ * save panel when the transfer completes. WKWebView drops a blob `<a download>`
+ * click without any error (cmd/ocode-desktop/save_file.go), so a desktop save
+ * has to go through the shell. Chunks stream via Blob slices, so peak memory
+ * stays ~SAVE_CHUNK_BYTES regardless of file size; the bytes never exist as
+ * one string.
+ *
+ * The bridge has no acknowledgement: this returns when the messages were
+ * posted, not when the shell accepted or wrote them. Refusals (bad nonce,
+ * over-cap chunk, a chunk arriving out of order) are only logged by the
+ * shell; a failed write is surfaced by the shell as a native error dialog.
  *
  * Throws when the page has no clipboard nonce (the shell refuses the save), when
- * the bridge is missing, or when the file exceeds MAX_DESKTOP_SAVE_BYTES. Nothing
- * is sent in those cases.
+ * the bridge goes missing mid-stream, or when the file exceeds
+ * MAX_DESKTOP_SAVE_BYTES. Nothing is sent in those cases (except that an
+ * interrupted stream leaves a dead session in the shell, which its stale-save
+ * reaper deletes).
  */
-export function saveDesktopFile(name: string, data: Uint8Array, target: Window = window): void {
+export async function saveDesktopBlob(name: string, blob: Blob, target: Window = window): Promise<void> {
   if (!clipboardNonce) {
     throw new Error(`save: ${name} not sent, the page has no desktop nonce`);
   }
-  assertDesktopSaveSize(name, data.byteLength);
-  const body = JSON.stringify({ name, data: bytesToBase64(data) });
-  if (!invokeWails(`ocode:save-file:${clipboardNonce}:${body}`, target)) {
+  assertDesktopSaveSize(name, blob.size);
+  const id = uuidv4();
+  const start = JSON.stringify({ id, name, size: blob.size });
+  if (!invokeWails(`ocode:save-file-start:${clipboardNonce}:${start}`, target)) {
     throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
   }
+  for (let offset = 0; offset < blob.size; offset += SAVE_CHUNK_BYTES) {
+    const end = Math.min(offset + SAVE_CHUNK_BYTES, blob.size);
+    const bytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
+    const body = JSON.stringify({ id, seq: offset / SAVE_CHUNK_BYTES, data: bytesToBase64(bytes) });
+    if (!invokeWails(`ocode:save-file-chunk:${clipboardNonce}:${body}`, target)) {
+      throw new Error(`save: ${name} interrupted, the desktop bridge is missing`);
+    }
+  }
+  if (!invokeWails(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, target)) {
+    throw new Error(`save: ${name} not finished, the desktop bridge is missing`);
+  }
+}
+
+/**
+ * Stream a fetch Response body to the desktop shell, chunk by chunk. Used by
+ * the Files-tab download: the body is read with getReader() and forwarded in
+ * ~SAVE_CHUNK_BYTES pieces, so a multi-GB file never resides in the webview —
+ * the peak is ~one chunk, not ~the whole file. Requires a trustworthy
+ * Content-Length (the shell verifies the final byte count); callers fall back
+ * to saveDesktopBlob when the stream or the length is missing.
+ *
+ * As with saveDesktopBlob, the bridge has no acknowledgement; a mid-stream
+ * refusal is only logged by the shell. Throws when the stream ends early or
+ * runs long (the shell session is then abandoned to its stale-save reaper).
+ */
+export async function saveDesktopStream(
+  name: string,
+  body: ReadableStream<Uint8Array>,
+  size: number,
+  target: Window = window,
+): Promise<void> {
+  if (!clipboardNonce) {
+    throw new Error(`save: ${name} not sent, the page has no desktop nonce`);
+  }
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`save: ${name} has no usable Content-Length`);
+  }
+  assertDesktopSaveSize(name, size);
+  const id = uuidv4();
+  const start = JSON.stringify({ id, name, size });
+  if (!invokeWails(`ocode:save-file-start:${clipboardNonce}:${start}`, target)) {
+    throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
+  }
+  const sendChunk = async (bytes: Uint8Array, seq: number): Promise<void> => {
+    const body = JSON.stringify({ id, seq, data: bytesToBase64(bytes) });
+    if (!invokeWails(`ocode:save-file-chunk:${clipboardNonce}:${body}`, target)) {
+      throw new Error(`save: ${name} interrupted, the desktop bridge is missing`);
+    }
+  };
+
+  const reader = body.getReader();
+  try {
+    let pending: Uint8Array[] = [];
+    let buffered = 0;
+    let received = 0;
+    let seq = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      received += value.byteLength;
+      if (received > size) {
+        throw new Error(`save: ${name} exceeded the declared ${size} bytes`);
+      }
+      pending.push(value);
+      buffered += value.byteLength;
+      if (buffered >= SAVE_CHUNK_BYTES) {
+        await sendChunk(concatBytes(pending, buffered), seq);
+        seq += 1;
+        pending = [];
+        buffered = 0;
+      }
+    }
+    if (buffered > 0) {
+      await sendChunk(concatBytes(pending, buffered), seq);
+    }
+    if (received !== size) {
+      throw new Error(`save: ${name} ended at ${received} of ${size} bytes`);
+    }
+    if (!invokeWails(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, target)) {
+      throw new Error(`save: ${name} not finished, the desktop bridge is missing`);
+    }
+  } finally {
+    // Every exit path releases the response, or a failed download holds a
+    // WKWebView connection slot (~6 per origin) until GC.
+    await reader.cancel().catch(() => {});
+  }
+}
+
+/** Concatenate chunk slices into one array of exactly `total` bytes. */
+function concatBytes(parts: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
 }
 
 /** Base64 without spreading the whole array into one call (that overflows the stack for multi-MB files). */

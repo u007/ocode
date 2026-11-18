@@ -3,9 +3,9 @@ import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/re
 import FileTree, { dropDestination, transferHasFolder } from "./FileTree";
 
 const mocks = vi.hoisted(() => ({
-  fsDownload: vi.fn(),
+  fsDownloadStream: vi.fn(),
   fsUpload: vi.fn(),
-  saveBlobAsFile: vi.fn(),
+  saveResponseAsFile: vi.fn(),
   getPathsConfig: vi.fn(),
 }));
 
@@ -16,7 +16,7 @@ vi.mock("@/api/client", async () => {
     api: {
       ...actual.api,
       getPathsConfig: mocks.getPathsConfig,
-      fsDownload: mocks.fsDownload,
+      fsDownloadStream: mocks.fsDownloadStream,
       fsUpload: mocks.fsUpload,
     },
     apiPath: (p: string) => p,
@@ -24,7 +24,7 @@ vi.mock("@/api/client", async () => {
   };
 });
 
-vi.mock("@/lib/saveBlob", () => ({ saveBlobAsFile: mocks.saveBlobAsFile }));
+vi.mock("@/lib/saveBlob", () => ({ saveResponseAsFile: mocks.saveResponseAsFile }));
 
 // Stock shadcn Dialog (Radix portal + focus guards) deadlocks jsdom/React when
 // opened inside a test container; these tests never drive a dialog.
@@ -147,7 +147,7 @@ describe("FileTree download and drop", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getPathsConfig.mockResolvedValue({ extra_allowed_paths: [], upload_dir: "" });
-    mocks.fsDownload.mockResolvedValue(new Blob(["remote bytes"]));
+    mocks.fsDownloadStream.mockResolvedValue(new Response("remote bytes", { headers: { "Content-Length": "12" } }));
     mocks.fsUpload.mockResolvedValue({ success: true, path: "/proj/a.png" });
     fetchSpy = mockTree();
   });
@@ -182,16 +182,16 @@ describe("FileTree download and drop", () => {
       fireEvent.contextMenu(screen.getByText("a.ts"));
       fireEvent.click(await screen.findByRole("menuitem", { name: /^Download$/ }));
 
-      await waitFor(() => expect(mocks.saveBlobAsFile).toHaveBeenCalledTimes(1));
-      expect(mocks.fsDownload).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined);
-      const [blob, name] = mocks.saveBlobAsFile.mock.calls[0];
-      expect(blob).toBeInstanceOf(Blob);
+      await waitFor(() => expect(mocks.saveResponseAsFile).toHaveBeenCalledTimes(1));
+      expect(mocks.fsDownloadStream).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined);
+      const [response, name] = mocks.saveResponseAsFile.mock.calls[0];
+      expect(response).toBeInstanceOf(Response);
       expect(name).toBe("a.ts");
       await waitFor(() => expect(screen.getByText("Downloaded 1 file")).toBeTruthy());
     });
 
     it("reports a failed download and keeps the notice honest", async () => {
-      mocks.fsDownload.mockRejectedValueOnce(new Error("file is too large to download"));
+      mocks.fsDownloadStream.mockRejectedValueOnce(new Error("file is too large to download"));
       await renderTree();
       fireEvent.contextMenu(screen.getByText("a.ts"));
       fireEvent.click(await screen.findByRole("menuitem", { name: /^Download$/ }));
@@ -199,7 +199,7 @@ describe("FileTree download and drop", () => {
       await waitFor(() =>
         expect(screen.getByText("Downloaded 0 files — a.ts: file is too large to download")).toBeTruthy(),
       );
-      expect(mocks.saveBlobAsFile).not.toHaveBeenCalled();
+      expect(mocks.saveResponseAsFile).not.toHaveBeenCalled();
     });
 
     it("is offered from the columns view too", async () => {
@@ -208,7 +208,7 @@ describe("FileTree download and drop", () => {
       fireEvent.contextMenu(screen.getByText("a.ts"));
       fireEvent.click(await screen.findByRole("menuitem", { name: /^Download$/ }));
 
-      await waitFor(() => expect(mocks.fsDownload).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined));
+      await waitFor(() => expect(mocks.fsDownloadStream).toHaveBeenCalledWith("/proj/a.ts", "/proj", undefined));
     });
   });
 

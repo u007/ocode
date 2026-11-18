@@ -16,7 +16,7 @@ tags:
   - postmessage
   - keyboard
   - shortcuts
-timestamp: 2026-11-16T02:56:47Z
+timestamp: 2026-11-18T11:03:37Z
 ---
 # Preview find: shared FindBar, DOM and PDF engines, iframe agent
 
@@ -76,7 +76,7 @@ re-runs it. Nothing here is persisted — see Limits.
 Each viewer also puts a slim header row above its scroller with a
 `"Find in document"` button (`title="Find (Ctrl/⌘ F)"`), because the keyboard
 shortcut is not discoverable on its own and may be claimed by another surface:
-`MarkdownViewer.tsx:532`, `DocxViewer.tsx:101`, `HtmlViewer.tsx:64`,
+`MarkdownViewer.tsx:532`, `DocxViewer.tsx:101`, `HtmlViewer.tsx:142`,
 `PdfViewer.tsx:1164`.
 
 ## Engine A — DOM text (Markdown and Word)
@@ -163,14 +163,14 @@ engine, zoom and print/download lives in
 ## Engine C — HTML iframe (postMessage agent)
 
 The HTML preview renders in `sandbox="allow-scripts"`
-(`HtmlViewer.tsx:85`) **without** `allow-same-origin`, so it is an opaque origin
+(`HtmlViewer.tsx:170`) **without** `allow-same-origin`, so it is an opaque origin
 and the parent cannot read its DOM (`useIframeFind.ts:11-16`). Find therefore
 travels inside the document:
 
 - `htmlFindAgent()` (`htmlFindAgent.ts:29`) installs the agent;
   `buildHtmlFindSrcDoc` (`htmlFindAgent.ts:319`) serializes it with
   `htmlFindAgent.toString()` and injects it before `</body>` into the `srcDoc`
-  (`HtmlViewer.tsx:31`).
+  (`HtmlViewer.tsx:108`).
 - **The agent must be fully self-contained.** `htmlFindAgent.toString()` is the
   entire program that runs in the frame: any module-scope identifier (a shared
   constant, an imported helper) survives typechecking and becomes an undefined
@@ -242,7 +242,7 @@ gate shapes prevent that:
      try/catch — hover is a bonus, not a gate).
 
   Call sites: `MarkdownViewer.tsx:484-500` (gate `:488`), `DocxViewer.tsx:80-96`
-  (gate `:84`), `HtmlViewer.tsx:43-59` (gate `:47`).
+  (gate `:84`), `HtmlViewer.tsx:120-137` (gate `:124`).
 
 `isEditableTarget` (`findDom.ts:158`) keeps native browser find inside
 `input`/`textarea`/`select`/contenteditable. The visible per-viewer **Find**
@@ -285,7 +285,7 @@ Pick the engine by where the text lives:
   frame reports 0 matches and the bar shows `"…"` until
   `IFRAME_FIND_REPLY_TIMEOUT_MS` (1200 ms) stops the spinner
   (`useIframeFind.ts:8`). The parent does not fall back to text-mode find.
-- **MDX is rendered as Markdown** (`previewKind.ts:85` maps `.mdx` → markdown),
+- **MDX is rendered as Markdown** (`previewKind.ts:91` maps `.mdx` → markdown),
   so find matches the rendered prose, never unevaluated JSX. See
   [../gotchas/mdx-preview-not-evaluated.md](../gotchas/mdx-preview-not-evaluated.md).
 - **Word body only:** the index covers the rendered document body (tables and

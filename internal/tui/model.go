@@ -468,6 +468,13 @@ type docsInitFinishedMsg struct {
 	err  error  // non-nil when the operation failed
 }
 
+// docsCleanupFinishedMsg is emitted when an async /docs cleanup operation
+// completes. Like /docs init it runs off the update loop because the LLM audit
+// can take minutes.
+type docsCleanupFinishedMsg struct {
+	text string
+}
+
 // localModelActionMsg is emitted when an async /localmodel enable|limit
 // operation (spawn + health-poll, which can take minutes on a cold model
 // download) completes. Config-map mutation happens in the Update() handler
@@ -3932,6 +3939,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text = fmt.Sprintf("Error initializing bundle: %v", msg.err)
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		m.rerenderTranscriptAndMaybeScroll()
+	case docsCleanupFinishedMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
 	case localModelActionMsg:
 		m.applyLocalModelResult(msg)
@@ -10725,8 +10735,12 @@ func (m *model) handleDocsCmd(args []string) tea.Cmd {
 				break
 			}
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: m.docsCleanup(confirm)})
-		return nil
+		// The audit (confirm=false) dispatches the context agent, which can take
+		// minutes; keep it off the update loop like /docs init.
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Cleaning up the OKF knowledge bundle..."})
+		return func() tea.Msg {
+			return docsCleanupFinishedMsg{text: m.docsCleanup(confirm)}
+		}
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /docs [on|off|status|init|update|cleanup]"})
 		return nil

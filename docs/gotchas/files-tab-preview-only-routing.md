@@ -1,10 +1,10 @@
 ---
 type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
-description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
+description: 'Gotcha: Files-tab auto-preview routing for binary/Office/media/HTML formats plus markdown/MDX/HTML Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. An extension missing from kindByExt degrades the sidebar to raw text even when split preview handles it. UTF-16/UTF-32 BOM text is transcoded, not flagged binary. Per-kind find availability.'
 resource: ""
-tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find]
-timestamp: 2026-11-09T09:42:56Z
+tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer, find, html, htm, htmlviewer]
+timestamp: 2026-11-18T15:33:22Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 
@@ -29,12 +29,12 @@ routing point for a Files-tab editor tab body, in priority order:
 3. otherwise → render `FileEditor` (Monaco) (`FileTabContent.tsx:338`).
 
 The **preview-only kind set** is `pdf`, `docx`, `pptx`, `excel`, `image`,
-`audio`, `video` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:185`). These
+`audio`, `video`, `sqlite` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:193`). These
 are binary containers with no editable text representation. `markdown`, `text`,
 are **deliberately excluded** and keep the Monaco editor. (2026-09-28: `.mmd` was promoted to split-preview — see the history note below.)
 `.mdx` is also **deliberately excluded** and keeps the Monaco editor (it routes
 to the same markdown mode switch as `.md`/`.markdown`).
-`previewOnlyKindForPath` (`previewKind.ts:258`) is therefore the narrow
+`previewOnlyKindForPath` (`previewKind.ts:267`) is therefore the narrow
 "must not open in Monaco" subset of the broader previewable set.
 
 `FileTabContent` also owns the PDF-page and PPTX-slide state
@@ -101,10 +101,11 @@ File open classification is a **three-tier model — not an extension allowlist*
    `NON_PREVIEWABLE_EXTS` (`web/src/lib/previewKind.ts`): archives
    (`.zip`, `.tar`, `.gz`, `.7z`, `.rar`, `.bz2`), executables and shared
    libraries (`.exe`, `.dll`, `.so`, `.dylib`, `.o`, `.a`), fonts (`.ttf`,
-   `.otf`, `.woff`, `.woff2`, `.eot`), databases (`.db`, `.sqlite`, `.sqlite3`,
-   `.mdb`), non-browser-playable media (`.mkv`, `.avi`, `.mov`, `.flv`,
+   `.otf`, `.woff`, `.woff2`, `.eot`), databases (`.mdb`, `.accdb` — the
+   SQLite extensions `.sqlite`/`.sqlite3`/`.db`/`.db3` are specialized
+   renderers in `kindByExt`), non-browser-playable media (`.mkv`, `.avi`, `.flv`,
    `.wmv`), unsupported images (`.bmp`, `.tiff`, `.ico`, `.psd`), legacy/binary
-   Office (`.doc`, `.ppt`, `.docm`, `.xlsm`, `.pptm`), and other opaque
+   Office (`.doc`, `.ppt`, `.docm`, `.pptm`), and other opaque
    containers.
 3. **Text** — otherwise (including extensionless paths and dotfiles like
    `.gitignore`, `Dockerfile`).
@@ -132,7 +133,7 @@ fetch).
 `.md`/`.markdown`/`.mdx` files (when `!props.isBinary`). The mode control is a
 `role="group"` (`aria-label="Markdown view mode"`) of `aria-pressed` toggle
 buttons — the same pattern as `FileTree.tsx`'s list/column view switch. New
-exported helper `isMarkdownPath(path)` (`previewKind.ts:198`) returns
+exported helper `isMarkdownPath(path)` (`previewKind.ts:206`) returns
 `previewKindForPath(path) === "markdown"` — this is `true` for `.md`,
 `.markdown`, AND `.mdx`.
 
@@ -153,7 +154,7 @@ exported helper `isMarkdownPath(path)` (`previewKind.ts:198`) returns
   without it Monaco paints against stale geometry.
 
 - **`.md`/`.markdown`/`.mdx` remain deliberately excluded from
-  `PREVIEW_ONLY_KINDS`** (`previewKind.ts:185`). The fetch-skip invariant for
+  `PREVIEW_ONLY_KINDS`** (`previewKind.ts:193`). The fetch-skip invariant for
   preview-only paths is unaffected — `/api/files/content` is still always
   fetched for markdown tabs.
 
@@ -162,9 +163,39 @@ exported helper `isMarkdownPath(path)` (`previewKind.ts:198`) returns
   source-level text. Evaluating MDX would execute arbitrary JavaScript from a
   previewed file. See `docs/gotchas/mdx-preview-not-evaluated.md`.
 
+## HTML documents (2026-11-18)
+
+`.html` / `.htm` resolve to kind `html`: both are entries in `kindByExt`
+(`web/src/lib/previewKind.ts`), with `isHtmlPath` as the exported predicate.
+They are **NOT** in `PREVIEW_ONLY_KINDS`, so the Files tab still opens them in
+Monaco with the same Edit/Preview/Split switch as Markdown, and
+`splitPreviewKindForPath` returns `"html"`. Both entries were re-added to
+`kindByExt` on 2026-11-18 — the 2026-09-23 text-set purge below had removed
+`.html` from it.
+
+Every other host resolves the kind through `previewKindForPath`: the sidebar
+`PreviewHost` via `resolvePreviewDoc` (which ignores the directive's own
+`kind`), `PreviewTabPage`, and the `preview_open` tool (`previewOpenKinds` in
+`internal/tool/preview.go`, with no `previewRawTypes` entry because HTML reads
+through the text content endpoint). Those hosts render `HtmlViewer` but pass no
+live editor text, so it runs UNCONTROLLED: it fetches `/api/files/content` and
+refetches silently when `revision` advances. Only the Files tab's Split view
+passes `content` (controlled), the same split as `MarkdownViewer`.
+`PreviewSurface` forwards `path`, `projectRoot`, `projectHost`, `content` and
+`revision` to it from the `kind === "html"` branch. Rendering is unchanged:
+`<iframe sandbox="allow-scripts" srcDoc=...>` — an opaque origin with no
+`allow-same-origin`, so relative asset paths do not resolve.
+
+**Failure mode:** an extension missing from `kindByExt` degrades every
+non-Files-tab host to `text` and shows the source as code, even when
+`splitPreviewKindForPath` handles it for the Files tab. Here Edit/Preview/Split
+rendered `HtmlViewer` while `PreviewHost`, `PreviewTabPage` and `preview_open`
+landed on `TextViewer`. `.json` remains the deliberate exception (split-preview
+only, still out of `kindByExt`).
+
 ## Audio/video were added to the preview-only set
 
-`PreviewKind` (`previewKind.ts:25`) gained `audio` and `video`, and
+`PreviewKind` (`previewKind.ts:27`) gained `audio` and `video`, and
 `previewOpenKinds` (`internal/tool/preview.go`) and `previewRawTypes`
 (`internal/server/handler_files.go:1224`) gained matching types/captured
 extensions. 2026-09-16: `.mmd` (Mermaid flow) was already in the markdown kind
@@ -320,7 +351,7 @@ flow and the known gaps are in
 
 Legacy binary Office formats (`.doc`, `.ppt`) have no in-browser renderer
 (`docx-preview` handles only `.docx`; there is no server-side conversion in v1).
-`isLegacyOfficePath` (`previewKind.ts:268`) matches them and
+`isLegacyOfficePath` (`previewKind.ts:277`) matches them and
 `LegacyOfficePane` (`web/src/components/Preview/LegacyOfficePane.tsx`) renders
 the OS-open fallback instead of a "Binary File" editor dead-end. The pane was
 extracted out of `PreviewHost`, which now shares it
@@ -449,8 +480,6 @@ bundle.
   documentation-vs-landed-behavior mismatch in the web preview/browser surface.
 - `docs/gotchas/mdx-preview-not-evaluated.md` — MDX preview rule: rendered as
   Markdown, never evaluated (security).
-- `docs/gotchas/files-tab-preview-only-routing copy.md` — deprecated predecessor
-  of this doc (superseded).
 - `docs/superpowers/specs/2026-09-10-preview-multipurpose-design.md` —
   superseded §2 for the Files-tab `.md` behavior (now Edit/Preview/Split in
   `FileTabContent`); sidebar `PreviewHost` path unchanged.

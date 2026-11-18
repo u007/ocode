@@ -4,7 +4,7 @@ type: concept
 title: Knowledge Bundle System
 description: Internal architecture of the OKF v0.1 knowledge bundle — bundle detection, scanning, frontmatter parsing, doc search, .okfignore exclusion, and store CRUD with documented edge cases and gotchas.
 tags: [knowledge, bundle, okf, frontmatter, search, pagination, okfignore]
-timestamp: 2026-09-28T18:00:58Z
+timestamp: 2026-11-18T13:09:57Z
 ---
 # Knowledge Bundle System
 
@@ -116,7 +116,7 @@ before writing).
 
 ## Store CRUD
 
-The bundle exposes exactly **four** doc tools to the context agent: `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` (`internal/agent/doc_tools.go`). There is **no `doc_delete` tool** — removal is never a doc-tool operation. To remove a document: deprecate it first (`doc_deprecate`), then delete it via `/docs cleanup` (lists deprecated docs, `--yes` deletes them under lock), or use an external `rm` on the file for anything not already deprecated.
+The bundle exposes exactly **four** doc tools to the context agent: `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` (`internal/agent/doc_tools.go`). There is **no `doc_delete` tool** — removal is never a doc-tool operation. To remove a document: deprecate it first (by hand, or via `/docs cleanup`, whose audit is an LLM `context` turn that reviews the bundle and may only `doc_deprecate` the duplicated, stale, superseded and orphaned docs — merging duplicates with `doc_write` first), then delete every deprecated doc in one batch with `/docs cleanup --yes` (under lock, each deletion logged, index regenerated). Outside the bundle you can always `rm` a file yourself.
 
 ### Write
 

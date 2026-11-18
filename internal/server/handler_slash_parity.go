@@ -529,8 +529,10 @@ func (h *Handler) HandleDocsUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDocsCleanup serves POST /api/docs/cleanup?project= with body
-// {"confirm": bool} — lists deprecated docs, deleting them only when
-// confirm=true (same gate as the TUI's /docs cleanup --yes).
+// {"confirm": bool}. Without confirm it returns the context-agent audit prompt
+// as `cleanup_prompt` (the web client sends it as a normal turn); with
+// confirm=true it deletes the docs already marked deprecated — the same gate as
+// the TUI's /docs cleanup --yes.
 func (h *Handler) HandleDocsCleanup(w http.ResponseWriter, r *http.Request) {
 	workDir, ok := h.docsWorkDir(r)
 	if !ok {
@@ -547,9 +549,12 @@ func (h *Handler) HandleDocsCleanup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"result": commandctx.DocsCleanup(workDir, req.Confirm),
-	})
+	text, cleanupPrompt := commandctx.DocsCleanup(workDir, req.Confirm)
+	resp := map[string]any{"result": text}
+	if cleanupPrompt != "" {
+		resp["cleanup_prompt"] = cleanupPrompt
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // applyExtraAllowedPathsToRuntime syncs the tool package's runtime allowlist

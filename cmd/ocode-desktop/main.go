@@ -228,6 +228,7 @@ func main() {
 	// RawMessageHandler below.
 	quitGuard := desktop.NewQuitGuard()
 	dockSvc := dock.New()
+	ensurePendingSaveReaper()
 	services := []application.Service{application.NewService(dockSvc)}
 	var notifier *notifications.NotificationService
 	if notificationsSupported() {
@@ -301,14 +302,24 @@ func main() {
 				if html, ok := pagePrintHTML(message, origin, dw.host, dw.clipNonce); ok {
 					openPrintWindow(html)
 				}
-				if req, ok := pageSaveFileRequest(message, origin, dw.host, dw.clipNonce); ok {
-					openSaveFile(window, req)
+				// The desktop save streams as start → chunk* → end messages;
+				// each is answered or refused independently. A chunk message
+				// fails the start-prefix match silently, so the chain below
+				// reaches its own handler without double logging.
+				if name, expected, ok := startPendingSave(message, origin, dw.host, dw.clipNonce); ok {
+					log.Printf("ocode-desktop: started save of %q (%d bytes)", name, expected)
+				} else if ok := appendSaveChunk(message, origin, dw.host, dw.clipNonce); ok {
+					// quiet: one log line per 8 MiB chunk would spam desktop.log
+				} else if fin, ok := finishPendingSave(message, origin, dw.host, dw.clipNonce); ok {
+					openFinishedSave(window, fin)
 				}
 			} else if strings.HasPrefix(message, msgClipboardWrite) {
 				log.Printf("ocode-desktop: refused clipboard write: window not ready")
 			} else if strings.HasPrefix(message, msgPrintDocument) {
 				log.Printf("ocode-desktop: refused print request: window not ready")
-			} else if strings.HasPrefix(message, msgSaveFile) {
+			} else if strings.HasPrefix(message, msgSaveFileStart) ||
+				strings.HasPrefix(message, msgSaveFileChunk) ||
+				strings.HasPrefix(message, msgSaveFileEnd) {
 				log.Printf("ocode-desktop: refused save file: window not ready")
 			}
 		},
