@@ -4,7 +4,7 @@
 - v1 of the UML session sub-tab ships the **Go analyzer only** (`internal/umlinfo`, stdlib go/parser). TS/JS/Python AST analysis is deferred behind the `umltreesitter` build tag (`smacker/go-tree-sitter`); the remote-binary builds use CGO_ENABLED=0, so plain builds must keep compiling without it.
 - **elkjs** is deferred: v1 uses a hand-rolled LOD layout; the third (elkjs layered) view is out of v1 or limited to focused subgraphs.
 - Also deferred: small-model comment generation (opt-in button), call graphs, export, watch/incremental re-parse, sequence diagrams, cross-machine view-state sync.
-- To close: implement the `umltreesitter`-tagged tree-sitter analyzers for TS/JS/Python, then evaluate elkjs on a 2k-node focused subgraph.
+- Limits to revisit: 20k-file / 1 MiB / 50k-symbol caps ( constants; index reports `truncated` and the UI shows a badge), Go-only parsing, 4-entry cache, root-level monorepo markers only. To close: implement the `umltreesitter`-tagged tree-sitter analyzers for TS/JS/Python, then evaluate elkjs on a 2k-node focused subgraph.
 
 ## Open: root elevation — live verification gaps (2026-11-18)
 
