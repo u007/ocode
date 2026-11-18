@@ -1,3 +1,23 @@
+## Open: advisor code-review turns with no file writes (2026-11-17)
+- The restored `plan` checkpoint covers the design half of "design or code review done does not trigger the advisor". The `done` half works only when the turn changed files: `advisorNoSessionChanges` stops the gate when a snapshot store has no changed file and the step wrote nothing, and even without that short-circuit the live judge picks `skip_not_substantive` for an answer-only turn (live scenario 7, p=0.97).
+- This is current deliberate policy, not a regression: a pure read-and-report code-review turn (no edits) gets no completion advisor review. If the user wants review outputs reviewed too, change both the `advisorNoSessionChanges` short-circuit and the `advisorGateInstructions` "answer to a question is not substantive" rule, and pin it with a new live scenario.
+- End-to-end behavior in a real session is still unverified: the plan checkpoint's loop wiring and the done gate were validated by Go unit tests plus the 12/12 live `TestAdvisorGateLiveScenarios`, not by driving an actual chat turn.
+- Full `internal/server` suite times out (>300s) here in `TestHelperMCPAppServer` helper-process tests; all advisor-named server tests pass in isolation.
+
+## Open: Excel save writes edited numbers/dates as text (2026-11-17)
+
+- The loader (`web/src/components/Preview/univerData.ts::excelJsCell`) stores each cell's DISPLAY text, discarding the raw numeric/date value and type. `xlsxPackagePatch.ts` now preserves numeric and boolean types for EDITED cells whose original `<c>` was numeric/bool and whose new display text parses back to a number/bool (commas stripped). UNEDITED cells keep their original XML byte-for-byte.
+- STILL LOSSY (now gated): edited DATE cells (raw serial discarded by the loader; the display text is written as text). Save now detects date-like edits and REQUIRES an explicit "I understand edited dates become text" checkbox in the save dialog before the Save button is enabled. To fix properly: capture raw typed values in the Univer snapshot (custom cell data / baseline map) or convert the display date back to a serial using the workbook's date system.
+- Pairing limit: extents are paired to images by per-sheet picture order (`workbookFromFileBytes`), not by `r:embed`/media relationship. This misaligns when a drawing contains non-picture anchors (`xdr:sp` shapes, group shapes, chart `graphicFrame`) interleaved with pictures. The shortcut comment at the pairing site names the upgrade path (rId→media pairing).
+
+- Known limit (not handled): image crops (`<a:srcRect>`) and rotation (`<a:xfrm rot=...>`) are ignored. A cropped or rotated picture keeps the full source image at its EMU extent, so it can look different from Excel. Recorded here per project rule rather than silently ignored.
+
+- DONE (sizing): image size now comes from the drawing XML `<a:ext cx/cy>` EMU extent (`extractDrawingExtents`, 914400 EMU = 1 inch), preferred over the two-cell anchor; 180x120 box is only a last-resort fallback. Verified on `09nov-leave.xlsx`: logo 148x120px, signature 160x110.6px. Still open: overlay images are view-only and do not follow row insert/delete.
+
+## Excel preview: floating images + save fidelity (resolved 2026-11-17)
+
+- DONE. `workbookFromExcelJs` extracts floating drawings; a read-only, scroll/zoom-synced `SheetImageOverlay` paints them at their cell anchors (two-cell anchor / drawing ext when available, 180x120 px fallback, culled when off-screen). The thumbnail panel stays as a fallback with a Radix lightbox. Save uses `patchWorkbookBytes(original, baseline, live)` (JSZip package patch): only cells changed since the load-time baseline are rewritten, so drawings/media/styles/sharedStrings stay byte-identical. Structural edits (sheet list, rowCount, columnCount, mergeData) throw a named error and reveal an explicit "Save without drawings" values-only fallback.
+- REMAINING LIMITS (view-only overlay). Overlay images cannot be selected or moved and do not follow row insert/delete; size is an estimate because anchors carry no bottom-right extent. An EDITED numeric/date cell is written from the loader's display text (type/format lost) — unedited cells keep original XML byte-identical. The thumbnail panel is a fallback, not the primary surface.
 ## Open: root elevation — live verification gaps (2026-11-18)
 
 Root elevation (leading `sudo`/`su` with a masked human password) is implemented on branch `feature/root-elevation` and verified by unit and integration tests against FAKE sudo/su scripts. The following real-world paths were NEVER exercised:
@@ -9,11 +29,7 @@ Root elevation (leading `sudo`/`su` with a masked human password) is implemented
 
 To close: run each path with a throwaway account/host, record the result, and add live tests where a fake executable is insufficient.
 
-## Open: Excel preview shows floating images in a side panel, not in the grid (2026-11-16)
 
-- What shipped. workbookFromExcelJs now extracts floating drawings (ExcelJS getImages/getImage) and ExcelViewer renders them as thumbnails in a panel below the grid, with a lightbox. Verified against ~/Downloads/09nov-leave.xlsx (2 images). Unit tests cover extraction and the per-sheet filter.
-- What is NOT done. The images are not painted in the grid where they were anchored: Univer OSS sheet stack has no floating-drawing support, and @univerjs/drawing is document/slide oriented, so in-place rendering needs either a custom overlay synced to Univer scroll/zoom or an upstream capability. Saving rewrites the file from the grid (values only), so drawings are NOT preserved on save even though the first-save dialog warns. Thumbnails are base64 data URLs with a 4 MiB per-image cap; very large workbooks could bloat memory.
-- To close it. Either (a) build a scroll-synced overlay positioning each image by its two-cell anchor using Univer row/column pixel metrics, or (b) wait for Univer OSS to support sheet drawings. For save fidelity, preserve drawings by copying the original package and re-injecting drawing parts (as the docx editor does) instead of rewriting from the grid.
 
 # TODO
 
@@ -42,7 +58,7 @@ To close: run each path with a throwaway account/host, record the result, and ad
 
 ## Open: markdown image rendering outside the viewer (2026-11-15)
 
-- **Print does not resolve local markdown images or raw HTML.** `printPreview.tsx`'s markdown branch re-renders the source with plain `ReactMarkdown` (no `img` component, no `rehype-raw`/`rehype-sanitize`), so a local image prints as its path and raw `<img>` prints as escaped text. Fixing it needs the same resolution in the print builder (it can only hold `data:` URLs — the print window has no origin for a blob). Documented in `docs/concepts/preview-print-save-as-pdf.md`; the viewer side shipped 2026-11-15.
+- **Print does not resolve raw HTML in markdown.** Local `<img>` sources now print: the markdown and html branches inline them as `data:` URLs (`inlineLocalImages`, 2026-11-18). Still open: `printPreview.tsx`'s markdown branch re-renders with plain `ReactMarkdown` (no `rehype-raw`/`rehype-sanitize`), so raw `<img>` in a markdown file prints as escaped text. Still open for html and markdown: CSS `url(...)` in `<style>` and `style=""` attributes, and relative `<link rel="stylesheet">`, print as written; `@import` too (see `docs/concepts/preview-print-save-as-pdf.md`). The live HTML viewer (`HtmlViewer.tsx`, `srcDoc`, no base) still does not resolve relative images on screen.
 - **Chat markdown (`MessageBubble`) has no local-image rendering.** It still emits a plain `<img src>` for a path, which the SPA fallback answers with HTML, so a chat reply that embeds a screenshot path shows a broken image. Only the preview viewer got the `MarkdownImage` treatment; wire the same helper if chat needs it.
 - **An in-flight image fetch is not aborted on unmount.** `api.fetchFileRaw` takes no `signal`; the component only drops the result and revokes the blob. Bounded by the ~26 MB report case, but a slow remote host can keep a transfer going after the preview closes. Add an optional `signal` to `fetchFileRaw` if that matters.
 - **Files-tab out-of-tree reveal has no session scope.** `revealOutsideTree` calls `api.revealInFileManager(path, projectRoot)` and `POST /api/files/open` carries no session id. That is correct today, but `docs/superpowers/specs/2026-11-15-session-scoped-files-tab-unlock-design.md` §3 lists open/reveal among the endpoints that must carry `session_id`; when that lands, this call site must be migrated or the fallback regresses to the "outside the folder this tree is browsing" notice for every out-of-tree path.
