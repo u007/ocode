@@ -354,6 +354,17 @@ func (h *Handler) handleKakiitReturn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save connector settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Register the cached access token with this root's manager so browse/read
+	// work immediately. It carries no refresh token; expiry forces /refresh.
+	if mgr := h.cloudManager(root); mgr != nil {
+		_ = mgr.RegisterTransient(
+			cloudconnect.Config{ID: bundle.ConnectionID, Provider: flow.provider},
+			cloudconnect.SecretBundle{
+				AccessToken:          bundle.AccessToken,
+				AccessTokenExpiresAt: bundle.ExpiresAt,
+			},
+		)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(kakiitClosePopupHTML))
 }
@@ -496,11 +507,13 @@ func (h *Handler) handleKakiitTokenRefresh(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	refreshedProvider := ""
 	for provider, meta := range f.Central.Connections {
 		if meta.ConnectionID == in.ConnectionID {
 			creds[provider] = cloudconnect.Credentials{AccessToken: access, ExpiresAt: expires}
 			meta.ExpiresAt = expires.UTC().Format(time.RFC3339)
 			f.Central.Connections[provider] = meta
+			refreshedProvider = provider
 		}
 	}
 	if err := sealHubCredentials(f, creds, key); err != nil {
@@ -510,6 +523,17 @@ func (h *Handler) handleKakiitTokenRefresh(w http.ResponseWriter, r *http.Reques
 	if err := config.SaveV2(root, f); err != nil {
 		http.Error(w, "save connector settings: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if refreshedProvider != "" {
+		if mgr := h.cloudManager(root); mgr != nil {
+			_ = mgr.RegisterTransient(
+				cloudconnect.Config{ID: in.ConnectionID, Provider: refreshedProvider},
+				cloudconnect.SecretBundle{
+					AccessToken:          access,
+					AccessTokenExpiresAt: expires,
+				},
+			)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"access_token": access,
@@ -549,7 +573,8 @@ func (h *Handler) handleKakiitDisconnect(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, _, ok := h.kakiitProject(w, r); !ok {
+	root, _, ok := h.kakiitProject(w, r)
+	if !ok {
 		return
 	}
 	connectionID := r.URL.Query().Get("connection_id")
@@ -565,6 +590,9 @@ func (h *Handler) handleKakiitDisconnect(w http.ResponseWriter, r *http.Request)
 	if err := client.Disconnect(r.Context(), connectionID); err != nil {
 		http.Error(w, "hub disconnect failed: "+err.Error(), http.StatusBadGateway)
 		return
+	}
+	if mgr := h.cloudManager(root); mgr != nil {
+		mgr.Remove(connectionID)
 	}
 	// Other projects' cached copies intentionally stay on disk: each goes stale
 	// and is cleared on its next refresh (see handleKakiitTokenRefresh).

@@ -2,8 +2,11 @@ package cloudconnect
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,5 +68,21 @@ func TestManagerUnsupportedProvider(t *testing.T) {
 	err := m.Register(Config{ID: "x", Provider: "box"}, SecretBundle{})
 	if err == nil {
 		t.Fatal("expected error for unsupported provider")
+	}
+}
+
+func TestRegisterTransientDoesNotWriteV1Metadata(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(filepath.Join(root, "data"), root, "")
+	if err := m.RegisterTransient(Config{ID: "hub-cid", Provider: "dropbox"}, SecretBundle{
+		AccessToken: "access-only",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Get("hub-cid"); !ok {
+		t.Fatal("transient connector not registered")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".ocode", "storage-connectors.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transient registration wrote v1 metadata: %v", err)
 	}
 }
