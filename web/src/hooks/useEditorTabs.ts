@@ -31,8 +31,9 @@ export interface EditorTab {
   /** The file changed (or vanished) on disk outside this app while this tab
    *  held unsaved edits — surfaced as a banner until reloaded or dismissed. */
   externalChange: boolean;
-  /** When true (the default) the opened file is attached to the LLM loop /
-   *  chat context on send. Unchecking excludes it without closing the tab. */
+  /** When true the opened file is attached to the LLM loop / chat context on
+   *  send. Off by default: opening a file never attaches it; the user opts in
+   *  with the tab-bar checkbox. Unchecking excludes it without closing the tab. */
   includeInContext: boolean;
   /** Hash of the disk content at the last accepted point (load or successful
    *  save). Used as the expected_hash for the save guard; not rebased on
@@ -183,7 +184,7 @@ export function useEditorTabs(): UseEditorTabsResult {
                   isDirty: false,
                   diffVersion: 0,
                   externalChange: false,
-                  includeInContext: true,
+                  includeInContext: false,
                   baseHash: hashContent(content),
                 },
               ],
@@ -230,7 +231,7 @@ export function useEditorTabs(): UseEditorTabsResult {
                 isDirty: false,
                 diffVersion: 0,
                 externalChange: false,
-                includeInContext: true,
+                includeInContext: false,
                 baseHash: "",
               },
             ],
@@ -261,7 +262,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           isDirty: true,
           diffVersion: 0,
           externalChange: draft.baseHash !== hashContent(disk.content),
-          includeInContext: true,
+          includeInContext: false,
           baseHash: draft.baseHash,
         };
       } else {
@@ -277,7 +278,7 @@ export function useEditorTabs(): UseEditorTabsResult {
           isDirty: false,
           diffVersion: 0,
           externalChange: false,
-          includeInContext: true,
+          includeInContext: false,
           baseHash: hashContent(disk.content),
         };
       }
@@ -304,7 +305,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         isDirty: true,
         diffVersion: 0,
         externalChange: true,
-        includeInContext: true,
+        includeInContext: false,
         baseHash: draft.baseHash,
       };
     }

@@ -44,6 +44,19 @@ describe("useEditorTabs", () => {
     expect(result.current.editorTabs).toHaveLength(1);
   });
 
+  it("opens files excluded from the chat context until the user opts in", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+    expect(result.current.editorTabs[0].includeInContext).toBe(false);
+
+    await act(async () => {
+      result.current.toggleIncludeInContext(result.current.editorTabs[0].id);
+    });
+    expect(result.current.editorTabs[0].includeInContext).toBe(true);
+  });
+
   it("opens preview-only files without fetching their contents", async () => {
     const { result } = renderHook(() => useEditorTabs());
     await act(async () => {
@@ -55,6 +68,7 @@ describe("useEditorTabs", () => {
     expect(tab.projectRoot).toBe("/proj");
     expect(tab.content).toBe("");
     expect(tab.isBinary).toBe(true);
+    expect(tab.includeInContext).toBe(false);
     // The viewer reads /api/files/raw itself — no /api/files/content round-trip.
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -65,6 +79,7 @@ describe("useEditorTabs", () => {
       await result.current.handleOpenFile("docs/old.doc");
     });
     expect(result.current.editorTabs).toHaveLength(1);
+    expect(result.current.editorTabs[0].includeInContext).toBe(false);
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -121,6 +136,9 @@ describe("useEditorTabs", () => {
     const second = renderHook(() => useEditorTabs());
     await waitFor(() => expect(second.result.current.editorTabs).toHaveLength(1));
     expect(second.result.current.editorTabs[0].path).toBe("/a/b.txt");
+    // Restored tabs default to excluded too, so an upgrade never silently
+    // attaches saved files to chat.
+    expect(second.result.current.editorTabs[0].includeInContext).toBe(false);
   });
 
   it("restores unsaved edits as a dirty draft after a reload", async () => {
