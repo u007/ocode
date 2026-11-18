@@ -17,6 +17,14 @@ import (
 	"github.com/u007/ocode/internal/paths"
 )
 
+// TokenSource resolves a fresh, valid access token for a provider. Hub mode
+// refresh is single-flight per connection; local mode reads the encrypted
+// credentials file. Implementations must never surface token material in
+// errors.
+type TokenSource interface {
+	Token(ctx context.Context, provider string) (accessToken string, expiresAt time.Time, err error)
+}
+
 // Manager owns connector instances and their (encrypted) secrets.
 type Manager struct {
 	mu             sync.RWMutex
