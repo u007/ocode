@@ -62,6 +62,7 @@ describe("hub cloud connector client", () => {
       {
         provider: "dropbox",
         connector_id: "kakiit",
+        install_id: "install-1",
         client_state: "cs-1",
         code_challenge: "chal-1",
       },
@@ -75,6 +76,7 @@ describe("hub cloud connector client", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       provider: "dropbox",
       connector_id: "kakiit",
+      install_id: "install-1",
       client_state: "cs-1",
       code_challenge: "chal-1",
     });

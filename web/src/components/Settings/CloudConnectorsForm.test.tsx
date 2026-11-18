@@ -226,6 +226,7 @@ describe("CloudConnectorsForm — hub start wiring", () => {
       "client_state",
       "code_challenge",
       "connector_id",
+      "install_id",
       "provider",
     ]);
     expect(payload.provider).toBe("dropbox");

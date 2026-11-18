@@ -5266,6 +5266,7 @@ export const api = {
     payload: {
       provider: string;
       connector_id: string;
+      install_id: string;
       client_state: string;
       code_challenge: string;
     },

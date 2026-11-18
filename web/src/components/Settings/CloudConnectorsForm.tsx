@@ -133,6 +133,21 @@ function randomToken(byteLength: number): string {
   return base64url(crypto.getRandomValues(new Uint8Array(byteLength)));
 }
 
+const HUB_INSTALL_KEY = "ocode.cloud.installId";
+
+/** Stable per-install id so one machine cannot redirect another's handoff. */
+function hubInstallId(): string {
+  try {
+    const existing = localStorage.getItem(HUB_INSTALL_KEY);
+    if (existing) return existing;
+    const generated = `install-${randomToken(12)}`;
+    localStorage.setItem(HUB_INSTALL_KEY, generated);
+    return generated;
+  } catch {
+    return `install-${randomToken(12)}`;
+  }
+}
+
 async function pkceChallenge(verifier: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -154,10 +169,9 @@ function normalizeLocal(value: unknown): LegacyConnector[] {
 }
 
 /**
- * `project` and `host` are accepted as props but omitted by SettingsPanel on
- * purpose: Settings is a global surface by convention. A project-scoped
- * surface passes them, and both are threaded into every hub call — dropping
- * either would route a remote project's token work to the wrong machine.
+ * `project` and `host` come from the active project via SettingsPanel. Both
+ * are threaded into every hub call — dropping either would route a remote
+ * project's token work to the wrong machine.
  */
 export default function CloudConnectorsForm({
   project = "",
@@ -271,6 +285,7 @@ export default function CloudConnectorsForm({
         {
           provider: "dropbox",
           connector_id: HUB_CONNECTOR_ID,
+          install_id: hubInstallId(),
           client_state: clientState,
           code_challenge: codeChallenge,
         },
