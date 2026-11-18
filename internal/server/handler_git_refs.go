@@ -45,6 +45,7 @@ const (
 	refTargetAny    refTargetRule = iota // hash or branch
 	refTargetHash                        // commit hash only
 	refTargetBranch                      // branch name only
+	refTargetTag                         // tag name only
 )
 
 // refActionSpec is one row of gitRefActions.
@@ -90,6 +91,17 @@ var gitRefActions = map[string]refActionSpec{
 	"branch-delete": {target: refTargetBranch, argv: func(target, _ string, _ bool) []string {
 		return []string{"branch", "-d", target}
 	}},
+	"branch-force-delete": {target: refTargetBranch, argv: func(target, _ string, _ bool) []string {
+		return []string{"branch", "-D", target}
+	}},
+	"branch-rename": {target: refTargetBranch, needsName: true, argv: func(target, name string, _ bool) []string {
+		return []string{"branch", "-m", target, name}
+	}},
+	// rebase rewrites the current branch's commits, so it takes the same turn
+	// guard as merge/reset: no chat turn may be committing underneath it.
+	"rebase": {target: refTargetAny, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
+		return []string{"rebase", target}
+	}},
 	"merge": {target: refTargetAny, writesWorktree: true, argv: func(target, _ string, _ bool) []string {
 		return []string{"merge", "--no-edit", target}
 	}},
@@ -110,6 +122,15 @@ var gitRefActions = map[string]refActionSpec{
 	}},
 	"tag": {target: refTargetAny, needsName: true, argv: func(target, name string, _ bool) []string {
 		return []string{"tag", name, target}
+	}},
+	"tag-delete": {target: refTargetTag, argv: func(target, _ string, _ bool) []string {
+		return []string{"tag", "-d", target}
+	}},
+	"set-upstream": {target: refTargetBranch, needsName: true, argv: func(target, name string, _ bool) []string {
+		return []string{"branch", "--set-upstream-to=" + name, target}
+	}},
+	"unset-upstream": {target: refTargetBranch, argv: func(target, _ string, _ bool) []string {
+		return []string{"branch", "--unset-upstream", target}
 	}},
 }
 
@@ -195,6 +216,8 @@ func validateGitRefActionUsing(p refProbes, action string, spec refActionSpec, r
 	// cafe or dead is a branch.
 	hash := isHexHash(req.Target) && !p.refResolves("refs/heads/"+req.Target)
 	switch {
+	case spec.target == refTargetTag && !p.refResolves("refs/tags/"+req.Target):
+		return action + " needs a tag name"
 	case spec.target == refTargetHash && !hash:
 		return action + " needs a commit hash"
 	case spec.target == refTargetBranch && hash:
@@ -228,6 +251,11 @@ func validateGitRefActionUsing(p refProbes, action string, spec refActionSpec, r
 	}
 	if !p.branchNameValid(req.Name) {
 		return fmt.Sprintf("invalid branch name %q", req.Name)
+	}
+	// Setting an upstream to a name git cannot resolve would only fail inside
+	// git with "not a valid ref"; require a fetched remote-tracking branch.
+	if action == "set-upstream" && !p.refResolves("refs/remotes/"+req.Name) {
+		return fmt.Sprintf("upstream %q is not a remote-tracking branch", req.Name)
 	}
 	return ""
 }

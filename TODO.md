@@ -1,3 +1,14 @@
+## Open: Git Branches view — live verification gap and deliberate non-goals (2026-11-18)
+
+The web Git tab's Branches sub-tab (switch, create from any ref, rename, merge, rebase, local delete + force delete, remote delete, push/`-u`, set/unset upstream, tag delete) is verified by unit tests and one fake-SSH server test. The following are NOT verified or NOT built:
+
+- **Live SSH/WSL verification.** `TestRemoteGitBranchesOverFakeSSH` proves argv quoting and parsing against a fake `ssh`; no real remote host was driven. Check `GET /api/git/branches?host=…` and a remote branch switch/delete on an actual SSH project.
+- **No real-browser pass was recorded in this session.** The panel's unit tests mock the API; the actions were not clicked through a served build.
+- **Deliberate non-goals.** Submodules, Git LFS, auto-stash (or auto-discard) on a dirty-tree switch, and editing a remote's URL are out of scope. A dirty switch asks for confirmation and then lets git refuse.
+- **Upstream editing is set/unset only.** `set-upstream` requires an already-fetched remote-tracking ref; there is no "push and create the remote branch first" combined flow (use Push branch with `-u` for that).
+- **Tag create stays in History.** "New tag here…" is on the commit context menu; the Branches view can delete a tag but does not create one.
+- **SourceTree operations that already exist elsewhere in the Git tab** (not rebuilt in Branches): stash save/apply/drop and worktrees are in the Changes view; fetch/pull/push are the header buttons; cherry-pick, revert and reset soft/mixed/hard are the History commit context menu; merge and rebase are in both History and Branches.
+
 ## Open: root elevation — live verification gaps (2026-11-18)
 
 Root elevation (leading `sudo`/`su` with a masked human password) is implemented on branch `feature/root-elevation` and verified by unit and integration tests against FAKE sudo/su scripts. The following real-world paths were NEVER exercised:

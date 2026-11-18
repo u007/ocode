@@ -1,12 +1,14 @@
-import { FileDiff, GitGraph } from "lucide-react";
+import { FileDiff, GitFork, GitGraph } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-/** The two views inside the Git tab: working-tree changes or commit history. */
-export type GitView = "changes" | "history";
+/** The three views inside the Git tab: working-tree changes, commit history,
+ *  or the branch/tag list. */
+export type GitView = "changes" | "history" | "branches";
 
 const GIT_VIEWS: Array<{ id: GitView; label: string; icon: typeof FileDiff }> = [
   { id: "changes", label: "Changes", icon: FileDiff },
   { id: "history", label: "History", icon: GitGraph },
+  { id: "branches", label: "Branches", icon: GitFork },
 ];
 
 interface Props {

@@ -142,6 +142,7 @@ func getJSON(t *testing.T, h *Handler, url string, out interface{}) *httptest.Re
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/git/status", h.HandleGitStatus)
 	mux.HandleFunc("GET /api/git/workspace", h.HandleGitWorkspace)
+	mux.HandleFunc("GET /api/git/branches", h.HandleGitBranches)
 	mux.HandleFunc("GET /api/git/log", h.HandleGitLog)
 	mux.HandleFunc("GET /api/files/tree", h.HandleFileTree)
 	mux.HandleFunc("GET /api/files/content", h.HandleFileContent)

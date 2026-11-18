@@ -220,6 +220,8 @@ const (
 	refProbeTargetFormat          // check-ref-format --branch <target> echoes target
 	refProbeNameFormat            // check-ref-format --branch <name> echoes name
 	refProbeTagFormat             // check-ref-format refs/tags/<name> succeeds
+	refProbeTagAtTarget           // refs/tags/<target> resolves
+	refProbeRemoteAtName          // refs/remotes/<name> resolves
 )
 
 // remoteRefProbes answers every probe the shared rule table can ask for this
@@ -241,6 +243,8 @@ func remoteRefProbes(ctx context.Context, rw remoteWork, target, name string) (r
 	b.WriteString("v=$(git check-ref-format --branch " + q(target) + " 2>/dev/null); [ \"$v\" = " + q(target) + " ]; printf '%s\\n' \"$?\"\n")
 	b.WriteString("v=$(git check-ref-format --branch " + q(name) + " 2>/dev/null); [ \"$v\" = " + q(name) + " ]; printf '%s\\n' \"$?\"\n")
 	b.WriteString("git check-ref-format " + q("refs/tags/"+name) + " >/dev/null 2>&1; printf '%s\\n' \"$?\"\n")
+	b.WriteString("git rev-parse --verify --quiet " + q("refs/tags/"+target) + " >/dev/null 2>&1; printf '%s\\n' \"$?\"\n")
+	b.WriteString("git rev-parse --verify --quiet " + q("refs/remotes/"+name) + " >/dev/null 2>&1; printf '%s\\n' \"$?\"\n")
 	out, err := remoteRun(ctx, rw, b.String())
 	if err != nil {
 		return refProbes{}, err
@@ -263,6 +267,10 @@ func parseRemoteRefProbes(out, target, name string) refProbes {
 				return ok(refProbeBranchAtTarget)
 			case target + "^{commit}":
 				return ok(refProbeTargetCommit)
+			case "refs/tags/" + target:
+				return ok(refProbeTagAtTarget)
+			case "refs/remotes/" + name:
+				return ok(refProbeRemoteAtName)
 			default:
 				return false
 			}
