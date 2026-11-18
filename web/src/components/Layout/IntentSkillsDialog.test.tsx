@@ -70,4 +70,23 @@ describe("IntentSkillsDialog", () => {
     expect(await screen.findByText(/registry unreachable/)).toBeTruthy();
     expect(mockInstall).not.toHaveBeenCalled();
   });
+
+  it("filters the checklist by keyword; a checked skill hidden by the filter still installs", async () => {
+    mockInstall.mockResolvedValue({ report: "ok" });
+    render(<IntentSkillsDialog open onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getByText("generate-skill")).toBeTruthy());
+
+    fireEvent.click(skillBox("generate-skill"));
+    const filter = screen.getByLabelText("Filter skills");
+    fireEvent.change(filter, { target: { value: "TREE building" } });
+    expect(screen.getByText("tree-generator")).toBeTruthy();
+    expect(screen.queryByText("generate-skill")).toBeNull();
+
+    // generate-skill is checked and now hidden: the install still includes it.
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(screen.getByText(/No skills match/)).toBeTruthy();
+    expect(screen.getByText(/1 selected/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Install selected/ }));
+    await waitFor(() => expect(mockInstall).toHaveBeenCalledWith(["generate-skill"]));
+  });
 });

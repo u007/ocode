@@ -145,6 +145,22 @@ describe("CoworkSidebar Skills toggle", () => {
     expect(beta.closest("div")?.className).not.toContain("opacity-60");
   });
 
+  it("filters the skill list by keyword without changing the header count", async () => {
+    renderSidebar();
+    await openSkillsSection();
+
+    const filter = screen.getByLabelText("Filter skills");
+    fireEvent.change(filter, { target: { value: "ENABLED one" } });
+    expect(skillLabelsInOrder()).toEqual(["Skill beta", "Skill gamma"]);
+
+    fireEvent.change(filter, { target: { value: "disabled" } });
+    expect(skillLabelsInOrder()).toEqual(["Skill alpha"]);
+
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(screen.getByText(/No skills match/)).toBeTruthy();
+    expect(screen.getByText("2/3")).toBeTruthy();
+  });
+
   it("queries the list for the active project", async () => {
     renderSidebar();
     await openSkillsSection();

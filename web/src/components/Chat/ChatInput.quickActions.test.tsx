@@ -235,6 +235,23 @@ describe("composer quick actions", () => {
     expect(getQueue(A)).toEqual([]);
   });
 
+  it("an append chip inserts at the caret, replaces the selection and keeps the rest of the draft", async () => {
+    quickActions.chips = [chip({ id: "x", label: "Draft it", message: "write a test", mode: "append" })];
+    render(composer());
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(ta, { target: { value: "please this now" } });
+    ta.setSelectionRange(7, 11); // highlight "this"
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Draft it — write a test" })); });
+
+    expect(ta.value).toBe("please write a test now");
+    expect(ta.selectionStart).toBe("please write a test".length);
+    expect(ta.selectionEnd).toBe(ta.selectionStart);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(getQueue(A)).toEqual([]);
+  });
+
   it("a send chip dispatches immediately", async () => {
     quickActions.chips = [chip({ id: "x", label: "Go", message: "go test ./..." })];
     render(composer());

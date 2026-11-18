@@ -759,6 +759,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     historyDraftRef.current = "";
   };
 
+  // Insert at the current caret (replacing any selection) instead of replacing
+  // the whole draft. Voice transcripts, `append` chips and LLM suggestions all
+  // land here so caret re-anchoring behaves identically on every path.
+  const insertAtCursor = (text: string) => {
+    const el = textareaRef.current;
+    if (!el) throw new Error("Composer textarea is not mounted; cannot insert text");
+    const inserted = insertTranscript(el.value, el.selectionStart, el.selectionEnd, text);
+    pendingCaretRef.current = { start: inserted.caret, end: inserted.caret, shift: 0 };
+    updateDraft(inserted.value);
+    el.focus();
+  };
+
   // Behaviour is resolved by SEED, then MODE. Declared below `updateDraft`
   // because a `fill` chip calls it, and a `const` referenced from a handler
   // that runs before its declaration is a TDZ crash on the first click.
@@ -776,16 +788,17 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       textareaRef.current?.focus();
       return;
     }
+    if (chip.mode === "append") {
+      insertAtCursor(chip.message);
+      return;
+    }
     runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
-  // A suggested response fills the composer, exactly like a "fill" quick
-  // action. It never auto-sends: the suggestion is a starting point the user
-  // may want to edit, and a one-click send of model-authored text is a
-  // surprising way to start a turn.
+  // An LLM suggestion is a starting point the user may edit, so it is inserted
+  // at the caret by default instead of replacing the draft. It never auto-sends.
   const runSuggestedResponse = (suggestion: string) => {
-    updateDraft(suggestion);
-    textareaRef.current?.focus();
+    insertAtCursor(suggestion);
   };
 
   const cancelPendingRewind = () => {
@@ -1125,13 +1138,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
 
   // Transcript from voice input goes into the composer, never into a send. It
   // replaces the highlighted selection, or sits at the caret when nothing is
-  // highlighted. The live DOM value and selection are the ones the user sees.
+  // highlighted — the same insertion path `append` chips and suggestions use.
   const onVoiceTranscript = (text: string) => {
-    const el = textareaRef.current;
-    if (!el) throw new Error("Composer textarea is not mounted; cannot insert the transcript");
-    const inserted = insertTranscript(el.value, el.selectionStart, el.selectionEnd, text);
-    pendingCaretRef.current = { start: inserted.caret, end: inserted.caret, shift: 0 };
-    updateDraft(inserted.value);
+    insertAtCursor(text);
   };
   const [voiceInstalling, setVoiceInstalling] = useState(false);
   const [voiceInstallAsk, setVoiceInstallAsk] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);

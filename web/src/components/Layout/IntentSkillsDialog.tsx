@@ -5,6 +5,8 @@ import { INTENT_PACKAGE_NAME, type IntentPackageInfo } from "../../api/types";
 import { reloadDynamicCommands } from "../Chat/commands";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
 
 interface Props {
   open: boolean;
@@ -21,6 +23,7 @@ export default function IntentSkillsDialog({ open, onOpenChange }: Props) {
   const [installing, setInstalling] = useState(false);
   const [report, setReport] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   // Each opening fetches the latest release again and starts from a clean slate.
   // Closing aborts the request, so the server's registry fetch is cancelled too
@@ -33,6 +36,7 @@ export default function IntentSkillsDialog({ open, onOpenChange }: Props) {
     setChecked(new Set());
     setReport(null);
     setInstallError(null);
+    setQuery("");
     api.listIntentSkills(ctrl.signal).then(
       (p) => setPkg(p),
       (err) => {
@@ -74,6 +78,12 @@ export default function IntentSkillsDialog({ open, onOpenChange }: Props) {
     }
   };
 
+  // A checked skill hidden by the filter stays checked and still installs.
+  const keywords = parseKeywords(query);
+  const visibleSkills = pkg
+    ? pkg.skills.filter((s) => matchesKeywords([s.name, s.description].join(" "), keywords))
+    : [];
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg max-h-[80vh] p-0 overflow-hidden gap-0 !flex flex-col">
@@ -85,6 +95,18 @@ export default function IntentSkillsDialog({ open, onOpenChange }: Props) {
             )}
           </DialogTitle>
         </DialogHeader>
+
+        {pkg && pkg.skills.length > 0 && (
+          <div className="px-4 py-2 border-b border-border">
+            <Input
+              aria-label="Filter skills"
+              placeholder="Filter skills by keyword"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto">
           {loadError && (
@@ -98,8 +120,13 @@ export default function IntentSkillsDialog({ open, onOpenChange }: Props) {
               Fetching the latest release from npm…
             </div>
           )}
+          {pkg && pkg.skills.length > 0 && visibleSkills.length === 0 && (
+            <div className="px-4 py-3 text-xs text-muted-foreground">
+              No skills match &ldquo;{query.trim()}&rdquo;.
+            </div>
+          )}
           {pkg &&
-            pkg.skills.map((s) => {
+            visibleSkills.map((s) => {
               const on = checked.has(s.name);
               return (
                 <button

@@ -8,11 +8,13 @@ import (
 	"strings"
 )
 
-// Quick-action chip modes. `fill` puts the message in the composer for review;
-// `send` dispatches it through the same pipeline as a typed message.
+// Quick-action chip modes. `fill` replaces the composer draft, `append` inserts
+// the message at the caret, and `send` dispatches it through the same pipeline
+// as a typed message.
 const (
-	QuickActionModeFill = "fill"
-	QuickActionModeSend = "send"
+	QuickActionModeFill   = "fill"
+	QuickActionModeAppend = "append"
+	QuickActionModeSend   = "send"
 )
 
 // Seed markers. They exist only on the three shipped starters and carry the
@@ -187,9 +189,9 @@ func (c QuickActionsConfig) Validate() error {
 		if !ValidQuickActionIcon(chip.Icon) {
 			return fmt.Errorf("quick_actions: chip %q has unknown icon %q", chip.ID, chip.Icon)
 		}
-		if chip.Mode != QuickActionModeFill && chip.Mode != QuickActionModeSend {
-			return fmt.Errorf("quick_actions: chip %q has unknown mode %q (want %q or %q)",
-				chip.ID, chip.Mode, QuickActionModeFill, QuickActionModeSend)
+		if chip.Mode != QuickActionModeFill && chip.Mode != QuickActionModeAppend && chip.Mode != QuickActionModeSend {
+			return fmt.Errorf("quick_actions: chip %q has unknown mode %q (want %q, %q or %q)",
+				chip.ID, chip.Mode, QuickActionModeFill, QuickActionModeAppend, QuickActionModeSend)
 		}
 		switch chip.Seed {
 		case "", QuickActionSeedCompact, QuickActionSeedContinue, QuickActionSeedRecap:

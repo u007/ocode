@@ -9,13 +9,16 @@ import (
 )
 
 // promptOverrideRow is one entry of the System Prompts settings group: a
-// catalog prompt joined with the user's override for it. The built-in text is
-// deliberately not sent; the UI only needs to say what kind of prompt it is.
+// catalog prompt joined with the user's override for it. Builtin is the exact
+// text the runtime sends, so the UI can show it for review. ReadOnly entries
+// are never overridable: the UI shows Builtin and no controls for them.
 type promptOverrideRow struct {
 	Key         string           `json:"key"`
 	Label       string           `json:"label"`
 	Description string           `json:"description"`
 	Kind        agent.PromptKind `json:"kind"`
+	Builtin     string           `json:"builtin"`
+	ReadOnly    bool             `json:"read_only"`
 	Enabled     bool             `json:"enabled"`
 	Text        string           `json:"text"`
 }
@@ -29,13 +32,15 @@ func newPromptOverrideRow(e agent.PromptCatalogEntry) promptOverrideRow {
 		Label:       e.Label,
 		Description: e.Description,
 		Kind:        e.Kind,
+		Builtin:     e.Builtin,
+		ReadOnly:    e.ReadOnly,
 		Enabled:     !o.Disabled,
 		Text:        o.Text,
 	}
 }
 
-// HandleListPromptOverrides lists every overridable built-in prompt in catalog
-// order, each joined with its override.
+// HandleListPromptOverrides lists every built-in prompt in the catalog in
+// catalog order, each joined with its override.
 func (h *Handler) HandleListPromptOverrides(w http.ResponseWriter, r *http.Request) {
 	catalog := agent.PromptCatalog()
 	rows := make([]promptOverrideRow, 0, len(catalog))
@@ -52,6 +57,10 @@ func (h *Handler) HandleSetPromptOverride(w http.ResponseWriter, r *http.Request
 	entry, ok := agent.PromptCatalogEntryFor(key)
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown prompt key: "+key)
+		return
+	}
+	if entry.ReadOnly {
+		writeError(w, http.StatusForbidden, "prompt is read-only and cannot be overridden: "+key)
 		return
 	}
 	var req struct {

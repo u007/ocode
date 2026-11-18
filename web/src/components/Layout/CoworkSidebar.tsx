@@ -6,6 +6,8 @@ import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { reportActionError } from "../../lib/actionErrors";
 import { truncateTitle } from "../../lib/title";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
+import { Input } from "../ui/input";
 import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus, ManageableSkill } from "../../api/types";
@@ -165,6 +167,7 @@ export default function CoworkSidebar({
   const [skills, setSkills] = useState<ManageableSkill[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
+  const [skillQuery, setSkillQuery] = useState("");
 
   const [titleGenerating, setTitleGenerating] = useState(false);
   const dispatch = useChatDispatch();
@@ -885,6 +888,10 @@ export default function CoworkSidebar({
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+  const skillKeywords = parseKeywords(skillQuery);
+  const visibleSkills = orderedSkills.filter((s) =>
+    matchesKeywords([s.name, s.description, s.when_to_use, s.plugin].join(" "), skillKeywords),
+  );
   const enabledSkillCount = skills.filter((s) => s.enabled).length;
 
   const content = (
@@ -1671,14 +1678,23 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
           </button>
           {expandedSections.skills && (
             <div className="px-4 pb-3">
+              {skills.length > 0 && (
+                <Input
+                  aria-label="Filter skills"
+                  placeholder="Filter skills by keyword"
+                  value={skillQuery}
+                  onChange={(e) => setSkillQuery(e.target.value)}
+                  className="h-7 text-xs mb-2"
+                />
+              )}
               {skillsLoading && skills.length === 0 ? (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   Loading…
                 </div>
-              ) : orderedSkills.length > 0 ? (
+              ) : visibleSkills.length > 0 ? (
                 <div className="space-y-1">
-                  {orderedSkills.map((s) => (
+                  {visibleSkills.map((s) => (
                     <div
                       key={s.name}
                       className={`flex items-center justify-between gap-2 cursor-pointer rounded px-1 py-1 hover:bg-muted${
@@ -1720,7 +1736,9 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-muted-foreground">No skills found</div>
+                <div className="text-xs text-muted-foreground">
+                  {skills.length > 0 ? `No skills match "${skillQuery.trim()}".` : "No skills found"}
+                </div>
               )}
             </div>
           )}

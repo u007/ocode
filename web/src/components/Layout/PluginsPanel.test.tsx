@@ -71,3 +71,28 @@ describe("PluginsPanel install", () => {
     );
   });
 });
+
+describe("PluginsPanel keyword filter", () => {
+  it("filters installed and builtin plugins by keyword and reports no match", async () => {
+    vi.mocked(api.listPlugins).mockResolvedValue([
+      { name: "deploy-kit", source: "github.com/u/deploy-kit", dir: "/d", enabled: true, description: "Ship containers" },
+      { name: "notes", source: "github.com/u/notes", dir: "/n", enabled: false, description: "Meeting notes" },
+    ]);
+    render(<PluginsPanel open onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getByText("deploy-kit")).toBeTruthy());
+
+    const filter = screen.getByLabelText("Filter plugins");
+    fireEvent.change(filter, { target: { value: "containers" } });
+    expect(screen.getByText("deploy-kit")).toBeTruthy();
+    expect(screen.queryByText("notes")).toBeNull();
+    expect(screen.queryByText("ast")).toBeNull();
+
+    fireEvent.change(filter, { target: { value: "AST" } });
+    expect(screen.getByText("ast")).toBeTruthy();
+    expect(screen.queryByText("deploy-kit")).toBeNull();
+
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(screen.getByText(/No plugins match/)).toBeTruthy();
+    expect(screen.queryByText("ast")).toBeNull();
+  });
+});

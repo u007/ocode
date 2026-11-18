@@ -10,7 +10,10 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import IntentSkillsDialog from "./IntentSkillsDialog";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
 import { Loader2, Trash2, Download, Puzzle } from "lucide-react";
+
+const AST_DESCRIPTION = "ast-grep structural search/rewrite (needs the ast-grep CLI on PATH).";
 
 interface Props {
   open: boolean;
@@ -31,6 +34,13 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
   const [astEnabled, setAstEnabled] = useState(false);
   const [astBusy, setAstBusy] = useState(false);
   const [intentOpen, setIntentOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const keywords = parseKeywords(query);
+  const visiblePlugins = plugins.filter((p) =>
+    matchesKeywords([p.name, p.description, p.source].join(" "), keywords),
+  );
+  const astVisible = matchesKeywords(["ast", AST_DESCRIPTION].join(" "), keywords);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -161,6 +171,16 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
             </Button>
           </div>
 
+          <div className="px-4 py-2 border-b border-border">
+            <Input
+              aria-label="Filter plugins"
+              placeholder="Filter plugins by keyword"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </div>
+
           {notice && (
             <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
               {notice}
@@ -175,34 +195,36 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
 
           <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
             {/* Builtin plugins — mirrors TUI's "Builtin plugins:" section */}
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground mb-2">
-                Builtin plugins
-              </div>
-              <div className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-accent/50">
-                <div className="min-w-0">
-                  <div className="text-sm text-foreground truncate">ast</div>
-                  <div className="text-xs text-muted-foreground truncate">
-                    ast-grep structural search/rewrite (needs the ast-grep CLI on PATH).
-                  </div>
+            {astVisible && (
+              <div>
+                <div className="text-xs font-semibold text-muted-foreground mb-2">
+                  Builtin plugins
                 </div>
-                <Button
-                  variant={astEnabled ? "default" : "outline"}
-                  size="sm"
-                  className="h-7 text-xs min-w-[56px] shrink-0"
-                  onClick={toggleAst}
-                  disabled={astBusy}
-                >
-                  {astBusy ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : astEnabled ? (
-                    "On"
-                  ) : (
-                    "Off"
-                  )}
-                </Button>
+                <div className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-accent/50">
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground truncate">ast</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {AST_DESCRIPTION}
+                    </div>
+                  </div>
+                  <Button
+                    variant={astEnabled ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 text-xs min-w-[56px] shrink-0"
+                    onClick={toggleAst}
+                    disabled={astBusy}
+                  >
+                    {astBusy ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : astEnabled ? (
+                      "On"
+                    ) : (
+                      "Off"
+                    )}
+                  </Button>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="border-t border-border pt-3">
               <div className="text-xs font-semibold text-muted-foreground mb-2">
@@ -216,8 +238,12 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
               <div className="text-xs text-muted-foreground text-center py-8">
                 No plugins installed.
               </div>
+            ) : visiblePlugins.length === 0 ? (
+              <div className="text-xs text-muted-foreground text-center py-8">
+                No plugins match &ldquo;{query.trim()}&rdquo;.
+              </div>
             ) : (
-              plugins.map((p) => (
+              visiblePlugins.map((p) => (
                 <div
                   key={p.name}
                   className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-accent/50"

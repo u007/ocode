@@ -3,16 +3,18 @@
 Date: 2026-10-01
 Status: approved in chat (design presented and accepted; cap set to 20). Awaiting spec review.
 
+> **2026-11-17 amendment (owner decision):** `append` became a first-class third chip mode alongside `fill` and `send`. `fill` still replaces the draft; `append` inserts at the caret. This reverses the "one-line change" deferral in §Composer wiring and the "out of scope" line near the end. The 2026-10-01 decisions are kept below as history.
+
 ## Problem
 
 The web/desktop composer has a hardcoded quick-action strip below the send row
 (`web/src/components/Chat/QuickActionsBar.tsx`, driven by
-`ChatInput.tsx:719-738`). Its three pills — Compact, Continue/Resume, Recap — are
+`ChatInput.tsx:722-742`). Its three pills — Compact, Continue/Resume, Recap — are
 baked into the component. Users cannot add their own one-click nudges, and the
 three that exist cannot be relabelled, reordered, or removed.
 
 Today the array is a literal and `runQuickAction` is a `switch` on three string
-ids (`ChatInput.tsx:762`). Anything user-configurable must replace both, and the
+ids (`ChatInput.tsx:777`). Anything user-configurable must replace both, and the
 three existing pills are the natural seed for that configuration rather than a
 parallel special case.
 
@@ -137,7 +139,7 @@ rather than blanking the strip.
 - `len(chips) > 20` → error
 - empty chips array → legal, and means "no strip" (the user removed everything)
 - per chip: `id` non-empty and unique; `label` non-empty after trim; `message`
-  non-empty after trim; `icon` in the allowlist; `mode` in `{fill, send}`;
+  non-empty after trim; `icon` in the allowlist; `mode` in `{fill, append, send}`;
   `seed` in `{compact, continue, recap}` when present
 - unknown field anywhere in the block → error (strict decode, so a typo'd key
   surfaces instead of being silently dropped)
@@ -185,21 +187,27 @@ composer share one source.
 Per click:
 
 1. `seed == "continue"` and `wasInterrupted` → `handleResume()`, return. Wins
-   over both modes — resume is not a text dispatch.
+   over all three modes — resume is not a text dispatch.
 2. `mode == "fill"` → `updateDraft(chip.message)` and focus the textarea. No
    send, no queue push, no draft clearing.
-3. `mode == "send"` → `runQuickDispatch(chip.message, kind)` where `kind` is
+3. `mode == "append"` → `insertAtCursor(chip.message)` (added 2026-11-17):
+   inserts at the caret, replacing any highlighted selection; no send.
+4. `mode == "send"` → `runQuickDispatch(chip.message, kind)` where `kind` is
    `"command"` for a `/` prefix and `"message"` otherwise. This is the existing
    helper, so busy-turn queueing, the compaction barrier, and the drain-on-idle
    path are unchanged.
 
-**`fill` replaces the draft rather than appending.** Clicking a chip states a
-new intent, matching the slash-command menu. Flagged in chat as a reversible
-call; if the user prefers append or prepend, it is a one-line change in step 2.
+**Original 2026-10-01 decision (superseded in part):** *"`fill` replaces the
+draft rather than appending. Clicking a chip states a new intent, matching the
+slash-command menu. Flagged in chat as a reversible call; if the user prefers
+append or prepend, it is a one-line change in step 2."* On **2026-11-17** the
+owner reversed the deferral: `append` is now a first-class third mode (Settings
+label **Insert at cursor**) sharing `insertAtCursor` with voice transcripts and
+LLM suggestions. `fill` is unchanged — it still replaces the draft.
 
 ### The visibility gate moves from the wrapper to the chip
 
-Today the whole strip is gated at the JSX level (`ChatInput.tsx:1765-1766`):
+Today the whole strip is gated at the JSX level (`ChatInput.tsx:1782-1784`, re-derived 2026-11-17; the snippet below is the pre-change form):
 
 ```tsx
 {hasConversation && (<QuickActionsBar actions={quickActions} onSelect={runQuickAction} />)}
@@ -278,7 +286,7 @@ first, since a build-only failure is INVALID, not CAUGHT.
 - Per-project chip lists
 - Importing chips from prompt history
 - Custom icon upload
-- Making `fill` append instead of replace
+- Making `fill` append instead of replace — **reversed 2026-11-17**: `append` is now its own first-class mode (Settings → Quick Actions → "Insert at cursor"); `fill` deliberately still replaces.
 
 ## Files
 

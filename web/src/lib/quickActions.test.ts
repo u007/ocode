@@ -183,8 +183,9 @@ describe("isQuickActionSeed / isQuickActionMode", () => {
     expect(isQuickActionSeed(undefined)).toBe(false);
   });
 
-  it("accepts exactly fill and send", () => {
+  it("accepts exactly fill, append and send", () => {
     expect(isQuickActionMode("fill")).toBe(true);
+    expect(isQuickActionMode("append")).toBe(true);
     expect(isQuickActionMode("send")).toBe(true);
     expect(isQuickActionMode("Fill")).toBe(false);
     expect(isQuickActionMode(null)).toBe(false);

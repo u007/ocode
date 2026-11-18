@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: System prompt overrides — per-prompt enable switch and custom instructions
-description: 'Per-prompt control of the built-in system prompts: an enable switch (on by default) and optional custom instructions appended to the built-in prompt. Covers the prompts key in ocodeconfig.json, legacy entry migration, the GET and PUT /api/config/prompts endpoints, the Settings System Prompts group, the 22 catalog keys, what disabling a prompt does by kind, what is deliberately excluded, and the live-store invariant.'
+description: 'Per-prompt control of the built-in system prompts: an enable switch (on by default) and optional custom instructions appended to the built-in prompt. Covers the prompts key in ocodeconfig.json, legacy entry migration, the GET and PUT /api/config/prompts endpoints, the Settings System Prompts group, the 39 catalog keys (24 overridable, 15 read-only), what disabling a prompt does by kind, what is deliberately excluded, and the live-store invariant.'
 tags:
   - prompts
   - config
@@ -25,6 +25,34 @@ Switching a prompt off omits the built-in prompt entirely. It does not send an
 empty or shortened version. For a prompt that is the only thing a caller has (a
 judge rubric, a helper instruction), that turns the capability off; see
 [What disabling a prompt does](#what-disabling-a-prompt-does).
+
+## Read-only entries
+
+Some catalog entries are listed for review only. Their `PromptCatalogEntry` has
+`ReadOnly` set (`internal/agent/prompt_catalog.go` line 30). They are the
+permission judge prompts (`permission_judge`, `permission_judge_chat`,
+`permission_judge_concern`, `permission_judge_enforced_concern`,
+`permission_judge_interpreter`, `permission_judge_rulebook`), the provider base
+prompts (`provider_*`), `small_model` and `task_verifier`.
+
+- A read-only key cannot be overridden. `PUT /api/config/prompts/{key}` returns
+  403 and nothing is written to the live store or to `ocodeconfig.json`
+  (`HandleSetPromptOverride`, `internal/server/handler_prompts.go` line 62).
+- No override is applied to a read-only text. `overrideBuiltinPrompt` returns it
+  unchanged (`internal/agent/prompt_catalog.go` line 360), and no call site passes
+  a read-only key to `config.ApplyPromptOverride`. The judge rubric stays fixed.
+- `builtin` is the value the runtime sends, not a copy. The three judge texts live
+  in `internal/agent/prompts/permission_judge.txt`,
+  `permission_judge_concern.txt` (the suffix that
+  `typesafeConcernInstructions` appends to the rubric) and
+  `permission_judge_enforced_concern.txt`, loaded with `//go:embed` in
+  `internal/agent/permission_typesafe.go`. The two request templates are fmt
+  templates held as consts: `permissionJudgePromptTemplate` in
+  `internal/agent/agent.go` and `permissionInterpreterPromptTemplate` in
+  `internal/agent/permission_interpreter.go`. Their `%s` placeholders are filled
+  per call, so the UI shows the template, not one request. The provider prompts
+  are the existing `prompts/*.txt` embeds in `internal/agent/provider_prompts.go`,
+  and the rulebook is `config.BundledAutoPermissionPromptBody`.
 
 ## Config
 
@@ -61,13 +89,16 @@ The previous schema was append-only and stored `{"enabled": bool, "text": "..."}
 ## Endpoints
 
 - `GET /api/config/prompts` returns `{"prompts": [...]}` in catalog order. Each
-  item has `key`, `label`, `description`, `kind`, `enabled` and `text`. `enabled`
-  means "the prompt is switched on" and is true for a key with no stored entry
-  (`newPromptOverrideRow`, `internal/server/handler_prompts.go` line 25). The
-  built-in prompt text is not sent; the UI does not need it.
+  item has `key`, `label`, `description`, `kind`, `builtin`, `read_only`,
+  `enabled` and `text`. `enabled` means "the prompt is switched on" and is true
+  for a key with no stored entry (`newPromptOverrideRow`,
+  `internal/server/handler_prompts.go` line 28). `builtin` is the exact built-in
+  text the runtime sends, so the UI can show it for review. `read_only` is true
+  for the entries in [Read-only entries](#read-only-entries).
 - `PUT /api/config/prompts/{key}` takes `{"enabled": bool, "text": string}` and
   returns the updated item. `enabled: false` is stored as `{"disabled": true}`
-  (line 69). An unknown key is 404. An invalid body is 400. Text over
+  (line 78). An unknown key is 404. A read-only key is 403 and saves nothing. An
+  invalid body is 400. Text over
   `config.MaxPromptOverrideBytes` (32 KiB) is 400, and `SavePromptOverride`
   rejects it too.
 
@@ -77,9 +108,12 @@ in `Server.registerRoutes()` in `internal/server/server.go`.
 ## Settings UI
 
 The web Settings panel shows these prompts in a group titled "System Prompts".
-Each row shows the label, a badge with the prompt's `kind`, an
-"Enable this prompt" checkbox, a custom-instructions textarea, and Save and
-Reset buttons. `kind` is one of `Sub-agent`, `Judge`, `Helper task` (a background
+Each row shows the label, a badge with the prompt's `kind`, and a "View built-in
+prompt" button that expands the built-in text in a read-only, scrollable block.
+An overridable prompt also has an "Enable this prompt" checkbox, a
+custom-instructions textarea, and Save and Reset buttons. A read-only prompt (see
+[Read-only entries](#read-only-entries)) shows a "Read-only" badge and none of
+those controls. `kind` is one of `Sub-agent`, `Judge`, `Helper task` (a background
 model call such as title, compaction or summaries) or `Main agent prompt` (a
 fragment added to the main agent's context). It is `agent.PromptKind` in
 `internal/agent/prompt_catalog.go`.
@@ -114,8 +148,8 @@ the same way in `internal/agent/discovery_glue.go` (lines 986 and 956).
 ### Sub-agent prompts
 
 `SubAgentPromptWithOverride` and `overrideBuiltinPrompt` return `""` for a
-disabled `subagent_*` prompt (`internal/agent/prompt_catalog.go` lines 208 and
-219). The mode fragment is skipped when that text is empty
+disabled `subagent_*` prompt (`internal/agent/prompt_catalog.go` lines 348 and
+363). The mode fragment is skipped when that text is empty
 (`internal/agent/prompt.go` line 258), so the sub-agent gets no role prompt from
 the catalog.
 
@@ -175,19 +209,26 @@ to empty here, so no role prompt is sent.
 ## Catalog keys
 
 The catalog is `agent.PromptCatalog()` in `internal/agent/prompt_catalog.go`.
-It currently holds 22 keys: `advisor`, `advisor_claude_code`,
-`auto_continue_judge`, `communication_style`, `compaction`, `content_guard`,
-`discovery_contract`, `doc_prompt`, `goal_judge`, `md_summary`,
-`network_guard`, `plan`, `recap`, `redaction_awareness`, `speech_summary`,
-`subagent_context`, `subagent_explore`, `subagent_general`, `subagent_scout`,
-`suggested_responses`, `title` and `tool_digest`.
+It holds 39 keys. 24 are overridable: `advisor`, `advisor_claude_code`,
+`advisor_gate`, `auto_continue_judge`, `auto_continue_question_judge`,
+`communication_style`, `compaction`, `content_guard`, `discovery_contract`,
+`doc_prompt`, `goal_judge`, `md_summary`, `network_guard`, `plan`, `recap`,
+`redaction_awareness`, `speech_summary`, `subagent_context`, `subagent_explore`,
+`subagent_general`, `subagent_scout`, `suggested_responses`, `title` and
+`tool_digest`. The other 15 are read-only: `permission_judge`,
+`permission_judge_chat`, `permission_judge_concern`,
+`permission_judge_enforced_concern`, `permission_judge_interpreter`,
+`permission_judge_rulebook`, `provider_claude`, `provider_copilot`,
+`provider_deepseek`, `provider_gemini`, `provider_gpt`, `provider_kimi`,
+`provider_reasoning`, `small_model` and `task_verifier`.
 
 ## Deliberately not covered
 
-- The permission judge prompt. Configure it with `permissions.auto.prompt`.
+- The user's own `permissions.auto.prompt` addendum. It is a separate setting,
+  not a catalog entry. The judge prompts themselves are listed as read-only
+  entries.
 - The Pulse assistant prompt. Configure it with `pulse_system_prompt`.
 - The commit message prompt. Configure it with `commit_msg_prompt`.
-- The provider main system prompts.
 
 ## Invariant: read the live store at call time
 

@@ -31,11 +31,12 @@ import type { QuickActionChip, QuickActionMode } from "@/api/types";
 
 /**
  * The mode options, in the order the composer interprets them. Rendered from a
- * literal list rather than derived from a type so adding a third mode is a
- * deliberate edit here instead of a silent runtime union.
+ * literal list rather than derived from a type so adding a mode is a deliberate
+ * edit here instead of a silent runtime union.
  */
 const MODES: Array<{ value: QuickActionMode; label: string }> = [
   { value: "fill", label: "Fill the composer" },
+  { value: "append", label: "Insert at cursor" },
   { value: "send", label: "Send immediately" },
 ];
 

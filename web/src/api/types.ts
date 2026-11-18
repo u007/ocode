@@ -248,7 +248,7 @@ export type ChatVerbosityResponse = ChatVerbosityConfig;
 /** Quick actions — the pill strip above the composer. Mirrors
  *  `internal/config.QuickActionChip`. `seed` is `omitempty` in Go, so the key
  *  is ABSENT (not empty) for a custom chip: it must stay optional here. */
-export type QuickActionMode = "fill" | "send";
+export type QuickActionMode = "fill" | "append" | "send";
 export type QuickActionSeed = "compact" | "continue" | "recap";
 
 export interface QuickActionChip {
@@ -1856,6 +1856,10 @@ export interface PromptOverrideEntry {
   label: string;
   description: string;
   kind: PromptKind;
+  /** The exact text the runtime sends. Shown for review, never edited here. */
+  builtin: string;
+  /** Review only: no enable switch, no custom instructions, no save or reset. */
+  read_only: boolean;
   enabled: boolean;
   text: string;
 }

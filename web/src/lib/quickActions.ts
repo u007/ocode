@@ -147,7 +147,7 @@ export function isQuickActionSeed(value: unknown): value is QuickActionSeed {
 }
 
 export function isQuickActionMode(value: unknown): value is QuickActionMode {
-  return value === "fill" || value === "send";
+  return value === "fill" || value === "append" || value === "send";
 }
 
 /**

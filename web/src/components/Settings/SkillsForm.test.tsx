@@ -181,4 +181,31 @@ describe("SkillsForm", () => {
       expect(box.className).toContain("checked:bg-emerald-600");
     }
   });
+
+  it("filters the list by keyword across name, description and plugin", async () => {
+    getManageableSkills.mockResolvedValue({
+      project_root: "",
+      skills: [
+        ...SKILLS,
+        { name: "plugin:deploy", description: "Ship it", enabled: true, plugin: "ops" },
+      ],
+    });
+    render(<SkillsForm />);
+    await waitFor(() => expect(screen.getByText(/3\/4 enabled/)).toBeInTheDocument());
+
+    const filter = screen.getByLabelText("Filter skills");
+    fireEvent.change(filter, { target: { value: "SECOND" } });
+    expect(screen.getByRole("checkbox", { name: "Skill beta" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Skill alpha" })).toBeNull();
+
+    // Terms are AND-ed; the plugin field is searchable too.
+    fireEvent.change(filter, { target: { value: "ops deploy" } });
+    expect(screen.getByRole("checkbox", { name: "Skill plugin:deploy" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Skill beta" })).toBeNull();
+
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(screen.getByText(/No skills match/)).toBeInTheDocument();
+    // The header count stays on the full list.
+    expect(screen.getByText(/3\/4 enabled/)).toBeInTheDocument();
+  });
 });

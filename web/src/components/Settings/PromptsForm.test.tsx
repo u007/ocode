@@ -12,11 +12,17 @@ vi.mock("../../api/client", () => ({
   },
 }));
 
+const COMPACTION_BUILTIN = "Summarise the older turns.\n\n- Keep file paths verbatim.";
+const TITLE_BUILTIN = "Name the session in three to seven words.";
+const JUDGE_BUILTIN = "You are a permission gatekeeper.\n  Allow only what is clearly in policy.";
+
 const compaction: PromptOverrideEntry = {
   key: "compaction",
   label: "Compaction summariser",
   description: "Writes the summary that replaces older turns.",
   kind: "Helper task",
+  builtin: COMPACTION_BUILTIN,
+  read_only: false,
   enabled: false,
   text: "",
 };
@@ -25,8 +31,20 @@ const title: PromptOverrideEntry = {
   label: "Session titles",
   description: "Names a new session.",
   kind: "Helper task",
+  builtin: TITLE_BUILTIN,
+  read_only: false,
   enabled: true,
   text: "Keep titles under five words.",
+};
+const permissionJudge: PromptOverrideEntry = {
+  key: "permission_judge",
+  label: "Permission judge",
+  description: "Gatekeeper rubric for tool calls awaiting approval.",
+  kind: "Judge",
+  builtin: JUDGE_BUILTIN,
+  read_only: true,
+  enabled: true,
+  text: "",
 };
 
 const card = (key: string) => within(screen.getByTestId(`prompt-card-${key}`));
@@ -50,7 +68,52 @@ describe("PromptsForm", () => {
     expect(screen.getByText("Session titles")).toBeTruthy();
     expect(card("compaction").getByText("Helper task")).toBeTruthy();
     expect(card("title").getByText("Helper task")).toBeTruthy();
-    expect(screen.queryByText(/Show built-in prompt/)).toBeNull();
+    expect(card("compaction").getByRole("button", { name: "View built-in prompt" })).toBeTruthy();
+    expect(screen.queryByLabelText("Built-in text of Compaction summariser")).toBeNull();
+  });
+
+  it("keeps the built-in text collapsed until View built-in prompt is pressed, verbatim", async () => {
+    render(<PromptsForm />);
+    await screen.findByText("Compaction summariser");
+
+    const toggle = card("compaction").getByRole("button", { name: "View built-in prompt" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("builtin-prompt-compaction");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const text = card("compaction").getByLabelText("Built-in text of Compaction summariser");
+    expect(text.textContent).toBe(COMPACTION_BUILTIN);
+    expect(text.className).toContain("whitespace-pre-wrap");
+    expect(text.className).toContain("max-h-80");
+  });
+
+  it("renders a read-only entry with its built-in text and no toggle, editor, save or reset", async () => {
+    mockGetPrompts.mockResolvedValue({ prompts: [permissionJudge] });
+    render(<PromptsForm />);
+    expect(await screen.findByText("Permission judge")).toBeTruthy();
+
+    expect(card("permission_judge").getByText("Read-only")).toBeTruthy();
+    expect(card("permission_judge").queryByLabelText("Enable this prompt")).toBeNull();
+    expect(
+      card("permission_judge").queryByPlaceholderText("Appended to the built-in prompt when enabled."),
+    ).toBeNull();
+    expect(card("permission_judge").queryByRole("button", { name: "Save" })).toBeNull();
+    expect(card("permission_judge").queryByRole("button", { name: "Reset" })).toBeNull();
+
+    fireEvent.click(card("permission_judge").getByRole("button", { name: "View built-in prompt" }));
+    const text = card("permission_judge").getByLabelText("Built-in text of Permission judge");
+    expect(text.textContent).toBe(JUDGE_BUILTIN);
+  });
+
+  it("marks only read-only entries with the Read-only badge", async () => {
+    mockGetPrompts.mockResolvedValue({ prompts: [permissionJudge, title] });
+    render(<PromptsForm />);
+    await screen.findByText("Permission judge");
+
+    expect(card("permission_judge").getByText("Read-only")).toBeTruthy();
+    expect(card("title").queryByText("Read-only")).toBeNull();
+    expect(card("title").getByLabelText("Enable this prompt")).toBeTruthy();
   });
 
   it("collapses the editor while a prompt is disabled and expands it when enabled", async () => {

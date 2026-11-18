@@ -89,7 +89,7 @@ describe("ChatInput suggested responses", () => {
     ).toBeTruthy();
   });
 
-  it("fills the composer when an option is clicked, without sending", () => {
+  it("inserts an option at the caret by default, without sending", () => {
     chat.suggestions = ["Run the tests"];
     render(<ChatInput sessionTabId="ses_1" />);
 
@@ -101,6 +101,21 @@ describe("ChatInput suggested responses", () => {
     expect(textarea.value).toBe("Run the tests");
     // A suggestion is a starting point the user may edit — it must never
     // start a turn on its own.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("replaces a highlighted selection and keeps the rest of the draft", () => {
+    chat.suggestions = ["Run the tests"];
+    render(<ChatInput sessionTabId="ses_1" />);
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "please do this now" } });
+    textarea.setSelectionRange(7, 14); // highlight "do this"
+
+    fireEvent.click(screen.getByRole("button", { name: "Run the tests" }));
+
+    expect(textarea.value).toBe("please Run the tests now");
+    expect(textarea.selectionStart).toBe("please Run the tests".length);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

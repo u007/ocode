@@ -12,7 +12,7 @@ tags:
   - caching
   - reload
   - gotcha
-timestamp: 2026-11-14T18:22:54Z
+timestamp: 2026-11-18T03:03:56Z
 ---
 # Per-Chat MCP Toggle
 
@@ -26,7 +26,7 @@ The web/desktop chat sidebar (`CoworkSidebar.tsx`) has a collapsible **MCP** sec
 
 ## Surface
 
-- **Section:** collapsible, default collapsed; persistence uses the same localStorage key as the other sidebar section states, `ocode.ui.sidebar.v2` (`SIDEBAR_SECTIONS_KEY`, `web/src/components/Layout/CoworkSidebar.tsx:66`).
+- **Section:** collapsible, default collapsed; persistence uses the same localStorage key as the other sidebar section states, `ocode.ui.sidebar.v2` (`SIDEBAR_SECTIONS_KEY`, `web/src/components/Layout/CoworkSidebar.tsx:84`).
 - **Data:** the server list is fetched session-scoped — `GET /api/mcp?session_id=` — so the switch shows *this* chat's effective state, not the process-wide one.
 - **API client** (`web/src/api/client.ts`):
   - `api.getMCP(host?, sessionId?)`

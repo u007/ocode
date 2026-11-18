@@ -76,4 +76,18 @@ describe("OcodePluginsForm with Claude Code plugins", () => {
     fireEvent.click(within(row("superpowers")).getByRole("button", { name: "Off" }));
     await waitFor(() => expect(mockToggle).toHaveBeenCalledWith("superpowers", true));
   });
+
+  it("filters external plugins by keyword and reports when none match", async () => {
+    render(<OcodePluginsForm />);
+    await waitFor(() => expect(screen.getByText("superpowers")).toBeTruthy());
+
+    const filter = screen.getByLabelText("Filter plugins");
+    fireEvent.change(filter, { target: { value: "GITHUB.COM/U" } });
+    expect(screen.queryByText("superpowers")).toBeNull();
+    expect(screen.getByText("mine")).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    expect(screen.getByText(/No plugins match/)).toBeTruthy();
+    expect(screen.queryByText("mine")).toBeNull();
+  });
 });

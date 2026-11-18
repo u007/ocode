@@ -4,11 +4,13 @@ import { INTENT_PACKAGE_NAME, isClaudeCodePlugin, type PluginInfo } from "../../
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import IntentSkillsDialog from "../Layout/IntentSkillsDialog";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
 import { Loader2, Trash2, Download } from "lucide-react";
 
 export default function OcodePluginsForm() {
   const [astEnabled, setAstEnabled] = useState(false);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [installing, setInstalling] = useState(false);
   const [intentOpen, setIntentOpen] = useState(false);
@@ -116,6 +118,9 @@ export default function OcodePluginsForm() {
     }
   };
 
+  const keywords = parseKeywords(query);
+  const visiblePlugins = plugins.filter((p) => matchesKeywords([p.name, p.description, p.source].join(" "), keywords));
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -157,11 +162,22 @@ export default function OcodePluginsForm() {
             Install
           </Button>
         </div>
+        {plugins.length > 0 && (
+          <Input
+            aria-label="Filter plugins"
+            placeholder="Filter plugins by keyword"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-8 text-xs mb-3"
+          />
+        )}
         {plugins.length === 0 ? (
           <div className="text-xs text-muted-foreground">No plugins installed.</div>
+        ) : visiblePlugins.length === 0 ? (
+          <div className="text-xs text-muted-foreground">No plugins match &ldquo;{query.trim()}&rdquo;.</div>
         ) : (
           <div className="space-y-1">
-            {plugins.map((p) => (
+            {visiblePlugins.map((p) => (
               <div key={p.name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-muted">
                 <div className="min-w-0 text-sm text-foreground truncate">
                   {p.name}

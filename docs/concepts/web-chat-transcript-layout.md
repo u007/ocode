@@ -10,7 +10,7 @@ tags:
   - agent-preview
   - flex
   - invariant
-timestamp: 2026-11-06T12:24:00Z
+timestamp: 2026-11-17T06:39:08Z
 ---
 # Web Chat Transcript Layout — Flex Column and Shrink-Weight Invariant
 
@@ -127,3 +127,22 @@ the surface.
 `web/src/components/Agents/RunNode.tsx` used to hand-roll its transcript (plain pre-wrap text, `tool(args.slice(0,120))`, untruncated results). Every entry now goes through `RunTranscriptEntry`, which reuses the chat transcript's components: `AssistantText` (markdown), `ThinkingBlock` (thinking policy), and `ToolBlock` (independent tool-call / tool-output gates, including the 20-line tail preview). A tool call and the role-"tool" message answering it are grouped into ONE block by tool-call id — the run DTO carries it (`runMessagesDTO` / `runToolCallDTO.ID` in `internal/server/handler_runs.go`, which also keeps reasoning-only entries and empty-content tool answers, so a call whose tool returned "" still shows as done rather than running).
 
 Those surfaces (the chat's Agents rail, the Agents tab list/detail) render outside `ChatPanel`, so `web/src/components/Agents/agentRunDisplay.tsx` (`AgentRunDisplayScope`) supplies the shared `useChatVerbosity()` policy plus its own disclosure store. It is a PASS-THROUGH when a `ChatDisplayContext` provider already exists, so the inline `task` card keeps the chat's policy and store. Regression tests: `Agents/RunNode.test.tsx` ("RunNode chat display parity"), `Chat/AgentPreview.test.tsx`, `Agents/agentRunDisplay.test.tsx`, and the Go `TestRunMessagesDTOCarriesToolCallIDAndKeepsReasoningOnlyEntries` and `TestRunMessagesDTOKeepsEmptyToolResultWithCallID`.
+
+## Gotcha: `highlight` is the find query, not matched text
+
+`ToolBlock`'s `highlight` prop is the ACTIVE FIND QUERY, not text already known
+to match: `ChatPanel.tsx:1930` passes `searchOpen ? searchQuery : ""`.
+`highlightMatches` (`ChatSearchBar.tsx:27`) wraps only occurrences of the query
+in `<mark>` and returns raw text unchanged when there is no occurrence, so zero
+marks is a valid result, not a broken highlighter.
+`HighlightedCode.test.tsx`'s "falls back to plaintext with mark when the find
+bar is active" broke at HEAD: commit `784c6425` set `tool` to `grep` but kept
+`highlight="ls"`. Grep's `formatToolArgsHint` (`toolHint.ts`) yields a non-empty
+`argsHint`, which suppresses the raw command block (`TurnParts.tsx`
+`command && !argsHint`), so "ls" had nowhere to render; the fix queries `hello`,
+text that really renders. Rule: query text that is ACTUALLY rendered — and note
+JSON output switches to the plaintext-with-marks fallback while a query is active
+(`TurnParts.tsx:445` `jsonTree = highlight.trim() === ""`, rendered at `:590`),
+since a JSON tree cannot carry `<mark>`. Chat find is ChatPanel-local:
+`docs/concepts/web-keyboard-shortcuts.md`.
+

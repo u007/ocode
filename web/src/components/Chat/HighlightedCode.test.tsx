@@ -84,7 +84,7 @@ describe("syntax highlighting", () => {
 
   it("falls back to plaintext with mark when the find bar is active", async () => {
     render(
-      <ToolBlock tool="grep" command={'{"pattern":"ls"}'} output="hello" highlight="ls" />,
+      <ToolBlock tool="grep" command={'{"pattern":"hello"}'} output={'{"message":"hello"}'} highlight="hello" />,
     );
     await waitFor(() => {
       expect(document.querySelectorAll("mark").length).toBeGreaterThan(0);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { api } from "../../api/client";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import type { PromptOverrideEntry } from "../../api/types";
 
@@ -9,7 +10,8 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Custom instructions for every configurable built-in system prompt.
+ * Custom instructions for every configurable built-in system prompt, and a
+ * read-only view of the built-in text of every prompt.
  *
  * Nothing is optimistic. Each save or reset round-trips and then shows the
  * entry the server returned, so the card only ever displays a value the server
@@ -56,6 +58,9 @@ export default function PromptsForm() {
         Each built-in prompt runs unless you switch it off, and switching one off
         turns off what it drives. Custom instructions are appended to the prompt
         while it is enabled. The editor stays collapsed while a prompt is off.
+        Read-only prompts, such as the permission judge and the provider prompts,
+        are shown for review only: they cannot be switched off or edited here.
+        Each card's "View built-in prompt" button shows its full text.
       </p>
       {error && (
         <div role="alert" className="text-xs text-red-400">
@@ -102,17 +107,19 @@ function PromptCard({
   const alreadyReset = entry.enabled && entry.text === "";
   const textareaId = `prompt-override-${entry.key}`;
 
+  if (entry.read_only) {
+    return (
+      <section data-testid={`prompt-card-${entry.key}`} className="space-y-2 border-t border-border pt-3">
+        <PromptHeader entry={entry} />
+        <BuiltinPrompt entryKey={entry.key} label={entry.label} text={entry.builtin} />
+      </section>
+    );
+  }
+
   return (
     <section data-testid={`prompt-card-${entry.key}`} className="space-y-2 border-t border-border pt-3">
-      <div>
-        <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold text-foreground">{entry.label}</h3>
-          <span className="rounded border border-border px-1.5 py-px text-[10px] text-muted-foreground">
-            {entry.kind}
-          </span>
-        </div>
-        <p className="text-xs text-muted-foreground">{entry.description}</p>
-      </div>
+      <PromptHeader entry={entry} />
+      <BuiltinPrompt entryKey={entry.key} label={entry.label} text={entry.builtin} />
       <label className="text-xs text-foreground flex items-center gap-2 cursor-pointer select-none">
         <input
           type="checkbox"
@@ -169,5 +176,58 @@ function PromptCard({
         </div>
       )}
     </section>
+  );
+}
+
+function PromptHeader({ entry }: { entry: PromptOverrideEntry }) {
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-semibold text-foreground">{entry.label}</h3>
+        <span className="rounded border border-border px-1.5 py-px text-[10px] text-muted-foreground">
+          {entry.kind}
+        </span>
+        {entry.read_only && (
+          <Badge variant="outline" className="px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+            Read-only
+          </Badge>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">{entry.description}</p>
+    </div>
+  );
+}
+
+/**
+ * The built-in text, collapsed until asked for. It is the value the runtime
+ * sends, shown verbatim: whitespace and line breaks are kept.
+ */
+function BuiltinPrompt({ entryKey, label, text }: { entryKey: string; label: string; text: string }) {
+  const [open, setOpen] = useState(false);
+  const regionId = `builtin-prompt-${entryKey}`;
+  return (
+    <div className="space-y-2">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-8 text-xs"
+        aria-expanded={open}
+        aria-controls={regionId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        View built-in prompt
+      </Button>
+      {open && (
+        <pre
+          id={regionId}
+          tabIndex={0}
+          aria-label={`Built-in text of ${label}`}
+          className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs text-foreground"
+        >
+          {text}
+        </pre>
+      )}
+    </div>
   );
 }

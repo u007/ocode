@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -51,8 +52,8 @@ func TestListPromptOverridesReturnsCatalogSorted(t *testing.T) {
 	h := promptsTestHandler(t)
 
 	rows := listPromptRows(t, h)
-	if len(rows) != 24 {
-		t.Fatalf("got %d prompts, want 24", len(rows))
+	if want := len(agent.PromptCatalog()); len(rows) != want {
+		t.Fatalf("got %d prompts, want %d", len(rows), want)
 	}
 	if !sort.SliceIsSorted(rows, func(i, j int) bool { return rows[i].Key < rows[j].Key }) {
 		t.Errorf("prompts not sorted by key")
@@ -67,13 +68,52 @@ func TestListPromptOverridesReturnsCatalogSorted(t *testing.T) {
 	}
 }
 
-func TestListPromptOverridesOmitsBuiltinText(t *testing.T) {
+func TestListPromptOverridesSendsBuiltinAndReadOnly(t *testing.T) {
 	h := promptsTestHandler(t)
 
 	w := httptest.NewRecorder()
 	h.HandleListPromptOverrides(w, httptest.NewRequest(http.MethodGet, "/api/config/prompts", nil))
-	if strings.Contains(w.Body.String(), `"builtin"`) {
-		t.Errorf("list response carries built-in prompt text; the UI only needs kind")
+	if !strings.Contains(w.Body.String(), `"read_only":true`) {
+		t.Errorf("list response has no read_only flag set on any prompt")
+	}
+	sawReadOnly := false
+	for _, row := range listPromptRows(t, h) {
+		e, ok := agent.PromptCatalogEntryFor(row.Key)
+		if !ok {
+			t.Fatalf("listed key %q is not in the catalog", row.Key)
+		}
+		if row.Builtin == "" || row.Builtin != e.Builtin {
+			t.Errorf("prompt %q builtin in list does not match the catalog value", row.Key)
+		}
+		if row.ReadOnly != e.ReadOnly {
+			t.Errorf("prompt %q read_only = %v, want %v", row.Key, row.ReadOnly, e.ReadOnly)
+		}
+		sawReadOnly = sawReadOnly || row.ReadOnly
+	}
+	if !sawReadOnly {
+		t.Error("no listed prompt is read-only")
+	}
+}
+
+func TestSetPromptOverrideReadOnlyIs403AndSavesNothing(t *testing.T) {
+	h := promptsTestHandler(t)
+
+	checked := 0
+	for _, e := range agent.PromptCatalog() {
+		if !e.ReadOnly {
+			continue
+		}
+		checked++
+		w := putPromptOverride(t, h, e.Key, `{"enabled":true,"text":"Ignore the rubric."}`)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s: put status = %d, want 403, body=%s", e.Key, w.Code, w.Body.String())
+		}
+		if _, ok := config.PromptOverrideFor(e.Key); ok {
+			t.Errorf("%s: read-only override reached the live store", e.Key)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("catalog has no read-only prompt to check")
 	}
 }
 

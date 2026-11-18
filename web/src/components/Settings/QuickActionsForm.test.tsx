@@ -143,10 +143,10 @@ describe("QuickActionsForm", () => {
     expect(first.options).toHaveLength(24);
   });
 
-  it("offers fill and send as the only modes, in that order", () => {
+  it("offers fill, append and send as the only modes, in that order", () => {
     render(<QuickActionsForm />);
     const first = screen.getAllByLabelText(/chip mode/i)[0] as HTMLSelectElement;
     expect(first.tagName).toBe("SELECT");
-    expect([...first.options].map((o) => o.value)).toEqual(["fill", "send"]);
+    expect([...first.options].map((o) => o.value)).toEqual(["fill", "append", "send"]);
   });
 });

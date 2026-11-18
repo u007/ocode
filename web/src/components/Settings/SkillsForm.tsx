@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { Loader2 } from "lucide-react";
 import type { ManageableSkill } from "../../api/types";
+import { Input } from "../ui/input";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
 
 // Global skills settings.
 //
@@ -17,6 +19,7 @@ export default function SkillsForm() {
   const [loading, setLoading] = useState(true);
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   // toggleSeqRef counts the toggles started per skill. A toggle's rollback
   // is only applied if its sequence is still the latest for that skill —
   // otherwise a LATE failure would restore a value that a LATER successful
@@ -88,6 +91,11 @@ export default function SkillsForm() {
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+  // Fields are joined with a space: a keyword never contains whitespace, so it cannot span two fields.
+  const keywords = parseKeywords(query);
+  const visibleSkills = orderedSkills.filter((s) =>
+    matchesKeywords([s.name, s.description, s.when_to_use, s.plugin].join(" "), keywords),
+  );
   const enabledCount = skills.filter((s) => s.enabled).length;
 
   if (loading) {
@@ -114,14 +122,28 @@ export default function SkillsForm() {
         <span>{enabledCount}/{skills.length} enabled</span>
       </div>
 
+      {skills.length > 0 && (
+        <Input
+          aria-label="Filter skills"
+          placeholder="Filter skills by keyword"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="h-8 text-xs"
+        />
+      )}
+
       <div className="border border-border rounded-md">
         {orderedSkills.length === 0 ? (
           <div className="px-4 py-3 text-xs text-muted-foreground">
             No discoverable skills found.
           </div>
+        ) : visibleSkills.length === 0 ? (
+          <div className="px-4 py-3 text-xs text-muted-foreground">
+            No skills match &ldquo;{query.trim()}&rdquo;.
+          </div>
         ) : (
           <div className="divide-y divide-border">
-            {orderedSkills.map((s) => (
+            {visibleSkills.map((s) => (
               <div
                 key={s.name}
                 className="flex items-center justify-between gap-2 cursor-pointer rounded px-3 py-2 hover:bg-muted"

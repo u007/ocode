@@ -138,6 +138,7 @@ func TestQuickActionsValidate(t *testing.T) {
 		// (Dropping the *Send* clause instead is a different mutant: it breaks
 		// send chips, which the other positive rows already cover.)
 		{"fill mode chip", QuickActionsConfig{Chips: []QuickActionChip{mutate(func(c *QuickActionChip) { c.Mode = QuickActionModeFill })}}, ""},
+		{"append mode chip", QuickActionsConfig{Chips: []QuickActionChip{mutate(func(c *QuickActionChip) { c.Mode = QuickActionModeAppend })}}, ""},
 		{"empty list is legal", QuickActionsConfig{Chips: []QuickActionChip{}}, ""},
 		{"20 chips ok", QuickActionsConfig{Chips: makeChips(20, base)}, ""},
 		{"21 chips rejected", QuickActionsConfig{Chips: makeChips(21, base)}, "at most 20"},

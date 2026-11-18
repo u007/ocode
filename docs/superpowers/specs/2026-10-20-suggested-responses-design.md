@@ -31,7 +31,8 @@ from the Settings UI and be on by default.
    text. The backend strips the block from the visible text and publishes it as a
    separate `suggestions` event.
 4. The web client renders the suggestions in a row **immediately above** the
-   quick-action strip. Clicking one **fills the composer** (it does not send).
+   quick-action strip. Clicking one **inserts at the caret** (it does not send).
+   (Updated 2026-11-17; originally "fills the composer" — see Q1 below.)
 5. The suggestions are **persisted** with the assistant message, so a page reload
    still shows them.
 6. Scope: **web/desktop only** for this cut. The TUI has no quick-action strip
@@ -42,11 +43,13 @@ from the Settings UI and be on by default.
 
 | # | Question | Decision |
 |---|----------|----------|
-| Q1 | Click behaviour | **Fill the composer** (quick-action "fill" mode). Never auto-send. |
+| Q1 | Click behaviour | **Insert at the caret** (append behaviour via the shared `insertAtCursor` helper). Never auto-send. Decision changed 2026-11-17; originally "Fill the composer (quick-action 'fill' mode)". |
 | Q2 | Persistence | **Persisted** on the assistant message → survives reload. |
 | Q3 | Config placement | **Extend the existing Features form + `/api/config/ocode/features`** with a third bool. |
 | Q4 | TUI parity | **Web/desktop only** for this cut. |
 | Q5 | Streaming | The row is hidden while a turn is streaming; the new set appears when the turn ends. |
+
+**2026-11-17 decision change (owner):** Q1 is now insert-at-caret, not fill. Suggestions have **no mode field** — append is their fixed default behaviour, not a configurable quick-action mode. They share `insertAtCursor` with voice transcripts and `append` chips, so caret re-anchoring is identical on all three paths. The never-auto-send invariant is unchanged. The original 2026-10-20 decision is kept above as history and annotated in §9 and §11.
 
 ## 3. Why this transport (and not the alternatives)
 
@@ -85,8 +88,8 @@ The model emits, at the very end of its reply:
 Rules:
 
 - At most **five** entries. More are truncated server-side.
-- Each entry is a short, single-line, imperative phrase (the user clicks it to fill
-  the composer, so it must read as something to SAY or DO).
+- Each entry is a short, single-line, imperative phrase (the user clicks it to
+  insert at the caret, so it must read as something to SAY or DO).
 - The block is optional: the model may omit it (e.g. a purely informational answer),
   and the row then simply does not render.
 - Parsing is tolerant: a malformed block is discarded silently (the visible text is
@@ -167,8 +170,9 @@ output is a tool result consumed by the model, not a response shown to a user.
   `<QuickActionsBar>` (the quick-actions block is the LAST element inside the
   composer's root div, so "before the quick actions" means directly above it, inside
   the same padded container).
-- Clicking a suggestion fills the composer (the quick-action "fill" mode behaviour) and
-  focuses the textarea. It never auto-sends.
+- Clicking a suggestion inserts at the caret via the shared `insertAtCursor` helper
+  (append behaviour, not a configurable mode) and focuses the textarea. It never
+  auto-sends. (Changed 2026-11-17; originally the quick-action "fill" mode behaviour.)
 
 ## 10. Persistence
 
@@ -182,5 +186,5 @@ dedicated field on the message.
 - Go: config round-trip and default; prompt injection present/absent per the flag;
   block parse/strip (well-formed, malformed, over-five, empty); event published with
   the right payload.
-- Web: features-form toggle round-trip; store reducer; row rendering; click fills the
-  composer and does not send; row hidden while a turn is streaming.
+- Web: features-form toggle round-trip; store reducer; row rendering; click inserts at
+  the caret and does not send; row hidden while a turn is streaming.
