@@ -5,6 +5,7 @@
 - **elkjs** is deferred: v1 uses a hand-rolled LOD layout; the third (elkjs layered) view is out of v1 or limited to focused subgraphs.
 - Also deferred: small-model comment generation (opt-in button), call graphs, export, watch/incremental re-parse, sequence diagrams, cross-machine view-state sync.
 - Limits to revisit: 20k-file / 1 MiB / 50k-symbol caps ( constants; index reports `truncated` and the UI shows a badge), Go-only parsing, 4-entry cache, root-level monorepo markers only. To close: implement the `umltreesitter`-tagged tree-sitter analyzers for TS/JS/Python, then evaluate elkjs on a 2k-node focused subgraph.
+- **OKF docs for the UML viewer are unwritten (blocked, not skipped).**  failed twice on 2026-11-18 with OpenRouter 429 `Daily limit reached for thinkingmachines/inkling-2-small:free` (reset 2026-11-19T00:00Z). Needed: new `docs/concepts/uml-viewer.md` plus a UML/view-state cross-link in `pdf-viewer-zoom-find.md` and an update to `chat-file-links-silent-noop.md` for the FileEditor line-reveal fix. Re-dispatch after the reset; verify anchors by symbol (files are new, no drift yet).
 
 ## Open: root elevation — live verification gaps (2026-11-18)
 
