@@ -258,8 +258,63 @@ func runGitNetwork(ctx context.Context, dir string, args ...string) error {
 	return nil
 }
 
+// gitPushRequest is the body of POST /api/git/push. The remote/branch fields
+// let the Branches view push one branch (and set its upstream) or delete a
+// remote branch, instead of only pushing the current branch's configured
+// upstream. Empty fields preserve the original "git push" behaviour.
 type gitPushRequest struct {
 	Force bool `json:"force"`
+	// Remote is a configured remote name ("origin").
+	Remote string `json:"remote,omitempty"`
+	// Branch is the local branch to push, or the remote branch to delete.
+	Branch string `json:"branch,omitempty"`
+	// Delete runs `git push <remote> --delete <branch>`.
+	Delete bool `json:"delete,omitempty"`
+	// SetUpstream adds -u, recording the pushed branch as its upstream.
+	SetUpstream bool `json:"set_upstream,omitempty"`
+}
+
+// gitPushArgs builds the push argv. Values that reach a shell (the remote
+// transport joins them verbatim) are refused when they look like an option or
+// carry whitespace; the remote path additionally single-quotes every argument.
+func gitPushArgs(req gitPushRequest) ([]string, error) {
+	validValue := func(v string) bool {
+		return v != "" && !strings.HasPrefix(v, "-") && !strings.ContainsAny(v, " \t\r\n")
+	}
+	if req.Remote != "" && !validValue(req.Remote) {
+		return nil, fmt.Errorf("invalid remote %q", req.Remote)
+	}
+	if req.Branch != "" && !validValue(req.Branch) {
+		return nil, fmt.Errorf("invalid branch %q", req.Branch)
+	}
+	if req.Delete {
+		if req.Remote == "" || req.Branch == "" {
+			return nil, fmt.Errorf("deleting a remote branch needs remote and branch")
+		}
+		return []string{"push", req.Remote, "--delete", req.Branch}, nil
+	}
+	if req.SetUpstream && req.Remote == "" {
+		return nil, fmt.Errorf("setting an upstream needs a remote")
+	}
+	// `git push feat` treats feat as a remote name, not a branch, so a branch
+	// without a remote would silently push to the wrong place (or fail).
+	if req.Branch != "" && req.Remote == "" {
+		return nil, fmt.Errorf("pushing a branch needs a remote")
+	}
+	args := []string{"push"}
+	if req.Force {
+		args = append(args, "--force-with-lease")
+	}
+	if req.SetUpstream {
+		args = append(args, "--set-upstream")
+	}
+	if req.Remote != "" {
+		args = append(args, req.Remote)
+	}
+	if req.Branch != "" {
+		args = append(args, req.Branch)
+	}
+	return args, nil
 }
 
 var sshBatchModeOption = regexp.MustCompile(`(?i)(?:^|\s)-o(?:\s+|)BatchMode\s*=\s*[^\s]+`)
@@ -370,9 +425,15 @@ func (h *Handler) HandleGitPush(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		args := []string{"push"}
-		if req.Force {
-			args = append(args, "--force-with-lease")
+		args, aerr := gitPushArgs(req)
+		if aerr != nil {
+			writeError(w, http.StatusBadRequest, aerr.Error())
+			return
+		}
+		// remoteGitCommand joins argv verbatim; quote every part so the remote
+		// shell cannot interpret a branch or remote value.
+		for i := range args {
+			args[i] = remote.ShellQuote(args[i])
 		}
 		if err := remoteRunNetwork(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git push failed: "+err.Error())
@@ -394,15 +455,43 @@ func (h *Handler) gitPushLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	args := []string{"push"}
-	if req.Force {
-		args = append(args, "--force-with-lease")
+	args, err := gitPushArgs(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// git would reject an unknown remote or a malformed branch itself, but the
+	// error is far less clear than naming the value the panel sent.
+	if req.Remote != "" && !gitRemoteExists(dir, req.Remote) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown remote %q", req.Remote))
+		return
+	}
+	if req.Branch != "" && !gitBranchNameValid(dir, req.Branch) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid branch name %q", req.Branch))
+		return
 	}
 	if err := runGitNetwork(r.Context(), dir, args...); err != nil {
 		writeError(w, http.StatusInternalServerError, "git push failed: "+err.Error())
 		return
 	}
 	writeLocalGitStatus(w, dir)
+}
+
+// gitRemoteExists reports whether name is one of the repository's configured
+// remotes, so a push cannot be pointed at an arbitrary string.
+func gitRemoteExists(dir, name string) bool {
+	out, err := gitRunInDir(dir, "remote")
+	if err != nil {
+		// intentionally not logged: a repository with no remotes is a normal
+		// answer (the push is refused), not a diagnostic event.
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleGitResetRemote is the explicit destructive alternative to a forced

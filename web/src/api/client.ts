@@ -21,6 +21,8 @@ import type {
   GitHunkRequest,
   GitRefActionRequest,
   GitRefActionResult,
+  GitBranches,
+  GitPushRequest,
   GitStash,
   GitWorktree,
   ThemeResponse,
@@ -2422,6 +2424,11 @@ export const api = {
   getGitWorkspace: (project?: string, host?: string) =>
     fetchJSON<GitWorkspace>(`/api/git/workspace${projQuery(project, host)}`),
 
+  /** Local branches, remote-tracking branches and tags, with upstream and
+   *  ahead/behind. Read-only. */
+  gitBranches: (project?: string, host?: string) =>
+    fetchJSON<GitBranches>(`/api/git/branches${projQuery(project, host)}`),
+
   /** Recent commits, newest first. `all` lists every branch, remote and tag
    *  (the history graph's "All branches" scope); `skip` pages past the first
    *  `skip` commits. */
@@ -2650,6 +2657,13 @@ export const api = {
     fetchJSON<GitStatus>(`/api/git/push${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ force }),
+    }),
+  /** Push one branch, set its upstream, or delete a remote branch. The
+   *  Branches view uses this; the header's Push button keeps gitPush. */
+  gitPushBranch: (req: GitPushRequest, project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/push${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify(req),
     }),
   gitResetRemote: (project?: string, host?: string) =>
     fetchJSON<GitStatus>(`/api/git/reset-remote${projQuery(project, host)}`, {

@@ -430,6 +430,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/git/diff", s.authMiddleware(s.handleGitDiff))
 	s.mux.HandleFunc("GET /api/git/workspace", s.authMiddleware(s.handler.HandleGitWorkspace))
+	s.mux.HandleFunc("GET /api/git/branches", s.authMiddleware(s.handler.HandleGitBranches))
 	s.mux.HandleFunc("GET /api/git/log", s.authMiddleware(s.handler.HandleGitLog))
 	s.mux.HandleFunc("GET /api/git/show", s.authMiddleware(s.handler.HandleGitShow))
 	s.mux.HandleFunc("GET /api/git/turn-active", s.authMiddleware(s.handler.HandleGitTurnActive))

@@ -906,26 +906,72 @@ export interface GitRef {
   current: boolean;
 }
 
-/** Action the history view can run through POST /api/git/ref-action. */
+/** Action the history view and the Branches view can run through
+ *  POST /api/git/ref-action. The server owns this closed vocabulary. */
 export type GitRefAction =
   | "checkout"
   | "branch"
   | "branch-checkout"
   | "branch-delete"
+  | "branch-force-delete"
+  | "branch-rename"
   | "merge"
+  | "rebase"
   | "cherry-pick"
   | "revert"
   | "reset-soft"
   | "reset-mixed"
   | "reset-hard"
-  | "tag";
+  | "tag"
+  | "tag-delete"
+  | "set-upstream"
+  | "unset-upstream";
 
 export interface GitRefActionRequest {
   action: GitRefAction;
-  /** Commit hash, or a branch name (local, or origin/x). */
+  /** Commit hash, or a branch/remote-branch/tag name (or a full refname). */
   target: string;
-  /** Required for branch, branch-checkout and tag. */
+  /** Required for branch, branch-checkout, tag, branch-rename and
+   *  set-upstream (where it is the upstream ref, e.g. origin/main). */
   name?: string;
+}
+
+/** One row of GET /api/git/branches. */
+export interface GitBranch {
+  name: string;
+  /** Full ref: refs/heads/x, refs/remotes/origin/x or refs/tags/x. */
+  refname: string;
+  hash: string;
+  kind: "local" | "remote" | "tag";
+  current: boolean;
+  /** Short upstream ref ("origin/main"); absent when there is none. */
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  /** The configured upstream was deleted from the remote ("[gone]"). */
+  upstream_gone?: boolean;
+  /** Remote name for a remote-tracking branch ("origin"). */
+  remote?: string;
+  subject: string;
+  date: string;
+}
+
+/** Body of GET /api/git/branches. Lists are never null. */
+export interface GitBranches {
+  local: GitBranch[];
+  remote: GitBranch[];
+  tags: GitBranch[];
+}
+
+/** Body of POST /api/git/push. Empty fields keep the plain `git push`. */
+export interface GitPushRequest {
+  force?: boolean;
+  /** A configured remote name ("origin"). */
+  remote?: string;
+  /** Branch to push, or the remote branch to delete. */
+  branch?: string;
+  delete?: boolean;
+  set_upstream?: boolean;
 }
 
 /** Success body of POST /api/git/ref-action. */

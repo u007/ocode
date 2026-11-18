@@ -35,6 +35,7 @@ import { ConflictChunks } from "./ConflictChunks";
 import WorktreesSection from "./WorktreesSection";
 import GitSubTabs, { type GitView } from "./GitSubTabs";
 import GitHistoryPanel from "./GitHistoryPanel";
+import BranchesPanel from "./BranchesPanel";
 import type {
   GitConflictChunkChoice,
   GitCommit,
@@ -258,7 +259,9 @@ function lineColor(line: string): string {
 
 function loadGitView(): GitView {
   try {
-    return window.localStorage.getItem(GIT_VIEW_KEY) === "history" ? "history" : "changes";
+    const saved = window.localStorage.getItem(GIT_VIEW_KEY);
+    if (saved === "history" || saved === "branches") return saved;
+    return "changes";
   } catch {
     // intentionally not logged: localStorage is unavailable in private mode; the default view applies.
     return "changes";
@@ -1633,6 +1636,21 @@ export default function GitPanel({
           }}
           onShowChanges={() => changeView("changes")}
           refreshToken={refreshToken}
+        />
+      )}
+
+      {view === "branches" && (
+        <BranchesPanel
+          projectPath={projectPath}
+          projectHost={projectHost}
+          active={active}
+          refreshToken={refreshToken}
+          currentBranch={status.branch}
+          dirty={status.has_changes || conflicts.length > 0}
+          onWorkspaceChanged={(ws) => {
+            setWorkspace(ws);
+            void load({ background: true });
+          }}
         />
       )}
 
