@@ -324,6 +324,11 @@ func TestQwen06BQ8ManifestPinsLlamaServerArtifact(t *testing.T) {
 		if argv := strings.Join(m.LaunchArgv, " "); !strings.Contains(argv, "--parallel {parallel}") {
 			t.Errorf("%s: LaunchArgv must pass --parallel {parallel}: %v", plat, m.LaunchArgv)
 		}
+		// Qwen3-0.6B thinks by default: without the budget flag a small
+		// max_tokens answer is spent entirely on reasoning_content.
+		if argv := strings.Join(m.LaunchArgv, " "); !strings.Contains(argv, "--reasoning-budget 0") {
+			t.Errorf("%s: LaunchArgv must pass --reasoning-budget 0: %v", plat, m.LaunchArgv)
+		}
 	}
 	for plat := range wantTarball {
 		if !seen[plat] {

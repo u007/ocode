@@ -376,6 +376,10 @@ func qwen38Manifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
 // The model artifact is Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.gguf; the SHA is
 // the Hugging Face LFS oid of the file. llama.cpp reports the GGUF path in
 // /v1/models, so ExpectedServeID() resolves to the Dest basename.
+// `--reasoning-budget 0` is load-bearing for this model: Qwen3-0.6B thinks by
+// default, so a small max_tokens budget is spent entirely on reasoning_content
+// and the answer comes back empty (verified live 2026-11-18). The budget flag
+// ends thinking immediately; the qwen3.8 distill does not need it.
 func qwen06bManifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
 	return ServerManifest{
 		OS: goos, Arch: goarch,
@@ -393,6 +397,7 @@ func qwen06bManifest(goos, goarch, llamaURL, llamaSHA string) ServerManifest {
 			"--port", "{port}",
 			"--parallel", "{parallel}",
 			"--ctx-size", "{ctx}",
+			"--reasoning-budget", "0",
 			"--host", "127.0.0.1"},
 		HealthPath:     "/v1/models",
 		CompletionPath: "/v1/chat/completions",

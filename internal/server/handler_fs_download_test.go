@@ -235,3 +235,49 @@ func TestHandleFSDownloadRemoteOverCapIs413(t *testing.T) {
 		t.Fatalf("remote over-cap download = %d body=%s, want 413", w.Code, w.Body.String())
 	}
 }
+
+// writeCountingRecorder counts Write calls. It deliberately does not implement
+// io.ReaderFrom, so io.Copy writes in its own ~32 KiB buffer.
+type writeCountingRecorder struct {
+	header http.Header
+	code   int
+	writes int
+	n      int64
+}
+
+func (w *writeCountingRecorder) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *writeCountingRecorder) WriteHeader(code int) { w.code = code }
+
+func (w *writeCountingRecorder) Write(p []byte) (int, error) {
+	w.writes++
+	w.n += int64(len(p))
+	return len(p), nil
+}
+
+// The 2 GiB cap bounds transfer time, never memory: fsDownloadLocal must copy the
+// file through io.Copy, not ReadAll. A buffered implementation writes the whole
+// body in ONE Write; a streaming copy writes in ~32 KiB pieces, so the write
+// count discriminates deterministically (no timing, no allocation measurement).
+func TestHandleFSDownloadDoesNotBufferTheWholeFile(t *testing.T) {
+	h := newGitTestHandler(t, false)
+	const size = 1 << 20
+	writeProjectFile(t, h.workDir, "big.bin", make([]byte, size))
+
+	w := &writeCountingRecorder{}
+	h.HandleFSDownload(w, httptest.NewRequest(http.MethodGet, downloadURLHost("", h.workDir, "big.bin"), nil))
+	if w.code != http.StatusOK {
+		t.Fatalf("download status = %d", w.code)
+	}
+	if w.n != size {
+		t.Fatalf("wrote %d bytes, want %d", w.n, size)
+	}
+	if w.writes <= 1 {
+		t.Fatalf("body written in %d Write call(s): the handler buffered all %d bytes in memory instead of streaming", w.writes, size)
+	}
+}
