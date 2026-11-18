@@ -4,6 +4,7 @@ import { api } from "../../api/client";
 import { imageMimeForPath, type PreviewKind } from "../../lib/previewKind";
 import { PRINT_BOOTSTRAP, documentShell, escapeHtml, printDocument } from "./printDocument";
 import { runMermaid } from "./mermaidQueue";
+import { localImagePath } from "./localImagePath";
 import type { ConvertedWorkbook } from "./univerData";
 
 // Print / Save as PDF for the rendered preview surfaces. The document is built
@@ -108,7 +109,7 @@ export async function collectAppStyles(): Promise<string> {
  * saved file, read through the same api its viewer uses (remote projects too).
  */
 export type PrintSource =
-  | { origin: "editor"; path: string; content: string }
+  | { origin: "editor"; path: string; content: string; projectRoot?: string; projectHost?: string }
   | { origin: "disk"; path: string; projectRoot?: string; projectHost?: string };
 
 async function textOf(source: PrintSource): Promise<string> {
@@ -128,6 +129,48 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = () => reject(new Error(`print: could not read image bytes: ${String(reader.error)}`));
     reader.readAsDataURL(blob);
   });
+}
+
+/**
+ * The data: URL of one local image, read through the same api the viewer uses.
+ * A failed read is logged and gives null, so the caller keeps the source as
+ * written and one missing file does not block the whole print.
+ */
+async function localImageDataUrl(path: string, source: PrintSource): Promise<string | null> {
+  const mime = imageMimeForPath(path);
+  if (mime === null) return null;
+  try {
+    const bytes = await api.fetchFileRaw(path, source.projectRoot, source.projectHost);
+    return await blobToDataUrl(new Blob([bytes], { type: mime }));
+  } catch (err) {
+    console.error("print preview: could not read a local image, printing it as written", { path }, err);
+    return null;
+  }
+}
+
+/**
+ * Gives every local image in a parsed document its bytes as a data: URL. The
+ * print window has no origin, so a relative or disk path cannot load there. A
+ * srcset that names a local file is dropped, because the browser prefers it over
+ * the inlined src.
+ */
+async function inlineLocalImages(doc: Document, docPath: string, source: PrintSource): Promise<void> {
+  const urls = new Map<string, Promise<string | null>>();
+  for (const img of Array.from(doc.querySelectorAll("img[src]"))) {
+    const local = localImagePath(docPath, img.getAttribute("src") ?? "");
+    if (local === null) continue;
+    let url = urls.get(local);
+    if (url === undefined) {
+      url = localImageDataUrl(local, source);
+      urls.set(local, url);
+    }
+    const dataUrl = await url;
+    if (dataUrl !== null) img.setAttribute("src", dataUrl);
+  }
+  for (const el of Array.from(doc.querySelectorAll("img[srcset], source[srcset]"))) {
+    const candidates = (el.getAttribute("srcset") ?? "").split(",");
+    if (candidates.some((c) => localImagePath(docPath, c.trim().split(/\s+/)[0] ?? "") !== null)) el.removeAttribute("srcset");
+  }
 }
 
 const IMAGE_PRINT_CSS = "img { display: block; max-width: 100%; max-height: 100vh; object-fit: contain; margin: 0 auto }";
@@ -343,7 +386,9 @@ export async function buildPrintDocument(kind: PreviewKind, source: PrintSource,
       ]);
       const markdown = await textOf(source);
       const markup = renderToStaticMarkup(<ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>);
-      const body = await inlineMermaid(markup, mermaidSources(markdown));
+      const doc = new DOMParser().parseFromString(markup, "text/html");
+      await inlineLocalImages(doc, source.path, source);
+      const body = await inlineMermaid(doc.body.innerHTML, mermaidSources(markdown));
       const styles = await collectAppStyles();
       return documentShell(
         title,
@@ -360,8 +405,10 @@ export async function buildPrintDocument(kind: PreviewKind, source: PrintSource,
       );
     case "html": {
       const content = await textOf(source);
+      const doc = new DOMParser().parseFromString(DOMPurify.sanitize(content, HTML_DOCUMENT_CONFIG), "text/html");
+      await inlineLocalImages(doc, source.path, source);
       const doctype = HTML_DOCTYPE.test(content) ? "<!doctype html>" : "";
-      return `${doctype}${DOMPurify.sanitize(content, HTML_DOCUMENT_CONFIG)}${PRINT_BOOTSTRAP}`;
+      return `${doctype}${doc.documentElement.outerHTML}${PRINT_BOOTSTRAP}`;
     }
     case "mermaid":
       return documentShell(title, `<style>${PAGE_CSS}${MERMAID_PRINT_CSS}</style>`, `<div>${await mermaidSvg(await textOf(source))}</div>`);

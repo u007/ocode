@@ -1,5 +1,11 @@
 import * as XLSX from "xlsx";
-import type { Cell, Workbook, Worksheet, Image as ExcelJsImage, IAnchor as ExcelJsAnchor } from "exceljs";
+import type {
+  Cell,
+  Workbook,
+  Worksheet,
+  Image as ExcelJsImage,
+  IAnchor as ExcelJsAnchor,
+} from "exceljs";
 import {
   BooleanNumber,
   BorderStyleTypes,
@@ -31,7 +37,11 @@ type ExcelJsWorksheet = Worksheet;
 /** Loose type for an entry returned by Worksheet.getImages(). */
 interface ExcelJsImageRef {
   imageId: number | string;
-  range?: { tl?: ExcelJsAnchor; br?: ExcelJsAnchor };
+  range?: {
+    tl?: ExcelJsAnchor;
+    br?: ExcelJsAnchor;
+    ext?: { width?: number; height?: number };
+  };
 }
 /**
  * Converts parsed spreadsheets into Univer `IWorkbookData`. No Univer runtime
@@ -92,13 +102,32 @@ export interface WorkbookImage {
   dataUrl: string;
   fromCol: number;
   fromRow: number;
+  /** Two-cell anchor end (`br`). Both set or both null. */
+  toCol: number | null;
+  toRow: number | null;
+  /** One-cell anchor extent in px (`ext`). Both set or both null. */
+  extWidth: number | null;
+  extHeight: number | null;
+}
+
+/** Both values, or null unless both are present (and positive when `positive`). */
+function anchorPair(
+  a: number | undefined,
+  b: number | undefined,
+  positive: boolean,
+): [number, number] | null {
+  if (a === undefined || b === undefined) return null;
+  const ok = (n: number) => Number.isFinite(n) && (!positive || n > 0);
+  return ok(a) && ok(b) ? [a, b] : null;
 }
 
 /** Throws when a file is above MAX_FILE_BYTES. The message is shown in the viewer. */
 export function assertWithinFileLimit(bytes: number): void {
   if (bytes > MAX_FILE_BYTES) {
     const mib = (bytes / (1024 * 1024)).toFixed(1);
-    throw new Error(`the spreadsheet is ${mib} MiB; the viewer refuses files above ${MAX_FILE_BYTES / (1024 * 1024)} MiB`);
+    throw new Error(
+      `the spreadsheet is ${mib} MiB; the viewer refuses files above ${MAX_FILE_BYTES / (1024 * 1024)} MiB`,
+    );
   }
 }
 
@@ -148,12 +177,22 @@ function atCell<T>(sheetName: string, address: string, build: () => T): T {
   }
 }
 
-function assemble(sheets: BuiltSheet[], styles: StyleRegistry, images: WorkbookImage[]): ConvertedWorkbook {
+function assemble(
+  sheets: BuiltSheet[],
+  styles: StyleRegistry,
+  images: WorkbookImage[],
+): ConvertedWorkbook {
   const sheetData: Record<string, Partial<IWorksheetData>> = {};
   const summaries: ConvertedSheet[] = sheets.map((sheet, i) => {
     const id = `sheet-${i + 1}`;
     sheetData[id] = worksheetData(id, sheet);
-    return { id, name: sheet.name, isEmpty: sheet.isEmpty, rowCapped: sheet.rowCapped, colCapped: sheet.colCapped };
+    return {
+      id,
+      name: sheet.name,
+      isEmpty: sheet.isEmpty,
+      rowCapped: sheet.rowCapped,
+      colCapped: sheet.colCapped,
+    };
   });
   return {
     sheets: summaries,
@@ -206,7 +245,9 @@ interface MergeBounds {
 
 function isMergeBounds(value: unknown): value is MergeBounds {
   if (typeof value !== "object" || value === null) return false;
-  return ["top", "left", "bottom", "right"].every((k) => typeof Reflect.get(value, k) === "number");
+  return ["top", "left", "bottom", "right"].every(
+    (k) => typeof Reflect.get(value, k) === "number",
+  );
 }
 
 /**
@@ -217,10 +258,13 @@ function isMergeBounds(value: unknown): value is MergeBounds {
 function mergeBoundsOf(ws: Worksheet): MergeBounds[] {
   const table: unknown = Reflect.get(ws, "_merges");
   if (typeof table !== "object" || table === null) {
-    throw new Error(`sheet "${ws.name}" has no readable merge table (ExcelJS internals changed)`);
+    throw new Error(
+      `sheet "${ws.name}" has no readable merge table (ExcelJS internals changed)`,
+    );
   }
   return Object.values(table).map((entry: unknown) => {
-    if (!isMergeBounds(entry)) throw new Error(`sheet "${ws.name}" has a malformed merge entry`);
+    if (!isMergeBounds(entry))
+      throw new Error(`sheet "${ws.name}" has a malformed merge entry`);
     return entry;
   });
 }
@@ -229,9 +273,11 @@ function mergeBoundsOf(ws: Worksheet): MergeBounds[] {
 function themeXmlOf(wb: Workbook): string | undefined {
   const themes: unknown = Reflect.get(wb, "_themes");
   if (themes === undefined) return undefined;
-  if (typeof themes !== "object" || themes === null) throw new Error("ExcelJS theme table has an unexpected shape");
+  if (typeof themes !== "object" || themes === null)
+    throw new Error("ExcelJS theme table has an unexpected shape");
   const theme1: unknown = Reflect.get(themes, "theme1");
-  if (typeof theme1 !== "string") throw new Error("ExcelJS theme table has no theme1 XML");
+  if (typeof theme1 !== "string")
+    throw new Error("ExcelJS theme table has no theme1 XML");
   return theme1;
 }
 
@@ -254,7 +300,12 @@ function excelJsSheet(ws: Worksheet, ctx: ExcelJsContext): BuiltSheet {
     if (m.top > rowCount || m.left > columnCount) continue;
     const bottom = Math.min(m.bottom, rowCount);
     const right = Math.min(m.right, columnCount);
-    mergeData.push({ startRow: m.top - 1, startColumn: m.left - 1, endRow: bottom - 1, endColumn: right - 1 });
+    mergeData.push({
+      startRow: m.top - 1,
+      startColumn: m.left - 1,
+      endRow: bottom - 1,
+      endColumn: right - 1,
+    });
     for (let r = m.top; r <= bottom; r++) {
       for (let c = m.left; c <= right; c++) {
         if (r !== m.top || c !== m.left) covered.add(`${r},${c}`);
@@ -299,7 +350,12 @@ function excelJsSheet(ws: Worksheet, ctx: ExcelJsContext): BuiltSheet {
 function excelJsCell(cell: Cell, ctx: ExcelJsContext): ICellData {
   const text = formatCell(cell.value, cell.numFmt, ctx.date1904);
   const style = univerCellStyle(
-    { font: cell.font, fill: cell.fill, border: cell.border, alignment: cell.alignment },
+    {
+      font: cell.font,
+      fill: cell.fill,
+      border: cell.border,
+      alignment: cell.alignment,
+    },
     ctx.palette,
     isNumericValue(cell.value),
   );
@@ -322,78 +378,139 @@ export function workbookFromExcelJs(wb: Workbook): ConvertedWorkbook {
   const date1904 = wb.properties.date1904 === true;
   const ctx: ExcelJsContext = { palette, date1904, styles };
   const sheets = wb.worksheets.map((ws) => excelJsSheet(ws, ctx));
- // Extract floating images (drawings) so the viewer can show them; Univer's
- // OSS grid does not paint Excel drawings itself. ExcelJS exposes these via
- // Worksheet.getImages() and Workbook.getImage(); both are typed loosely, so
- // validate the shape before use and log (never swallow) failures.
- const images: WorkbookImage[] = [];
- const sheetIds = new Map(wb.worksheets.map((ws, idx) => [ws.name, "sheet-" + (idx + 1)]));
- const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
- for (const ws of wb.worksheets) {
-   const sheetId = sheetIds.get(ws.name);
-   if (sheetId === undefined) {
-     console.error("workbookFromExcelJs: missing sheet id for " + ws.name);
-     continue;
-   }
-   let imgs: ExcelJsImageRef[];
-   try {
-     imgs = (ws as ExcelJsWorksheet).getImages?.() ?? [];
-   } catch (e) {
-     console.error("workbookFromExcelJs: getImages failed for sheet " + ws.name + ":", e);
-     continue;
-   }
-   for (const img of imgs) {
-     let image: ExcelJsImage | undefined;
-     try {
-       image = wb.getImage(Number(img.imageId));
-     } catch (e) {
-       console.error("workbookFromExcelJs: getImage failed for imageId " + img.imageId + ":", e);
-       continue;
-     }
-     if (!image) {
-       console.error("workbookFromExcelJs: no image for imageId " + img.imageId);
-       continue;
-     }
-     const buffer = image.buffer;
-     const hasBase64 = typeof image.base64 === "string" && image.base64.length > 0;
-     if (!buffer && !hasBase64) {
-       console.error("workbookFromExcelJs: image " + img.imageId + " has no buffer or base64");
-       continue;
-     }
-     if (buffer && (buffer as unknown as { length: number }).length > MAX_IMAGE_BYTES) {
-       console.warn("workbookFromExcelJs: skipping image " + img.imageId + " (" + (buffer as unknown as { length: number }).length + " bytes exceeds " + MAX_IMAGE_BYTES + ")");
-       continue;
-     }
-     const ext = (image.extension || "png").toLowerCase();
-     const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : "image/png";
-     let b64 = "";
-     if (typeof buffer === "string") b64 = buffer;
-     else if (hasBase64) b64 = image.base64 as string;
-     else if (buffer) {
-       const bytes = buffer instanceof Uint8Array
-         ? buffer
-         : buffer instanceof ArrayBuffer
-           ? new Uint8Array(buffer)
-           : Uint8Array.from(buffer as unknown as ArrayLike<number>);
-       let bin = "";
-       for (let j = 0; j < bytes.length; j++) bin += String.fromCharCode(bytes[j]);
-       b64 = btoa(bin);
-     }
-     if (!b64) {
-       console.error("workbookFromExcelJs: failed to encode image " + img.imageId);
-       continue;
-     }
-     const tl = img.range && img.range.tl;
-     images.push({
-       sheetId,
-       sheetName: ws.name,
-       dataUrl: "data:" + mime + ";base64," + b64,
-       fromCol: typeof (tl && tl.col) === "number" ? (tl as ExcelJsAnchor).col : 0,
-       fromRow: typeof (tl && tl.row) === "number" ? (tl as ExcelJsAnchor).row : 0,
-     });
-   }
- }
- return assemble(sheets, styles, images);
+  // Extract floating images (drawings) so the viewer can show them; Univer's
+  // OSS grid does not paint Excel drawings itself. ExcelJS exposes these via
+  // Worksheet.getImages() and Workbook.getImage(); both are typed loosely, so
+  // validate the shape before use and log (never swallow) failures.
+  const images: WorkbookImage[] = [];
+  const sheetIds = new Map(
+    wb.worksheets.map((ws, idx) => [ws.name, "sheet-" + (idx + 1)]),
+  );
+  const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+  for (const ws of wb.worksheets) {
+    const sheetId = sheetIds.get(ws.name);
+    if (sheetId === undefined) {
+      console.error("workbookFromExcelJs: missing sheet id for " + ws.name);
+      continue;
+    }
+    let imgs: ExcelJsImageRef[];
+    try {
+      imgs = (ws as ExcelJsWorksheet).getImages?.() ?? [];
+    } catch (e) {
+      console.error(
+        "workbookFromExcelJs: getImages failed for sheet " + ws.name + ":",
+        e,
+      );
+      continue;
+    }
+    for (const img of imgs) {
+      let image: ExcelJsImage | undefined;
+      try {
+        image = wb.getImage(Number(img.imageId));
+      } catch (e) {
+        console.error(
+          "workbookFromExcelJs: getImage failed for imageId " +
+            img.imageId +
+            ":",
+          e,
+        );
+        continue;
+      }
+      if (!image) {
+        console.error(
+          "workbookFromExcelJs: no image for imageId " + img.imageId,
+        );
+        continue;
+      }
+      const buffer = image.buffer;
+      const hasBase64 =
+        typeof image.base64 === "string" && image.base64.length > 0;
+      if (!buffer && !hasBase64) {
+        console.error(
+          "workbookFromExcelJs: image " +
+            img.imageId +
+            " has no buffer or base64",
+        );
+        continue;
+      }
+      if (
+        buffer &&
+        (buffer as unknown as { length: number }).length > MAX_IMAGE_BYTES
+      ) {
+        console.warn(
+          "workbookFromExcelJs: skipping image " +
+            img.imageId +
+            " (" +
+            (buffer as unknown as { length: number }).length +
+            " bytes exceeds " +
+            MAX_IMAGE_BYTES +
+            ")",
+        );
+        continue;
+      }
+      const ext = (image.extension || "").toLowerCase();
+      const mime =
+        ext === "jpg" || ext === "jpeg"
+          ? "image/jpeg"
+          : ext === "png"
+            ? "image/png"
+            : ext === "gif"
+              ? "image/gif"
+              : "";
+      if (!mime) {
+        console.error(
+          "workbookFromExcelJs: unsupported image extension '" +
+            ext +
+            "' for image " +
+            img.imageId +
+            " (EMF/WMF and other types are not renderable)",
+        );
+        continue;
+      }
+      let b64 = "";
+      if (typeof buffer === "string") b64 = buffer;
+      else if (hasBase64) b64 = image.base64 as string;
+      else if (buffer) {
+        const bytes =
+          buffer instanceof Uint8Array
+            ? buffer
+            : buffer instanceof ArrayBuffer
+              ? new Uint8Array(buffer)
+              : Uint8Array.from(buffer as unknown as ArrayLike<number>);
+        let bin = "";
+        for (let j = 0; j < bytes.length; j++)
+          bin += String.fromCharCode(bytes[j]);
+        b64 = btoa(bin);
+      }
+      if (!b64) {
+        console.error(
+          "workbookFromExcelJs: failed to encode image " + img.imageId,
+        );
+        continue;
+      }
+      const tl = img.range && img.range.tl;
+      const brPair = anchorPair(img.range?.br?.col, img.range?.br?.row, false);
+      const extPair = anchorPair(
+        img.range?.ext?.width,
+        img.range?.ext?.height,
+        true,
+      );
+      images.push({
+        sheetId,
+        sheetName: ws.name,
+        dataUrl: "data:" + mime + ";base64," + b64,
+        fromCol:
+          typeof (tl && tl.col) === "number" ? (tl as ExcelJsAnchor).col : 0,
+        fromRow:
+          typeof (tl && tl.row) === "number" ? (tl as ExcelJsAnchor).row : 0,
+        toCol: brPair === null ? null : brPair[0],
+        toRow: brPair === null ? null : brPair[1],
+        extWidth: extPair === null ? null : extPair[0],
+        extHeight: extPair === null ? null : extPair[1],
+      });
+    }
+  }
+  return assemble(sheets, styles, images);
 }
 
 /** Header-row style for CSV/TSV: bold, lightly filled, with a rule under it. */
@@ -416,10 +533,17 @@ function csvHeaderStyle(): IStyleData {
  * Callers must read with `sheetRows: SHEETJS_READ_ROWS` so an over-long sheet
  * shows up as a parsed range longer than MAX_ROWS.
  */
-export function workbookFromSheetJs(wb: XLSX.WorkBook, firstRowIsHeader: boolean): ConvertedWorkbook {
+export function workbookFromSheetJs(
+  wb: XLSX.WorkBook,
+  firstRowIsHeader: boolean,
+): ConvertedWorkbook {
   const styles = new StyleRegistry();
-  const headerId = firstRowIsHeader ? styles.idFor(csvHeaderStyle()) : undefined;
-  const sheets = wb.SheetNames.map((name) => sheetJsSheet(name, wb.Sheets[name], styles, headerId));
+  const headerId = firstRowIsHeader
+    ? styles.idFor(csvHeaderStyle())
+    : undefined;
+  const sheets = wb.SheetNames.map((name) =>
+    sheetJsSheet(name, wb.Sheets[name], styles, headerId),
+  );
   return assemble(sheets, styles, []);
 }
 
@@ -427,7 +551,12 @@ function isCellObject(value: unknown): value is XLSX.CellObject {
   return typeof value === "object" && value !== null && "t" in value;
 }
 
-function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, headerId: string | undefined): BuiltSheet {
+function sheetJsSheet(
+  name: string,
+  ws: XLSX.WorkSheet,
+  styles: StyleRegistry,
+  headerId: string | undefined,
+): BuiltSheet {
   const ref = ws["!ref"];
   if (ref === undefined) {
     return {
@@ -435,7 +564,14 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
       isEmpty: true,
       rowCapped: false,
       colCapped: false,
-      body: { rowCount: 0, columnCount: 0, cellData: {}, rowData: {}, columnData: {}, mergeData: [] },
+      body: {
+        rowCount: 0,
+        columnCount: 0,
+        cellData: {},
+        rowData: {},
+        columnData: {},
+        mergeData: [],
+      },
     };
   }
   // Counted from A1, not from the first used cell: a sheet whose data starts at
@@ -456,7 +592,11 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
     if (!isCellObject(cell)) continue;
     const text = XLSX.utils.format_cell(cell);
     const isHeader = headerId !== undefined && address.r === 0;
-    const style = isHeader ? headerId : styles.idFor(univerCellStyle({}, DEFAULT_THEME_PALETTE, cell.t === "n"));
+    const style = isHeader
+      ? headerId
+      : styles.idFor(
+          univerCellStyle({}, DEFAULT_THEME_PALETTE, cell.t === "n"),
+        );
     const data: ICellData = { s: style };
     if (text !== "") {
       data.v = text;
@@ -469,7 +609,12 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
 
   const columnData: Record<number, Partial<IColumnData>> = {};
   widths.forEach((chars, c) => {
-    columnData[c] = { w: Math.min(AUTO_WIDTH_MAX_PX, Math.max(AUTO_WIDTH_MIN_PX, chars * AUTO_CHAR_PX + AUTO_PAD_PX)) };
+    columnData[c] = {
+      w: Math.min(
+        AUTO_WIDTH_MAX_PX,
+        Math.max(AUTO_WIDTH_MIN_PX, chars * AUTO_CHAR_PX + AUTO_PAD_PX),
+      ),
+    };
   });
 
   return {
@@ -477,7 +622,14 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
     isEmpty: false,
     rowCapped: totalRows > MAX_ROWS,
     colCapped: totalCols > MAX_COLS,
-    body: { rowCount, columnCount, cellData, rowData: {}, columnData, mergeData: [] },
+    body: {
+      rowCount,
+      columnCount,
+      cellData,
+      rowData: {},
+      columnData,
+      mergeData: [],
+    },
   };
 }
 
@@ -487,31 +639,227 @@ function sheetJsSheet(name: string, ws: XLSX.WorkSheet, styles: StyleRegistry, h
  */
 export function workbookFromDelimitedText(text: string): ConvertedWorkbook {
   assertWithinFileLimit(new TextEncoder().encode(text).byteLength);
-  return workbookFromSheetJs(XLSX.read(text, { type: "string", sheetRows: SHEETJS_READ_ROWS }), true);
+  return workbookFromSheetJs(
+    XLSX.read(text, { type: "string", sheetRows: SHEETJS_READ_ROWS }),
+    true,
+  );
 }
 
 const OOXML_WORKBOOK = /\.(xlsx|xlsm)$/i;
+const OOXML_DRAWING_PART = /^xl\/drawings\/[^/]+\.xml$/;
+
+/**
+ * Rewrites drawing parts that use a default namespace (no `xdr:` prefix) to the
+ * prefixed form ExcelJS expects. ExcelJS matches tag names literally, so such a
+ * drawing parses to nothing and the whole load throws. Returns `buf` itself when
+ * no part needed rewriting.
+ */
+export async function prefixDrawingNamespaces(
+  buf: ArrayBuffer,
+): Promise<ArrayBuffer> {
+  // Dynamic so JSZip stays out of the main bundle, like ExcelJS.
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(buf);
+  let changed = false;
+  for (const part of zip.file(OOXML_DRAWING_PART)) {
+    const xml = await part.async("string");
+    if (!/<wsDr[\s>]/.test(xml)) continue;
+    const prefixed = xml
+      .replace(/<(\/?)([A-Za-z_][\w.-]*)(?=[\s>/])/g, "<$1xdr:$2")
+      .replace(/(<xdr:wsDr[^>]*?)\sxmlns=/, "$1 xmlns:xdr=");
+    zip.file(part.name, prefixed);
+    changed = true;
+  }
+  if (!changed) return buf;
+  return zip.generateAsync({ type: "arraybuffer" });
+}
+
+/**
+ * Reads the true display size of each floating image from the drawing XML.
+ * ExcelJS's getImages() exposes only the cell anchors, which bound the picture
+ * but do not give its real size; stretching to the cell range distorts it.
+ * OOXML stores the size as EMU in <a:ext cx=".." cy=".."> (914400 EMU = 1 inch).
+ * Results are in CSS pixels at 96 dpi and follow drawing/picture order.
+ */
+type Extent = { width: number; height: number };
+const OFFICE_RELS =
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/** Resolve an OOXML part reference relative to the part that declares it. */
+function resolvePart(base: string, target: string): string {
+  if (target.startsWith("/")) return target.slice(1);
+  const parts = base.split("/").slice(0, -1);
+  for (const seg of target.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+function relsPath(part: string): string {
+  const i = part.lastIndexOf("/");
+  return i < 0
+    ? `_rels/${part}.rels`
+    : `${part.slice(0, i)}/_rels/${part.slice(i + 1)}.rels`;
+}
+
+function parseExtents(xml: string): Array<Extent | null> {
+  const out: Array<{ width: number; height: number } | null> = [];
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const ANCHORS = [
+    "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+    "http://schemas.openxmlformats.org/drawingml/2006/main",
+  ];
+  const pics = ANCHORS.flatMap((ns) =>
+    Array.from(doc.getElementsByTagNameNS(ns, "pic")),
+  );
+  for (const pic of pics) {
+    // A picture also carries <a:ext uri=..> creationId nodes; only the
+    // <a:ext cx cy> inside <a:xfrm> describes its size.
+    let found: Extent | null = null;
+    for (const ext of Array.from(
+      pic.getElementsByTagNameNS(
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "ext",
+      ),
+    )) {
+      const cx = Number(ext.getAttribute("cx"));
+      const cy = Number(ext.getAttribute("cy"));
+      if (Number.isFinite(cx) && Number.isFinite(cy) && cx > 0 && cy > 0) {
+        found = { width: cx / 9525, height: cy / 9525 };
+        break;
+      }
+    }
+    out.push(found);
+  }
+  return out;
+}
+
+/**
+ * Extents keyed by sheet name, so a picture is never sized from another
+ * sheet's drawing. Worksheet and drawing part paths come from OOXML
+ * relationships, not from archive order (which third-party producers and
+ * sheet moves do not keep in sync). Unmapped drawings fall back to their part
+ * name; callers can still read them in archive order.
+ */
+export async function extractDrawingExtentsBySheet(
+  buf: ArrayBuffer,
+): Promise<Map<string, Array<Extent | null>>> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(buf);
+  const out = new Map<string, Array<Extent | null>>();
+  const ridToTarget = new Map<string, string>();
+  const wbRels = zip.file("xl/_rels/workbook.xml.rels");
+  if (wbRels) {
+    const doc = new DOMParser().parseFromString(
+      await wbRels.async("string"),
+      "application/xml",
+    );
+    for (const rel of Array.from(doc.getElementsByTagName("Relationship"))) {
+      const id = rel.getAttribute("Id");
+      const target = rel.getAttribute("Target");
+      if (id && target) ridToTarget.set(id, target);
+    }
+  }
+  const workbook = zip.file("xl/workbook.xml");
+  if (workbook) {
+    const doc = new DOMParser().parseFromString(
+      await workbook.async("string"),
+      "application/xml",
+    );
+    for (const sheet of Array.from(doc.getElementsByTagName("sheet"))) {
+      const name = sheet.getAttribute("name");
+      const rid =
+        sheet.getAttributeNS(OFFICE_RELS, "id") ?? sheet.getAttribute("r:id");
+      const target = rid ? ridToTarget.get(rid) : undefined;
+      if (!name || !target || !/\.xml$/i.test(target)) continue;
+      const sheetPart = resolvePart("xl/workbook.xml", target);
+      const sheetRels = zip.file(relsPath(sheetPart));
+      if (!sheetRels) continue;
+      const relsDoc = new DOMParser().parseFromString(
+        await sheetRels.async("string"),
+        "application/xml",
+      );
+      let drawingPart: string | null = null;
+      for (const rel of Array.from(
+        relsDoc.getElementsByTagName("Relationship"),
+      )) {
+        if (!/\/drawing$/i.test(rel.getAttribute("Type") ?? "")) continue;
+        const drawingTarget = rel.getAttribute("Target");
+        if (drawingTarget) {
+          drawingPart = resolvePart(sheetPart, drawingTarget);
+          break;
+        }
+      }
+      if (!drawingPart) continue;
+      const part = zip.file(drawingPart);
+      if (part) out.set(name, parseExtents(await part.async("string")));
+    }
+  }
+  for (const part of zip.file(OOXML_DRAWING_PART)) {
+    if (!out.has(part.name))
+      out.set(part.name, parseExtents(await part.async("string")));
+  }
+  return out;
+}
 
 /**
  * Converts a spreadsheet file's bytes by extension: `.xlsx`/`.xlsm` through
  * ExcelJS (formatting kept), CSV/TSV decoded as UTF-8 first, anything else
  * (legacy `.xls`) through SheetJS.
  */
-export async function workbookFromFileBytes(path: string, buf: ArrayBuffer): Promise<ConvertedWorkbook> {
+export async function workbookFromFileBytes(
+  path: string,
+  buf: ArrayBuffer,
+): Promise<ConvertedWorkbook> {
   // Refused before any parser runs: ExcelJS and SheetJS hold the whole file.
   assertWithinFileLimit(buf.byteLength);
   // Delimited text has no binary magic, so it must be decoded as UTF-8
   // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
   // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
   if (isDelimitedTextPath(path)) {
-    return workbookFromSheetJs(XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: SHEETJS_READ_ROWS }), true);
+    return workbookFromSheetJs(
+      XLSX.read(new TextDecoder().decode(buf), {
+        type: "string",
+        sheetRows: SHEETJS_READ_ROWS,
+      }),
+      true,
+    );
   }
   if (OOXML_WORKBOOK.test(path)) {
     // Dynamic so ExcelJS stays out of the main bundle.
     const { Workbook: ExcelWorkbook } = await import("exceljs");
     const wb = new ExcelWorkbook();
-    await wb.xlsx.load(buf);
-    return workbookFromExcelJs(wb);
+    // ExcelJS throws on drawings written with a default namespace; the caller keeps the original bytes.
+    await wb.xlsx.load(await prefixDrawingNamespaces(buf));
+    const converted = workbookFromExcelJs(wb);
+    // Replace the loose cell-range guess with the picture's real EMU extent.
+    const extentsBySheet = await extractDrawingExtentsBySheet(buf);
+    // Fallback for a sheet whose workbook->drawing mapping failed: extents are
+    // keyed by PART NAME for unmapped drawings (never by sheet name), so flat
+    // pairing is only safe when one drawing exists in the whole archive.
+    const extentsList = [...extentsBySheet.values()];
+    const flat =
+      extentsList.length === 1 ? extentsList[0] : ([] as (Extent | null)[]);
+    const perSheet = new Map<string, number>();
+    converted.images.forEach((image, i) => {
+      // shortcut: pictures are paired to extents by per-sheet picture order,
+      // not by r:embed. This holds when a drawing contains only xdr:pic nodes;
+      // upgrade to rId->media pairing if non-picture anchors (xdr:sp shapes,
+      // group shapes, chart graphicFrames) ever need reliable extents.
+      const index = perSheet.get(image.sheetName) ?? 0;
+      perSheet.set(image.sheetName, index + 1);
+      const extent = extentsBySheet.get(image.sheetName)?.[index] ?? flat[i];
+      if (extent !== undefined && extent !== null) {
+        image.extWidth = extent.width;
+        image.extHeight = extent.height;
+      }
+    });
+    return converted;
   }
-  return workbookFromSheetJs(XLSX.read(buf, { type: "array", sheetRows: SHEETJS_READ_ROWS }), false);
+  return workbookFromSheetJs(
+    XLSX.read(buf, { type: "array", sheetRows: SHEETJS_READ_ROWS }),
+    false,
+  );
 }

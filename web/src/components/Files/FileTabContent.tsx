@@ -209,7 +209,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
             <PrintPreviewButton
               kind={splitKind}
               title={fileName}
-              source={{ origin: "editor", path: props.path, content: props.content }}
+              source={{ origin: "editor", path: props.path, content: props.content, projectRoot: props.projectRoot, projectHost: props.projectHost }}
               className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             />
             {/* Light/dark override for the Monaco pane AND the rendered preview.

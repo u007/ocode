@@ -42,6 +42,7 @@ export default function ConfirmDialog({
   confirmVariant = "destructive",
   onConfirm,
   onCancel,
+  confirmDisabled = false,
 }: {
   open: boolean;
   title: string;
@@ -59,6 +60,8 @@ export default function ConfirmDialog({
   /** Must REJECT on failure so the dialog can stay open with the error. */
   onConfirm: () => Promise<void>;
   onCancel: () => void;
+  /** Disables the confirm button until a caller-provided precondition is met. */
+  confirmDisabled?: boolean;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +102,7 @@ export default function ConfirmDialog({
           </Button>
           <Button
             variant={confirmVariant}
-            disabled={pending}
+            disabled={pending || confirmDisabled}
             onClick={async () => {
               setError(null);
               setPending(true);

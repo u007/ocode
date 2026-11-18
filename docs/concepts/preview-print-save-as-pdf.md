@@ -2,9 +2,9 @@
 type: Concept
 title: Preview Print / Save as PDF
 description: "Print for markdown, html, text, json, mermaid, image, excel, docx and pptx previews: the toolbar button prints a document built from the file (binary kinds through the same api their viewer uses, each rendered by its viewer's own parser or renderer), natively on the desktop (the native print panel from a print window over the Wails bridge, macOS via `ocode_printWindow`, elsewhere via Wails `Print()`) or in the browser (a hidden sandboxed iframe that calls window.print()), plus the bridge rules that guard the desktop path. Markdown ```mermaid fences render in place in the viewer and as inline SVG (pre-rendered in the browser) in print."
-resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/MarkdownViewer.tsx; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
+resource: web/src/components/Preview/printPreview.tsx; web/src/components/Preview/printDocument.ts; web/src/components/Preview/PrintPreviewButton.tsx; web/src/components/Preview/MarkdownViewer.tsx; web/src/components/Preview/localImagePath.ts; web/src/components/Preview/pptxDeck.ts; web/src/components/Preview/univerData.ts; web/src/components/Preview/mermaidQueue.ts; web/src/lib/wails.ts; web/src/lib/previewKind.ts; cmd/ocode-desktop/print.go; cmd/ocode-desktop/main.go
 tags: [web, preview, print, pdf, desktop, wails, security]
-timestamp: 2026-11-16T02:30:29Z
+timestamp: 2026-11-18T03:56:31Z
 status: active
 ---
 # Preview Print / Save as PDF
@@ -37,10 +37,11 @@ see [PDF viewer zoom, Space navigation, and find](pdf-viewer-zoom-find.md).
 from the file, never from the live DOM. The host passes a `PrintSource` through
 the `source` prop of `PrintPreviewButton`:
 
-- `{ origin: "editor", path, content }`: the unsaved text of the Files-tab split
-  view (`FileTabContent`), so Edit mode prints what is typed. Only the kinds
-  that have a split view use it: the text kinds, `image` (SVG) and `excel`
-  (CSV/TSV).
+- `{ origin: "editor", path, content, projectRoot?, projectHost? }`: the unsaved
+  text of the Files-tab split view (`FileTabContent`, which passes the project
+  root and host so local images resolve in the same project), so Edit mode
+  prints what is typed. Only the kinds that have a split view use it: the text
+  kinds, `image` (SVG) and `excel` (CSV/TSV).
 - `{ origin: "disk", path, projectRoot, projectHost }`: the saved file
   (`PreviewHost`, `PreviewTabPage`). The document is read at click time, with the
   same api its viewer uses: `api.getFileContent` for the text kinds,
@@ -50,10 +51,14 @@ the `source` prop of `PrintPreviewButton`:
 Per kind:
 
 - **markdown:** `renderToStaticMarkup` of `ReactMarkdown` with `remarkGfm`,
-  wrapped in `<article class="prose max-w-none">`. It gets no `components`
-  override, so the viewer's local-image handling does not apply (see
-  [Known gaps](#known-gaps)), and no `rehype-raw`/`rehype-sanitize` either, so
-  raw HTML in a printed markdown document comes out as escaped text.
+  wrapped in `<article class="prose max-w-none">`
+  (`web/src/components/Preview/printPreview.tsx:388`). It gets no `components`
+  override, so the viewer's image component does not run. Local images are
+  inlined by the print builder instead: `inlineLocalImages` runs on the markup
+  before the mermaid pass (see [Local images](#local-images)). There is no
+  `rehype-raw`/`rehype-sanitize` either, so raw HTML in a printed markdown
+  document comes out as escaped text, and an `<img>` written as raw HTML is
+  never an image.
   The app CSS is inlined by
   `collectAppStyles`, see [Style collection](#style-collection). It is inlined,
   not linked, because the desktop print window has no origin to resolve a
@@ -65,7 +70,11 @@ Per kind:
   (`WHOLE_DOCUMENT`), so `<head>` styles and `<link>` stylesheet references
   survive and style attributes stay. The author's `<!doctype html>` is kept, so
   the page is in standards mode like the viewer. Scripts, `on*` handlers and
-  `javascript:` URLs are removed. Only the bootstrap script is appended.
+  `javascript:` URLs are removed. Then `inlineLocalImages` inlines the local
+  `<img>` files (see [Local images](#local-images)), and the document is
+  serialized from `doc.documentElement.outerHTML`
+  (`web/src/components/Preview/printPreview.tsx:411`). Only the bootstrap script
+  is appended.
 - **mermaid:** the source is rendered again with mermaid on the light theme
   (`theme: "default"`, `mermaid.render`), and the SVG is placed in the document.
   The viewer's own SVG is not reused: it is drawn on the dark theme by default.
@@ -119,43 +128,72 @@ Per kind:
 `univerData` (with ExcelJS and SheetJS behind it) and `pptxDeck` are dynamic
 imports, so they stay out of the entry chunk.
 
+## Local images
+
+The print window has no origin, so a relative or disk path in an `<img>` cannot
+load there. The html and markdown kinds therefore carry each local image as a
+`data:` URL:
+
+- `localImagePath` (`web/src/components/Preview/localImagePath.ts`) decides
+  which sources are local, with the same rule the viewer uses. It is shared so
+  that print and the viewer fetch the same bytes for the same source.
+- `inlineLocalImages` (`web/src/components/Preview/printPreview.tsx:157`) walks
+  every `img[src]` of the parsed document. A local source is read through
+  `api.fetchFileRaw` with the source's project root and host, and replaced by a
+  `data:` URL whose MIME type comes from `imageMimeForPath`
+  (`localImageDataUrl`, `web/src/components/Preview/printPreview.tsx:139`). A
+  file without an image extension is never read, so a local `.html` or script
+  file is not inlined.
+- A failed read is logged with `console.error` and the `src` is kept as written,
+  the same pattern as mermaid and stylesheets, so one missing file does not
+  block the print.
+- `img[srcset]` and `source[srcset]` are dropped when any candidate names a
+  local file, because the browser prefers a srcset candidate over the inlined
+  `src`. A srcset of remote candidates only is kept.
+
+Inlining runs after DOMPurify in the html kind, so the `data:` URL is added to a
+sanitized document and does not carry any script. It is covered by the four
+`printPreview.test.tsx` cases whose names start with "inlines a relative" and
+"keeps" (html, markdown, srcset, failed read); the on-screen `HtmlViewer` is
+unchanged, see [Known gaps](#known-gaps).
+
 ## Markdown mermaid fences
 
 A ```mermaid fence in a Markdown preview is a diagram in place, both on screen
 and on paper. The viewer and the print builder each handle it independently,
 and neither prints the fence as code.
 
-**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:220`)
+**Viewer.** `MarkdownViewer` (`web/src/components/Preview/MarkdownViewer.tsx:168`)
 overrides ReactMarkdown's `pre` component in one memoized `components` object
-(`:345`), with `a: MarkdownLink` and the image override (`img: MarkdownImage`)
-merged into the same object. `mermaidFenceSource`
-(`web/src/components/Preview/MarkdownViewer.tsx:32`) reads the
+(`:336`), with `a: MarkdownLink` and the image override (`img: renderImage`,
+which renders `MarkdownImage`) merged into the same object. `mermaidFenceSource`
+(`web/src/components/Preview/MarkdownViewer.tsx:42`) reads the
 `language-mermaid` code child, so every fence renders as the interactive
 `MermaidViewer` where the author wrote it. A non-mermaid fenced block still
 renders as `<pre>{children}</pre>`. There is no longer an `extractMermaid`
 helper or a separate `diagram` memo hoisting the first fence into a strip above
 the prose: all fences render in document order, and a document with no fence
 renders no viewer. `components` is passed to `ReactMarkdown`
-(`web/src/components/Preview/MarkdownViewer.tsx:543`).
+(`web/src/components/Preview/MarkdownViewer.tsx:504`).
 
 **Print.** `buildPrintDocument`'s markdown branch renders the prose with
-`renderToStaticMarkup`, then calls
-`inlineMermaid(markup, mermaidSources(markdown))`
-(`web/src/components/Preview/printPreview.tsx:346`):
+`renderToStaticMarkup`, inlines the local images (see [Local images](#local-images)),
+then calls `inlineMermaid(doc.body.innerHTML, mermaidSources(markdown))`
+(`web/src/components/Preview/printPreview.tsx:391`):
 
-- `mermaidSources` (`web/src/components/Preview/printPreview.tsx:181`) extracts
+- `mermaidSources` (`web/src/components/Preview/printPreview.tsx:224`) extracts
   every fence in document order with `MERMAID_FENCE`
-  (`web/src/components/Preview/printPreview.tsx:152`).
-- `inlineMermaid` (`web/src/components/Preview/printPreview.tsx:193`) matches
+  (`web/src/components/Preview/printPreview.tsx:195`).
+- `inlineMermaid` (`web/src/components/Preview/printPreview.tsx:236`) matches
   the `<pre><code class="language-mermaid">…` blocks react-markdown emits
-  (`MERMAID_CODE_HTML`, `web/src/components/Preview/printPreview.tsx:155`) and
+  (`MERMAID_CODE_HTML`, `web/src/components/Preview/printPreview.tsx:198`) and
   replaces only those with `<div class="print-mermaid">SVG</div>`. Other code
   blocks are left untouched.
 - Each diagram is rendered by the existing `mermaidSvg`
-  (`web/src/components/Preview/printPreview.tsx:162`) on the light theme,
+  (`web/src/components/Preview/printPreview.tsx:205`) on the light theme,
   through `runMermaid`, and sanitized with DOMPurify under
   `MERMAID_SVG_CONFIG`. `MARKDOWN_PRINT_CSS`
-  (`web/src/components/Preview/printPreview.tsx:148`) gives `.print-mermaid`
+  (`web/src/components/Preview/printPreview.tsx:191`) gives `.print-mermaid`
   `margin: 1em 0; break-inside: avoid` and its `svg` `max-width: 100%;
   height: auto`, so a diagram is not split across pages and is scaled to the
   column.
@@ -163,7 +201,7 @@ renders no viewer. `components` is passed to `ReactMarkdown`
   `"print preview: could not render a mermaid diagram, printing its source"`.
   One broken fence does not abort the whole document. The `.mmd` preview kind
   still propagates the render error
-  (`web/src/components/Preview/printPreview.tsx:366`), because there the diagram
+  (`web/src/components/Preview/printPreview.tsx:414`), because there the diagram
   IS the document.
 
 **No server-side PDF engine.** Mermaid is pre-rendered in the browser (the
@@ -326,14 +364,18 @@ The desktop print window's bridge rules apply to the toolbar path:
   text), `mermaidQueue.test.ts`, `PrintPreviewButton.test.tsx`,
   `PdfViewer.print.test.tsx` and `print_test.go`. The print routes are not yet
   checked in Chrome or WebKit, and the desktop shell is not yet checked in the
-  running app. The docx, pptx, excel, image and mermaid documents have not been
-  looked at as printed pages.
+  running app. Local-image inlining (see [Local images](#local-images)) is
+  verified by vitest only, not in Chrome, WebKit or the desktop print window.
+  The docx, pptx, excel, image and mermaid documents have not been looked at as
+  printed pages.
 - **Sanitizing is a removal list, not a proof.** DOMPurify's defaults decide what
   survives, and the config adds `link` (html), `foreignObject` plus its HTML
   integration point (mermaid). `img` `data:` URLs and inline `style` attributes are
   kept, so an `<img>` in a PRINTED document loads whatever URL that document
-  carries. It does not resolve a path on disk. The viewer is different only for
-  local files: it fetches their bytes itself and shows a blob URL, see
+  carries. The sanitizer never resolves a path on disk: the print builder inlines
+  local image files itself, after sanitizing (see [Local images](#local-images)).
+  The viewer does the same for markdown images, fetching their bytes and showing a
+  blob URL, see
   [Markdown preview: local images via /api/files/raw](markdown-local-images.md).
   The docx hyperlinks are also filtered (see [Content, not DOM](#content-not-dom)).
 - **Mermaid and SVG print on a fixed theme.** Mermaid prints on the light theme
@@ -348,18 +390,20 @@ The desktop print window's bridge rules apply to the toolbar path:
 - **Font CORS unverified.** Fonts reached through the rewritten `url()` are
   fetched by the desktop print window. Whether they load across origin there
   is not checked.
-- **Relative image paths print as written.** The VIEWER resolves a local
-  markdown image — a relative source against the markdown file's directory, an
-  absolute path, or `~/…` — through `GET /api/files/raw` and a blob URL (see
-  [Markdown preview: local images via /api/files/raw](markdown-local-images.md)).
-  PRINT does not: the builder re-renders the source with plain `ReactMarkdown`
-  and no `img` override (`printPreview.tsx:345`), so the viewer's resolution
-  never runs. A relative or local image is printed as an `<img>` whose `src` the
-  print window cannot resolve: it has no origin, so there is nothing to resolve
-  a relative path against, and it never fetches a disk path. `http(s)` sources
-  still print; `data:` sources do not — react-markdown's `defaultUrlTransform`
-  blanks any scheme outside `http(s)`/`irc(s)`/`mailto`/`xmpp`, and print passes
-  no `urlTransform` override.
+- **Relative paths outside `<img>` still print as written.** Local `<img>` files
+  are inlined in html and markdown print (see [Local images](#local-images)), and
+  `http(s)` sources still print. Not handled: CSS `url(...)` in a `<style>`
+  element or a `style` attribute of the document, a relative
+  `<link rel="stylesheet">` in an html file, `@import`, and an `<img>` written as
+  raw HTML inside markdown (that prints as escaped text, not an image). Each
+  still names a path the print window cannot resolve, because it has no origin,
+  so it does not load. The on-screen `HtmlViewer`
+  (`web/src/components/Preview/HtmlViewer.tsx`) has the same gap for every
+  relative asset: its `srcDoc` has no base URL (`HtmlViewer.tsx:23`). That
+  viewer is unchanged by this print work.
+- **Markdown `data:` image sources do not print.** react-markdown's
+  `defaultUrlTransform` blanks any scheme outside `http(s)`/`irc(s)`/`mailto`/`xmpp`,
+  and print passes no `urlTransform` override, so the `src` is emptied.
 - **Document shares the bridge's JS world.** Scripts in a desktop print window
   run in the same JS world as the Wails bridge bootstrap. The sanitizer removes
   the author's scripts from every previewed document, so only the app's own

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildPrintDocument, collectAppStyles, printPreview } from "./printPreview";
 import { printDocument } from "./printDocument";
+import { api } from "../../api/client";
+
+const PNG = new Uint8Array([137, 80, 78, 71]).buffer;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -153,6 +156,59 @@ describe("buildPrintDocument", () => {
 
     expect(html).toContain("<style>p{color:red}</style>");
     expect(html).toContain("<p>x</p>");
+  });
+
+  it("inlines a relative html image against the document's directory, in its project", async () => {
+    const fetchRaw = vi.spyOn(api, "fetchFileRaw").mockResolvedValue(PNG);
+
+    const html = await buildPrintDocument(
+      "html",
+      { origin: "editor", path: "site/index.html", content: '<img src="img/a.png">', projectRoot: "/work/p", projectHost: "box" },
+      "index.html",
+    );
+
+    expect(fetchRaw).toHaveBeenCalledWith("site/img/a.png", "/work/p", "box");
+    expect(html).toContain('<img src="data:image/png;base64,');
+    expect(html).not.toContain('src="img/a.png"');
+  });
+
+  it("inlines a relative markdown image against the markdown file's directory", async () => {
+    const fetchRaw = vi.spyOn(api, "fetchFileRaw").mockResolvedValue(PNG);
+
+    const html = await buildPrintDocument("markdown", { origin: "editor", path: "docs/report.md", content: "![chart](img/c.png)" }, "report.md");
+
+    expect(fetchRaw).toHaveBeenCalledWith("docs/img/c.png", undefined, undefined);
+    expect(html).toContain('src="data:image/png;base64,');
+  });
+
+  it("keeps remote and data image sources, and drops a srcset that names a local file", async () => {
+    const fetchRaw = vi.spyOn(api, "fetchFileRaw").mockResolvedValue(PNG);
+
+    const remote = await buildPrintDocument(
+      "html",
+      { origin: "editor", path: "p.html", content: '<img src="https://x.test/a.png" srcset="https://x.test/a@2x.png 2x">' },
+      "p.html",
+    );
+    const local = await buildPrintDocument(
+      "html",
+      { origin: "editor", path: "p.html", content: '<img src="a.png" srcset="a.png 1x, a@2x.png 2x">' },
+      "p.html",
+    );
+
+    expect(fetchRaw).toHaveBeenCalledTimes(1);
+    expect(remote).toContain('src="https://x.test/a.png" srcset="https://x.test/a@2x.png 2x"');
+    expect(local).not.toContain("srcset");
+    expect(local).toContain('src="data:image/png;base64,');
+  });
+
+  it("keeps an image as written when its read fails, and logs the failure", async () => {
+    vi.spyOn(api, "fetchFileRaw").mockRejectedValue(new Error("HTTP 404"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const html = await buildPrintDocument("html", { origin: "editor", path: "index.html", content: '<img src="missing.png">' }, "index.html");
+
+    expect(html).toContain('<img src="missing.png">');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("could not read a local image"), { path: "missing.png" }, expect.any(Error));
   });
 
   it("rejects kinds it cannot print", async () => {

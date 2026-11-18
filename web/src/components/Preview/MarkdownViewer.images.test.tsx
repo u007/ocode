@@ -10,7 +10,8 @@ vi.mock("../../api/client", () => ({
 vi.mock("../Files/FileEditor", () => ({ default: () => null }));
 vi.mock("./MermaidViewer", () => ({ default: () => null }));
 
-import MarkdownViewer, { localImagePath } from "./MarkdownViewer";
+import MarkdownViewer from "./MarkdownViewer";
+import { localImagePath } from "./localImagePath";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer;
 

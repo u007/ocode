@@ -18,9 +18,30 @@ export interface MountUniverOpts {
   onDirty?: () => void;
 }
 
+/**
+ * Live sheet-grid geometry for the image overlay. Coordinates are CSS pixels
+ * relative to the grid origin (the top-left cell, excluding both headers).
+ */
+export interface ViewportMetrics {
+  scrollX: number;
+  scrollY: number;
+  zoom: number;
+  rowHeaderWidth: number;
+  columnHeaderHeight: number;
+  /** Cumulative px offset of the top of `rowIndex`, at zoom 1. */
+  rowStart(rowIndex: number): number;
+  /** Cumulative px offset of the left of `colIndex`, at zoom 1. */
+  colStart(colIndex: number): number;
+  rowHeight(rowIndex: number): number;
+  colWidth(colIndex: number): number;
+}
+
 /** Largest selection the viewer reports to the chat, in cells. */
 const MAX_SELECTION_ROWS = 20;
 const MAX_SELECTION_COLS = 10;
+/** Mirrors `worksheetData()` in univerData.ts; Univer has no facade getter for these. */
+const ROW_HEADER_WIDTH_PX = 46;
+const COLUMN_HEADER_HEIGHT_PX = 20;
 /**
  * Id of the operation every selection change runs (mouse, keyboard, programmatic
  * activate). Defined locally because `@univerjs/sheets` is only a transitive dependency.
@@ -45,6 +66,8 @@ export interface UniverSheetHandle {
    * its render-unit lookup of the selections service returns null.
    */
   onSelectionChange(cb: () => void): () => void;
+  /** Read-only viewport access for painting floating images over the grid. */
+  viewport(): { metrics(): ViewportMetrics | null; subscribe(cb: () => void): () => void };
   setDarkMode(darkMode: boolean): void;
   /** Current workbook snapshot, for serialization on save. */
   snapshot(): IWorkbookData;
@@ -95,6 +118,7 @@ export async function mountUniverSheet(
   workbook.setEditable(editable);
   // Selection subscriptions still open. dispose() ends any the caller kept.
   const selectionSubs = new Set<IDisposable>();
+  const viewportSubs = new Set<IDisposable>();
 
   return {
     activateSheet(sheetId) {
@@ -148,6 +172,64 @@ export async function mountUniverSheet(
         }
       };
     },
+    viewport() {
+      return {
+        metrics() {
+          try {
+          const sheet = workbook.getActiveSheet();
+          const scroll = workbook.getScrollStateBySheetId(sheet.getSheetId());
+          // Univer stores scroll as an offset inside the first visible row/column.
+          // The overlay needs one absolute offset from the grid origin instead.
+          const colStart = (colIndex: number) => {
+            let px = 0;
+            for (let c = 0; c < colIndex; c += 1) px += sheet.getColumnWidth(c);
+            return px;
+          };
+          const rowStart = (rowIndex: number) => {
+            let px = 0;
+            for (let r = 0; r < rowIndex; r += 1) px += sheet.getRowHeight(r);
+            return px;
+          };
+          return {
+            scrollX: colStart(scroll?.sheetViewStartColumn ?? 0) + (scroll?.offsetX ?? 0),
+            scrollY: rowStart(scroll?.sheetViewStartRow ?? 0) + (scroll?.offsetY ?? 0),
+            zoom: sheet.getZoom(),
+            rowHeaderWidth: ROW_HEADER_WIDTH_PX,
+            columnHeaderHeight: COLUMN_HEADER_HEIGHT_PX,
+            rowStart,
+            colStart,
+            rowHeight: (rowIndex) => sheet.getRowHeight(rowIndex),
+            colWidth: (colIndex) => sheet.getColumnWidth(colIndex),
+          };
+          } catch (e) {
+            // The scroll/skeleton services are not available until the grid has
+            // rendered; the overlay simply waits for the next event.
+            console.warn("[univerMount] viewport metrics unavailable:", e);
+            return null;
+          }
+        },
+        subscribe(cb) {
+          let subs: IDisposable[];
+          try {
+          subs = [
+            univerAPI.addEvent(univerAPI.Event.Scroll, cb),
+            univerAPI.addEvent(univerAPI.Event.SheetZoomChanged, cb),
+            univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, cb),
+          ];
+          } catch (e) {
+            console.warn("[univerMount] viewport events unavailable:", e);
+            return () => {};
+          }
+          for (const sub of subs) viewportSubs.add(sub);
+          return () => {
+            for (const sub of subs) {
+              sub.dispose();
+              viewportSubs.delete(sub);
+            }
+          };
+        },
+      };
+    },
     setDarkMode(next) {
       univerAPI.toggleDarkMode(next);
     },
@@ -155,7 +237,7 @@ export async function mountUniverSheet(
       return workbook.save();
     },
     dispose() {
-      for (const sub of [...userEdits, ...selectionSubs]) sub.dispose();
+      for (const sub of [...userEdits, ...selectionSubs, ...viewportSubs]) sub.dispose();
       univer.dispose();
     },
   };

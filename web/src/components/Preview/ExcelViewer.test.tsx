@@ -41,6 +41,7 @@ let handle: {
   onSelectionChange: Mock;
   activateRange: Mock;
   sheetNames: Mock;
+  viewport: Mock;
 };
 let dirtyCb: (() => void) | null;
 
@@ -59,6 +60,7 @@ beforeEach(() => {
     onSelectionChange: vi.fn(() => () => {}),
     activateRange: vi.fn(),
     sheetNames: vi.fn(() => ["Stock", "Cities"]),
+    viewport: vi.fn(() => ({ metrics: () => null, subscribe: () => () => {} })),
   };
   vi.mocked(mountUniverSheet).mockReset();
   vi.mocked(mountUniverSheet).mockImplementation(async (_c, _d, _dark, opts) => {
@@ -251,6 +253,45 @@ describe("ExcelViewer tab-separated files", () => {
     await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(2));
     expect(handle.dispose).toHaveBeenCalledTimes(1);
   });
+
+  it("re-mounts a new .xlsx path on the same instance without a failure state", async () => {
+    vi.mocked(api.fetchFileRaw).mockImplementation(async (p) =>
+      p === "first.xlsx"
+        ? workbookBytes()
+        : xlsxBytes((wb) => {
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["id"], [7]]), "Orders");
+          }),
+    );
+    // A real Univer handle throws once disposed, so a stale activateSheet on
+    // the old grid surfaces as the failure state rather than passing silently.
+    const activations: Mock[] = [];
+    vi.mocked(mountUniverSheet).mockImplementation(async () => {
+      let disposed = false;
+      const activateSheet = vi.fn(() => {
+        if (disposed) throw new Error('Univer has no sheet "sheet-1"');
+      });
+      activations.push(activateSheet);
+      return {
+        ...handle,
+        activateSheet,
+        dispose: vi.fn(() => {
+          disposed = true;
+        }),
+      };
+    });
+    const { rerender } = render(<ExcelViewer path="first.xlsx" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    // Wait until the first grid is live (its sheet was activated), so the
+    // rerender below really changes path under a mounted, undisposed handle.
+    await waitFor(() => expect(activations[0]).toHaveBeenCalled());
+
+    rerender(<ExcelViewer path="second.xlsx" />);
+    expect(screen.queryByText(/Spreadsheet failed/)).toBeNull();
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/Spreadsheet failed/)).toBeNull();
+    expect(mountedData(1).sheets["sheet-1"]?.name).toBe("Orders");
+    expect(await screen.findByRole("tab", { name: "Orders" })).toBeDefined();
+  });
 });
 
 describe("ExcelViewer editable mode", () => {
@@ -334,7 +375,7 @@ describe("ExcelViewer editable mode", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
     expect(await screen.findByText("Save spreadsheet?")).toBeDefined();
-    expect(screen.getByText(/formulas, charts, images and pivot tables/i)).toBeDefined();
+    expect(screen.getByText(/drawings and images from the original file/i)).toBeDefined();
     expect(screen.getByText(/cancel\.xlsx\.bak/)).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -733,6 +774,131 @@ describe("ExcelViewer agent control", () => {
       </ViewerReportContext.Provider>,
     );
     await waitFor(() => expect(screen.getByText(/No images on this sheet/i)).toBeDefined());
+  });
+
+
+  it("offers an explicit values-only save when the patcher reports a structural change", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="struct.xlsx" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const [, mountedData] = vi.mocked(mountUniverSheet).mock.calls[0];
+    const structurallyChanged = JSON.parse(JSON.stringify(mountedData));
+    structurallyChanged.sheets[structurallyChanged.sheetOrder[0]].rowCount = 999;
+    handle.snapshot.mockImplementation(() => structurallyChanged);
+    dirtyCb?.();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    const fallback = await screen.findByRole("button", { name: "Save without drawings" });
+    expect(api.saveFileRaw).not.toHaveBeenCalled();
+
+    fireEvent.click(fallback);
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
+  });
+
+
+  it("Save button writes bytes that keep the workbook images", async () => {
+    const { Workbook } = await import("exceljs");
+    const wb = new Workbook();
+    const ws = wb.addWorksheet("Stock");
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const buf = Buffer.from(pngBase64, "base64");
+    const id = wb.addImage({ buffer: buf as any, extension: "png" });
+    ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } });
+    const imageBytes = await wb.xlsx.writeBuffer();
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(imageBytes as ArrayBuffer);
+    render(
+      <ViewerReportContext.Provider value="s1">
+        <ExcelViewer path="save-img.xlsx" projectRoot="/tmp" />
+      </ViewerReportContext.Provider>,
+    );
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    dirtyCb?.();
+    const tab = await screen.findByRole("button", { name: "Save spreadsheet" });
+    fireEvent.click(tab);
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(api.saveFileRaw).mock.calls[0][1] as ArrayBuffer;
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(saved);
+    expect(zip.file("xl/media/image1.png")).not.toBeNull();
+  });
+
+
+  it("requires an explicit checkbox before saving a date-like edit", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="dates.xlsx" projectRoot="/tmp" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const live = JSON.parse(JSON.stringify(mountedData()));
+    live.sheets["sheet-1"].cellData[1][1] = { v: "3/15/23", t: 1 };
+    handle.snapshot.mockImplementation(() => live);
+    dirtyCb?.();
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    const save = await screen.findByRole("button", { name: "Save" });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /I understand edited dates become text/i }));
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
+  });
+
+  it.each([
+    ["1-2-3", "not flagged (mixed-separator, version-like)"],
+    ["10/2-11/3", "not flagged (mixed separators, a range)"],
+    ["3/15/23", "flagged (same separator, 2-digit year)"],
+    ["2026-01-05", "flagged (same separator, 4-digit year)"],
+    ["15 Mar 2026", "flagged (month name)"],
+  ])("date gate: %s is %s", async (value, expected) => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    // A distinct path per case: confirmedSaveKeys is module-level, so a shared
+    // path would make later cases skip the dialog entirely.
+    render(<ExcelViewer path={`dates-${expected.replace(/\W+/g, "-")}.xlsx`} projectRoot="/tmp" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    const live = JSON.parse(JSON.stringify(mountedData()));
+    live.sheets["sheet-1"].cellData[1][1] = { v: value, t: 1 };
+    handle.snapshot.mockImplementation(() => live);
+    dirtyCb?.();
+    const wantGate = expected.startsWith("flagged");
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    if (wantGate) {
+      // The gate holds: the dialog's Save is disabled until the checkbox.
+      const save = await screen.findByRole("button", { name: "Save" });
+      expect((save as HTMLButtonElement).disabled).toBe(true);
+    } else {
+      // A non-date edit saves straight through the confirm dialog.
+      fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+      await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
+    }
+  });
+
+  it("re-gates a date-like edit typed while the save dialog is already open", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(workbookBytes());
+    render(<ExcelViewer path="dates-late.xlsx" projectRoot="/tmp" />);
+    await waitFor(() => expect(mountUniverSheet).toHaveBeenCalledTimes(1));
+    // First edit is date-free: the dialog opens with the checkbox hidden and
+    // Save enabled.
+    dirtyCb?.();
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    const save = await screen.findByRole("button", { name: "Save" });
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+    // A date-like cell is edited WHILE the dialog is open (Univer keeps
+    // running; the dialog is non-blocking).
+    const live = JSON.parse(JSON.stringify(mountedData()));
+    live.sheets["sheet-1"].cellData[1][1] = { v: "3/15/23", t: 1 };
+    handle.snapshot.mockImplementation(() => live);
+    // Save must refuse: no acknowledgement was recorded for this edit. The
+    // dialog closes with the attempt; the re-gate appears on the next
+    // Save click.
+    fireEvent.click(save);
+    await waitFor(() => expect(api.saveFileRaw).not.toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "Save spreadsheet" }));
+    const save2 = await screen.findByRole("button", { name: "Save" });
+    expect((save2 as HTMLButtonElement).disabled).toBe(true);
+    expect(api.saveFileRaw).not.toHaveBeenCalled();
+    // Ticking the acknowledgement now releases the save.
+    fireEvent.click(screen.getByRole("checkbox", { name: /I understand edited dates become text/i }));
+    fireEvent.click(save2);
+    await waitFor(() => expect(api.saveFileRaw).toHaveBeenCalledTimes(1));
   });
 
 });

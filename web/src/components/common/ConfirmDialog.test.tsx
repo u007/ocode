@@ -119,6 +119,27 @@ describe("ConfirmDialog", () => {
     expect(dialog()).toBeDefined();
   });
 
+  it("disables the confirm button while confirmDisabled is true and re-enables when it flips", async () => {
+    const { rerender, onConfirm } = renderConfirm({ confirmDisabled: true });
+    expect(confirmButton()).toBeDisabled();
+    fireEvent.click(confirmButton());
+    expect(onConfirm).not.toHaveBeenCalled();
+    rerender(
+      <ConfirmDialog
+        open
+        title="Delete the thing?"
+        description="This removes it from the list."
+        confirmLabel="Delete"
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+        confirmDisabled={false}
+      />,
+    );
+    expect(confirmButton()).toBeEnabled();
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+  });
+
   it("focuses Cancel, the safe action, not the destructive button", () => {
     renderConfirm();
     // Repo dialog focus policy: [data-dialog-default-action] receives initial
