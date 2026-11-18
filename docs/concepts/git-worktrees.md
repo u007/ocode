@@ -7,7 +7,7 @@ tags:
   - worktree
   - web
   - git-panel
-timestamp: 2026-11-16T02:33:14Z
+timestamp: 2026-11-18T04:24:07Z
 ---
 # Git worktrees: list, open, create, remove (web Git tab)
 
@@ -25,7 +25,7 @@ The Git tab (`web/src/components/Git/GitPanel.tsx`, shared by the web app and th
 
 ## Endpoints
 
-Registered in `internal/server/server.go:419-421` behind `s.authMiddleware`. Handlers live in `internal/server/handler_git_worktrees.go`.
+Registered in `internal/server/server.go:452-454` behind `s.authMiddleware`. Handlers live in `internal/server/handler_git_worktrees.go`.
 
 | Method and path | Handler | Body | Returns |
 |---|---|---|---|
@@ -33,16 +33,16 @@ Registered in `internal/server/server.go:419-421` behind `s.authMiddleware`. Han
 | `POST /api/git/worktree?project=` | `HandleGitWorktreeCreate` (`:153`) | `{"branch": "..."}` | refreshed `[]GitWorktree` |
 | `POST /api/git/worktree/remove?project=` | `HandleGitWorktreeRemove` (`:236`) | `{"path": "..."}` | refreshed `[]GitWorktree` |
 
-`GitWorktree` is declared at `internal/server/handler_git_worktrees.go:18`. The TypeScript mirror is `web/src/api/types.ts:877`. Client methods are `gitWorktrees`, `gitWorktreeCreate` and `gitWorktreeRemove` in `web/src/api/client.ts:2171-2184`.
+`GitWorktree` is declared at `internal/server/handler_git_worktrees.go:19`. The TypeScript mirror is `web/src/api/types.ts:1014`. Client methods are `gitWorktrees`, `gitWorktreeCreate` and `gitWorktreeRemove` in `web/src/api/client.ts:2604-2625`.
 
-Listing parses `git worktree list --porcelain` in `parseGitWorktreeList` (`handler_git_worktrees.go:36`) and then `gitWorktreesForDir` (`:76`). Bare entries are skipped. Git always prints the main checkout first, so `IsMain` marks the first record even when a later record is skipped. The result is sorted with the main checkout first, then by path. `IsCurrent` compares each path to `git rev-parse --show-toplevel` through `samePath` (`:102`).
+Listing parses `git worktree list --porcelain` in `parseGitWorktreeList` (`handler_git_worktrees.go:84`) and then `gitWorktreesForDir` (`:130`). Bare entries are skipped. Git always prints the main checkout first, so `IsMain` marks the first record even when a later record is skipped. The result is sorted with the main checkout first, then by path. `IsCurrent` compares each path to `git rev-parse --show-toplevel` through `samePath` (`:156`).
 
 ## Create rules
 
 - The branch name goes through `git check-ref-format --branch`. The command echoes a valid name unchanged, so comparing the echo rejects a leading `-` and `@{-N}`, which would otherwise expand to another branch.
 - The checkout path is built on the server as `<main checkout>/.worktrees/<branch>`. The caller never supplies a filesystem path.
 - An existing **empty** directory at the target is accepted, since git accepts it too. Anything else there is a 409.
-- An existing local branch is checked out. A new branch is forked from the **open project's** `HEAD`, not the main checkout's, because the command runs in the main checkout (`handler_git_worktrees.go:204-218`).
+- An existing local branch is checked out. A new branch is forked from the **open project's** `HEAD`, not the main checkout's, because the command runs in the main checkout (`handler_git_worktrees.go:270-280`).
 - Before creating, `ensureWorktreesDirExcluded` (`:335`) appends `.worktrees/` to the repository's `info/exclude` if it is not already there. That file is local and never committed, so `git status` stays clean without touching the project's `.gitignore`. The path comes from `git rev-parse --git-path info/exclude`, so it resolves for linked checkouts too.
 - A repository with no main checkout (bare, with a linked checkout) is refused with 400 rather than nesting `.worktrees/` inside a linked checkout.
 
@@ -65,9 +65,9 @@ The project **list** is the one place linked worktrees are grouped. `GET /api/pr
 ## Web behaviour
 
 - **Collapsed by default.** The `worktrees` key in `ocode.ui.git-panel.v1` defaults to `false` (`GitPanel.tsx`, `DEFAULT_SECTIONS`). The list is fetched only once the section is expanded, so projects that never use worktrees pay nothing.
-- **Keyed by project.** `GitPanel.tsx:1501` mounts the section with `key` set to the host and project path, so switching projects discards the old list instead of briefly showing it.
+- **Keyed by project.** `GitPanel.tsx:1835` mounts the section with `key` set to the host and project path, so switching projects discards the old list instead of briefly showing it.
 - **Loaded separately.** The list is not part of the workspace refresh `Promise.all`. A failed list shows an inline error in the section and cannot break the Files or Changes panes.
-- **Open is optional.** `GitPanel` takes `onOpenWorktree` as an optional prop (`GitPanel.tsx:245`). When it is omitted the list still shows and the Open action is hidden. The app wires it at `web/src/App.tsx:1953` to `openProjectPath`.
+- **Open is optional.** `GitPanel` takes `onOpenWorktree` as an optional prop (`GitPanel.tsx:221`). When it is omitted the list still shows and the Open action is hidden. The app wires it at `web/src/App.tsx:2056` to `openProjectPath`.
 - **Open registers, then selects.** `openProjectPath` (`web/src/stores/projectStore.tsx:1210`) calls `POST /api/projects` (idempotent on the server), reloads the project list, and selects the entry for that path. It rejects on failure instead of swallowing the error the way `addProject` does, so the section can show the reason.
 - Create and remove use a dialog and a `ConfirmDialog`. A rejected request keeps the dialog open with git's message.
 
@@ -87,3 +87,8 @@ The project **list** is the one place linked worktrees are grouped. `GET /api/pr
 ## Open items
 
 Tracked in `TODO.md` under "Git worktrees follow-ups (2026-10-15)": remote-project support, removing the saved project entry that outlives a removed checkout, pagination of the list, and the missing tests listed above.
+
+## See also
+
+- [Web Git Branches sub-view](web-git-branches.md) — the sibling Branches sub-view where a branch is checked out, created, renamed, deleted or pushed.
+- [Web Git history graph](web-git-history-graph.md) — the History sub-view and the shared ref-action contract.

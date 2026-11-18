@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-16T07:48:45Z
+timestamp: 2026-11-16T11:28:22Z
 status: active
 ---
 # browser_run step loop
@@ -33,7 +33,7 @@ slower per task).
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
 `internal/agent/browser_run.go:255`). Each sub-step is a real call to
-`handleToolCallWithContext` (`internal/agent/agent.go:4072`) with the tool name
+`handleToolCallWithContext` (`internal/agent/agent.go:4185`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
 loop and never appended to the transcript. Only `browser_run`'s own result is.
@@ -238,7 +238,7 @@ backend or to the main model.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
   `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
-  `internal/agent/agent.go:6944`). The dialog then reads like
+  `internal/agent/agent.go:7165`). The dialog then reads like
   `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6767`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.
@@ -279,12 +279,12 @@ backend or to the main model.
 
 ## The controls action and the Settle rule
 
-`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:472`).
+`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:491`).
 It returns one JSON object after an untrusted-content header. The object's keys are
 `url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls`, `omitted`,
 `viewport_width`, `viewport_height` (the viewport in CSS pixels), `scroll_x` and `scroll_y`
 (the document's scroll offset in CSS pixels; on the htrcli surface, the snapshot's `scroll`). `text` and `text_truncated` map the cdp layer's viewport text fields. The
-struct is `browserControlsOutput` (`internal/server/browser_tool.go:1208`).
+struct is `browserControlsOutput` (`internal/server/browser_tool.go:1317`).
 
 Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set),
 `operations`, `box` and `in_viewport`. `box` is the control's rectangle in CSS pixels of the
@@ -330,8 +330,8 @@ quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
 (`browserObserveActions`, `internal/agent/permissions.go:6678`), so it is allowed on an agent-opened tab. A user tab
-asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:533`). Read-only
-agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:232`).
+asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:511`). Read-only
+agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:238`).
 
 ## Routing the model to browser_run
 
@@ -412,8 +412,8 @@ re-tuned on that corpus.
   `Controls` (273), `controlsWhereExpr` (332), `controlLayout` (365), `placeControls` (398),
   `controlsWalker.add` (479), `controlsFingerprint` (522).
 - `internal/browse/cdp/pagedom_read.go`: the settle and control caps (36 to 45).
-- `internal/server/browser_tool.go`: `browserActions` (62), `browserReadOnlyActions` (232),
-  the `controls` case (472), `browserControlsOutput` (1208), `controls` (1226).
+- `internal/server/browser_tool.go`: `browserActions` (62), `browserReadOnlyActions` (238),
+  the `controls` case (491), `browserControlsOutput` (1317), `controls` (1326).
 
 Related: [browser-agent-tools](browser-agent-tools.md) (the `browser` tool, its actions and
 permissions), [inbound-content-guardrail](inbound-content-guardrail.md).

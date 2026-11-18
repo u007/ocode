@@ -3,7 +3,7 @@ type: Concept
 title: 'Web Git panel: stacked section heights'
 description: How the Git tab's left file pane stacks its five sections and sizes the three list sections by content (with caps) instead of equal flex shares, plus the definite-height chain the percentage caps depend on.
 tags: []
-timestamp: 2026-11-02T02:53:09Z
+timestamp: 2026-11-18T04:24:07Z
 ---
 # Web Git panel: stacked section heights
 
@@ -16,16 +16,16 @@ timestamp: 2026-11-02T02:53:09Z
 
 ## Overview
 
-The Git tab's left pane (`web/src/components/Git/GitPanel.tsx`, `data-testid="git-file-pane"`) stacks five sections: **Staged changes**, **Unstaged changes**, **Commits**, **Worktrees** (`WorktreesSection.tsx`), and **Stashes**. The pane is the single scroll container so the stacked sections stay reachable when they do not all fit: `overflow-x-hidden overflow-y-auto overscroll-contain` (`GitPanel.tsx:1592`). `overflow-x-hidden` still clips during the width animation; below the `md` breakpoint (768px) the same element is an overlay drawer (`absolute inset-y-0 left-0 z-30 ... -translate-x-full` when closed) rather than the older fixed 45% height, so its height is `inset-y-0`.
+The Git tab's left pane (`web/src/components/Git/GitPanel.tsx`, `data-testid="git-file-pane"`) stacks five sections: **Staged changes**, **Unstaged changes**, **Commits**, **Worktrees** (`WorktreesSection.tsx`), and **Stashes**. The pane is the single scroll container so the stacked sections stay reachable when they do not all fit: `overflow-x-hidden overflow-y-auto overscroll-contain` (`GitPanel.tsx:1683`). `overflow-x-hidden` still clips during the width animation; below the `md` breakpoint (768px) the same element is an overlay drawer (`absolute inset-y-0 left-0 z-30 ... -translate-x-full` when closed) rather than the older fixed 45% height, so its height is `inset-y-0`.
 
-The Git tab also has a History sub-view, which replaces this body split and the commit box; see [Web Git history graph](web-git-history-graph.md).
+The Git tab also has History and Branches sub-views, which replace this body split and the commit box; see [Web Git history graph](web-git-history-graph.md) and [Web Git Branches sub-view](web-git-branches.md).
 
 ## Content-sized list sections, not equal flex shares
 
-The three list sections (Commits / Worktrees / Stashes) are **content-sized when expanded**, not equal flex shares. `listSectionClass(expanded, maxHeight)` (`GitPanel.tsx:100`) returns `flex-none min-h-0 <max-h>` when expanded and `shrink-0` when collapsed.
+The three list sections (Commits / Worktrees / Stashes) are **content-sized when expanded**, not equal flex shares. `listSectionClass(expanded, maxHeight)` (`GitPanel.tsx:110`) returns `flex-none min-h-0 <max-h>` when expanded and `shrink-0` when collapsed.
 
 - **Why:** the previous `flex-1` (= `flex: 1 1 0%`) split the pane into equal thirds, so on a phone-pane a two-item worktree or stash list was squeezed into one visible row with an inner scrollbar while space below sat empty.
-- **Caps:** Commits `max-h-[30%] md:max-h-[55%]` (`GitPanel.tsx:96`); Worktrees/Stashes `max-h-[45%] md:max-h-[55%]` (`GitPanel.tsx:97`). The commit log is the only list routinely long, so it gets the tighter cap; a phone gets the tightest caps because the drawer/pane is short.
+- **Caps:** Commits `max-h-[30%] md:max-h-[55%]` (`GitPanel.tsx:106`); Worktrees/Stashes `max-h-[45%] md:max-h-[55%]` (`GitPanel.tsx:107`). The commit log is the only list routinely long, so it gets the tighter cap; a phone gets the tightest caps because the drawer/pane is short.
 - **Overflow:** a list longer than its cap still scrolls internally (`min-h-0 overflow-y-auto overscroll-contain`, e.g. `WorktreesSection.tsx:253`), and the pane scrolls when the expanded sections together exceed it.
 - **Inner-list rule:** the inner list must **not** be `flex-1` (that made the root's intrinsic height collapse to the header); it mirrors `FileSection`'s pattern (`shrink-0 max-h-[34%]` root, plain `overflow-y-auto min-h-0` list).
 

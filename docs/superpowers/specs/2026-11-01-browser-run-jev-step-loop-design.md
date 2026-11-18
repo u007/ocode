@@ -11,7 +11,7 @@ tags:
   - tools
   - permissions
   - design-spec
-timestamp: 2026-11-16T07:48:45Z
+timestamp: 2026-11-16T11:28:22Z
 ---
 # browser_run — a Jev-driven step loop over the browser tool
 
@@ -161,10 +161,10 @@ Run the kaizen webforms corpus with and without `browser_run`; compare main-mode
 task, Jev calls, wall-clock and the checker's pass rate. Thresholds (0.55 / 0.85 / 160 / 30 KB) are
 starting points copied from fastbrowse and are to be re-tuned on that corpus.
 
-## Code anchors (verified 2026-11-01, re-verify before commit)
+## Code anchors (verified 2026-11-01; `browser_tool.go` re-derived 2026-11-16, re-verify before commit)
 
 - `internal/server/browser_tool.go`: `browserActions` (line 62), `browserSurface` interface (79),
-  `browserArgs` (171), `ExecuteCtx` (361), `perform` (464), `PageContext` (621).
+  `browserArgs` (171), `ExecuteCtx` (376), `perform` (483), `PageContext` (715).
 - `internal/browse/cdp/pagedom_read.go`: `Snapshot` (89), `snapshotWriter.walk` (134),
   `snapshotStates` (85). `refs.go`: `RefTable.Mint` (38). `target_agent.go`: `ReadyState` (142).
 - `internal/agent/agent.go`: `handleToolCallWithContext` (3965), `a.tools["task"]` registration
