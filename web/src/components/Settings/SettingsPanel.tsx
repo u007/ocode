@@ -46,7 +46,7 @@ import CloudConnectorsForm from "./CloudConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
 import PromptsForm from "./PromptsForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
-import { useProjectState } from "../../stores/projectStore";
+import { useOptionalProjectState } from "../../stores/projectStore";
 
 export type SettingsGroupId =
   | "backend"
@@ -334,8 +334,8 @@ function NavSection({
 }
 
 export default function SettingsPanel() {
-  const { state: projectState } = useProjectState();
-  const activeProject = projectState.activeProject;
+  const projectState = useOptionalProjectState();
+  const activeProject = projectState?.state.activeProject;
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
   // Mobile only: the section list is an overlay drawer, not a column. Without
   // this the <=md layout rendered the two <NavSection> stacks side by side
