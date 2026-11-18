@@ -7,7 +7,7 @@ import { useEditorTabs } from "./useEditorTabs";
 import { __resetDraftGuardForTests, draftPersistenceBlocked } from "../lib/editorDraftGuard";
 
 vi.mock("../api/client", () => ({
-  api: { saveFileContent: vi.fn(), checkFileAccess: vi.fn() },
+  api: { saveFileContent: vi.fn(), checkFileAccess: vi.fn(), readCloudConnector: vi.fn() },
   apiPath: (p: string) => p,
   authHeaders: () => ({}),
 }));
@@ -141,6 +141,32 @@ describe("useEditorTabs", () => {
     expect(second.result.current.editorTabs[0].includeInContext).toBe(false);
   });
 
+  it("restores the per-tab chat-context opt-in across a reload", async () => {
+    const first = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await first.result.current.handleOpenFile("/a/b.txt");
+    });
+    act(() => {
+      first.result.current.toggleIncludeInContext("editor-/a/b.txt");
+    });
+    expect(first.result.current.editorTabs[0].includeInContext).toBe(true);
+    first.unmount();
+
+    const second = renderHook(() => useEditorTabs());
+    await waitFor(() => expect(second.result.current.editorTabs).toHaveLength(1));
+    expect(second.result.current.editorTabs[0].includeInContext).toBe(true);
+  });
+
+  it("keeps a tab from a pre-flag saved list excluded", async () => {
+    window.localStorage.setItem(
+      "ocode.ui.editorTabs.v1",
+      JSON.stringify({ version: 1, tabs: [{ path: "/a/b.txt" }], activeId: "editor-/a/b.txt" }),
+    );
+    const { result } = renderHook(() => useEditorTabs());
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    expect(result.current.editorTabs[0].includeInContext).toBe(false);
+  });
+
   it("restores unsaved edits as a dirty draft after a reload", async () => {
     const first = renderHook(() => useEditorTabs());
     await act(async () => {
@@ -163,6 +189,7 @@ describe("useEditorTabs", () => {
     expect(tab.originalContent).toBe("hello");
     expect(tab.isDirty).toBe(true);
     expect(tab.externalChange).toBe(false);
+    expect(tab.includeInContext).toBe(false);
   });
 
   it("flags a restored draft when the file changed on disk underneath it", async () => {
@@ -191,6 +218,7 @@ describe("useEditorTabs", () => {
     expect(tab.originalContent).toBe("changed on disk");
     expect(tab.isDirty).toBe(true);
     expect(tab.externalChange).toBe(true);
+    expect(tab.includeInContext).toBe(false);
   });
 
   it("restores a draft even when the file was deleted on disk", async () => {
@@ -214,6 +242,16 @@ describe("useEditorTabs", () => {
     expect(tab.content).toBe("hello edited");
     expect(tab.isDirty).toBe(true);
     expect(tab.externalChange).toBe(true);
+    expect(tab.includeInContext).toBe(false);
+  });
+
+  it("opens cloud files without adding them to the chat context", async () => {
+    (api.readCloudConnector as Mock).mockResolvedValue("hello");
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("cloud://conn/notes.md");
+    });
+    expect(result.current.editorTabs[0].includeInContext).toBe(false);
   });
 
   it("rapid concurrent opens of the same file create exactly one tab", async () => {

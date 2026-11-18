@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { Check, FileCode, FolderTree, X } from "lucide-react";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
+import { tabIncludedInContext } from "../Files/editorTabsPersistence";
 
 export interface EditorTabInfo {
   id: string;
@@ -61,7 +62,7 @@ export default function EditorTabBar({
     >
       {editorTabs.map((et) => {
         const isActive = activeEditorTabId === et.id;
-        const included = et.includeInContext === true;
+        const included = tabIncludedInContext(et);
         // One tab = one context menu, so the whole pill (label, checkbox, close)
         // is the trigger. Right-clicking makes the tab active first: the reveal
         // is about the file the user just pointed at, and an inactive tab's row

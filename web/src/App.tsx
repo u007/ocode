@@ -85,6 +85,7 @@ import { useResizableSidebar } from "./hooks/useResizableSidebar";
 import { useEditorTabs } from "./hooks/useEditorTabs";
 import {
   resolveVisibleEditorTabId,
+  tabIncludedInContext,
   visibleEditorTabs as visibleEditorTabsForProject,
 } from "./components/Files/editorTabsPersistence";
 import { useChat } from "./hooks/useChat";
@@ -662,7 +663,7 @@ function HomeApp() {
   // can filter per session-tab and avoid leaking files across projects. Off by
   // default: opening a file attaches nothing until the user checks its tab.
   const contextFileEntries = useMemo(
-    () => visibleEditorTabs.filter((t) => t.includeInContext === true).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+    () => visibleEditorTabs.filter(tabIncludedInContext).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
     [visibleEditorTabs],
   );
 
@@ -676,7 +677,7 @@ function HomeApp() {
       (t) => t.path === activeEditorContext.path && (t.projectRoot ?? "") === (activeEditorContext.projectRoot ?? ""),
     );
     // Not opted in (the default), or hidden by a project switch: attach nothing.
-    if (!tab || !tab.includeInContext) return null;
+    if (!tab || !tabIncludedInContext(tab)) return null;
     return activeEditorContext;
   }, [activeEditorContext, visibleEditorTabs]);
 

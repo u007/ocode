@@ -37,7 +37,7 @@ describe("EditorTabBar chat-context checkbox", () => {
     ).toHaveAttribute("aria-checked", "false");
   });
 
-  it("asks the owner to include the file when the user checks it", () => {
+  it("calls onToggleInclude with the tab id when the checkbox is clicked", () => {
     const { onToggleInclude } = renderBar({ ...TABS[0], includeInContext: false });
     fireEvent.click(screen.getByRole("checkbox", { name: /excluded from chat context/i }));
     expect(onToggleInclude).toHaveBeenCalledWith("a");

@@ -299,6 +299,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         id,
         path,
         projectRoot,
+        projectHost: host,
         content: draft.content,
         originalContent: "",
         isBinary: false,
@@ -391,6 +392,23 @@ export function useEditorTabs(): UseEditorTabsResult {
       for (const t of saved.tabs) {
         await handleOpenFile(t.path, t.projectRoot, t.projectHost);
       }
+      // Open tabs default to excluded, so re-apply the saved opt-in. Lists
+      // written before the flag existed have no value and stay excluded.
+      const included = saved.tabs.filter((t) => t.includeInContext === true);
+      if (included.length > 0) {
+        setEditorTabs((prev) =>
+          prev.map((tab) =>
+            included.some(
+              (s) =>
+                s.path === tab.path &&
+                (s.projectRoot ?? "") === (tab.projectRoot ?? "") &&
+                (s.projectHost ?? "") === (tab.projectHost ?? ""),
+            )
+              ? { ...tab, includeInContext: true }
+              : tab,
+          ),
+        );
+      }
       setActiveEditorTabId((prev) => {
         if (saved.activeId && openFileIdsRef.current.has(saved.activeId)) return saved.activeId;
         return prev;
@@ -405,7 +423,12 @@ export function useEditorTabs(): UseEditorTabsResult {
   useEffect(() => {
     if (!restoreDone.current) return;
     saveEditorTabs(
-      editorTabs.map((t) => ({ path: t.path, projectRoot: t.projectRoot, projectHost: t.projectHost })),
+      editorTabs.map((t) => ({
+        path: t.path,
+        projectRoot: t.projectRoot,
+        projectHost: t.projectHost,
+        includeInContext: t.includeInContext,
+      })),
       activeEditorTabId,
       editorTabs.map((t) => t.id),
     );
