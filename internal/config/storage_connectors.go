@@ -91,3 +91,81 @@ func SaveStorageConnectors(projectRoot string, cfg *StorageConnectorsFile) error
 	}
 	return nil
 }
+
+// v2 format: one central connector (kakiit) holds metadata in plaintext; all
+// token material lives in a raw-key ENCv2 envelope. The v1 reader above stays
+// exported so Task 4a can migrate legacy files; no migration happens here.
+const connectorsVersionV2 = "v2"
+
+type StorageConnectorsFileV2 struct {
+	Version             string           `json:"version"`
+	Central             CentralConnector `json:"central"`
+	CredentialsEnvelope string           `json:"credentials_envelope"`
+}
+
+type CentralConnector struct {
+	ConnectorID string                    `json:"connector_id"` // "kakiit"
+	Mode        string                    `json:"mode"`         // "hub" | "local"
+	Connections map[string]ConnectionMeta `json:"connections"`  // key = provider
+}
+
+type ConnectionMeta struct {
+	Provider      string `json:"provider"`
+	ConnectionID  string `json:"connection_id"`
+	ExpiresAt     string `json:"expires_at"` // RFC3339
+	RootPath      string `json:"root_path"`
+	MaxCacheBytes int64  `json:"max_cache_bytes"`
+	Status        string `json:"status"`
+}
+
+func LoadV2(projectRoot string) (*StorageConnectorsFileV2, error) {
+	path := connectorsFilePath(projectRoot)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return &StorageConnectorsFileV2{
+			Version: connectorsVersionV2,
+			Central: CentralConnector{
+				ConnectorID: "kakiit",
+				Mode:        "hub",
+				Connections: make(map[string]ConnectionMeta),
+			},
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read v2 connectors settings: %w", err)
+	}
+	var f StorageConnectorsFileV2
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse v2 connectors settings: %w", err)
+	}
+	if f.Central.Connections == nil {
+		f.Central.Connections = make(map[string]ConnectionMeta)
+	}
+	return &f, nil
+}
+
+func SaveV2(projectRoot string, f *StorageConnectorsFileV2) error {
+	if f == nil {
+		return fmt.Errorf("v2 connectors config is nil")
+	}
+	f.Version = connectorsVersionV2
+	if f.Central.Connections == nil {
+		f.Central.Connections = make(map[string]ConnectionMeta)
+	}
+	path := connectorsFilePath(projectRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return fmt.Errorf("create connectors settings dir: %w", err)
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal v2 connectors settings: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write v2 connectors settings temp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename v2 connectors settings: %w", err)
+	}
+	return nil
+}

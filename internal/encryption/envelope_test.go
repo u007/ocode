@@ -1,10 +1,85 @@
 package encryption
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
 )
+
+// rawTestKey is a 32-byte raw AES key for the ENCv2:raw envelope (no KDF).
+var rawTestKey = []byte("0123456789abcdef0123456789abcdef")
+
+func TestSealWithKeyRoundTrip(t *testing.T) {
+	sealed, err := SealWithKey([]byte("secret"), rawTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(sealed, "ENCv2:raw:") {
+		t.Fatalf("bad envelope prefix: %q", sealed)
+	}
+	got, err := OpenWithKey(sealed, rawTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "secret" {
+		t.Fatalf("got %q, want secret", got)
+	}
+	// A fresh nonce must be used for each seal.
+	sealed2, err := SealWithKey([]byte("secret"), rawTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed2 == sealed {
+		t.Fatal("nonce reused across seals")
+	}
+}
+
+func TestOpenWithKeyRejectsBadEnvelopes(t *testing.T) {
+	sealed, err := SealWithKey([]byte("secret"), rawTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(sealed, ":")
+	if len(parts) != 4 {
+		t.Fatalf("unexpected envelope parts: %d", len(parts))
+	}
+	// Drop the sealed-data field: truncated envelope must be rejected.
+	if _, err := OpenWithKey(strings.Join(parts[:3], ":"), rawTestKey); err == nil {
+		t.Fatal("truncated envelope accepted")
+	}
+	// Wrong version label must be rejected.
+	if _, err := OpenWithKey("ENCv1:raw:"+parts[2]+":"+parts[3], rawTestKey); err == nil {
+		t.Fatal("non-ENCv2 envelope accepted")
+	}
+	// Wrong key must fail authentication.
+	wrong := bytes.Repeat([]byte{0x01}, 32)
+	if _, err := OpenWithKey(sealed, wrong); err == nil {
+		t.Fatal("wrong key accepted")
+	}
+}
+
+func TestSealWithKeyRejectsInvalidKeyLength(t *testing.T) {
+	if _, err := SealWithKey([]byte("x"), []byte("too-short")); err == nil {
+		t.Fatal("short raw key accepted")
+	}
+	if _, err := OpenWithKey("ENCv2:raw:AAAA:BBBB", []byte("too-short")); err == nil {
+		t.Fatal("short raw key accepted on open")
+	}
+}
+
+// TestENCv1StillDecrypts pins a fixed ENCv1 vector so the password+Argon2id
+// reader remains compatible after the raw-key ENCv2 addition.
+func TestENCv1StillDecrypts(t *testing.T) {
+	const vector = "ENCv1:argon2:Zml4ZWQtc2FsdC12MS12ZWN0b3Ih:Zml4ZWRub25jZTEy:JBnPwz6X82j6A6VVThOTE9ZiLJ6ZYo/BkJxhthB+zUu+TBs2jdA2dgRCqS87bsbEJ5HZ3A=="
+	got, err := DecryptJSON(vector, "vector-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"provider":"dropbox","token":"abc"}`; string(got) != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	plaintext := []byte(`{"provider":"google-drive","root":"/docs","project":"test"}`)
