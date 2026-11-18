@@ -39,7 +39,15 @@ The web Git tab's Branches sub-tab (switch, create from any ref, rename, merge, 
 - **Upstream editing is set/unset only.** `set-upstream` requires an already-fetched remote-tracking ref; there is no "push and create the remote branch first" combined flow (use Push branch with `-u` for that).
 - **Tag create stays in History.** "New tag here…" is on the commit context menu; the Branches view can delete a tag but does not create one.
 - **SourceTree operations that already exist elsewhere in the Git tab** (not rebuilt in Branches): stash save/apply/drop and worktrees are in the Changes view; fetch/pull/push are the header buttons; cherry-pick, revert and reset soft/mixed/hard are the History commit context menu; merge and rebase are in both History and Branches.
+## Open: UML viewer defers TS/Python parsing and full elkjs (2026-11-18)
 
+- **Spec:** `mockups/uml-viewer-spec.md` (mockup beside it). Docs: `docs/concepts/uml-viewer.md`.
+- v1 of the UML session sub-tab ships the **Go analyzer only** (`internal/umlinfo`, stdlib go/parser). TS/JS/Python AST analysis is deferred behind the `umltreesitter` build tag (`smacker/go-tree-sitter`); the remote-binary builds use CGO_ENABLED=0, so plain builds must keep compiling without it.
+- **elkjs** is deferred: v1 uses a hand-rolled LOD layout; the third (elkjs layered) view is out of v1 or limited to focused subgraphs.
+- Also deferred: small-model comment generation (opt-in button), call graphs, export, watch/incremental re-parse, sequence diagrams, cross-machine view-state sync.
+- Limits to revisit: 20k-file / 1 MiB / 50k-symbol caps (`internal/umlinfo` constants; index reports `truncated` and the UI shows a badge), Go-only parsing, 4-entry cache, root-level monorepo markers only. To close: implement the `umltreesitter`-tagged tree-sitter analyzers for TS/JS/Python, then evaluate elkjs on a 2k-node focused subgraph.
+- **Remote UML is covered by a fake host, never by a real SSH host.** `GET /api/uml?host=` now proxies to the host's own `ocode serve` (`remoteUml` → `pulseRemoteRequest`, no dial), and a handler test drives the happy path, the indexing passthrough and a disconnected host against the in-package fake. What is still unverified: a real `ocode serve --remote` answering `/api/uml`, and a >4 MB index crossing the tunnel.
+- **Every 1 s poll runs a full stat-only tree walk** (`umlinfo.Fingerprint`, 10 s timeout) to decide 200 vs 202, so an open UML tab keeps the CPU a little busy on a big repo. Acceptable for v1 (measured ~0.14 s on 101 packages); upgrade to a watcher-fed mtime watermark before raising the poll rate or shipping this for huge monorepos.
 ## Open: root elevation — live verification gaps (2026-11-18)
 
 Root elevation (leading `sudo`/`su` with a masked human password) is implemented on branch `feature/root-elevation` and verified by unit and integration tests against FAKE sudo/su scripts. The following real-world paths were NEVER exercised:

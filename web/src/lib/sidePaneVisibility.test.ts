@@ -14,7 +14,7 @@ describe("shouldRenderSidePane", () => {
   });
 
   it("hides on non-chat session sub-tabs", () => {
-    for (const sub of ["agents", "changes", "logs", "status", "preview"] as SessionSubTabId[]) {
+    for (const sub of ["agents", "changes", "logs", "status", "preview", "uml"] as SessionSubTabId[]) {
       expect(shouldRenderSidePane({ ...base, activeSubTab: sub }, ), `sub=${sub}`).toBe(false);
     }
   });

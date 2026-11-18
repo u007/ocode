@@ -43,6 +43,7 @@ import (
 	"github.com/u007/ocode/internal/tabs"
 	"github.com/u007/ocode/internal/termtabs"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/umlinfo"
 	"github.com/u007/ocode/internal/vault"
 )
 
@@ -95,6 +96,8 @@ type Handler struct {
 	// project-scoped /api/portmaps panel. nil for a bare NewHandler(); wired
 	// by server.New from procSup.
 	portMaps *portMapRegistry
+	// umlIndexer caches the AST symbol index for the UML session sub-tab.
+	umlIndexer *umlinfo.Indexer
 	// remoteHosts owns one remote.RemoteWorkspace per remote host, created
 	// lazily on first use. nil for a bare NewHandler(); wired by server.New.
 	remoteHosts *remoteHostRegistry
@@ -824,6 +827,7 @@ func NewHandler() *Handler {
 		messaging:           msgMgr,
 		cloudconnect:        ccMgr,
 		monaco:              monacoStore,
+		umlIndexer:          umlinfo.NewIndexer(),
 		appearance:          appearanceService,
 		vaultGrants:         make(map[string]bool),
 		headlessSubs:        make(map[chan SSEEvent]struct{}),

@@ -14,7 +14,7 @@ tags:
   - jsdom
   - persistence
   - project-switch
-timestamp: 2026-11-04T07:46:00Z
+timestamp: 2026-11-18T13:19:56Z
 ---
 # PDF viewer zoom, Space navigation, and find
 
@@ -95,6 +95,7 @@ A project switch used to unmount the Files-tab pane and still remounts the sideb
 - Shape: `{page?, zoom?, scrollTop?}`. Bounded to 200 entries (MRU eviction, stable insertion order). Prototype-pollution keys (`__proto__`, `constructor`, `prototype`) are dropped at load; non-finite values are rejected.
 - `PdfViewer` restores zoom + a stored `scrollTop` (consistent with the target page's band) on its first-placement effect. Persistence is **armed only after** the first-placement restore (`restoreDoneRef`): `schedulePersist` no-ops until `restoreDoneRef.current` is true, so pre-restore state cannot overwrite the stored position. Debounced 250 ms via `saveTimerRef`; flushes on unmount (uses `lastScrollTopRef` because React detaches refs before passive-effect cleanup).
 - `FileTabContent` restores/persists page (or slide for pptx) under the same key, so all viewers for one file share a single position.
+- The UML session sub-tab reuses this convention with its own key: `ocode.ui.umlViewState.v1`, entry key `host::root::sessionId`; see [UML viewer](uml-viewer.md).
 
 ### Per-project sidebar shell state — `web/src/components/Preview/sidebarPreviewState.ts`
 

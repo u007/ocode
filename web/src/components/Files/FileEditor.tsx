@@ -922,9 +922,35 @@ function FileEditorImpl({
       }
       return;
     }
-    // Defer to allow Monaco model to be ready with new content
-    const timer = setTimeout(() => applyHighlight(init.query, init.line), 50);
-    return () => clearTimeout(timer);
+    // Defer to allow Monaco model to be ready with new content. A single
+    // 50ms timer raced the lazy model load: revealLineInCenter on an empty
+    // or short model clamps to line 1 and the click looked broken (chat file
+    // links and the UML tab both depend on this). Poll until the model
+    // covers the target line, bounded to ~2s.
+    const target = init.line && init.line > 0 ? init.line : 1;
+    let attempts = 0;
+    let cancelled = false;
+    let timer: number | undefined;
+    const tryApply = () => {
+      if (cancelled) return;
+      const model = editorRef.current?.getModel();
+      attempts += 1;
+      if (model && (model.getLineCount() >= target || attempts >= 40 || !init.line)) {
+        applyHighlight(init.query, init.line);
+        return;
+      }
+      if (attempts >= 40) {
+        // Model never grew; apply anyway so a non-line highlight still lands.
+        applyHighlight(init.query, init.line);
+        return;
+      }
+      timer = window.setTimeout(tryApply, 50);
+    };
+    timer = window.setTimeout(tryApply, 50);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [path, projectRoot, content, initialHighlight]);
 
   // Also handle window event for already-mounted editors
