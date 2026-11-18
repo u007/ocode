@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ocode — UML tab mockup (design artifact, not shipped code)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141a22; --panel2:#1a2230; --edge:#26303f; --edge2:#33405a;
+    --fg:#d7e0ea; --dim:#8b98a9; --accent:#58a6ff; --accent2:#bc8cff;
+    --go:#00add8; --ts:#3178c6; --py:#ffd343; --ok:#3fb950; --warn:#d29922;
+    --sel:#1f6feb44; --pulse:#58a6ff;
+  }
+  *{box-sizing:border-box; margin:0}
+  html,body{height:100%}
+  body{background:var(--bg); color:var(--fg); font:13px/1.45 -apple-system,"SF Pro Text",Segoe UI,Roboto,sans-serif; overflow:hidden}
+  /* ---- session chrome ---- */
+  .subtabs{display:flex; gap:2px; align-items:center; padding:6px 10px 0; border-bottom:1px solid var(--edge); background:#0a0e14}
+  .subtab{padding:5px 14px; border-radius:6px 6px 0 0; color:var(--dim); cursor:pointer; user-select:none; border:1px solid transparent; border-bottom:none}
+  .subtab:hover{color:var(--fg)}
+  .subtab.active{color:var(--fg); background:var(--panel); border-color:var(--edge); box-shadow:0 -1px 0 var(--accent) inset}
+  .subtab .n{opacity:.5; font-size:10px; margin-left:6px}
+  .topright{margin-left:auto; color:var(--dim); font-size:11px; padding-bottom:6px; display:flex; gap:14px; align-items:center}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:4px}
+  /* ---- layout ---- */
+  .workspace{display:grid; grid-template-columns:300px 1fr 300px; height:calc(100vh - 36px)}
+  @media (max-width:1200px){.workspace{grid-template-columns:260px 1fr 0} .inspector{display:none}}
+  /* ---- left pane: search + list ---- */
+  .left{background:var(--panel); border-right:1px solid var(--edge); display:flex; flex-direction:column; min-height:0}
+  .searchbox{padding:10px; border-bottom:1px solid var(--edge)}
+  .searchbox input{width:100%; background:var(--panel2); border:1px solid var(--edge2); color:var(--fg); border-radius:6px; padding:7px 9px; font-size:12px; outline:none}
+  .searchbox input:focus{border-color:var(--accent)}
+  .chips{display:flex; flex-wrap:wrap; gap:5px; margin-top:8px}
+  .chip{font-size:10px; padding:2px 8px; border:1px solid var(--edge2); border-radius:10px; color:var(--dim); cursor:pointer; user-select:none}
+  .chip.on{color:#03152e; background:var(--accent); border-color:var(--accent); font-weight:600}
+  .chip.go.on{background:var(--go); border-color:var(--go); color:#03242b}
+  .chip.ts.on{background:var(--ts); border-color:var(--ts); color:#03152e}
+  .chip.py.on{background:var(--py); border-color:var(--py); color:#241c00}
+  .meta{display:flex; justify-content:space-between; padding:6px 10px; color:var(--dim); font-size:10px; border-bottom:1px solid var(--edge)}
+  .results{overflow:auto; flex:1}
+  .row{padding:7px 10px; border-bottom:1px solid #1d2530; cursor:pointer; border-left:2px solid transparent}
+  .row:hover{background:#182031}
+  .row.sel{background:var(--sel); border-left-color:var(--accent)}
+  .row .name{font-weight:600; font-size:12px}
+  .row .name .kind{font-size:9px; text-transform:uppercase; color:var(--dim); font-weight:700; margin-left:6px; letter-spacing:.5px}
+  .row .name .kind.class{color:#79c0ff}.row .name .kind.interface{color:#d2a8ff}.row .name .kind.func{color:#7ee787}.row .name .kind.method{color:#ffa657}
+  .row .file{color:var(--dim); font-size:10px; font-family:ui-monospace,Menlo,monospace; margin-top:2px; display:flex; justify-content:space-between; gap:8px}
+  .row .doc{color:var(--dim); font-size:11px; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .langpill{font-size:9px; border-radius:3px; padding:0 4px; margin-right:5px; font-family:ui-monospace,monospace}
+  .langpill.Go{background:#00add822; color:var(--go)} .langpill.TS{background:#3178c622; color:#6ea8ff} .langpill.PY{background:#ffd34322; color:var(--py)}
+  /* ---- canvas ---- */
+  .canvaswrap{position:relative; min-width:0; background:radial-gradient(1100px 700px at 40% 35%, #111826 0%, var(--bg) 70%)}
+  .canvaswrap svg{width:100%; height:100%; display:block; cursor:grab}
+  .canvaswrap svg:active{cursor:grabbing}
+  .toolbar{position:absolute; top:10px; left:10px; display:flex; gap:6px; align-items:center; background:#141a22e6; backdrop-filter:blur(6px); border:1px solid var(--edge2); border-radius:8px; padding:6px 8px; z-index:5}
+  .tbtn{background:var(--panel2); border:1px solid var(--edge2); color:var(--fg); border-radius:5px; width:26px; height:26px; cursor:pointer; font-size:14px}
+  .tbtn:hover{border-color:var(--accent); color:var(--accent)}
+  .zoomval{width:46px; text-align:center; color:var(--dim); font-variant-numeric:tabular-nums; font-size:11px}
+  .viewswitch{position:absolute; top:10px; left:50%; transform:translateX(-50%); display:flex; gap:2px; background:#141a22e6; border:1px solid var(--edge2); border-radius:8px; padding:4px; z-index:5}
+  .vsbtn{background:transparent; border:none; color:var(--dim); padding:5px 12px; border-radius:6px; cursor:pointer; font-size:11px}
+  .vsbtn.on{background:var(--accent); color:#03152e; font-weight:700}
+  .legend{position:absolute; bottom:10px; left:10px; background:#141a22e6; border:1px solid var(--edge2); border-radius:8px; padding:7px 9px; font-size:10px; color:var(--dim); z-index:5}
+  .legend b{color:var(--fg)}
+  .minimap{position:absolute; bottom:10px; right:10px; width:150px; height:96px; background:#0a0e14; border:1px solid var(--edge2); border-radius:6px; z-index:5}
+  .toast{position:absolute; bottom:44px; left:50%; transform:translateX(-50%); background:#1f6feb; color:#eef4ff; padding:8px 14px; border-radius:6px; font-size:12px; display:none; z-index:9; box-shadow:0 4px 18px #000a}
+  /* ---- SVG diagram ---- */
+  .cluster{fill:#131c29; stroke:#2d3b52; stroke-width:1.2; rx:10}
+  .cluster-title{fill:#9fb3cc; font-size:12px; font-weight:700; font-family:ui-monospace,Menlo,monospace}
+  .cluster-sub{fill:#5b6a7f; font-size:9px}
+  .cls{fill:#182437; stroke:#3b5878; stroke-width:1.3; rx:6}
+  .iface{fill:#1d1830; stroke:#5b4a8a}
+  .cls.selnode{stroke:var(--accent); stroke-width:2.4; filter:drop-shadow(0 0 6px #58a6ff88)}
+  .cls-title{fill:#cfe3ff; font-size:11px; font-weight:700}
+  .iface .cls-title{fill:#e3d7ff}
+  .divider{stroke:#2b3850; stroke-width:1}
+  .member{fill:#9fb3cc; font-size:8.5px; font-family:ui-monospace,Menlo,monospace}
+  .member.fn{fill:#7ee787}.member.fld{fill:#ffa657}
+  .edge{stroke:#3d4d68; stroke-width:1.4; fill:none; marker-end:url(#arrow)}
+  .edge-dep{stroke-dasharray:5 4; stroke:#4a5a78}
+  .node-file{fill:#5b6a7f; font-size:7.5px; font-family:ui-monospace,Menlo,monospace}
+  @keyframes pulse{0%,100%{stroke:var(--accent); stroke-width:2.2}50%{stroke:#a5d6ff; stroke-width:4}}
+  .pulse{animation:pulse .9s ease-in-out 3}
+  /* ---- inspector ---- */
+  .inspector{background:var(--panel); border-left:1px solid var(--edge); padding:12px; overflow:auto}
+  .insp-title{font-size:14px; font-weight:700}
+  .insp-kind{font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--dim); margin-top:2px}
+  .insp-sec{margin-top:12px; border-top:1px solid var(--edge); padding-top:10px}
+  .insp-sec h4{font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin-bottom:6px}
+  .doc{background:var(--panel2); border:1px solid var(--edge); border-radius:6px; padding:8px; font-size:11px; color:#c8d3e0; white-space:pre-wrap}
+  .docmissing{background:#2a2214; border:1px solid #4a3b1a; border-radius:6px; padding:8px; font-size:11px; color:#e6c97a}
+  .loc{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--accent)}
+  .btn{display:inline-flex; align-items:center; gap:6px; background:var(--panel2); border:1px solid var(--edge2); color:var(--fg); border-radius:6px; padding:6px 10px; cursor:pointer; font-size:11px; margin-top:8px}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#03152e; font-weight:700}
+  .btn:hover{border-color:var(--accent)}
+  .members li{font-family:ui-monospace,Menlo,monospace; font-size:10px; color:#a9b8ca; list-style:none; padding:2px 0; border-bottom:1px dashed #1d2530}
+  .members b{color:#7ee787; font-weight:600}
+  .badge{font-size:9px; background:#1d2530; border-radius:3px; padding:0 5px; color:var(--dim)}
+  .kbd{background:#1d2530; border:1px solid var(--edge2); border-bottom-width:2px; border-radius:4px; padding:0 5px; font-size:10px; font-family:ui-monospace,monospace}
+  .footnote{position:absolute; top:8px; right:12px; color:#4a5a78; font-size:9px; z-index:6}
+</style>
+</head>
+<body>
+
+<!-- ===== session chrome (one of six sub-tabs, persisted as sub_tab:"uml" in tabs.json) ===== -->
+<div class="subtabs" role="tablist" aria-label="Session sub-tabs">
+  <div class="subtab">Chat</div>
+  <div class="subtab">Agents <span class="n">2</span></div>
+  <div class="subtab">Changes <span class="n">17</span></div>
+  <div class="subtab">Logs</div>
+  <div class="subtab">Status</div>
+  <div class="subtab">Preview</div>
+  <div class="subtab active" role="tab" aria-selected="true">UML <span class="n">2,341 sym</span></div>
+  <div class="topright"><span><span class="dot"></span>indexed 4.2s ago · 1,204 files · 3 langs</span><span class="kbd">⌘⇧U</span></div>
+</div>
+
+<div class="workspace">
+
+  <!-- ===== LEFT: search + filterable list ===== -->
+  <aside class="left">
+    <div class="searchbox">
+      <input id="q" type="text" placeholder="Search symbols, files, docs…  ( / )" autocomplete="off" spellcheck="false">
+      <div class="chips" id="langchips">
+        <span class="chip go on" data-lang="Go">Go</span>
+        <span class="chip ts on" data-lang="TS">TS/JS</span>
+        <span class="chip py on" data-lang="PY">Python</span>
+      </div>
+      <div class="chips" id="kindchips">
+        <span class="chip on" data-kind="class">class</span>
+        <span class="chip on" data-kind="interface">interface</span>
+        <span class="chip on" data-kind="func">func</span>
+        <span class="chip on" data-kind="method">method</span>
+      </div>
+      <div class="chips" id="pkgchips">
+        <span class="chip on" data-pkg="all">all packages (14)</span>
+        <span class="chip" data-pkg="internal/agent">internal/agent</span>
+        <span class="chip" data-pkg="web">web/src</span>
+        <span class="chip" data-pkg="apps/api">apps/api</span>
+      </div>
+    </div>
+    <div class="meta"><span id="count"></span><span>↑↓ navigate · ↵ open · esc clear</span></div>
+    <div class="results" id="results" role="listbox" aria-label="Symbol results"></div>
+  </aside>
+
+  <!-- ===== CANVAS: SVG diagram, 3 proposed views ===== -->
+  <main class="canvaswrap">
+    <div class="toolbar">
+      <button class="tbtn" id="zoomOut" title="Zoom out">−</button>
+      <span class="zoomval" id="zoomVal">100%</span>
+      <button class="tbtn" id="zoomIn" title="Zoom in">+</button>
+      <button class="tbtn" id="zoomReset" title="Reset view" style="font-size:11px">⤾</button>
+      <span style="width:1px;height:18px;background:var(--edge2);margin:0 2px"></span>
+      <button class="tbtn" id="toggleMinimap" title="Toggle minimap" style="font-size:11px">▦</button>
+    </div>
+
+    <div class="viewswitch" role="tablist" aria-label="Diagram view">
+      <button class="vsbtn on" data-view="pkgmap" role="tab">Package map</button>
+      <button class="vsbtn" data-view="classdiag" role="tab">Class diagram</button>
+      <button class="vsbtn" data-view="elk" role="tab">elkjs layered</button>
+    </div>
+    <div class="footnote">interactive mock — zoom / pan / click work</div>
+
+    <svg id="diagram" viewBox="0 0 1200 760" preserveAspectRatio="xMidYMid meet" aria-label="UML diagram">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#54678a"></path>
+        </marker>
+      </defs>
+      <g id="viewport">
+        <!-- views injected by JS -->
+      </g>
+    </svg>
+
+    <div class="legend" id="legend"></div>
+
+    <canvas class="minimap" id="minimap" width="150" height="96"></canvas>
+    <div class="toast" id="toast"></div>
+  </main>
+
+  <!-- ===== RIGHT: inspector ===== -->
+  <aside class="inspector" id="inspector"></aside>
+</div>
+
+<script>
+"use strict";
+/* ============ mock data: what the /api/uml payload would carry ============ */
+const SYMBOLS = [
+  {id:'agent', name:'Agent', kind:'class', lang:'Go', pkg:'internal/agent', file:'internal/agent/agent.go', line:412,
+   doc:'Agent is the core coding agent. It owns the tool loop, permission asks, compaction and the session transcript.',
+   members:[['f','provider LLMClient'],['f','messages []Message'],['m','Step() error'],['m','Recap(ctx) (string, error)'],['m','SetSystemPromptOverride(msg)']]},
+  {id:'client', name:'LLMClient', kind:'interface', lang:'Go', pkg:'internal/agent', file:'internal/agent/client.go', line:88,
+   doc:'LLMClient abstracts one streaming chat completion. Implemented by Anthropic, OpenAI, Google and decision-only Typesafe.',
+   members:[['m','Chat(ctx, msgs) (*Response, error)'],['m','Provider() string']]},
+  {id:'decider', name:'Decider', kind:'interface', lang:'Go', pkg:'internal/agent', file:'internal/agent/decider.go', line:14,
+   doc:'Decider is the narrow decision-only surface (Decide/DecideCtx/GetProvider/GetModel). Typesafe implements it; never widened with Chat.',
+   members:[['m','Decide(ctx, req) (*Answer, error)'],['m','GetProvider() string']]},
+  {id:'session', name:'AgentSession', kind:'class', lang:'Go', pkg:'internal/server', file:'internal/server/agent_session.go', line:160,
+   doc:'AgentSession is the per-session runtime: agent, mu, turn state, pending asks, heartbeats.',
+   members:[['f','agent *agent.Agent'],['f','mu sync.Mutex'],['f','turnActive atomic.Bool'],['m','runTurn()']]},
+  {id:'store', name:'Store', kind:'class', lang:'Go', pkg:'internal/snapshot', file:'internal/snapshot/store.go', line:31,
+   doc:'Store is the write-snapshot journal backing Changes-tab undo. LastWriteSeq orders writes across sessions.',
+   members:[['f','db *sql.DB'],['m','Record(path string, data []byte)'],['m','LastWriteSeq() int64'],['m','ChangedSince(seq int64) []FileChange']]},
+  {id:'handler', name:'Handler', kind:'class', lang:'Go', pkg:'internal/server', file:'internal/server/handler.go', line:96,
+   doc:'Handler is the web/desktop HTTP surface. h.mu guards the agents map only — never holds across LLM calls.',
+   members:[['f','agents map[string]*AgentSession'],['f','mu sync.Mutex'],['m','HandleChat(w, r)'],['m','registerAgentSession(...)']]},
+  {id:'chatpanel', name:'ChatPanel', kind:'class', lang:'TS', pkg:'web/src', file:'web/src/components/Chat/ChatPanel.tsx', line:204,
+   doc:'ChatPanel renders one session tab: transcript, streaming, scroll pinning, sub-tab chrome mount point.',
+   members:[['f','session: Session'],['f','visible: boolean'],['m','render()'],['m','scrollToBottom()']]},
+  {id:'useChat', name:'useChat', kind:'func', lang:'TS', pkg:'web/src', file:'web/src/hooks/useChat.ts', line:140,
+   doc:'useChat: sendMessage, stop, resolvePermission, executeShell. Reducer-backed via chatStore.',
+   members:[['m','sendMessage(text)'],['m','stop()'],['m','resolvePermission(id, decision)']]},
+  {id:'tabs', name:'useEditorTabs', kind:'func', lang:'TS', pkg:'web/src', file:'web/src/hooks/useEditorTabs.ts', line:60,
+   doc:'Editor tab state + localStorage persistence (ocode.ui.editorTabs.v1). Session sub-tabs persist to tabs.json instead.',
+   members:[['m','openTab(path, line?)'],['m','closeTab(id)'],['m','revealLine(tabId, line)']]},
+  {id:'graph', name:'GraphIndex', kind:'class', lang:'PY', pkg:'apps/api', file:'apps/api/services/graph.py', line:44,
+   doc:'GraphIndex: cross-repo symbol index. Nightly recompute, serves /internal/symbols for the UML tab.',
+   members:[['f','_conn: psycopg.Connection'],['m','rebuild(full: bool) -> int'],['m','search(q: str, limit: int = 50)']]},
+  {id:'celery', name:'rebuild_symbols', kind:'func', lang:'PY', pkg:'apps/api', file:'apps/api/tasks/rebuild.py', line:12,
+   doc:'Nightly Celery task. Idempotent; skips repos whose HEAD sha matches the last indexed sha.',
+   members:[['m','rebuild_symbols(repo_id: int) -> RebuildReport']]},
+];
+const PKGS = [
+  {id:'internal/agent', label:'internal/agent', count:812, lang:'Go', x:90, y:120, w:300, h:230, deps:['internal/server','internal/snapshot']},
+  {id:'internal/server', label:'internal/server', count:640, lang:'Go', x:560, y:80, w:300, h:210, deps:['internal/snapshot','web/src']},
+  {id:'internal/snapshot', label:'internal/snapshot', count:74, lang:'Go', x:950, y:300, w:180, h:150, deps:[]},
+  {id:'web/src', label:'web/src', count:1480, lang:'TS', x:560, y:420, w:300, h:220, deps:[]},
+  {id:'apps/api', label:'apps/api', count:355, lang:'PY', x:90, y:470, w:300, h:170, deps:['internal/server']},
+];
+const EDGES = [
+  {from:'internal/agent', to:'internal/snapshot', label:'uses'},
+  {from:'internal/server', to:'internal/agent', label:'owns'},
+  {from:'internal/server', to:'internal/snapshot', label:'reads'},
+  {from:'web/src', to:'internal/server', label:'HTTP', dep:true},
+  {from:'apps/api', to:'internal/server', label:'HTTP', dep:true},
+];
+
+/* ============ viewport (zoom / pan) ============ */
+const svg = document.getElementById('diagram');
+const vp  = document.getElementById('viewport');
+let scale = 1, tx = 0, ty = 0;
+const applyVP = () => vp.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`);
+const setZoom = (s, cx, cy) => {
+  s = Math.min(2.6, Math.max(0.35, s));
+  const rect = svg.getBoundingClientRect();
+  cx = cx ?? rect.width/2; cy = cy ?? rect.height/2;
+  const k = s/scale;
+  tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; scale = s;
+  applyVP();
+  document.getElementById('zoomVal').textContent = Math.round(scale*100) + '%';
+  drawMinimap();
+};
+svg.addEventListener('wheel', e => { if(!e.ctrlKey && !e.metaKey) return; e.preventDefault(); const r = svg.getBoundingClientRect(); setZoom(scale * (e.deltaY < 0 ? 1.12 : 0.89), e.clientX - r.left, e.clientY - r.top); }, {passive:false});
+let drag = null;
+svg.addEventListener('mousedown', e => { drag = {x:e.clientX - tx, y:e.clientY - ty}; });
+window.addEventListener('mousemove', e => { if(!drag) return; tx = e.clientX - drag.x; ty = e.clientY - drag.y; applyVP(); drawMinimap(); });
+window.addEventListener('mouseup', () => drag = null);
+document.getElementById('zoomIn').onclick = () => setZoom(scale*1.25);
+document.getElementById('zoomOut').onclick = () => setZoom(scale/1.25);
+document.getElementById('zoomReset').onclick = () => { scale = 1; tx = 0; ty = 0; applyVP(); document.getElementById('zoomVal').textContent='100%'; drawMinimap(); };
+
+/* ============ element helpers ============ */
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs, text) => { const n = document.createElementNS(NS, tag); for(const k in attrs) n.setAttribute(k, attrs[k]); if(text != null) n.textContent = text; return n; };
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+function clsNode(x, y, w, sym, sel){
+  const h = 30 + 16 + sym.members.length * 13 + 8;
+  const g = el('g', {class:'node', 'data-id':sym.id, tabindex:'0', role:'button', 'aria-label':esc(sym.name)});
+  g.appendChild(el('rect', {class:'cls' + (sym.kind==='interface'?' iface':'') + (sel?' selnode':''), x, y, width:w, height:h, rx:6}));
+  const stereotype = sym.kind==='interface' ? '«interface»  ' : '';
+  g.appendChild(el('text', {class:'cls-title', x:x+10, y:y+17}, stereotype + sym.name));
+  g.appendChild(el('text', {class:'node-file', x:x+10, y:y+28}, sym.file + ':' + sym.line));
+  g.appendChild(el('line', {class:'divider', x1:x, y1:y+34, x2:x+w, y2:y+34}));
+  sym.members.forEach(([k, m], i) => {
+    g.appendChild(el('text', {class:'member ' + (k==='m'?'fn':'fld'), x:x+12, y:y+48+i*13}, (k==='m'?'+ ':'- ') + m));
+  });
+  g.style.cursor = 'pointer';
+  g.addEventListener('click', () => selectSymbol(sym.id, false));
+  g.addEventListener('dblclick', () => jumpToSource(sym));
+  return {g, h};
+}
+
+function clusterBox(p, open){
+  const g = el('g', {class:'clusterbox'});
+  g.appendChild(el('rect', {class:'cluster', x:p.x, y:p.y, width:p.w, height:p.h, rx:10, opacity: open?0.55:1}));
+  g.appendChild(el('text', {class:'cluster-title', x:p.x+12, y:p.y+20}, p.label));
+  g.appendChild(el('text', {class:'cluster-sub', x:p.x+12, y:p.y+34}, `${p.count} symbols · ${p.lang} · click to ${open?'collapse':'expand'}`));
+  return g;
+}
+
+function edgesFor(pmap){
+  const centers = {}; for(const p of PKGS) centers[p.id] = {x:p.x + p.w/2, y:p.y + p.h/2};
+  const g = el('g', {});
+  for(const e of EDGES){
+    const a = centers[e.from], b = centers[e.to];
+    if(!a || !b) continue;
+    const path = `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    g.appendChild(el('path', {class:'edge' + (e.dep?' edge-dep':''), d:path}));
+  }
+  return g;
+}
+
+/* ============ the three proposed views ============ */
+let currentView = 'pkgmap';
+let selectedId = 'agent';
+const views = {
+  /* View 1 — Package map: LOD level 0, the whole monorepo as cluster boxes */
+  pkgmap(){
+    vp.innerHTML = '';
+    vp.appendChild(edgesFor(true));
+    for(const p of PKGS) vp.appendChild(clusterBox(p, false));
+    document.getElementById('legend').innerHTML =
+      '<b>Package map</b> · one box per package · edges = imports<br>dashed = cross-app HTTP · wheel+ctrl zoom · drag pan';
+  },
+  /* View 2 — Class diagram: LOD level 2 inside internal/agent + detail nodes */
+  classdiag(){
+    vp.innerHTML = '';
+    vp.appendChild(edgesFor(false));
+    const agent = PKGS.find(p=>p.id==='internal/agent');
+    vp.appendChild(clusterBox(agent, true));
+    const place = {Agent:[110,170,250], LLMClient:[430,150,215], Decider:[430,330,215], AgentSession:[700,120,250], Handler:[940,150,230], Store:[940,370,230]};
+    for(const s of SYMBOLS){
+      const p = place[s.name]; if(!p) continue;
+      const {g} = clsNode(p[0], p[1], p[2], s, s.id===selectedId);
+      vp.appendChild(g);
+    }
+    document.getElementById('legend').innerHTML =
+      '<b>Class diagram</b> · LOD level 2 · members visible<br>green + = method · orange − = field · dbl-click node = open file:line';
+  },
+  /* View 3 — elkjs layered: same data, top-down layered layout (what elkjs produces) */
+  elk(){
+    vp.innerHTML = '';
+    const L = [ // x = column, y = layer; layered by dependency depth
+      {s:'chatpanel', x:70,  y:110}, {s:'useChat', x:330, y:110}, {s:'tabs', x:590, y:110},
+      {s:'handler',   x:330, y:280}, {s:'session', x:70,  y:280},
+      {s:'agent',     x:590, y:280}, {s:'client',  x:590, y:440}, {s:'decider', x:330, y:440},
+      {s:'store',     x:70,  y:440}, {s:'graph',   x:70,  y:610}, {s:'celery',  x:330, y:610},
+    ];
+    const pos = {}; for(const l of L) pos[l.s] = l;
+    const link = (a,b) => el('path', {class:'edge', d:`M ${pos[a].x+90} ${pos[a].y} C ${pos[a].x+90} ${(pos[a].y+pos[b].y)/2}, ${pos[b].x+90} ${(pos[a].y+pos[b].y)/2}, ${pos[b].x+90} ${pos[b].y}`});
+    [['chatpanel','useChat'],['useChat','handler'],['tabs','handler'],['handler','session'],['handler','agent'],['session','agent'],['agent','client'],['agent','decider'],['handler','store'],['graph','celery']].forEach(([a,b]) => vp.appendChild(link(a,b)));
+    for(const l of L){
+      const s = SYMBOLS.find(x=>x.id===l.s);
+      const {g} = clsNode(l.x, l.y, 190, s, s.id===selectedId);
+      vp.appendChild(g);
+    }
+    document.getElementById('legend').innerHTML =
+      '<b>elkjs layered</b> · Sugiyama-style, layer = dependency depth<br>better for deep graphs · web/ deps elided for clarity';
+  },
+};
+function renderView(){ views[currentView](); applyVP(); }
+
+/* ============ inspector ============ */
+function renderInspector(s){
+  const docHtml = s.doc
+    ? `<div class="doc">${esc(s.doc)}</div><div class="badge" style="margin-top:4px">from source doc comment</div>`
+    : `<div class="docmissing">No doc comment. <button class="btn" data-gen="${s.id}" style="margin-top:6px">✨ Generate with small model…</button></div>`;
+  document.getElementById('inspector').innerHTML = `
+    <div class="insp-title">${esc(s.name)}</div>
+    <div class="insp-kind">${esc(s.kind)} · ${esc(s.lang)} · ${esc(s.pkg)}</div>
+    <div class="insp-sec"><h4>Location</h4><div class="loc">${esc(s.file)}:${s.line}</div>
+      <button class="btn primary" id="openSrc">↗ Open in editor at line ${s.line}</button></div>
+    <div class="insp-sec"><h4>Doc comment</h4>${docHtml}</div>
+    <div class="insp-sec"><h4>Members (${s.members.length})</h4><ul class="members">${s.members.map(([k,m]) => `<li>${k==='m'?'<b>fn</b> ':'fld '}${esc(m)}</li>`).join('')}</ul></div>`;
+  document.getElementById('openSrc').onclick = () => jumpToSource(s);
+  const gen = document.querySelector('[data-gen]');
+  if(gen) gen.onclick = () => { gen.textContent = '⏳ Queued — generate on small model'; gen.disabled = true; };
+}
+
+/* ============ selection + jump-to-focus ============ */
+function focusNode(id){
+  // zoom/pan so the node lands center-canvas, then pulse it
+  const node = vp.querySelector(`[data-id="${id}"]`);
+  if(!node){ toast('Node is outside this view — switch views to see it'); return; }
+  const box = node.getBBox(), target = Math.max(1.4, 1.8);
+  const r = svg.getBoundingClientRect();
+  scale = target; tx = r.width/2 - (box.x + box.width/2) * scale; ty = r.height/2 - (box.y + box.height/2) * scale;
+  applyVP(); document.getElementById('zoomVal').textContent = Math.round(scale*100)+'%';
+  node.querySelector('.cls, .iface').classList.add('pulse');
+  setTimeout(() => node.querySelector('.cls, .iface')?.classList.remove('pulse'), 3000);
+  drawMinimap();
+}
+function selectSymbol(id, fromList){
+  selectedId = id;
+  document.querySelectorAll('.row').forEach(r => r.classList.toggle('sel', r.dataset.id === id));
+  document.querySelectorAll('.cls').forEach(c => c.classList.remove('selnode'));
+  renderView();
+  const s = SYMBOLS.find(s => s.id === id);
+  renderInspector(s);
+  if(fromList) focusNode(id);
+}
+function jumpToSource(s){ toast(`ocode:open-file → ${s.file}:${s.line}  (editor tab opens at the line)`); }
+
+/* ============ toast ============ */
+let toastTimer = null;
+function toast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display='none', 2600); }
+
+/* ============ search + list ============ */
+const q = document.getElementById('q'), results = document.getElementById('results'), count = document.getElementById('count');
+const langOn = new Set(['Go','TS','PY']), kindOn = new Set(['class','interface','func','method']);
+let pkgFilter = 'all';
+document.querySelectorAll('#langchips .chip').forEach(c => c.onclick = () => { const l = c.dataset.lang; langOn.has(l) ? langOn.delete(l) : langOn.add(l); c.classList.toggle('on'); applyFilter(); });
+document.querySelectorAll('#kindchips .chip').forEach(c => c.onclick = () => { const k = c.dataset.kind; kindOn.has(k) ? kindOn.delete(k) : kindOn.add(k); c.classList.toggle('on'); applyFilter(); });
+document.querySelectorAll('#pkgchips .chip').forEach(c => c.onclick = () => { pkgFilter = c.dataset.pkg; document.querySelectorAll('#pkgchips .chip').forEach(x => x.classList.toggle('on', x === c)); applyFilter(); });
+
+function applyFilter(){
+  const needle = q.value.trim().toLowerCase();
+  const hits = SYMBOLS.filter(s =>
+    langOn.has(s.lang) && kindOn.has(s.kind) &&
+    (pkgFilter === 'all' || s.pkg === pkgFilter) &&
+    (!needle || [s.name, s.file, s.pkg, s.doc, ...s.members.map(m => m[1])].join(' ').toLowerCase().includes(needle))
+  );
+  count.textContent = `${hits.length} result${hits.length === 1 ? '' : 's'}`;
+  results.innerHTML = hits.map(s => `
+    <div class="row${s.id===selectedId?' sel':''}" data-id="${s.id}" role="option" tabindex="0">
+      <div class="name"><span class="langpill ${s.lang}">${s.lang}</span>${esc(s.name)}<span class="kind ${s.kind}">${s.kind}</span></div>
+      <div class="file"><span>${esc(s.file)}:${s.line}</span><span>${esc(s.pkg)}</span></div>
+      <div class="doc">${esc(s.doc || '· no doc comment ·')}</div>
+    </div>`).join('') || '<div class="row" style="color:var(--dim)">No matches — try fewer filters</div>';
+}
+results.addEventListener('click', e => { const row = e.target.closest('.row'); if(row?.dataset.id) selectSymbol(row.dataset.id, true); });
+results.addEventListener('keydown', e => { const row = e.target.closest('.row'); if(!row) return; if(e.key === 'Enter') selectSymbol(row.dataset.id, true); });
+q.addEventListener('input', applyFilter);
+q.addEventListener('keydown', e => { if(e.key === 'Escape'){ q.value=''; applyFilter(); } });
+window.addEventListener('keydown', e => { if(e.key === '/' && document.activeElement !== q && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)){ e.preventDefault(); q.focus(); } });
+
+/* ============ view switching + minimap ============ */
+document.querySelectorAll('.vsbtn').forEach(b => b.onclick = () => { currentView = b.dataset.view; document.querySelectorAll('.vsbtn').forEach(x => x.classList.toggle('on', x === b)); renderView(); });
+const mm = document.getElementById('minimap'), mctx = mm.getContext('2d');
+function drawMinimap(){
+  mctx.clearRect(0,0,mm.width,mm.height); mctx.fillStyle = '#0d1420'; mctx.fillRect(0,0,mm.width,mm.height);
+  const sx = mm.width/1200, sy = mm.height/760;
+  for(const p of PKGS){ mctx.fillStyle = {Go:'#00add8',TS:'#3178c6',PY:'#ffd343'}[p.lang] + '55'; mctx.fillRect(p.x*sx, p.y*sy, p.w*sx, p.h*sy); }
+  mctx.strokeStyle = '#58a6ff'; mctx.strokeRect((-tx/scale)*sx, (-ty/scale)*sy, (1200/scale)*sx*0.0 + (mm.width - 0) , 0); // viewport outline is indicative only
+}
+document.getElementById('toggleMinimap').onclick = () => { mm.style.display = mm.style.display === 'none' ? 'block' : 'none'; };
+
+/* ============ boot ============ */
+renderView(); renderInspector(SYMBOLS[0]); applyFilter(); drawMinimap();
+</script>
+</body>
+</html>
