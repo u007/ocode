@@ -441,3 +441,43 @@ func TestKakiitDisconnectClearsOtherProjectCopy(t *testing.T) {
 		t.Fatal("revoked connection still listed in rootB's v2 file")
 	}
 }
+
+func TestKakiitConnectionsReRegistersHubTokenAfterFreshHandler(t *testing.T) {
+	root := t.TempDir()
+	h, _ := newKakiitTestHandler(t, root)
+	h.cloudconnect = cloudconnect.NewManager(t.TempDir(), root, "")
+
+	f := &config.StorageConnectorsFileV2{
+		Version: "v2",
+		Central: config.CentralConnector{
+			ConnectorID: "kakiit",
+			Mode:        "hub",
+			Connections: map[string]config.ConnectionMeta{
+				"dropbox": {
+					Provider:     "dropbox",
+					ConnectionID: "cid-restart",
+					ExpiresAt:    time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+					Status:       "active",
+				},
+			},
+		},
+	}
+	if err := sealHubCredentials(f, map[string]cloudconnect.Credentials{
+		"dropbox": {AccessToken: "cached-access", ExpiresAt: time.Now().Add(time.Hour)},
+	}, kakiitTestKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveV2(root, f); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/cloud/connections?project="+url.QueryEscape(root), nil)
+	w := httptest.NewRecorder()
+	h.handleKakiitConnections(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if _, ok := h.cloudManager(root).Get("cid-restart"); !ok {
+		t.Fatal("list did not re-register the cached hub token for browse")
+	}
+}

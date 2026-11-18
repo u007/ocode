@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -154,6 +155,21 @@ func hubCredentials(f *config.StorageConnectorsFileV2, key []byte) (map[string]c
 		return nil, fmt.Errorf("decode credentials: %w", err)
 	}
 	return creds, nil
+}
+
+// registerHubToken makes a cached hub access token available to browse/read.
+// It is in-memory only: the v2 file remains the authoritative copy.
+func (h *Handler) registerHubToken(root, provider, connectionID, access string, expires time.Time) {
+	mgr := h.cloudManager(root)
+	if mgr == nil || access == "" {
+		return
+	}
+	if err := mgr.RegisterTransient(
+		cloudconnect.Config{ID: connectionID, Provider: provider},
+		cloudconnect.SecretBundle{AccessToken: access, AccessTokenExpiresAt: expires},
+	); err != nil {
+		log.Printf("cloud connectors: register transient hub token for %s: %v", provider, err)
+	}
 }
 
 // sealHubCredentials writes the credentials back with NO refresh token: hub
@@ -393,8 +409,21 @@ func (h *Handler) handleKakiitConnections(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if len(f.Central.Connections) > 0 {
+		key, _, err := resolveHubKey()
+		if err != nil {
+			http.Error(w, "resolve connector key: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		creds, err := hubCredentials(f, key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		views := make([]hubConnectionView, 0, len(f.Central.Connections))
 		for _, meta := range f.Central.Connections {
+			if c := creds[meta.Provider]; c.AccessToken != "" && time.Now().Before(c.ExpiresAt) {
+				h.registerHubToken(root, meta.Provider, meta.ConnectionID, c.AccessToken, c.ExpiresAt)
+			}
 			views = append(views, hubConnectionView{meta.Provider, meta.ConnectionID, meta.RootPath, meta.ExpiresAt})
 		}
 		writeJSON(w, http.StatusOK, views)
@@ -439,6 +468,7 @@ func (h *Handler) handleKakiitConnections(w http.ResponseWriter, r *http.Request
 			ExpiresAt:    expires.UTC().Format(time.RFC3339),
 			Status:       "active",
 		}
+		h.registerHubToken(root, c.Provider, c.ConnectionID, access, expires)
 		views = append(views, hubConnectionView{c.Provider, c.ConnectionID, c.RootPath, f.Central.Connections[c.Provider].ExpiresAt})
 	}
 	f.Central.ConnectorID = "kakiit"
