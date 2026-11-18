@@ -1893,3 +1893,66 @@ export interface STTTranscribeResult {
   text: string;
   model: string;
 }
+
+// ── UML tab (AST symbol index) ──
+
+export type UmlSymbolKind = "struct" | "interface" | "type" | "func" | "method";
+
+export interface UmlMember {
+  kind: "field" | "method";
+  name: string;
+  sig: string;
+}
+
+export interface UmlSymbol {
+  id: string;
+  name: string;
+  kind: UmlSymbolKind;
+  lang: string;
+  pkg: string;
+  file: string; // relative to the index root
+  line: number;
+  end_line: number;
+  doc?: string;
+  receiver?: string;
+  sig?: string;
+  members?: UmlMember[];
+  is_test?: boolean;
+}
+
+export interface UmlPackage {
+  id: string;
+  label: string;
+  lang: string;
+  file_count: number;
+  symbol_count: number;
+}
+
+export interface UmlEdge {
+  from: string;
+  to: string;
+  kind: string; // import
+}
+
+export interface UmlIndex {
+  version: number;
+  root: string;
+  generated_at: string;
+  monorepo: string;
+  truncated?: boolean;
+  packages: UmlPackage[];
+  symbols: UmlSymbol[];
+  edges: UmlEdge[];
+}
+
+export interface UmlResponse {
+  state: "ready" | "indexing" | "error";
+  index?: UmlIndex;
+  error?: string;
+}
+
+export interface UmlStatusResponse {
+  state: "indexing" | "error" | "idle";
+  error?: string;
+  building: boolean;
+}

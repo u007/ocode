@@ -95,6 +95,8 @@ import type {
   PreparePendingRewindRequest,
   PulsePage,
   McpAppResource,
+  UmlResponse,
+  UmlStatusResponse,
 } from "./types";
 
 import { isEnvTemplateURL } from "../lib/dbConnectTemplate";
@@ -4727,6 +4729,14 @@ export const api = {
       { method: "POST", body: JSON.stringify({ path }) },
       host,
     ),
+
+  // ── UML tab (AST symbol index) ──
+  // `project` is the session's project root. The server validates it
+  // against its local allowed roots and refuses remote `host` in v1.
+  uml: (project: string, host?: string) =>
+    fetchJSON<UmlResponse>(`/api/uml?project=${encodeURIComponent(project)}`, undefined, host),
+  umlStatus: (project: string, host?: string) =>
+    fetchJSON<UmlStatusResponse>(`/api/uml/status?project=${encodeURIComponent(project)}`, undefined, host),
 
   // ── Session logs (Logs tab) ──
   // Session-scoped; `host` routes a remote project's logs to that host's

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
 import { Maximize2, PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
@@ -49,6 +49,7 @@ import CloudFileTree from "./components/Files/CloudFileTree";
 import FileTabContent from "./components/Files/FileTabContent";
 import type { TreeRevealRequest } from "./components/Files/FileTree";
 import LogPanel from "./components/Logs/LogPanel";
+const UmlPanel = lazy(() => import("./components/UML/UmlPanel"));
 import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
@@ -2351,6 +2352,22 @@ function HomeApp() {
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
                           <StatusPanel onClose={() => projectDispatch({ type: "SET_TAB_SUB_TAB", id: tab.id, subTab: "chat" })} />
+                        </div>
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "uml";
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:uml`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <Suspense fallback={<div className="grid h-full place-items-center text-xs text-[#8b98a9]">Loading UML…</div>}>
+                            <UmlPanel
+                              sessionId={tab.id}
+                              projectRoot={tab.projectPath}
+                              host={resolveSessionHost(projectState, tab.id)}
+                            />
+                          </Suspense>
                         </div>
                       );
                     })}
