@@ -135,6 +135,11 @@ interface FileMenuActions {
   download: (paths: string[]) => void;
   remove: (paths: string[]) => void;
   rename: (path: string) => void;
+  /** File row currently renamed inline (null when none). */
+  renamingPath: string | null;
+  beginInlineRename: (path: string) => void;
+  commitInlineRename: (path: string, value: string) => void;
+  cancelInlineRename: () => void;
   newFile: (dir: string) => void;
   newFolder: (dir: string) => void;
   duplicate: (path: string) => void;
@@ -715,6 +720,10 @@ function TreeNode({
     : [node.path];
 
   const handleRowClick = (e: React.MouseEvent) => {
+    if (isInlineRenameClick(e, node.path, isDir, menu.selectedPaths, selectedPath)) {
+      menu.beginInlineRename(node.path);
+      return;
+    }
     menu.setFocus({ path: node.path, isDir: node.is_dir });
     if (e.shiftKey && lastClickedPath && siblings.some((s) => s.path === lastClickedPath)) {
       const idxA = siblings.findIndex((s) => s.path === lastClickedPath);
@@ -919,22 +928,97 @@ function TreeNode({
           style={{ paddingLeft: `${depth * 12 + 16}px` }}
         >
           {CheckBox}
-          <button className={`${rowBase} ${rowState} flex-1 min-w-0`} onClick={handleRowClick}>
-            <FileIcon name={node.name} isDir={false} expanded={false} />
-            <span className="truncate flex-1 min-w-0 text-left">{node.name}</span>
-            {node.git_status && <GitBadge status={node.git_status} />}
-            {isIncluded && (
-              <span
-                title="Included in chat context — uncheck in the file preview to remove"
-                className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
-                aria-label="Included in chat context"
+          {menu.renamingPath === node.path ? (
+            <div className={`${rowBase} ${rowState} flex-1 min-w-0`}>
+              <FileIcon name={node.name} isDir={false} expanded={false} />
+              <InlineRenameInput
+                name={node.name}
+                onCommit={(value) => menu.commitInlineRename(node.path, value)}
+                onCancel={menu.cancelInlineRename}
               />
-            )}
-          </button>
+            </div>
+          ) : (
+            <button className={`${rowBase} ${rowState} flex-1 min-w-0`} onClick={handleRowClick}>
+              <FileIcon name={node.name} isDir={false} expanded={false} />
+              <span data-tree-name="" className="truncate flex-1 min-w-0 text-left">{node.name}</span>
+              {node.git_status && <GitBadge status={node.git_status} />}
+              {isIncluded && (
+                <span
+                  title="Included in chat context — uncheck in the file preview to remove"
+                  className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
+                  aria-label="Included in chat context"
+                />
+              )}
+            </button>
+          )}
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>{dirItems}</ContextMenuContent>
     </ContextMenu>
+  );
+}
+
+// Finder-style rename gesture, shared by the tree and Miller-column views: a
+// plain single click on a file's NAME that was already the sole selection
+// before this click (the first click selected it) starts an inline rename.
+function isInlineRenameClick(
+  e: React.MouseEvent,
+  path: string,
+  isDir: boolean,
+  selectedPaths: Set<string>,
+  selectedPath: string | null,
+): boolean {
+  if (isDir || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.detail >= 2) return false;
+  if (!(e.target instanceof Element && e.target.closest("[data-tree-name]"))) return false;
+  return selectedPaths.size === 1 && selectedPaths.has(path) && selectedPath === path;
+}
+
+// Inline rename for a file row. Enter and blur commit, Escape cancels. The ref
+// flag stops one edit committing twice (Enter, then the blur from unmounting).
+function InlineRenameInput({
+  name,
+  onCommit,
+  onCancel,
+}: {
+  name: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const doneRef = useRef(false);
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    const dot = name.lastIndexOf(".");
+    el.setSelectionRange(0, dot > 0 ? dot : name.length);
+  }, [name]);
+  const finish = (commit: boolean, value: string) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    if (commit) onCommit(value);
+    else onCancel();
+  };
+  return (
+    <Input
+      ref={inputRef}
+      aria-label={`Rename ${name}`}
+      defaultValue={name}
+      className="h-6 px-1 py-0 text-xs flex-1 min-w-0"
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") finish(true, e.currentTarget.value);
+        else if (e.key === "Escape") {
+          e.preventDefault();
+          finish(false, "");
+        }
+      }}
+      onBlur={(e) => finish(true, e.currentTarget.value)}
+    />
   );
 }
 
@@ -1072,6 +1156,18 @@ export default function FileTree({
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastClickedPath, setLastClickedPath] = useState<string | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  // The row whose inline rename just ended; focus is restored to its button so
+  // keyboard users keep their place (the input unmounts and takes focus with it).
+  const renameFocusRef = useRef<string | null>(null);
+  const restoreRenameFocus = () => {
+    const path = renameFocusRef.current;
+    if (!path) return;
+    renameFocusRef.current = null;
+    document
+      .querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(path)}"] button`)
+      ?.focus();
+  };
   const [clipboard, setClipboard] = useState<{ op: "copy" | "cut"; paths: string[] } | null>(null);
   // The row the user last acted on, WITH its kind: a directory is a paste
   // destination, a file means "paste beside me" (see pasteDestination).
@@ -2141,6 +2237,16 @@ export default function FileTree({
     }
   }, [pendingDelete, activeRoot, projectHost, runFs]);
 
+  // The one rename call, shared by the Rename dialog and the inline editor.
+  const performRename = (path: string, value: string) => {
+    runFs(async () => {
+      const res = (await api.fsRename(anchorPath(path), value, requestRoot, projectHost)) as { path?: string };
+      const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+      const newPath = res?.path ?? (dir ? `${dir}/${value}` : value);
+      window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
+    });
+  };
+
   const menu: FileMenuActions = {
     isGitRepo,
     selectedPaths,
@@ -2231,14 +2337,27 @@ export default function FileTree({
         onConfirm: (value) => {
           setPrompt(null);
           if (!value) return;
-          runFs(async () => {
-            const res = (await api.fsRename(anchorPath(path), value, requestRoot, projectHost)) as { path?: string };
-            const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-            const newPath = res?.path ?? (dir ? `${dir}/${value}` : value);
-            window.dispatchEvent(new CustomEvent("ocode:fs-rename", { detail: { oldPath: path, newPath, projectRoot: activeRoot, ...(projectHost ? { host: projectHost } : {}) } }));
-          });
+          performRename(path, value);
         },
       });
+    },
+    renamingPath,
+    beginInlineRename: (path) => {
+      renameFocusRef.current = path;
+      setRenamingPath(path);
+    },
+    commitInlineRename: (path, value) => {
+      setRenamingPath(null);
+      // The row button re-renders after setRenamingPath; restore on the next
+      // tick so the replaced <div> is back to the interactive <button>.
+      queueMicrotask(restoreRenameFocus);
+      const next = value.trim();
+      if (!next || next === (path.split("/").pop() || "")) return;
+      performRename(path, next);
+    },
+    cancelInlineRename: () => {
+      setRenamingPath(null);
+      queueMicrotask(restoreRenameFocus);
     },
     newFile: (dir) => {
       setPrompt({
@@ -2958,34 +3077,49 @@ export default function FileTree({
                                   }}
                                 >
                                   <ContextMenuTrigger asChild>
-                                    <button
-                                      type="button"
-                                      data-tree-path={normalizeTreePath(node.path)}
-                                      data-tree-dir={isDir ? "" : undefined}
-                                      onClick={() => {
-                                        menu.setFocus({ path: node.path, isDir });
-                                        handleColumnSelect(colIdx, node);
-                                      }}
-                                      className={`${rowBase} ${rowState}`}
-                                      title={node.path}
-                                    >
-                                      <FileIcon name={node.name} isDir={isDir} expanded={isSelected && isDir} />
-                                      <span className="truncate flex-1 min-w-0 text-left">{node.name}</span>
-                                      {isDir ? (
-                                        <ChevronRight className={`w-3 h-3 shrink-0 ${isSelected ? "text-accent-foreground" : "text-muted-foreground"}`} />
-                                      ) : (
-                                        <>
-                                          {node.git_status && <GitBadge status={node.git_status} />}
-                                          {includedSet.has(node.path) && (
-                                            <span
-                                              title="Included in chat context — uncheck in the file preview to remove"
-                                              className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
-                                              aria-label="Included in chat context"
-                                            />
-                                          )}
-                                        </>
-                                      )}
-                                    </button>
+                                    {menu.renamingPath === node.path ? (
+                                      <div data-tree-path={normalizeTreePath(node.path)} className={`${rowBase} ${rowState}`}>
+                                        <FileIcon name={node.name} isDir={isDir} expanded={isSelected && isDir} />
+                                        <InlineRenameInput
+                                          name={node.name}
+                                          onCommit={(value) => menu.commitInlineRename(node.path, value)}
+                                          onCancel={menu.cancelInlineRename}
+                                        />
+                                      </div>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        data-tree-path={normalizeTreePath(node.path)}
+                                        data-tree-dir={isDir ? "" : undefined}
+                                        onClick={(e) => {
+                                          if (isInlineRenameClick(e, node.path, isDir, selectedPaths, selectedPath)) {
+                                            menu.beginInlineRename(node.path);
+                                            return;
+                                          }
+                                          menu.setFocus({ path: node.path, isDir });
+                                          handleColumnSelect(colIdx, node);
+                                        }}
+                                        className={`${rowBase} ${rowState}`}
+                                        title={node.path}
+                                      >
+                                        <FileIcon name={node.name} isDir={isDir} expanded={isSelected && isDir} />
+                                        <span data-tree-name="" className="truncate flex-1 min-w-0 text-left">{node.name}</span>
+                                        {isDir ? (
+                                          <ChevronRight className={`w-3 h-3 shrink-0 ${isSelected ? "text-accent-foreground" : "text-muted-foreground"}`} />
+                                        ) : (
+                                          <>
+                                            {node.git_status && <GitBadge status={node.git_status} />}
+                                            {includedSet.has(node.path) && (
+                                              <span
+                                                title="Included in chat context — uncheck in the file preview to remove"
+                                                className="ml-1 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0"
+                                                aria-label="Included in chat context"
+                                              />
+                                            )}
+                                          </>
+                                        )}
+                                      </button>
+                                    )}
                                   </ContextMenuTrigger>
                                   <ContextMenuContent>
                                     {(() => {
