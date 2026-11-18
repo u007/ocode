@@ -323,3 +323,61 @@ func TestRemoteGitBranchesOverFakeSSH(t *testing.T) {
 		t.Fatalf("tags = %+v, want v1", got.Tags)
 	}
 }
+
+// TestWritesWorktreeGuardMembership pins which ref actions take the chat-turn
+// guard. The Branches view relies on this split: checkout/branch-checkout/
+// rebase move files and must wait, while branch create/delete/rename and
+// upstream/tag edits only touch refs and config.
+func TestWritesWorktreeGuardMembership(t *testing.T) {
+	cases := map[string]bool{
+		"checkout":            true,
+		"branch-checkout":     true,
+		"rebase":              true,
+		"merge":               true,
+		"cherry-pick":         true,
+		"revert":              true,
+		"reset-hard":          true,
+		"branch":              false,
+		"branch-delete":       false,
+		"branch-force-delete": false,
+		"branch-rename":       false,
+		"tag":                 false,
+		"tag-delete":          false,
+		"set-upstream":        false,
+		"unset-upstream":      false,
+	}
+	for action, want := range cases {
+		spec, ok := gitRefActions[action]
+		if !ok {
+			t.Fatalf("action %q is not in the table", action)
+		}
+		if spec.writesWorktree != want {
+			t.Errorf("%s writesWorktree = %v, want %v", action, spec.writesWorktree, want)
+		}
+	}
+}
+
+// TestTurnGuardRefusesCheckoutAndAllowsBranchCreate proves the membership
+// above changes behaviour, not just a struct field: checkout is refused while
+// the host reports a running turn, and a ref-only create runs anyway.
+func TestTurnGuardRefusesCheckoutAndAllowsBranchCreate(t *testing.T) {
+	h, repo, _, _ := remoteRefFixture(t)
+	connectedTurnHost(t, h, "ci.local", func() bool { return true }, 0)
+	query := "?host=ci.local&project=" + repo
+
+	rec := refActionPost(t, h, query, map[string]string{"action": "checkout", "target": "main"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("checkout while a turn runs: status %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "a chat turn is running") {
+		t.Errorf("body %q is not the turn-guard refusal", rec.Body.String())
+	}
+
+	rec = refActionPost(t, h, query, map[string]string{"action": "branch", "target": "main", "name": "sideline"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("branch create while a turn runs: status %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !gitRefResolves(repo, "refs/heads/sideline") {
+		t.Error("branch create did not create refs/heads/sideline")
+	}
+}

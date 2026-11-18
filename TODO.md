@@ -3,7 +3,8 @@
 The web Git tab's Branches sub-tab (switch, create from any ref, rename, merge, rebase, local delete + force delete, remote delete, push/`-u`, set/unset upstream, tag delete) is verified by unit tests and one fake-SSH server test. The following are NOT verified or NOT built:
 
 - **Live SSH/WSL verification.** `TestRemoteGitBranchesOverFakeSSH` proves argv quoting and parsing against a fake `ssh`; no real remote host was driven. Check `GET /api/git/branches?host=…` and a remote branch switch/delete on an actual SSH project.
-- **No real-browser pass was recorded in this session.** The panel's unit tests mock the API; the actions were not clicked through a served build.
+- **Browser pass is dev-server only.** Switch (with the dirty warning), create-from-branch, delete confirmation and force delete were clicked through the Vite dev server against a temporary repo; it caught the checkout-detach bug. No pass was made against an embedded production `web/dist` build.
+- **Production `web/dist` build pass not run.** A fresh worktree `pnpm install --frozen-lockfile` cannot resolve `@univerjs/ui/locale/en-US` / `@univerjs/docs-ui/locale/en-US` (pre-existing at HEAD; `bun check .` reports the same two errors), so `vite build` fails in `Preview/univerDocMount.ts`. The browser pass used the Vite dev server, which does not load that lazy chunk. Re-run against an installed tree where the build succeeds.
 - **Deliberate non-goals.** Submodules, Git LFS, auto-stash (or auto-discard) on a dirty-tree switch, and editing a remote's URL are out of scope. A dirty switch asks for confirmation and then lets git refuse.
 - **Upstream editing is set/unset only.** `set-upstream` requires an already-fetched remote-tracking ref; there is no "push and create the remote branch first" combined flow (use Push branch with `-u` for that).
 - **Tag create stays in History.** "New tag here…" is on the commit context menu; the Branches view can delete a tag but does not create one.
