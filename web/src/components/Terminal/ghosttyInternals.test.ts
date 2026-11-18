@@ -1,9 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Terminal } from "ghostty-web";
 import {
   clearBuiltinLinkProviders,
   disableBuiltinMouseReporting,
   disableBuiltinSelectionCopy,
+  pauseRenderLoop,
+  resumeRenderLoop,
   resyncTerminalViewport,
   setSelectionAbsolute,
 } from "./ghosttyInternals";
@@ -210,5 +212,73 @@ describe("resyncTerminalViewport", () => {
     expect(() => resyncTerminalViewport(asTerm({ cols: 80, rows: 24, renderer: {}, wasmTerm: {} }))).toThrow(
       "ghostty-web internals changed: CanvasRenderer.resize is not a function",
     );
+  });
+});
+
+describe("pauseRenderLoop", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels the pending frame and clears the field", () => {
+    const cancel = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancel);
+    const term = asTerm({ renderer: {}, animationFrameId: 7 });
+    pauseRenderLoop(term);
+    expect(cancel).toHaveBeenCalledWith(7);
+    expect((term as unknown as { animationFrameId: unknown }).animationFrameId).toBeUndefined();
+  });
+
+  it("is a no-op when already paused", () => {
+    const cancel = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancel);
+    pauseRenderLoop(asTerm({ renderer: {}, animationFrameId: undefined }));
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("throws when animationFrameId is not a number", () => {
+    expect(() => pauseRenderLoop(asTerm({ renderer: {}, animationFrameId: "7" }))).toThrow(
+      "ghostty-web internals changed: Terminal.animationFrameId is not a number or undefined",
+    );
+  });
+
+  it("returns quietly without a renderer (terminal not open or disposed)", () => {
+    const cancel = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancel);
+    expect(() => pauseRenderLoop(asTerm({ animationFrameId: 7 }))).not.toThrow();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("resumeRenderLoop", () => {
+  it("restarts the render loop on the terminal and repaints the whole viewport", () => {
+    const render = vi.fn();
+    const startRenderLoop = vi.fn();
+    const buffer = { id: "buffer" };
+    const term = asTerm({
+      renderer: { render },
+      wasmTerm: buffer,
+      viewportY: 0,
+      startRenderLoop,
+    });
+
+    resumeRenderLoop(term);
+
+    expect(startRenderLoop).toHaveBeenCalledTimes(1);
+    expect(startRenderLoop.mock.contexts[0]).toBe(term);
+    // Full repaint (second argument): the canvas went stale while the loop was stopped.
+    expect(render).toHaveBeenCalledWith(buffer, true, 0, term);
+  });
+
+  it("throws when startRenderLoop is gone", () => {
+    expect(() => resumeRenderLoop(asTerm({ renderer: { render: vi.fn() }, wasmTerm: {} }))).toThrow(
+      "ghostty-web internals changed: Terminal.startRenderLoop is not a function",
+    );
+  });
+
+  it("returns quietly without a renderer (terminal not open or disposed)", () => {
+    const startRenderLoop = vi.fn();
+    expect(() => resumeRenderLoop(asTerm({ startRenderLoop }))).not.toThrow();
+    expect(startRenderLoop).not.toHaveBeenCalled();
   });
 });

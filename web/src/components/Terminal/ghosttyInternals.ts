@@ -169,6 +169,36 @@ export function applyCellAdjust(
   redrawTerminal(term);
 }
 
+/** Stops the render loop of a terminal whose panel is hidden. A `display: none` canvas still
+ *  gets a full frame per rAF tick, which is wasted work on the one UI thread. No-op when already
+ *  paused. Pair with resumeRenderLoop. */
+export function pauseRenderLoop(term: Terminal): void {
+  const renderer = term.renderer;
+  if (!renderer) return;
+  const raw = term as unknown as Obj;
+  const id = raw.animationFrameId;
+  if (id === undefined) return;
+  if (typeof id !== "number") {
+    throw new Error("ghostty-web internals changed: Terminal.animationFrameId is not a number or undefined");
+  }
+  cancelAnimationFrame(id);
+  raw.animationFrameId = undefined;
+}
+
+/** Restarts a paused render loop (a no-op when already running) and repaints the whole viewport,
+ *  because the canvas went stale while the loop was stopped. Call when the panel becomes active. */
+export function resumeRenderLoop(term: Terminal): void {
+  const renderer = term.renderer;
+  if (!renderer) return;
+  const raw = term as unknown as Obj;
+  const start = raw.startRenderLoop;
+  if (typeof start !== "function") {
+    throw new Error("ghostty-web internals changed: Terminal.startRenderLoop is not a function");
+  }
+  start.call(term);
+  redrawTerminal(term);
+}
+
 /** Repaints the whole viewport. Needed after any metrics/theme change, because
  *  the render loop only repaints rows the wasm buffer reports as dirty. */
 export function redrawTerminal(term: Terminal): void {

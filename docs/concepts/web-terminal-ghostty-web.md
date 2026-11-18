@@ -2,7 +2,7 @@
 type: Concept
 title: Web/Desktop Terminal on ghostty-web (libghostty-vt)
 description: |-
-  The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0, soft-keyboard IME re-commits sent twice, Backspace dropped from Android soft keyboards), the ocode wrapper modules that compensate, and the pty environment (TERM pinned to xterm-256color).
+  The web/desktop terminal renders with ghostty-web (libghostty-vt wasm, canvas 2D; ocode's u007/ghostty-web security-fixes fork of 0.4.0, vendored as a tarball in web/vendor) instead of xterm.js. Records the verified traps of that library (no OSC handlers, bell on OSC terminators, built-in mouse reporting without focus events, built-in copy-on-select, inverted key-handler convention, unzeroed wasm heap in upstream 0.4.0, soft-keyboard IME re-commits sent twice, Backspace dropped from Android soft keyboards), the ocode wrapper modules that compensate, the pty environment (TERM pinned to xterm-256color), and the render loop of hidden terminals (paused while the tab is hidden, a full repaint on resume; a scrolled-up visible terminal still repaints every row each frame).
 resource: ""
 tags:
   - terminal
@@ -11,7 +11,8 @@ tags:
   - web
   - desktop
   - pulse
-timestamp: 2026-11-09T03:24:11Z
+  - performance
+timestamp: 2026-11-17T03:45:00Z
 ---
 # Web/Desktop Terminal on ghostty-web
 
@@ -40,6 +41,7 @@ The terminal panel uses `Terminal` and `FitAddon` from `ghostty-web` (libghostty
 - **Option changes after `open()`.** Only `cursorBlink`, `cursorStyle`, `fontSize`, `fontFamily`, `cols`, `rows` apply live. `theme` does not. `scrollback` does not either, but the panel applies a changed `scrollbackLines` to an open terminal itself: it serializes the buffer, sets `options.scrollback`, calls `Terminal.reset()` (which rebuilds the wasm terminal from that option) and replays the text, like the mount restore. The pty and socket are untouched. The rebuild drops terminal modes (mouse tracking, alternate screen, bracketed paste) that a running full-screen program had set, plus the selection and link cache; the program is not asked to re-send them, so it keeps running but looks idle to the mouse and redraws only when it next repaints. This is the one deliberate `reset()` call, acceptable because the setting changes rarely.
 - **`select(col,row,len)` is wrong when scrollback exists.** Use `setSelectionAbsolute` from `ghosttyInternals.ts`.
 - **`buffer.active.viewportY` is always 0.** Use `getViewportY()`.
+- **The render loop never stops by itself.** Every `Terminal` re-arms `requestAnimationFrame` each frame, including while its panel is `display: none`. ocode pauses it for hidden tabs; see "Hidden terminals stop their render loop".
 
 ### Phone soft-keyboard navigation keys
 
@@ -106,6 +108,31 @@ Timing and cost: the 70 ms retry is one extra `fit()` per `fitAndResize` invocat
 
 Regression: `TerminalPanel.appearance.test.tsx` "TerminalPanel activation refit" (asserts the activation fit, a second fit after `FIT_RETRY_MS`, and the `resyncTerminalViewport` call; removing the retry timer or the resync call fails it) and `ghosttyInternals.test.ts` "resyncTerminalViewport" (resize arguments, full-redraw arguments, no-op before `open()`, and the loud failure on a renamed method). `ghosttyWebMock.ts` now records `FakeFitAddon` instances and exposes `resyncTerminalViewport: vi.fn()` so the panel test can observe both.
 
+## Hidden terminals stop their render loop
+
+ghostty-web runs a private render loop per `Terminal`. `startRenderLoop()` re-arms `requestAnimationFrame` every frame and keeps the handle in the private `animationFrameId`; it returns early while that field is truthy. `open()` and the public `Terminal.resize()` both call it. Nothing stops the loop on its own.
+
+ocode keeps every terminal panel mounted while its tab is hidden (`active === false`, `display: none`), so each hidden terminal kept painting a full frame per tick on the one webview UI thread. Measured on the desktop app with seven mounted terminals: that thread was about 95% busy, about 29% of it canvas `fillText` plus font shaping, and `desktop.log` recorded `frontend-stall` entries of 2.8 s to 18.8 s. The symptom was the whole desktop UI lagging, tab switching included. The Go server was not the cause (about 38% of one core, nothing blocked).
+
+Fix (2026-11-17, in source):
+- `pauseRenderLoop(term)` (`ghosttyInternals.ts`, line 175) cancels the pending frame and clears `animationFrameId`. `resumeRenderLoop(term)` (line 190) calls `startRenderLoop()` and then `redrawTerminal()`: one full repaint, because the canvas went stale while the loop was stopped. Both return quietly when there is no renderer (`open()` has not run). Each throws `ghostty-web internals changed: ...` only on the private shape it depends on: `animationFrameId` not a number or undefined (pause), `startRenderLoop` not a function (resume).
+- `TerminalPanel.tsx` wires it in two places. A `[active]` effect calls `resumeRenderLoop` when the tab is active and `pauseRenderLoop` when it is not (line 2358). The `loadGhostty().then` block pauses a terminal created while its tab is hidden, because the active effect ran before the terminal existed (line 2272).
+- Parsing, stream scanning (titles, bells, OSC 52) and snapshots are fed from the socket, not from rendering, so they keep running while paused. Only painting stops.
+
+Invariant: `Terminal.resize()` restarts the loop. Today a hidden panel is never resized: `fitAndResize` reports `skipped` when there is no layout, so the pause holds. Any new resize path that can reach a hidden terminal must pause it again afterwards.
+
+Regression: `TerminalPanel.renderLoop.test.tsx` (pauses a terminal created hidden; resumes on activation and pauses again on hide; does not pause a terminal created active). The helpers are covered in `ghosttyInternals.test.ts`. `ghosttyInternalsMock()` in `ghosttyWebMock.ts` exposes both helpers as spies.
+
+Status: the fix passes `bun check .` and the `web/src/components/Terminal` suite, but it has NOT been verified in a rebuilt desktop app.
+
+### Still open: a scrolled-up visible terminal repaints every row every frame
+
+The renderer repaints only dirty rows, except when the viewport is scrolled back (`viewportY > 0`): then it repaints every row on every frame. `writePreservingScrollback` keeps a scrolled-up terminal scrolled up while output streams, so a terminal left scrolled up costs a full repaint about 60 times a second, even when its tab is visible. The pause above does not cover this case. The fix needs a renderer change in the `u007/ghostty-web` fork and a re-vendored tarball (see "Dependency source").
+
+### Diagnosis recipe
+
+The bundle had no JS-side recipe for UI lag. On macOS, sample the desktop app's WebContent process (the WKWebView renderer) with `sample <pid> 10` and read the `com.apple.main-thread` tree. `fillText` under `serviceRequestAnimationFrameCallbacks` means terminal rendering. JS frames appear anonymous in a native sample, so attribute by the native frame names.
+
 ## Module map (`web/src/components/Terminal/`)
 
 | Module | Role |
@@ -114,7 +141,7 @@ Regression: `TerminalPanel.appearance.test.tsx` "TerminalPanel activation refit"
 | `terminalStream.ts` | Byte-stream scanner: OSC code/payload and real bells |
 | `terminalSerialize.ts` | Buffer to SGR text for the localStorage snapshot |
 | `terminalSearch.ts` | Plain case-insensitive find, no all-matches highlight; row text cached until the panel's next write (`invalidate()`) |
-| `ghosttyInternals.ts` | The only file touching private ghostty-web members; throws if the vendored build's shape changed |
+| `ghosttyInternals.ts` | The only file touching private ghostty-web members; throws if the vendored build's shape changed; also pauses and resumes the render loop of hidden terminals |
 | `terminalMouse.ts` | Mouse and focus reporting; shift or alt drag selects under a mouse-owning program |
 | `terminalFocus.ts` | Tab-to-terminal focus registry; `focusTerminalInput` focuses the hidden textarea, never the host |
 | `terminalLinkProvider.ts` | File `path:line` and URL providers on the ghostty-web link API |

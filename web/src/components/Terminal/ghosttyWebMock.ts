@@ -186,6 +186,10 @@ export function ghosttyInternalsMock() {
     applyCellAdjust: vi.fn(),
     applyTerminalTheme: vi.fn(),
     resyncTerminalViewport: vi.fn(),
+    // FakeTerminal has no `renderer`, so the real helpers would return early anyway. The
+    // mocks are spies so a panel test can assert the active-tab pause/resume.
+    pauseRenderLoop: vi.fn(),
+    resumeRenderLoop: vi.fn(),
   };
 }
 

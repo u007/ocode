@@ -32,6 +32,8 @@ import {
   clearBuiltinLinkProviders,
   disableBuiltinMouseReporting,
   disableBuiltinSelectionCopy,
+  pauseRenderLoop,
+  resumeRenderLoop,
   resyncTerminalViewport,
   setSelectionAbsolute,
 } from "./ghosttyInternals";
@@ -2266,6 +2268,8 @@ export default function TerminalPanel({
         cleanup = setup(ghostty);
         // The active-tab effect ran before the terminal existed.
         if (activeRef.current && termRef.current) focusTerminalInput(termRef.current);
+        // Same for the render loop: a terminal created while its tab is hidden must not keep looping.
+        if (!activeRef.current && termRef.current) pauseRenderLoop(termRef.current);
       })
       .catch((err: unknown) => {
         console.error("terminal: failed to start the ghostty-web terminal", err);
@@ -2346,6 +2350,14 @@ export default function TerminalPanel({
     searchRef.current?.invalidate();
     snapshotRef.current?.markDirty();
   }, [themeKey]);
+
+  // A hidden terminal's render loop repaints a display:none canvas every frame on the one UI thread; parsing, titles and bells are fed from the socket, not from rendering.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (active) resumeRenderLoop(term);
+    else pauseRenderLoop(term);
+  }, [active]);
 
   // Re-fit when the tab comes back to the foreground: any resize that happened
   // while hidden was skipped because the container had no layout.
