@@ -675,3 +675,41 @@ func TestPermissionResolveOnNonPendingAskErrors(t *testing.T) {
 		t.Fatal("resolving a non-pending permission must error")
 	}
 }
+
+// TestPulseRefusesWindowsShapedElevationAsk pins the cross-platform guard: on
+// Windows NeedsPassword is false (UAC authenticates), but a leading sudo/su is
+// still an elevation ask (ElevationCommand is set). The Pulse assistant must
+// refuse it even though no password field is involved, or it could silently
+// approve a privileged command. The parked ask must stay unresolved.
+func TestPulseRefusesWindowsShapedElevationAsk(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	req := agent.PermissionRequest{
+		ToolName:         "bash",
+		Command:          "sudo whoami",
+		Scope:            agent.PermissionScopeBashPrefix,
+		Rule:             "permission.elevation",
+		NeedsPassword:    false, // Windows: UAC, no masked field.
+		ElevationCommand: "sudo whoami",
+	}
+	const reqID = "c-elev-win"
+	ev := newPermissionEvent(reqID, req)
+	if as.childAsks == nil {
+		as.childAsks = newChildPermAsks()
+	}
+	if !as.childAsks.add(reqID, &childPermAsk{req: req, event: ev, respCh: make(chan agent.PermissionResponse, 1)}) {
+		t.Fatal("could not park elevation child ask")
+	}
+
+	_, err := runPulseTool(t, h, "permission_resolve",
+		`{"session_id":"`+id+`","request_id":"`+reqID+`","decision":"allow"}`)
+	if err == nil {
+		t.Fatal("Pulse must refuse a Windows-shaped elevation ask")
+	}
+	if !strings.Contains(err.Error(), "elevation ask") {
+		t.Fatalf("error should name the elevation ask: %v", err)
+	}
+	if as.childAsks.get(reqID) == nil {
+		t.Fatal("refused elevation ask must stay parked (fail closed)")
+	}
+}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   ScopedDialog,
   ScopedDialogContent,
@@ -81,6 +82,11 @@ interface Props {
   agentName?: string;
   /** Assistant message (prose + reasoning) that led to this ask. */
   context?: AskContext | null;
+  /** Elevation ask (leading sudo/su): show a masked password field. The server
+   *  sets this false on Windows, where UAC handles elevation. */
+  needsPassword?: boolean;
+  /** Raw command that will run elevated, shown next to the password field. */
+  elevationCommand?: string;
   /** Session the ask belongs to. Required for the "Explain this tool call"
    *  action; without it the button is not rendered. */
   sessionId?: string;
@@ -95,6 +101,8 @@ interface Props {
     decision: PermissionDecision,
     /** Chosen bash prefix rule, only for always_rule on a bash-prefix ask. */
     prefix?: string,
+    /** Masked password, only on approval of an elevation ask. */
+    password?: string,
   ) => Promise<PermissionDecideResult>;
 }
 
@@ -168,6 +176,8 @@ export default function PermissionDialog({
   untrustedScores,
   untrustedFailure,
   agentName,
+  needsPassword,
+  elevationCommand,
   context,
   sessionId,
   host,
@@ -198,6 +208,10 @@ export default function PermissionDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   // Characters of untrustedContent currently rendered (see CONTENT_PAGE_CHARS).
   const [contentLimit, setContentLimit] = useState(CONTENT_PAGE_CHARS);
+  // Typed elevation password. Lives only in this masked input and is cleared
+  // the moment a decision is submitted; it is never echoed into the transcript,
+  // the digest payload, an error message or any other rendered state.
+  const [password, setPassword] = useState("");
   // On-demand explanation of the pending call. Kept per request (reset below)
   // and aborted on a new ask/unmount so a slow reply cannot land on a different
   // ask's dialog.
@@ -234,6 +248,7 @@ export default function PermissionDialog({
     setChosenPrefix("");
     setSubmitError(null);
     setContentLimit(CONTENT_PAGE_CHARS);
+    setPassword("");
     digestAbort.current?.abort();
     digestAbort.current = null;
     setDigest(null);
@@ -248,18 +263,25 @@ export default function PermissionDialog({
   const handleResponse = async (decision: PermissionDecision) => {
     setLoading(true);
     setSubmitError(null);
+    // Read the masked value once, then clear it before any await: it must not
+    // survive on screen or in state after the submit. Deny never carries it.
+    const submittedPassword =
+      needsPassword && decision !== "deny" ? password : undefined;
+    setPassword("");
     try {
       // Only an always-rule on a bash ask carries a prefix; sending one for any
       // other decision is rejected by the server as unpersistable.
       const prefixChoice =
         decision === "always_rule" && effectivePrefix ? effectivePrefix : undefined;
-      // Call through with two arguments when there is no prefix choice. The
-      // third argument is meaningful only for a bash always-rule, and keeping
-      // the arity stable means every existing caller/test that asserts on
-      // (requestId, decision) keeps working.
-      const result = prefixChoice
-        ? await onDecide(requestId, decision, prefixChoice)
-        : await onDecide(requestId, decision);
+      // Keep the argument count stable for ordinary asks: 2 args with neither
+      // value, 3 for a bash always-rule prefix, 4 only when a password is sent.
+      // Existing callers/tests asserting on (requestId, decision) or on the
+      // prefix choice stay byte-identical to before this field existed.
+      const result = submittedPassword
+        ? await onDecide(requestId, decision, prefixChoice, submittedPassword)
+        : prefixChoice
+          ? await onDecide(requestId, decision, prefixChoice)
+          : await onDecide(requestId, decision);
       if (!result.ok) {
         setSubmitError(result.error);
         setLoading(false);
@@ -567,6 +589,39 @@ export default function PermissionDialog({
                   )}
                 </div>
               </div>
+
+              {needsPassword && !isContentAsk && (
+                <section aria-label="Elevation credentials" className="min-w-0 max-w-full space-y-2">
+                  <div className="text-sm text-foreground">
+                    This command runs with elevated privileges. Enter your password to approve.
+                  </div>
+                  {elevationCommand && (
+                    <pre
+                      data-testid="elevation-command"
+                      className="max-h-32 max-w-full overflow-y-auto rounded-lg border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-words text-foreground [overflow-wrap:anywhere]"
+                    >
+                      {elevationCommand}
+                    </pre>
+                  )}
+                  <label
+                    htmlFor={`permission-password-${requestId}`}
+                    className="block text-sm font-medium text-foreground"
+                  >
+                    Password
+                  </label>
+                  <Input
+                    id={`permission-password-${requestId}`}
+                    data-testid="permission-password"
+                    type="password"
+                    autoComplete="off"
+                    placeholder="sudo password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={loading}
+                  />
+                </section>
+              )}
+
               {/* No digest for a content ask: that tool already ran, so there is
                   no pending call to explain (the flagged result has its own
                   review UI below). */}

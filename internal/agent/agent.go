@@ -166,6 +166,9 @@ func (a *Agent) RekeySession(oldID, newID string) {
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
 	}
+	// /reset-id starts a new conversation identity: drop any elevation secret
+	// gathered under the old id so it cannot be consumed after the rekey.
+	a.ClearElevationSecrets()
 }
 
 // RekeyOpenCodeSession is the TUI's rekey entry point: like RekeySession it
@@ -185,6 +188,80 @@ func (a *Agent) RekeyOpenCodeSession(oldID, newID string) {
 	}
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
+	}
+	a.ClearElevationSecrets()
+}
+
+// ClearElevationSecrets zeroes and drops every elevation password held for
+// this agent. Session reset (/new, /clear), /reset-id and idle eviction call
+// it (via Shutdown / the rekey methods) so a secret never outlives the
+// conversation that supplied it. Nil-safe: directly-constructed agents in
+// tests carry no store, and there is nothing to allocate on a no-op clear.
+func (a *Agent) ClearElevationSecrets() {
+	if a == nil || a.elevation == nil {
+		return
+	}
+	a.elevation.ClearAll()
+}
+
+// StoreElevationSecret hands a human-typed password to this agent's elevation
+// store, keyed by the ask's request id (the paused tool-call id). Callers must
+// invoke it only after an explicit approval; automatic grants never reach this
+// method. The store copies the bytes and consumes them once when the approved
+// call re-executes (see HandleApprovedToolCall). Nil-safe for test agents.
+func (a *Agent) StoreElevationSecret(requestID string, secret []byte) {
+	if a == nil || a.elevation == nil {
+		return
+	}
+	a.elevation.Store(requestID, secret)
+}
+
+// maxElevationFailures is the 3-strike cap from spec §4.8: exactly three
+// consecutive wrong-password re-asks, then deny with a clear message.
+const maxElevationFailures = 3
+
+const elevationCapDeniedMessage = "root elevation denied after 3 consecutive failed attempts; run a normal command or start a new turn, then retry"
+
+// NoteElevationFailure records a failed elevated execution and returns the new
+// consecutive count. ElevationAttemptsExhausted reports whether the cap is hit;
+// ResetElevationFailures clears the chain. All are nil-safe for test agents
+// constructed without an elevation store.
+func (a *Agent) NoteElevationFailure() int {
+	if a == nil || a.elevation == nil {
+		return 0
+	}
+	return a.elevation.noteFailure()
+}
+
+func (a *Agent) elevationFailureCount() int {
+	if a == nil || a.elevation == nil {
+		return 0
+	}
+	return a.elevation.failureCount()
+}
+
+func (a *Agent) ElevationAttemptsExhausted() bool {
+	return a.elevationFailureCount() >= maxElevationFailures
+}
+
+func (a *Agent) ResetElevationFailures() {
+	if a == nil || a.elevation == nil {
+		return
+	}
+	a.elevation.resetFailures()
+}
+
+// trackElevationOutcome applies the 3-strike rule after a tool call returns.
+// Only a failed elevated execution consumes a strike; a non-elevation command
+// ends the chain and resets it. A permission-ask sentinel is not an execution,
+// so it must leave the counter untouched.
+func (a *Agent) trackElevationOutcome(name string, args json.RawMessage, text string) {
+	if !isElevationApproval(name, args) {
+		a.ResetElevationFailures()
+		return
+	}
+	if strings.HasPrefix(text, "Command failed") {
+		a.NoteElevationFailure()
 	}
 }
 
@@ -449,9 +526,13 @@ type Agent struct {
 	// turn end scores only messages it has not seen (autocontinue_select_typesafe.go).
 	selectScores typesafeScoreCache
 	mcpErrors    []string
-	config       *config.Config
-	mode         Mode
-	spec         *AgentSpec
+	// elevation holds single-use elevation passwords for pending asks, keyed by
+	// request id. Per Agent (not global) so a subagent never reads its parent's
+	// secrets; see elevation.go. Never serialized into a transcript or frame.
+	elevation *ElevationManager
+	config    *config.Config
+	mode      Mode
+	spec      *AgentSpec
 	// workDir, when set, overrides os.Getwd() for the environment prompt.
 	// This is used by the /cd command to update the working directory shown
 	// to the LLM without changing the process working directory.
@@ -720,6 +801,12 @@ type Agent struct {
 	// Sub-agents run in their own goroutines and never reach the TUI's
 	// tool-result handling, so the sentinel path is invisible to them.
 	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// noInteractivePasswordPrompt is set by headless entry points (`run` / `acp`)
+	// that have no UI to collect an elevation password. When set, a leading
+	// sudo/su is refused with a clear error instead of parking an unanswerable
+	// PERMISSION_ASK (or, under --yolo, running without a secret). TUI, web and
+	// desktop agents leave it false and keep the normal masked ask.
+	noInteractivePasswordPrompt bool
 	// OnPermissionCheck, if set, is invoked around an auto-permission LLM
 	// judge consult (consultPermissionModel): once with active=true right
 	// before the consult starts, and once with active=false when it returns
@@ -1366,6 +1453,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		tools:          toolMap,
 		mcpTools:       make(map[string]struct{}),
 		mcpServers:     make(map[string]string),
+		elevation:      NewElevationManager(),
 		config:         cfg,
 		mode:           ModeBuild,
 		lspMgr:         lspMgr,
@@ -1642,6 +1730,15 @@ func (t AgentTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 
 func (a *Agent) Step(messages []Message) ([]Message, error) {
 	a.stepLimitHit.Store(false)
+	// A fresh human turn ends any in-flight elevation ask-chain: reset the
+	// 3-strike counter so a new request gets a clean set of tries. Synthetic
+	// [ocode:...] user-role resumes are not new human turns.
+	if len(messages) > 0 {
+		last := messages[len(messages)-1]
+		if last.Role == "user" && !strings.HasPrefix(last.Content, "[ocode:") {
+			a.ResetElevationFailures()
+		}
+	}
 	if a.client == nil {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
@@ -4087,9 +4184,15 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 // under toolCallID only when the call completed (see keepMCPAppRef).
 func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	text, err := a.runToolCallWithContext(ctx, name, args, b, toolCallID)
+	a.trackElevationOutcome(name, args, text)
 	a.keepMCPAppRef(name, toolCallID)
 	return text, err
 }
+
+// headlessElevationErrorText is the user-facing refusal for a leading sudo/su
+// in a headless entry point (run / acp). Unix needs a UI to collect the password;
+// Windows needs an interactive desktop for UAC. The wording stays OS-neutral.
+const headlessElevationErrorText = "root elevation requires an interactive session; not supported in headless mode"
 
 // runToolCallWithContext is the body of handleToolCallWithContext.
 func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
@@ -4288,12 +4391,19 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 			return denyToolMessage(name, decision), nil
 		}
 		if decision.Level == PermissionAsk {
-			if autoEnabled && !guardEscalated {
-				// Build the permission request so we can check for harmful ops.
-				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
-				if decision.Request != nil {
-					req = *decision.Request
-				}
+			// Build the permission request so we can check for harmful ops.
+			req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+			if decision.Request != nil {
+				req = *decision.Request
+			}
+			// A headless run/acp has no UI to collect an elevation password. Refuse a
+			// leading sudo/su here — before any asker (including --yolo's auto-allow)
+			// or the unanswerable PERMISSION_ASK sentinel — with a clear error.
+			if a.noInteractivePasswordPrompt && IsElevationRequest(req) {
+				return "", errors.New(headlessElevationErrorText)
+			}
+			// Elevation asks are human-only: no judge may satisfy them.
+			if autoEnabled && !guardEscalated && !IsElevationRequest(req) {
 				if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
 					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
 					// Fall through to human ask unless destructive auto-permission is enabled.
@@ -4327,6 +4437,13 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 				}
 			}
 			a.emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
+			// 3-strike cap (spec §4.8): after three consecutive failed elevation
+			// executions, deny the re-ask outright with a clear message. No ask
+			// reaches the user and no command runs — fail closed on every path.
+			if isElevationApproval(name, args) && a.ElevationAttemptsExhausted() {
+				a.emitDebug("ELEVATION", "denied: 3 consecutive failed attempts")
+				return elevationCapDeniedMessage, nil
+			}
 			// When a permission callback is wired (sub-agents), ask the user
 			// synchronously and act on the answer. The PERMISSION_ASK: sentinel
 			// path is used only when no callback is set (the main agent's flow,
@@ -4342,11 +4459,36 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 				if decision.Request != nil {
 					req = *decision.Request
 				}
+				// Stamp the paused tool-call id on an elevation ask so the
+				// host's approval handler can hand the typed secret back through
+				// the in-process path keyed by this same id.
+				if isElevationApproval(name, args) {
+					req.ElevationKey = toolCallID
+				}
 				resp := asker(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
-					return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
+					execCtx := ctx
+					if isElevationApproval(name, args) {
+						// The host staged the human-typed secret in-process under
+						// req.ElevationKey before delivering this approval. Move
+						// it into THIS child's own store keyed by the tool-call
+						// id; never the parent's (the asker callback is shared by
+						// every child, so only this child may consume it).
+						if secret := takePendingElevationSecret(req.ElevationKey); len(secret) > 0 {
+							a.StoreElevationSecret(toolCallID, secret)
+							clear(secret)
+						}
+						clearPendingElevationSecret(req.ElevationKey)
+						execCtx = tool.WithElevationFlag(execCtx, true)
+						if a.elevation != nil {
+							reqID := toolCallID
+							execCtx = tool.WithElevationSecret(execCtx, func() []byte { return a.elevation.Take(reqID) })
+						}
+					}
+					return a.executeToolCallWithContext(execCtx, name, args, b, toolCallID)
 				}
+				clearPendingElevationSecret(req.ElevationKey)
 				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
 			payload, err := json.Marshal(decision.Request)
@@ -5866,6 +6008,22 @@ func extractFilesFromCommand(command string) []string {
 	return files
 }
 
+// isElevationApproval reports whether an approved call is a leading sudo/su.
+// It reconstructs the original PermissionRequest's elevation fields from the
+// call args using the same detection the permission layer used, so the flag is
+// set from IsElevationRequest(req) exactly as at ask time — independent of
+// whether a password was stored.
+func isElevationApproval(name string, args json.RawMessage) bool {
+	if name != "bash" {
+		return false
+	}
+	elevCmd, elevated := leadingElevationCommand(bashCommand(args))
+	if !elevated {
+		return false
+	}
+	return IsElevationRequest(PermissionRequest{ToolName: name, ElevationCommand: elevCmd})
+}
+
 // HandleApprovedToolCall runs a tool call that already cleared a human
 // permission Ask (TUI's executeApprovedTool, server's
 // executeApprovedWithTempPath) and applies the same secret-redaction gate the
@@ -5879,14 +6037,44 @@ func extractFilesFromCommand(command string) []string {
 // re-executes and returns its result through this path, so without the guard a
 // user who approved a *tool* call would still receive an unvetted remote result.
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCallID string) (string, error) {
-	result, err := a.executeToolCall(name, args, nil, toolCallID)
+	// The original call's context is not available to a host approval handler,
+	// so build one that carries this ask's elevation getter (keyed by the same
+	// tool-call id the store used). Ordinary approvals attach no getter.
+	ctx := context.Background()
+	if a.elevation != nil && toolCallID != "" {
+		reqID := toolCallID
+		ctx = tool.WithElevationSecret(ctx, func() []byte { return a.elevation.Take(reqID) })
+	}
+	// The flag is independent of the getter: the getter is attached to every
+	// approval, but only a leading sudo/su is an elevation. Set it here so both
+	// the server resolve and TUI approval paths (which both call this method)
+	// carry it, even when the secret is missing — the tool then fails closed
+	// rather than running the command unprivileged. On Windows no password is
+	// collected (NeedsPassword=false), yet the flag still routes to native
+	// elevation.
+	if isElevationApproval(name, args) {
+		ctx = tool.WithElevationFlag(ctx, true)
+	}
+	return a.HandleApprovedToolCallCtx(ctx, name, args, toolCallID)
+}
+
+// HandleApprovedToolCallCtx is HandleApprovedToolCall with the caller's
+// context threaded through to the tool. Re-execution must see the same context
+// values as the original call — executeToolCall's context.Background() would
+// drop them (including the elevation-secret getter) before the tool runs.
+func (a *Agent) HandleApprovedToolCallCtx(ctx context.Context, name string, args json.RawMessage, toolCallID string) (string, error) {
+	result, err := a.executeToolCallWithContext(ctx, name, args, nil, toolCallID)
+	// Main-agent approvals re-execute here rather than through
+	// handleToolCallWithContext. Track the elevation outcome so the 3-strike
+	// cap covers both hosts (TUI and web), not only sub-agent approvals.
+	a.trackElevationOutcome(name, args, result)
 	if err != nil {
 		return result, err
 	}
 	result = a.scanToolResult(name, string(args), result)
-	ctx, cancel := contextGuardBackground()
+	guardCtx, cancel := contextGuardBackground()
 	defer cancel()
-	return a.guardExecutedToolResult(ctx, toolCallID, name, string(args), result), nil
+	return a.guardExecutedToolResult(guardCtx, toolCallID, name, string(args), result), nil
 }
 
 // contextGuardBackground is a non-turn-bound guard context.
@@ -6678,6 +6866,9 @@ func (a *Agent) emitJob(ev JobEvent) {
 // Shutdown cancels the agent and async subagent runs. Shared process teardown
 // is owned by the session supervisor, not the agent registries.
 func (a *Agent) Shutdown() {
+	// /new, /clear and idle eviction all tear the agent down here. Zero any
+	// elevation password before the store becomes garbage so it does not linger.
+	a.ClearElevationSecrets()
 	a.Cancel()
 	if a.runs != nil {
 		a.runs.CancelAll()
@@ -6920,6 +7111,14 @@ func (a *Agent) autoPermissionConfig() *config.AutoPermissionConfig {
 // PERMISSION_ASK: sentinel handled by the TUI's message pipeline.
 func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionResponse) {
 	a.subAgentPermAsker = f
+}
+
+// SetNoInteractivePasswordPrompt marks the agent as running in a headless entry
+// point (`run` / `acp`) with no UI to collect an elevation password. A leading
+// sudo/su is then refused with a clear error instead of parking an unanswerable
+// ask. TUI, web and desktop agents never call this.
+func (a *Agent) SetNoInteractivePasswordPrompt() {
+	a.noInteractivePasswordPrompt = true
 }
 
 // attributePermAsker wraps a sub-agent permission-ask callback so every request

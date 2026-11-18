@@ -449,6 +449,9 @@ func (t TaskTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
 	subAgent.toolBatchDelay = 0
 	subAgent.isSubAgent = true
+	// A headless parent has no password UI; its children must refuse leading
+	// sudo/su with the same clear error rather than park an unanswerable ask.
+	subAgent.noInteractivePasswordPrompt = t.mainAgent.noInteractivePasswordPrompt
 	// A dispatched child is a helper: its final result is returned to the parent
 	// as a TOOL RESULT, not rendered to the user, and it only sees the dispatch
 	// prompt. A recap or plan block would be noise and factually wrong in the

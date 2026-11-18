@@ -371,11 +371,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       requestId: string,
       decision: PermissionDecision,
       prefix?: string,
+      password?: string,
     ): Promise<PermissionDecideResult> => {
       if (!sessionId) return { ok: false, error: "no active session" };
       dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
       try {
-        const response = await api.resolvePermission(requestId, sessionId, decision, projectHost, prefix);
+        const response = await api.resolvePermission(requestId, sessionId, decision, projectHost, prefix, password);
         const model = dispatchedModel(response);
         if (model) {
           dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });

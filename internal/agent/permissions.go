@@ -161,6 +161,19 @@ type PermissionRequest struct {
 	// asked", which is useless when several run at once. omitempty keeps every
 	// existing frame byte-identical, same precedent as the Untrusted* fields.
 	AgentName string `json:"agent_name,omitempty"`
+	// NeedsPassword marks an elevation ask (a leading sudo/su) whose secret is
+	// collected in a masked human prompt. Windows leaves it false: UAC performs
+	// authentication, so the ask is a plain elevation-intent confirmation.
+	NeedsPassword bool `json:"needs_password,omitempty"`
+	// ElevationCommand is the raw bash command that will run elevated. It is
+	// dialog metadata only, never a channel for the password itself.
+	ElevationCommand string `json:"elevation_command,omitempty"`
+	// ElevationKey carries the paused tool-call id on a sub-agent elevation ask
+	// so the host's approval handler can hand the typed secret to the CHILD's
+	// own ElevationManager through the in-process path (see
+	// SetPendingElevationSecret). It is an opaque id, NOT the secret, and is
+	// excluded from every wire, prompt and persisted form. Empty off that path.
+	ElevationKey string `json:"-"`
 }
 
 type PermissionDecision struct {
@@ -2136,6 +2149,18 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if isHardBlockedCommand(command) {
 			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
+		}
+		// A leading sudo/su is ALWAYS a human ask. Check the raw head before
+		// wrapper peeling: sudo is a transparent wrapper, so a peeled view would
+		// drop it and let the wrapped command take an automatic allow path. This
+		// sits above every auto path (allow rules, persisted prefixes, YOLO,
+		// sandbox and the judge) so none of them can satisfy an elevation ask.
+		if elevCmd, elevated := leadingElevationCommand(command); elevated {
+			req := bashPermissionRequest(args, command, "permission.elevation", nil)
+			req.NeedsPassword = runtime.GOOS != "windows"
+			req.ElevationCommand = elevCmd
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (elevation): tool=bash command=%q", command))
+			return PermissionDecision{Level: PermissionAsk, Request: req}
 		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for i := range parsed {
@@ -7473,6 +7498,11 @@ func isHardBlockedCommand(command string) bool {
 	if pipesIntoInterpreter(command) {
 		return true
 	}
+	// Inline secrets and chained elevation never reach the masked prompt: they
+	// are hard denies, not asks.
+	if inlineElevationSecret(command) || chainedElevation(command) {
+		return true
+	}
 	// Hard-block destructive and exfiltration patterns
 	blockedPatterns := []string{
 		"dd if=", "mkfs", // disk/partition write
@@ -7480,6 +7510,89 @@ func isHardBlockedCommand(command string) bool {
 	}
 	for _, p := range blockedPatterns {
 		if strings.Contains(command, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isElevationHead reports whether a command word invokes sudo or su.
+func isElevationHead(word string) bool {
+	switch path.Base(word) {
+	case "sudo", "su":
+		return true
+	}
+	return false
+}
+
+// leadingElevationCommand reports the raw command when a sudo/su head drives
+// it, either directly or through transparent wrappers (env, command, nohup...).
+// It walks the same peel chain as effectiveCommandWords because those wrappers
+// are transparent to auto-permission: "env sudo whoami" peels to "whoami" and
+// would otherwise take an automatic allow path. The check sits above every
+// auto path in Decide.
+func leadingElevationCommand(command string) (string, bool) {
+	fields := splitShellFields(command)
+	words := stripLeadingEnvAssignments(fields)
+	// Keep the raw-head check.
+	if len(words) > 0 && isElevationHead(words[0]) {
+		return command, true
+	}
+	// Walk the leading transparent-wrapper peel chain: any head in the chain
+	// that is sudo/su is an elevation ask.
+	for _, eff := range effectiveCommandWords(fields) {
+		if len(eff) > 0 && isElevationHead(eff[0]) {
+			return command, true
+		}
+	}
+	return "", false
+}
+
+// IsElevationRequest reports whether req was raised by a leading sudo/su. Such
+// asks are human-only: no automatic path (judge, allow rule, prefix or YOLO)
+// may satisfy them.
+func IsElevationRequest(req PermissionRequest) bool {
+	return req.ToolName == "bash" && req.ElevationCommand != ""
+}
+
+// inlineElevationSecret reports the forms that smuggle a password onto stdin
+// or through an askpass helper instead of the masked prompt. SUDO_ASKPASS is
+// kept as a raw substring (an env assignment name); -S/--stdin are detected
+// by tokenizing flags after a sudo head so a quoted "sudo -S" used as data in
+// an argument is not a false positive.
+func inlineElevationSecret(command string) bool {
+	if strings.Contains(command, "SUDO_ASKPASS=") {
+		return true
+	}
+	for _, eff := range effectiveCommandWords(splitShellFields(command)) {
+		for i, w := range eff {
+			if path.Base(w) != "sudo" {
+				continue
+			}
+			for _, flag := range eff[i+1:] {
+				if !strings.HasPrefix(flag, "-") || flag == "-" || flag == "--" {
+					break // reached the wrapped command (or end of flags)
+				}
+				if flag == "--stdin" || strings.HasPrefix(flag, "--stdin=") ||
+					(!strings.HasPrefix(flag, "--") && strings.ContainsRune(flag[1:], 'S')) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// chainedElevation reports a `;`, `&&` or `|` followed by a command driven by
+// sudo/su, including behind transparent wrappers (`; env sudo whoami`).
+func chainedElevation(command string) bool {
+	fields := splitShellFields(command)
+	for i := 0; i+1 < len(fields); i++ {
+		f := fields[i]
+		if f != ";" && f != "&&" && f != "|" && !strings.HasSuffix(f, ";") {
+			continue
+		}
+		if _, elevated := leadingElevationCommand(strings.Join(fields[i+1:], " ")); elevated {
 			return true
 		}
 	}

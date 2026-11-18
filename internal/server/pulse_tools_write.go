@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 )
@@ -490,6 +491,19 @@ func (h *Handler) pulsePermissionResolveTool(raw json.RawMessage) (string, error
 	}
 	if err := h.pulseWriteTarget(args.SessionID); err != nil {
 		return "", err
+	}
+	// Elevation (leading sudo/su) asks are human-only for the Pulse assistant.
+	// Key on the elevation command, not NeedsPassword: on Windows UAC authenticates
+	// on the secure desktop so NeedsPassword is false, yet the ask must still be
+	// refused — approving it would let Pulse silently authorize a privileged
+	// command. Keeping this in the Pulse-only caller preserves legitimate web/TUI
+	// elevation approvals, which go through the shared handler with a password.
+	if asks := h.livePendingAsks(args.SessionID); asks != nil {
+		for _, perm := range asks.Permissions {
+			if perm.RequestID == args.RequestID && agent.IsElevationRequest(agent.PermissionRequest{ToolName: perm.Tool, ElevationCommand: perm.ElevationCommand}) {
+				return "", fmt.Errorf("elevation ask %s requires an interactive session; the Pulse assistant cannot resolve it", args.RequestID)
+			}
+		}
 	}
 	if _, err := pulseCall(http.MethodPost, "/api/permissions/resolve",
 		map[string]any{"request_id": args.RequestID, "session_id": args.SessionID, "decision": args.Decision},

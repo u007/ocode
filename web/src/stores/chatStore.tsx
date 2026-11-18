@@ -63,6 +63,8 @@ export function parsePermissionFromMessage(msg: Message): PermissionRequest | nu
       untrusted_scores: (req["untrusted_scores"] as ContentGuardScore[]) || undefined,
       untrusted_failure: (req["untrusted_failure"] as string) || undefined,
       agent_name: (req["agent_name"] as string) || undefined,
+      needs_password: (req["needs_password"] as boolean) || undefined,
+      elevation_command: (req["elevation_command"] as string) || undefined,
     };
   } catch {
     return null;
@@ -265,6 +267,10 @@ export interface PermissionRequest {
    *  Without it the dialog can only say "a sub-agent asked", which is useless
    *  when several are parked at once. */
   agent_name?: string;
+  /** Elevation ask (leading sudo/su): show a masked password field. */
+  needs_password?: boolean;
+  /** Raw command that will run elevated, shown next to the password field. */
+  elevation_command?: string;
 }
 
 /** One chunk's judge output. Both questions are reported separately so the

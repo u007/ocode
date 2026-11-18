@@ -83,6 +83,11 @@ type PermissionEvent struct {
 	// which is useless when several are parked at once. omitempty, so every
 	// main-agent frame stays byte-identical to before.
 	AgentName string `json:"agent_name,omitempty"`
+	// NeedsPassword/ElevationCommand mirror the elevation ask so the web dialog
+	// can show the masked field and the command that will run elevated.
+	// omitempty keeps every ordinary permission frame byte-identical.
+	NeedsPassword    bool   `json:"needs_password,omitempty"`
+	ElevationCommand string `json:"elevation_command,omitempty"`
 }
 
 // newPermissionEvent projects a parsed PermissionRequest onto the SSE frame the
@@ -116,6 +121,8 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		UntrustedScores:  req.UntrustedScores,
 		UntrustedFailure: req.UntrustedFailure,
 		AgentName:        req.AgentName,
+		NeedsPassword:    req.NeedsPassword,
+		ElevationCommand: req.ElevationCommand,
 	}
 }
 
@@ -180,6 +187,11 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		// decision. Empty means "use the ask's narrowest derived rule" (older
 		// clients and the RC bridge). Validated against the ask's candidates.
 		Prefix string `json:"prefix,omitempty"`
+		// Password is WRITE-ONLY: accepted from a masked prompt for an elevation
+		// ask, it is stored on the owning agent before the approved call runs and
+		// is never copied into a response, SSE frame, tool result, transcript,
+		// log, argv or environment.
+		Password string `json:"password,omitempty"`
 	}
 	if err := readBodyJSON(r, &bodyReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -241,7 +253,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// The branch is also far simpler than the main-agent path below: there is no
 	// sentinel to rewrite and no continuation to dispatch. The decision goes
 	// straight into the channel the child is already blocked on.
-	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision, bodyReq.Prefix) {
+	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision, bodyReq.Prefix, bodyReq.Password) {
 		return
 	}
 
@@ -356,6 +368,14 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 			working[askIdx].Content = agent.TruncateToolResult(bodyReq.RequestID,
 				agent.ResolveContentAsk(permReq, decision != PermDecisionDeny))
 		} else if decision != PermDecisionDeny {
+			// Elevation approvals must prime the per-request secret store BEFORE the
+			// approved tool re-executes: the bash tool reads the secret once from that
+			// store and fails closed when the elevation flag is set without one. Deny
+			// and ordinary asks never reach this store. The password is write-only —
+			// nothing here echoes it into the result, a log line or an SSE frame.
+			if permReq.NeedsPassword {
+				storeResolveElevationSecret(as.agent, bodyReq.RequestID, bodyReq.Password)
+			}
 			pathRoot := agent.OutOfScopePathRoot(permReq)
 			result, err := executeApprovedWithTempPathFn(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
 			if err != nil {
@@ -493,6 +513,18 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 // server test cannot reach the state through the public surface.
 var executeApprovedWithTempPathFn = executeApprovedWithTempPath
 
+// storeResolveElevationSecret is the seam tests replace to assert the password
+// reaches the owning agent before re-execution. Production delegates to the
+// agent's per-request elevation store, which copies and consumes the secret.
+var storeResolveElevationSecret = func(ag *agent.Agent, requestID, password string) {
+	ag.StoreElevationSecret(requestID, []byte(password))
+}
+
+// stageChildElevationSecret is the seam tests replace to assert a sub-agent
+// elevation password is staged through the in-process handoff (keyed by the
+// ask's ElevationKey) before deliverResponse, never in PermissionResponse.
+var stageChildElevationSecret = agent.SetPendingElevationSecret
+
 // executeApprovedWithTempPath wraps HandleApprovedToolCall exactly like the
 // TUI's executeApprovedTool: when the ask was an out-of-workspace path, the
 // path root is temporarily registered as allowed for the duration of this one
@@ -526,7 +558,7 @@ func executeApprovedWithTempPath(ag *agent.Agent, toolName string, args json.Raw
 // that is exactly the blanket grant the out-of-scope guard exists to prevent.
 // The TUI sends those flags because it persists through its own dialog path and
 // answers out-of-scope asks separately; here persistAlwaysAllow is that path.
-func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision, requestedPrefix string) bool {
+func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision, requestedPrefix, password string) bool {
 	as, ask := h.findChildPermAsk(sessionID, requestID)
 	if ask == nil {
 		// The id left the registry without this request owning it: already
@@ -609,7 +641,18 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	if decision == PermDecisionDeny {
 		ask.deliver(agent.PermissionDeny)
 	} else {
-		ask.deliver(agent.PermissionAllow)
+		// Stage the masked password in the in-process handoff under the child
+		// ask's ElevationKey BEFORE delivering the approval; the child moves it
+		// into its OWN ElevationManager. It must never ride in the shared
+		// PermissionResponse. Elevation asks carry ElevationCommand on every
+		// OS; on Windows the password is empty (UAC authenticates) and the
+		// child still routes to native elevation via its own flag. The parent's
+		// store is untouched.
+		resp := agent.PermissionResponse{Level: agent.PermissionAllow}
+		if agent.IsElevationRequest(ask.req) {
+			stageChildElevationSecret(ask.req.ElevationKey, []byte(password))
+		}
+		ask.deliverResponse(resp)
 	}
 	writeJSON(w, http.StatusOK, ChatResponse{})
 	return true

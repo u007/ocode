@@ -212,12 +212,32 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	}()
 
 	command := params.Command
+	// The elevation FLAG — not the yielded secret — is the elevation marker.
+	// The getter is attached to every approved call; a leading sudo/su whose
+	// secret is missing must fail closed, never fall through to the ordinary
+	// path and run the command unprivileged. Consume the getter only for a
+	// flagged elevation.
+	elevated := ElevationFlagFromContext(ctx)
+	var elevationSecret []byte
+	if elevated {
+		if getter := ElevationSecretFromContext(ctx); getter != nil {
+			elevationSecret = getter()
+		}
+		// Unix types the password into sudo/su; Windows uses UAC and collects
+		// none. On Unix a missing secret fails closed before any command runs.
+		if elevatedSecretRequired() && len(elevationSecret) == 0 {
+			return fmt.Sprintf("Command failed: %s", elevationNoSecretMessage), nil
+		}
+	}
+	// Elevated commands must run the ORIGINAL string unchanged: the parent
+	// monitor wrap backgrounds the command with stdin=/dev/null, which would
+	// starve the password read. executeElevated owns process lifecycle.
 	// Wrap before Start, rather than when the command is promoted. A
 	// foreground command may become a background command after it has
 	// already started; starting the monitor here means both paths retain
 	// the same parent-death protection without interrupting streaming or
 	// replacing the process that the registry and supervisor track.
-	if t.Procs != nil {
+	if t.Procs != nil && !elevated {
 		command = WrapWithParentMonitor(params.Command)
 	}
 	// Unified construction: GOOS branch + session-workdir cmd.Dir + the
@@ -235,6 +255,18 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		// and list it, so the monitor is no longer under its leader and the
 		// list would show it. The stop branch owns the whole-group kill here.
 		cmd.Cancel = func() error { return nil }
+	}
+
+	// A flagged leading sudo/su runs on the PTY executor, which types the secret
+	// and scrubs it from all output/errors. An unflagged (ordinary) call keeps
+	// the normal path below unchanged, byte for byte.
+	if elevated {
+		out, elevErr := executeElevated(ctx, cmd, elevationSecret)
+		registerBashWrites(ctx, tcID, backedUpPaths)
+		if t.Recorder != nil {
+			t.Recorder.Post(bashBase, params.Command, commandExitCode(elevErr))
+		}
+		return finalizeExecResult(out, elevErr, deadlineStop(ctx, timeout), !FullOutputRetained(ctx)), nil
 	}
 
 	// streaming gates live emission. Once the command is moved to the

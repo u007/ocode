@@ -904,6 +904,30 @@ describe("chatStore reload rehydration from transcript snapshot", () => {
     expect(getSessionSlice(recovered, "a").pendingPermission?.args).toEqual(args);
   });
 
+  it("keeps elevation flags when rehydrating a masked ask after reload", () => {
+    const state = chatReducer(initial(), {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        {
+          role: "tool",
+          tool_call_id: "call-elev",
+          content:
+            "PERMISSION_ASK:" +
+            JSON.stringify({
+              tool_name: "bash",
+              command: "sudo whoami",
+              needs_password: true,
+              elevation_command: "sudo whoami",
+            }),
+        },
+      ],
+    });
+    const ask = getSessionSlice(state, "a").pendingPermission;
+    expect(ask?.needs_password).toBe(true);
+    expect(ask?.elevation_command).toBe("sudo whoami");
+  });
+
   const makeAskMsg = (id: string, toolName = "bash", command = "rm -rf /tmp/x") => ({
     role: "tool" as const,
     content:
