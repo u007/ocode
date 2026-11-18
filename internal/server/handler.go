@@ -26,7 +26,6 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/contextbudget"
 	"github.com/u007/ocode/internal/crashguard"
-	"github.com/u007/ocode/internal/umlinfo"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/messaging"
@@ -44,6 +43,7 @@ import (
 	"github.com/u007/ocode/internal/tabs"
 	"github.com/u007/ocode/internal/termtabs"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/umlinfo"
 	"github.com/u007/ocode/internal/vault"
 )
 

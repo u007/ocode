@@ -70,6 +70,12 @@ type pulseRemoteFake struct {
 	// serves that many pages, linked by cursor.
 	pulseDelay time.Duration
 	pulsePages int
+
+	// umlIndexing makes GET /api/uml answer 202 instead of an index, the way the
+	// real host does while its own build runs. umlQueries records each request's
+	// query so a test can prove the caller's host param is not forwarded.
+	umlIndexing bool
+	umlQueries  []string
 }
 
 func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemoteFake {
@@ -249,6 +255,31 @@ func newPulseRemoteFake(t *testing.T, log string, cols, rows uint16) *pulseRemot
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(first))
 		_, _, _ = conn.ReadMessage() // wait for the client's close
+	}))
+	mux.HandleFunc("GET /api/uml", auth(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.umlQueries = append(f.umlQueries, r.URL.RawQuery)
+		indexing := f.umlIndexing
+		f.mu.Unlock()
+		if indexing {
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]string{"state": "indexing"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state": "ready",
+			"index": map[string]any{
+				"version":      1,
+				"root":         pulseRemoteTestPath,
+				"generated_at": "2026-11-18T00:00:00Z",
+				"monorepo":     "none",
+				"packages":     []map[string]any{{"id": ".", "label": ".", "lang": "Go", "file_count": 1, "symbol_count": 1}},
+				"symbols": []map[string]any{{
+					"id": "remote.Greeter", "name": "Greeter", "kind": "interface", "lang": "Go",
+					"pkg": ".", "file": "remote.go", "line": 3, "end_line": 5,
+				}},
+			},
+		})
 	}))
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
