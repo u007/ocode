@@ -424,6 +424,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
 	s.mux.HandleFunc("GET /api/changes", s.authMiddleware(s.handleListChanges))
+	// UML tab AST index: 200 when fresh, 202 + poll otherwise (never parked).
+	s.mux.HandleFunc("GET /api/uml", s.authMiddleware(s.handler.HandleUml))
+	s.mux.HandleFunc("GET /api/uml/status", s.authMiddleware(s.handler.HandleUmlStatus))
 	s.mux.HandleFunc("GET /api/changes/diff", s.authMiddleware(s.handleChangesDiff))
 	s.mux.HandleFunc("POST /api/changes/undo-file", s.authMiddleware(s.handleUndoChangeFile))
 	s.mux.HandleFunc("POST /api/changes/undo-block", s.authMiddleware(s.handleUndoChangeBlock))
