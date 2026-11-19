@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Menu, X } from "lucide-react";
+import { Menu, Search, X } from "lucide-react";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { matchesKeywords, parseKeywords } from "../../lib/keywordFilter";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import ModelDefaultsForm from "./ModelDefaultsForm";
@@ -337,6 +339,15 @@ export default function SettingsPanel() {
   const projectState = useOptionalProjectState();
   const activeProject = projectState?.state.activeProject;
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
+  // Filters the section menu (desktop column and mobile drawer). Matching is
+  // case-insensitive keyword AND over the label plus its category, so typing a
+  // category name ("voice") lists that whole group.
+  const [navFilter, setNavFilter] = useState("");
+  const navKeywords = parseKeywords(navFilter);
+  const matchesFilter = (g: GroupDef) =>
+    matchesKeywords([g.label, g.category ?? ""].join(" "), navKeywords);
+  const ocodeMatches = OCODE_GROUPS.filter(matchesFilter);
+  const opencodeMatches = OPENCODE_GROUPS.filter(matchesFilter);
   // Mobile only: the section list is an overlay drawer, not a column. Without
   // this the <=md layout rendered the two <NavSection> stacks side by side
   // across the full width and pushed the selected form below the viewport —
@@ -385,8 +396,49 @@ export default function SettingsPanel() {
 
   const navSections = (
     <>
-      <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={selectGroup} />
-      <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={selectGroup} />
+      <div className="px-3 pb-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={navFilter}
+            onChange={(e) => setNavFilter(e.target.value)}
+            placeholder="Filter settings…"
+            aria-label="Filter settings sections"
+            className="h-8 pl-7 pr-7 text-xs"
+          />
+          {navFilter && (
+            <button
+              type="button"
+              onClick={() => setNavFilter("")}
+              aria-label="Clear settings filter"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+      {ocodeMatches.length > 0 && (
+        <NavSection
+          title="ocode"
+          groups={ocodeMatches}
+          active={active}
+          onSelect={selectGroup}
+        />
+      )}
+      {opencodeMatches.length > 0 && (
+        <NavSection
+          title="opencode"
+          groups={opencodeMatches}
+          active={active}
+          onSelect={selectGroup}
+        />
+      )}
+      {ocodeMatches.length === 0 && opencodeMatches.length === 0 && (
+        <div className="px-3 py-2 text-xs text-muted-foreground">
+          No settings match “{navFilter.trim()}”.
+        </div>
+      )}
     </>
   );
 
