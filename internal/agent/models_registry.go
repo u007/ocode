@@ -1264,6 +1264,22 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			}
 		}
 	}
+	// kakiit live models — LIVE ONLY (the gateway owns the catalog; kakiit is
+	// absent from models.dev by design). On the main loop (refresh=false)
+	// only a still-fresh cache is consulted, so the picker never blocks on
+	// the gateway.
+	if kakiitLive := kakiitProviderModels(refresh); len(kakiitLive) > 0 {
+		have := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			have[id] = true
+		}
+		for _, id := range kakiitLive {
+			if !have[id] {
+				ids = append(ids, id)
+				have[id] = true
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1392,6 +1408,13 @@ func providerModelsFromRegistry(provider string, refresh bool) []string {
 			}
 		}
 		return providerModelsFromSnapshot(provider)
+	}
+	if provider == kakiitProvider {
+		// kakiit's catalog is LIVE ONLY: the gateway owns the model list and
+		// prices (vendor extensions), and kakiit is deliberately absent from
+		// models.dev, so there is no snapshot fallback — a failed fetch yields
+		// an empty picker section, never stale/foreign data.
+		return kakiitProviderModels(refresh)
 	}
 	// Fallback for providers without a live fetcher: refresh is ignored and the
 	// static snapshot is returned. Providers with live support (openrouter,

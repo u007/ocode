@@ -3122,6 +3122,9 @@ func (m model) Init() tea.Cmd {
 	agent.PreloadAIHubMixModels()
 	// Preload Groq's live /models list so newly released Groq models appear in the picker.
 	agent.PreloadGroqModels()
+	// Preload kakiit's live /v1/models list so gateway models appear in the
+	// picker as soon as a kakiit credential exists (the catalog is live-only).
+	agent.PreloadKakiitModels()
 	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
 	if m.lspDiagCh != nil {
 		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
@@ -5609,7 +5612,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastRetryableLLMErr = ""
 				return m, nil
 			}
-			errorText := fmt.Sprintf("Error: %v", msg.err)
+			// User-facing mapping first: a kakiit 402 (insufficient credits)
+			// renders its one-line top-up notice instead of the raw provider
+			// envelope; every other error keeps the generic form.
+			errorText := fmt.Sprintf("Error: %s", agent.UserFacingLLMError(msg.err))
 			if isRetryableLLMError(msg.err) {
 				m.lastRetryableLLMErr = errorText
 			} else {

@@ -156,6 +156,7 @@ var Providers = []Provider{
 	{ID: "cloudflare-workers", Label: "Cloudflare Workers AI", EnvVar: "CLOUDFLARE_API_KEY"},
 	{ID: "cloudflare-gateway", Label: "Cloudflare AI Gateway", EnvVar: "CLOUDFLARE_GATEWAY_KEY"},
 	{ID: "codex", Label: "OpenAI Codex", EnvVar: "OPENAI_API_KEY", OAuthFlow: "openai"},
+	{ID: "kakiit", Label: "kakiit LLM Gateway", EnvVar: "KAKIIT_API_KEY"},
 }
 
 // GetBaseURL returns the per-credential base URL override, or "" if none.

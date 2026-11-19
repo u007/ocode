@@ -6579,12 +6579,14 @@ func (a *Agent) StepLimitHit() bool {
 // budget. Callers render it so a turn that was cut off — or a triage that
 // declined to resume — is visible instead of the transcript going silent.
 // Read AFTER Step returns; like stepLimitHit it describes the last call only.
+// For failed steps the text is user-facing: kakiit credit-402s render their
+// top-up notice (UserFacingLLMError), everything else the raw error.
 func (a *Agent) StepLimitHitDetail(err error) string {
 	if a.stepLimitHit.Load() {
 		return "cut off by the /max-step cap — reply summarized, work may remain"
 	}
 	if err != nil {
-		return "turn failed: " + err.Error()
+		return "turn failed: " + UserFacingLLMError(err)
 	}
 	return ""
 }

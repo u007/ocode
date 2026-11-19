@@ -405,14 +405,19 @@ func (c *GenericClient) setOpenRouterAttributionHeaders(req *http.Request) {
 const openRouterSessionHeader = "x-session-id"
 
 // setOpencodeSessionHeader stamps the stable per-conversation session id onto
-// an outbound LLM request. It is a no-op for non-opencode providers, so every
-// chat transport can call it unconditionally. The value is the agent's
+// an outbound LLM request. It is a no-op for providers that are neither
+// opencode zen backends nor the kakiit gateway (whose spec REQUIRES the same
+// sticky header so session affinity survives the gateway), so every chat
+// transport can call it unconditionally. The value is the agent's
 // session id (wired via Agent.SetSessionID) or, when none is wired, a
 // per-client id generated once — either way stable for the whole
 // conversation, never a per-request UUID, so the backend groups all of one
 // conversation's requests together.
 func (c *GenericClient) setOpencodeSessionHeader(req *http.Request) {
-	if req == nil || c == nil || !c.isOpencodeProvider() {
+	if req == nil || c == nil {
+		return
+	}
+	if !c.isOpencodeProvider() && !c.isKakiitProvider() {
 		return
 	}
 	req.Header.Set(opencodeSessionHeader, c.opencodeSessionID())
@@ -759,6 +764,16 @@ func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	if c.Provider == "anthropic" {
 		return true
 	}
+	// kakiit routes per-model on the gateway's declared x_kakiit_protocol
+	// (same failure class as opencode-go: an Anthropic-protocol model posted
+	// to /chat/completions 500s deterministically). Only the declared
+	// anthropic-messages value routes here — the openai-* protocols stay on
+	// the OpenAI path, and a missing/unknown protocol is refused by
+	// kakiitProtocolGuard before any request is sent.
+	if c.isKakiitProvider() {
+		protocol, _ := kakiitModelProtocol(c.Model)
+		return protocol == kakiitProtocolAnthropic
+	}
 	// opencode/opencode-go route per-model. models.dev declares each model's
 	// protocol via `provider.npm`, and upstream OpenCode picks the transport
 	// from it per model (packages/core/src/session/runner/model.ts). An
@@ -822,6 +837,12 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 	perCallDelta := deltaCallbackFromContext(baseCtx)
 	var lastErr error
 	attempts := 0
+	// kakiit: one X-Request-Id per turn, minted BEFORE the attempt loop so
+	// every retry inside this turn reuses it (gateway ledger idempotency —
+	// a retried request converges to one settle, never double-debits).
+	if c.isKakiitProvider() {
+		baseCtx = withKakiitRequestID(baseCtx, kakiitTurnRequestID())
+	}
 	for attempt := 0; ; attempt++ {
 		if baseCtx.Err() != nil {
 			return nil, contextCause(baseCtx)
@@ -1455,6 +1476,20 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 			return c.chatOpenAIResponses(ctx, messages, tools)
 		}
 	}
+	// kakiit routes per-model on the gateway's declared protocol. The guard
+	// is FIRST: a model with no usable protocol must fail before any request
+	// (never a silent default to chat/completions — the opencode-go lesson).
+	if c.isKakiitProvider() {
+		protocol, err := kakiitProtocolForModel(c.Model)
+		if err != nil {
+			return nil, err
+		}
+		if protocol == kakiitProtocolResponses {
+			return c.chatOpenAIResponses(ctx, messages, tools)
+		}
+		// kakiitProtocolChat (and nothing else) falls through to the
+		// chat/completions path below.
+	}
 	// opencode-go (and opencode) route Responses-only models through the OpenAI
 	// Responses API, not chat/completions. These models only serve tool calls
 	// correctly on the responses path; sending them to chat/completions is what
@@ -1472,7 +1507,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if c.UseWebSocket && SupportsWebSocket(c.Provider) {
 		return c.chatOpenAIWebSocket(ctx, messages, tools)
 	}
-	url := c.BaseURL + "/chat/completions"
+	url := c.apiRoot() + "/chat/completions"
 
 	openAIMessages, err := c.convertToOpenAIMessages(messages)
 	if err != nil {
@@ -1524,6 +1559,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	}
 	c.setOpencodeSessionHeader(req)
 	c.setOpenRouterAttributionHeaders(req)
+	c.setKakiitHeaders(req)
 	applyHarnessHeaders(req, c.Provider)
 	c.emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
@@ -3319,6 +3355,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	c.setOpencodeSessionHeader(req)
 	c.setSessionAffinityHeaders(req)
+	c.setKakiitHeaders(req)
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
@@ -3781,7 +3818,7 @@ func (c *GenericClient) openAIResponsesURL() string {
 	if c.UseOAuth && c.Provider == "openai" {
 		return "https://chatgpt.com/backend-api/codex/responses"
 	}
-	return strings.TrimRight(c.BaseURL, "/") + "/responses"
+	return strings.TrimRight(c.apiRoot(), "/") + "/responses"
 }
 
 // normalizeOpenAICodexModel mirrors the Codex/opencode OAuth bridge behavior for
@@ -3924,7 +3961,7 @@ func jwtClaim(token string, keys ...string) string {
 }
 
 func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
-	url := c.BaseURL + "/messages"
+	url := c.apiRoot() + "/messages"
 
 	messages = repairToolCallSequence(messages)
 
@@ -4004,6 +4041,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	req.Header.Set("anthropic-version", "2023-06-01")
 	c.setOpencodeSessionHeader(req)
 	c.setSessionAffinityHeaders(req)
+	c.setKakiitHeaders(req)
 	if c.UseOAuth {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 		if c.ThinkingBudget > 0 {
@@ -4572,6 +4610,7 @@ var providers = map[string]providerInfo{
 	"ollama-cloud":   {"OLLAMA_API_KEY", "https://ollama.com/v1"},
 	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
+	"kakiit":         {"KAKIIT_API_KEY", "https://hub.mercstudio.com/api/llm"},
 	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
 	"lmstudio":       {"", "http://localhost:1234/v1"},
 	// "local" has no static baseURL — see the provider == "local" branch
@@ -4874,6 +4913,16 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	if provider == "lmstudio" {
 		if override := os.Getenv("LMSTUDIO_BASE_URL"); override != "" {
 			baseURL = normalizeLMStudioBaseURL(override)
+		}
+	}
+
+	// kakiit base URL override: KAKIIT_BASE_URL env > ocode config
+	// `kakiit_base_url` > per-credential auth.json override (already applied
+	// above) > the providers-map default (already in baseURL). Mirrors the
+	// LM Studio env pattern; the gateway root is a deployment value.
+	if provider == kakiitProvider {
+		if override := KakiitBaseURL(); override != "" && override != KakiitDefaultBaseURL {
+			baseURL = override
 		}
 	}
 

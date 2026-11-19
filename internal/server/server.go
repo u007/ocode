@@ -2471,6 +2471,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	go agent.PreloadNovitaModels()
 	go agent.PreloadAIHubMixModels()
 	go agent.PreloadGroqModels()
+	go agent.PreloadKakiitModels()
 	log.Printf("serving on %s", s.addr)
 	// Periodically release idle built agents so agent/plugin processes do not
 	// accumulate as projects accumulate. The registry entry and on-disk

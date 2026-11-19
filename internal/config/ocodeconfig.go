@@ -1259,6 +1259,12 @@ type OcodeConfig struct {
 	// Switch via /fake-agent <name> (TUI), Settings > Backend (web), or
 	// OCODE_FAKE_AGENT env override (not persisted).
 	FakeAgent string `json:"fake_agent,omitempty"`
+	// KakiitBaseURL overrides the kakiit LLM gateway root used by the
+	// `kakiit/` provider (default https://hub.mercstudio.com/api/llm).
+	// Empty falls back to KAKIIT_BASE_URL, then the production default.
+	// Unlike sync_url (the config/auth sync server), this only affects the
+	// LLM request path of the kakiit provider.
+	KakiitBaseURL string `json:"kakiit_base_url,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
 	Ocr         ocr.OcrConfig     `json:"ocr"`
@@ -1711,6 +1717,7 @@ type ocodeConfigFile struct {
 	BackendURL                 string                      `json:"backend_url,omitempty"`
 	SyncURL                    string                      `json:"sync_url,omitempty"`
 	FakeAgent                  string                      `json:"fake_agent,omitempty"`
+	KakiitBaseURL              string                      `json:"kakiit_base_url,omitempty"`
 	Ocr                        *ocr.OcrConfig              `json:"ocr,omitempty"`
 	ImageGen                   *ImageGenConfig             `json:"imagegen,omitempty"`
 	VideoGen                   *VideoGenConfig             `json:"videogen,omitempty"`
@@ -2559,6 +2566,14 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		} else {
 			log.Printf("config: invalid fake_agent %q on disk, preserving raw value: %v", file.FakeAgent, err)
 		}
+	}
+
+	// kakiit_base_url is a plain URL string (no normalization beyond trimming
+	// whitespace): unlike backend_url/sync_url it targets a developer-controlled
+	// LLM gateway root that may legitimately be http://<lan-host>:<port>.
+	if _, ok := raw["kakiit_base_url"]; ok {
+		cfg.KakiitBaseURL = strings.TrimSpace(file.KakiitBaseURL)
+		delete(raw, "kakiit_base_url")
 	}
 
 	if rawOcr, ok := raw["ocr"]; ok && rawOcr != nil {
@@ -3460,6 +3475,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.FakeAgent != "" {
 		payload["fake_agent"] = cfg.FakeAgent
+	}
+	if cfg.KakiitBaseURL != "" {
+		payload["kakiit_base_url"] = cfg.KakiitBaseURL
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
