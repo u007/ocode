@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   editorTabProjectKey,
   resolveVisibleEditorTabId,
+  tabIncludedInContext,
   visibleEditorTabs,
 } from "./editorTabsPersistence";
 import { projectSessionKey } from "../../stores/projectStore";
@@ -46,6 +47,14 @@ describe("visibleEditorTabs", () => {
     expect(visibleEditorTabs(tabs, null)).toEqual(tabs);
     expect(visibleEditorTabs(tabs, undefined)).toEqual(tabs);
     expect(visibleEditorTabs(tabs, { path: "" })).toEqual(tabs);
+  });
+});
+
+describe("tabIncludedInContext", () => {
+  it("counts only an explicit true, so a legacy tab stays excluded", () => {
+    expect(tabIncludedInContext({})).toBe(false);
+    expect(tabIncludedInContext({ includeInContext: false })).toBe(false);
+    expect(tabIncludedInContext({ includeInContext: true })).toBe(true);
   });
 });
 

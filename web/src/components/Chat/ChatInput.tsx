@@ -428,9 +428,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // file tab opens. We detect "new" by diffing contextFilePaths against the set
   // of paths we've already seen this session. A path that appears for the first
   // time is a freshly-opened tab → drop it from excludedPaths so it re-injects.
-  // When a path disappears (tab closed) we forget it, so a later reopen counts
-  // as new too. Re-selecting an existing tab does NOT change contextFilePaths,
-  // so it never reinjects. On session change the seen set resets (fresh slate).
+  // When a path disappears (tab closed or opted out of the context) we forget
+  // it, so a later reopen counts as new too. Re-selecting an existing tab does
+  // NOT change contextFilePaths, so it never reinjects. On session change the
+  // seen set resets (fresh slate).
   useEffect(() => {
     const current = new Set(contextFilePaths ?? []);
     const seen = seenContextPathsRef.current;

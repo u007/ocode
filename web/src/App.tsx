@@ -86,6 +86,7 @@ import { useResizableSidebar } from "./hooks/useResizableSidebar";
 import { useEditorTabs } from "./hooks/useEditorTabs";
 import {
   resolveVisibleEditorTabId,
+  tabIncludedInContext,
   visibleEditorTabs as visibleEditorTabsForProject,
 } from "./components/Files/editorTabsPersistence";
 import { useChat } from "./hooks/useChat";
@@ -660,10 +661,10 @@ function HomeApp() {
   const visibleEditorTabIds = useMemo(() => new Set(visibleEditorTabs.map((t) => t.id)), [visibleEditorTabs]);
 
   // Editor tabs opted into the LLM loop, preserving their project root so we
-  // can filter per session-tab and avoid leaking files across projects. Omit
-  // `includeInContext` (pre-feature) defaults to true.
+  // can filter per session-tab and avoid leaking files across projects. Off by
+  // default: opening a file attaches nothing until the user checks its tab.
   const contextFileEntries = useMemo(
-    () => visibleEditorTabs.filter((t) => t.includeInContext !== false).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+    () => visibleEditorTabs.filter(tabIncludedInContext).map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
     [visibleEditorTabs],
   );
 
@@ -676,10 +677,8 @@ function HomeApp() {
     const tab = visibleEditorTabs.find(
       (t) => t.path === activeEditorContext.path && (t.projectRoot ?? "") === (activeEditorContext.projectRoot ?? ""),
     );
-    if (tab && tab.includeInContext === false) return null;
-    // A context left over from a tab that is now hidden (project switched) must
-    // not be attached to the newly-focused project's chat.
-    if (!tab) return null;
+    // Not opted in (the default), or hidden by a project switch: attach nothing.
+    if (!tab || !tabIncludedInContext(tab)) return null;
     return activeEditorContext;
   }, [activeEditorContext, visibleEditorTabs]);
 

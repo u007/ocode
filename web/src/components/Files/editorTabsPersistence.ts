@@ -10,6 +10,9 @@ export interface PersistedEditorTab {
    *  persisted: without it a restored remote tab is re-fetched against the
    *  local server (correct path, wrong host) or collides with a local tab. */
   projectHost?: string;
+  /** Chat-context opt-in. Absent in lists written before the default flipped;
+   *  absent means excluded. */
+  includeInContext?: boolean;
 }
 
 /** Host-qualified identity of the project an editor tab belongs to. Mirrors
@@ -20,6 +23,13 @@ export function editorTabProjectKey(tab: { projectRoot?: string; projectHost?: s
   const host = tab.projectHost ?? "";
   const root = tab.projectRoot ?? "";
   return host ? `${host}::${root}` : root;
+}
+
+/** Whether an opened tab is opted into the chat/LLM context. Only an explicit
+ *  true counts: an absent value (a tab persisted before the default flipped)
+ *  stays excluded. */
+export function tabIncludedInContext(tab: { includeInContext?: boolean }): boolean {
+  return tab.includeInContext === true;
 }
 
 /** The subset of editor tabs that belong to the active project. With no active

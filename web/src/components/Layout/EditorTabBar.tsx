@@ -1,12 +1,14 @@
 import { useRef } from "react";
 import { Check, FileCode, FolderTree, X } from "lucide-react";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
+import { tabIncludedInContext } from "../Files/editorTabsPersistence";
 
 export interface EditorTabInfo {
   id: string;
   path: string;
   isDirty?: boolean;
-  /** When true (default) this opened file is attached to the chat/LLM loop. */
+  /** When true this opened file is attached to the chat/LLM loop. Off by
+   *  default; the user opts in with the checkbox. */
   includeInContext?: boolean;
   /** Root this tab's path is relative to (or lives under). Needed to locate the
    *  file in the file tree when it is not the project's own root. */
@@ -60,7 +62,7 @@ export default function EditorTabBar({
     >
       {editorTabs.map((et) => {
         const isActive = activeEditorTabId === et.id;
-        const included = et.includeInContext !== false;
+        const included = tabIncludedInContext(et);
         // One tab = one context menu, so the whole pill (label, checkbox, close)
         // is the trigger. Right-clicking makes the tab active first: the reveal
         // is about the file the user just pointed at, and an inactive tab's row
