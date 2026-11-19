@@ -143,6 +143,58 @@ describe("QuestionDialog", () => {
     );
   });
 
+  it("keeps free text separate for multiple custom options in one question", async () => {
+    const { onSubmit } = renderDialog({
+      questions: [
+        {
+          header: "Clients",
+          question: "Who are the clients?",
+          multiple: true,
+          options: [
+            { label: "ocode" },
+            { label: "Other tenants' apps" },
+            { label: "Something else" },
+          ],
+        },
+      ],
+    });
+
+    // Both custom rows match isOtherLabel → each gets its own free-text input.
+    fireEvent.click(screen.getByText("Other tenants' apps"));
+    fireEvent.click(screen.getByText("Something else"));
+
+    const inputs = screen.getAllByPlaceholderText("Type your answer…");
+    expect(inputs).toHaveLength(2);
+
+    // Submit stays disabled until both custom rows carry text.
+    const submit = screen.getByRole("button", { name: /submit/i });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(inputs[0], { target: { value: "first answer" } });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(inputs[1], { target: { value: "second answer" } });
+    expect((submit as HTMLButtonElement).disabled).toBe(false);
+
+    // Each input keeps its own text — nothing is shared.
+    expect((inputs[0] as HTMLInputElement).value).toBe("first answer");
+    expect((inputs[1] as HTMLInputElement).value).toBe("second answer");
+
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith("req-1", [
+        {
+          header: "Clients",
+          question: "Who are the clients?",
+          answers: [
+            { label: "Other tenants' apps", text: "first answer", custom: true },
+            { label: "Something else", text: "second answer", custom: true },
+          ],
+        },
+      ]),
+    );
+  });
+
   it("keeps multiple selections for multiple:true questions", async () => {
     const { onSubmit } = renderDialog({
       questions: [

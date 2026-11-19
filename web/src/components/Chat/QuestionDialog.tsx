@@ -90,7 +90,7 @@ function displayOptions(q: QuestionPrompt): DisplayOption[] {
 // Per-question selection: a set of chosen option labels plus the custom text.
 interface QState {
   selected: Set<string>;
-  customText: string;
+  customText: Map<string, string>;
 }
 
 interface QuestionOptionListProps {
@@ -98,10 +98,10 @@ interface QuestionOptionListProps {
   questionIndex: number;
   options: DisplayOption[];
   selected: Set<string>;
-  customText: string;
+  customText: Map<string, string>;
   loading: boolean;
   onToggle: (questionIndex: number, option: DisplayOption) => void;
-  onCustomTextChange: (text: string) => void;
+  onCustomTextChange: (label: string, text: string) => void;
 }
 
 function QuestionOptionList({
@@ -182,8 +182,8 @@ function QuestionOptionList({
             {option.custom && checked && (
               <Input
                 autoFocus
-                value={customText}
-                onChange={(e) => onCustomTextChange(e.target.value)}
+                value={customText.get(option.label) ?? ""}
+                onChange={(e) => onCustomTextChange(option.label, e.target.value)}
                 placeholder="Type your answer…"
                 disabled={loading}
                 className="ml-6 bg-card text-foreground"
@@ -212,7 +212,10 @@ export default function QuestionDialog({
   );
 
   const [state, setState] = useState<QState[]>(() =>
-    questions.map(() => ({ selected: new Set<string>(), customText: "" })),
+    questions.map(() => ({
+      selected: new Set<string>(),
+      customText: new Map<string, string>(),
+    })),
   );
   const [loading, setLoading] = useState(false);
 
@@ -235,13 +238,13 @@ export default function QuestionDialog({
     });
   };
 
-  const setCustomText = (qi: number, text: string) => {
+  const setCustomText = (qi: number, label: string, text: string) => {
     setState((prev) => {
       const next = prev.map((s) => ({
         selected: new Set(s.selected),
-        customText: s.customText,
+        customText: new Map(s.customText),
       }));
-      next[qi].customText = text;
+      next[qi].customText.set(label, text);
       return next;
     });
   };
@@ -254,13 +257,17 @@ export default function QuestionDialog({
     for (const label of s.selected) {
       const opt = optionsPerQuestion[qi].find((o) => o.label === label);
       if (opt?.custom) {
-        if (s.customText.trim() === "") return false;
+        if ((s.customText.get(opt.label) ?? "").trim() === "") return false;
         continue;
       }
       return true;
     }
-    // Only the custom row is selected — answered iff its text is filled.
-    return s.customText.trim() !== "";
+    // Only custom rows remain — answered iff every selected custom row
+    // carries non-empty text (matching the prior single-text behavior where
+    // one shared value covered all custom picks).
+    return [...s.selected].every(
+      (label) => (s.customText.get(label) ?? "").trim() !== "",
+    );
   };
 
   const allAnswered = questions.every((_, qi) => isAnswered(qi));
@@ -274,7 +281,7 @@ export default function QuestionDialog({
         if (opt.custom) {
           answers.push({
             label: opt.label,
-            text: s.customText.trim(),
+            text: (s.customText.get(opt.label) ?? "").trim(),
             custom: true,
           });
         } else {
@@ -335,7 +342,7 @@ export default function QuestionDialog({
           customText={s.customText}
           loading={loading}
           onToggle={toggle}
-          onCustomTextChange={(text) => setCustomText(qi, text)}
+          onCustomTextChange={(label, text) => setCustomText(qi, label, text)}
         />
       </div>
     );
