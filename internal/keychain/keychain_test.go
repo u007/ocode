@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+// stubNativeStore only reports presence; NativeAvailable must never construct
+// the machineID-derived fallback store.
+type stubNativeStore struct{}
+
+func (stubNativeStore) Get(string, string) (string, error) { return "", ErrNotFound }
+func (stubNativeStore) Set(string, string, string) error   { return nil }
+func (stubNativeStore) Delete(string, string) error        { return nil }
+
+func TestNativeAvailableDetectsPlatformStore(t *testing.T) {
+	orig := newPlatformStoreFn
+	t.Cleanup(func() { newPlatformStoreFn = orig })
+
+	newPlatformStoreFn = func(Options) (Store, bool) { return nil, false }
+	if NativeAvailable() {
+		t.Fatal("NativeAvailable() = true with no platform store")
+	}
+	newPlatformStoreFn = func(Options) (Store, bool) { return stubNativeStore{}, true }
+	if !NativeAvailable() {
+		t.Fatal("NativeAvailable() = false with a platform store")
+	}
+}
+
 func TestFallbackRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "kc.json")

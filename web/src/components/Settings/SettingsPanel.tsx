@@ -46,6 +46,7 @@ import CloudConnectorsForm from "./CloudConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
 import PromptsForm from "./PromptsForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
+import { useOptionalProjectState } from "../../stores/projectStore";
 
 export type SettingsGroupId =
   | "backend"
@@ -166,7 +167,11 @@ function groupLabel(id: SettingsGroupId): string {
 // Placeholder content renderer — later tasks replace each case with the
 // group's real form component. Kept as a single switch (not a lookup map)
 // so each task's diff is a localized one-case addition.
-function renderGroup(id: SettingsGroupId) {
+function renderGroup(
+  id: SettingsGroupId,
+  cloudProject?: string,
+  cloudHost?: string,
+) {
   switch (id) {
     case "backend":
       return <BackendForm />;
@@ -187,7 +192,12 @@ function renderGroup(id: SettingsGroupId) {
     case "chat-connectors":
       return <ChatConnectorsForm />;
     case "cloud-connectors":
-      return <CloudConnectorsForm />;
+      return (
+        <CloudConnectorsForm
+          project={cloudProject}
+          host={cloudHost}
+        />
+      );
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":
@@ -324,6 +334,8 @@ function NavSection({
 }
 
 export default function SettingsPanel() {
+  const projectState = useOptionalProjectState();
+  const activeProject = projectState?.state.activeProject;
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
   // Mobile only: the section list is an overlay drawer, not a column. Without
   // this the <=md layout rendered the two <NavSection> stacks side by side
@@ -432,7 +444,7 @@ export default function SettingsPanel() {
           className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
         />
       )}
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">{renderGroup(active)}</div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">{renderGroup(active, activeProject?.path, activeProject?.host ?? undefined)}</div>
       {isMobile && navOpen && (
         // Off-canvas drawer + backdrop, matching ProjectSidebar/CoworkSidebar's
         // mobile pattern.

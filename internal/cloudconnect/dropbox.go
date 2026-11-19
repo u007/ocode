@@ -55,6 +55,9 @@ func (c *DropboxConnector) accessTokenCached(ctx context.Context) (string, error
 }
 
 func (c *DropboxConnector) refreshAccessToken(ctx context.Context) (string, time.Time, error) {
+	if c.sec.AccessToken != "" && time.Now().Before(c.sec.AccessTokenExpiresAt) {
+		return c.sec.AccessToken, c.sec.AccessTokenExpiresAt, nil
+	}
 	if c.sec.RefreshToken == "" {
 		if c.sec.AccessKey != "" {
 			return c.sec.AccessKey, time.Now().Add(1 * time.Hour), nil

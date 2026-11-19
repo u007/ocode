@@ -59,6 +59,9 @@ type SecretBundle struct {
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
+	// Hub mode: kakiit holds the refresh token; ocode caches only this access token.
+	AccessToken          string    `json:"access_token,omitempty"`
+	AccessTokenExpiresAt time.Time `json:"access_token_expires_at,omitempty"`
 	// Service-account / static key flow (GCS, S3).
 	ServiceAccountJSON string `json:"service_account_json,omitempty"`
 	AccessKey          string `json:"access_key,omitempty"`

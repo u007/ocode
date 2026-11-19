@@ -57,3 +57,16 @@ func New(opts ...Option) Store {
 	}
 	return newFallbackStore(o)
 }
+
+// newPlatformStoreFn is indirected so tests can force native availability
+// without depending on which secret-store binaries are installed on the host.
+var newPlatformStoreFn = newPlatformStore
+
+// NativeAvailable reports whether an OS-native secret store is present. It
+// probes newPlatformStore directly and never constructs the machineID-derived
+// fallback store, so callers can refuse to persist secrets when only the
+// fallback is available.
+func NativeAvailable() bool {
+	s, ok := newPlatformStoreFn(Options{})
+	return ok && s != nil
+}

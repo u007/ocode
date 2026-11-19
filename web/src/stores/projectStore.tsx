@@ -1550,6 +1550,11 @@ export function useProjectState() {
   return ctx;
 }
 
+/** For surfaces that may render without a ProjectProvider (e.g. Settings in tests). */
+export function useOptionalProjectState() {
+  return useContext(ProjectContext);
+}
+
 /** Subscribe to the stable project dispatch only. Prefer this over
  *  `useProjectState()` in components that just fire project actions — it never
  *  re-renders the caller when project state changes. */

@@ -17,6 +17,14 @@ import (
 	"github.com/u007/ocode/internal/paths"
 )
 
+// TokenSource resolves a fresh, valid access token for a provider. Hub mode
+// refresh is single-flight per connection; local mode reads the encrypted
+// credentials file. Implementations must never surface token material in
+// errors.
+type TokenSource interface {
+	Token(ctx context.Context, provider string) (accessToken string, expiresAt time.Time, err error)
+}
+
 // Manager owns connector instances and their (encrypted) secrets.
 type Manager struct {
 	mu             sync.RWMutex
@@ -165,6 +173,22 @@ func (m *Manager) Register(cfg Config, sec SecretBundle) error {
 		return err
 	}
 	return m.saveSecrets()
+}
+
+// RegisterTransient exposes a hub access token to browse/read without writing
+// any legacy v1 metadata. The authoritative copy is the v2 file; a process
+// restart rebuilds this from the hub on next use.
+func (m *Manager) RegisterTransient(cfg Config, sec SecretBundle) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	conn, err := newConnector(cfg, sec)
+	if err != nil {
+		return err
+	}
+	m.configs[cfg.ID] = cfg
+	m.secrets[cfg.ID] = sec
+	m.connectors[cfg.ID] = conn
+	return nil
 }
 
 // Remove deletes a connector.
