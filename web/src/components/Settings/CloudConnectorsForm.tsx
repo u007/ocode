@@ -405,7 +405,7 @@ export default function CloudConnectorsForm({
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="space-y-5">
+      <div className="p-6 max-w-2xl space-y-5">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Cloud

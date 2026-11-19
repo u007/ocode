@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { api } from "../../api/client";
 import { eventBus } from "../../lib/eventBus";
 
 interface Account {
@@ -21,7 +22,9 @@ export default function ChatConnectorsForm() {
   const [fbAppSecret, setFbAppSecret] = useState("");
   const [fbAllowed, setFbAllowed] = useState("");
   const [busy, setBusy] = useState(false);
-  const [syncUrl, setSyncUrl] = useState("");
+  // Resolved server-side from sync_url (production hub by default); this form
+  // only reports it. There is deliberately no editable URL input.
+  const [syncTarget, setSyncTarget] = useState("");
   const [recent, setRecent] = useState<any[]>([]);
   const [qrMap, setQrMap] = useState<Record<string, string>>({});
 
@@ -43,6 +46,18 @@ export default function ChatConnectorsForm() {
 
   useEffect(() => {
     load();
+    api
+      .getSyncURLConfig()
+      .then((cfg) => setSyncTarget(cfg.resolved_url))
+      .catch((err) => {
+        if (err.name === "AbortError") {
+          // intentionally not logged: fetch aborted on unmount is expected, not a failure
+          return;
+        }
+        console.error("getSyncURLConfig failed", err);
+      });
+    // The push resolves its URL server-side, so an empty resolved target here
+    // is cosmetic only — sync still targets the configured sync server.
     const off = eventBus.on("messaging_message", (env) => {
       setRecent((r) => [env.data, ...r].slice(0, 20));
     });
@@ -83,7 +98,7 @@ export default function ChatConnectorsForm() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 max-w-2xl space-y-4">
       <h3 className="text-lg font-medium">Chat Connectors (WhatsApp / Telegram / Facebook)</h3>
       {recent.length > 0 && (
         <div className="border rounded p-2 space-y-1 max-h-40 overflow-auto">
@@ -130,12 +145,14 @@ export default function ChatConnectorsForm() {
           <Input placeholder={provider === "telegram" ? "Bot token" : "Session dir (optional)"} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
         )}
         <Button onClick={add} disabled={busy}>Add account</Button>
-        <div className="flex gap-2 items-center">
-          <Input placeholder="kakiit sync URL" value={syncUrl} onChange={(e) => setSyncUrl(e.target.value)} />
+        <div className="space-y-1">
           <Button size="sm" onClick={async () => {
-            const res = await fetch("/api/messaging/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: syncUrl, dir: "push" }) });
+            const res = await fetch("/api/messaging/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dir: "push" }) });
             if (!res.ok) { const t = await res.text(); alert("Sync failed: " + t); }
           }}>Sync push</Button>
+          <p className="text-xs text-muted-foreground">
+            Syncs via {syncTarget || "the configured sync server"}. Set it in Backend → Sync server.
+          </p>
         </div>
       </div>
     </div>

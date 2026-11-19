@@ -103,18 +103,26 @@ type SyncURLConfigResponse struct {
 	ResolvedURL string `json:"resolved_url"`
 }
 
-// HandleGetSyncURLConfig reports the configured (if any) and effective sync
-// server URL.
-func (h *Handler) HandleGetSyncURLConfig(w http.ResponseWriter, r *http.Request) {
+// syncURLConfig reports the persisted sync_url override (empty when unset) and
+// the URL actually in use: the override, else OCODE_SYNC_URL, else the
+// production hub. Both are read together under h.mu so a concurrent save
+// cannot tear the pair.
+func (h *Handler) syncURLConfig() (configured, resolved string) {
 	h.mu.Lock()
-	configured := ""
 	if h.cfg != nil {
 		configured = h.cfg.Ocode.SyncURL
 	}
 	h.mu.Unlock()
+	return configured, ocodesync.ResolveBaseURL(configured)
+}
+
+// HandleGetSyncURLConfig reports the configured (if any) and effective sync
+// server URL.
+func (h *Handler) HandleGetSyncURLConfig(w http.ResponseWriter, r *http.Request) {
+	configured, resolved := h.syncURLConfig()
 	writeJSON(w, http.StatusOK, SyncURLConfigResponse{
 		SyncURL:     configured,
-		ResolvedURL: ocodesync.ResolveBaseURL(configured),
+		ResolvedURL: resolved,
 	})
 }
 

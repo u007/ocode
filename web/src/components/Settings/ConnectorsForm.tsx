@@ -158,7 +158,7 @@ export default function ConnectorsForm({ host }: { host?: string }) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 max-w-2xl space-y-4">
       <div className="text-sm text-muted-foreground">
         These are the base credentials in <code>auth.json</code>, shared with the <code>/connect</code> dialog.
         Per-profile overrides live in Profiles.

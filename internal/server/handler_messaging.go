@@ -253,12 +253,15 @@ func (h *Handler) handleMessagingSync(w http.ResponseWriter, r *http.Request) {
 		Dir string `json:"dir"` // push or pull
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	if in.URL != "" {
-		u, err := url.Parse(in.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			http.Error(w, "invalid sync url", http.StatusBadRequest)
-			return
-		}
+	if in.URL == "" {
+		// The hub is not a user setting: an omitted url resolves from sync_url
+		// (production hub by default) so the SPA cannot point sync elsewhere.
+		_, in.URL = h.syncURLConfig()
+	}
+	u, err := url.Parse(in.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		http.Error(w, "invalid sync url", http.StatusBadRequest)
+		return
 	}
 	if in.Dir == "pull" {
 		err := mgr.PullFromRemote(r.Context(), in.URL)
