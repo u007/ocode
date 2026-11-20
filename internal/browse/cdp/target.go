@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/crashguard"
 )
 
 // Target represents one browser context + page target for a stateKey.
@@ -361,9 +363,12 @@ func isLoopbackHostname(h string) bool {
 // poll is the only live source. A var so tests can shorten it.
 var titlePollInterval = 2 * time.Second
 
-func (t *Target) startHandlers() {
+// startHandlers subscribes the tab's event handlers and enables request
+// interception. In attach mode an error means the request guard is not on, so
+// the caller must not use the tab: the subscriptions are already torn down.
+func (t *Target) startHandlers() error {
 	if t.conn == nil {
-		return
+		return nil
 	}
 	// Screencast frames
 	chFrame, c1 := t.conn.Subscribe(t.sessionID, "Page.screencastFrame")
@@ -374,7 +379,13 @@ func (t *Target) startHandlers() {
 	chReq, c6 := t.conn.Subscribe(t.sessionID, "Network.requestWillBeSent")
 	chConsole, c7 := t.conn.Subscribe(t.sessionID, "Runtime.consoleAPICalled")
 	chExc, c8 := t.conn.Subscribe(t.sessionID, "Runtime.exceptionThrown")
-	chAuth, c9 := t.conn.SubscribeLossless(t.sessionID, "Fetch.authRequired")
+	// The proxy auth handler is launch-only: an attached browser's own proxy
+	// answers its own challenges.
+	var chAuth <-chan json.RawMessage
+	c9 := func() {}
+	if !t.attachMode() {
+		chAuth, c9 = t.conn.SubscribeLossless(t.sessionID, "Fetch.authRequired")
+	}
 	chPaused, c10 := t.conn.SubscribeLossless(t.sessionID, "Fetch.requestPaused")
 	chFinished, c11 := t.conn.Subscribe(t.sessionID, "Network.loadingFinished")
 	chPerf, c12 := t.conn.Subscribe(t.sessionID, "Performance.metrics")
@@ -405,7 +416,9 @@ func (t *Target) startHandlers() {
 	go t.handlePerformanceMetrics(chPerf)
 	go t.handleConsole(chConsole)
 	go t.handleException(chExc)
-	go t.handleAuthRequired(chAuth)
+	if !t.attachMode() {
+		go t.handleAuthRequired(chAuth)
+	}
 	go t.handleRequestPaused(chPaused)
 	go t.handleJavaScriptDialog(chDialog)
 	go t.handleLoadEvent(chLoad)
@@ -414,7 +427,16 @@ func (t *Target) startHandlers() {
 	// above so no auth challenge is missed before the handler is live. Also
 	// handle requestPaused for any patterns Chrome may emit (the handler just
 	// continues the request).
-	_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.enable", map[string]any{"handleAuthRequests": true}, nil)
+	if t.attachMode() {
+		// Attach mode guards the page and every child session. Fetch failing
+		// means requests would run unjudged, so the attach fails.
+		if err := t.enableGuard(t.sessionID); err != nil {
+			t.stopHandlers()
+			return err
+		}
+	} else {
+		_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.enable", map[string]any{"handleAuthRequests": true}, nil)
+	}
 
 	// Learn main frame via getFrameTree async
 	go func() {
@@ -434,6 +456,7 @@ func (t *Target) startHandlers() {
 			t.mu.Unlock()
 		}
 	}()
+	return nil
 }
 
 func (t *Target) handleScreencast(ch <-chan json.RawMessage) {
@@ -945,12 +968,110 @@ func (t *Target) handleAuthRequired(ch <-chan json.RawMessage) {
 }
 
 func (t *Target) handleRequestPaused(ch <-chan json.RawMessage) {
+	t.answerPaused(t.sessionID, ch)
+}
+
+// answerPaused answers each Fetch.requestPaused on sid. Launch mode answers in
+// order, as it always has. Attach mode answers each request on its own
+// goroutine, so one slow decision cannot hold up the requests behind it.
+func (t *Target) answerPaused(sid string, ch <-chan json.RawMessage) {
+	for raw := range ch {
+		if !t.attachMode() {
+			continuePaused(t.conn, sid, raw)
+			continue
+		}
+		raw := raw
+		crashguard.Go(func() { t.judgePaused(sid, raw) })
+	}
+}
+
+// pausedRequest is the part of a Fetch.requestPaused event the handler reads.
+type pausedRequest struct {
+	RequestID string `json:"requestId"`
+	Request   struct {
+		URL string `json:"url"`
+	} `json:"request"`
+}
+
+func continuePaused(conn *Conn, sid string, raw json.RawMessage) {
+	var ev pausedRequest
+	_ = json.Unmarshal(raw, &ev)
+	_ = conn.Call(context.Background(), sid, "Fetch.continueRequest", map[string]string{"requestId": ev.RequestID}, nil)
+}
+
+// judgePaused answers one paused request in attach mode: failed when
+// blockedRequest says so, continued otherwise. Every path sends exactly one
+// answer, and blockedRequest never errors, so a request is never left paused.
+func (t *Target) judgePaused(sid string, raw json.RawMessage) {
+	var ev pausedRequest
+	_ = json.Unmarshal(raw, &ev)
+	if ev.RequestID == "" {
+		return
+	}
+	if blockedRequest(context.Background(), t.manager.resolveHost, ev.Request.URL) {
+		_ = t.conn.Call(context.Background(), sid, "Fetch.failRequest",
+			map[string]string{"requestId": ev.RequestID, "errorReason": "BlockedByClient"}, nil)
+		return
+	}
+	_ = t.conn.Call(context.Background(), sid, "Fetch.continueRequest", map[string]string{"requestId": ev.RequestID}, nil)
+}
+
+// enableGuard turns on request interception and auto-attach for sid in attach
+// mode. The child subscription is taken first, so no child attachment is
+// missed. Auto-attach holds each child (waitForDebuggerOnStart) until
+// guardChild has enabled it.
+func (t *Target) enableGuard(sid string) error {
+	children, cancel := t.conn.SubscribeLossless(sid, "Target.attachedToTarget")
+	t.addCancel(cancel)
+	crashguard.Go(func() { t.handleChildAttached(children) })
+	bg := context.Background()
+	if err := t.conn.Call(bg, sid, "Fetch.enable", map[string]any{"patterns": []map[string]string{{"urlPattern": "*"}}}, nil); err != nil {
+		return fmt.Errorf("cdp: attach: Fetch.enable on %s: %w", sid, err)
+	}
+	if err := t.conn.Call(bg, sid, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}, nil); err != nil {
+		return fmt.Errorf("cdp: attach: Target.setAutoAttach on %s: %w", sid, err)
+	}
+	return nil
+}
+
+func (t *Target) handleChildAttached(ch <-chan json.RawMessage) {
 	for raw := range ch {
 		var ev struct {
-			RequestID string `json:"requestId"`
+			SessionID string `json:"sessionId"`
 		}
 		_ = json.Unmarshal(raw, &ev)
-		_ = t.conn.Call(context.Background(), t.sessionID, "Fetch.continueRequest", map[string]string{"requestId": ev.RequestID}, nil)
+		if ev.SessionID != "" {
+			t.guardChild(ev.SessionID)
+		}
+	}
+}
+
+// guardChild gives an auto-attached child (iframe, worker) the same guard as
+// the page, then lets it run. A child that cannot be guarded is detached
+// instead, so it never runs unjudged.
+func (t *Target) guardChild(sid string) {
+	paused, cancelPaused := t.conn.SubscribeLossless(sid, "Fetch.requestPaused")
+	t.addCancel(cancelPaused)
+	crashguard.Go(func() { t.answerPaused(sid, paused) })
+	if err := t.enableGuard(sid); err != nil {
+		cancelPaused()
+		_ = t.conn.Call(context.Background(), "", "Target.detachFromTarget", map[string]string{"sessionId": sid}, nil)
+		return
+	}
+	_ = t.conn.Call(context.Background(), sid, "Runtime.runIfWaitingForDebugger", nil, nil)
+}
+
+// addCancel records a subscription cancel for stopHandlers. A subscription
+// taken after the target has stopped is cancelled at once.
+func (t *Target) addCancel(c func()) {
+	t.mu.Lock()
+	stopped := t.titleStopped
+	if !stopped {
+		t.cancels = append(t.cancels, c)
+	}
+	t.mu.Unlock()
+	if stopped {
+		c()
 	}
 }
 

@@ -51,6 +51,19 @@ describe("SettingsPanel section filter", () => {
     expect(sectionButton("Terminal")).toBeNull();
   });
 
+  it("matches a section by its extra keywords, not only its label", () => {
+    render(<SettingsPanel />);
+    // "Upstash Box" is not called "sandbox" or "remote browser" anywhere but in
+    // its keywords, so these queries only find it through the keyword list.
+    fireEvent.change(filterInput(), { target: { value: "sandbox" } });
+    expect(sectionButton("Upstash Box")).not.toBeNull();
+    expect(sectionButton("Backend")).toBeNull();
+
+    fireEvent.change(filterInput(), { target: { value: "remote browser" } });
+    expect(sectionButton("Upstash Box")).not.toBeNull();
+    expect(sectionButton("Git")).toBeNull();
+  });
+
   it("requires every whitespace-separated term (AND), not any", () => {
     render(<SettingsPanel />);
     fireEvent.change(filterInput(), { target: { value: "chat display" } });

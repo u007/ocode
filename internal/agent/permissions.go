@@ -4097,7 +4097,9 @@ func isPermissionConfigTarget(resolved string) bool {
 // isPermissionAPIPath reports whether a URL token's path names a route the
 // agent must not drive on the local server: anything under /api/permissions,
 // /api/config/ (the model, judge rubrics, prompts, writable roots, discovery
-// and every other config route), or /api/mcp (MCP reload starts the commands a
+// and every other config route), /api/upstash/ (Upstash Box accounts: adding
+// one or repointing the default backend changes where the agent's work runs
+// and stores its API key), or /api/mcp (MCP reload starts the commands a
 // project's MCP config declares, and enable/disable changes the agent's tool
 // set). Those routes decide the agent's own guards, so the prefixes are broad
 // on purpose: an over-ask on a loopback GET of /api/config/model costs one
@@ -4122,6 +4124,8 @@ func isPermissionAPIPath(t string) bool {
 	return strings.HasPrefix(clean, "/api/permissions") ||
 		clean == "/api/config" ||
 		strings.HasPrefix(clean, "/api/config/") ||
+		clean == "/api/upstash" ||
+		strings.HasPrefix(clean, "/api/upstash/") ||
 		clean == "/api/mcp" ||
 		strings.HasPrefix(clean, "/api/mcp/")
 }

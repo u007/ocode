@@ -89,6 +89,11 @@ import type {
   VaultItemMeta,
   VaultStatus,
   VaultGenOptions,
+  UpstashAccount,
+  UpstashAccountInput,
+  UpstashAccountsResponse,
+  UpstashSettings,
+  UpstashSettingsInput,
   ChatVerbosityConfig,
   ChatVerbosityResponse,
   QuickActionsConfig,
@@ -5220,6 +5225,29 @@ export const api = {
     fetchJSON<{ password: string }>("/api/vault/generate", {
       method: "POST",
       body: JSON.stringify(opts),
+    }),
+  // Upstash Box accounts (Settings → Upstash Box). The server never returns a
+  // raw key; `key_masked` is the only key material the UI ever shows.
+  upstashListAccounts: () =>
+    fetchJSON<UpstashAccountsResponse>("/api/upstash/accounts"),
+  upstashCreateAccount: (body: UpstashAccountInput) =>
+    fetchJSON<UpstashAccount>("/api/upstash/accounts", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  upstashUpdateAccount: (id: string, body: Partial<UpstashAccountInput>) =>
+    fetchJSON<UpstashAccount>(`/api/upstash/accounts/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  upstashDeleteAccount: (id: string) =>
+    fetchEmpty(`/api/upstash/accounts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  upstashUpdateSettings: (body: UpstashSettingsInput) =>
+    fetchJSON<UpstashSettings>("/api/upstash/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
     }),
   listArtifacts: (opts: any, host: any) => {
     const params = new URLSearchParams();

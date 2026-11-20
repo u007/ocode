@@ -1741,6 +1741,57 @@ export interface VaultGenOptions {
   symbols?: boolean;
 }
 
+// ── Upstash Box (Settings → Upstash Box) ─────────────────────────────────────
+
+/** Default browser backend: the local browser or a box on an Upstash account. */
+export type UpstashBackend = "local" | "upstash";
+
+/** Box size. Wire values are the lowercase words. */
+export type UpstashBoxSize = "small" | "medium" | "large";
+
+/** One saved Upstash account. The raw API key is never returned; only the mask. */
+export interface UpstashAccount {
+  id: string;
+  name: string;
+  key_masked: string;
+  size: UpstashBoxSize;
+  idle_minutes: number;
+  hard_cap_minutes: number;
+  retain_days: number;
+  is_default: boolean;
+}
+
+/** GET /api/upstash/accounts. */
+export interface UpstashAccountsResponse {
+  accounts: UpstashAccount[];
+  default_backend: UpstashBackend;
+  total: number;
+}
+
+/** POST /api/upstash/accounts and PUT /api/upstash/accounts/{id}. On PUT,
+ *  omitting `api_key` keeps the stored key, so the field must be absent (not
+ *  empty) when the user did not type one. */
+export interface UpstashAccountInput {
+  name: string;
+  api_key?: string;
+  size: UpstashBoxSize;
+  idle_minutes: number;
+  hard_cap_minutes: number;
+  retain_days: number;
+}
+
+/** PUT /api/upstash/settings. Both fields optional; send only what changes. */
+export interface UpstashSettingsInput {
+  default_backend?: UpstashBackend;
+  default_account_id?: string;
+}
+
+/** PUT /api/upstash/settings response. */
+export interface UpstashSettings {
+  default_backend: UpstashBackend;
+  default_account_id: string;
+}
+
 // ── Pulse (cross-project live-sessions dashboard) ────────────────────────────
 // Mirrors internal/server/pulse_rows.go. The status union and its precedence
 // (needs_permission > needs_question > running > error > idle), the sort order

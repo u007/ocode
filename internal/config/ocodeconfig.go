@@ -1035,13 +1035,16 @@ type RedactionConfig struct {
 }
 
 type OcodeConfig struct {
-	Compact       CompactConfig
-	Advisor       AdvisorConfig
-	Permissions   PermissionConfig
-	Plugins       PluginsConfig
-	Browser       BrowserConfig
-	TTS           TTSConfig
-	STT           STTConfig
+	Compact     CompactConfig
+	Advisor     AdvisorConfig
+	Permissions PermissionConfig
+	Plugins     PluginsConfig
+	Browser     BrowserConfig
+	TTS         TTSConfig
+	STT         STTConfig
+	// UpstashBox holds the non-secret Upstash Box account list and default
+	// backend. API keys are in auth.json, never here. See upstash_box_config.go.
+	UpstashBox    UpstashBoxConfig
 	ChatVerbosity ChatVerbosityConfig
 	// Appearance is the colour/icon theme selection and the extra extension
 	// roots the discovery scan adds. Persisted under ocodeconfig.json's
@@ -1650,6 +1653,7 @@ type ocodeConfigFile struct {
 	Browser                    browserConfigFile           `json:"browser"`
 	TTS                        TTSConfig                   `json:"tts,omitempty"`
 	STT                        STTConfig                   `json:"stt,omitempty"`
+	UpstashBox                 UpstashBoxConfig            `json:"upstash_box,omitempty"`
 	ChatVerbosity              *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
 	Appearance                 *appearanceConfigFile       `json:"appearance,omitempty"`
 	QuickActions               *QuickActionsConfig         `json:"quick_actions,omitempty"`
@@ -2174,6 +2178,12 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["stt"]; ok {
 		cfg.STT = file.STT
 		delete(raw, "stt")
+	}
+
+	if _, ok := raw["upstash_box"]; ok {
+		cfg.UpstashBox = file.UpstashBox
+		cfg.UpstashBox.normalize()
+		delete(raw, "upstash_box")
 	}
 
 	if _, ok := raw["chat_verbosity"]; ok {
@@ -3284,6 +3294,11 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if len(cfg.LocalModels) > 0 {
 		payload["local_models"] = cfg.LocalModels
+	}
+	// Written only once an account or a non-default backend exists, so an
+	// untouched install gains no key.
+	if len(cfg.UpstashBox.Accounts) > 0 || cfg.UpstashBox.Backend() != UpstashBoxBackendLocal {
+		payload["upstash_box"] = cfg.UpstashBox
 	}
 	if len(cfg.DB.Connections) > 0 {
 		payload["db"] = cfg.DB

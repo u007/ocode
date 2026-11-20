@@ -64,6 +64,34 @@ To close: run each path with a throwaway account/host, record the result, and ad
 
 # TODO
 
+## Open: Upstash Box as a browser backend (2026-11-21)
+
+- **Spec:** `docs/superpowers/specs/2026-11-21-upstash-box-browser-backend-design.md` (revision 2, after a code-grounded review). The user approved starting on 2026-11-21.
+- **Done, uncommitted, not wired into the tools (phases 1 and 2):** Box API client (`internal/upstashbox`), accounts backend (`/api/upstash/*`, key in `auth.json`, covered by `isPermissionAPIPath`), "Upstash Box" settings section, websocket CDP transport and attach-mode `Manager` (`internal/browse/cdp`). Code-reviewed on 2026-11-21 and the findings fixed. The settings section was checked in a browser against a private server.
+- **Not verified against a real box:** the Box client and attach mode have only fake-server tests. A live test gated on a Box API key environment variable is still to write; add that variable to `.env.example` in the same change.
+- **Known limits of attach-mode request blocking:** host names resolve on the ocode machine, not in the box; a popup request in flight before interception starts is not judged; WebSocket handshake interception is unverified on a live browser.
+- **Open, awaiting the user:** `internal/auth/store.go` writes its whole in-memory cache, so a second ocode process can erase a credential saved by the first. Affects every provider key and predates this work.
+- **Not started (phase 3):** `backend`, `start` and `terminate` on the browser tools, the Handler-level box manager, the permission category for `start`, idle timeout, hard cap, journal and lease-based sweep, boxes panel.
+- **Not started (phases 4 and 5):** login states (cookies and localStorage stored locally), then `retain`.
+- **Later:** `htrcli` attach mode for the external CDP URL, importing selected domains from the local browser into a login state, restoring open tabs, uploads on the upstash backend, in-box driver.
+- **Untested:** whether `ttl` can be extended, whether Box's `/tmp` Chromium profile survives a pause, whether a Box network policy can deny private ranges, and how web `/new` and `/clear` reach the server.
+
+## Nice to have: Upstash Box as a remote host for ocode and Claude Code (2026-11-21)
+
+- **Status:** not started and not scheduled. Do not start without the user asking; the Upstash Box browser backend comes first.
+- **Idea:** a `KindBox` target beside `KindSSH`/`KindWSL` (`internal/remote/target.go`, `newTransportForTarget`), a `remote.Transport` over Box SSH or the Box API, and `ocode serve --remote` reached through a bearer-protected Box preview URL (Box SSH refuses `-L`, so no tunnel). Claude Code runs in an ocode terminal on the box.
+- **Why deferred:** the project needs its own `git clone` on the box, uncommitted local work does not travel, and an SSH remote host already covers most of the use.
+- **Unverified before any design:** whether a detached `ocode serve` mid-turn counts as activity (Box auto-pauses an idle box and pause kills processes), and whether preview URLs carry WebSocket and SSE.
+- **Pricing reference:** `docs/concepts/upstash-firecrawl-browser-pricing.md`.
+
+## Nice to have: Firecrawl as a browser/scrape backend option (2026-11-21)
+
+- **Status:** not started and not scheduled. Do not start without the user asking; the Upstash Box browser backend comes first.
+- **Idea:** offer Firecrawl beside `local` and `upstash` for read-only work: URL to clean markdown, crawl, search, with its built-in anti-bot handling. Its Interact sessions and saved profiles (cookies + localStorage) could serve as a third interactive target.
+- **Why deferred:** it is a managed scrape API, not a CDP browser, so `htrcli` and the `browser_run` step loop cannot drive it unchanged. It needs its own adapter and credit accounting.
+- **Open question:** whether it belongs on the `browser` tool `target` or on `webfetch` as a fetch backend.
+- **Pricing reference:** `docs/concepts/upstash-firecrawl-browser-pricing.md`.
+
 ## Deferred: ocode mobile companion (2026-11-16)
 
 - **Spec:** `docs/superpowers/specs/2026-11-16-ocode-mobile-companion-design.md`.

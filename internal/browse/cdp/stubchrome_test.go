@@ -28,6 +28,12 @@ type stubChrome struct {
 	beforeReply func(method, sessionID string)
 	// overrides replaces the canned reply for a method (see SetResult).
 	overrides map[string]any
+	// failures makes a method reply with a CDP error (see SetFailure).
+	failures map[string]string
+	// replyGate, when it returns a channel, holds that command's reply until
+	// the channel is closed. The reply is written from its own goroutine, so
+	// the stub keeps reading later commands meanwhile (see SetReplyGate).
+	replyGate func(method string, params json.RawMessage) <-chan struct{}
 }
 
 // newStubChrome creates a pipe pair and a Conn. The returned conn is what
@@ -58,6 +64,23 @@ func (s *stubChrome) SetResult(method string, result any) {
 		s.overrides = map[string]any{}
 	}
 	s.overrides[method] = result
+}
+
+// SetFailure makes every later call to method reply with a CDP error.
+func (s *stubChrome) SetFailure(method, message string) {
+	s.callsMu.Lock()
+	defer s.callsMu.Unlock()
+	if s.failures == nil {
+		s.failures = map[string]string{}
+	}
+	s.failures[method] = message
+}
+
+// SetReplyGate installs a gate consulted for every command reply.
+func (s *stubChrome) SetReplyGate(gate func(method string, params json.RawMessage) <-chan struct{}) {
+	s.callsMu.Lock()
+	defer s.callsMu.Unlock()
+	s.replyGate = gate
 }
 
 func (s *stubChrome) Calls() []stubCall {
@@ -144,11 +167,27 @@ func (s *stubChrome) handleFrame(frame []byte) {
 		}
 		raw, _ := json.Marshal(result)
 		reply := map[string]any{"id": *msg.ID, "result": json.RawMessage(raw)}
+		s.callsMu.Lock()
+		failMsg, failing := s.failures[msg.Method]
+		gate := s.replyGate
+		s.callsMu.Unlock()
+		if failing {
+			reply = map[string]any{"id": *msg.ID, "error": map[string]any{"code": -32000, "message": failMsg}}
+		}
 		if msg.SessionID != "" {
 			reply["sessionId"] = msg.SessionID
 		}
 		b, _ := json.Marshal(reply)
 		b = append(b, 0)
+		if gate != nil {
+			if ch := gate(msg.Method, msg.Params); ch != nil {
+				go func() {
+					<-ch
+					_, _ = s.wCh.Write(b)
+				}()
+				return
+			}
+		}
 		_, _ = s.wCh.Write(b)
 	} else {
 		// Event from client — ignore

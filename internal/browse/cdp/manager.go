@@ -196,6 +196,21 @@ type Manager struct {
 	cleanup func()
 	proxy   *EgressProxy
 
+	// attachMode is set by NewAttachManager. The browser belongs to someone
+	// else: no proxyServer, no proxy auth handler, one shared browser context,
+	// request blocking, and Close never sends Browser.close.
+	attachMode bool
+	// sharedBC is attach mode's single browser context, created on first use
+	// and cleared when the connection ends. attachContexts lists every context
+	// this Manager created, so a redial and Close can dispose them. Both are
+	// guarded by mu.
+	sharedBC       string
+	sharedBCOwner  *Conn
+	attachContexts []string
+	// resolveHost judges name-based request hosts in attach mode. Set by
+	// NewAttachManager; tests replace it.
+	resolveHost resolveFunc
+
 	// launch injection for tests
 	launchFn func(context.Context) (*Conn, <-chan int, func(), error)
 
@@ -315,8 +330,8 @@ func (m *Manager) ensureChrome(ctx context.Context) error {
 	m.conn = conn
 	m.exited = exited
 	m.cleanup = cleanup
-	// Create egress proxy lazily if not exists.
-	if m.proxy == nil {
+	// Create egress proxy lazily if not exists. Attach mode never proxies.
+	if m.proxy == nil && !m.attachMode {
 		p, perr := NewEgressProxy(m.opts.Dialer)
 		if perr != nil {
 			m.mu.Unlock()
@@ -334,7 +349,7 @@ func (m *Manager) ensureChrome(ctx context.Context) error {
 	m.mu.Unlock()
 
 	// Watch for exit
-	go m.watchExited(exited)
+	go m.watchExited(conn, exited)
 
 	return nil
 }
@@ -352,16 +367,24 @@ func (m *Manager) defaultLaunch(ctx context.Context) (*Conn, <-chan int, func(),
 	}, m.opts.ProfileDir, m.opts.NoSandbox)
 }
 
-func (m *Manager) watchExited(exited <-chan int) {
+func (m *Manager) watchExited(conn *Conn, exited <-chan int) {
 	_, ok := <-exited
 	if !ok {
 		// channel closed without value — treat as exit
 	}
-	m.handleChromeExit()
+	m.handleChromeExit(conn)
 }
 
-func (m *Manager) handleChromeExit() {
+// handleChromeExit clears the state of conn when it is still the current
+// connection. An exit notice for a connection that was already replaced by a
+// redial is stale: acting on it would clear the new connection's targets and
+// shared context.
+func (m *Manager) handleChromeExit(conn *Conn) {
 	m.mu.Lock()
+	if m.conn != conn {
+		m.mu.Unlock()
+		return
+	}
 	// Collect targets to notify
 	targets := make([]*Target, 0, len(m.targets))
 	for _, t := range m.targets {
@@ -378,6 +401,8 @@ func (m *Manager) handleChromeExit() {
 	}
 	m.conn = nil
 	m.exited = nil
+	m.sharedBC = ""
+	m.sharedBCOwner = nil
 	// Do not clear proxy — keep it for next launch? Spec says Close closes proxy.
 	// Keep proxy alive across relaunches; only Close() closes it.
 
@@ -429,7 +454,7 @@ func (m *Manager) startBrowserHandlersLocked() {
 	}()
 	go func(c *Conn) {
 		<-c.Done()
-		m.handleChromeExit()
+		m.handleChromeExit(c)
 	}(conn)
 }
 
@@ -645,7 +670,14 @@ func (m *Manager) maybeRegisterNewTab(targetID, targetType, url, browserContextI
 		sharedContext:    true,
 	}
 	t.perfRecording = true
-	t.startHandlers()
+	if err := t.startHandlers(); err != nil {
+		m.abandonTarget(t, targetID)
+		return
+	}
+	if m.attachMode && m.popupBlocked(conn, targetID, url) {
+		m.abandonTarget(t, targetID)
+		return
+	}
 	t.startFileChooser()
 
 	m.mu.Lock()
@@ -819,19 +851,9 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 	}
 
 	// 1. createBrowserContext
-	var bcRes struct {
-		BrowserContextID string `json:"browserContextId"`
-	}
-	err := conn.Call(ctx, "", "Target.createBrowserContext", map[string]string{
-		"proxyServer":     proxyURL,
-		"proxyBypassList": "<-loopback>",
-	}, &bcRes)
+	bcID, err := m.browserContextFor(ctx, conn, proxyURL)
 	if err != nil {
 		return nil, err
-	}
-	bcID := bcRes.BrowserContextID
-	if bcID == "" {
-		bcID = "ctx-auto"
 	}
 	// 2. createTarget
 	var tgtRes struct {
@@ -842,7 +864,9 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 		"browserContextId": bcID,
 	}, &tgtRes)
 	if err != nil {
-		_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": bcID}, nil)
+		if !m.attachMode {
+			_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": bcID}, nil)
+		}
 		return nil, err
 	}
 	targetID := tgtRes.TargetID
@@ -857,7 +881,9 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 	}, &attRes)
 	if err != nil {
 		_ = conn.Call(context.Background(), "", "Target.closeTarget", map[string]string{"targetId": targetID}, nil)
-		_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": bcID}, nil)
+		if !m.attachMode {
+			_ = conn.Call(context.Background(), "", "Target.disposeBrowserContext", map[string]string{"browserContextId": bcID}, nil)
+		}
 		return nil, err
 	}
 	sessionID := attRes.SessionID
@@ -868,8 +894,11 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 	m.pending[targetID] = stateKey
 	m.mu.Unlock()
 
-	// 4. Enable domains and auto-attach
-	_ = conn.Call(ctx, sessionID, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}, nil)
+	// 4. Enable domains and auto-attach. Attach mode sets auto-attach inside
+	// startHandlers instead, once its child-session guard is subscribed.
+	if !m.attachMode {
+		_ = conn.Call(ctx, sessionID, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}, nil)
+	}
 	_ = conn.Call(ctx, sessionID, "Page.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Runtime.enable", nil, nil)
 	_ = conn.Call(ctx, sessionID, "Network.enable", nil, nil)
@@ -882,17 +911,22 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 		proxyUser:        proxyUser,
 		proxyPass:        proxyPass,
 		browserContextID: bcID,
-		targetID:         targetID,
-		sessionID:        sessionID,
-		sink:             sink,
-		conn:             conn,
+		// A shared context is never disposed: attach mode puts every tab in it.
+		sharedContext: m.attachMode,
+		targetID:      targetID,
+		sessionID:     sessionID,
+		sink:          sink,
+		conn:          conn,
 	}
 	// The Performance domain was enabled above, so recording starts on.
 	// PerfStop/PerfStart toggle it per socket command; the flag is the
 	// authoritative state re-sent to each newly attached socket.
 	t.perfRecording = true
 	// Setup per-target event handlers + screencast
-	t.startHandlers()
+	if err := t.startHandlers(); err != nil {
+		m.abandonTarget(t, targetID)
+		return nil, err
+	}
 	t.startFileChooser()
 	// A headless target has no sink to read frames: Chrome would stream them
 	// into nothing, so the screencast starts only with a panel sink.
@@ -1061,15 +1095,26 @@ func (m *Manager) Close(ctx context.Context) error {
 	exited := m.exited
 	cleanup := m.cleanup
 	proxy := m.proxy
+	targets := m.targets
+	contexts := m.attachContexts
 	m.cleanup = nil
 	m.conn = nil
 	m.exited = nil
 	m.proxy = nil
 	m.targets = make(map[string]*Target)
+	m.attachContexts = nil
+	m.sharedBC = ""
+	m.sharedBCOwner = nil
 	m.mu.Unlock()
 
 	if conn != nil {
-		_ = conn.Call(ctx, "", "Browser.close", nil, nil)
+		if m.attachMode {
+			// An attached browser is not ours to shut down: close our tabs and
+			// the contexts we created, then the connection. Never Browser.close.
+			m.releaseAttached(ctx, conn, targets, contexts)
+		} else {
+			_ = conn.Call(ctx, "", "Browser.close", nil, nil)
+		}
 		_ = conn.Close()
 	}
 	if exited != nil {

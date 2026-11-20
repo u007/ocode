@@ -2257,7 +2257,9 @@ func (h *Handler) configuredProviderIDs() map[string]bool {
 	// Every stored credential counts, including provider ids that are not in
 	// the auth registry (custom/gateway providers such as xiaomi-token-plan-sgp).
 	for id := range auth.List() {
-		if id != "" {
+		// Upstash Box keys share this store but are not LLM providers; listing
+		// one here would add a phantom provider to the model picker.
+		if id != "" && !auth.IsUpstashBoxCredentialID(id) {
 			out[id] = true
 		}
 	}

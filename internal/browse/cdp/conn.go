@@ -61,12 +61,61 @@ type pendingResp struct {
 	err    error
 }
 
-// Conn is a minimal Chrome DevTools Protocol client over the
-// --remote-debugging-pipe transport: NUL-terminated JSON on the pipe, with
-// request/response correlation by id and per-session event subscriptions.
+// transport moves whole CDP messages over one connection. Each implementation
+// owns its framing: the pipe transport NUL-terminates every message, the
+// websocket transport sends one message per text frame.
+type transport interface {
+	// write sends one marshalled command. deadline, when non-zero, bounds the
+	// write on transports that support one.
+	write(msg []byte, deadline time.Time) error
+	// read blocks for the next message from the peer and returns its JSON
+	// body without framing. A non-nil error ends the stream.
+	read() ([]byte, error)
+	// close tears the connection down and must unblock a pending read.
+	close() error
+}
+
+// pipeTransport is the --remote-debugging-pipe framing: NUL-terminated JSON.
+type pipeTransport struct {
+	r  io.Reader
+	w  io.Writer
+	rd *bufio.Reader
+}
+
+func (p *pipeTransport) write(msg []byte, deadline time.Time) error {
+	if dw, ok := p.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := dw.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	_, err := p.w.Write(append(msg, 0))
+	return err
+}
+
+func (p *pipeTransport) read() ([]byte, error) {
+	frame, err := p.rd.ReadBytes(0) // grows without a line cap
+	if err != nil {
+		return nil, ErrConnClosed
+	}
+	return bytes.TrimSpace(frame[:len(frame)-1]), nil // strip trailing \0 and stray whitespace
+}
+
+func (p *pipeTransport) close() error {
+	if cw, ok := p.w.(io.Closer); ok {
+		_ = cw.Close()
+	}
+	if cr, ok := p.r.(io.Closer); ok {
+		_ = cr.Close()
+	}
+	return nil
+}
+
+// Conn is a minimal Chrome DevTools Protocol client, with request/response
+// correlation by id and per-session event subscriptions. It speaks over a
+// transport: the --remote-debugging-pipe pipe (NewConn) or a websocket
+// (DialWebSocket).
 type Conn struct {
-	r       io.Reader
-	w       io.Writer
+	tr      transport
 	wmu     sync.Mutex // serializes writes
 	pmu     sync.Mutex // guards id and pending
 	id      int64      // next command id (start at 1)
@@ -84,9 +133,13 @@ type Conn struct {
 // a background goroutine. Closing the returned Conn closes writer (and reader,
 // when it is an io.Closer) and shuts the reader loop down.
 func NewConn(r io.Reader, w io.Writer) *Conn {
+	return newConn(&pipeTransport{r: r, w: w, rd: bufio.NewReader(r)})
+}
+
+// newConn wraps a transport and starts its reader goroutine.
+func newConn(tr transport) *Conn {
 	c := &Conn{
-		r:       r,
-		w:       w,
+		tr:      tr,
 		pending: make(map[int64]chan *pendingResp),
 		done:    make(chan struct{}),
 		subs:    make(map[subKey][]*EventSub),
@@ -103,13 +156,8 @@ func (c *Conn) Done() <-chan struct{} { return c.done }
 // all subscription channels, and is idempotent.
 func (c *Conn) Close() error {
 	c.closed.Do(func() {
-		if cw, ok := c.w.(io.Closer); ok {
-			_ = cw.Close()
-		}
+		_ = c.tr.close()
 		c.finish(ErrConnClosed)
-		if cr, ok := c.r.(io.Closer); ok {
-			_ = cr.Close()
-		}
 	})
 	return nil
 }
@@ -158,7 +206,6 @@ func (c *Conn) Call(ctx context.Context, sessionID, method string, params any, r
 	if err != nil {
 		return err
 	}
-	b = append(b, 0)
 	ch := c.registerPending(id)
 	defer c.removePending(id)
 
@@ -200,14 +247,12 @@ func (c *Conn) Call(ctx context.Context, sessionID, method string, params any, r
 }
 
 func (c *Conn) readLoop() {
-	rd := bufio.NewReader(c.r)
 	for {
-		frame, err := rd.ReadBytes(0) // grows without a line cap
+		frame, err := c.tr.read()
 		if err != nil {
-			c.finish(ErrConnClosed)
+			c.finish(err)
 			return
 		}
-		frame = bytes.TrimSpace(frame[:len(frame)-1]) // strip trailing \0 and stray whitespace
 		if len(frame) == 0 {
 			continue
 		}
@@ -265,19 +310,12 @@ func (c *Conn) dispatchResponse(m wireMessage) {
 	ch <- pr // buffered(1); a late reply to a removed id is dropped above
 }
 
-// write serializes one command onto the pipe. Writes block when Chrome stops
-// draining fd 3 (~64 KB of buffer), and wmu serializes every call in the
-// process behind the first blocked writer, so the caller's deadline is
-// applied to the write as well as the reply wait. *os.File pipes support
-// SetWriteDeadline; other writers (test stubs) are written without one.
+// write serializes one command onto the transport. Pipe writes block when
+// Chrome stops draining fd 3 (~64 KB of buffer), and wmu serializes every call
+// in the process behind the first blocked writer, so the caller's deadline is
+// applied to the write as well as the reply wait.
 func (c *Conn) write(data []byte, deadline time.Time) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	if dw, ok := c.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		if err := dw.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
-	}
-	_, err := c.w.Write(data)
-	return err
+	return c.tr.write(data, deadline)
 }

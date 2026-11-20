@@ -47,12 +47,14 @@ import ChatConnectorsForm from "./ChatConnectorsForm";
 import CloudConnectorsForm from "./CloudConnectorsForm";
 import PulseAssistantForm from "./PulseAssistantForm";
 import PromptsForm from "./PromptsForm";
+import UpstashBoxForm from "./UpstashBoxForm";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
 import { useOptionalProjectState } from "../../stores/projectStore";
 
 export type SettingsGroupId =
   | "backend"
   | "browser"
+  | "upstash-box"
   | "vault"
   | "tts"
   | "stt"
@@ -99,6 +101,9 @@ interface GroupDef {
   id: SettingsGroupId;
   label: string;
   category?: string;
+  /** Extra words the filter matches besides the label and category, for a
+   *  section known by other names (e.g. "sandbox" for a remote box). */
+  keywords?: string;
 }
 
 const OCODE_GROUPS: GroupDef[] = [
@@ -131,6 +136,12 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "terminal", label: "Terminal", category: "Terminal & Tools" },
   { id: "computer-use", label: "Computer Use", category: "Terminal & Tools" },
   { id: "browser", label: "Browser", category: "Terminal & Tools" },
+  {
+    id: "upstash-box",
+    label: "Upstash Box",
+    category: "Terminal & Tools",
+    keywords: "upstash box browser sandbox remote browser",
+  },
   { id: "git", label: "Git", category: "Terminal & Tools" },
   // Discovery & Skills
   { id: "discovery", label: "Discovery", category: "Discovery & Skills" },
@@ -179,6 +190,8 @@ function renderGroup(
       return <BackendForm />;
     case "browser":
       return <BrowserForm />;
+    case "upstash-box":
+      return <UpstashBoxForm />;
     case "vault":
       return <VaultForm />;
     case "tts":
@@ -345,7 +358,10 @@ export default function SettingsPanel() {
   const [navFilter, setNavFilter] = useState("");
   const navKeywords = parseKeywords(navFilter);
   const matchesFilter = (g: GroupDef) =>
-    matchesKeywords([g.label, g.category ?? ""].join(" "), navKeywords);
+    matchesKeywords(
+      [g.label, g.category ?? "", g.keywords ?? ""].join(" "),
+      navKeywords,
+    );
   const ocodeMatches = OCODE_GROUPS.filter(matchesFilter);
   const opencodeMatches = OPENCODE_GROUPS.filter(matchesFilter);
   // Mobile only: the section list is an overlay drawer, not a column. Without

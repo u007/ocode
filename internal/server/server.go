@@ -751,6 +751,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleGetSyncURLConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleSetSyncURLConfig))
 
+	// Upstash Box accounts: non-secret fields in ocodeconfig.json, each API key
+	// in auth.json (never returned; responses carry a masked form only).
+	s.mux.HandleFunc("GET /api/upstash/accounts", s.authMiddleware(s.handler.HandleUpstashAccountsList))
+	s.mux.HandleFunc("POST /api/upstash/accounts", s.authMiddleware(s.handler.HandleUpstashAccountCreate))
+	s.mux.HandleFunc("PUT /api/upstash/accounts/{id}", s.authMiddleware(s.handler.HandleUpstashAccountUpdate))
+	s.mux.HandleFunc("DELETE /api/upstash/accounts/{id}", s.authMiddleware(s.handler.HandleUpstashAccountDelete))
+	s.mux.HandleFunc("PUT /api/upstash/settings", s.authMiddleware(s.handler.HandleUpstashSettingsUpdate))
+
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
