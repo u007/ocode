@@ -8,7 +8,9 @@ tags:
   - performance
   - session-dialog
   - pagination
-timestamp: 2026-09-24T06:12:33Z
+  - legacy-sessions
+  - cpu
+timestamp: 2026-11-19T11:40:47Z
 ---
 # Web "All sessions" dialog was slow to pop up (2026-09-24, fixed)
 
@@ -47,5 +49,30 @@ e.g. `ses_2026-09-24-133707-d5eda0e8_child_context_2026-09-24-133958`. They are 
 - `web/src/components/Layout/SessionDialog.test.tsx` — child hidden; first page renders 50 rows; Load more shows; both mutation-verified (removing the filter/slice fails them).
 - `web/src/lib/sessionId.test.ts` — `_child_` infix match, `childless` negative, empty-id negative.
 
-## Known follow-up (NOT fixed)
-The server still re-reads ~5,527 legacy `.json`/`.ojsonl` session files per list request (**~390ms**) and returns the full payload. Indexing legacy sessions is a separate optimization; the client fix deliberately does not touch the endpoint.
+## Known follow-up (NOT fixed): server-side legacy scan
+`session.legacyOcodeMetas` (`internal/session/session.go`, called from `ocodeRefsForDir`) re-parses every
+un-migrated legacy `.json`/`.ojsonl` session file on each session list, with no cache. Four server paths
+reach it:
+
+- `HandleListProjectSessions` (`internal/server/handler_projects.go`) through
+  `session.ListRefsWithClaudeForDir`.
+- `HandleGitWorktreeList` → `enrichWorktrees` → `worktreeOwners`
+  (`internal/server/handler_git_worktree_state.go`), which calls `session.ListRefsForDir` once per
+  worktree.
+- `gatherDiskPulseInputs` (`internal/server/handler_pulse.go`), once per local project, reached from
+  `gatherPulseInputs` for the "all" dashboard scope — the polled path.
+- `HandleListPulseChats` (`internal/server/pulse_assistant.go`), for the assistant's own chat list.
+
+Measurements:
+
+- 2026-09-24: ~5,527 legacy files re-read per list request (**~390ms**), full payload returned.
+- 2026-11-19: 3,803 legacy files (1.7 GB) in one project took ~17% of server CPU. On the affected machine,
+  22,769 legacy files (2.8 GB, none with a sqlite sibling) were moved out of
+  `~/.local/share/opencode/project/*/sessions` to an archive folder; a 15 s profile afterwards showed no
+  legacy-scan frames. That fixes that machine only. The code path is still uncached for anyone with
+  legacy files.
+- Six legacy files were test fixtures (`ses_stilllegacy1`, `ses_mixed-ojsonl`) that the Go test suite
+  leaked into the real data dir on 2026-11-14/15/18. The leaking test is not identified.
+
+Indexing legacy sessions is a separate optimization; the client fix deliberately does not touch the
+endpoint.
