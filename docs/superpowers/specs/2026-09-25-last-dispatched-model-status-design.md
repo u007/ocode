@@ -104,7 +104,7 @@ snapshot:
 `docs/gotchas/main-model-pick-also-sets-global-default.md`) and whenever the
 config default changes, **without any turn having been dispatched with it**.
 It is also the field the sidebar and several dialogs deliberately treat as
-authoritative (`ModelDialog.tsx:82-87`, `sessionEvents.ts` explicitly refuses to
+authoritative (`ModelDialog.tsx:61-64`, `sessionEvents.ts` explicitly refuses to
 propagate snapshot `main_model` globally). The result: the status bar's
 "model: …" was not a statement about what the running or last turn actually
 used — it tracked a picker/config value, indistinguishable from the sidebar's,

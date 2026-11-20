@@ -43,6 +43,10 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   pulse: "Select Assistant Model",
 };
 
+// Stable empty identity for the deferred first render: the navigation model must
+// not expose ids for rows that are not mounted yet.
+const NO_NAV_IDS: readonly string[] = [];
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -307,6 +311,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // The input shows `search` immediately; the list follows `deferredSearch` so a
   // keystroke never blocks on filtering the full registry (~10k rows).
   const deferredSearch = useDeferredValue(search);
+  // The rows mount one render after the dialog shell, at deferred priority, so
+  // a reopen paints the dialog at once instead of blocking on ~540 rows.
+  const listReady = useDeferredValue(open);
   const filteredModels = useMemo(() => {
     const query = deferredSearch.toLowerCase();
     if (query === "") return models;
@@ -597,8 +604,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     onClose();
   };
 
+  // Gate the ids with the rows: while `listReady` is false the DOM has no rows,
+  // so a nav model that could focus one would silently lose the focus request.
+  const navIds = listReady ? modelNavIds : NO_NAV_IDS;
   const modelNavigation = useListNavigation({
-    itemIds: modelNavIds,
+    itemIds: navIds,
     onActivate: (index) => {
       const row = modelNavRows[index];
       if (row) handleSelect(row.model);
@@ -789,10 +799,15 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     // entries never show the option.
     const canRemove = isRecent && m.name.includes("/");
 
-    return (
-      <ContextMenu key={m.name}>
-        <ContextMenuTrigger asChild>
-          <div className="flex items-start gap-1">
+    // Only a removable recents row gets a Radix ContextMenu. Wrapping all ~540
+    // rows mounted a menu root per row and made open and close visibly slow.
+    const row = (
+          <div
+            key={m.name}
+            className="flex items-start gap-1"
+            // Same as the ContextMenu trigger: no native menu on a model row.
+            onContextMenu={canRemove ? undefined : (e) => e.preventDefault()}
+          >
             <button
               {...(navProps ?? {})}
               type="button"
@@ -834,18 +849,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           </button>
         )}
           </div>
-        </ContextMenuTrigger>
-        {canRemove && (
-          <ContextMenuContent>
-            <ContextMenuItem
-              onClick={() => removeFromRecents(m)}
-              disabled={pendingRecent === m.name}
-            >
-              <Trash2 className="mr-2 h-4 w-4 shrink-0" />
-              Remove from recently used
-            </ContextMenuItem>
-          </ContextMenuContent>
-        )}
+    );
+    if (!canRemove) return row;
+    return (
+      <ContextMenu key={m.name}>
+        <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            onClick={() => removeFromRecents(m)}
+            disabled={pendingRecent === m.name}
+          >
+            <Trash2 className="mr-2 h-4 w-4 shrink-0" />
+            Remove from recently used
+          </ContextMenuItem>
+        </ContextMenuContent>
       </ContextMenu>
     );
   };
@@ -915,6 +932,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
             ★ Favorites, then provider groups, mirroring the TUI picker
             (internal/tui/picker.go openModelPicker). Others: provider groups. */}
         <div className="max-h-96 overflow-y-auto">
+          {listReady && (<>
           {sections && sections.recents.length > 0 && (
             <div className="mb-4">
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -954,6 +972,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               No models found
             </div>
           )}
+          </>)}
         </div>
       </DialogContent>
     </Dialog>

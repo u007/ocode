@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import ModelDialog from "./ModelDialog";
+import ModelDialog, { type ModelDialogTab } from "./ModelDialog";
 import { ProjectProvider, useProjectDispatch } from "../../stores/projectStore";
 import { useSessionHost } from "../../hooks/useSessionHost";
 import type { ModelInfo } from "../../api/types";
@@ -763,9 +763,64 @@ describe("ModelDialog recents context menu", () => {
     // gpt-c lives in the openai provider group, not recents.
     const row = document.querySelector<HTMLElement>('[data-list-nav-id="openai:openai/gpt-c"]');
     expect(row).not.toBeNull();
-    fireEvent.contextMenu(row!);
+    // No Radix wrapper on this row, so the renderer's own handler must still
+    // suppress the native menu (dispatchEvent returns false when prevented).
+    expect(fireEvent.contextMenu(row!)).toBe(false);
 
     expect(screen.queryByRole("menuitem", { name: "Remove from recently used" })).toBeNull();
     expect(hoisted.api.removeModelRecent).not.toHaveBeenCalled();
+  });
+});
+
+describe("ModelDialogHost", () => {
+  it("opens for the requested purpose without a parent state change", async () => {
+    const { ModelDialogHost } = await import("./ModelDialogHost");
+    const ref: { current: import("./ModelDialogHost").ModelDialogHostHandle | null } = { current: null };
+    let parentRenders = 0;
+    function Parent() {
+      parentRenders++;
+      return <ModelDialogHost ref={ref} />;
+    }
+    render(<Parent />);
+    const rendersAfterMount = parentRenders;
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    act(() => ref.current!.open("advisor"));
+    await waitFor(() => expect(screen.getByText("Select Advisor Model")).toBeInTheDocument());
+    // The row list is deferred behind the dialog shell but must still mount.
+    await waitFor(() => expect(document.querySelectorAll("[data-list-nav-row]").length).toBeGreaterThan(0));
+    expect(parentRenders).toBe(rendersAfterMount);
+  });
+
+  it("retitles an already-open dialog opened for another purpose", async () => {
+    const { ModelDialogHost } = await import("./ModelDialogHost");
+    const ref: { current: import("./ModelDialogHost").ModelDialogHostHandle | null } = { current: null };
+    render(<ModelDialogHost ref={ref} />);
+    act(() => ref.current!.open("advisor"));
+    await waitFor(() => expect(screen.getByText("Select Advisor Model")).toBeInTheDocument());
+
+    act(() => ref.current!.open("main"));
+    await waitFor(() => expect(screen.getByText("Select Model")).toBeInTheDocument());
+    expect(screen.queryByText("Select Advisor Model")).toBeNull();
+  });
+
+  it("writes nothing for an unknown purpose, then reopens normally", async () => {
+    const { ModelDialogHost } = await import("./ModelDialogHost");
+    const ref: { current: import("./ModelDialogHost").ModelDialogHostHandle | null } = { current: null };
+    render(<ModelDialogHost ref={ref} />);
+    act(() => ref.current!.open("not-a-purpose" as ModelDialogTab));
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-list-nav-row]").length).toBeGreaterThan(0),
+    );
+
+    // handleSelect's default branch only calls onPick, and the host passes none.
+    fireEvent.click(document.querySelector<HTMLElement>('[data-list-nav-id="openai:openai/gpt-b"]')!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(hoisted.api.setConfigModel).not.toHaveBeenCalled();
+    expect(hoisted.api.setSessionModel).not.toHaveBeenCalled();
+    expect(hoisted.api.setPermissionModel).not.toHaveBeenCalled();
+
+    act(() => ref.current!.open("main"));
+    await waitFor(() => expect(screen.getByText("Select Model")).toBeInTheDocument());
   });
 });

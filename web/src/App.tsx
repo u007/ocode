@@ -71,7 +71,7 @@ import { shouldRenderReaderPreview } from "./lib/readerMode";
 import { ReaderChatHeader } from "./components/Layout/ReaderChatHeader";
 import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
 import { basename, cn } from "./lib/utils";
-import ModelDialog from "./components/Layout/ModelDialog";
+import { ModelDialogHost, type ModelDialogHostHandle } from "./components/Layout/ModelDialogHost";
 import IntentSkillsDialog from "./components/Layout/IntentSkillsDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import ArtifactPublishDialog from "./components/Artifacts/ArtifactPublishDialog";
@@ -246,7 +246,9 @@ function HomeApp() {
   const [coworkOpen, setCoworkOpen] = useState(() =>
     typeof window === "undefined" ? true : window.innerWidth >= 768,
   );
-  const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  // The model dialog owns its open state (ModelDialogHost): keeping it here
+  // re-rendered the whole app on every open and close.
+  const modelDialogRef = useRef<ModelDialogHostHandle>(null);
   const [publishTarget, setPublishTarget] = useState<{
     artifactId: string;
     projectPath: string;
@@ -259,7 +261,6 @@ function HomeApp() {
   } | null>(null);
   const [artifactRefreshKey, setArtifactRefreshKey] = useState(0);
   const [intentSkillsOpen, setIntentSkillsOpen] = useState(false);
-  const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const sidebar = useResizableSidebar();
   const fileTreePane = useResizableSidebar({
     storageKey: "ocode.ui.filetree_width",
@@ -1132,8 +1133,7 @@ function HomeApp() {
   });
 
   const openModelDialog = (tab: ModelDialogTab = "main") => {
-    setModelDialogTab(tab);
-    setModelDialogOpen(true);
+    modelDialogRef.current?.open(tab);
   };
 
   // `placeholderTitle` is set only for a brand-new `new-*` tab; a /reset-id
@@ -2651,10 +2651,8 @@ function HomeApp() {
         onClose={() => setCmdOpen(false)}
         onExecute={handleCommand}
       />
-      <ModelDialog
-        open={modelDialogOpen}
-        onClose={() => setModelDialogOpen(false)}
-        purpose={modelDialogTab}
+      <ModelDialogHost
+        ref={modelDialogRef}
         sessionId={activeTabId ?? undefined}
         host={activeSessionHost}
       />

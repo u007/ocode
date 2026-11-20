@@ -267,7 +267,7 @@ web/
             │
             └── Dialogs:
                 ├── <SessionDialog>     (filterable session picker)
-                ├── <ModelDialog>       (model selector, one purpose per open — see ModelDialogTab)
+                ├── <ModelDialogHost>   (owns the open state; renders <ModelDialog>, one purpose per open — see ModelDialogTab)
                 ├── <PermissionDialog>  (permission approval)
                 ├── <QuestionDialog>    (question prompt)
                 ├── <ShareDialog>       (desktop share: status + start/stop)

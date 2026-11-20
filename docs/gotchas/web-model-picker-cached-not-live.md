@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Web model picker must open from the cached model list, not a live refresh
-description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter'
+description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter; 2026-11-19 dialog open state moved out of App, Radix menu only on removable rows, deferred row mount on reopen'
 resource: ""
 tags:
   - gotcha
@@ -16,14 +16,19 @@ tags:
   - gzip
   - configured
   - payload
-timestamp: 2026-09-19T12:46:03Z
+  - re-render
+  - radix
+  - context-menu
+  - deferred-value
+  - host-component
+timestamp: 2026-11-19T15:25:32Z
 ---
 # Web model picker must open from the cached model list, not a live refresh
 
 **Type:** Gotcha  
-**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer  
-**Resource:** web/src/components/Layout/ModelDialog.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go  
-**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload  
+**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer; on 2026-11-19 also the dialog's open state in the root App re-rendering the whole app, a Radix menu on every row, and the full row list mounting inside the click  
+**Resource:** web/src/components/Layout/ModelDialog.tsx; web/src/components/Layout/ModelDialogHost.tsx; web/src/App.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go  
+**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload, re-render, radix, context-menu, deferred-value, host-component  
 
 ---
 
@@ -53,6 +58,8 @@ payload 1.2–1.3 MB / ~8,207 models / 223 providers.
 5. **Ship only the consumer's configured providers, not the full registry.** A 19-credential
    account only needs ~19 providers (~1,650 models) of the 223-provider (8,207 model) registry.
    Filter server-side behind a `configured=true` opt-in so other consumers are unaffected.
+6. **Keep a dialog's open state in a small host component, not in a large root component.** Opening or closing it re-renders everything below the root. Expose `open(purpose)` through a ref (§6).
+7. **Do not wrap every list row in a Radix menu root when only a few rows have a menu.** Wrap only the rows that have menu content (§7).
 
 ## 1. Dialog opened with `refresh: true` — live provider fetch on every open
 
@@ -132,6 +139,51 @@ still get the full registry.
 
 **Tests:** `internal/server/handler_models_configured_test.go`.
 
+## 6. Dialog open state in the root `App` re-rendered the whole app (2026-11-19)
+
+Symptom (desktop app): every click on the model opened and closed the dialog with lag, and it got
+slower as the session went on.
+
+**Measurement setup for §6 and §8:** headless Chromium against vite dev, the configured list of 1,435
+models (538 rendered rows after the 500-row cap, plus recents and favorites), 5 open/close cycles. Not
+measured in the WKWebView production build. §7 is a jsdom benchmark.
+
+`HomeApp` (`web/src/App.tsx`) owned the dialog's open state (`modelDialogOpen`, `modelDialogTab`), so each
+open and close re-rendered the whole app. A CPU profile showed `FileTree` `TreeNode`, `ProjectSidebar`
+rows, `GitPanel`, `TerminalTabs` and `CronPanel` rendering on every toggle. That cost grows with app state
+(open sessions, tree size), which is why it felt slower over time.
+
+**Fix:** `ModelDialogHost` (`web/src/components/Layout/ModelDialogHost.tsx`) owns the open state and the
+purpose, and exposes `open(purpose)` through a ref (`ModelDialogHostHandle`). App calls
+`modelDialogRef.current?.open(tab)` from `openModelDialog`. The host lives in its own file on purpose:
+18 App test files mock `./components/Layout/ModelDialog` with only a default export, so a named
+`ModelDialogHost` export placed in that module would be missing under those mocks.
+
+Close-to-paint went from ~105 ms to ~60 ms. The profile shows no App-level component rendering on a toggle.
+
+## 7. A Radix `ContextMenu` on every model row
+
+Every row was wrapped in a Radix `ContextMenu`, but only removable "Recently Used" rows have menu content.
+Now only `canRemove` rows (a recent whose id is `provider/model`) get the wrapper, in the row renderer of
+`ModelDialog.tsx`. Other rows keep `onContextMenu` preventDefault, so the native menu stays suppressed as
+before.
+
+jsdom benchmark: close ~75 ms → ~36 ms; open ~145 ms → ~95 ms.
+
+## 8. Reopen mounted ~538 rows inside the click
+
+On a reopen, the cached `models` state mounted every row synchronously inside the click, which blocked the
+dialog's first paint (~330 ms open-to-paint in dev). `listReady = useDeferredValue(open)` in
+`ModelDialog.tsx` gates the list: the shell paints first (~35 ms) and the rows mount at deferred priority
+(~250 ms later in dev mode). The navigation model is gated with the rows (`navIds = listReady ?
+modelNavIds : NO_NAV_IDS`, an empty `readonly string[]`), so a keypress in that window cannot target a
+row that is not mounted.
+
+## Open: duplicate Radix dismissable-layer versions (not fixed)
+
+`pnpm why @radix-ui/react-dismissable-layer` in `web/` shows two versions. The app's own Radix packages
+resolve 1.1.19; 1.2.1 is pulled only through `@univerjs/design` (dropdown-menu and hover-card). Not changed.
+
 ## Regression tests
 
 - `internal/agent/context_test.go` `TestModelContextKindsAt_AgreesWithPerModelLookup`
@@ -139,6 +191,8 @@ still get the full registry.
 - `web ModelDialog.test.tsx` ("opens from the cached list and never blocks on a live refresh",
   "Refresh fetches live provider lists…", provider render cap)
 - `web modelSelection.test.ts` capProviderGroups
+- `web ModelDialog.test.tsx` `ModelDialogHost` case: `open(purpose)` through the ref shows the dialog and
+  the parent does not re-render
 - `web dialogStreaming.test.tsx` host assertion updated
 - `internal/server/gzip_test.go` (gzip middleware: compression, content-type allowlist, SSE/WebSocket
   exclusion, Flusher/Hijacker delegation, Unwrap, Vary header, small-body skip)
