@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: kakiit LLM Gateway Provider
-description: The `kakiit` provider — auth and base-URL override chain, live-only /v1/models catalog (no models.dev), per-model protocol routing with the refusing-to-guess rule, the sticky session header plus the SINGLE-USE per-turn request id, and the 402 top-up / 409 duplicate-id mappings; includes the provider registration sites that adding a provider must touch.
+description: The `kakiit` provider — auth and base-URL override chain, live-only /v1/models catalog (no models.dev), per-model protocol routing with the refusing-to-guess rule, the sticky session header plus the SINGLE-USE per-turn request id, and the 402 top-up / 409 duplicate-id mappings (which fire on all three transports and reach the web/desktop banner); includes the provider registration sites that adding a provider must touch.
 resource: internal/agent/client_kakiit.go
 tags:
   - provider
@@ -10,7 +10,7 @@ tags:
   - gateway
   - models-registry
   - auth
-timestamp: 2026-11-21T10:35:34Z
+timestamp: 2026-11-21T11:32:08Z
 ---
 # kakiit LLM Gateway Provider
 
@@ -24,7 +24,8 @@ dispatch — no forked transport.
 
 Committed in `8ab8d978` ("feat(agent): kakiit LLM gateway provider",
 2026-11-20); the single-use request-id contract and its 409 mapping landed in
-`e607214c` (gateway side `92f3b276`). Everything in this doc is verified
+`e607214c` (gateway side `92f3b276`), and `590971e6` made that mapping fire on
+all three transports and reach the web/desktop banner. Everything in this doc is verified
 against the current tree; all behaviour is pinned by httptest stubs, and **no
 live end-to-end call has been made yet** (the gateway is not deployed — see
 "Deferred / open").
@@ -46,7 +47,7 @@ live end-to-end call has been made yet** (the gateway is not deployed — see
   compaction client) skip instead.
 - **Base URL.** Default `KakiitDefaultBaseURL` =
   `https://hub.mercstudio.com/api/llm` (`internal/agent/client_kakiit.go:25`).
-  `KakiitBaseURL()` (`client_kakiit.go:219-227`) resolves:
+  `KakiitBaseURL()` (`client_kakiit.go:233-241`) resolves:
   `KAKIIT_BASE_URL` env > `kakiit_base_url` (ocodeconfig.json,
   `internal/config/ocodeconfig.go:1265-1270`) > default.
 - **The two base-URL paths disagree on where the auth.json per-credential
@@ -72,7 +73,7 @@ any moment. `providerModelsFromRegistry("kakiit", …)` therefore returns the
 live list and never falls back to the snapshot
 (`internal/agent/models_registry.go:1412-1418`); `allProviderModelsFromRegistry`
 merges the live `kakiit/` ids into the picker list
-(`models_registry.go:1267-1280`).
+(`models_registry.go:1267-1282`).
 
 - **Source:** `GET {BaseURL}/v1/models` with the bearer key. Entries carry the
   vendor extensions ocode consumes:
@@ -82,20 +83,20 @@ merges the live `kakiit/` ids into the picker list
   - `x_kakiit_free` — free models report zero price
   - `context_length`, `pricing{prompt,completion}` (USD per 1M, string, the
     OpenRouter/models.dev convention) — parsed into
-    `pricing.ModelPricing` (`models_registry_kakiit.go:29-57`)
+    `pricing.ModelPricing` (`models_registry_kakiit.go:37-57`)
 - **Cache:** one in-process cache (`kakiitLiveData`), 5-minute TTL
   (`kakiitCacheTTL`, same value as the models.dev/OpenRouter caches). On the
   TUI main loop only a still-fresh cache is consulted (`refresh=false`), so
   the picker never blocks on the gateway; `PreloadKakiitModels()`
   (`models_registry_kakiit.go:283-285`, via `crashguard.Go`) warms it at TUI
   Init (`internal/tui/model.go:3127`) and server Serve
-  (`internal/server/server.go:2482`).
+  (`internal/server/server.go:2488`).
 - **Failure behaviour is split by cause:**
   - *Fetch failure / malformed body / empty list* → nil list + one debug line;
     the picker section is simply empty (`TestKakiitFetchFailureYieldsEmptyListAndDebugLineNotStaleFallback`).
     Never a stale or models.dev fallback — a wrong list is worse than none.
   - *401/403* → recorded in `KakiitModelsAuthError()`
-    (`models_registry_kakiit.go:209-217`) so a rejected key reads as "your key
+    (`models_registry_kakiit.go:74-78`) so a rejected key reads as "your key
     is bad", not as "no models" (`TestKakiitRevokedKeyYieldsAuthErrorNotSilentEmptyList`).
   - *No credential configured* → no fetch at all (nothing to list).
 - **Exported, currently test-only surfaces** (for the deferred picker chrome,
@@ -118,7 +119,7 @@ speaks via `x_kakiit_protocol`. ocode routes through the **existing dispatch**
 | `openai-chat` | `chatOpenAI` fall-through | `{BaseURL}/v1/chat/completions` |
 
 - **`apiRoot()` inserts the `/v1` segment for kakiit**
-  (`client_kakiit.go:162-167`): the declared BaseURL is the gateway ROOT
+  (`client_kakiit.go:176-181`): the declared BaseURL is the gateway ROOT
   (…/api/llm), unlike `api.openai.com/v1`-style providers whose map entry
   already carries the version. All three transports append their suffix to
   `apiRoot()` (`client.go:1513, 3824, 3967`), so one helper keeps them
@@ -154,8 +155,8 @@ speaks via `x_kakiit_protocol`. ocode routes through the **existing dispatch**
   call sites stamp it (`client.go:1563, 1670, 3359, 4045, 5341`).
 - **`X-Request-Id` is minted once per turn and is SINGLE-USE at the
   gateway.** A `req_`-prefixed UUIDv7 (`kakiitTurnRequestID`,
-  `client_kakiit.go:172-174`; `newUUIDv7` implemented locally,
-  `client_kakiit.go:180-213`, rather than promoting google/uuid from an
+  `client_kakiit.go:186-188`; `newUUIDv7` implemented locally,
+  `client_kakiit.go:194-227`, rather than promoting google/uuid from an
   indirect dependency) is parked on the context in `ChatWithContext` BEFORE
   the attempt loop (`client.go:840-848`), so every retry inside one turn
   reuses it; the next turn mints a new one (pinned by
@@ -169,7 +170,7 @@ speaks via `x_kakiit_protocol`. ocode routes through the **existing dispatch**
   instead of silently billing a second upstream call. `setKakiitHeaders` is
   stamped at the three transport sites (`client.go:1565, 3361, 4047`); its
   doc comment records the consequence for retries
-  (`client_kakiit.go:69-84`).
+  (`client_kakiit.go:83-98`).
 - **Why single-use:** the gateway keeps the id on every ledger row it touches
   (`placeHold` in the kakiit repo's `src/server/llm/wallet.ts`). Returning an
   existing hold as an "idempotent retry" was a double-spend — the caller got
@@ -190,19 +191,34 @@ The gateway returns HTTP 402 with an OpenAI-shaped envelope whose code is
 `llm_insufficient_credits` for an uncovered wallet hold.
 
 - **Classification is status-code + typed code, never prose**
-  (`kakiitUserFacingError`, `client_kakiit.go:107-140`, the same classifier
+  (`kakiitUserFacingError`, `client_kakiit.go:121-154`, the same classifier
   the 409 mapping below uses): a body that merely mentions credits on a
   non-402 status stays generic, and a 402 WITHOUT the
   `llm_insufficient_credits` code stays generic too (the gateway may grow
   other payment errors whose remedy is different). Pinned by
   `TestKakiit402ClassificationIsByStatusAndCodeNotProse`.
+- **All three transports label the error `kakiit`, so the mapping fires on
+  every one.** The classifier keys on `providerStatusError.Provider ==
+  "kakiit"`, but the two native transports used to label a typed status error
+  with their PROTOCOL (`anthropic`, `openai responses`), so a gateway 402/409
+  on those routes silently stayed generic. `statusProviderLabel(fallback)`
+  (`client_kakiit.go:63-75`) returns `kakiit` for a kakiit client and the
+  protocol label for every other provider; the Responses and Anthropic
+  transports now pass their label through it (`client.go:3402`,
+  `client.go:4073`), and chat/completions already used `c.Provider`
+  (`client.go:1578`). Pinned by `TestKakiit402MapsOnAllThreeProtocols` and
+  `TestNonKakiitProvidersKeepProtocolLabels`.
 - **User-facing line** (verbatim, `KakiitTopUpMessage`,
-  `client_kakiit.go:89`): *Insufficient kakiit credits — top up at
+  `client_kakiit.go:103`): *Insufficient kakiit credits — top up at
   hub.mercstudio.com (or ask your site admin)*. Surfaced through
-  `UserFacingLLMError` (`client_kakiit.go:146-154`), consumed by the TUI
-  `streamDoneMsg` error line (`internal/tui/model.go:5618`) and
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6584-6592`) — the
-  web/desktop error banner rides the latter.
+  `UserFacingLLMError` (`client_kakiit.go:160-168`), consumed by the TUI
+  `streamDoneMsg` error line (`internal/tui/model.go:5618`), by
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6589-6597`), and by the
+  web/desktop server's `publishTurnError`
+  (`internal/server/agent_session.go:1167`), which publishes
+  `agent.UserFacingLLMError(err)` as the `turn_error` payload's `error` field
+  (`agent_session.go:1183`) — so the browser/desktop banner shows the mapped
+  line, not the raw JSON envelope.
 - **No auto-retry:** 402 is outside the retryable set — typed status errors
   retry only via the 429 / 500-504-529 arms (`isRateLimitError`,
   `internal/agent/client.go:1083-1093`; `isServerUnavailableError`,
@@ -217,17 +233,23 @@ The gateway answers `409` with an OpenAI-shaped envelope whose code is
 (see "Sticky session header and per-turn request id").
 
 - **Same status-then-code classification.** The 409 arm of
-  `kakiitUserFacingError` (`client_kakiit.go:107-140`) requires the envelope
+  `kakiitUserFacingError` (`client_kakiit.go:121-154`) requires the envelope
   code `duplicate_request_id`; an unrelated 409 stays generic, so a conflict
   with a different cause never tells the user their request "already ran".
   Pinned by `TestKakiit409OtherConflictsStayGeneric`.
+- **The `kakiit` provider label is what makes it fire on every transport**,
+  the same `statusProviderLabel` change described under 402: without it the
+  Responses/Anthropic 409s carried the protocol name and stayed generic.
+  Pinned by `TestKakiit409MapsOnAllThreeProtocols`.
 - **User-facing line** (verbatim, `KakiitDuplicateRequestMessage`,
-  `client_kakiit.go:105`): *kakiit: this request already ran (or is still
+  `client_kakiit.go:119`): *kakiit: this request already ran (or is still
   running) — send it again to start a new attempt*. It rides the same
-  `UserFacingLLMError` (`client_kakiit.go:146-154`) path as the top-up line:
-  the TUI `streamDoneMsg` error line (`internal/tui/model.go:5618`) and the
-  web/desktop banner via `Agent.StepLimitHitDetail`
-  (`internal/agent/agent.go:6584-6592`).
+  `UserFacingLLMError` (`client_kakiit.go:160-168`) path as the top-up line:
+  the TUI `streamDoneMsg` error line (`internal/tui/model.go:5618`),
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6589-6597`), and the
+  web/desktop `publishTurnError` banner
+  (`internal/server/agent_session.go:1167`, `agent.UserFacingLLMError(err)` at
+  `:1183`).
 - **When it appears:** only after the gateway has accepted an attempt carrying
   the turn's id — a retry inside that same turn, or an ambiguous failure the
   caller retried — because the id is single-use. A fresh turn mints a fresh
@@ -254,7 +276,7 @@ commit `8ab8d978` touched, in the order that matters:
 3. **`keyOptionalProviders` non-membership** (`client.go:4548-4553`): decide
    keyless-allowed vs typed refusal; kakiit is refused (see Setup).
 4. **Preload sites**: TUI `Init` (`internal/tui/model.go:3127`) and server
-   `Serve` (`internal/server/server.go:2482`) call `PreloadKakiitModels()`.
+   `Serve` (`internal/server/server.go:2488`) call `PreloadKakiitModels()`.
 5. **Registry branches**: `providerModelsFromRegistry` /
    `allProviderModelsFromRegistry` (`internal/agent/models_registry.go:1412`,
    `:1267`) — live-only here, snapshot-fallback for models.dev providers.
@@ -263,11 +285,13 @@ commit `8ab8d978` touched, in the order that matters:
    the `NewClientWithProfile` override branch (`client.go:4922-4930`).
 
 Tests live in `internal/agent/{client_kakiit_test.go,
-client_kakiit_protocol_test.go, client_kakiit_402_test.go,
-client_kakiit_409_test.go, models_registry_kakiit_test.go}` — 25 test
-functions, runnable as `go test ./internal/agent/ -run Kakiit`. The 402 and
-409 cases go through the real `ChatWithContext` path with a stubbed transport
-(`chatErrorFromStub`), not a hand-built error value.
+client_kakiit_protocol_test.go, client_kakiit_protocol_errors_test.go,
+client_kakiit_402_test.go, client_kakiit_409_test.go,
+models_registry_kakiit_test.go}` — 28 test functions, runnable as
+`go test ./internal/agent/ -run Kakiit`. The 402 and 409 cases go through the
+real `ChatWithContext` path with a stubbed transport (`chatErrorFromStub`),
+not a hand-built error value; `client_kakiit_protocol_errors_test.go` pins the
+per-transport provider label.
 
 ## Operator pointer and deferred items
 
