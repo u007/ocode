@@ -60,6 +60,20 @@ func kakiitRequestIDFromContext(ctx context.Context) string {
 	return ""
 }
 
+// statusProviderLabel is the Provider field a typed status error carries.
+//
+// The protocol-specific transports label errors with the PROTOCOL ("anthropic",
+// "openai responses"), but the kakiit classifier keys on the PROVIDER, so a
+// gateway 402/409 on those routes went unrecognised and surfaced as raw JSON.
+// Every kakiit transport reports "kakiit" instead; other providers keep their
+// protocol label unchanged.
+func (c *GenericClient) statusProviderLabel(fallback string) string {
+	if c != nil && c.isKakiitProvider() {
+		return kakiitProvider
+	}
+	return fallback
+}
+
 // isKakiitProvider reports whether this client talks to the kakiit LLM
 // gateway.
 func (c *GenericClient) isKakiitProvider() bool {

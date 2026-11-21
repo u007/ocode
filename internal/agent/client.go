@@ -3399,7 +3399,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, newProviderStatusError("openai responses", resp.StatusCode, string(body), resp.Header)
+		return nil, newProviderStatusError(c.statusProviderLabel("openai responses"), resp.StatusCode, string(body), resp.Header)
 	}
 
 	// Parse SSE stream to accumulate the full response.
@@ -4070,7 +4070,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body))
 		c.emitDebug("error", msg)
-		return nil, newProviderStatusError("anthropic", resp.StatusCode, string(body), resp.Header)
+		return nil, newProviderStatusError(c.statusProviderLabel("anthropic"), resp.StatusCode, string(body), resp.Header)
 	}
 
 	// Streaming parser. Anthropic emits one of:

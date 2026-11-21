@@ -1149,7 +1149,13 @@ func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
 	if !startedAt.IsZero() {
 		tookMs = endedAt.Sub(startedAt).Milliseconds()
 	}
-	data := map[string]any{"session_id": sessionID, "error": err.Error()}
+	// The user-facing text, not the raw error: a kakiit 402/409 has a one-line
+	// remedy (top up / send again) that the raw envelope would bury. Every other
+	// provider's UserFacingLLMError is err.Error(), so this is a no-op for them.
+	data := map[string]any{
+		"session_id": sessionID,
+		"error":      agent.UserFacingLLMError(err),
+	}
 	if stage != "" {
 		data["stage"] = stage
 	}
