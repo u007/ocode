@@ -27,10 +27,10 @@ const kakiitCacheTTL = 5 * time.Minute
 // picker's free badge; context_length and pricing feed the context gauge and
 // usage ledger exactly like models.dev data does for other providers.
 type kakiitModelInfo struct {
-	ID            string  `json:"id"`
-	ContextLength int64   `json:"context_length"`
-	Protocol      string  `json:"x_kakiit_protocol"`
-	Free          bool    `json:"x_kakiit_free"`
+	ID            string        `json:"id"`
+	ContextLength int64         `json:"context_length"`
+	Protocol      string        `json:"x_kakiit_protocol"`
+	Free          bool          `json:"x_kakiit_free"`
 	Pricing       kakiitPricing `json:"pricing"`
 }
 
@@ -293,8 +293,8 @@ func KakiitModelsLoaded() bool { return kakiitCacheFresh() }
 // x_kakiit_protocol — never rename.
 const (
 	kakiitProtocolAnthropic = "anthropic-messages"
-	kakiitProtocolResponses  = "openai-responses"
-	kakiitProtocolChat       = "openai-chat"
+	kakiitProtocolResponses = "openai-responses"
+	kakiitProtocolChat      = "openai-chat"
 )
 
 // kakiitProtocolForModel resolves the transport protocol for a kakiit model

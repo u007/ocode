@@ -25,9 +25,12 @@ const kakiitProvider = "kakiit"
 const KakiitDefaultBaseURL = "https://hub.mercstudio.com/api/llm"
 
 // kakiitRequestIDHeader is the per-turn request id the gateway persists on
-// every ledger row it touches; retries within one turn reuse it so a user's
-// retry converges to one settle and never double-debits (kakiit spec,
-// "Persisted request id").
+// every ledger row it touches. It is SINGLE-USE at the gateway: replaying an id
+// whose request is in flight or finished is refused with 409
+// duplicate_request_id (a proxy cannot replay a response, so a replay would
+// only double-bill the upstream). A turn therefore gets one attempt's worth of
+// meaning out of its id; retries that reuse it fail closed rather than
+// duplicating work.
 const kakiitRequestIDHeader = "X-Request-Id"
 
 // ctxKeyKakiitRequestID carries the per-turn kakiit request id through the
@@ -67,9 +70,10 @@ func (c *GenericClient) isKakiitProvider() bool {
 // gateway request. The sticky X-Opencode-Session rides the same request via
 // setOpencodeSessionHeader (kakiit is admitted there by provider id), so this
 // helper only adds the request id: minted once per ChatWithContext turn and
-// parked on the context, every retry attempt inside the turn reuses it, which
-// is the gateway's wallet-ledger idempotency key (a retried request converges
-// to one settle instead of double-debiting).
+// parked on the context. Note the consequence for retries — the gateway refuses
+// a reused id (409 duplicate_request_id) instead of re-executing it, so an
+// ambiguous failure retried with the same id fails closed rather than billing
+// the upstream twice.
 func (c *GenericClient) setKakiitHeaders(req *http.Request) {
 	if req == nil || c == nil || !c.isKakiitProvider() {
 		return
@@ -88,6 +92,18 @@ const KakiitTopUpMessage = "Insufficient kakiit credits — top up at hub.mercst
 // uncovered wallet hold (HTTP 402).
 const kakiitInsufficientCreditsCode = "llm_insufficient_credits"
 
+// kakiitDuplicateRequestIDCode is the gateway's envelope code for a reused
+// X-Request-Id (HTTP 409). Since the gateway cannot replay a response, an id is
+// SINGLE-USE: replaying one whose request finished, or one still in flight,
+// is refused rather than re-executed (a replay would double-bill the upstream
+// for one charge).
+const kakiitDuplicateRequestIDCode = "duplicate_request_id"
+
+// KakiitDuplicateRequestMessage is the one-line notice for that 409: the
+// attempt already ran, so the user's "retry" must be a fresh turn (which mints
+// a fresh id) rather than a resend of the same request.
+const KakiitDuplicateRequestMessage = "kakiit: this request already ran (or is still running) — send it again to start a new attempt"
+
 // kakiitUserFacingError maps a kakiit chat error to its one-line user-facing
 // notice, "" when the error carries no kakiit-specific mapping (callers then
 // render the generic error text).
@@ -105,13 +121,22 @@ func kakiitUserFacingError(err error) string {
 	if se.Provider != kakiitProvider {
 		return ""
 	}
-	if se.Code != http.StatusPaymentRequired {
+	switch se.Code {
+	case http.StatusPaymentRequired:
+		if !strings.Contains(strings.ToLower(se.Body), kakiitInsufficientCreditsCode) {
+			return ""
+		}
+		return KakiitTopUpMessage
+	case http.StatusConflict:
+		// A 409 is only the duplicate-id notice when the envelope says so; any
+		// other conflict stays generic.
+		if !strings.Contains(strings.ToLower(se.Body), kakiitDuplicateRequestIDCode) {
+			return ""
+		}
+		return KakiitDuplicateRequestMessage
+	default:
 		return ""
 	}
-	if !strings.Contains(strings.ToLower(se.Body), kakiitInsufficientCreditsCode) {
-		return ""
-	}
-	return KakiitTopUpMessage
 }
 
 // UserFacingLLMError returns the one-line message a chat surface should show

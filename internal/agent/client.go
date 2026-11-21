@@ -838,8 +838,11 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 	var lastErr error
 	attempts := 0
 	// kakiit: one X-Request-Id per turn, minted BEFORE the attempt loop so
-	// every retry inside this turn reuses it (gateway ledger idempotency —
-	// a retried request converges to one settle, never double-debits).
+	// every retry inside this turn reuses it. The gateway treats an id as
+	// SINGLE-USE: a retry that reaches it after the first attempt was accepted
+	// is refused with 409 duplicate_request_id (a replay cannot be answered
+	// from cache, and re-executing would bill the upstream twice). That is the
+	// intended fail-closed behaviour; kakiitUserFacingError explains it.
 	if c.isKakiitProvider() {
 		baseCtx = withKakiitRequestID(baseCtx, kakiitTurnRequestID())
 	}
