@@ -5,7 +5,7 @@ status: resolved-with-follow-ups
 tags: [session, sqlite, concurrency, persistence]
 type: Gotcha
 description: Concurrent session writers — conflict semantics and recovery (updated with 2026-11-05 dismissed-question incident)
-timestamp: 2026-11-09T07:48:45Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Concurrent session writers — conflict semantics and recovery
 
@@ -190,7 +190,7 @@ Two coupled defects in the concurrent-writer reconcile (`internal/session/sessio
    `rebaseAppend` produced a merge whose last rows were still the raw
    rows (calls intact), but `reconcileAppendToDirWithMessages` returned
    `removeIncompleteToolRequests(merged)` — the filtered view.
-   `persistTurnTranscript` (`internal/server/agent_session.go:1767`; the adoption is at `:1778`) adopted
+   `persistTurnTranscript` (`internal/server/agent_session.go:2008`; the adoption is at `:2019`) adopted
    it as `as.messages`, erasing the trailing PERMISSION_ASK sentinel + its
    tool-call from the resident transcript. `tailIsPermissionAsk` went
    false (the next user message started a fresh turn, the orphaned call
@@ -247,7 +247,7 @@ without answering."). The user then reopened the dismissed prompt from its
 transcript card and answered it. `HandleAnswerQuestion`
 (`internal/server/handler_questions.go`) deliberately accepts a dismissed
 question, applies the answer in memory, and calls `rewriteAskResult`
-(`internal/server/agent_session.go:2793`), which calls
+(`internal/server/agent_session.go:3040`), which calls
 `session.RewriteAskResultForDir` and then `rewriteAskResultRow`
 (`internal/session/sqlitestore.go:721`). That guard accepted only ask
 sentinels, so it refused with `serve: rewrite ask result for <id> seq N:

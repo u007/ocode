@@ -13,7 +13,7 @@ tags:
   - fail-open
   - timeout
   - server
-timestamp: 2026-11-15T10:40:57Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Speech summary is fail-open: skip while the turn holds `as.mu`, cancellable summariser, unlocked config write
 
@@ -28,13 +28,13 @@ Three separate locks were being held across slow work, and each one turns a
 side task into a stall for unrelated code:
 
 1. **Waiting behind the turn.** `runTurn` does `as.mu.Lock(); defer
-   as.mu.Unlock()` (`internal/server/agent_session.go:1093-1095`) and holds it
+   as.mu.Unlock()` (`internal/server/agent_session.go:1396-1400`) and holds it
    for the **entire** turn. The handler's later `as.mu.Lock()` to read
    `as.agent` therefore used to block until the turn finished — the summariser
    only started after the turn ended, with the user waiting the whole time.
 2. **Holding `h.mu` across the config write.** `h.mu` is documented as "a
    short-lived map lock, never a work lock"
-   (`internal/server/agent_session.go:40-47`). `SaveOcodeSpeechSummary` does a
+   (`internal/server/agent_session.go:47-54`). `SaveOcodeSpeechSummary` does a
    cross-process read-modify-write bounded at ~5s on a contended lock file
    (`lockOcodeConfig`, `internal/config/ocodeconfig.go:3142-3151`). Holding
    `h.mu` across it stalls every other session's send, the run-state polls and

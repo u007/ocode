@@ -7,7 +7,7 @@ tags:
   - gotcha
   - security
   - policy-decision
-timestamp: 2026-11-15T16:31:57Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 ## 1. THE POLICY
 
@@ -23,7 +23,7 @@ The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:91`) di
 
 ## 3. MITIGATIONS THAT MAKE IT DELIBERATE
 
-Package installs are human-gated (npm/pnpm/bun `install`/`ci`/`dlx`/`exec` require human approval in the same prose — `auto_permission_prompt.go:85-89`). The v1.9.1 fail-closed rule: *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* (version bump to `BundledAutoPermissionPromptVersion = "1.9.1"`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not the prose: `classifyInterpreterExecution` basename-matches in `internal/agent/permissions.go:5356`. The code layer stays **narrower** than the prose: auto-allow only for runnerSafeTools basenames `{tsc,tsgo,eslint,prettier,biome,vitest,jest,stylelint}` under canonical workDir containment — `runnerSafeTools` (list at `internal/agent/permissions.go:5074`) with `shimUnderWorkDir` at `internal/agent/permissions.go:4899` and `nodeModulesBinTool` at `internal/agent/permissions.go:4942` — the prose expansion is judge-mediated only.
+Package installs are human-gated (npm/pnpm/bun `install`/`ci`/`dlx`/`exec` require human approval in the same prose — `auto_permission_prompt.go:85-89`). The v1.9.1 fail-closed rule: *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* (version bump to `BundledAutoPermissionPromptVersion = "1.9.1"`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not the prose: `classifyInterpreterExecution` basename-matches in `internal/agent/permissions.go:5716`. The code layer stays **narrower** than the prose: auto-allow only for runnerSafeTools basenames `{tsc,tsgo,eslint,prettier,biome,vitest,jest,stylelint}` under canonical workDir containment — `runnerSafeTools` (list at `internal/agent/permissions.go:5434`) with `shimUnderWorkDir` at `internal/agent/permissions.go:5259` and `nodeModulesBinTool` at `internal/agent/permissions.go:5302` — the prose expansion is judge-mediated only.
 
 ## 4. WHY ACCEPTED
 

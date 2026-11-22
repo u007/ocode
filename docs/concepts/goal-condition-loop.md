@@ -3,7 +3,7 @@ type: Concept
 title: "Goal Condition Loop (/goal)"
 description: 'The /goal session condition: a judge checks after every turn whether the condition is met, impossible, or should pause the goal. Covers command syntax, the per-turn evaluation order, the verdict table, pause and resume rules, the sticky 50-turn cap, the persisted goal key, the session goal endpoints, and how it differs from /orchestrate.'
 tags: [goal, judge, agent-loop, server, tui, web, typesafe, auto-continue]
-timestamp: 2026-11-09T09:47:54Z
+timestamp: 2026-11-22T16:46:00Z
 ---
 # Goal Condition Loop (`/goal`)
 
@@ -40,9 +40,9 @@ Each natural stop (a turn that ended without a pending ask) is handled in this o
 **Server** (`internal/server/agent_session.go`, `runTurn`):
 
 1. Step-limit hard resume (`/max-step` cut-off). It is decided in `autoContinueShouldResume`
-   (`:1388`) and counts against the auto-continue chain.
-2. The triage judge stands aside while a goal is evaluable (`:1396`).
-3. The goal judge runs (`:1293`), but only when the tail is not a pending permission or question
+   (`:1769`) and counts against the auto-continue chain.
+2. The triage judge stands aside while a goal is evaluable (`:1807`).
+3. The goal judge runs (`:1633`), but only when the tail is not a pending permission or question
    ask. A `not_met` verdict appends the `[ocode:goal]` prompt and continues the loop. A goal resume
    does not advance `autoContinueCount`.
 
@@ -50,10 +50,10 @@ The server path and its precedence are also described in
 `docs/concepts/server-auto-continue.md` (`/goal` Precedence).
 
 **TUI** (`internal/tui/model.go`, `streamDoneMsg`): the step-limit hard resume fires first. Then the
-goal judge is dispatched for TUI turns (`:5623`) and for `/rc` turns (`rcGoalJudge`, `:5382`, `:5459`).
+goal judge is dispatched for TUI turns (`:5680`) and for `/rc` turns (`rcGoalJudge`, `:5433`, `:5512`).
 The auto-continue judge is dispatched only when no goal is evaluable and the turn did not hit the
-step limit (`:5624`). Judge calls run asynchronously (`maybeDispatchGoalJudge`, `:272`); the result
-arrives as `goalJudgeFinishedMsg` (`:5855`). If the previous judge is still in flight, the turn gets
+step limit (`:5682`). Judge calls run asynchronously (`maybeDispatchGoalJudge`, `:272`); the result
+arrives as `goalJudgeFinishedMsg` (`:5947`). If the previous judge is still in flight, the turn gets
 no verdict and the transcript says `goal judge busy; verdict skipped for this turn`. Nothing re-runs
 the judge for that turn.
 
@@ -65,12 +65,12 @@ the judge for that turn.
 2. Turn accounting: `Turns` increments. `NoToolTurns` resets when this turn's assistant messages made
    a tool call, otherwise it increments (`goalTurnUsedTools`, `:105`).
 3. Stall guard: `NoToolTurns >= goalStallTurns` (3) pauses the goal with `stalled`. No judge call.
-4. Resolve the judge (`resolveDecider(slotGoal)`, `:370`). Unresolved pauses with `unavailable`.
-5. Judge call (`:382`) with the condition, turn count, the last 12 messages (`goalTailN`), and
+4. Resolve the judge (`resolveDecider(slotGoal)`, `:374`). Unresolved pauses with `unavailable`.
+5. Judge call (`:386`) with the condition, turn count, the last 12 messages (`goalTailN`), and
    `turn_ended`. A call error, a nil response, or a missing or invalid verdict pauses with `unavailable`.
-6. Confidence floor (`goalMinConfidenceDefault` = 0.6, `:37`, applied at `:411`): a `met` or
+6. Confidence floor (`goalMinConfidenceDefault` = 0.6, `:37`, applied at `:415`): a `met` or
    `impossible` verdict below the floor is treated as `not_met`.
-7. Apply the verdict (`:418`): `met` and `impossible` are terminal, at the cap too. `not_met` with
+7. Apply the verdict (`:422`): `met` and `impossible` are terminal, at the cap too. `not_met` with
    the reason `awaiting_user` pauses. A `not_met` on a turn with `Turns >= GoalMaxTurns` (50) pauses
    as `capped`. Any other `not_met` stays active and resumes.
 
@@ -105,8 +105,8 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   session removes it (`ClearGoal`, `internal/agent/goal.go:179`).
 - **A human turn reactivates a paused goal** (`GoalMarkHumanTurn`, `:219`). It sets the status to
   `active` and resets `NoToolTurns`. Terminal (`met`, `impossible`) goals stay terminal. Active goals
-  are left alone. The server calls it on sync and async human entries (`agent_session.go:1823`,
-  `:2043`). The TUI calls `markHumanTurn` at its human send points only: typed input,
+  are left alone. The server calls it on sync and async human entries (`agent_session.go:2273`,
+  `:2510`). The TUI calls `markHumanTurn` at its human send points only: typed input,
   `/rc` web messages, custom command prompts and `/agent <name> <prompt>`. Auto-continue,
   goal resumes, retries and job completions never reactivate a paused goal.
 - **A `not_met` verdict on a non-human turn leaves a paused goal paused.** `decideGoal` does not
@@ -114,15 +114,15 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
 - **The 50-turn cap is sticky.** A human turn does not reset `Turns`. After a `capped` pause, the
   goal reactivates on the next human message and the judge runs again. A `not_met` caps again, but a
   `met` verdict closes the goal, so a finished goal is never stranded by the cap. Only a new
-  `/goal <text>` starts fresh state (`SetGoal`, `:162`).
+  `/goal <text>` starts fresh state (`SetGoal`, `:164`).
 - **A pending ask never auto-resumes.** The server skips the goal judge while the tail is an
-  unresolved permission or question ask (`agent_session.go:1318`). The TUI runs its post-turn
-  decisions only when `queueDrainBlocked()` is false (`model.go:5618`).
+  unresolved permission or question ask (`agent_session.go:1632`). The TUI runs its post-turn
+  decisions only when `queueDrainBlocked()` is false (`model.go:5639`).
 - **A deferred resume waits for an idle session.** In the TUI, a `Resume` verdict that cannot fire
   right away (the session is streaming, compacting, or has a queue drain blocked) sets
   `goalResumePending`. `compactFinishedMsg` fires it once the session is idle (`goalResumeReady`,
-  `model.go:303`, `:5792`). Any new turn clears the flag, because that turn's own judge decides the
-  goal (`askAgent`, `model.go:16097`).
+  `model.go:305`, `:5844`). Any new turn clears the flag, because that turn's own judge decides the
+  goal (`askAgent`, `model.go:16543`).
 - **The resume message is user-role.** `GoalResumeMessage` (`goal.go:241`) produces a `[ocode:goal]`
   user message: the condition, the evaluator's last reason, and a continue instruction. It is never
   system-role, so the cached system prefix stays stable.
@@ -133,12 +133,12 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `no_tool_turns`, `last_reason`, and `set_at` (RFC 3339). `GoalStateToMetadata` writes it;
   `GoalStateFromMetadata` (`goal.go:466`) reads it. A malformed record is rejected, and the
   rejected values are logged with the `GOAL` debug kind.
-- Written after every judged turn (`goalShouldResume`, `agent_session.go:1510`), by the server
+- Written after every judged turn (`goalShouldResume`, `agent_session.go:1946`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
-  (`sessionSidebarMetadata`, `model.go:21964`).
-- Restored when a server agent is built (`agent_session.go:658`) and when a TUI session loads
-  (`restoreSessionMetadata`, `model.go:21998`). The key is listed in `sessionOwnedMetadataKeys`
-  (`model.go:21936`), so the TUI's carry-forward copy never overwrites it.
+  (`sessionSidebarMetadata`, `model.go:22124`).
+- Restored when a server agent is built (`agent_session.go:797`) and when a TUI session loads
+  (`restoreSessionMetadata`, `model.go:22158`). The key is listed in `sessionOwnedMetadataKeys`
+  (`model.go:22096`), so the TUI's carry-forward copy never overwrites it.
 
 ## Endpoints
 
@@ -164,7 +164,7 @@ and sends `kickoff_prompt` as the turn.
 ## Judge configuration
 
 - Config key `ocode.goal.judge_model`, default `typesafe/jev-latest` (`defaultJudgeModel`,
-  `internal/agent/decider.go:36`; slot read at `:112-113`).
+  `internal/agent/decider.go:36`; slot read at `:115-116`).
 - The goal judge has its own confidence floor, `goalMinConfidenceDefault`. It does not read
   `permissions.auto.min_confidence` or the auto-continue floor.
 - There is no fallback to another backend. An unset or keyless judge pauses the goal as

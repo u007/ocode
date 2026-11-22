@@ -3,8 +3,8 @@ type: Gotcha
 title: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context
 description: |-
   buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).
-resource: internal/agent/agent.go:5573; internal/agent/agent.go:4772
-timestamp: 2026-10-07T04:23:15Z
+resource: internal/agent/agent.go:5611; internal/agent/agent.go:4785
+timestamp: 2026-11-22T16:21:35Z
 tags:
   - security
   - permissions
@@ -22,7 +22,7 @@ tags:
 The auto-permission judge is an **LLM**. Shipping a credential-bearing file
 (`.env`, `auth.json`, SSH keys, …) into its prompt is the exact exposure the
 permission layer exists to prevent. `buildPermissionContext`
-(`internal/agent/agent.go:5573`) therefore assembles the judge's
+(`internal/agent/agent.go:5611`) therefore assembles the judge's
 `project_context` while refusing to embed sensitive file contents — the same
 predicate family `scanToolResult` uses for tool results, but here the raw
 content never reaches the judge at all.
@@ -51,7 +51,7 @@ Source sections (counted against `maxSources`):
 7. `Fetch target:` (`Domain:` / `Path:`) for webfetch.
 
 Defaults: `MaxContextBytes` 4096 / `MaxContextSources` 2 /
-`MaxContextLinesPerSource` 80 (`internal/config/ocodeconfig.go:1889-1891`);
+`MaxContextLinesPerSource` 80 (`internal/config/ocodeconfig.go:1900-1902`);
 the TypeSafe state builder uses 2048/3/40 unless overridden
 (`internal/agent/permission_typesafe.go:657`). When nothing is collected the
 function returns `"(no context available)"`.
@@ -60,25 +60,29 @@ function returns `"(no context available)"`.
 
 ```go
 sensitiveContextFile := func(p string) bool {
-    return redact.IsSensitiveFile(p) || isSecretMaterialPath(p)
+    return redact.IsSensitiveFile(p) || isSecretMaterialPath(p) || isLoginStatePath(p, a.effectiveWorkDir())
 }
 ```
 
-`internal/agent/agent.go:5636`. `redact.IsSensitiveFile`
-(`internal/redact/sensitive.go:19`) and `isSecretMaterialPath`
-(`internal/agent/permissions.go:3599`) cover `.env` / `.env.*` (except the
+`internal/agent/agent.go:5676`. `redact.IsSensitiveFile`
+(`internal/redact/sensitive.go:55`) and `isSecretMaterialPath`
+(`internal/agent/permissions.go:3983`) cover `.env` / `.env.*` (except the
 committed `.env.example|.sample|.template|.dist`), `*.pem|*.key|*.p12|*.pfx|
 *.secrets`, `id_rsa|id_dsa|id_ecdsa|id_ed25519`, `.npmrc|.netrc|.pypirc|
 .pgpass`, `*credentials*`, `secrets.*`, `auth.json`, `ocodeconfig.json`,
-`opencode.json`.
+`opencode.json`. `isLoginStatePath`
+(`internal/agent/permissions.go:3787`) withholds a browser login-state file
+(cookies and storage) too: it matches a login-state path segment, or a resolved
+path under a login-state root, so an alias to a state file is caught even though
+its own name is ordinary.
 
 Behaviour differs by section, deliberately:
 
 | Section | Sensitive file behaviour | Code |
 |---|---|---|
-| Target file (path-scoped tools) | Path still shown; contents replaced by `(contents withheld: sensitive file)`. The parent-directory listing is still emitted. | `agent.go:5678` |
-| Executed custom script | Skipped entirely — no `Executed custom script:` section is added. | `agent.go:5743` |
-| Referenced file | Skipped entirely — no `Referenced file:` section. | `agent.go:5800` |
+| Target file (path-scoped tools) | Path still shown; contents replaced by `(contents withheld: sensitive file)`. The parent-directory listing is still emitted. | `agent.go:5714-5719` |
+| Executed custom script | Skipped entirely — no `Executed custom script:` section is added. | `agent.go:5784-5786` |
+| Referenced file | Skipped entirely — no `Referenced file:` section. | `agent.go:5841-5843` |
 | Non-sensitive file | Included as before. | positive control |
 
 The target-file marker exists so the judge does not misread a withheld file as
@@ -104,36 +108,36 @@ func (a *Agent) bindSideClient(client LLMClient) LLMClient {
 ```
 
 `attachRedactionHook` (`agent.go:337`) writes the agent's tier-1 `redactionHook`
-onto the `*GenericClient`'s `Redaction` field (`client.go:247`); a nil hook or a
+onto the `*GenericClient`'s `Redaction` field (`client.go:275`); a nil hook or a
 non-`*GenericClient` implementation is returned unchanged, so mocks keep working.
 
 Nine side-task sites route through it:
 
 | Side task | Constructor | Site |
 |---|---|---|
-| Compaction | `smallModelOrMainClient` / `overrideModelClient` / `noThinkingClient` (all reached via `compactSummaryClient`, `agent.go:3627`) | `agent.go:3676`, `:3720`, `:3588` |
-| Speech summary | `speechSummaryClient` (delegates to the same two compaction helpers) | `speech_summary.go:80` |
-| Recap | `recapClient` | `agent.go:3191` |
-| Auto-continue judge | `autoContinueJudgeClient` | `agent.go:3226` |
-| Session title | `titleClients` | `title.go:143` |
-| Advisor | `AdvisorTool.ExecuteCtx` | `advisor_tool.go:270` |
+| Compaction | `smallModelOrMainClient` / `overrideModelClient` / `noThinkingClient` (all reached via `compactSummaryClient`, `agent.go:3632`) | `agent.go:3685`, `:3739`, `:3612` |
+| Speech summary | `speechSummaryClient` (delegates to the same two compaction helpers) | `speech_summary.go:142`, `:144` |
+| Recap | `recapClient` | `agent.go:3196` |
+| Auto-continue judge | `autoContinueJudgeClient` | `agent.go:3231` |
+| Session title | `titleClients` | `title.go:157` |
+| Advisor | `AdvisorTool.ExecuteCtx` | `advisor_tool.go:290` |
 | Doc maintenance | `docMaintenanceClient` | `doc_maintenance.go:228` |
 | Memory maintenance | `memoryMaintenanceClient` | `memory_maintenance.go:205` |
 | Task contract | `TaskTool.verifierClient` | `task_contract.go:98` |
 
-(The spec-model swap, `applySpecModel` at `agent.go:6600`, also binds on its
+(The spec-model swap, `applySpecModel` at `agent.go:6643`, also binds on its
 freshly-built client *before* installing it as the main client — its old
 hand-rolled "re-wire the hook onto `a.client`" block was removed.)
 
 **Rule:** any NEW freshly-built side-task client must go through
 `Agent.bindSideClient`. Never call it on `a.client` itself — writing `Redaction`
 onto the live main client would race with its own in-flight use (the hook is
-already wired there by `SetRedactionHook`, `agent.go:3895`).
+already wired there by `SetRedactionHook`, `agent.go:3900`).
 
 **Deliberate exception — the auto-permission judge.** `askPermissionModel`
-(`agent.go:4772`) still uses `bindOpenCodeSessionID` alone (`agent.go:4801`) and
+(`agent.go:4785`) still uses `bindOpenCodeSessionID` alone (`agent.go:4814`) and
 attaches the hook itself only when `a.judgeMaskRegistry() != nil`
-(`agent.go:4808`): the mask hook only makes sense when there is a registry to
+(`agent.go:4821`): the mask hook only makes sense when there is a registry to
 **unmask** with, so without one the judge must see raw text. The registry check
 is load-bearing, not a shortcut.
 
@@ -146,7 +150,7 @@ an explicit decision that is still owed — with an `// intentional:` comment
 either way, mirroring the registry-gated decision above.
 
 Pinned by `TestSideClientsCarryRedactionHook`
-(`internal/agent/agent_test.go:3539`): removing `attachRedactionHook` from
+(`internal/agent/agent_test.go:3590`): removing `attachRedactionHook` from
 `bindSideClient` fails every case.
 
 ## Rules for maintainers
@@ -154,7 +158,7 @@ Pinned by `TestSideClientsCarryRedactionHook`
 - **Any new file-content section in `buildPermissionContext` must route through
   `sensitiveContextFile`** before reading. Adding a section that calls
   `readFileSnippet` directly re-opens the leak.
-- Do not conflate this with `scanToolResult` (`agent.go:3921`) — that masks a
+- Do not conflate this with `scanToolResult` (`agent.go:3926`) — that masks a
   tool result on the way to the chat model via the redaction registry. The judge
   path withholds raw content outright; it never sees it, even masked.
 - Keep the target-file (marker) vs script/reference (skip) distinction: the

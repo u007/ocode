@@ -10,7 +10,7 @@ tags:
   - gateway
   - models-registry
   - auth
-timestamp: 2026-11-22T07:21:22Z
+timestamp: 2026-11-22T16:46:00Z
 ---
 # kakiit LLM Gateway Provider
 
@@ -213,11 +213,11 @@ The gateway returns HTTP 402 with an OpenAI-shaped envelope whose code is
   hub.mercstudio.com (or ask your site admin)*. Surfaced through
   `UserFacingLLMError` (`client_kakiit.go:160-168`), consumed by the TUI
   `streamDoneMsg` error line (`internal/tui/model.go:5618`), by
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6589-6597`), and by the
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6617-6625`), and by the
   web/desktop server's `publishTurnError`
-  (`internal/server/agent_session.go:1167`), which publishes
+  (`internal/server/agent_session.go:1184`), which publishes
   `agent.UserFacingLLMError(err)` as the `turn_error` payload's `error` field
-  (`agent_session.go:1183`) — so the browser/desktop banner shows the mapped
+  (`agent_session.go:1200`) — so the browser/desktop banner shows the mapped
   line, not the raw JSON envelope.
 - **No auto-retry:** 402 is outside the retryable set — typed status errors
   retry only via the 429 / 500-504-529 arms (`isRateLimitError`,
@@ -246,10 +246,10 @@ The gateway answers `409` with an OpenAI-shaped envelope whose code is
   running) — send it again to start a new attempt*. It rides the same
   `UserFacingLLMError` (`client_kakiit.go:160-168`) path as the top-up line:
   the TUI `streamDoneMsg` error line (`internal/tui/model.go:5618`),
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6589-6597`), and the
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6617-6625`), and the
   web/desktop `publishTurnError` banner
-  (`internal/server/agent_session.go:1167`, `agent.UserFacingLLMError(err)` at
-  `:1183`).
+  (`internal/server/agent_session.go:1184`, `agent.UserFacingLLMError(err)` at
+  `:1200`).
 - **When it appears:** only after the gateway has accepted an attempt carrying
   the turn's id — a retry inside that same turn, or an ambiguous failure the
   caller retried — because the id is single-use. A fresh turn mints a fresh

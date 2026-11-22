@@ -762,3 +762,52 @@ func TestStartRefusesRowOfLivePeerProcess(t *testing.T) {
 		t.Fatalf("row = %+v, want the peer's row unchanged", row)
 	}
 }
+
+// TestRetainedStartReplacesBoxWhenAssignmentChanged: a retained box carries the
+// login state it was created with, so reassigning the project must replace it
+// rather than hand the caller the previous identity's cookies.
+func TestRetainedStartReplacesBoxWhenAssignmentChanged(t *testing.T) {
+	r := newRetainedRig(t)
+	r.setAssign("ses-1", "work")
+	first := startRetained(t, r.h.m, "ses-1")
+
+	r.setAssign("ses-1", "personal")
+	second := startRetained(t, r.h.m, "ses-1")
+
+	if second.Reused || second.BoxID == first.BoxID {
+		t.Fatalf("Start after reassignment = %+v, want a new box, not reuse of %s", second, first.BoxID)
+	}
+	if second.LoginState != "personal" {
+		t.Fatalf("LoginState = %q, want personal", second.LoginState)
+	}
+	if n := r.h.api.createCount(); n != 2 {
+		t.Fatalf("creates = %d, want 2", n)
+	}
+	if got := r.h.api.pauseCalls(); !slices.Contains(got, first.BoxID) {
+		t.Fatalf("pause calls = %v, want the old retained box %s paused", got, first.BoxID)
+	}
+	if h := r.holder("work"); h != "" {
+		t.Fatalf("login state work still held by %q", h)
+	}
+	if row := retainedRowOf(t, r, "work"); !row.Paused {
+		t.Fatalf("row = %+v, want the old retained row paused", row)
+	}
+}
+
+// TestSlowCreateDoesNotBackdateTheNewBox: lastUsed and the checkpoint clock must
+// be read when the box is published, not when Start was entered. A create that
+// outlives the idle timeout must not hand the caller a box the next Tick reaps.
+func TestSlowCreateDoesNotBackdateTheNewBox(t *testing.T) {
+	r := newLoginRig(t)
+	r.onCreate = func() { r.h.clock.Advance(2 * r.h.account.Idle) }
+	st := mustStart(t, r.h.m, "ses-1")
+	if st.Reused {
+		t.Fatalf("Start = %+v, want a created box", st)
+	}
+
+	r.h.m.Tick(context.Background())
+
+	if _, err := r.h.m.Browser("ses-1"); err != nil {
+		t.Fatalf("the box was reaped right after a create slower than the idle timeout: %v", err)
+	}
+}

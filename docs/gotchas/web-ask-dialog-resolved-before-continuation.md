@@ -13,7 +13,7 @@ tags:
   - async
   - concurrency
   - locks
-timestamp: 2026-11-05T12:21:06Z
+timestamp: 2026-11-22T16:46:00Z
 ---
 # Web ask dialogs: 202 + background continuation (broadcast `*_resolved` before Step)
 
@@ -41,8 +41,8 @@ via:
 - `(*Handler).dispatchAskContinuation(sessionID, as, fn)` —
   `internal/server/handler_ask_continuation.go:31`.
 - `HandleAnswerQuestion` dispatches at
-  `internal/server/handler_questions.go:310` and writes 202 at
-  `handler_questions.go:370`. The callback wires callbacks, sets
+  `internal/server/handler_questions.go:318` and writes 202 at
+  `handler_questions.go:378`. The callback wires callbacks, sets
   `turnActive(true)`, starts the heartbeat + activity broadcast, broadcasts
   `question_resolved`, runs `Step`, persists, broadcasts `messages` +
   `turn_done`, and calls `MaybeCompactAsync`.
@@ -54,7 +54,7 @@ via:
   `permission_resolved` broadcast still happens synchronously BEFORE dispatch
   (`handler_permissions_resolve.go:325-329`); for questions the
   `question_resolved` broadcast happens inside the callback but still before
-  `Step` (`handler_questions.go:343`, Step at `:345`).
+  `Step` (`handler_questions.go:351`, Step at `:353`).
 - Multi-ask branch: if another unresolved permission ask remains in the same
   trailing round, the callback saves the single resolution and broadcasts
   `messages` without running Step (`handler_permissions_resolve.go:412-421`),
@@ -63,20 +63,20 @@ via:
 ### Lock-ownership handoff (the subtle part)
 
 `findPendingSession` returns the `agentSession` with `as.mu` **held**
-(`handler_questions.go:278`,
+(`handler_questions.go:282`,
 `handler_permissions_resolve.go:257`). The caller must **NOT** unlock it on
 the success path — `dispatchAskContinuation` transfers ownership to the
 callback goroutine, which unlocks via `defer as.mu.Unlock()` when `fn`
 returns (`handler_ask_continuation.go:67`). Consequently there is no
 handler-level unlock defer anymore: every post-`findPendingSession` error
-path must unlock explicitly (e.g. `handler_questions.go:288,294`;
+path must unlock explicitly (e.g. `handler_questions.go:296,302`;
 `handler_permissions_resolve.go:271,277,286,292,299,310`). A new validation
 branch added after `findPendingSession` that forgets its explicit unlock
 deadlocks the session.
 
 ### Shutdown admission mirrors `dispatchTurn`
 
-`dispatchTurn` (`internal/server/agent_session.go:1997`) is the pattern;
+`dispatchTurn` (`internal/server/agent_session.go:2238`) is the pattern;
 `dispatchAskContinuation` mirrors it exactly:
 
 - Under `shutdownMu`, if `shutdownStarted`: unlock and run `fn` INLINE on the
@@ -93,13 +93,13 @@ deadlocks the session.
   as `serve error: ask continuation panic`) → decrement `turnInFlight` →
   `turnJobsWG.Done()` (`handler_ask_continuation.go:52-69`).
 
-The flush in that chain (`handler_ask_continuation.go:66`) is one of two ways a deferred memory pass runs. A job event that finds `as.mu` busy is deferred by `queueJobMemoryMaintenance` (`internal/server/agent_session.go:2507`), which keeps only the latest event and starts `awaitDeferredMemoryMaintenance` (`agent_session.go:2529`) on its own goroutine. That waiter blocks for `as.mu` off the job loop and takes the marker once the lock is released, so a holder that never flushes (an HTTP compaction, recap or stream) still gets the pass. Lock order is `as.mu` then `memoryMaintMu`; `h.mu` is not taken.
+The flush in that chain (`handler_ask_continuation.go:66`) is one of two ways a deferred memory pass runs. A job event that finds `as.mu` busy is deferred by `queueJobMemoryMaintenance` (`internal/server/agent_session.go:2751`), which keeps only the latest event and starts `awaitDeferredMemoryMaintenance` (`agent_session.go:2773`) on its own goroutine. That waiter blocks for `as.mu` off the job loop and takes the marker once the lock is released, so a holder that never flushes (an HTTP compaction, recap or stream) still gets the pass. Lock order is `as.mu` then `memoryMaintMu`; `h.mu` is not taken.
 
 The continuation keeps the full `turnActive`/heartbeat contract from the
 original fix below: `setTurnActive(true)` + `startTurnHeartbeat` +
 `startAgentActivityBroadcast` with defers declared last so they run first,
 preserving the `drainPendingClose` → `setTurnActive(false)` order
-(`handler_questions.go:321-331`, `handler_permissions_resolve.go:434-443`).
+(`handler_questions.go:324-339`, `handler_permissions_resolve.go:434-443`).
 
 ## Web client: echo/dismiss BEFORE the await, re-hydrate on retryable failure
 
@@ -113,7 +113,7 @@ the POST, so the visible result never depends on response latency:
   echo of the answers) + `QUESTION_RESOLVED` first (`useChat.ts:416-417`),
   then awaits `api.answerQuestion`.
 - On a retryable failure (anything that is not HTTP 404/409) they call
-  `hydratePendingAsks()` (`useChat.ts:154`, called at `:391` and `:429`),
+  `hydratePendingAsks()` (`useChat.ts:154`, called at `:392` and `:430`),
   which refetches `GET /api/sessions/:id/state` and re-dispatches
   `PERMISSION_REQUEST`/`QUESTION_REQUEST` from the server's live
   `pending_asks` (`internal/server/handler_session_state.go:64`) — so an

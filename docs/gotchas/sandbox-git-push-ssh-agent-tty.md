@@ -9,7 +9,7 @@ tags:
   - seatbelt
   - security
   - macOS
-timestamp: 2026-11-16T07:28:44Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Sandbox git push — SSH agent inheritance and fail-closed TTY prompts
 
@@ -20,11 +20,11 @@ timestamp: 2026-11-16T07:28:44Z
 
 **2. Permission layer: plain `git push` AUTO-ALLOWS in sandbox mode** — sandbox auto-allow
 `internal/agent/permissions.go:~1433` fires before the normal pipeline, and
-`sensitiveSandboxDecision` `permissions.go:3690-3714` only ASKs on STATIC
+`sensitiveSandboxDecision` `permissions.go:4074` only ASKs on STATIC
 `~/.ssh`/`.env/auth.json` references (path args/redirects), which plain push lacks — the key read happens inside git's ssh child and is invisible to static extraction (documented residual). Force-flagged `git push/pull` ASKs via the sandbox gate
-`isHarmfulForceCommand` (`permissions.go:897`); `TestDecideSandboxGitPush`: push=Allow, force=Ask). In normal (non-sandbox) mode plain push still goes through the auto-permission judge.
+`isHarmfulForceCommand` (`permissions.go:920`); `TestDecideSandboxGitPush`: push=Allow, force=Ask). In normal (non-sandbox) mode plain push still goes through the auto-permission judge.
 
-**3. Destructive git subcommands now require Ask in sandbox mode** — Beyond force-flagged push/pull, the broader destructive git family (`git stash pop/apply/drop/clear`, `git checkout`, `git reset`, `git clean`, `git restore`, `git switch`) also routes to **Ask** before the sandbox auto-allow. This is the `IsHarmfulBashCommand` guard (`permissions.go:1557`), called at `permissions.go:2239` in the `Decide` path when mode is `sandbox`. Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:700`) and still auto-allow. `TestDecideSandboxHarmfulGitRequiresAsk` locks the full matrix.
+**3. Destructive git subcommands now require Ask in sandbox mode** — Beyond force-flagged push/pull, the broader destructive git family (`git stash pop/apply/drop/clear`, `git checkout`, `git reset`, `git clean`, `git restore`, `git switch`) also routes to **Ask** before the sandbox auto-allow. This is the `IsHarmfulBashCommand` guard (`permissions.go:1586`), called at `permissions.go:2320` in the `Decide` path when mode is `sandbox`. Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:723`) and still auto-allow. `TestDecideSandboxHarmfulGitRequiresAsk` locks the full matrix.
 
 **4. Reported failure "git push fails: ssh key not available" under sandbox is NOT the sandbox denying key access** (reads are globally open by design — cite
 `architecture/shell-sandbox-integrity-only-mode.md`). Two real causes:

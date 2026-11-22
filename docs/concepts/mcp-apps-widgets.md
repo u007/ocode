@@ -8,7 +8,7 @@ tags:
   - mcp-apps
   - plugins
   - web
-timestamp: 2026-11-15T16:33:41Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # MCP Apps widgets and plugin MCP servers
 
@@ -136,10 +136,10 @@ Other providers were not checked against this list.
 - **Web and desktop server.** The process-wide config merges only shared plugins:
   `internal/server/handler.go:757` at startup and `internal/server/handler.go:1009` on
   reload. The MCP tool cache is built from that config (`internal/server/mcp_cache.go:34`).
-  Each session merges its own project's plugins (`internal/server/agent_session.go:546`).
+  Each session merges its own project's plugins (`internal/server/agent_session.go:551`).
   When the merge adds a server the shared config lacks, the session enumerates its own
-  tools (`internal/server/agent_session.go:547`, `internal/server/handler_mcp.go:188`).
-  Otherwise it uses the shared cache (`internal/server/agent_session.go:711`).
+  tools (`internal/server/agent_session.go:552`, `internal/server/handler_mcp.go:188`).
+  Otherwise it uses the shared cache (`internal/server/agent_session.go:754`).
 - **Web toggle.** `HandleSetMCPEnabled` refuses a server in `h.pluginMCP`, which holds
   only the shared merge (`internal/server/handler_mcp.go:126`). A project-local server is
   not in `h.cfg.MCP`, so the toggle answers 404 for it (`internal/server/handler_mcp.go:123`).

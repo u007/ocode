@@ -5,7 +5,7 @@ description: Persistent, disk-backed cron engine + headless agent dispatcher for
 tags: [scheduler, cron, dispatch, agent, automation]
 status: active
 created: 2026-07-17
-timestamp: 2026-11-15T16:59:35Z
+timestamp: 2026-11-22T16:21:35Z
 ---
 # Scheduled Jobs / Cron Dispatch
 
@@ -59,13 +59,13 @@ fire unless a long-lived host is running. Document this in user-facing docs.
   ```
 - Constructs a per-job agent via `agent.NewAgent(client, tools, cfg, lspMgr)`
   and runs `ag.Step(msgs)` — the same entry the server SSE and TUI stream paths
-  use (`internal/server/handler_sse.go:302`, `internal/tui/model.go:16641`).
+  use (`internal/server/handler_sse.go:302`, `internal/tui/model.go:16780`).
 - Uses a **persistent per-job session** `cron:<id>` so context accumulates
   across firings. Retention: `capMessages(result, 80)` keeps the seeded context
   + the 79 most recent turns so the transcript never grows unbounded
   (`session.Save` overwrites the full transcript and never prunes).
 - Per-job permission mode is bound via `ag.Permissions().SetMode(...)` (the
-  runtime mutation point in `internal/agent/permissions.go:5849`). Safe default
+  runtime mutation point in `internal/agent/permissions.go:6209`). Safe default
   is `normal`; `yolo`/`locked` are explicit opt-in.
 
 ### Dispatch semantics (mirroring Claude Code)
@@ -483,10 +483,10 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
 - `web/src/components/Cron/reminderFormat.ts` — due-date/status formatting
   helpers.
 - `web/src/components/Cron/CronHistoryPanel.tsx` — gains an optional
-  `fetchRuns` prop (`:47`) so a reminder reuses the cron history panel
+  `fetchRuns` prop (`:53`) so a reminder reuses the cron history panel
   against the shared `runs.jsonl`.
 - `web/src/components/Cron/CronPanel.tsx` — holds `SUB_VIEW_FOR_KIND`, the
-  singular→plural kind→collection map (`:232`). All three panes stay
+  singular→plural kind→collection map (`:249`). All three panes stay
   mounted but load **lazily** (a pane fetches the first time it is shown)
   and only the front pane polls.
 
@@ -518,7 +518,7 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
   set as grow-only/sticky within a session.
 - **No exported `Agent.SetPermissions`**: `SetMode` is workflow mode, not
   permission mode. Per-job permission mode is set on the `PermissionManager`
-  after `NewAgent` (`internal/agent/permissions.go:5849`).
+  after `NewAgent` (`internal/agent/permissions.go:6209`).
 - **Persistent session trade-off**: a recurring `cron:<id>` session
   accumulates context across firings (good for jobs that need history) but
   must be capped — `session.Save` never prunes. The current cap is 80 messages;

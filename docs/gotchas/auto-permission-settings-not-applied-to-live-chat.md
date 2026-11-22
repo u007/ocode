@@ -11,7 +11,7 @@ tags:
   - live
   - config
   - agent
-timestamp: 2026-09-24T03:27:56Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 Fixed 2026-09-24. Symptom: unchecking a category in **Settings → Permissions** ("Categories the judge must enforce" = `permissions.auto.relaxed_concerns`) had no effect on an already-open chat — the judge kept using the old config.
 
@@ -19,7 +19,7 @@ Fixed 2026-09-24. Symptom: unchecking a category in **Settings → Permissions**
 
 Two independent bugs compounded:
 
-1. **Runtime reads used the agent's build-time snapshot** (`a.config.Ocode.Permissions.Auto`). The PUT only wrote `h.cfg` + disk; it never pushed to a running agent. A resident agent was rebuilt only on profile/model/credential change (`reconcileProfileAgent`, `internal/server/agent_session.go:1321`), so a permissions-only change never landed on the next judge call.
+1. **Runtime reads used the agent's build-time snapshot** (`a.config.Ocode.Permissions.Auto`). The PUT only wrote `h.cfg` + disk; it never pushed to a running agent. A resident agent was rebuilt only on profile/model/credential change (`reconcileProfileAgent`, `internal/server/agent_session.go:869`), so a permissions-only change never landed on the next judge call.
 
 2. **Profile-bound sessions hold a separate config.** `buildAgentSession` sets `effCfg = config.LoadEffectiveForProfile(prof)`; `EffectiveOcodeConfig` shallow-clones, so the global write never reached that session's agent.
 
@@ -75,4 +75,4 @@ Two independent bugs compounded:
 ## Related docs
 
 - `concepts/auto-permission-enforced-categories.md` — the `permissions.auto.relaxed_concerns` config mechanism (that doc covers the config structure; this gotcha covers only the live-apply problem)
-- `gotchas/profile-switch-window-id-divergence.md` — mentions `reconcileProfileAgent` at `agent_session.go:687` (the rebuild gate that previously blocked permission-only changes)
+- `gotchas/profile-switch-window-id-divergence.md` — mentions `reconcileProfileAgent` at `agent_session.go:869` (the rebuild gate that previously blocked permission-only changes)

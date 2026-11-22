@@ -10,7 +10,7 @@ tags:
   - rebase
   - persistence
   - server
-timestamp: 2026-09-17T14:25:49Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Auto-continue turn transcript rebase: capture base length before the loop
 
@@ -54,10 +54,10 @@ This pattern generalises to **any bounded loop that mutates the message slice be
 
 | Area | Path |
 |------|------|
-| turnBaseLen capture | `internal/server/agent_session.go:661-667` |
-| Auto-continue loop | `internal/server/agent_session.go:772-836` |
-| persistTurnTranscript | `internal/server/agent_session.go:982-1008` |
-| reconcileTurnSave | `internal/server/agent_session.go:1012-1017` |
+| turnBaseLen capture | `internal/server/agent_session.go:1416-1422` |
+| Auto-continue loop | `internal/server/agent_session.go:1518-1648` |
+| persistTurnTranscript | `internal/server/agent_session.go:2008` |
+| reconcileTurnSave | `internal/server/agent_session.go:2058` |
 
 ## The Rule
 

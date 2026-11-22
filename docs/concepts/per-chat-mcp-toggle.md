@@ -12,7 +12,7 @@ tags:
   - caching
   - reload
   - gotcha
-timestamp: 2026-11-18T03:03:56Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Per-Chat MCP Toggle
 
@@ -58,7 +58,7 @@ MCP tools are enumerated **once per process** into a process-wide `mcpCache` war
 
 ## Fast path vs. re-enumeration (`mcpToolsForSession`)
 
-`mcpToolsForSession(cfg, sessionID)` (called from `buildAgentSession`, `internal/server/agent_session.go:703`):
+`mcpToolsForSession(cfg, sessionID)` (called from `buildAgentSession`, `internal/server/agent_session.go:746`):
 
 - **No overrides** (the overwhelmingly common case): returns nil so the builder keeps the process-wide `mcpCache` fast path — sessions that never toggled anything pay zero extra MCP enumeration cost.
 - **Has overrides**: re-enumerates MCP tools from a **cloned** copy of the session's effective config produced by `applyMCPSessionOverrides`, which honors the per-window profile's `delta.MCP`.

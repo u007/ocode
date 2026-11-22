@@ -10,7 +10,7 @@ tags:
   - sidebar
   - tui-status
   - derived-field
-timestamp: 2026-11-01T05:24:00Z
+timestamp: 2026-11-22T15:41:37Z
 ---
 # Session-tagged snapshot: override base fields but recompute ALL derived fields
 
@@ -26,7 +26,7 @@ Affected builders:
 
 The web main-model pick is a per-session override: `ModelDialog.tsx:520` → `setSessionModel` (`web/src/api/client.ts`, `PUT /api/sessions/{id}/model`) → `HandleSetSessionModel` → `pushSessionStatusSnapshot`.
 
-**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1770` → `reconcileProfileAgent` defined at `agent_session.go:802`, called at `handler.go:1785`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6681`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:332`, `discoveryModelRoot`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6600/3825`). The TUI-bridged path was already correct (`internal/tui/model.go:17025-17029` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
+**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1770` → `reconcileProfileAgent` defined at `agent_session.go:869`, called at `handler.go:1785`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6681`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:332`, `discoveryModelRoot`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6600/3825`). The TUI-bridged path was already correct (`internal/tui/model.go:17025-17029` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
 
 ## Durable rule
 
@@ -40,7 +40,7 @@ The web main-model pick is a per-session override: `ModelDialog.tsx:520` → `se
 
 `applySessionModelPrompt(snap, baseModel, baseCWD)` (`internal/server/model_context.go`) recomputes the banner **only when `MainModel`/`CWD` changed**, guarded to avoid a second disk scan (resolving a `.OCODE.md` shells out to git for tracked files via `agent.readContextFileAt`). When neither changed, the existing `buildStatusSnapshot` value is kept.
 
-Wired into all four session-tagged builders at `handler_session_state.go:282` (`HandleSessionStatus`), `:591` (`publishTurnStatusSnapshot`), `:740` (`pushSessionStatusSnapshot`) and `title_gen.go:152` (`finishSessionTitle`).
+Wired into all four session-tagged builders at `handler_session_state.go:208` (`HandleSessionStatus`), `:557` (`publishTurnStatusSnapshot`), `:729` (`pushSessionStatusSnapshot`) and `title_gen.go:100` (`finishSessionTitle`).
 
 ## Tests
 

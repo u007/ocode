@@ -386,9 +386,37 @@ func (m *Manager) Start(ctx context.Context, sessionID string, opts StartOptions
 		return Status{}, errShutDown
 	}
 
+	// A retained box carries the login state and account it was created with, so
+	// resolve this start's identity BEFORE deciding reuse: a reassigned project or
+	// a switched default account must replace the box, not hand back the old
+	// identity's cookies. A plain start keeps the old order (no lookup on reuse).
+	var retainedLogin string
+	var retainedAcc Account
+	if opts.Retain {
+		retainedLogin, err = m.loginStateName(sessionID)
+		if err != nil {
+			m.dropIfEmpty(e)
+			return Status{}, err
+		}
+		retainedAcc, err = m.deps.Account()
+		if err != nil {
+			m.dropIfEmpty(e)
+			return Status{}, fmt.Errorf("boxsession: resolve account: %w", err)
+		}
+		if err := retainedAcc.validateRetained(); err != nil {
+			m.dropIfEmpty(e)
+			return Status{}, err
+		}
+		if retainedLogin == "" {
+			m.dropIfEmpty(e)
+			return Status{}, ErrRetainNeedsLoginState
+		}
+	}
+
 	now := m.now()
 	m.mu.Lock()
-	if b := e.box; b != nil && reusable(b, now, opts.Retain) {
+	if b := e.box; b != nil && reusable(b, now, opts.Retain) &&
+		(!opts.Retain || retainedReuseMatches(b, retainedLogin, retainedAcc.ID)) {
 		e.lastUsed = now
 		st := m.statusLocked(e)
 		m.mu.Unlock()
@@ -400,24 +428,20 @@ func (m *Manager) Start(ctx context.Context, sessionID string, opts StartOptions
 
 	// Every refusal and lookup is made before anything is retired or created, so a
 	// failed or refused start leaves the session exactly as it was.
-	loginName, err := m.loginStateName(sessionID)
-	if err != nil {
-		m.dropIfEmpty(e)
-		return Status{}, err
-	}
-	acc, err := m.deps.Account()
-	if err != nil {
-		m.dropIfEmpty(e)
-		return Status{}, fmt.Errorf("boxsession: resolve account: %w", err)
-	}
+	loginName := retainedLogin
+	var acc Account
 	if opts.Retain {
-		if err := acc.validateRetained(); err != nil {
+		acc = retainedAcc
+	} else {
+		loginName, err = m.loginStateName(sessionID)
+		if err != nil {
 			m.dropIfEmpty(e)
 			return Status{}, err
 		}
-		if loginName == "" {
+		acc, err = m.deps.Account()
+		if err != nil {
 			m.dropIfEmpty(e)
-			return Status{}, ErrRetainNeedsLoginState
+			return Status{}, fmt.Errorf("boxsession: resolve account: %w", err)
 		}
 	}
 
@@ -472,6 +496,14 @@ func reusable(b *liveBox, now time.Time, retain bool) bool {
 		return b.kind == KindRetained
 	}
 	return b.kind == KindRetained || now.Before(b.expiresAt)
+}
+
+// retainedReuseMatches reports whether a live retained box was created for the
+// login state and account this start resolved. A retained box carries the
+// identity it was started with, so a reassigned project or a switched default
+// account must replace it rather than hand back the old cookies.
+func retainedReuseMatches(b *liveBox, loginName, accountID string) bool {
+	return b.hold != nil && b.hold.name == loginName && b.accountID == accountID
 }
 
 // isClosed reports whether Shutdown has begun.
@@ -776,6 +808,9 @@ func (m *Manager) attach(ctx context.Context, e *entry, s attachSpec) (Status, e
 		}
 	}
 
+	// The clock starts when the box is published, not when Start was entered: a
+	// slow create must not make the new box look idle to the next Tick.
+	publishAt := m.now()
 	lb := &liveBox{
 		id:        boxID,
 		accountID: s.acc.ID,
@@ -789,7 +824,7 @@ func (m *Manager) attach(ctx context.Context, e *entry, s attachSpec) (Status, e
 		storage:   storage,
 		hold:      s.hold,
 		// The restore is the box's first state, so the max-wait clock starts here.
-		lastSave: s.now,
+		lastSave: publishAt,
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -799,7 +834,7 @@ func (m *Manager) attach(ctx context.Context, e *entry, s attachSpec) (Status, e
 		return fail(errShutDown)
 	}
 	e.box = lb
-	e.lastUsed = s.now
+	e.lastUsed = publishAt
 	st := m.statusLocked(e)
 	m.mu.Unlock()
 	return st, nil
