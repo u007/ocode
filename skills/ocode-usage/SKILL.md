@@ -240,6 +240,7 @@ ocode serve -port 8080
 | `POST /api/sync/login/start` | Start sync login |
 | `POST /api/sync/login/poll` | Poll sync login |
 | `GET /api/sync/status` | Get sync status |
+| `POST /api/sync/sync` | Trigger an immediate config+auth sync (pull + push) and report refreshed status |
 | `GET /api/events` | Server-sent events |
 
 ### 3.4 ACP Server (Agent Communication Protocol)

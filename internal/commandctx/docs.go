@@ -12,9 +12,9 @@ import (
 )
 
 // DocsInit bootstraps the OKF knowledge bundle for workDir. It returns the
-// human-readable result text plus, when a new bundle was just created, the
-// context-agent annotation prompt the caller should dispatch (the TUI sends it
-// through dispatchContextAgent; the server returns it as `annotate_prompt` so
+// human-readable result text plus the context-agent pass the caller should
+// dispatch on every call, new bundle or re-run (the TUI sends it through
+// dispatchContextAgent; the server returns it as `annotate_prompt` so
 // the web client can send it as a normal turn). Moved from internal/tui
 // (docs_knowledge.go) so both surfaces behave identically.
 func DocsInit(docPromptEnabled bool, workDir string) (text string, annotatePrompt string) {
@@ -31,10 +31,10 @@ func DocsInit(docPromptEnabled bool, workDir string) (text string, annotatePromp
 		workDir = wd
 	}
 
-	// Check if bundle already exists.
+	// An existing bundle re-audits its index, then runs the same incremental
+	// pass as a new one so code features added since the last init get docs.
 	if bundle, ok := knowledge.DetectBundle(workDir); ok {
-		// Re-run audit (idempotent).
-		return docsReAudit(bundle), ""
+		return docsReAudit(bundle) + "\n" + docsInitDispatchNote, docsInitPrompt
 	}
 
 	// Init the bundle: create index.md + log.md with marker.
@@ -43,25 +43,44 @@ func DocsInit(docPromptEnabled bool, workDir string) (text string, annotatePromp
 	}
 
 	// The annotation pass runs as a context-agent turn on both surfaces.
-	return "Bundle initialized. Dispatching context agent to annotate existing docs...",
-		`You are initializing the OKF knowledge bundle for this project.
+	return "Bundle initialized. " + docsInitDispatchNote, docsInitPrompt
+}
 
-1. Scan the docs/ directory for existing markdown files (excluding index.md, log.md, and files matching default exclusion patterns: PLAN-*.md and *.OCODE.md).
-2. Also check if docs/.okfignore exists; if so, read it and skip any files whose names or paths match its patterns.
-3. For each included file that can be classified, add frontmatter (type, title, description, tags where appropriate) preserving all existing content.
-4. Do NOT delete any content or files.
-5. After classification, use doc_write for each file to add frontmatter.
-6. Finally, produce a summary of what was classified and any notes about files that could not be classified.
+const docsInitDispatchNote = "Dispatching context agent to classify existing docs and document code features..."
 
-Types of files to create:
+// docsInitPrompt is the context-agent pass behind /docs init. Part 1 classifies
+// hand-written docs; part 2 documents the code's existing features. It is
+// incremental: classified docs and already-covered features are skipped, so a
+// re-run fills gaps without rewriting docs.
+// shortcut: the 25-feature cap bounds one context turn's step budget, raise it once large repos stop converging across re-runs.
+const docsInitPrompt = `You are maintaining the OKF knowledge bundle for this project (docs/). If you are the main agent, dispatch this whole task to the "context" sub-agent (task agent=context) and report its result.
+
+Part 1: classify existing docs
+1. Scan docs/ for markdown files. Exclude index.md, log.md, and files matching PLAN-*.md or *.OCODE.md.
+2. If docs/.okfignore exists, skip every file whose name or path matches its patterns.
+3. Skip any file whose frontmatter already has a type. It is already classified.
+4. For each remaining file that fits a category, use doc_write to add frontmatter (type, title, description, tags where appropriate), preserving all existing body content.
+5. Do NOT delete any content or files.
+
+Categories:
 - decisions/ — architecture decisions, technical choices
 - playbooks/ — how-to guides, runbooks
 - schemas/ — data models, API structures
 - gotchas/ — known pitfalls, workarounds
 - concepts/ — general documentation, explanations
 
-If a file doesn't fit any category, leave it as-is (non-conforming).`
-}
+If a file doesn't fit any category, leave it as-is (non-conforming).
+
+Part 2: document existing code features
+Goal: each user-facing feature and each significant subsystem in the code has one bundle doc. Never rewrite a doc that already covers its feature.
+1. Read docs/index.md to see what is already documented.
+2. Survey these entry points in order: CLI commands, HTTP routes, slash or chat commands, agent tools, public config keys, then the main packages or modules. Read the source to confirm each feature. Do not describe behavior you did not read.
+3. For each feature, call doc_search with its name. If a bundle doc covers it, skip it.
+4. For each uncovered feature, call doc_write once. Use type Playbook for a workflow a user runs, Schema for a data model or API shape, and Concept for everything else. The body states what it does, its entry points, and its key files and symbols. Cite repo-relative paths and symbol names. Never cite line numbers.
+5. Document at most 25 features per pass. Leave the rest for a later /docs init.
+6. Do NOT edit index.md or log.md. doc_write maintains both.
+
+Report: docs classified (paths), docs created (paths), features already covered, and features not yet documented, so the next /docs init can continue.`
 
 // docsReAudit regenerates the bundle index under lock and reports counts.
 func docsReAudit(bundle *knowledge.Bundle) string {

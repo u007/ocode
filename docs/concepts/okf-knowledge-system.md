@@ -8,7 +8,7 @@ tags:
   - knowledge
   - context-agent
   - docs
-timestamp: 2026-11-18T13:09:57Z
+timestamp: 2026-11-22T15:07:00Z
 ---
 # Knowledge System (OKF Bundle): Agents, Tools and Maintenance
 
@@ -67,7 +67,7 @@ toolkit directly.
 |------------|----------|
 | `on` / `off` | Toggle doc-first development prompt (master switch for knowledge system) |
 | `status` | Bundle presence, doc counts (conforming/non-conforming/deprecated), last log entry, active state |
-| `init` | Bootstrap `docs/` into an OKF bundle — add frontmatter, generate index + log, emit staleness report; dispatches the `context` subagent to scan & annotate existing docs. Non-destructive, idempotent (re-run re-audits without clobbering). |
+| `init` | Bootstrap `docs/` into an OKF bundle — add frontmatter, generate index + log; dispatches the `context` subagent for one incremental pass that classifies existing docs and documents the code's existing features. A re-run re-audits the index and fills gaps without rewriting covered docs. Non-destructive, idempotent. |
 | `update [focus]` | Force a maintenance pass (scan for staleness, duplicates, orphans). Queued asynchronously. |
 | `cleanup [--yes]` | An LLM audit, not a preset deprecation list: without `--yes` it dispatches the `context` subagent to find duplicated, stale (staleness verified against the source), superseded and orphaned docs, merge duplicates with `doc_write` first, then `doc_deprecate` each removal with a one-line reason. The audit never deletes. With `--yes` it deterministically deletes every doc already marked `status: deprecated` under lock, appends `Deletion` log entries and regenerates the index. No bundle → hints `/docs init`. |
 

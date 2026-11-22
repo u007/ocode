@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -126,14 +127,12 @@ func (h *Handler) HandleGetSyncURLConfig(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// HandleSetSyncURLConfig persists a sync server URL override. Changing the
-// URL stops the background watcher and drops the cached client immediately:
-// the old watcher holds a client bound to the previous endpoint, and the
-// config-save event from this very change would otherwise trigger a push of
-// (possibly secret-bearing) blobs to that old server. Sync stays suspended
-// until the next login against the new endpoint rebuilds the client and
-// restarts the watcher; the stored token is left untouched since it is tied
-// to whichever server issued it.
+// HandleSetSyncURLConfig persists a sync server URL override. Changing it to a
+// different URL signs this machine out of sync before the new URL is saved:
+// the client is detached, the watcher stopped, the old token revoked
+// best-effort, and the token cleared locally. Saving the URL that is already
+// set changes nothing. Sync stays logged out until the user logs in against
+// the new server.
 func (h *Handler) HandleSetSyncURLConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SyncURL string `json:"sync_url"`
@@ -147,6 +146,29 @@ func (h *Handler) HandleSetSyncURLConfig(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.mu.Lock()
+	previous := ""
+	if h.cfg != nil {
+		previous = h.cfg.Ocode.SyncURL
+	}
+	h.mu.Unlock()
+	// Sign out before the new URL is in effect: a client rebuilt against the
+	// new URL would revoke or send the old token to the new server.
+	if normalized != previous {
+		token, loggedIn, err := ocodesync.LoadToken()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "load sync token: "+err.Error())
+			return
+		}
+		if loggedIn {
+			if err := h.signOutSync(r, token); err != nil {
+				writeError(w, http.StatusInternalServerError, "clear sync token: "+err.Error())
+				return
+			}
+		} else {
+			h.detachSyncClientForLogout()
+		}
+	}
 	if err := config.SaveSyncURL(normalized); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
@@ -156,18 +178,6 @@ func (h *Handler) HandleSetSyncURLConfig(w http.ResponseWriter, r *http.Request)
 		h.cfg.Ocode.SyncURL = normalized
 	}
 	h.mu.Unlock()
-	// Invalidate under syncMu (lock order: syncMu -> mu, same as syncClient):
-	// stop the old-endpoint watcher and drop the cached client so the next
-	// syncClient() call rebuilds against the new URL. A watcher started later
-	// by startSyncWatcher carries an identity check, so it cannot resurrect
-	// this detached client.
-	h.syncMu.Lock()
-	if h.syncStop != nil {
-		h.syncStop()
-		h.syncStop = nil
-	}
-	h.syncClientInst = nil
-	h.syncMu.Unlock()
 	writeJSON(w, http.StatusOK, SyncURLConfigResponse{
 		SyncURL:     normalized,
 		ResolvedURL: ocodesync.ResolveBaseURL(normalized),
@@ -240,6 +250,80 @@ func (h *Handler) HandleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// syncBlobBoth pulls then pushes one blob, logging each step. It returns the
+// first error encountered so HandleSyncNow can surface it. Pulling brings
+// server changes down; pushing uploads local changes up and (on success)
+// writes the snapshot that marks the blob "synced". Doing both means a
+// machine that has never synced reaches "synced" even when the server has no
+// blob yet.
+func syncBlobBoth(client *ocodesync.Client, parent context.Context, blob ocodesync.BlobType) error {
+	// One deadline per blob, so a slow pull of one cannot starve the other.
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if err := client.Pull(ctx, blob); err != nil {
+		log.Printf("sync: pull %s failed: %v", blob, err)
+		return err
+	}
+	if err := client.PushLocal(ctx, blob); err != nil {
+		log.Printf("sync: push %s failed: %v", blob, err)
+		return err
+	}
+	return nil
+}
+
+// HandleSyncNow triggers an immediate pull+push of both config and auth
+// blobs, then reports the updated sync status, or answers 502 with the first
+// pull or push error. It backs the manual "Sync now" button and the auto-sync
+// catch-up, so a machine that is "not synced yet" converges on the server
+// without the user re-logging in. A machine that is not logged in answers 409
+// and contacts no server.
+//
+// A concurrent call (double-click, or a poll racing a click) does not start a
+// second overlapping sync: it reports the current status instead. The guard is
+// held only for the flag flip; the network pulls run outside syncMu.
+func (h *Handler) HandleSyncNow(w http.ResponseWriter, r *http.Request) {
+	_, loggedIn, err := ocodesync.LoadToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load sync token: "+err.Error())
+		return
+	}
+	if !loggedIn {
+		writeError(w, http.StatusConflict, "not logged in to sync")
+		return
+	}
+
+	h.syncMu.Lock()
+	if h.syncNowInFlight {
+		h.syncMu.Unlock()
+		// A sync is already in flight; report current status without starting
+		// another sync.
+		h.HandleSyncStatus(w, r)
+		return
+	}
+	h.syncNowInFlight = true
+	h.syncMu.Unlock()
+
+	defer func() {
+		h.syncMu.Lock()
+		h.syncNowInFlight = false
+		h.syncMu.Unlock()
+	}()
+
+	client := h.syncClient()
+	var firstErr error
+	if err := syncBlobBoth(client, r.Context(), ocodesync.BlobTypeConfig); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := syncBlobBoth(client, r.Context(), ocodesync.BlobTypeAuth); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr != nil {
+		writeError(w, http.StatusBadGateway, "sync failed: "+firstErr.Error())
+		return
+	}
+	h.HandleSyncStatus(w, r)
+}
+
 // HandleSyncLogout stops the background watcher, revokes the token
 // server-side (best-effort), and clears it locally. The watcher is stopped
 // and the client pointer is detached under syncMu (via
@@ -254,20 +338,24 @@ func (h *Handler) HandleSyncLogout(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
+	if err := h.signOutSync(r, token); err != nil {
+		writeError(w, http.StatusInternalServerError, "clear sync token: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
 
+// signOutSync detaches the sync client (stopping its watcher), revokes the
+// token on the server when a client existed (best-effort, outside any lock),
+// then clears the token locally.
+func (h *Handler) signOutSync(r *http.Request, token string) error {
 	client := h.detachSyncClientForLogout()
-
 	if client != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		_ = client.Revoke(ctx, token) // best-effort; token is cleared locally either way
 	}
-
-	if err := ocodesync.ClearToken(); err != nil {
-		writeError(w, http.StatusInternalServerError, "clear sync token: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	return ocodesync.ClearToken()
 }
 
 // startSyncWatcher pulls both blobs and (re)starts the background

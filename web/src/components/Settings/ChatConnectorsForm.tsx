@@ -22,6 +22,10 @@ export default function ChatConnectorsForm() {
   const [fbAppSecret, setFbAppSecret] = useState("");
   const [fbAllowed, setFbAllowed] = useState("");
   const [busy, setBusy] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addOk, setAddOk] = useState(false);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ id: string; ok: boolean; text: string } | null>(null);
   // Resolved server-side from sync_url (production hub by default); this form
   // only reports it. There is deliberately no editable URL input.
   const [syncTarget, setSyncTarget] = useState("");
@@ -65,20 +69,31 @@ export default function ChatConnectorsForm() {
   }, []);
 
   const add = async () => {
+    setAddError(null);
+    setAddOk(false);
     setBusy(true);
     try {
       let creds = credentials;
       if (provider === "facebook") {
         creds = JSON.stringify({ page_token: fbPageToken, verify_token: fbVerifyToken, app_secret: fbAppSecret, allowed_senders: fbAllowed.split(",").map((x) => x.trim()).filter(Boolean) });
       }
-      await fetch("/api/messaging/accounts", {
+      const res = await fetch("/api/messaging/accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider, label, credentials: creds }),
       });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
       setLabel("");
       setCredentials("");
+      setAddOk(true);
       await load();
+    } catch (err) {
+      // Logged for debugging; surfaced to the user via addError below.
+      console.error("add messaging account failed", err);
+      setAddError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -97,9 +112,42 @@ export default function ChatConnectorsForm() {
     await load();
   };
 
+  const test = async (id: string) => {
+    setTestingId(id);
+    setTestResult(null);
+    try {
+      const res = await fetch(`/api/messaging/accounts/${id}/test`, { method: "POST" });
+      let body: { ok?: boolean; error?: string } = {};
+      try {
+        body = await res.json();
+      } catch {}
+      setTestResult({
+        id,
+        ok: res.ok && body.ok === true,
+        text: body.ok ? "Token valid."
+          : body.error || `HTTP ${res.status}`,
+      });
+    } catch (err) {
+      console.error("test messaging account failed", err);
+      setTestResult({ id, ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setTestingId(null);
+    }
+  };
+
   return (
     <div className="p-6 max-w-2xl space-y-4">
       <h3 className="text-lg font-medium">Chat Connectors (WhatsApp / Telegram / Facebook)</h3>
+      {addOk && (
+        <div role="status" className="rounded border border-green/50 bg-green/10 p-3 text-sm">
+          Account added.
+        </div>
+      )}
+      {addError && (
+        <div role="alert" className="rounded border border-destructive/50 bg-destructive/10 p-3 text-sm">
+          Add failed: {addError}
+        </div>
+      )}
       {recent.length > 0 && (
         <div className="border rounded p-2 space-y-1 max-h-40 overflow-auto">
           <div className="text-xs font-medium">Recent inbound messages</div>
@@ -120,8 +168,23 @@ export default function ChatConnectorsForm() {
             <div className="ml-auto flex gap-1">
               <Button size="sm" onClick={() => start(a.id)}>Start</Button>
               <Button size="sm" variant="outline" onClick={() => stop(a.id)}>Stop</Button>
+              {a.provider === "telegram" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void test(a.id)}
+                  disabled={testingId === a.id}
+                >
+                  {testingId === a.id ? "Testing…" : "Test"}
+                </Button>
+              )}
               <Button size="sm" variant="destructive" onClick={() => remove(a.id)}>Remove</Button>
             </div>
+            {testResult?.id === a.id && (
+              <div className={`text-xs ml-auto ${testResult.ok ? "text-green-600" : "text-destructive"}`}>
+                {testResult.text}
+              </div>
+            )}
           </div>
         ))}
         {accounts.length === 0 && <p className="text-sm text-muted-foreground">No accounts configured.</p>}

@@ -3,12 +3,15 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/u007/ocode/internal/messaging"
 )
 
@@ -45,6 +48,87 @@ func TestMessagingAccountsCRUD(t *testing.T) {
 	h.handleMessagingAccountAction(w3, r3)
 	if w3.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", w3.Code, w3.Body.String())
+	}
+}
+
+// TestMessagingAccountTest covers the account-test endpoint's not-found,
+// unsupported-provider and uninitialised responses.
+func TestMessagingAccountTest(t *testing.T) {
+	h := NewHandler()
+	st, err := messaging.NewStore(filepath.Join(t.TempDir(), "messaging.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	h.messaging = messaging.NewManager(st, t.TempDir())
+
+	if err := st.UpsertAccount(messaging.Account{
+		ID:          "acct-telegram",
+		Provider:    messaging.ProviderTelegram,
+		Label:       "tg",
+		Credentials: "123456:ABC",
+		Status:      "disconnected",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.UpsertAccount(messaging.Account{
+		ID:          "acct-whatsapp",
+		Provider:    messaging.ProviderWhatsApp,
+		Label:       "wa",
+		Credentials: "session",
+		Status:      "disconnected",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// not found
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/messaging/accounts/nope/test", nil)
+	h.handleMessagingAccountTest(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("not found: %d %s", w.Code, w.Body.String())
+	}
+
+	// unsupported provider
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, "/api/messaging/accounts/acct-whatsapp/test", nil)
+	h.handleMessagingAccountTest(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported: %d %s", w.Code, w.Body.String())
+	}
+
+	// messaging not initialized
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, "/api/messaging/accounts/acct-telegram/test", nil)
+	(&Handler{}).handleMessagingAccountTest(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not initialized: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTelegramTokenCheckMessage(t *testing.T) {
+	const (
+		reach    = "could not reach Telegram API"
+		rejected = "token rejected by Telegram"
+		failed   = "Telegram check failed, try again"
+	)
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"unreachable", &url.Error{Op: "Post", URL: "https://api.telegram.org/botTOKEN/getMe", Err: errors.New("dial tcp: no route")}, reach},
+		{"unauthorized", &tgbotapi.Error{Code: http.StatusUnauthorized, Message: "Unauthorized"}, rejected},
+		{"not found", &tgbotapi.Error{Code: http.StatusNotFound, Message: "Not Found"}, rejected},
+		{"rate limited", &tgbotapi.Error{Code: http.StatusTooManyRequests, Message: "Too Many Requests"}, failed},
+		{"bad gateway", &tgbotapi.Error{Code: http.StatusBadGateway, Message: "Bad Gateway"}, failed},
+		{"decode failure", errors.New("invalid character '<' looking for beginning of value"), failed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := telegramTokenCheckMessage(tc.err); got != tc.want {
+				t.Fatalf("telegramTokenCheckMessage() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

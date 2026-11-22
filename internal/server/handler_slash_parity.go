@@ -464,10 +464,10 @@ func (h *Handler) HandleDocsStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDocsInit serves POST /api/docs/init?project= — creates the OKF bundle
-// marker files (or re-audits an existing bundle). When a new bundle was just
-// created, the response carries annotate_prompt which the client should send
-// as a normal turn so the context agent classifies existing docs (the TUI
-// dispatches it via dispatchContextAgent).
+// marker files (or re-audits an existing bundle). The response carries
+// annotate_prompt on every call, new bundle or re-run, which the client should
+// send as a normal turn so the context agent classifies existing docs and
+// documents code features (the TUI dispatches it via dispatchContextAgent).
 func (h *Handler) HandleDocsInit(w http.ResponseWriter, r *http.Request) {
 	workDir, ok := h.docsWorkDir(r)
 	if !ok {

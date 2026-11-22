@@ -3,10 +3,12 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestPushSendsToServerAndSavesSnapshot(t *testing.T) {
@@ -96,5 +98,49 @@ func TestPushWithoutTokenIsNoop(t *testing.T) {
 	}
 	if pushed {
 		t.Fatal("expected no push when not logged in")
+	}
+}
+
+// A cancelled context must end the conflict backoff at once. The hub conflicts
+// on every push, so the second attempt is followed by a 500ms backoff; the
+// cancel lands 20ms into it and Push has to return within 150ms of that.
+func TestPushReturnsPromptlyOnCancelDuringConflictBackoff(t *testing.T) {
+	withTempHome(t)
+
+	snapshotPath, _ := SnapshotPath(BlobTypeConfig)
+	sd, _ := syncDir()
+	os.MkdirAll(sd, 0700)
+	os.WriteFile(snapshotPath, []byte(`{"version":5,"blob":{"theme":"light"}}`), 0600)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelAt time.Time
+	attempt := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 2 {
+			time.AfterFunc(20*time.Millisecond, func() {
+				cancelAt = time.Now()
+				cancel()
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok": false, "currentVersion": 5,
+			"currentBlob": `{"theme":"light","extra":"remote"}`,
+		})
+	}))
+	defer srv.Close()
+
+	if err := SaveToken("tok"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	c := &Client{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := c.Push(ctx, BlobTypeConfig, json.RawMessage(`{"theme":"dark"}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Push error = %v, want context.Canceled", err)
+	}
+	if lag := time.Since(cancelAt); lag > 150*time.Millisecond {
+		t.Fatalf("Push returned %v after cancel; the conflict backoff ignores ctx", lag)
 	}
 }

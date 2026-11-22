@@ -453,6 +453,10 @@ type Handler struct {
 	// actually changes at runtime — never on every call, which would clobber
 	// a client pointed at a test server or otherwise built out-of-band.
 	syncConfiguredURL string
+	// syncNowInFlight guards the manual/auto sync-now pull so concurrent
+	// clicks (or a poll and a click) don't launch overlapping network pulls.
+	// Guarded by syncMu; the actual Pull runs outside the lock.
+	syncNowInFlight bool
 
 	// lspMgrs holds one LSP manager per project root. Sessions bound to the
 	// same project share a manager (multiple tabs on one repo don't spawn

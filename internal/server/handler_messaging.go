@@ -6,13 +6,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	qrcode "github.com/skip2/go-qrcode"
 	"github.com/u007/ocode/internal/messaging"
 )
@@ -130,6 +133,59 @@ func (h *Handler) handleMessagingAccountAction(w http.ResponseWriter, r *http.Re
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 	}
+}
+
+// handleMessagingAccountTest validates an account's credentials without
+// persisting or starting anything. Telegram tokens are checked against the
+// Telegram API (getMe) with a short timeout; the token itself is never echoed
+// back in the response or logs.
+func (h *Handler) handleMessagingAccountTest(w http.ResponseWriter, r *http.Request) {
+	mgr := h.messaging
+	if mgr == nil {
+		http.Error(w, "messaging not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 5 || parts[4] != "test" {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	id := parts[3]
+	acc, err := mgr.Store().GetAccount(id)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	switch acc.Provider {
+	case messaging.ProviderTelegram:
+		if err := messaging.ValidateBotToken(acc.Credentials); err != nil {
+			msg := telegramTokenCheckMessage(err)
+			slog.Warn("messaging: telegram token check failed", "account_id", id, "reason", msg)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": msg})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	default:
+		http.Error(w, "test not supported for this provider", http.StatusBadRequest)
+	}
+}
+
+// telegramTokenCheckMessage maps a ValidateBotToken error to the fixed message
+// shown to the user. Only this message is returned or logged: the raw error can
+// embed the bot token (a *url.Error carries the request URL).
+func telegramTokenCheckMessage(err error) string {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return "could not reach Telegram API"
+	}
+	// The library returns *tgbotapi.Error from MakeRequest on a non-ok response.
+	var apiErr *tgbotapi.Error
+	if errors.As(err, &apiErr) && (apiErr.Code == http.StatusUnauthorized || apiErr.Code == http.StatusNotFound) {
+		return "token rejected by Telegram"
+	}
+	// Rate limits, 5xx, and undecodable bodies (e.g. a proxy's HTML page) say
+	// nothing about the token, so do not call a working token bad.
+	return "Telegram check failed, try again"
 }
 
 func (h *Handler) handleMessagingChats(w http.ResponseWriter, r *http.Request) {

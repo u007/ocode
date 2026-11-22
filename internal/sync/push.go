@@ -185,11 +185,34 @@ func (c *Client) Push(ctx context.Context, blob BlobType, local json.RawMessage)
 		version = resp.CurrentVersion
 		payload = merged
 
-		time.Sleep(retryBackoff(attempt))
+		timer := time.NewTimer(retryBackoff(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("push %s: %w", blob, ctx.Err())
+		case <-timer.C:
+		}
 	}
 
 	log.Printf("sync: gave up pushing %s after %d attempts (persistent conflict), will retry next cycle", blob, maxPushRetries)
 	return nil
+}
+
+// PushLocal reads the on-disk blob and pushes it to the server. It returns
+// the push error so callers can surface it; on success the snapshot is
+// written (inside Push) and the blob is marked synced. Used by on-demand sync
+// so a machine that has never synced (no snapshot yet) reaches "synced" by
+// uploading its local blob even when the server has none.
+func (c *Client) PushLocal(ctx context.Context, blob BlobType) error {
+	path, err := localConfigPathFor(blob)
+	if err != nil {
+		return err
+	}
+	data, err := readLocalConfigFile(path)
+	if err != nil {
+		return err
+	}
+	return c.Push(ctx, blob, data)
 }
 
 func (c *Client) pushOnce(ctx context.Context, token string, blob BlobType, version int, data json.RawMessage) (*pushResponse, error) {

@@ -29,6 +29,7 @@ function formatSyncedAt(iso: string): string {
 export default function SyncStatusWidget() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<SyncStatusResponse | null>(null);
+  const loggedIn = status?.loggedIn ?? false;
   const [loginState, setLoginState] = useState<
     | { phase: "idle" }
     | { phase: "starting" }
@@ -37,21 +38,89 @@ export default function SyncStatusWidget() {
   >({ phase: "idle" });
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  // Login poll only; stopPolling() clears this one.
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The 30 s status poll, cleared only by its own effect's cleanup.
+  const statusTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Last time a sync attempt (manual or auto) was started, for backoff.
+  const lastSyncAttempt = useRef(0);
+  // Latest status for the interval callback, which otherwise closes over the first render.
+  const statusRef = useRef<SyncStatusResponse | null>(null);
+
+  // How long to wait between automatic retry attempts while a blob is still
+  // not synced. Matches the status poll interval so a failed sync is retried
+  // at most once per poll tick.
+  const AUTO_SYNC_RETRY_MS = 30000;
+
+  const applyStatus = (next: SyncStatusResponse) => {
+    statusRef.current = next;
+    setStatus(next);
+  };
 
   const refreshStatus = () => {
-    api.getSyncStatus().then(setStatus).catch(() => {});
+    api.getSyncStatus().then(applyStatus).catch(() => {});
+  };
+
+  // Sync both blobs (server <-> local) and refresh the displayed status.
+  const syncNow = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    lastSyncAttempt.current = Date.now();
+    try {
+      const updated = await api.syncNow();
+      applyStatus(updated);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Sync failed";
+      setSyncError(message);
+      // Log so the failure is visible server-side/operator-side, not swallowed.
+      console.error("sync: sync now failed:", err);
+      // A failed sync can still have synced one blob, so re-read the real state.
+      refreshStatus();
+    } finally {
+      setSyncing(false);
+    }
   };
 
   useEffect(() => {
     refreshStatus();
-  }, []);
 
-  useEffect(() => {
+    // Keep the displayed status fresh while logged in (status reads are cheap;
+    // they never start a sync). On each tick, auto-retry sync if a blob is
+    // still not synced and the backoff has elapsed.
+    statusTimer.current = setInterval(() => {
+      refreshStatus();
+      maybeAutoSync();
+    }, 30000);
     return () => {
-      if (pollTimer.current) clearInterval(pollTimer.current);
+      if (statusTimer.current) clearInterval(statusTimer.current);
+      statusTimer.current = null;
     };
   }, []);
+
+  // Auto-sync catch-up: when logged in and either blob shows "not synced yet",
+  // sync once so the machine converges without the user clicking the button.
+  // Retries automatically on each poll tick while still not synced, gated by
+  // lastSyncAttempt so a failed sync is retried at most once per backoff
+  // window instead of being stuck forever.
+  const maybeAutoSync = () => {
+    const current = statusRef.current;
+    if (!current?.loggedIn) return;
+    const needsSync = !current.config.synced || !current.auth.synced;
+    if (!needsSync) return;
+    if (Date.now() - lastSyncAttempt.current < AUTO_SYNC_RETRY_MS) return;
+    void syncNow();
+  };
+
+  // Fire an initial auto-sync shortly after mount when not yet synced.
+  useEffect(() => {
+    if (!loggedIn || !status) return;
+    const needsSync = !status.config.synced || !status.auth.synced;
+    if (!needsSync) return;
+    const t = setTimeout(() => syncNow(), 800);
+    return () => clearTimeout(t);
+  }, [loggedIn, status?.config.synced, status?.auth.synced]);
 
   const stopPolling = () => {
     if (pollTimer.current) {
@@ -59,6 +128,9 @@ export default function SyncStatusWidget() {
       pollTimer.current = null;
     }
   };
+
+  // Unmount: the login poll has no effect of its own, so clear it here.
+  useEffect(() => () => stopPolling(), []);
 
   const startLogin = async () => {
     setLoginState({ phase: "starting" });
@@ -123,8 +195,6 @@ export default function SyncStatusWidget() {
     setLoginState({ phase: "idle" });
     refreshStatus();
   };
-
-  const loggedIn = status?.loggedIn ?? false;
 
   return (
     <>
@@ -264,6 +334,16 @@ export default function SyncStatusWidget() {
                   </span>
                 </div>
               </div>
+              {syncError && (
+                <p className="text-sm text-red-400">{syncError}</p>
+              )}
+              <Button
+                onClick={syncNow}
+                disabled={syncing}
+                className="w-full"
+              >
+                {syncing ? "Syncing…" : "Sync now"}
+              </Button>
               <Button onClick={logout} variant="outline" className="w-full">
                 Log Out
               </Button>

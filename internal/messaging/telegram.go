@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -133,4 +134,21 @@ func parseChatID(s string) (int64, error) {
 	var id int64
 	_, err := fmt.Sscanf(s, "%d", &id)
 	return id, err
+}
+
+// ValidateBotToken reports whether a Telegram bot token is accepted by the
+// Telegram API (a getMe call), without starting to poll. A nil error means the
+// token is valid; it makes a real network call with a short timeout, so tests
+// should use ValidateBotTokenWithClient to avoid hitting the network.
+func ValidateBotToken(token string) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	_, err := tgbotapi.NewBotAPIWithClient(strings.TrimSpace(token), tgbotapi.APIEndpoint, client)
+	return err
+}
+
+// ValidateBotTokenWithClient is ValidateBotToken with an injected HTTP client
+// and API endpoint, so the check can be exercised against an httptest server.
+func ValidateBotTokenWithClient(token, apiEndpoint string, client tgbotapi.HTTPClient) error {
+	_, err := tgbotapi.NewBotAPIWithClient(strings.TrimSpace(token), apiEndpoint, client)
+	return err
 }

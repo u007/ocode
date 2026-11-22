@@ -559,7 +559,7 @@ An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that the
 | Command | Purpose |
 |---------|---------|
 | `/docs on` / `/docs off` | Toggle the knowledge system flag |
-| `/docs init` | Create bundle marker (`docs/index.md` + `docs/log.md`) + dispatch the `context` subagent to annotate existing docs |
+| `/docs init` | Create bundle marker (`docs/index.md` + `docs/log.md`) + dispatch the `context` subagent to classify existing docs and document the code's existing features (a re-run skips covered features and classified docs) |
 | `/docs status` | Show bundle presence, doc counts, last log entry |
 | `/docs update [focus]` | Force a maintenance pass (scan for staleness, duplicates) |
 | `/docs cleanup [--yes]` | Dispatch the `context` subagent to audit for stale/duplicate/orphan docs and deprecate them; `--yes` then deletes the deprecated files |

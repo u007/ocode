@@ -13,7 +13,7 @@ import (
 )
 
 func TestSyncStatusLoggedOutByDefault(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	h := NewHandler()
 	w := httptest.NewRecorder()
@@ -36,7 +36,7 @@ func TestSyncStatusLoggedOutByDefault(t *testing.T) {
 }
 
 func TestSyncLoginStartReturnsDeviceCode(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -66,7 +66,7 @@ func TestSyncLoginStartReturnsDeviceCode(t *testing.T) {
 }
 
 func TestSyncLoginPollApprovedSavesTokenAndUpdatesStatus(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -120,7 +120,7 @@ func TestSyncLoginPollApprovedSavesTokenAndUpdatesStatus(t *testing.T) {
 // concurrently call h.syncClient() and assert every result is the same
 // pointer. Run with -race to detect data races in the accessor.
 func TestSyncClientConcurrentAccess(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	h := NewHandler()
 	h.mu.Lock()
@@ -167,7 +167,7 @@ func TestSyncClientConcurrentAccess(t *testing.T) {
 // release the handler. The identity check (h.syncClientInst != client) must
 // make startSyncWatcher a no-op, so no watcher is reinstated.
 func TestSyncLogoutDuringLoginPollWatcherRace(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	h := NewHandler()
 	h.mu.Lock()
@@ -235,7 +235,7 @@ func TestSyncLogoutDuringLoginPollWatcherRace(t *testing.T) {
 // TestSyncLogoutClearsTokenAndStopsWatcher verifies the logout invariant:
 // watcher stopped, server-side revoke called, token cleared locally.
 func TestSyncLogoutClearsTokenAndStopsWatcher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	revoked := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -270,5 +270,346 @@ func TestSyncLogoutClearsTokenAndStopsWatcher(t *testing.T) {
 	}
 	if _, ok, _ := ocodesync.LoadToken(); ok {
 		t.Error("expected token to be cleared locally")
+	}
+}
+
+// TestSyncNowPullsBothBlobs verifies POST /api/sync/sync pulls config and auth
+// from the sync server and reports refreshed (synced) status. A blob is
+// "synced" once its snapshot file exists on disk; Pull writes it when the
+// server has a blob, PushLocal writes it after uploading the local blob.
+func TestSyncNowPullsBothBlobs(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/ocode/sync/ocodeconfig" || r.URL.Path == "/api/ocode/sync/authsecrets"):
+			json.NewEncoder(w).Encode(map[string]interface{}{"version": 1, "blob": "{}"})
+		case r.Method == http.MethodPut && (r.URL.Path == "/api/ocode/sync/ocodeconfig" || r.URL.Path == "/api/ocode/sync/authsecrets"):
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	if err := ocodesync.SaveToken("tok-abc"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	h := NewHandler()
+	h.syncClientInst = ocodesync.NewClient(srv.URL)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result SyncStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.LoggedIn {
+		t.Error("expected loggedIn=true")
+	}
+	if !result.Config.Synced || !result.Auth.Synced {
+		t.Errorf("expected both blobs synced, got %+v", result)
+	}
+}
+
+// TestSyncNowNeverSyncedReachesSynced verifies that a machine which has never
+// synced (server has no blob, so Pull writes no snapshot) still reaches
+// "synced" by pushing its local blob up.
+func TestSyncNowNeverSyncedReachesSynced(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	var pulls, puts []string
+	mu := &sync.Mutex{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.Method == http.MethodGet {
+			pulls = append(pulls, r.URL.Path)
+		} else {
+			puts = append(puts, r.URL.Path)
+		}
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/ocode/sync/ocodeconfig" || r.URL.Path == "/api/ocode/sync/authsecrets"):
+			// Server has no blob for this user yet.
+			json.NewEncoder(w).Encode(map[string]interface{}{"version": 0, "blob": ""})
+		case r.Method == http.MethodPut && (r.URL.Path == "/api/ocode/sync/ocodeconfig" || r.URL.Path == "/api/ocode/sync/authsecrets"):
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	if err := ocodesync.SaveToken("tok-abc"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	h := NewHandler()
+	h.syncClientInst = ocodesync.NewClient(srv.URL)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result SyncStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.Config.Synced || !result.Auth.Synced {
+		t.Errorf("expected both blobs synced after push, got %+v", result)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pulls) != 2 || len(puts) != 2 {
+		t.Errorf("expected 2 pulls and 2 pushes, got pulls=%v puts=%v", pulls, puts)
+	}
+}
+
+// TestSyncNowInFlightGuardSkipsPull verifies a concurrent sync-now call does
+// not start a second overlapping Pull: with syncNowInFlight set it reports the
+// current status without hitting the sync server.
+func TestSyncNowInFlightGuardSkipsPull(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	if err := ocodesync.SaveToken("tok-abc"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		json.NewEncoder(w).Encode(map[string]interface{}{"version": 1, "blob": "{}"})
+	}))
+	defer srv.Close()
+
+	h := NewHandler()
+	h.syncClientInst = ocodesync.NewClient(srv.URL)
+
+	// Simulate a sync already in flight.
+	h.syncMu.Lock()
+	h.syncNowInFlight = true
+	h.syncMu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if hits != 0 {
+		t.Errorf("expected no Pull while in flight, got %d hits", hits)
+	}
+}
+
+// TestSyncNowFlagResetsAfterPullError verifies the in-flight flag resets after
+// a failed sync so a subsequent call is not permanently blocked.
+func TestSyncNowFlagResetsAfterPullError(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	if err := ocodesync.SaveToken("tok-abc"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	// First mock: every pull returns 500, so the sync fails.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	h := NewHandler()
+	h.syncClientInst = ocodesync.NewClient(srv.URL)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 on sync failure, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sync failed") {
+		t.Fatalf("expected error body naming the failure, got %s", w.Body.String())
+	}
+
+	// syncBlobBoth runs synchronously, so by now the flag must be reset.
+	h.syncMu.Lock()
+	inFlight := h.syncNowInFlight
+	h.syncMu.Unlock()
+	if inFlight {
+		t.Error("expected syncNowInFlight to reset after a failed sync")
+	}
+
+	// A subsequent call must reach the server (not be blocked by a stale flag).
+	hits := 0
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		json.NewEncoder(w).Encode(map[string]interface{}{"version": 1, "blob": "{}"})
+	}))
+	defer srv2.Close()
+	h.syncClientInst = ocodesync.NewClient(srv2.URL)
+
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w2, r2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 on retry, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if hits == 0 {
+		t.Error("expected subsequent sync to reach the server after flag reset")
+	}
+}
+
+// TestSyncNowNotLoggedInReturnsConflict verifies Sync now refuses to run
+// without a stored token and contacts no sync server.
+func TestSyncNowNotLoggedInReturnsConflict(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"version": 1, "blob": "{}"})
+	}))
+	defer srv.Close()
+
+	h := NewHandler()
+	h.syncClientInst = ocodesync.NewClient(srv.URL)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when not logged in, got %d: %s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Errorf("expected no requests to the sync server, got %d", hits)
+	}
+}
+
+// TestSetSyncURLChangeSignsOutAndSuspendsSync verifies that changing the sync
+// URL revokes and clears the token issued by the old server, so a following
+// Sync now sends nothing to the new server.
+func TestSetSyncURLChangeSignsOutAndSuspendsSync(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	var mu sync.Mutex
+	var oldPaths []string
+	oldHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		oldPaths = append(oldPaths, r.URL.Path)
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer oldHub.Close()
+	newHits := 0
+	newHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		newHits++
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer newHub.Close()
+
+	if err := ocodesync.SaveToken("tok-old"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	h := NewHandler()
+	h.mu.Lock()
+	h.cfg = &config.Config{Ocode: config.OcodeConfig{SyncURL: oldHub.URL}}
+	h.mu.Unlock()
+	h.syncMu.Lock()
+	h.syncClientInst = ocodesync.NewClient(oldHub.URL)
+	h.syncConfiguredURL = oldHub.URL
+	h.syncMu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/sync-url", strings.NewReader(`{"sync_url":"`+newHub.URL+`"}`))
+	h.HandleSetSyncURLConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on URL change, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, ok, _ := ocodesync.LoadToken(); ok {
+		t.Fatal("expected token cleared after sync URL change")
+	}
+	mu.Lock()
+	revokedOnOld := false
+	for _, p := range oldPaths {
+		if p == "/api/ocode/device/revoke" {
+			revokedOnOld = true
+		}
+	}
+	mu.Unlock()
+	if !revokedOnOld {
+		t.Error("expected the old token to be revoked on the old server")
+	}
+
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("POST", "/api/sync/sync", nil)
+	h.HandleSyncNow(w2, r2)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for Sync now after URL change, got %d: %s", w2.Code, w2.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if newHits != 0 {
+		t.Errorf("expected nothing sent to the new server, got %d requests", newHits)
+	}
+}
+
+// TestSetSyncURLSameURLKeepsToken verifies that saving the sync URL already in
+// effect leaves the stored token and the client alone.
+func TestSetSyncURLSameURLKeepsToken(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to sync server: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	if err := ocodesync.SaveToken("tok-keep"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+
+	h := NewHandler()
+	h.mu.Lock()
+	h.cfg = &config.Config{Ocode: config.OcodeConfig{SyncURL: srv.URL}}
+	h.mu.Unlock()
+	seeded := ocodesync.NewClient(srv.URL)
+	h.syncMu.Lock()
+	h.syncClientInst = seeded
+	h.syncConfiguredURL = srv.URL
+	h.syncMu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/sync-url", strings.NewReader(`{"sync_url":"`+srv.URL+`"}`))
+	h.HandleSetSyncURLConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	token, ok, err := ocodesync.LoadToken()
+	if err != nil || !ok || token != "tok-keep" {
+		t.Errorf("expected token tok-keep kept, got %q ok=%v err=%v", token, ok, err)
+	}
+	h.syncMu.Lock()
+	defer h.syncMu.Unlock()
+	if h.syncClientInst != seeded {
+		t.Error("expected the sync client to be kept when the URL is unchanged")
 	}
 }

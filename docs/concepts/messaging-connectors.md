@@ -16,7 +16,7 @@ tags:
   - settings
   - security
   - sync
-timestamp: 2026-11-19T03:52:41Z
+timestamp: 2026-11-22T18:19:10Z
 ---
 Experimental subsystem that links ocode to chat platforms: accounts are configured once,
 inbound messages are persisted to SQLite, and both the agent and the web UI can read,
@@ -24,7 +24,7 @@ search and send. Three providers share one interface — Telegram, WhatsApp and 
 Messenger.
 
 It is **server-mode only**. `messaging.DefaultManager` is set at server boot
-(`internal/server/handler.go:794`); a TUI or headless process never sets it, so every
+(`internal/server/handler.go:822`); a TUI or headless process never sets it, so every
 `chat_*` tool fails with `chat connectors not initialized` outside the web/desktop
 server.
 
@@ -57,7 +57,7 @@ connector subsystem.
 
 ## Storage and SQLite schema
 
-`Store` opens `<GlobalDataDir>/messaging.sqlite` (`internal/server/handler.go:788`),
+`Store` opens `<GlobalDataDir>/messaging.sqlite` (`internal/server/handler.go:816`),
 creating the parent directory with mode `0700` and chmodding the database file to
 `0600`. The driver is `modernc.org/sqlite` (pure Go).
 
@@ -106,14 +106,14 @@ Known provider limitations in this first cut:
 
 ## Facebook Messenger webhook
 
-Route: **`/api/messaging/messenger/webhook`** (`internal/server/server.go:333`), a thin
+Route: **`/api/messaging/messenger/webhook`** (`internal/server/server.go:339`), a thin
 `Handler.handleMessengerWebhook` wrapper around `messaging.HandleMessengerWebhook`
 (`internal/messaging/messenger.go:311`).
 
 - **It is the one messaging route NOT behind `authMiddleware`.** Meta calls it
   unauthenticated; the `hub.verify_token` (GET) and the app-secret signature (POST) are
   its only gates. Every other `/api/messaging/*` route is wrapped in `authMiddleware`
-  (`internal/server/server.go:324-331`).
+  (`internal/server/server.go:329-337`).
 - **GET = subscription verification.** With `hub.mode=subscribe` it looks up the
   `hub.verify_token` in the live-provider registry and echoes `hub.challenge` on a match;
   anything else is `403`. Because the lookup is against *registered* providers, the
@@ -162,7 +162,7 @@ at that URL.
 
 ## LLM tools
 
-Five builtins registered in `internal/tool/tool.go:239` (`internal/tool/messaging_tools.go`):
+Five builtins registered in `internal/tool/tool.go:239-243` (`internal/tool/messaging_tools.go`):
 
 | Tool | Params | Returns |
 |------|--------|---------|
@@ -185,7 +185,7 @@ Five builtins registered in `internal/tool/tool.go:239` (`internal/tool/messagin
 ## HTTP API
 
 Managing routes are registered in `Server.registerRoutes()` behind `authMiddleware`
-(`internal/server/server.go:324-331`); handlers live in
+(`internal/server/server.go:329-337`); handlers live in
 `internal/server/handler_messaging.go`. Every handler returns 503 when messaging was not
 initialized at boot. The Messenger webhook is the exception (unauthenticated, see above).
 
@@ -201,15 +201,16 @@ initialized at boot. The Messenger webhook is the exception (unauthenticated, se
 | `GET /api/messaging/messages?account_id=&chat_id=` | recent messages |
 | `GET /api/messaging/search?q=&account_id=` | FTS search |
 | `POST /api/messaging/send` | `{account_id, chat_id, text}` → `{id}` |
+| `POST /api/messaging/accounts/{id}/test` | check a Telegram account's token against the Telegram API; persists nothing; `{ok, error}` (see Credential check below) |
 | `POST /api/messaging/sync` | `{url?, dir}` → push (`dir != "pull"`) or pull; an omitted `url` resolves from `sync_url`; `{cursor, status}` on push |
 | `GET/POST /api/messaging/messenger/webhook` | **unauthenticated** Meta verification + event delivery |
 
-`handleMessagingSync` (`internal/server/handler_messaging.go:245`) decodes `{url?, dir}`
+`handleMessagingSync` (`internal/server/handler_messaging.go:301`) decodes `{url?, dir}`
 and treats anything other than `dir == "pull"` as a push. **An omitted `url` is resolved
 server-side from the configured sync server** (`_, in.URL = h.syncURLConfig()`,
-`internal/server/handler_messaging.go:259`): the configured `sync_url`, else
+`internal/server/handler_messaging.go:315`): the configured `sync_url`, else
 `OCODE_SYNC_URL`, else `https://hub.mercstudio.com`. `h.syncURLConfig()`
-(`internal/server/handler_sync.go:110-117`) reads `cfg.Ocode.SyncURL` under `h.mu`, and
+(`internal/server/handler_sync.go:111-118`) reads `cfg.Ocode.SyncURL` under `h.mu`, and
 `HandleGetSyncURLConfig` uses the same helper, so the messaging push and
 `GET /api/config/ocode/sync-url` can never disagree. A caller-supplied `url` is still
 honoured and validated (http/https + host), so the HTTP contract stays backwards
@@ -218,7 +219,32 @@ A caller-supplied invalid URL is **400** `invalid sync url`; a sync error is ret
 **502 Bad Gateway** with the error text as the body.
 
 Note: `?limit` on `GET /api/messaging/messages` is honoured (default 50; a non-positive or
-unparseable value is 400 `invalid limit`, `internal/server/handler_messaging.go:158-166`).
+unparseable value is 400 `invalid limit`, `internal/server/handler_messaging.go:214-221`).
+
+## Credential check: `POST /api/messaging/accounts/{id}/test`
+
+`handleMessagingAccountTest` (`internal/server/handler_messaging.go:142`) checks a stored
+account's credentials and returns. It persists nothing: no store write, no provider start,
+no status change.
+
+- **Telegram only.** Any other provider is `400 test not supported for this provider`. An
+  unknown account id is `404`; messaging not initialized is `503`.
+- **The check** is `messaging.ValidateBotToken` (`internal/messaging/telegram.go:143`), which
+  calls the Telegram API with a 10 s client timeout.
+- **The answer is always HTTP 200**: `{"ok": true}`, or `{"ok": false, "error": "<message>"}`.
+  The message is one of three fixed strings, chosen by `telegramTokenCheckMessage`
+  (`internal/server/handler_messaging.go:176`):
+
+  | Error from the check | `error` returned |
+  |----------------------|------------------|
+  | `*url.Error` (the API could not be reached) | `could not reach Telegram API` |
+  | `*tgbotapi.Error` with code 401 or 404 | `token rejected by Telegram` |
+  | anything else (429, 5xx, an undecodable body) | `Telegram check failed, try again` |
+
+- **Only the fixed message is returned or logged.** The raw error can embed the bot token (a
+  `*url.Error` carries the request URL), so the handler logs the account id and the fixed
+  message at warn level, never the error. A 429 or 5xx says nothing about the token, so it is
+  never reported as a rejected token.
 
 ## Sync: cursors, export/import, and the remote transport
 
@@ -271,38 +297,38 @@ target because it omits `url`, but a direct API caller that supplies one is hono
 ## Settings UI
 
 `web/src/components/Settings/ChatConnectorsForm.tsx` is rendered for the
-`chat-connectors` tab (`web/src/components/Settings/SettingsPanel.tsx:194`) and is a
+`chat-connectors` tab (`web/src/components/Settings/SettingsPanel.tsx:207-208`) and is a
 **global** surface (no project host binding, unlike the connectors form). It lists
 accounts with live status, offers Start / Stop / Remove per row, renders the WhatsApp QR
 when one is available, and an add form choosing Telegram (bot token), WhatsApp (QR
 pairing) or Messenger. It only ever renders id, provider, label, status and error,
 because that is all the GET returns. For Messenger it shows the webhook URL and the
 constraints inline: "must be publicly reachable; Meta requires HTTPS. App secret is
-required." (`web/src/components/Settings/ChatConnectorsForm.tsx:134`).
+required." (`web/src/components/Settings/ChatConnectorsForm.tsx:205`).
 
 The form supplies its own `p-6 max-w-2xl` frame
-(`web/src/components/Settings/ChatConnectorsForm.tsx:93`), as do
+(`web/src/components/Settings/ChatConnectorsForm.tsx:139`), as do
 `ConnectorsForm` and `CloudConnectorsForm`: the settings content pane is
 `min-h-0 min-w-0 flex-1 overflow-y-auto` with **no padding**
-(`web/src/components/Settings/SettingsPanel.tsx:499`), so each form adds its own.
+(`web/src/components/Settings/SettingsPanel.tsx:515`), so each form adds its own.
 
 Two sync-facing behaviours live here:
 
 - **`messaging_message` SSE consumer**
-  (`web/src/components/Settings/ChatConnectorsForm.tsx:53`): on mount it subscribes with
+  (`web/src/components/Settings/ChatConnectorsForm.tsx:65`): on mount it subscribes with
   `eventBus.on("messaging_message", …)` and prepends `env.data` to a `recent` list capped
   at 20, rendered above the account list as "Recent inbound messages"
   (`account_id / chat_id: text`). The subscription is torn down on unmount
   (`return () => off()`). Because the event is not replayable and the form only exists
   while the settings tab is open, messages that arrive while the tab is closed are not
   shown — they are still persisted, so the tools and HTTP reads see them.
-- **Sync push button** (`web/src/components/Settings/ChatConnectorsForm.tsx:140-144`): a
+- **Sync push button** (`web/src/components/Settings/ChatConnectorsForm.tsx:213-215`): a
   **Sync push** button that `POST`s `{dir: "push"}` — **no `url`** — to
   `/api/messaging/sync`, and raises `alert("Sync failed: " + body)` on any non-2xx
   response. The target is not editable: on mount the form calls `api.getSyncURLConfig()`
   and renders the resolved URL read-only beside the button ("Syncs via <resolved_url>.
   Set it in Backend → Sync server.",
-  `web/src/components/Settings/ChatConnectorsForm.tsx:145-147`). There is **no pull
+  `web/src/components/Settings/ChatConnectorsForm.tsx:217`). There is **no pull
   button**; `dir: "pull"` is only reachable by calling the endpoint directly.
 
 ## Security
@@ -312,8 +338,10 @@ Two sync-facing behaviours live here:
   of `id/provider/label/status/error` rather than marshalling the struct. Create accepts
   the secret; no read path returns it.
 - **The store file is `0600` and its directory `0700`**
-  (`internal/messaging/store.go:26-34`). Credentials and raw provider payloads are stored in
-  plaintext in SQLite; there is no at-rest encryption yet.
+  (`internal/messaging/store.go:26-34`). Credentials are encrypted at rest with
+  AES-256-GCM (`encryptMessagingCreds`, `internal/messaging/store.go:316`) under a 32-byte key
+  in `<messaging.sqlite>.key` (`loadOrCreateMessagingKey`, `internal/messaging/store.go:301`,
+  mode `0600`). Message text and raw provider payloads are plaintext in SQLite.
 - **Inbound text is untrusted.** Read/search tool output is wrapped in the
   `UNTRUSTED CONNECTOR MESSAGES` notice; messages are third-party content and must not be
   treated as instructions.
@@ -328,7 +356,7 @@ Two sync-facing behaviours live here:
 ## Inbound event bus
 
 At boot the server wires `msgMgr.OnInbound` to publish a non-session-scoped event
-(`internal/server/handler.go:878`):
+(`internal/server/handler.go:904`):
 
 ```go
 h.bus.Publish("messaging_message", "", "", m)
@@ -355,7 +383,8 @@ h.bus.Publish("messaging_message", "", "", m)
   attachments, quick replies and postbacks.
 - Messenger has **no outbound webhook for delivery/read events** and no Graph API
   health check; `connected` only means the page-info lookup succeeded.
-- No at-rest encryption; credentials and raw payloads sit in plaintext SQLite.
+- Message text and raw payloads sit in plaintext SQLite; credentials are encrypted with the
+  key file beside the database (see Security).
 - Deleting an account leaves its WhatsApp session directory on disk.
 - Tools only work inside a server process (`DefaultManager` is nil elsewhere).
 
@@ -374,5 +403,7 @@ h.bus.Publish("messaging_message", "", "", m)
   `httptest` server, posts `{"dir":"push"}` with one message in a temp store, and asserts
   the stub received `/api/messaging/sync`. Without the resolution branch the handler
   returns 400 `invalid sync url`.
+- `internal/server/handler_messaging_test.go` — `TestMessagingAccountTest` and
+  `TestTelegramTokenCheckMessage` cover the credential check.
 - `web/src/components/Settings/ChatConnectorsForm.test.tsx` — no URL input; the resolved
   URL is rendered; the push body is exactly `{dir:"push"}`.

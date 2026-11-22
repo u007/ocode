@@ -3005,6 +3005,10 @@ export const api = {
       body: JSON.stringify({ deviceCode }),
     }),
   syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
+  // Trigger an immediate pull of both config and auth blobs (server -> local)
+  // and return the refreshed sync status. Backs the manual "Sync now" button
+  // and the auto-sync catch-up for blobs that are "not synced yet".
+  syncNow: () => fetchJSON<SyncStatusResponse>("/api/sync/sync", { method: "POST" }),
   getMCP: (host?: string, sessionId?: string) =>
     fetchJSON<MCPStatus[]>(
       sessionId

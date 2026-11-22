@@ -2659,8 +2659,8 @@ async function handleDocs(args: string, ctx: CommandContext): Promise<CommandRes
     try {
       const r = await ctx.api.docsInit(ctx.projectPath, ctx.host);
       if (r.annotate_prompt) {
-        // New bundle: mirror the TUI by dispatching the annotation pass as a
-        // normal turn right after reporting init.
+        // New bundle or re-run: mirror the TUI by dispatching the context pass
+        // as a normal turn right after reporting init.
         return {
           handled: true,
           messages: [ok(r.result).messages![0]],

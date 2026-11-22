@@ -10,9 +10,9 @@ import (
 )
 
 // docsInit delegates to the shared commandctx.DocsInit so the server's
-// /api/docs/init endpoint behaves identically. Returns the result text; when a
-// new bundle was created the annotation prompt is dispatched to the context
-// agent here (the server returns it to the web client instead).
+// /api/docs/init endpoint behaves identically. Returns the result text; the
+// context-agent pass is dispatched here on every call, new bundle or re-run
+// (the server returns it to the web client instead).
 func (m *model) docsInit() string {
 	if m.agent == nil {
 		return "Error: no active agent"

@@ -100,6 +100,41 @@ func TestDocsCleanupConfirmWithNothingDeprecated(t *testing.T) {
 	}
 }
 
+// assertDocsInitPass checks the annotation pass that /docs init dispatches:
+// the main-agent preamble, the code-feature survey, and the no-edit rule.
+func assertDocsInitPass(t *testing.T, prompt string) {
+	t.Helper()
+	if prompt == "" {
+		t.Fatal("expected a context-agent prompt, got none")
+	}
+	for _, want := range []string{`task agent=context`, "Part 2: document existing code features", "doc_search", "doc_write", "Never cite line numbers", "Do NOT edit index.md or log.md"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("init prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestDocsInitFreshBundleDispatchesCodeFeaturePass(t *testing.T) {
+	workDir := t.TempDir()
+	text, prompt := DocsInit(true, workDir)
+	if !strings.Contains(text, "Bundle initialized") {
+		t.Errorf("text = %q, want the bundle-initialized message", text)
+	}
+	assertDocsInitPass(t, prompt)
+}
+
+func TestDocsInitExistingBundleReAuditsAndDispatchesCodeFeaturePass(t *testing.T) {
+	workDir, _ := setupDocsBundle(t, false)
+	text, prompt := DocsInit(true, workDir)
+	if !strings.Contains(text, "re-audited") {
+		t.Errorf("text = %q, want the re-audit message", text)
+	}
+	assertDocsInitPass(t, prompt)
+	if _, err := os.Stat(filepath.Join(workDir, "docs", "active.md")); err != nil {
+		t.Errorf("re-run removed an existing doc: %v", err)
+	}
+}
+
 func TestDocsCleanupWithoutBundle(t *testing.T) {
 	text, prompt := DocsCleanup(t.TempDir(), false)
 	if prompt != "" {

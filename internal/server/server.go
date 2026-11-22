@@ -329,6 +329,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/messaging/accounts", s.authMiddleware(s.handler.handleMessagingAccounts))
 	s.mux.HandleFunc("/api/messaging/accounts/", s.authMiddleware(s.handler.handleMessagingAccountAction))
 	s.mux.HandleFunc("GET /api/messaging/accounts/{id}/qr", s.authMiddleware(s.handler.handleMessagingAccountQR))
+	s.mux.HandleFunc("POST /api/messaging/accounts/{id}/test", s.authMiddleware(s.handler.handleMessagingAccountTest))
 	s.mux.HandleFunc("GET /api/messaging/chats", s.authMiddleware(s.handler.handleMessagingChats))
 	s.mux.HandleFunc("GET /api/messaging/messages", s.authMiddleware(s.handler.handleMessagingMessages))
 	s.mux.HandleFunc("GET /api/messaging/search", s.authMiddleware(s.handler.handleMessagingSearch))
@@ -753,6 +754,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sync/login/poll", s.authMiddleware(s.handleSyncLoginPoll))
 	s.mux.HandleFunc("GET /api/sync/status", s.authMiddleware(s.handleSyncStatus))
 	s.mux.HandleFunc("POST /api/sync/logout", s.authMiddleware(s.handleSyncLogout))
+	s.mux.HandleFunc("POST /api/sync/sync", s.authMiddleware(s.handleSyncSync))
 	s.mux.HandleFunc("GET /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleGetSyncURLConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/sync-url", s.authMiddleware(s.handler.HandleSetSyncURLConfig))
 
@@ -2216,6 +2218,10 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncLogout(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSyncLogout(w, r)
+}
+
+func (s *Server) handleSyncSync(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSyncNow(w, r)
 }
 
 func (s *Server) handleListThemes(w http.ResponseWriter, r *http.Request) {
