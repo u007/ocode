@@ -257,6 +257,11 @@ type PermissionManager struct {
 	// agent's session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
 	sessionID string
+	// browserBoxLoginState resolves the login state a box start will restore.
+	// The server sets it from the session's project assignment; nil in the TUI
+	// and for sessions without the box backend. It is read only while building
+	// the human-only start ask and is set before the agent is published.
+	browserBoxLoginState func() string
 	// tempAllows tracks the in-flight RunWithTemporaryUserAllow calls per tool,
 	// guarded by tempAllowMu. See temporaryAllow.
 	tempAllowMu sync.Mutex
@@ -2395,20 +2400,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
-	if pathScopedTools[toolName] {
-		// Browser login-state files: checked before path-pattern allows, tool
-		// rules and the user-confirmed bypass below, so no persisted rule can
-		// reopen them. A user deny pattern on the path still denies. Every mode
-		// except yolo reaches this block, and yolo mirrors auth.json (allow).
-		if hit := pm.loginStateToolHit(toolName, args); hit != "" {
-			if pm.CheckPathPatterns(toolName, hit) == PermissionDeny {
-				return PermissionDecision{Level: PermissionDeny, DenyReason: fmt.Sprintf("path pattern rule denies %s", hit)}
-			}
-			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (login-state): tool=%s path=%s", toolName, hit))
-			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
-				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".login_state",
-			}}
+	// Browser login-state files: checked for EVERY tool, before path-pattern
+	// allows, tool rules and the user-confirmed bypass below, so no persisted
+	// rule can reopen them and a media/OCR tool cannot carry a state file to a
+	// provider. A user deny pattern on the path still denies. Every mode except
+	// yolo reaches this check, and yolo mirrors auth.json (allow).
+	if hit := pm.loginStateToolHit(toolName, args); hit != "" {
+		if pm.CheckPathPatterns(toolName, hit) == PermissionDeny {
+			return PermissionDecision{Level: PermissionDeny, DenyReason: fmt.Sprintf("path pattern rule denies %s", hit)}
 		}
+		pm.emitDebug("perm", fmt.Sprintf("Decide ASK (login-state): tool=%s path=%s", toolName, hit))
+		return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+			ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".login_state",
+		}}
+	}
+
+	if pathScopedTools[toolName] {
 		path := extractPathFromArgs(toolName, args)
 		if path != "" {
 			// Check path-based permission patterns first (e.g., opencode.json
@@ -3820,11 +3827,13 @@ func loginStateResolvedHitFold(resolved string, roots []string, fold bool) bool 
 // when the arguments do not parse, so the caller can fail closed.
 func loginStateToolPaths(toolName string, args json.RawMessage) (out []string, ok bool) {
 	var params struct {
-		Path      string `json:"path"`
-		FilePath  string `json:"file_path"`
-		Pattern   string `json:"pattern"`
-		PatchText string `json:"patchText"`
-		Edits     []struct {
+		Path       string `json:"path"`
+		FilePath   string `json:"file_path"`
+		Pattern    string `json:"pattern"`
+		PatchText  string `json:"patchText"`
+		ImagePath  string `json:"image_path"`
+		OutputPath string `json:"output_path"`
+		Edits      []struct {
 			Path string `json:"path"`
 		} `json:"edits"`
 	}
@@ -3838,6 +3847,11 @@ func loginStateToolPaths(toolName string, args json.RawMessage) (out []string, o
 	}
 	add(params.Path)
 	add(params.FilePath)
+	// imagegen/ocr read image_path and every media tool writes output_path, so
+	// these tools can name a login-state file even though they are not
+	// pathScopedTools.
+	add(params.ImagePath)
+	add(params.OutputPath)
 	if toolName == "glob" || toolName == "list" {
 		add(params.Pattern)
 	}
@@ -7146,6 +7160,11 @@ func browserAction(pm *PermissionManager, args json.RawMessage) string {
 		if params.Retain {
 			summary = "start a RETAINED Upstash browser box (kept between sessions, paused when idle)"
 		}
+		// The box restores the project's saved identity before the model sees it,
+		// so the approver must see which one.
+		if name := pm.browserBoxLoginStateName(); name != "" {
+			summary += fmt.Sprintf(" (login state %q is restored)", name)
+		}
 	case "terminate":
 		summary = "terminate the browser box"
 	}
@@ -7896,6 +7915,20 @@ func leadingElevationCommand(command string) (string, bool) {
 // satisfies it, and it offers no always-allow choice. Only the human answer, or
 // YOLO mode (which allows every call), lets it run.
 const BrowserBoxStartRule = "browser.box_start"
+
+// SetBrowserBoxLoginStateDetail sets the resolver the box-start ask uses to
+// name the saved login state the box will restore. Pass nil to clear it.
+func (pm *PermissionManager) SetBrowserBoxLoginStateDetail(fn func() string) {
+	pm.browserBoxLoginState = fn
+}
+
+// browserBoxLoginStateName is the assigned login state for the ask text, or "".
+func (pm *PermissionManager) browserBoxLoginStateName() string {
+	if pm.browserBoxLoginState == nil {
+		return ""
+	}
+	return pm.browserBoxLoginState()
+}
 
 // IsBrowserBoxStartRequest reports whether req is the box start ask.
 func IsBrowserBoxStartRequest(req PermissionRequest) bool {

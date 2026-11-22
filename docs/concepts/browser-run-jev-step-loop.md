@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-22T01:45:00+08:00
+timestamp: 2026-11-22T23:12:03+08:00
 status: active
 ---
 # browser_run step loop
@@ -42,7 +42,7 @@ loop and never appended to the transcript. Only `browser_run`'s own result is.
 
 Arguments: `goal` (required), `data` (named string values the loop may type), `tab`
 (as for `browser`), `backend` (only in a session with the Upstash box backend; every sub-step drives the backend the run was given), and `max_steps` (default 15, at most 40). The tool is registered only
-when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:381`).
+when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:388`).
 It is `PermissionAllow` by default (the allow list in `NewPermissionManager`, `internal/agent/permissions.go`), because it
 performs nothing on its own.
 
@@ -88,7 +88,7 @@ Each step sends one batched request with these questions. The value question is 
 | `done` | noul | the goal is met on this page, given the recent actions |
 | `operation` | choice | the operations the page offers, plus `scroll_down`, `press_enter` and `stuck` |
 | `target_click`, `target_fill`, `target_check`, `target_uncheck` | choice | the controls offering that operation. Asked only for operations with at least one candidate |
-| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:892`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
+| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:899`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
 
 Answers in one request cannot see each other. A value asked beside its target was answered
 without knowing the field: live, `none` at probability 0.61 for a "Name" field. Asked in its
@@ -100,7 +100,7 @@ done. A rejected operation, target or value answer stops the run as `unsure`.
 The state carries `goal`, `date`, `page` (url, title, text, settled), `data_keys`,
 `recent_actions` (the last 8 steps), `elements` (the controls as offered, copied with
 their current `value` cleared by `browserRunRedactedControls`,
-`internal/agent/browser_run.go:904`), and `omitted_elements`. `page.settled` is false
+`internal/agent/browser_run.go:911`), and `omitted_elements`. `page.settled` is false
 when the settle bound ran out, so the judge can see that a listing may still be
 mid-render. Data values never enter the state. Only key names do. This is the text view's
 state. A page the text view cannot judge is sent as a screenshot instead (see
@@ -237,7 +237,7 @@ backend or to the main model.
   sub-step is denied.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
-  `browser_run` (`internal/agent/browser_run.go:529`, `withPermissionAsker` in
+  `browser_run` (`internal/agent/browser_run.go:536`, `withPermissionAsker` in
   `internal/agent/agent.go`). The dialog then reads like
   `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (built in `browserAction`, `internal/agent/permissions.go`),
   and the loop waits for the answer. With no asker at all, the step stops as
@@ -246,7 +246,7 @@ backend or to the main model.
   `browser_run`, and so do the unlisted `general` and `review` definitions. `explore` and
   `context` do not get it. A read-only agent's sub-steps still hit the browser tool's
   refusal for each mutating step.
-- **Content guard.** Each sub-step result is guarded (`browser_run.go:552`), and so is
+- **Content guard.** Each sub-step result is guarded (`browser_run.go:559`), and so is
   `browser_run`'s own result (the `browser_run` case of `contentGuardSourceFor`,
   `internal/agent/content_guard_typesafe.go:320`). Known gap: on the main agent, a
   content-guard ask on a sub-step result becomes `needs_approval`, not a blocking ask.
@@ -279,12 +279,12 @@ backend or to the main model.
 
 ## The controls action and the Settle rule
 
-`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:588`).
+`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:591`).
 It returns one JSON object after an untrusted-content header. The object's keys are
 `url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls`, `omitted`,
 `viewport_width`, `viewport_height` (the viewport in CSS pixels), `scroll_x` and `scroll_y`
 (the document's scroll offset in CSS pixels; on the htrcli surface, the snapshot's `scroll`). `text` and `text_truncated` map the cdp layer's viewport text fields. The
-struct is `browserControlsOutput` (`internal/server/browser_tool.go:1442`).
+struct is `browserControlsOutput` (`internal/server/browser_tool.go:1445`).
 
 Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set),
 `operations`, `box` and `in_viewport`. `box` is the control's rectangle in CSS pixels of the

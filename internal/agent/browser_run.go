@@ -314,6 +314,13 @@ func (a *Agent) SetBrowserBoxBackend(on bool) {
 	a.browserBoxBackend.Store(on)
 }
 
+// SetBrowserBoxLoginStateDetail lets the session's box manager name the login
+// state a box start will restore, so the human-only start ask shows the identity
+// instead of a bare "start a browser box".
+func (a *Agent) SetBrowserBoxLoginStateDetail(fn func() string) {
+	a.permissions.SetBrowserBoxLoginStateDetail(fn)
+}
+
 // Execute is the fallback for callers without a context. The agent always calls
 // ExecuteCtx, because the sub-steps need the turn's context.
 func (t *browserRunTool) Execute(args json.RawMessage) (string, error) {

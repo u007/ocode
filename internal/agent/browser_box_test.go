@@ -319,3 +319,35 @@ func TestBoxStartAlwaysAllowPersistsNothing(t *testing.T) {
 		t.Fatalf("start after a box-start always-allow = %s, want Ask", again.Level)
 	}
 }
+
+// TestPermissions_BoxStartNamesTheAssignedLoginState pins that the human
+// approving a start sees which saved identity the box will restore. The server
+// sets the resolver from the session's project assignment; with none, the
+// summary must not invent one.
+func TestPermissions_BoxStartNamesTheAssignedLoginState(t *testing.T) {
+	pm := NewPermissionManager()
+	dec := pm.Decide("browser", json.RawMessage(browserBoxStartArgs))
+	if dec.Request == nil {
+		t.Fatal("start raised no request")
+	}
+	if strings.Contains(dec.Request.Command, "login state") {
+		t.Fatalf("summary %q names a login state with none assigned", dec.Request.Command)
+	}
+
+	pm.SetBrowserBoxLoginStateDetail(func() string { return "bank" })
+	dec = pm.Decide("browser", json.RawMessage(browserBoxStartArgs))
+	if dec.Request == nil {
+		t.Fatal("start with a login state raised no request")
+	}
+	if want := `login state "bank" is restored`; !strings.Contains(dec.Request.Command, want) {
+		t.Fatalf("summary = %q, want it to contain %q", dec.Request.Command, want)
+	}
+
+	dec = pm.Decide("browser", json.RawMessage(`{"action":"start","backend":"upstash","retain":true}`))
+	if dec.Request == nil {
+		t.Fatal("retained start raised no request")
+	}
+	if !strings.Contains(dec.Request.Command, "RETAINED") || !strings.Contains(dec.Request.Command, `login state "bank"`) {
+		t.Fatalf("retained summary = %q, want RETAINED and the login state", dec.Request.Command)
+	}
+}

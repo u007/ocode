@@ -3,7 +3,7 @@ type: Concept
 title: Sandbox Permission Mode
 description: 'Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references'
 tags: []
-timestamp: 2026-11-21T17:45:00Z
+timestamp: 2026-11-22T15:12:03Z
 ---
 ## Decision
 
@@ -164,7 +164,7 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   secret material (`isSecretMaterialPath`: `.env`, `.netrc`, SSH keys, `.pem`,
   `.aws/`, …) → Ask on read or write;
   repo-metadata dirs (`.git/`, `.github/workflows/`) → Ask on WRITE only
-- browser login-state directory (`<GlobalDataDir>/browse/login-states`): file tools and bash lines that name it → Ask in normal and sandbox, Deny in locked, Allow in yolo. Yolo does not guard it. The Ask is human-only: no judge, no always-allow choice, nothing persisted, and Pulse's `permission_resolve` refuses to approve it. Paths built from shell variables, or read inside an interpreter, are not caught by the Ask. The OS write-wall still blocks a sandboxed write into the directory, because it is a non-writable root (see "What it confines" above).
+- browser login-state directory (`<GlobalDataDir>/browse/login-states`): every tool whose path argument names it — the file tools, `imagegen`/`ocr` (`image_path`) and the media tools (`output_path`) — and bash lines that name it → Ask in normal and sandbox, Deny in locked, Allow in yolo. Yolo does not guard it. The Ask is human-only: no judge, no always-allow choice, nothing persisted, and Pulse's `permission_resolve` refuses to approve it. The check runs on every tool, not just the file tools, so a media or OCR tool cannot carry a state file to a provider. Paths built from shell variables, read inside an interpreter, and a recursive read of a PARENT directory (a `grep -r` over the data dir) are not caught by the Ask. The OS write-wall still blocks a sandboxed write into the directory, because it is a non-writable root (see "What it confines" above).
 - danger-`rm` heuristics → Ask
 - destructive git forms (`git stash`/`checkout`/`reset`/`clean`/`restore`/
   `switch`, plus force-flagged `git push`/`pull`; read-only
@@ -207,7 +207,7 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   (previously a body line that happened to read `git reset …` asked).
 - writes to permission-defining files (`.ocode/settings.json`,
   `.claude/settings.json`, `storage-connectors.json`, ocode config gating files) and loopback requests to
-  `/api/permissions*` or to any `/api/config/*` path → Ask (self-escalation guard, all modes).
+  `/api/permissions*`, `/api/config/*`, `/api/upstash*` or `/api/mcp*` → Ask (self-escalation guard, all modes).
   The path is taken from the raw request token, cleaned and lowercased before matching, and
   the guard does not percent-decode it: any `%` in a loopback path asks outright. Every command
   on a compound line is checked (`permissionApiLoopback`, `internal/agent/permissions.go`),

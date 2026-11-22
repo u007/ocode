@@ -15,7 +15,7 @@ tags:
   - desktop
   - htr
   - htrcli
-timestamp: 2026-11-22T13:48:30+08:00
+timestamp: 2026-11-22T23:12:03+08:00
 ---
 # Browser agent tool
 
@@ -143,9 +143,12 @@ Status, known limits and the open network-policy decision are in
   before the box is published, and its result reports the notes (rejected cookies, skipped
   origins). Each box teardown saves the state before it deletes or pauses the box, and a debounced
   checkpoint runs after browser calls. A second session that asks for a state in use is
-  refused with the holder named, and no box is created. File tools and bash lines that name
-  the directory are an Ask in normal and sandbox modes, a Deny in locked and an Allow in
-  yolo; the Ask is human-only. Storage, restore, the hold and protection are in
+  refused with the holder named, and no box is created. Every tool whose path argument names
+  the directory — the file tools, `imagegen`/`ocr` (`image_path`) and the media tools
+  (`output_path`) — is an Ask in normal and sandbox modes, as are bash lines that name it;
+  locked mode denies it, yolo allows it, and the Ask is human-only. A path built from a shell
+  variable, read inside an interpreter, or a recursive read of a parent directory is not
+  caught. Storage, restore, the hold and protection are in
   [the design spec](../superpowers/specs/2026-11-21-upstash-box-browser-backend-design.md)
   (4.6), and [sandbox permission mode](sandbox-permission-mode.md) lists the directory
   with the other protected paths.
@@ -154,7 +157,9 @@ Status, known limits and the open network-policy decision are in
 - **Permission: `browser.box_start`.** `start` asks under its own category
   (`agent.BrowserBoxStartRule`). It is a static ask in normal and sandbox modes,
   denied in locked mode and allowed in YOLO. A `retain` start's ask says the box is RETAINED
-  (kept between sessions, paused when idle). The auto-permission judge is never
+  (kept between sessions, paused when idle), and when the project has a login state assigned
+  the ask names it (` (login state "<name>" is restored)`), so the approver sees the identity
+  the box will restore. The auto-permission judge is never
   consulted for it, it offers no always-allow choice, no tool allow rule covers it,
   and Pulse's `permission_resolve` refuses to approve it.
 - **Lifecycle.** An ephemeral box has a ttl equal to the hard cap. The Manager deletes it on

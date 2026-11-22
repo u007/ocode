@@ -461,3 +461,37 @@ func ruleOf(d PermissionDecision) string {
 	}
 	return d.Request.Rule
 }
+
+// TestLoginStateMediaAndOCRToolsAsk covers the tools that take a path but are
+// not pathScopedTools. imagegen and ocr read a file and send its bytes to a
+// provider, and the media tools write output_path, so a login-state target must
+// ask for them too. Before this gate every one of them was Allow by default.
+func TestLoginStateMediaAndOCRToolsAsk(t *testing.T) {
+	f := newLoginStateFixture(t)
+	pm := newLoginStatePM(t, PermissionModeNormal)
+	q := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+	cases := []fileToolCall{
+		{"imagegen", `{"prompt":"x","image_path":` + q(f.lsFile) + `}`},
+		{"imagegen", `{"prompt":"x","output_path":` + q(f.lsDir) + `}`},
+		{"videogen", `{"prompt":"x","output_path":` + q(f.lsFile) + `}`},
+		{"audiogen", `{"text":"x","output_path":` + q(f.lsFile) + `}`},
+		{"ocr", `{"image_path":` + q(f.lsFile) + `}`},
+	}
+	for _, c := range cases {
+		d := pm.Decide(c.tool, json.RawMessage(c.args))
+		if !isLoginStateAsk(d) {
+			t.Errorf("%s %s: decision = %+v, want a login-state ask", c.tool, c.args, d)
+			continue
+		}
+		if !IsLoginStateRequest(*d.Request) {
+			t.Errorf("%s: request is not recognised as a login-state ask", c.tool)
+		}
+	}
+
+	// Positive control: a media tool on an ordinary path keeps its default
+	// allow, so the gate did not simply start asking for every call.
+	ordinary := filepath.Join(t.TempDir(), "picture.png")
+	if d := pm.Decide("imagegen", json.RawMessage(`{"prompt":"x","image_path":`+q(ordinary)+`}`)); d.Level != PermissionAllow {
+		t.Errorf("imagegen on an ordinary path = %+v, want allow", d)
+	}
+}

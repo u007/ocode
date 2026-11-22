@@ -9,7 +9,7 @@ tags:
   - upstash
   - cloud-sandbox
   - login-state
-timestamp: 2026-11-22T07:21:22Z
+timestamp: 2026-11-22T15:12:03Z
 status: active
 ---
 
@@ -139,7 +139,7 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 ### 4.5 Lifecycle
 
 - **Ownership.** A box manager sits at the `Handler` level and is keyed by session id. It is not hung on the agent or the tool. `Agent.Shutdown` and `closeSessionTools` (`internal/agent/agent.go`) also run on idle eviction and agent rebuilds, and `/reset-id` (`internal/server/handler_reset_id.go`) releases the agent. So eviction and rebuild never delete a box.
-- **Creation.** Only `start` creates a box. It is a static permission ask with its own category, in normal and sandbox modes. The auto-permission judge is not consulted for it. Locked mode denies it. Yolo mode allows it, as it allows everything else. Sub-agents are refused.
+- **Creation.** Only `start` creates a box. It is a static permission ask with its own category, in normal and sandbox modes. The auto-permission judge is not consulted for it. Locked mode denies it. Yolo mode allows it, as it allows everything else. Sub-agents are refused. When the project has a login state assigned, the ask names it (` (login state "<name>" is restored)`), so the approver sees the identity the box will restore.
 - **Default box.** Ephemeral, with a ttl equal to the hard cap. Upstash deletes it even if ocode crashes.
 - **Early teardown by ocode.** An ephemeral box is deleted early on:
   - `HandleCloseSession`;
@@ -193,7 +193,7 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
   - The hold is a file, `<name>.lock.json`, that records the session id, the pid and the process start. A holder with our pid but another process start is stale.
   - A rekey (`Rekey`) moves the hold with `Transfer`.
   - **Per project, by the user only.** The assignment is `upstash_box.login_states` (project root to name) in ocodeconfig.json. It is set through `GET`/`PUT /api/upstash/login-state?project=` or the Upstash Box settings section. **Per-session assignment is not built**, and the model cannot name a login state. No tool argument names one. "none" gives a clean browser each time.
-- **Protection.** File tools and bash lines that name the login-state directory are an Ask in normal and sandbox modes, a Deny in locked and an Allow in yolo. The Ask is human-only: no judge, no always-allow, nothing persisted. The judge context withholds the files (`sensitiveContextFile` in `internal/agent/agent.go`). `redact.IsSensitiveFile` treats them like auth.json. In sandbox mode the directory is also a non-writable root (`AllowedRootsClassified` in `internal/agent/permissions.go`), so the OS blocks a sandboxed write into it. See [sandbox permission mode](../../concepts/sandbox-permission-mode.md).
+- **Protection.** Every tool whose path argument names the login-state directory — the file tools, `imagegen`/`ocr` (`image_path`) and the media tools (`output_path`) — is an Ask in normal and sandbox modes, as are bash lines that name it; locked mode denies it and yolo allows it. The Ask is human-only: no judge, no always-allow, nothing persisted. A path built from a shell variable, read inside an interpreter, or a recursive read of a parent directory (`grep -r` over the data dir) is not caught. The judge context withholds the files (`sensitiveContextFile` in `internal/agent/agent.go`). `redact.IsSensitiveFile` treats them like auth.json. In sandbox mode the directory is also a non-writable root (`AllowedRootsClassified` in `internal/agent/permissions.go`), so the OS blocks a sandboxed write into it. See [sandbox permission mode](../../concepts/sandbox-permission-mode.md).
 - **Sync.** The `upstash_box` section (account names and ids, login-state assignments, no keys) syncs with ocodeconfig.json. Login-state files never sync.
 - Login-state data never enters a provider payload or a Jev request.
 - The local login state stays the source of truth for retained boxes too. It is saved before every pause and restored after every resume. Box keeps its Chromium profile under `/tmp` on the overlay disk. The profile survives a pause, but Chromium restarts on resume and every tab is gone (spike findings, phase 5).

@@ -670,6 +670,16 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	ag.SetProfile(prof)
 	if upstashBrowser {
 		ag.SetBrowserBoxBackend(true)
+		// The human-only start ask names the identity the box will restore. The
+		// closure re-reads the project's assignment at ask time, so a change made
+		// in Settings while the session runs is what the approver sees.
+		ag.SetBrowserBoxLoginStateDetail(func() string {
+			name, err := h.boxLoginStateFor(sessionID)
+			if err != nil {
+				return ""
+			}
+			return name
+		})
 	}
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
