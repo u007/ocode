@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/boxsession"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -709,5 +710,110 @@ func TestUpstashBodySizeLimit(t *testing.T) {
 	code, raw := upstashDo(t, mux, http.MethodPost, "/api/upstash/accounts", "not an object")
 	if code != http.StatusBadRequest {
 		t.Fatalf("malformed body = %d %s, want 400", code, raw)
+	}
+}
+
+// TestUpstashAccountDeleteRemovesItsBoxes: deleting an account must delete the
+// boxes this installation journals for it first. Otherwise its key goes away and
+// no sweep can ever pause or delete a retained box, which has no ttl.
+func TestUpstashAccountDeleteRemovesItsBoxes(t *testing.T) {
+	mux, h := upstashTestServer(t)
+	id := upstashCreate(t, mux, "Work", "ubx-k-1234567890abcdef")
+	fake := &fakeUpstashBoxAPI{}
+	wireUpstashBoxClient(t, h, fake)
+
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Add(boxsession.Entry{
+		BoxID: "box-1", AccountID: id, Kind: boxsession.KindRetained,
+		LoginState: "work", SessionID: "ses-1",
+	}); err != nil {
+		t.Fatalf("journal.Add: %v", err)
+	}
+
+	code, raw := upstashDo(t, mux, http.MethodDelete, "/api/upstash/accounts/"+id, nil)
+	if code != http.StatusNoContent {
+		t.Fatalf("delete account: %d %s", code, raw)
+	}
+	deleted := false
+	for _, c := range fake.calls {
+		if c == "DELETE /v2/box/box-1" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("calls = %v, want a DELETE of box-1", fake.calls)
+	}
+	if rows, err := journal.List(); err != nil || len(rows) != 0 {
+		t.Fatalf("journal = %v, err %v; want empty", rows, err)
+	}
+	if _, ok := auth.UpstashBoxAPIKey(id); ok {
+		t.Fatal("the account key is still stored after the delete")
+	}
+}
+
+// TestUpstashAccountDeleteKeepsTheAccountWhenBoxDeleteFails: a box that cannot
+// be deleted must abort the account delete, so the key and config stay and the
+// user can retry instead of stranding the box.
+func TestUpstashAccountDeleteKeepsTheAccountWhenBoxDeleteFails(t *testing.T) {
+	mux, h := upstashTestServer(t)
+	id := upstashCreate(t, mux, "Work", "ubx-k-abcdef1234567890")
+	fake := &fakeUpstashBoxAPI{deleteCode: http.StatusInternalServerError}
+	wireUpstashBoxClient(t, h, fake)
+
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Add(boxsession.Entry{
+		BoxID: "box-1", AccountID: id, Kind: boxsession.KindRetained,
+		LoginState: "work", SessionID: "ses-1",
+	}); err != nil {
+		t.Fatalf("journal.Add: %v", err)
+	}
+
+	code, raw := upstashDo(t, mux, http.MethodDelete, "/api/upstash/accounts/"+id, nil)
+	if code != http.StatusBadGateway {
+		t.Fatalf("delete account with a failed box delete: %d %s, want 502", code, raw)
+	}
+	if _, ok := auth.UpstashBoxAPIKey(id); !ok {
+		t.Fatal("the key was removed even though its box could not be deleted")
+	}
+	if rows, err := journal.List(); err != nil || len(rows) != 1 {
+		t.Fatalf("journal = %v, err %v; want the row kept", rows, err)
+	}
+}
+
+// TestUpstashAccountDeleteTreatsAGoneBoxAsDeleted: a box already deleted on the
+// server is not a reason to keep the account. The API answers 404, which must
+// count as success so a half-deleted account can still be removed.
+func TestUpstashAccountDeleteTreatsAGoneBoxAsDeleted(t *testing.T) {
+	mux, h := upstashTestServer(t)
+	id := upstashCreate(t, mux, "Work", "ubx-k-gone1234567890ab")
+	fake := &fakeUpstashBoxAPI{deleteCode: http.StatusNotFound}
+	wireUpstashBoxClient(t, h, fake)
+
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Add(boxsession.Entry{
+		BoxID: "box-1", AccountID: id, Kind: boxsession.KindRetained,
+		LoginState: "work", SessionID: "ses-1",
+	}); err != nil {
+		t.Fatalf("journal.Add: %v", err)
+	}
+
+	code, raw := upstashDo(t, mux, http.MethodDelete, "/api/upstash/accounts/"+id, nil)
+	if code != http.StatusNoContent {
+		t.Fatalf("delete account with an already-gone box: %d %s, want 204", code, raw)
+	}
+	if rows, err := journal.List(); err != nil || len(rows) != 0 {
+		t.Fatalf("journal = %v, err %v; want empty", rows, err)
+	}
+	if _, ok := auth.UpstashBoxAPIKey(id); ok {
+		t.Fatal("the account key is still stored")
 	}
 }

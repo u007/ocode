@@ -22,6 +22,8 @@ import (
 type fakeUpstashBoxAPI struct {
 	boxes    []map[string]any
 	listCode int
+	// deleteCode, when non-zero, is the status a box DELETE answers with.
+	deleteCode int
 	// pauseOK makes POST .../pause succeed. Off, it refuses like an ephemeral box.
 	pauseOK bool
 	calls   []string
@@ -43,6 +45,11 @@ func (f *fakeUpstashBoxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"Ephemeral boxes cannot be paused"}`))
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v2/box/"):
+		if f.deleteCode != 0 {
+			w.WriteHeader(f.deleteCode)
+			_, _ = w.Write([]byte(`{"error":"delete refused"}`))
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.WriteHeader(http.StatusNotFound)

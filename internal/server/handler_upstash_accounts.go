@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,7 +14,9 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/boxsession"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/upstashbox"
 )
 
 // Upstash Box account management. Non-secret fields are persisted through
@@ -309,10 +312,17 @@ func (h *Handler) HandleUpstashAccountUpdate(w http.ResponseWriter, r *http.Requ
 }
 
 // HandleUpstashAccountDelete removes an account and its key in one guarded
-// change. If the key removal fails the account stays, and if the config save
-// fails the key is restored, so the two never disagree.
+// change. Its boxes are deleted first: removing the key first would strand a
+// retained box, which has no ttl and can no longer be reached by any sweep. If
+// the key removal fails the account stays, and if the config save fails the key
+// is restored, so the two never disagree.
 func (h *Handler) HandleUpstashAccountDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if err := h.deleteAccountBoxes(r.Context(), id); err != nil {
+		log.Printf("upstash accounts: delete %s: %v", id, err)
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	err := config.MutateUpstashBoxGuarded(func(c *config.UpstashBoxConfig) (func(), error) {
 		prevKey, hadPrevKey := auth.UpstashBoxAPIKey(id)
 		if err := c.RemoveAccount(id); err != nil {
@@ -330,6 +340,83 @@ func (h *Handler) HandleUpstashAccountDelete(w http.ResponseWriter, r *http.Requ
 	}
 	h.refreshUpstashBoxSnapshot()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteAccountBoxes deletes every box this installation journals for the
+// account, so removing its key cannot strand one. A live ephemeral box goes
+// through the manager (which closes its browser and journal row); every other
+// box is deleted through the API and forgotten locally. Each box gets its own
+// deadline, and a failure aborts the account delete before its key is touched.
+//
+// shortcut: a Start that slips between the journal read and the key removal is
+// not re-checked, so that box can still be stranded; close it when box starts
+// take an account-level lock.
+func (h *Handler) deleteAccountBoxes(ctx context.Context, accountID string) error {
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		return err
+	}
+	rows, err := journal.List()
+	if err != nil {
+		return fmt.Errorf("read the box journal: %w", err)
+	}
+	var owned []boxsession.Entry
+	for _, e := range rows {
+		if e.AccountID == accountID {
+			owned = append(owned, e)
+		}
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+	key, ok := auth.UpstashBoxAPIKey(accountID)
+	if !ok {
+		return fmt.Errorf("account %s has %d box(es) but no API key to delete them", accountID, len(owned))
+	}
+	client, err := h.upstashBoxClient(key)
+	if err != nil {
+		return fmt.Errorf("build the box client: %w", err)
+	}
+	for _, e := range owned {
+		boxCtx, cancel := context.WithTimeout(ctx, upstashBoxRequestTimeout)
+		err := h.deleteAccountBox(boxCtx, client, e.BoxID)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("delete box %s: %w", e.BoxID, err)
+		}
+	}
+	return nil
+}
+
+// deleteAccountBox deletes one box of an account being removed. A live ephemeral
+// box is ended through the manager. Anything else, a live retained box included,
+// is deleted through the API and then forgotten, which drops its live side too.
+func (h *Handler) deleteAccountBox(ctx context.Context, client upstashBoxAPI, boxID string) error {
+	if mgr := h.boxManagerIfBuilt(); mgr != nil {
+		for _, st := range mgr.Statuses() {
+			if st.BoxID != boxID || st.Kind != boxsession.KindEphemeral {
+				continue
+			}
+			err := mgr.Terminate(ctx, st.SessionID)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, boxsession.ErrNotStarted) && !errors.Is(err, boxsession.ErrExpired) {
+				return err
+			}
+			break
+		}
+	}
+	if err := client.Delete(ctx, boxID); err != nil && !upstashBoxGone(err) {
+		return err
+	}
+	return h.forgetDeletedBox(boxID)
+}
+
+// upstashBoxGone reports whether a delete failed only because the box is gone.
+func upstashBoxGone(err error) bool {
+	var apiErr *upstashbox.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // HandleUpstashSettingsUpdate sets the default backend and/or default account.
