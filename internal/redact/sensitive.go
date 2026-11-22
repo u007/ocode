@@ -2,8 +2,43 @@ package redact
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
+
+// loginStateDirSegments is the browser login-state directory as two consecutive
+// path segments: <paths.GlobalDataDir()>/browse/login-states. It is the twin of
+// internal/agent (loginStateSegment in permissions.go) and of internal/boxsession
+// (loginStateDirName, DefaultLoginStateDir). This package cannot import internal/agent,
+// so the agent package's TestLoginStateRedactTwinAgrees pins the two together.
+var loginStateDirSegments = [2]string{"browse", "login-states"}
+
+// caseFoldLoginStates reports whether login-state segments match ignoring case.
+// It is the twin of loginStateCaseFold in internal/agent/permissions.go: APFS
+// (the macOS default) and NTFS fold case, Linux does not.
+func caseFoldLoginStates() bool {
+	return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+}
+
+// isLoginStateSegments reports whether path names the login-state directory or
+// anything beneath it, by path segments: browse and login-states as consecutive
+// segments. A sibling such as login-states-old is a different segment and does
+// not match. fold lowers both sides before comparing, as the agent twin does.
+func isLoginStateSegments(path string, fold bool) bool {
+	segs := strings.Split(filepath.ToSlash(path), "/")
+	eq := func(got, want string) bool {
+		if fold {
+			return strings.ToLower(got) == strings.ToLower(want)
+		}
+		return got == want
+	}
+	for i := 0; i+1 < len(segs); i++ {
+		if eq(segs[i], loginStateDirSegments[0]) && eq(segs[i+1], loginStateDirSegments[1]) {
+			return true
+		}
+	}
+	return false
+}
 
 // sensitiveFilePatterns returns true when the given file path matches a
 // sensitive-file pattern. The check is case-insensitive for the basename.
@@ -16,6 +51,7 @@ import (
 //	.npmrc, .netrc
 //	*credentials*, secrets.*, .pgpass
 //	auth.json, ocodeconfig.json, opencode.json
+//	browse/login-states/** (as consecutive path segments)
 func IsSensitiveFile(path string) bool {
 	if path == "" {
 		return false
@@ -71,6 +107,13 @@ func IsSensitiveFile(path string) bool {
 	// secret masking — the directory allow-list intentionally does not carry a
 	// name-based sensitive-path veto that would re-introduce prompts.
 	if base == "auth.json" || base == "ocodeconfig.json" || base == "opencode.json" {
+		return true
+	}
+
+	// The browser login-state directory (cookies and storage of a remote browser).
+	// It is treated exactly as auth.json is: the same tool-result branch masks it.
+	// Matched by segments, not basename, because the directory is the unit.
+	if isLoginStateSegments(path, caseFoldLoginStates()) {
 		return true
 	}
 

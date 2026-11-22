@@ -20,6 +20,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/appearance"
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/boxsession"
 	"github.com/u007/ocode/internal/browsertabs"
 	"github.com/u007/ocode/internal/cloudconnect"
 	"github.com/u007/ocode/internal/computer"
@@ -263,7 +264,23 @@ type Handler struct {
 	// browseSurfaces gives the browser agent tool this server's Chrome. Set once
 	// by EnableBrowse, before Serve. Nil means no browser tool is registered.
 	browseSurfaces browserSurfaces
-	monaco         *monaco.Store
+	// boxMu guards the Upstash box fields below. It is never held across box IO
+	// that a request waits on beyond the one-time manager build, and never with h.mu.
+	boxMu sync.Mutex
+	// boxes is the Upstash box manager. Nil until a box is first needed (see boxManager).
+	boxes *boxsession.Manager
+	// boxStop cancels the manager's reaper loop; shutdownBoxes calls it.
+	boxStop context.CancelFunc
+	// boxLabelCached is the installation label, read once from the data directory.
+	boxLabelCached string
+	// boxCloses counts the background box teardowns a session close started
+	// (terminateSessionBox). A test waits on it so the teardown's journal write
+	// finishes before the test's temp home is removed.
+	boxCloses sync.WaitGroup
+	// newUpstashBoxClient builds the Upstash Box API client for the boxes endpoints.
+	// Nil means the production client; tests replace it with a fake server.
+	newUpstashBoxClient func(apiKey string) (upstashBoxAPI, error)
+	monaco              *monaco.Store
 	// appearance discovers VS Code colour themes in installed editor extensions
 	// and converts them on demand (handler_appearance.go). It is local to this
 	// machine by design: the endpoints take no ?host= and are never proxied.
@@ -1452,6 +1469,13 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		// Decided before the session is registered, so a failed read leaves no
+		// half-created session behind.
+		upstashBrowser, ubErr := upstashBrowserAtCreation()
+		if ubErr != nil {
+			writeError(w, http.StatusInternalServerError, ubErr.Error())
+			return
+		}
 		sid = session.NewSessionID()
 		createdSession = true
 		entry = h.sessions.RegisterWithWindow(sid, projectRoot, windowID)
@@ -1476,6 +1500,14 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(req.PinnedMCPServers) > 0 {
 			meta[pinnedMCPServersMetadataKey] = req.PinnedMCPServers
+		}
+		// Only this creation branch sets the upstash_browser flag. A session created
+		// with a preset id (the sid != "" branch above) or by any other registration
+		// path never gets the upstash backend, even when Upstash Box accounts exist:
+		// the flag is decided here, once, and a session without it keeps the
+		// local-only browser.
+		if upstashBrowser {
+			meta[upstashBrowserMetadataKey] = true
 		}
 		if err := h.saveSession(sid, "", nil, meta); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

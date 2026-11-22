@@ -40,6 +40,7 @@ let createAccount: Mock<typeof api.upstashCreateAccount>;
 let updateAccount: Mock<typeof api.upstashUpdateAccount>;
 let deleteAccount: Mock<typeof api.upstashDeleteAccount>;
 let updateSettings: Mock<typeof api.upstashUpdateSettings>;
+let listBoxes: Mock<typeof api.upstashListBoxes>;
 
 function mockList(accounts: UpstashAccount[], defaultBackend: "local" | "upstash" = "local") {
   listAccounts.mockImplementation(async () => ({
@@ -60,6 +61,12 @@ beforeEach(() => {
   vi.spyOn(api, "upstashUpdateAccount").mockImplementation(updateAccount);
   vi.spyOn(api, "upstashDeleteAccount").mockImplementation(deleteAccount);
   vi.spyOn(api, "upstashUpdateSettings").mockImplementation(updateSettings);
+  // The boxes list mounts under the accounts; keep it off the network here.
+  listBoxes = vi.fn(async () => ({ boxes: [], total: 0, page: 1, page_size: 20, account_id: "acc-1" }));
+  vi.spyOn(api, "upstashListBoxes").mockImplementation(listBoxes);
+  // The login-states section mounts under an account too; no project is open
+  // here, so only the list is fetched.
+  vi.spyOn(api, "upstashListLoginStates").mockImplementation(async () => ({ login_states: [] }));
 });
 
 afterEach(() => {

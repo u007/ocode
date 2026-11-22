@@ -683,14 +683,14 @@ func TestBrowserTool_ExecuteImageWithoutScreenshotFails(t *testing.T) {
 // the project is local. Tab state never gates registration.
 func TestBrowserToolFor_RegistrationGates(t *testing.T) {
 	h := &Handler{}
-	if got := h.browserToolFor(testProjectKey, nil); got != nil {
+	if got := h.browserToolFor(testProjectKey, nil, nil); got != nil {
 		t.Fatalf("tool registered without a browser surface: %v", got.Name())
 	}
 
 	s := New("127.0.0.1:0", "", "", nil)
 	bs := browse.New("", nil)
 	s.EnableBrowse("http://127.0.0.1:0", bs)
-	got := s.handler.browserToolFor(testProjectKey, nil)
+	got := s.handler.browserToolFor(testProjectKey, nil, nil)
 	if got == nil || got.Name() != "browser" {
 		t.Fatalf("browserToolFor with a wired browse server = %v, want the browser tool", got)
 	}
@@ -714,10 +714,10 @@ func TestBrowserToolFor_RemoteProjectGetsNoLocalTool(t *testing.T) {
 	s := New("127.0.0.1:0", "", "", nil)
 	s.EnableBrowse("http://127.0.0.1:0", browse.New("", nil))
 	s.handler.projects = store
-	if got := s.handler.browserToolFor("/work/remote", nil); got != nil {
+	if got := s.handler.browserToolFor("/work/remote", nil, nil); got != nil {
 		t.Fatalf("remote project got the local browser tool: %s", got.Name())
 	}
-	if got := s.handler.browserToolFor("/work/local", nil); got == nil {
+	if got := s.handler.browserToolFor("/work/local", nil, nil); got == nil {
 		t.Fatal("local project got no browser tool")
 	}
 }
@@ -732,7 +732,7 @@ func TestEnableBrowse_RemoteModeHostRegistersItsOwnChrome(t *testing.T) {
 	if s.handler.browseSurfaces == nil {
 		t.Fatal("remote-mode host did not wire its Chrome for the agent tool")
 	}
-	if got := s.handler.browserToolFor("/host/project", nil); got == nil {
+	if got := s.handler.browserToolFor("/host/project", nil, nil); got == nil {
 		t.Fatal("remote-mode host registered no browser tool for its own project")
 	}
 }

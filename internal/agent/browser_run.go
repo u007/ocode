@@ -262,36 +262,56 @@ func (t *browserRunTool) Name() string        { return browserRunToolName }
 func (t *browserRunTool) Description() string { return browserRunDescription }
 func (t *browserRunTool) Parallel() bool      { return false }
 
+// browserRunBackendDescription is the backend property's static description. The
+// property is added only when the session has the box backend (SetBrowserBoxBackend).
+const browserRunBackendDescription = "Browser to drive, as for the browser tool: local (this machine) or upstash (a cloud browser box that the browser tool's action=start creates). browser_run never starts a box itself."
+
 func (t *browserRunTool) Definition() map[string]interface{} {
+	properties := map[string]interface{}{
+		"goal": map[string]interface{}{
+			"type":        "string",
+			"description": "What to achieve on the page, in plain words.",
+		},
+		"data": map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": map[string]interface{}{"type": "string"},
+			"description":          "Named values the loop may type into fields, for example {\"email\": \"...\"}. Only the key names reach the decision model.",
+		},
+		"tab": map[string]interface{}{
+			"type":        "string",
+			"description": "Tab id, as for the browser tool. Default: the project's active tab.",
+		},
+		"max_steps": map[string]interface{}{
+			"type":        "integer",
+			"minimum":     1,
+			"maximum":     browserRunMaxSteps,
+			"description": "Most actions the run may take. Default 15.",
+		},
+	}
+	if t.owner != nil && t.owner.browserBoxBackend.Load() {
+		properties["backend"] = map[string]interface{}{
+			"type":        "string",
+			"enum":        []string{"local", "upstash"},
+			"description": browserRunBackendDescription,
+		}
+	}
 	return map[string]interface{}{
 		"name":        browserRunToolName,
 		"description": browserRunDescription,
 		"parameters": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"goal": map[string]interface{}{
-					"type":        "string",
-					"description": "What to achieve on the page, in plain words.",
-				},
-				"data": map[string]interface{}{
-					"type":                 "object",
-					"additionalProperties": map[string]interface{}{"type": "string"},
-					"description":          "Named values the loop may type into fields, for example {\"email\": \"...\"}. Only the key names reach the decision model.",
-				},
-				"tab": map[string]interface{}{
-					"type":        "string",
-					"description": "Tab id, as for the browser tool. Default: the project's active tab.",
-				},
-				"max_steps": map[string]interface{}{
-					"type":        "integer",
-					"minimum":     1,
-					"maximum":     browserRunMaxSteps,
-					"description": "Most actions the run may take. Default 15.",
-				},
-			},
-			"required": []string{"goal"},
+			"type":       "object",
+			"properties": properties,
+			"required":   []string{"goal"},
 		},
 	}
+}
+
+// SetBrowserBoxBackend sets whether browser_run takes the backend parameter, so it
+// can drive a session's upstash box. The server sets it from the session's creation
+// metadata, the same metadata that decides the browser tool's box backend. It is
+// read on every request, so a rebuilt tool keeps the setting it was given.
+func (a *Agent) SetBrowserBoxBackend(on bool) {
+	a.browserBoxBackend.Store(on)
 }
 
 // Execute is the fallback for callers without a context. The agent always calls
@@ -306,9 +326,13 @@ func (t *browserRunTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (
 		Data     map[string]string `json:"data"`
 		Tab      string            `json:"tab"`
 		MaxSteps *int              `json:"max_steps"`
+		Backend  string            `json:"backend"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("browser_run: arguments are not a valid object: %w", err)
+	}
+	if p.Backend != "" && !t.owner.browserBoxBackend.Load() {
+		return "", errors.New("browser_run: backend is not available in this session")
 	}
 	goal := strings.TrimSpace(p.Goal)
 	if goal == "" {
@@ -337,6 +361,7 @@ func (t *browserRunTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (
 		data:     p.Data,
 		dataKeys: browserRunDataKeys(p.Data),
 		tab:      p.Tab,
+		backend:  p.Backend,
 		maxSteps: maxSteps,
 	}
 	end, page := run.execute(decider)
@@ -369,6 +394,7 @@ type browserRunRun struct {
 	data     map[string]string
 	dataKeys []string
 	tab      string
+	backend  string
 	maxSteps int
 	seq      int
 	jevCalls int
@@ -483,6 +509,11 @@ func (r *browserRunRun) readControls() (browserRunPage, *browserRunEnd) {
 func (r *browserRunRun) subStep(args map[string]any) (string, *browserRunEnd) {
 	if r.tab != "" {
 		args["tab"] = r.tab
+	}
+	// Every sub-step drives the backend the run was given. browser_run never starts
+	// a box: with none running, the first sub-step's error stops the run.
+	if r.backend != "" {
+		args["backend"] = r.backend
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {

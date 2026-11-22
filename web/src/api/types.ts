@@ -1792,6 +1792,66 @@ export interface UpstashSettings {
   default_account_id: string;
 }
 
+/** Box lifetime: `persistent` boxes can be paused and resumed; `ephemeral` ones are not.
+ *  `retained` is a persistent box this installation keeps per login state: paused when
+ *  idle, and deleted if it stays unused until `expires_at`. */
+export type UpstashBoxKind = "ephemeral" | "persistent" | "retained";
+
+/** One box on an Upstash account, as listed by GET /api/upstash/boxes. */
+export interface UpstashBox {
+  id: string;
+  name: string;
+  status: string;
+  size: string;
+  kind: UpstashBoxKind;
+  /** False when the box exists on the account but was not created by ocode here. */
+  ours: boolean;
+  session_id: string;
+  /** RFC3339, or empty when the box has never been used. */
+  last_used: string;
+  /** RFC3339, or empty when the box does not expire. */
+  expires_at: string;
+  created_at: string;
+  /** Login state the box was started with, or empty for none (or when not running here). */
+  login_state: string;
+}
+
+/** GET /api/upstash/boxes. Newest first, as the server sorts them. */
+export interface UpstashBoxesResponse {
+  boxes: UpstashBox[];
+  total: number;
+  page: number;
+  page_size: number;
+  account_id: string;
+}
+
+/** One saved login state, as GET /api/upstash/login-states lists it. Counts
+ *  only: the cookie and storage values never leave the server. */
+export interface UpstashLoginState {
+  name: string;
+  /** RFC3339, or empty when unknown. */
+  saved_at: string;
+  cookies: number;
+  origins: number;
+  bytes: number;
+  /** Session id holding the state right now, or empty when it is free. */
+  in_use_by: string;
+  /** The file cannot be read. Counts are zero and only Delete applies. */
+  corrupt: boolean;
+}
+
+/** GET /api/upstash/login-states. Sorted by name; never null. */
+export interface UpstashLoginStatesResponse {
+  login_states: UpstashLoginState[];
+}
+
+/** GET and PUT /api/upstash/login-state. `name` is "" when the project has no
+ *  login state assigned. */
+export interface UpstashLoginStateAssignment {
+  project: string;
+  name: string;
+}
+
 // ── Pulse (cross-project live-sessions dashboard) ────────────────────────────
 // Mirrors internal/server/pulse_rows.go. The status union and its precedence
 // (needs_permission > needs_question > running > error > idle), the sort order

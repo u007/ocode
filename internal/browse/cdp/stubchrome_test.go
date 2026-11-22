@@ -34,6 +34,9 @@ type stubChrome struct {
 	// the channel is closed. The reply is written from its own goroutine, so
 	// the stub keeps reading later commands meanwhile (see SetReplyGate).
 	replyGate func(method string, params json.RawMessage) <-chan struct{}
+	// responder, when set, answers a command by method and session (see
+	// SetResponder). handled=false falls through to the usual replies.
+	responder func(method, sessionID string, params json.RawMessage) (result any, errMsg string, handled bool)
 }
 
 // newStubChrome creates a pipe pair and a Conn. The returned conn is what
@@ -81,6 +84,14 @@ func (s *stubChrome) SetReplyGate(gate func(method string, params json.RawMessag
 	s.callsMu.Lock()
 	defer s.callsMu.Unlock()
 	s.replyGate = gate
+}
+
+// SetResponder installs a per-command responder. Unlike SetResult it can give
+// two sessions different replies to the same method.
+func (s *stubChrome) SetResponder(fn func(method, sessionID string, params json.RawMessage) (result any, errMsg string, handled bool)) {
+	s.callsMu.Lock()
+	defer s.callsMu.Unlock()
+	s.responder = fn
 }
 
 func (s *stubChrome) Calls() []stubCall {
@@ -170,7 +181,17 @@ func (s *stubChrome) handleFrame(frame []byte) {
 		s.callsMu.Lock()
 		failMsg, failing := s.failures[msg.Method]
 		gate := s.replyGate
+		responder := s.responder
 		s.callsMu.Unlock()
+		if responder != nil {
+			if res, errMsg, handled := responder(msg.Method, msg.SessionID, msg.Params); handled {
+				failing, failMsg = errMsg != "", errMsg
+				if !failing {
+					raw, _ := json.Marshal(res)
+					reply = map[string]any{"id": *msg.ID, "result": json.RawMessage(raw)}
+				}
+			}
+		}
 		if failing {
 			reply = map[string]any{"id": *msg.ID, "error": map[string]any{"code": -32000, "message": failMsg}}
 		}

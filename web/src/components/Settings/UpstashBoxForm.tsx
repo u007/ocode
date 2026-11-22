@@ -26,6 +26,8 @@ import {
   SelectValue,
 } from "../ui/select";
 import ConfirmDialog from "../common/ConfirmDialog";
+import UpstashBoxesList from "./UpstashBoxesList";
+import UpstashLoginStates from "./UpstashLoginStates";
 
 // Settings → Upstash Box. Manages one or more Upstash accounts and the default
 // browser backend. Mirrors VaultForm (list + Add/Edit dialog) and ConnectorsForm
@@ -152,7 +154,14 @@ function accountToDraft(a: UpstashAccount): Draft {
   };
 }
 
-export default function UpstashBoxForm() {
+/** Props. `project` and `host` are the Settings panel's active project; login
+ *  states are assigned to it. Both are absent when no project is open. */
+interface UpstashBoxFormProps {
+  project?: string;
+  host?: string;
+}
+
+export default function UpstashBoxForm({ project, host }: UpstashBoxFormProps) {
   const [accounts, setAccounts] = useState<UpstashAccount[]>([]);
   const [defaultBackend, setDefaultBackend] = useState<UpstashBackend>("local");
   const [loading, setLoading] = useState(true);
@@ -420,6 +429,9 @@ export default function UpstashBoxForm() {
               ))}
             </ul>
           )}
+
+          {accounts.length > 0 && <UpstashBoxesList accounts={accounts} />}
+          {accounts.length > 0 && <UpstashLoginStates project={project} host={host} />}
         </>
       )}
 

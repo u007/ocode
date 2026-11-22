@@ -8,7 +8,7 @@ tags:
   - oauth
   - security
   - web
-timestamp: 2026-10-02T02:51:21Z
+timestamp: 2026-11-22T07:21:22Z
 ---
 # Web/Desktop "Connectors" settings — TUI `/connect` parity — design
 
@@ -114,7 +114,7 @@ per-profile: an in-place edit must invalidate the cached client."*
 
 **The intent was not met for the base store (design-time state; fixed —
 as-built note below).** `auth.Set` and `auth.Remove`
-(`internal/auth/store.go:373`/`:393`) mutate the cache and call `persistLocked`,
+(`internal/auth/store.go`, `Set`/`Remove`) mutate the cache and call `persistLocked`,
 and at the time **never bumped `profileVersion`** — that counter lives in
 `internal/auth/profile_store.go` and was bumped only by profile mutations. So a
 write through `PUT /api/auth/connect/{provider}` left every live session on the
@@ -130,7 +130,7 @@ remember to read. Fire `OnCredentialsSaved` as today — it is what
 
 **As-built (2026-10-01, plan item 5).** Implemented with one correction to the
 decision above: the bump lives directly in `Set`/`Remove`
-(`internal/auth/store.go:388` / `:407`), NOT in `persistLocked` — that also runs
+(`internal/auth/store.go`, `Set`/`Remove`), NOT in `persistLocked` — that also runs
 on the seed-on-load path that materialises an empty `auth.json` without changing
 a credential, which would invalidate every agent for a no-op write (14 tests
 failed until it moved). The reconcile check now compares the single
@@ -165,10 +165,11 @@ contract as a model switch.
   satisfied: `handler_connect.go` contains zero `h.mu` references, and
   `handleConnectTest` runs `testCredentialFn` (network) with no lock held.
   Keep it that way when the OAuth mode logic lands.
-- **Write serialisation is already correct.** `auth.Set` / `auth.Remove`
-  (`internal/auth/store.go:373`/`:393`) take `storeMu` and `persistLocked` writes
-  the whole file under that lock, so the read-modify-write is atomic. No new lock
-  needed.
+- **Write serialisation is correct.** `auth.Set` / `auth.Remove`
+  (`internal/auth/store.go`) take `storeMu`, then re-read and rewrite auth.json
+  under the cross-process file lock (`auth.json.lock`), so a key another process
+  saved since this one loaded is kept. No new lock needed. See
+  [auth.json multi-process credential loss](../../gotchas/auth-json-multi-process-credential-loss.md).
 - **Per-host credentials, never a local fallback.** A remote project's agent runs
   on the host, so its key must come from the host's `auth.json`. `/api/remote/{host}`
   proxies to the host's `serve --remote`, where this same handler runs against the

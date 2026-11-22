@@ -43,8 +43,7 @@ func ocodeDataDirForTest(t *testing.T, home string) string {
 // `anthropic error (401): api_key_expired` while the main agent worked.
 func TestActiveProfileReadsOcodeDataDirWindowState(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	setHomeTree(t, home)
 	// OCODE_PROFILE wins over the file; make sure it is not set.
 	t.Setenv("OCODE_PROFILE", "")
 	writeWindowStateForTest(t, home, "ocode2")
@@ -84,8 +83,7 @@ func setWindowStateFallbackForTest(t *testing.T, on bool) {
 // profile must not leak into it; OCODE_PROFILE is still honoured.
 func TestActiveProfileIgnoresWindowStateOutsideServer(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	setHomeTree(t, home)
 	t.Setenv("OCODE_PROFILE", "")
 	writeWindowStateForTest(t, home, "ocode2")
 	setWindowStateFallbackForTest(t, false)

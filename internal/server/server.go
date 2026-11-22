@@ -227,6 +227,8 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.artifactTailscaleShareSnapshot = s.artifactShare.status
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
+	// Sweep an earlier process's orphaned Upstash boxes now, when the journal has rows.
+	h.resumeBoxSweepIfJournaled()
 	return s
 }
 
@@ -758,6 +760,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/upstash/accounts/{id}", s.authMiddleware(s.handler.HandleUpstashAccountUpdate))
 	s.mux.HandleFunc("DELETE /api/upstash/accounts/{id}", s.authMiddleware(s.handler.HandleUpstashAccountDelete))
 	s.mux.HandleFunc("PUT /api/upstash/settings", s.authMiddleware(s.handler.HandleUpstashSettingsUpdate))
+	s.mux.HandleFunc("GET /api/upstash/boxes", s.authMiddleware(s.handler.HandleUpstashBoxesList))
+	s.mux.HandleFunc("POST /api/upstash/boxes/{id}/pause", s.authMiddleware(s.handler.HandleUpstashBoxPause))
+	s.mux.HandleFunc("POST /api/upstash/boxes/{id}/resume", s.authMiddleware(s.handler.HandleUpstashBoxResume))
+	s.mux.HandleFunc("DELETE /api/upstash/boxes/{id}", s.authMiddleware(s.handler.HandleUpstashBoxDelete))
+	// Login states (cookies and site storage of a box browser, kept on this
+	// machine) and their per-project assignment. Only counts are listed.
+	s.mux.HandleFunc("GET /api/upstash/login-states", s.authMiddleware(s.handler.HandleUpstashLoginStatesList))
+	s.mux.HandleFunc("DELETE /api/upstash/login-states/{name}", s.authMiddleware(s.handler.HandleUpstashLoginStateDelete))
+	s.mux.HandleFunc("GET /api/upstash/login-state", s.authMiddleware(s.handler.HandleUpstashLoginStateGet))
+	s.mux.HandleFunc("PUT /api/upstash/login-state", s.authMiddleware(s.handler.HandleUpstashLoginStateSet))
 
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))

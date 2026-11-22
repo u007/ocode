@@ -936,7 +936,12 @@ type Agent struct {
 	// advisorAvailable, which runs on the async auto-continue judge goroutine. A
 	// concurrent map read and write is a fatal runtime error that recover cannot
 	// catch. Never hold it across a call into another component.
-	toolsMu          sync.RWMutex
+	toolsMu sync.RWMutex
+
+	// browserBoxBackend exposes the backend parameter on browser_run. The server
+	// sets it from the session's creation metadata (SetBrowserBoxBackend).
+	browserBoxBackend atomic.Bool
+
 	preloadedContext string // set by askAgent to avoid duplicate LoadContext calls
 	// orphanRecoveryWG tracks background goroutines spawned by
 	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
@@ -4402,8 +4407,8 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 			if a.noInteractivePasswordPrompt && IsElevationRequest(req) {
 				return "", errors.New(headlessElevationErrorText)
 			}
-			// Elevation asks are human-only: no judge may satisfy them.
-			if autoEnabled && !guardEscalated && !IsElevationRequest(req) {
+			// Elevation asks, browser box starts and login-state asks are human-only: no judge may satisfy them.
+			if autoEnabled && !guardEscalated && !IsElevationRequest(req) && !IsBrowserBoxStartRequest(req) && !IsLoginStateRequest(req) {
 				if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
 					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
 					// Fall through to human ask unless destructive auto-permission is enabled.
@@ -4615,6 +4620,14 @@ func permissionRequestSummary(req *PermissionRequest) string {
 // configured, local server not healthy, transport failure) and the reason
 // describes that failure — callers must not present it as a denial.
 func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (allowed bool, reason string, summary string, consulted bool) {
+	// Login-state data never reaches the judge, through any caller. The Ask gate
+	// in runToolCallWithContext already excludes login-state asks; this covers the
+	// other doors (the deny branch, the sandbox judge gate, a dangerous-rm ask
+	// that names a state file) that call the judge directly.
+	if reason := a.loginStateJudgeVeto(name, args, req); reason != "" {
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=login_state_no_judge tool=%s reason=%s", name, reason))
+		return false, reason, "", false
+	}
 	if a.OnPermissionCheck != nil {
 		modelLabel := a.autoPermissionModelDisplayName()
 		a.OnPermissionCheck(name, modelLabel, true)
@@ -5011,6 +5024,31 @@ var pathConfinedAutoTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
 	"multiedit": true, "multi_file_edit": true, "replace_lines": true,
 	"apply_patch": true, "format": true, "lsp": true,
+}
+
+// loginStateJudgeVeto returns why a call must not be shown to the judge because it
+// touches browser login-state data, or "". It checks the request's identity first,
+// then the call itself: some gates raise an Ask (a dangerous rm, a permission
+// escalation) before the login-state check runs, and a path-pattern deny raises
+// no request at all.
+func (a *Agent) loginStateJudgeVeto(name string, args json.RawMessage, req *PermissionRequest) string {
+	if req != nil && IsLoginStateRequest(*req) {
+		return "login-state request is human-only"
+	}
+	pm := a.permissions
+	if pm == nil {
+		return ""
+	}
+	if name == "bash" {
+		if hit := pm.loginStateBashHit(bashCommand(args)); hit != "" {
+			return "command touches browser login-state data: " + hit
+		}
+		return ""
+	}
+	if hit := pm.loginStateToolHit(name, args); hit != "" {
+		return "arguments touch browser login-state data: " + hit
+	}
+	return ""
 }
 
 // verifyAutoGrant re-checks a model ALLOW verdict against Go's deterministic
@@ -5632,8 +5670,11 @@ func (a *Agent) buildPermissionContextScripts(toolName string, args json.RawMess
 	// permission layer exists to prevent. Uses the same predicate scanToolResult
 	// applies to tool results, so a file that would be masked on the way to the
 	// model is also not read on the way to the judge.
+	// A browser login-state file (cookies and storage) is withheld by the same
+	// rule: isLoginStatePath resolves symlinks, so an alias to a state file is
+	// caught even though its own name is ordinary.
 	sensitiveContextFile := func(p string) bool {
-		return redact.IsSensitiveFile(p) || isSecretMaterialPath(p)
+		return redact.IsSensitiveFile(p) || isSecretMaterialPath(p) || isLoginStatePath(p, a.effectiveWorkDir())
 	}
 
 	// 1. Working directory and project type. Use the agent's workDir, not the
@@ -7195,6 +7236,16 @@ func (a *Agent) DispatchSubagent(agentName, prompt string) (string, error) {
 
 func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionResponse) {
 	if a.permissions == nil || resp.Level != PermissionAllow {
+		return
+	}
+	// A box start has no rule to persist (see AlwaysRuleChoiceAvailable). A host that
+	// answers allow-always anyway, such as the ACP bridge, gets a one-time allow: the
+	// tool-level allow it would install would cover every other browser action.
+	if IsBrowserBoxStartRequest(req) {
+		return
+	}
+	// A login-state ask has no rule to persist either (see AlwaysRuleChoiceAvailable).
+	if IsLoginStateRequest(req) {
 		return
 	}
 	if resp.PersistTool {

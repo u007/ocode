@@ -319,3 +319,95 @@ func TestMutateUpstashBoxGuardedRefusalWritesNothing(t *testing.T) {
 		t.Fatalf("refused change still saved the config %d times", writes)
 	}
 }
+
+func TestValidLoginStateName(t *testing.T) {
+	ok := []string{"a", "work", "box-1", "a_b", "0x", strings.Repeat("a", 40)}
+	for _, name := range ok {
+		if err := ValidLoginStateName(name); err != nil {
+			t.Errorf("ValidLoginStateName(%q) = %v, want nil", name, err)
+		}
+	}
+	bad := []string{"", "none", "-x", "_x", "Work", "a.b", "a/b", "../x", "a b", "a\n",
+		strings.Repeat("a", 41)}
+	for _, name := range bad {
+		err := ValidLoginStateName(name)
+		if !errors.Is(err, ErrUpstashBoxInvalid) {
+			t.Errorf("ValidLoginStateName(%q) = %v, want ErrUpstashBoxInvalid", name, err)
+		}
+	}
+}
+
+func TestLoginStateAssignmentSetAndClear(t *testing.T) {
+	var c UpstashBoxConfig
+	if got := c.LoginStateFor("/p/one"); got != "" {
+		t.Fatalf("unset LoginStateFor = %q, want empty", got)
+	}
+	if err := c.SetLoginState("/p/one", "work"); err != nil {
+		t.Fatalf("SetLoginState: %v", err)
+	}
+	if got := c.LoginStateFor("/p/one"); got != "work" {
+		t.Fatalf("LoginStateFor = %q, want work", got)
+	}
+	if got := c.LoginStateFor("/p/two"); got != "" {
+		t.Fatalf("other project LoginStateFor = %q, want empty", got)
+	}
+	// A name need not be a saved state yet, so it is accepted.
+	if err := c.SetLoginState("/p/two", "fresh-one"); err != nil {
+		t.Fatalf("SetLoginState to an unsaved name: %v", err)
+	}
+	if err := c.SetLoginState("/p/one", LoginStateNone); err != nil {
+		t.Fatalf("SetLoginState none: %v", err)
+	}
+	if _, ok := c.LoginStates["/p/one"]; ok {
+		t.Fatal("none did not remove the assignment")
+	}
+	if err := c.SetLoginState("/p/two", ""); err != nil {
+		t.Fatalf("SetLoginState empty: %v", err)
+	}
+	if c.LoginStates != nil {
+		t.Fatalf("empty assignments left a non-nil map: %v", c.LoginStates)
+	}
+}
+
+func TestLoginStateAssignmentRefusals(t *testing.T) {
+	var c UpstashBoxConfig
+	if err := c.SetLoginState("", "work"); !errors.Is(err, ErrUpstashBoxInvalid) {
+		t.Fatalf("empty project = %v, want ErrUpstashBoxInvalid", err)
+	}
+	if err := c.SetLoginState("/p", "Bad Name"); !errors.Is(err, ErrUpstashBoxInvalid) {
+		t.Fatalf("bad name = %v, want ErrUpstashBoxInvalid", err)
+	}
+	if len(c.LoginStates) != 0 {
+		t.Fatalf("refused assignment was stored: %v", c.LoginStates)
+	}
+}
+
+func TestClearLoginStateAssignments(t *testing.T) {
+	c := UpstashBoxConfig{LoginStates: map[string]string{"/a": "work", "/b": "home", "/c": "work"}}
+	if !c.ClearLoginStateAssignments("work") {
+		t.Fatal("ClearLoginStateAssignments reported no change")
+	}
+	if len(c.LoginStates) != 1 || c.LoginStates["/b"] != "home" {
+		t.Fatalf("after clear = %v, want only /b=home", c.LoginStates)
+	}
+	if c.ClearLoginStateAssignments("work") {
+		t.Fatal("second clear reported a change")
+	}
+}
+
+// Assignments persist through the targeted saver and reload intact.
+func TestLoginStateAssignmentPersistsRoundTrip(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	if err := MutateUpstashBox(func(c *UpstashBoxConfig) error {
+		return c.SetLoginState("/proj", "work")
+	}); err != nil {
+		t.Fatalf("MutateUpstashBox: %v", err)
+	}
+	got, err := LoadUpstashBoxConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LoginStateFor("/proj") != "work" {
+		t.Fatalf("reloaded assignment = %v, want /proj=work", got.LoginStates)
+	}
+}

@@ -422,3 +422,136 @@ func jsonEqual(got, want any) bool {
 	b, _ := json.Marshal(want)
 	return string(a) == string(b)
 }
+
+// TestCreateOnCreatedRunsOnceBeforePolling: the id reaches OnCreated before any
+// poll, once, and the request body carries nothing from OnCreated.
+func TestCreateOnCreatedRunsOnceBeforePolling(t *testing.T) {
+	var gets atomic.Int32
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+			}
+			if len(body) != 1 || body["ephemeral"] != true {
+				t.Errorf("body = %v, want only {ephemeral: true}; OnCreated must not be sent", body)
+			}
+			_, _ = io.WriteString(w, boxWithStatus("creating"))
+		case http.MethodGet:
+			gets.Add(1)
+			_, _ = io.WriteString(w, boxWithStatus("idle"))
+		}
+	})
+	c.pollInitial = time.Millisecond
+
+	var calls int
+	var getsAtCall int32 = -1
+	var gotID string
+	box, err := c.Create(context.Background(), CreateOptions{
+		Ephemeral: true,
+		OnCreated: func(id string) error {
+			calls++
+			gotID = id
+			getsAtCall = gets.Load()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OnCreated ran %d times, want 1", calls)
+	}
+	if gotID != "sunny-guppy-35079" || box.ID != gotID {
+		t.Fatalf("OnCreated got %q, box is %q; want the created id", gotID, box.ID)
+	}
+	if getsAtCall != 0 {
+		t.Fatalf("OnCreated ran after %d polls, want before any poll", getsAtCall)
+	}
+	if gets.Load() == 0 {
+		t.Fatal("Create did not poll a creating box")
+	}
+}
+
+// TestCreateOnCreatedErrorAbortsWithoutPolling: an OnCreated error stops Create
+// before any poll, and the box with its id comes back with the error.
+func TestCreateOnCreatedErrorAbortsWithoutPolling(t *testing.T) {
+	var gets atomic.Int32
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+		}
+		_, _ = io.WriteString(w, boxWithStatus("creating"))
+	})
+	c.pollInitial = time.Millisecond
+	c.pollMax = time.Millisecond
+	c.createWait = 50 * time.Millisecond // a mutant that polls must fail fast, not wait the 300 s budget
+	sentinel := errors.New("journal is read-only")
+
+	box, err := c.Create(context.Background(), CreateOptions{
+		Ephemeral: true,
+		OnCreated: func(string) error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Create err = %v, want the OnCreated error in the chain", err)
+	}
+	if box == nil || box.ID != "sunny-guppy-35079" {
+		t.Fatalf("box = %+v, want the created box with its id", box)
+	}
+	if n := gets.Load(); n != 0 {
+		t.Fatalf("Create polled %d times after OnCreated failed, want none", n)
+	}
+}
+
+// TestCreateOnCreatedSkippedWithoutID: a POST answer with no id has no box to
+// report, so OnCreated does not run.
+func TestCreateOnCreatedSkippedWithoutID(t *testing.T) {
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"creating"}`)
+	})
+	called := false
+	_, err := c.Create(context.Background(), CreateOptions{
+		Ephemeral: true,
+		OnCreated: func(string) error { called = true; return nil },
+	})
+	if err == nil {
+		t.Fatal("Create with no id in the POST answer: want error")
+	}
+	if called {
+		t.Fatal("OnCreated ran without a box id")
+	}
+}
+
+// TestCreatePersistentSendsNoEphemeralOrTTLKeys checks that a persistent box (not
+// ephemeral, no ttl) sends neither key, not even as false or zero, and that a
+// response with no expires_at is accepted as a box that does not expire.
+func TestCreatePersistentSendsNoEphemeralOrTTLKeys(t *testing.T) {
+	c := newServerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		expectRequest(t, r, http.MethodPost, "/v2/box")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		for _, key := range []string{"ephemeral", "ttl"} {
+			if _, present := body[key]; present {
+				t.Errorf("body[%q] is present = %v, want the key absent", key, body[key])
+			}
+		}
+		if body["browser"] != true || body["name"] != "ocode-ls-work" {
+			t.Errorf("body = %v, want browser true and the name", body)
+		}
+		_, _ = io.WriteString(w, `{"id":"box-persistent","name":"ocode-ls-work","status":"idle","browser":true,"ephemeral":false,"created_at":1700000000,"updated_at":1700000000}`)
+	})
+	box, err := c.Create(context.Background(), CreateOptions{
+		Name:      "ocode-ls-work",
+		Browser:   true,
+		Ephemeral: false,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if box.ID != "box-persistent" || box.Ephemeral || !box.ExpiresAt.IsZero() || box.Status != "idle" {
+		t.Errorf("returned box = %+v, want a persistent idle box with no expiry", box)
+	}
+}

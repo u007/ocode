@@ -27,7 +27,7 @@ func init() {
 // grokRefreshHook refreshes a Grok subscription credential via the stored x.com
 // session cookies. It implements auth.RefreshHook so the shared auth layer
 // (refreshIfExpiring) no longer special-cases the "grok" provider by ID.
-func grokRefreshHook(ctx context.Context, cred auth.Credential) (auth.Credential, bool) {
+func grokRefreshHook(ctx context.Context, cred auth.Credential, store auth.CredentialStore) (auth.Credential, bool) {
 	if cred.CookieAuthToken == "" || cred.CookieCt0 == "" {
 		return cred, true
 	}
@@ -38,7 +38,9 @@ func grokRefreshHook(ctx context.Context, cred auth.Credential) (auth.Credential
 	// Serialize concurrent grok refreshes on the shared per-provider mutex so
 	// that two simultaneous NewClient("grok/...") calls during token expiry do
 	// not both hit GrokSubscriptionRefresh; the second reuses the first's result.
-	return auth.RefreshLocked("grok", cred, func() (auth.Credential, error) {
+	// The store is the one cred was read from, so a profile's Grok credential is
+	// re-read and saved in the profile store, never the base auth.json.
+	return auth.RefreshLocked("grok", cred, store, func() (auth.Credential, error) {
 		return auth.GrokSubscriptionRefresh(ctx, cred)
 	})
 }

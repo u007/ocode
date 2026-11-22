@@ -1920,6 +1920,16 @@ func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
 	if req.Scope == PermissionScopeContent {
 		return false
 	}
+	// A box start is one approval of one box: a persisted tool-level allow for
+	// browser would auto-allow every other browser action, not the box.
+	if IsBrowserBoxStartRequest(req) {
+		return false
+	}
+	// A login-state ask is one approval of one path: a persisted rule would reopen
+	// the directory's other files for every later call.
+	if IsLoginStateRequest(req) {
+		return false
+	}
 	if req.ToolName == "bash" {
 		// Out-of-workspace path asks persist the PATH ROOT, not a bash rule.
 		if IsOutOfScopePathRequest(req) {
@@ -1984,6 +1994,12 @@ func AlwaysToolChoiceAvailable(req PermissionRequest) bool {
 	// one approval exempt every future result from the same tool, which is the
 	// opposite of what "deliver this one" means.
 	if req.Scope == PermissionScopeContent {
+		return false
+	}
+	if IsBrowserBoxStartRequest(req) {
+		return false
+	}
+	if IsLoginStateRequest(req) {
 		return false
 	}
 	return req.ToolName != "bash"
@@ -2137,6 +2153,12 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	}
 	if pm.mode == PermissionModeLocked {
 		if isReadOnlyTool(toolName) {
+			// Login-state data (cookies, storage) must never reach a model
+			// request, so even a read-only tool is refused on it in locked mode.
+			if hit := pm.loginStateToolHit(toolName, args); hit != "" {
+				pm.emitDebug("perm", fmt.Sprintf("Decide DENY (locked, login-state): tool=%s path=%s", toolName, hit))
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "locked permission mode: browser login-state data is never readable: " + hit}
+			}
 			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (locked, read-only): tool=%s", toolName))
 			return PermissionDecision{Level: PermissionAllow}
 		}
@@ -2184,6 +2206,15 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			pm.emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
 			return PermissionDecision{Level: PermissionAllow}
 		}
+		// Browser login-state data (normal and sandbox): any line that names the
+		// login-state directory asks, whatever its command. The synthetic
+		// "permission." prefix can never match a persisted command rule, and it
+		// sits above the allow rules and the sandbox auto-allow. Yolo returned
+		// above, so it stays an allow, as auth.json is.
+		if hit := pm.loginStateBashHit(command); hit != "" {
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (login-state): tool=bash target=%s", hit))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "permission.login_state", nil)}
+		}
 		// Sandbox = YOLO's prompt-bypass plus OS write-confinement: allow
 		// (the bash builder wraps the command so writes outside the writable
 		// roots fail at the OS level). Hard blocks and dangerous-rm still win,
@@ -2197,7 +2228,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// permission layer must. Reroutes to the auto-permission judge when auto
 		// is on, else a human prompt (sandbox never disables auto). Ordinary
 		// shared/project writes under the data dir auto-allow; only auth.json
-		// inside it stays Ask.
+		// and the browser login-state tree inside it stay Ask.
 		if pm.mode == PermissionModeSandbox {
 			// Per-constituent sandbox gate. The blanket OS-wrapped auto-allow
 			// below is reached before the compound parser at the tail of this
@@ -2365,6 +2396,19 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	}
 
 	if pathScopedTools[toolName] {
+		// Browser login-state files: checked before path-pattern allows, tool
+		// rules and the user-confirmed bypass below, so no persisted rule can
+		// reopen them. A user deny pattern on the path still denies. Every mode
+		// except yolo reaches this block, and yolo mirrors auth.json (allow).
+		if hit := pm.loginStateToolHit(toolName, args); hit != "" {
+			if pm.CheckPathPatterns(toolName, hit) == PermissionDeny {
+				return PermissionDecision{Level: PermissionDeny, DenyReason: fmt.Sprintf("path pattern rule denies %s", hit)}
+			}
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (login-state): tool=%s path=%s", toolName, hit))
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".login_state",
+			}}
+		}
 		path := extractPathFromArgs(toolName, args)
 		if path != "" {
 			// Check path-based permission patterns first (e.g., opencode.json
@@ -2545,6 +2589,29 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			params.Action = ""
 		}
 		level := pm.Check(toolName)
+		// Outside yolo (which returns before this branch), a box start is never
+		// auto-allowed: no allow rule, host list or judge reaches it. A tools.browser
+		// deny still wins, as a hard deny that no judge can lift.
+		if params.Action == "start" {
+			if level == PermissionDeny {
+				pm.emitDebug("perm", "Decide DENY (browser box start): permissions.tools.browser = deny")
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "permissions.tools.browser = deny"}
+			}
+			pm.emitDebug("perm", "Decide ASK (browser box start)")
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: BrowserBoxStartRule, Command: browserAction(pm, args),
+			}}
+		}
+		// terminate only stops a box and its billing, so it needs no ask. A tools.browser
+		// deny still applies: locked mode already denied it above.
+		if params.Action == "terminate" {
+			if level == PermissionDeny {
+				pm.emitDebug("perm", "Decide DENY (browser box terminate): permissions.tools.browser = deny")
+				return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "permissions.tools.browser = deny"}
+			}
+			pm.emitDebug("perm", "Decide ALLOW (browser box terminate)")
+			return PermissionDecision{Level: PermissionAllow}
+		}
 		// browserURLRefusal already ran at the top of Decide, so a refused
 		// scheme or metadata address never reaches this allow. An explicit
 		// tools.browser deny still wins over the host list.
@@ -2930,7 +2997,8 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	// project/{slug}/ state) and config dir (~/.config/opencode): the data dir
 	// is classified WRITABLE so sandboxed bash has full access to the opencode
 	// shared dir and per-project state (project/** — sessions, snapshots,
-	// md-summaries, memory). auth.json lives here too; the permission-layer
+	// md-summaries, memory). auth.json and the browser login-state tree
+	// (browse/login-states) live here too; the permission-layer
 	// Ask gate (sandboxSensitivePath flags any auth.json read/write) is one
 	// layer, but a command that builds its path dynamically could evade a
 	// static scanner, so auth.json is ALSO marked non-writable here — NewRootSet
@@ -2943,6 +3011,15 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 		add(dataDir, true)
 		if authPath, err := auth.AuthPath(); err == nil {
 			add(authPath, false)
+		}
+		// The browser login-state directory is the same class as auth.json:
+		// protected by the carve-out, so the OS write-wall stops a sandboxed
+		// write into it. NewRootSet only carves out a protected path that
+		// exists, so create it first. Otherwise browse/ would be granted whole
+		// and a sandboxed command could create login-states/ and write there.
+		if lsDir, err := loginStateDir(); err == nil {
+			_ = os.MkdirAll(lsDir, 0o700)
+			add(lsDir, false)
 		}
 	}
 	if configDir, err := paths.GlobalConfigDir(); err == nil {
@@ -3649,7 +3726,239 @@ func allArgsAreTempDirs(cmdWords []string) bool {
 }
 
 func isSensitivePath(path string) bool {
-	return isSecretMaterialPath(path) || isRepoMetadataPath(path)
+	return isSecretMaterialPath(path) || isRepoMetadataPath(path) || isLoginStatePath(path, "")
+}
+
+// loginStateSegment is the data-dir-relative location of the browser login
+// states: <paths.GlobalDataDir()>/browse/login-states. It is the twin of
+// internal/boxsession (loginStateDirName, DefaultLoginStateDir) and of the
+// segment matcher in internal/redact (isLoginStateSegments). This package does
+// not import boxsession, so TestLoginStateDirMatchesBoxsession pins the two
+// definitions together by reading the boxsession source; the redact twin is
+// pinned by TestLoginStateRedactTwinAgrees.
+const loginStateSegment = "browse/login-states"
+
+// loginStateDir resolves the login-state directory the way the auth path is
+// resolved: through paths.GlobalDataDir, so the platform split and XDG handling
+// are the same as auth.json's.
+func loginStateDir() (string, error) {
+	base, err := paths.GlobalDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, filepath.FromSlash(loginStateSegment)), nil
+}
+
+// loginStateRoots returns the absolute forms the login-state directory can be
+// matched under: the lexical path and its symlink-resolved form (macOS
+// /var vs /private/var, a symlinked data dir). When the data dir cannot be
+// resolved, it returns nil and the segment rule in isLoginStatePath still
+// applies.
+func loginStateRoots() []string {
+	dir, err := loginStateDir()
+	if err != nil {
+		return nil
+	}
+	roots := []string{filepath.Clean(dir)}
+	if r, ok := resolveForScopeCheck(dir); ok && r != roots[0] {
+		roots = append(roots, r)
+	}
+	return roots
+}
+
+// isLoginStatePath reports whether p names the browser login-state directory or
+// anything beneath it. p is resolved against workDir when relative. Two rules
+// are OR-ed:
+//
+//   - segment: the cleaned path contains browse/login-states at a path-segment
+//     boundary, wherever it lives. Like auth.json's basename rule this catches
+//     ~/…, $HOME/… spellings and relative paths the resolver cannot anchor.
+//   - resolved: the resolved path (and its symlink-resolved form) sits under the
+//     login-state directory.
+//
+// Both reject browse/login-states-old, so only the directory tree is caught.
+func isLoginStatePath(p, workDir string) bool {
+	if p == "" {
+		return false
+	}
+	if loginStateSegmentHitFold(filepath.ToSlash(filepath.Clean(p)), loginStateCaseFold()) {
+		return true
+	}
+	return loginStateResolvedHit(resolvePath(p, workDir), loginStateRoots())
+}
+
+// loginStateResolvedHit is the resolved half of isLoginStatePath, split out so
+// a whole-line scan can resolve roots once rather than once per word.
+func loginStateResolvedHit(resolved string, roots []string) bool {
+	return loginStateResolvedHitFold(resolved, roots, loginStateCaseFold())
+}
+
+// loginStateResolvedHitFold is loginStateResolvedHit with the case fold explicit.
+// pathUnderRoot folds only on windows, so darwin needs the fold passed in here.
+func loginStateResolvedHitFold(resolved string, roots []string, fold bool) bool {
+	if resolved == "" || !filepath.IsAbs(resolved) || len(roots) == 0 {
+		return false
+	}
+	cands := []string{filepath.Clean(resolved)}
+	if r, ok := resolveForScopeCheck(resolved); ok && r != cands[0] {
+		cands = append(cands, r)
+	}
+	for _, c := range cands {
+		for _, r := range roots {
+			if pathUnderRootFold(c, r, fold) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// loginStateToolPaths returns every path a path-scoped tool call names:
+// path/file_path, a glob or list pattern, multi_file_edit's edits[].path, and
+// apply_patch's file headers. The generic extractPathFromArgs returns nothing
+// for multi_file_edit and apply_patch, which is why they need this. ok is false
+// when the arguments do not parse, so the caller can fail closed.
+func loginStateToolPaths(toolName string, args json.RawMessage) (out []string, ok bool) {
+	var params struct {
+		Path      string `json:"path"`
+		FilePath  string `json:"file_path"`
+		Pattern   string `json:"pattern"`
+		PatchText string `json:"patchText"`
+		Edits     []struct {
+			Path string `json:"path"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, false
+	}
+	add := func(p string) {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	add(params.Path)
+	add(params.FilePath)
+	if toolName == "glob" || toolName == "list" {
+		add(params.Pattern)
+	}
+	for _, e := range params.Edits {
+		add(e.Path)
+	}
+	if toolName == "apply_patch" {
+		for _, line := range strings.Split(params.PatchText, "\n") {
+			t := strings.TrimSpace(line)
+			for _, marker := range []string{"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"} {
+				if rest, found := strings.CutPrefix(t, marker); found {
+					add(strings.TrimSpace(rest))
+				}
+			}
+		}
+	}
+	return out, true
+}
+
+// loginStateToolHit returns the first login-state path a path-scoped tool call
+// names, or "". Unparseable arguments that mention the directory also hit, so
+// a malformed call cannot slip past by being malformed.
+func (pm *PermissionManager) loginStateToolHit(toolName string, args json.RawMessage) string {
+	paths, ok := loginStateToolPaths(toolName, args)
+	if !ok {
+		if mentionsLoginStates(string(args)) {
+			return "unparseable arguments naming " + loginStateSegment
+		}
+		return ""
+	}
+	for _, p := range paths {
+		if isLoginStatePath(p, pm.workDir) {
+			return p
+		}
+	}
+	return ""
+}
+
+// mentionsLoginStates reports whether text names the login-state directory
+// literally, at a boundary: browse/login-states followed by end-of-text, "/", or
+// a non-name byte. browse/login-states-old does not match. It is the fail-closed
+// check for spellings no resolver can expand ($HOME, ${XDG_DATA_HOME}, a
+// variable, the body of python -c).
+func mentionsLoginStates(text string) bool {
+	return mentionsLoginStatesFold(text, loginStateCaseFold())
+}
+
+func loginStateNameByte(b byte) bool {
+	return b == '-' || b == '_' || b == '.' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// loginStateBashHit reports the first login-state target a bash line names, or
+// "". It is a whole-line scan, not a per-fragment one, for three reasons:
+//
+//   - A `cd` into the directory carries its cwd into later fragments, so
+//     `cd <dir> && cat x.json` resolves x.json inside the directory.
+//   - Every word is checked, not only the words extractBashCommandPaths
+//     recognises, along with redirections, stdin redirects and env values.
+//   - The raw line is scanned literally first, so $HOME and quoted spellings are
+//     caught even where the parser cannot expand them.
+//
+// A parse failure falls back to a whitespace split of the line.
+func (pm *PermissionManager) loginStateBashHit(command string) string {
+	if mentionsLoginStates(command) {
+		return "command names " + loginStateSegment
+	}
+	roots := loginStateRoots()
+	fold := loginStateCaseFold()
+	hit := func(p, cwd string) bool {
+		if loginStateSegmentHitFold(filepath.ToSlash(filepath.Clean(p)), fold) {
+			return true
+		}
+		return loginStateResolvedHitFold(resolvePath(p, cwd), roots, fold)
+	}
+	parseTarget := command
+	if header, docs := extractHeredocs(command); len(docs) > 0 {
+		parseTarget = header
+	}
+	parsed, err := parseShellCommandLine(parseTarget)
+	if err != nil {
+		for _, f := range splitShellFields(command) {
+			if hit(f, pm.workDir) {
+				return f
+			}
+		}
+		return ""
+	}
+	cwd := pm.workDir
+	for _, c := range parsed {
+		words := c.cmdWords
+		if len(words) > 0 && (words[0] == "cd" || words[0] == "pushd") {
+			target := "~"
+			for _, w := range words[1:] {
+				if !strings.HasPrefix(w, "-") {
+					target = w
+					break
+				}
+			}
+			cwd = resolvePath(target, cwd)
+			if loginStateResolvedHitFold(cwd, roots, fold) {
+				return cwd
+			}
+			continue
+		}
+		cands := make([]string, 0, len(words)+len(c.redirections)+len(c.stdinRedirections)+len(c.envVars))
+		cands = append(cands, c.redirections...)
+		cands = append(cands, c.stdinRedirections...)
+		cands = append(cands, words...)
+		for _, e := range c.envVars {
+			if _, v, ok := strings.Cut(e, "="); ok {
+				cands = append(cands, v)
+			}
+		}
+		for _, p := range cands {
+			if p != "" && hit(p, cwd) {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // isSecretMaterialPath reports whether path names credential-bearing material:
@@ -3741,7 +4050,7 @@ func pathUnderSensitiveDir(clean, dir string) bool {
 //
 // Ordinary writes under the shared data dir (~/.local/share/opencode,
 // including project/**) are NOT sensitive and auto-allow in sandbox; only
-// auth.json inside it stays Ask.
+// auth.json and the browser login-state tree inside it stay Ask.
 //
 // It returns nil when no sensitive target is statically found, letting the
 // caller auto-allow. Static extraction can't see a read hidden inside an
@@ -3966,7 +4275,8 @@ func sandboxSensitivePathRelaxed(resolved string, write, secretsRelaxed bool) bo
 	// (config writes guard self-granting a permission rule). The shared data
 	// dir (~/.local/share/opencode, including project/**) is intentionally NOT
 	// sensitive: sandboxed bash has full OS-level access there, and only
-	// auth.json inside it stays protected via the rule below.
+	// auth.json and the browser login-state tree inside it stay protected via
+	// the rules below.
 	if write {
 		if cfgDir, err := paths.GlobalConfigDir(); err == nil && pathUnderRoot(clean, cfgDir) {
 			return true
@@ -3978,6 +4288,13 @@ func sandboxSensitivePathRelaxed(resolved string, write, secretsRelaxed bool) bo
 	// (internal/auth.ProfileAuthPath) — same sensitivity class as auth.json,
 	// just a different basename.
 	if base := filepath.Base(clean); base == "auth.json" || base == "auth.profiles.json" {
+		return true
+	}
+
+	// The browser login-state directory (cookies + storage of a remote browser):
+	// read or write, and not relaxed by the secrets concern, because the model
+	// must never see or alter a login state.
+	if isLoginStatePath(clean, "") {
 		return true
 	}
 
@@ -6714,10 +7031,17 @@ var browserObserveActions = map[string]bool{
 // outright by tool.BrowserURLDenyReason. The deny is HardDeny: no judge can
 // turn it into an allow. Loopback and LAN hosts are not refused here: the
 // network guard judges them, as it does for webfetch.
+//
+// The box list (tool.BoxBrowserURLDenyReason) is applied here only when the call
+// names backend "upstash" explicitly. A call that omits backend, and so takes the
+// session default, is checked against the local list by this layer. The tool's own
+// check on the RESOLVED backend (checkURLFor in the server's browser tool) is the
+// enforcement for every call, so the default-backend box call is still refused there.
 func (pm *PermissionManager) browserURLRefusal(args json.RawMessage) (PermissionDecision, bool) {
 	var params struct {
-		Action string `json:"action"`
-		URL    string `json:"url"`
+		Action  string `json:"action"`
+		URL     string `json:"url"`
+		Backend string `json:"backend"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		// intentionally not logged: the browser tool rejects the same unparseable
@@ -6728,6 +7052,11 @@ func (pm *PermissionManager) browserURLRefusal(args json.RawMessage) (Permission
 		return PermissionDecision{}, false
 	}
 	reason := tool.BrowserURLDenyReason(params.URL)
+	// The upstash box refuses the addresses that are its own network, so it has a
+	// stricter list. The check is HardDeny here too, so no ask is raised for it.
+	if params.Backend == "upstash" && params.URL != "" {
+		reason = tool.BoxBrowserURLDenyReason(params.URL)
+	}
 	if reason == "" {
 		return PermissionDecision{}, false
 	}
@@ -6760,6 +7089,7 @@ func browserAction(pm *PermissionManager, args json.RawMessage) string {
 		Target string   `json:"target"`
 		Fields []any    `json:"fields"`
 		Files  []string `json:"files"`
+		Retain bool     `json:"retain"`
 
 		RunStep *browserRunStep `json:"run_step"`
 	}
@@ -6810,6 +7140,14 @@ func browserAction(pm *PermissionManager, args json.RawMessage) string {
 		}
 	case "key":
 		summary = "key " + params.Key
+	case "start":
+		// A retained box outlives the session, so the approver must see that it is not a throwaway.
+		summary = "start a browser box"
+		if params.Retain {
+			summary = "start a RETAINED Upstash browser box (kept between sessions, paused when idle)"
+		}
+	case "terminate":
+		summary = "terminate the browser box"
 	}
 	if params.Tab != "" {
 		summary += " (tab " + params.Tab + ")"
@@ -7550,6 +7888,69 @@ func leadingElevationCommand(command string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// BrowserBoxStartRule is the static ask category for the browser tool's start
+// action, which creates a cloud box. Like an elevation ask it is human-only: the
+// auto-permission judge is never consulted for it, no allow rule or host list
+// satisfies it, and it offers no always-allow choice. Only the human answer, or
+// YOLO mode (which allows every call), lets it run.
+const BrowserBoxStartRule = "browser.box_start"
+
+// IsBrowserBoxStartRequest reports whether req is the box start ask.
+func IsBrowserBoxStartRequest(req PermissionRequest) bool {
+	return req.ToolName == "browser" && req.Rule == BrowserBoxStartRule
+}
+
+// IsLoginStateRequest reports whether req is an ask for a browser login-state
+// path, from a file tool (rule tool.<name>.login_state) or from bash (rule
+// bash.prefix.permission.login_state). Such asks are human-only, like elevation
+// and box start: no judge may satisfy them, no always-choice is offered, and an
+// allow-always answer persists nothing. Matching on the Rule keeps the check
+// usable from any host that holds only the request fields.
+func IsLoginStateRequest(req PermissionRequest) bool {
+	return strings.HasSuffix(req.Rule, ".login_state")
+}
+
+// loginStateCaseFold reports whether login-state matching ignores case. APFS
+// (the macOS default) and NTFS resolve Browse/Login-States to the same directory,
+// so a case-sensitive segment match there is a bypass. Linux filesystems are
+// case-sensitive by default, so the match stays exact there. This is the twin of
+// caseFoldLoginStates in internal/redact.
+func loginStateCaseFold() bool {
+	return runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+}
+
+// loginStateSegmentHitFold reports whether clean (a slash-separated, cleaned path)
+// names the login-state directory at a segment boundary. fold lowers both sides
+// first. ASCII-only lowering is enough for the fixed segment, and ToLower is what
+// the redact twin uses too.
+func loginStateSegmentHitFold(clean string, fold bool) bool {
+	if fold {
+		clean = strings.ToLower(clean)
+	}
+	return pathUnderSensitiveDir(clean, loginStateSegment+"/")
+}
+
+// mentionsLoginStatesFold is mentionsLoginStates with the case fold made explicit.
+// The text is lowered before the search, so every index it computes is into the
+// lowered copy and stays consistent with the boundary byte checks.
+func mentionsLoginStatesFold(text string, fold bool) bool {
+	text = filepath.ToSlash(text)
+	if fold {
+		text = strings.ToLower(text)
+	}
+	for i := 0; ; {
+		j := strings.Index(text[i:], loginStateSegment)
+		if j < 0 {
+			return false
+		}
+		end := i + j + len(loginStateSegment)
+		if end == len(text) || text[end] == '/' || !loginStateNameByte(text[end]) {
+			return true
+		}
+		i = end
+	}
 }
 
 // IsElevationRequest reports whether req was raised by a leading sudo/su. Such
@@ -8951,6 +9352,13 @@ func isLibraryPreloadEnvVar(name string) bool {
 // secret material is vetoed: repo-metadata writes (.git/…) deliberately reach
 // the judge. Every segment is scanned because Decide keeps only the first Ask.
 func (pm *PermissionManager) redirectionVetoReason(command string) string {
+	// Login-state data never gets an auto-grant, whatever the command: the
+	// judge is an LLM, and an approved read would put cookies into a model
+	// request. This is the bash-side veto, and verifyAutoGrant reaches it for
+	// every bash judge approval.
+	if hit := pm.loginStateBashHit(command); hit != "" {
+		return "command touches browser login-state data: " + hit
+	}
 	parsed, err := parseShellCommandLine(command)
 	if err != nil {
 		return "command could not be parsed, so its redirection targets cannot be checked: " + err.Error()

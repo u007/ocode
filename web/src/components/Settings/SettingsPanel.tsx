@@ -191,7 +191,7 @@ function renderGroup(
     case "browser":
       return <BrowserForm />;
     case "upstash-box":
-      return <UpstashBoxForm />;
+      return <UpstashBoxForm project={cloudProject} host={cloudHost} />;
     case "vault":
       return <VaultForm />;
     case "tts":

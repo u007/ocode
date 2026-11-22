@@ -17,6 +17,15 @@ import (
 // verified against @upstash/box 0.8.1 source on 2026-11-21
 const statusCreating = "creating"
 
+// StatusDeleted is the status GET reports for a box after Delete. The API
+// soft-deletes: the box stays readable with this status, and List omits it.
+// observed against the live API on 2026-11-21 (not in the SDK source)
+const StatusDeleted = "deleted"
+
+// StatusPaused is the status of a persistent box that was paused. Connecting to
+// its browser resumes it. observed against the live API on 2026-11-22 (not in the SDK source)
+const StatusPaused = "paused"
+
 // Box is one Upstash Box as the API reports it.
 type Box struct {
 	ID        string

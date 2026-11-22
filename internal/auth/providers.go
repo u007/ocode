@@ -35,43 +35,86 @@ func getRefreshMu(provider string) *sync.Mutex {
 // reused rather than repeated.
 //
 // refresh performs the actual provider-specific refresh (e.g.
-// GrokSubscriptionRefresh) and returns the refreshed credential. On success the
-// refreshed credential is persisted via Set and returned. The second return
+// GrokSubscriptionRefresh) and returns the refreshed credential. Both the re-read
+// and the save go through store, the same store the caller read cred from, so a
+// profile's refresh never reads or writes the base account's credential, and the
+// reverse. When store holds no OAuth credential for id, cred is returned
+// unrefreshed: a refresh must not bring a removed credential back. On success the
+// refreshed credential is saved through store and returned. The second return
 // value is always true (handled) so callers do not fall through to the generic
-// refresh-token path.
-func RefreshLocked(id string, cred Credential, refresh func() (Credential, error)) (Credential, bool) {
+// refresh-token path. A failed save is logged, and the refreshed credential is
+// still returned.
+func RefreshLocked(id string, cred Credential, store CredentialStore, refresh func() (Credential, error)) (Credential, bool) {
 	mu := getRefreshMu(id)
 	mu.Lock()
 	defer mu.Unlock()
 
 	const skew = 60 * time.Second
 	// Another goroutine may have finished refreshing this credential while we
-	// were waiting on the lock. Re-read it from storage and reuse the fresh
+	// were waiting on the lock. Re-read it from the same store and reuse the fresh
 	// result instead of issuing a redundant refresh.
-	if current, ok := Get(id); ok && current.ExpiresAt != 0 {
-		if time.Until(time.Unix(current.ExpiresAt, 0)) > skew {
-			return current, true
-		}
+	current, ok := store.get(id)
+	if !ok || current.Kind != KindOAuth {
+		return cred, true
+	}
+	if current.ExpiresAt != 0 && time.Until(time.Unix(current.ExpiresAt, 0)) > skew {
+		return current, true
 	}
 	refreshed, err := refresh()
 	if err != nil || refreshed.AccessToken == "" {
 		return cred, true
 	}
-	_ = Set(id, refreshed)
+	if serr := store.set(id, refreshed); serr != nil {
+		// The rotated refresh token is not saved, so it may be lost. Log the
+		// error only: it names a path, never a token.
+		log.Printf("auth: save refreshed %s credential: %v", id, serr)
+	}
 	return refreshed, true
 }
 
+// CredentialStore is one place a credential lives: the base account's auth.json,
+// or one profile's overlay in auth.profiles.json. A refresh reads the CURRENT
+// value and saves its result through the same store, so a profile's rotated
+// token never overwrites the base account's, and the reverse.
+//
+// The fields are unexported, so code outside this package can receive a
+// CredentialStore (a RefreshHook does) but cannot build one of its own.
+type CredentialStore struct {
+	get func(id string) (Credential, bool)
+	set func(id string, cred Credential) error
+}
+
+// baseCredentialStore is the base account's store.
+var baseCredentialStore = CredentialStore{get: Get, set: Set}
+
+// profileCredentialStore is one profile's store.
+func profileCredentialStore(profile string) CredentialStore {
+	return CredentialStore{
+		get: func(id string) (Credential, bool) { return GetProfileCredential(profile, id) },
+		set: func(id string, cred Credential) error { return SetProfileCredential(profile, id, cred) },
+	}
+}
+
+// providerRefreshers maps a provider id to its generic refresh-token exchange.
+// A test replaces an entry to stand in for the network call.
+var providerRefreshers = map[string]func(refreshToken string) (Credential, error){
+	"anthropic": AnthropicRefresh,
+	"openai":    OpenAIRefresh,
+}
+
 // refreshIfExpiring returns a fresh credential if the stored OAuth token is
-// expired or within the skew window. Falls back to the original credential
+// expired or within the skew window. cred is the caller's copy, read from store.
+// The refresh is saved to that same store. Falls back to the stored credential
 // on refresh failure (caller decides whether to surface the error).
-func refreshIfExpiring(id string, cred Credential) Credential {
+func refreshIfExpiring(id string, cred Credential, store CredentialStore) Credential {
 	if cred.Kind != KindOAuth {
 		return cred
 	}
 	// Provider-specific refresh (e.g. Grok's cookie-based x.com SSO refresh)
 	// is delegated to a hook registered by the provider plugin, keeping the
-	// shared auth layer free of per-provider special-casing.
-	if refreshed, handled := refreshViaHook(id, cred); handled {
+	// shared auth layer free of per-provider special-casing. The hook gets the
+	// same store, so it reads and saves in the store cred came from.
+	if refreshed, handled := refreshViaHook(id, cred, store); handled {
 		return refreshed
 	}
 	if cred.ExpiresAt == 0 || cred.RefreshToken == "" {
@@ -81,38 +124,46 @@ func refreshIfExpiring(id string, cred Credential) Credential {
 	if time.Until(time.Unix(cred.ExpiresAt, 0)) > skew {
 		return cred
 	}
+	refresher, ok := providerRefreshers[id]
+	if !ok {
+		return cred
+	}
 
 	mu := getRefreshMu(id)
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Re-check after acquiring lock — another goroutine may have refreshed.
-	if time.Until(time.Unix(cred.ExpiresAt, 0)) > skew {
+	// Re-read the stored credential under the lock, through the same store. Another
+	// goroutine or process may have refreshed it since the caller read it, and the
+	// stored refresh token may have rotated: refreshing from the caller's copy would
+	// spend a token already used. A credential that is gone is not refreshed, so
+	// the refresh cannot bring a removed credential back.
+	current, ok := store.get(id)
+	if !ok || current.Kind != KindOAuth {
 		return cred
+	}
+	if current.ExpiresAt == 0 || current.RefreshToken == "" ||
+		time.Until(time.Unix(current.ExpiresAt, 0)) > skew {
+		return current
 	}
 
-	var refreshed Credential
-	var err error
-	switch id {
-	case "anthropic":
-		refreshed, err = AnthropicRefresh(cred.RefreshToken)
-	case "openai":
-		refreshed, err = OpenAIRefresh(cred.RefreshToken)
-	default:
-		return cred
-	}
+	refreshed, err := refresher(current.RefreshToken)
 	if err != nil || refreshed.AccessToken == "" {
-		return cred
+		return current
 	}
 	if refreshed.RefreshToken == "" {
-		refreshed.RefreshToken = cred.RefreshToken
+		refreshed.RefreshToken = current.RefreshToken
 	}
-	refreshed.Account = cred.Account
-	refreshed.AccountID = cred.AccountID
-	if refreshed.AccountID == "" && cred.AccountID != "" {
-		log.Printf("warn: %s token refresh lost AccountID (was %q)", id, cred.AccountID)
+	refreshed.Account = current.Account
+	refreshed.AccountID = current.AccountID
+	if refreshed.AccountID == "" && current.AccountID != "" {
+		log.Printf("warn: %s token refresh lost AccountID (was %q)", id, current.AccountID)
 	}
-	_ = Set(id, refreshed)
+	if serr := store.set(id, refreshed); serr != nil {
+		// The refreshed token is still returned for this call, but its rotated
+		// refresh token is not saved. Log the error only: it names a path.
+		log.Printf("auth: save refreshed %s credential: %v", id, serr)
+	}
 	return refreshed
 }
 
@@ -184,7 +235,7 @@ func OAuthAccessToken(id string) (string, bool) {
 	if !ok || cred.Kind != KindOAuth {
 		return "", false
 	}
-	cred = refreshIfExpiring(id, cred)
+	cred = refreshIfExpiring(id, cred, baseCredentialStore)
 	if cred.AccessToken == "" {
 		return "", false
 	}
@@ -197,7 +248,7 @@ func OAuthAccessTokenForProfile(profile, id string) (string, bool) {
 	if !ok || cred.Kind != KindOAuth {
 		return "", false
 	}
-	cred = refreshIfExpiring(id, cred)
+	cred = refreshIfExpiring(id, cred, profileCredentialStore(profile))
 	if cred.AccessToken == "" {
 		return "", false
 	}
@@ -231,7 +282,7 @@ func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
 	activeProfile := activeProfileForResolution()
 	if activeProfile != "" && !(ProviderEnvOutranksProfile() && p.EnvVar != "" && os.Getenv(p.EnvVar) != "") {
 		if cred, ok := GetProfileCredential(activeProfile, id); ok {
-			cred = refreshIfExpiring(id, cred)
+			cred = refreshIfExpiring(id, cred, profileCredentialStore(activeProfile))
 			if cred.Kind == KindAPIKey && cred.Key != "" {
 				return cred.Key
 			}
@@ -253,7 +304,7 @@ func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
 	// 3. Stored credential (auth store).
 	cred, ok := Get(id)
 	if ok {
-		cred = refreshIfExpiring(id, cred)
+		cred = refreshIfExpiring(id, cred, baseCredentialStore)
 		if cred.Kind == KindAPIKey && cred.Key != "" {
 			return cred.Key
 		}
@@ -273,7 +324,7 @@ func ResolveKeyForProfile(id, profile string, cfg *config.Config) string {
 	}
 	if profile != "" {
 		if cred, ok := GetProfileCredential(profile, id); ok {
-			cred = refreshIfExpiring(id, cred)
+			cred = refreshIfExpiring(id, cred, profileCredentialStore(profile))
 			if cred.Kind == KindAPIKey && cred.Key != "" {
 				return cred.Key
 			}

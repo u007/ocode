@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Upstash Box as a browser backend for ocode
-description: Draft design, revision 2. Phases 1 and 2 implemented, uncommitted, not wired into the tools; phases 3 to 5 not started. An optional Upstash Box Chromium backend for the browser and browser_run tools, with a per-call backend field, an explicit start action, a websocket attach-mode driver, a lease-based sweep, login states kept on the ocode machine, a boxes panel and phased delivery.
+description: Draft design, revision 2. Phases 1 and 2 committed (f96e2da9). Phases 3 to 5 implemented, uncommitted. An optional Upstash Box Chromium backend for the browser and browser_run tools, with a per-call backend field, an explicit start action, a websocket attach-mode driver, a lease-based sweep, login states kept on the ocode machine, a boxes panel and phased delivery.
 resource: internal/browse/cdp
 tags:
   - design-spec
@@ -9,18 +9,18 @@ tags:
   - upstash
   - cloud-sandbox
   - login-state
-timestamp: 2026-11-21T01:46:41+08:00
+timestamp: 2026-11-22T07:21:22Z
 status: active
 ---
 
 # Upstash Box as a browser backend for ocode
 
 - **Date:** 2026-11-21
-- **Status:** Draft, awaiting user approval. Partly implemented; see Implementation status.
+- **Status:** Draft. Phases 1 and 2 committed; phases 3 to 5 implemented and uncommitted; see Implementation status.
 - **Scope:** An optional remote headless Chromium for the `browser` and `browser_run` tools, hosted in an Upstash Box.
 - **Related:** [Spike findings](../../concepts/upstash-box-browser-spike-findings.md), [Pricing](../../concepts/upstash-firecrawl-browser-pricing.md), [Browser agent tool](../../concepts/browser-agent-tools.md)
 - **Revision 2 (2026-11-21):** Revised after a code-grounded review. Section 7 lists each review finding and the section that now covers it.
-- **Implementation status (2026-11-21):** Phases 1 and 2 implemented, uncommitted, not wired into the browser tools. Phases 3 to 5 not started. No session can use a box yet.
+- **Implementation status (2026-11-22):** Phases 1 and 2 are committed in f96e2da9. Phases 3 to 5 are implemented and uncommitted: a session created with an Upstash account can use the box backend, its login states are saved and restored, and `retain` keeps a persistent box per login state. Section 8 has the current built and not-built lists, the known limits and the open network-policy decision.
 
 ## 1. Goal
 
@@ -90,7 +90,7 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 - New `browser` actions, valid only with `backend` set to `upstash`: `start` and `terminate`.
   - `start` is the only call that creates a box.
   - Any other upstash call with no running box returns an error that tells the model to call `start`.
-  - `start` takes an optional `retain` boolean. It is used in phase 5.
+  - `start` takes an optional `retain` boolean (phase 5). See 4.5, retained box.
 - **Why an explicit `start`.** The permission decision (`Decide` in `internal/agent/permissions.go`) sees only the tool name and its arguments. It allows observe-type actions and navigation to allowed hosts outright. A lazy create hidden inside such a call would run with no ask.
 - `browser_run` threads `backend` into every sub-step it issues. The sub-steps are built in `internal/agent/browser_run.go`. `browser_run` never calls `start` itself. With no box running, it stops with an error.
 - **Tools array stability.** Tool definitions are derived from the agent's tools on every request (`internal/agent/agent.go`). The agent is rebuilt on idle eviction, on skill or plugin changes, and on `/reset-id`. So the decision "this session has the upstash fields" is recorded in creation-only session metadata, the same way as `pinned_mcp_servers`. Every rebuild reads it from there.
@@ -118,9 +118,9 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 - **Egress rule for the box `Manager`.** There is no local proxy and no proxy-auth handler. Three parts replace them.
   1. The tool refuses loopback, private and link-local URLs before any `navigate` or `open` on the upstash backend. Today loopback URLs are allowed (`internal/tool/browser_url.go`). They skip the network guard (`internal/agent/network_guard_typesafe.go`) and the content guard (`content_guard_typesafe.go`). That is wrong in a box, because `127.0.0.1:9222` there is the box's token-free CDP endpoint.
   2. The box `Manager` blocks requests to loopback, private and link-local hosts with CDP request interception. A redirect or a page script cannot reach them either.
-  3. The box is created with a Box network policy that denies private address ranges.
+  3. The box is created with a Box network policy that denies private address ranges. **Not implemented.** Phase 3 sets no network policy (decided in phase 3, see section 8). The live probe found that a `custom` policy with only `DeniedCIDRs` is accepted by the API but no page loads; it works only together with `AllowedDomains`.
   
-  Parts 2 and 3 still need verification against a real box; that is the gated live test in 4.8. The box is not on the user's network, so it cannot reach the user's LAN in any case.
+  Part 2 is verified against a real box: attach-mode blocking stops `127.0.0.1:9222` and `169.254.169.254` (spike findings, phase 3 live findings). Without part 3, the box rests on parts 1 and 2. The box is not on the user's network, so it cannot reach the user's LAN in any case.
 - **What the egress code does (uncommitted).**
   - Attach mode fails closed. If request interception cannot be enabled on a tab, popup or child session, that target is closed or detached.
   - Allowed schemes are `http`, `https`, `ws`, `wss`, `data`, `blob` and `about`. Everything else is blocked.
@@ -141,43 +141,62 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 - **Ownership.** A box manager sits at the `Handler` level and is keyed by session id. It is not hung on the agent or the tool. `Agent.Shutdown` and `closeSessionTools` (`internal/agent/agent.go`) also run on idle eviction and agent rebuilds, and `/reset-id` (`internal/server/handler_reset_id.go`) releases the agent. So eviction and rebuild never delete a box.
 - **Creation.** Only `start` creates a box. It is a static permission ask with its own category, in normal and sandbox modes. The auto-permission judge is not consulted for it. Locked mode denies it. Yolo mode allows it, as it allows everything else. Sub-agents are refused.
 - **Default box.** Ephemeral, with a ttl equal to the hard cap. Upstash deletes it even if ocode crashes.
-- **Early deletion by ocode.** A box is deleted early on:
+- **Early teardown by ocode.** An ephemeral box is deleted early on:
   - `HandleCloseSession`;
-  - `Handler.Shutdown` (`internal/server/handler_shutdown.go`), which has no browser step today;
+  - `Handler.Shutdown` (`internal/server/handler_shutdown.go`), through `shutdownBoxes`;
   - the idle timeout;
   - the `terminate` action.
+  A retained box is paused on the same four triggers instead (see 4.5, retained box).
 - The server has no session-delete route today. `session.Delete` is TUI-only (`internal/tui/model.go`).
 - How web `/new` and `/clear` reach the server, and whether they close the old session, was not determined in the review. The implementation plan decides it. Until then the idle timeout and the ttl cover those paths.
-- **Idle timeout.** The timer counts only while the session has no active turn and no pending permission or question ask. It is paused during a turn. The hard cap still applies.
+- **Idle timeout.** The timer counts only while the session has no active turn and no pending permission or question ask. It is paused during a turn. The hard cap applies to an ephemeral box only; a retained box has none.
 - **Re-key.** The manager's session-keyed map is added to the `/reset-id` move list (`internal/server/handler_reset_id.go`).
 - **Ownership label.** Every box carries a label that names ocode and this installation.
 - **Journal and sweep.**
   - Each created box is journaled in the data directory with its kind (ephemeral or retained) and the owning process's lease. The lease holds the process id, the process start time and a heartbeat time.
   - Several ocode server processes can share one data directory. No session is live at server start, because agents are built lazily. So the sweep never uses "no live session" as its test.
-  - The sweep deletes only ephemeral boxes of this installation whose owning lease is dead or expired. Retained boxes are exempt from the sweep.
-- **Hard cap mid-task.** The next call fails with a clear error that says the box expired. The model calls `start` again. The login state is restored. Page state is gone.
-- **Teardown ordering.** Teardown takes the per-box lock, cancels the pending checkpoint, writes a final login-state save, then deletes the box. No checkpoint runs after a delete has started. Login-state files are written atomically: a temporary file, then a rename.
-- **Retained box (phase 5).**
-  - It is created only by `start` with `retain`. Each such call is a permission ask.
-  - It needs a named login state. `retain` with login state "none" is refused, because the rule is one retained box per login state.
-  - It is a persistent, non-keep-alive box.
-  - On idle and on session end it is paused, not deleted.
-  - It is deleted after the retained-box period unused.
+  - The sweep (`Tick`) acts on two sets. Ephemeral boxes journaled by another process whose lease is dead are deleted (`Journal.Orphans`). Retained rows are read through `Journal.RetainedDue` and claimed through `Journal.ClaimDue`: a row past its delete-at is deleted (an unpaused row only when its owner is dead), and an unpaused row of a dead process inside its period is paused.
+  - A lease is dead when its heartbeat is older than 90 s and its process is gone. A process created after the lease's last heartbeat is a reused pid, so that lease is dead too (`leaseAliveWith`). Each process heartbeats every 20 s.
+  - Retained rows live in `upstash-boxes.json`. A retained row carries `LoginState`, `Paused`, `LastUsed` and `Deleting`, and its `ExpiresAt` is the delete-at. `Journal.Resume` is a compare-and-set. It returns `ErrRetainedBusy` for a row being deleted or run by a live peer. Inside one process, the `resuming` and `sweeping` reservations close the same races.
+- **Hard cap mid-task (ephemeral).** The next call fails with a clear error that says the box expired. The model calls `start` again. The login state is restored. Page state is gone.
+- **Teardown ordering.** Teardown takes the per-box lock, cancels the pending checkpoint, writes a final login-state save, then deletes the box (ephemeral) or pauses it (retained). No checkpoint runs after a delete or pause has started. The ordering is tested in phase 4. Login-state files are written atomically: a temporary file, then a rename (4.6).
+- **Retained box (phase 5, built).**
+  - It is created or resumed only by `start` with `retain`. Each such call is a permission ask (`browser.box_start`), and its text names the box as retained.
+  - It needs a named login state. With no login state, or with `none`, the start is refused (`ErrRetainNeedsLoginState`). The rule is one retained box per (account, login state), named `ocode-ls-<login state>`.
+  - It is created with no ttl and no keep-alive. Its journal row's `ExpiresAt` is its delete-at: last use plus the account's retained-box period.
+  - A start resumes the journaled box through `Journal.Resume`, a compare-and-set. The browser connect call wakes a paused box, so no separate resume call is made (about 6.5 s live).
+  - A running ephemeral box of the session is retired first, with its final save and delete. The retained start then creates or resumes its box.
+  - On idle, `terminate`, session close and shutdown it is paused, not deleted. Each of these goes through `retireBox`: the final login-state save, the browser closed, then `parkRetained` pauses the box and journals it paused. A failed pause keeps the box running and queues it in the `unpaused` set, and `Tick` retries it.
+  - A pause releases the login-state hold, so any session whose project uses that login state can resume the same box.
+  - After an idle pause, browser calls return `ErrPaused` until the next start or terminate clears it. The 2 h hard cap does not apply.
+  - `Tick` deletes it once its delete-at passes: a paused row at once, an unpaused row only when its owner is dead. Deletion needs a running ocode.
   - Ephemeral versus persistent is fixed at creation, because pausing an ephemeral box is refused by the API. So opting in while an ephemeral box runs terminates that box and starts a persistent one.
 
 ### 4.6 Login states
 
 - **Naming.** The stored unit is called a "login state", not a "profile". "Profile" already means the credential profile (`internal/server/agent_session.go`) and the Chrome profile directory of `browse/chrome-profile` (`internal/server/server.go`).
-- Named login states are stored on the ocode machine, under the browse area of the global data directory, in owner-only files.
-- A login state holds all cookies of the box's shared browser context, and the localStorage of each visited origin. It does not hold open tabs.
-- It is saved on every clean teardown, and by a debounced checkpoint after browser calls. A ttl delete or a crash gives no warning, so the checkpoint matters.
+- **Storage (as built).** Each login state is one file, `<GlobalDataDir>/browse/login-states/<name>.json`. The directory is 0700 and the files are 0600. A write goes to a temporary file, is fsynced, then renamed over the old file. A name must match `^[a-z0-9][a-z0-9_-]{0,39}$`, and `none` is reserved (`config.ValidLoginStateName`).
+- **Contents.** A login state holds all cookies of the box's shared browser context, and the localStorage of each origin. It does not hold open tabs.
+  - **Deviation:** localStorage is captured only for origins that have a tab open at capture time. The original text said "each visited origin". Section 8 lists this as a known limit.
+- **Save.**
+  - Every `Browser()` call arms a 10 s debounced checkpoint. It is forced after 60 s without one. One more checkpoint runs within 90 s of the box's expiry. A ttl delete or a crash gives no warning, so the checkpoint matters.
+  - Teardown order: stop the checkpoint, final save (bounded at 10 s), close the attach Manager, delete the box (ephemeral) or pause it (retained), release the hold. No checkpoint runs after a delete has started.
+  - `Shutdown` runs all final saves concurrently under one deadline, then tears each box down: an ephemeral box is deleted and a retained box is paused. When a retained box's save is pending, the saves get at least `shutdownSaveFloor` (2 s), detached from the caller's deadline.
+  - Capture merge: cookies are replaced wholesale when the read succeeds, and a failed read keeps the file's cookies. An origin in the snapshot replaces the stored one, and an empty origin clears it. An origin that is absent, or over about 1 MiB, keeps its stored values.
 - **Restore.**
-  - Cookies are restored at `start`.
-  - localStorage is restored lazily, once per origin per box, through a new-document script on the first visit to that origin. After that, the page's own values are never overwritten.
-- The user assigns a login state to a session or project. The model cannot name one. "none" gives a clean browser each time.
-- **One writer per login state.** A second session that tries to `start` with a login state already in use gets an error. The error names the holding session. It does not get a clean box silently.
-- Login-state data never enters a provider payload, a Jev request, or sync.
-- The local login state stays the source of truth for retained boxes too. Box keeps its Chromium profile under `/tmp`, and survival across a pause is untested.
+  - Cookies are restored at `start`. Expired cookies are dropped. Rejected cookies are counted, and the count is one of the notes in the `start` result.
+  - localStorage is seeded once per origin per box. Each origin gets one isolated-world new-document script. The script reports its origin back through an isolated-world binding (`Runtime.addBinding` with `executionContextName`), and the Manager then removes that origin's script from every tab. No marker key is written to page storage, so the page's own values are never overwritten. A legacy marker key is dropped on capture.
+  - The restore runs before the box is published.
+  - **Re-dial.** When the websocket drops, the attach Manager asks `Target.getBrowserContexts`. A surviving shared context is reused and never disposed. A missing one (the browser restarted) is replaced, and the restore hook runs before any tab opens. A failed restore fails the attach. This fixed a reviewed data-loss path, where an empty cookie jar was saved over a good state.
+- **Hold and assignment.**
+  - `start` takes the hold before it creates a box. A second session that asks for a state in use gets `ErrLoginStateInUse`, which names the holding session, and no box is created. It never gets a clean box silently.
+  - The hold is a file, `<name>.lock.json`, that records the session id, the pid and the process start. A holder with our pid but another process start is stale.
+  - A rekey (`Rekey`) moves the hold with `Transfer`.
+  - **Per project, by the user only.** The assignment is `upstash_box.login_states` (project root to name) in ocodeconfig.json. It is set through `GET`/`PUT /api/upstash/login-state?project=` or the Upstash Box settings section. **Per-session assignment is not built**, and the model cannot name a login state. No tool argument names one. "none" gives a clean browser each time.
+- **Protection.** File tools and bash lines that name the login-state directory are an Ask in normal and sandbox modes, a Deny in locked and an Allow in yolo. The Ask is human-only: no judge, no always-allow, nothing persisted. The judge context withholds the files (`sensitiveContextFile` in `internal/agent/agent.go`). `redact.IsSensitiveFile` treats them like auth.json. In sandbox mode the directory is also a non-writable root (`AllowedRootsClassified` in `internal/agent/permissions.go`), so the OS blocks a sandboxed write into it. See [sandbox permission mode](../../concepts/sandbox-permission-mode.md).
+- **Sync.** The `upstash_box` section (account names and ids, login-state assignments, no keys) syncs with ocodeconfig.json. Login-state files never sync.
+- Login-state data never enters a provider payload or a Jev request.
+- The local login state stays the source of truth for retained boxes too. It is saved before every pause and restored after every resume. Box keeps its Chromium profile under `/tmp` on the overlay disk. The profile survives a pause, but Chromium restarts on resume and every tab is gone (spike findings, phase 5).
 - **Privacy.** While a box lives, the cookies are in the box, and all page traffic passes through Upstash.
 
 ### 4.7 Boxes panel
@@ -185,6 +204,7 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 - Web only. A panel lists every box for each account. Columns: status, size, kind (ephemeral or retained), login state, owning session, last used, and expiry.
 - The list is sorted and paginated, which is the project-wide rule for listings.
 - Actions: pause, resume and delete. Delete asks for confirmation.
+- For a retained box (phase 5): resume answers 409, because a retained start resumes the box. Pause goes through `Manager.PauseBox`. That detaches a box a live session holds (through `retireBox`) and pauses it. A box no session holds is paused through the API. It answers 409 when another live process runs the box. Delete runs the API delete and then `Manager.ForgetBox`. The list shows a "retained" badge and "Deleted if unused until", and no Resume button.
 - The idle reaper and the sweep act only on boxes labelled for this installation. Other boxes are listed, and changed only by hand.
 - The panel polls. It does not use push events.
 - There is no TUI part. See the non-goal in section 2.
@@ -197,7 +217,7 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
   - sub-agent refusal;
   - the idle timer paused during a turn and during a pending ask;
   - the hard-cap expiry error;
-  - the sweep deletes only dead-lease ephemeral boxes, and never retained boxes or another live process's boxes;
+  - the sweep deletes only dead-lease ephemeral boxes. For retained rows it acts only on what `RetainedDue` lists (a row past its delete-at, or a running stray of a dead process), and never on a live process's box;
   - the `/reset-id` move;
   - teardown versus checkpoint ordering;
   - refusal of loopback and private URLs;
@@ -205,27 +225,29 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
   - the tools array unchanged when an account is added to a live session.
 - Websocket transport tests against a local Chrome started with a debugging port.
 - Login-state round trip: save, start a new browser, restore, then confirm that cookies are present in a tab, and that localStorage is restored once and not overwritten on the second load.
-- One live test, gated on a Box API key environment variable, follows the repo's gated-test pattern.
+- Live tests, gated on the `UPSTASH_BOX_API_KEY` environment variable, follow the repo's gated-test pattern. The phase 3 live tests are `TestLiveBoxBrowser` and `TestLiveBoxNetworkPolicy` (`internal/upstashbox/live_test.go`) and `TestLiveBrowserToolOnBox` (`internal/server/browser_boxes_live_test.go`). The phase 4 login-state round trip is `TestLiveBoxLoginStateRoundTrip` (`internal/upstashbox`) and `TestLiveBrowserToolLoginState` (`internal/server`). The phase 5 retained-box test is `TestLiveBrowserToolRetainedBox` (`internal/server`).
 
 ### 4.9 Phases
 
-1. Box API client, accounts and settings section, secret storage.
-2. Websocket transport, attach-mode `Manager` with one shared context, egress blocking. Proven by the gated live test. No tool exposure yet.
-3. `backend`, `start` and `terminate` on the tools. Handler-level box manager. Permission category. Idle timeout, hard cap, journal and sweep. Boxes panel.
-4. Login states.
-5. `retain`.
+1. Box API client, accounts and settings section, secret storage. Committed in f96e2da9.
+2. Websocket transport, attach-mode `Manager` with one shared context, egress blocking. Committed in f96e2da9. Its blocking is shown by the gated live test (see section 8, live evidence). No tool exposure yet.
+3. `backend`, `start` and `terminate` on the tools. Handler-level box manager. Permission category. Idle timeout, hard cap, journal and sweep. Boxes panel. Implemented, uncommitted.
+4. Login states. Implemented, uncommitted (2026-11-22). See 4.6 and section 8.
+5. `retain`: a persistent box per login state, paused when idle and deleted after the retained-box period. Implemented, uncommitted (2026-11-22). See 4.5 and section 8.
 6. Later: htrcli attach mode; importing selected domains from the local browser into a login state; restoring open tabs; uploads; an in-box driver.
 
 ## 5. Open questions
 
 - Whether ttl can be extended after creation. Not found in the MCP tool, the box CLI, or the docs.
-- Whether Box's `/tmp` Chromium profile survives a pause.
 - Whether 340 ms per command is acceptable for `browser_run`.
-- Whether a Box network policy can deny private ranges while allowing everything else, and whether CDP request interception is enough for redirects.
+- Whether a Box network policy can deny private ranges while allowing everything else. The live probe found that a `custom` policy with only `DeniedCIDRs` loads no page; it works only with `AllowedDomains` too. Open decision: no network policy is set (4.4, part 3). Whether CDP request interception is enough for redirects is not settled by the live run.
 - How web `/new` and `/clear` reach the server, and whether they close the old session.
 - Sites that bind sessions to an IP address or a device may reject restored cookies. Rotating refresh tokens may log out another browser.
 - Stability of the Box REST API, and of the external CDP URL on ephemeral boxes. The docs promise neither.
-- The shared credential store (`internal/auth/store.go`) loads once and writes its whole cache, so a second ocode process with an older copy can erase a key saved by the first. This affects every provider credential and predates this work. The user has been asked whether to fix it.
+- A crash leaves a retained box running until an ocode start or a sweep pauses it as a stray. A persistent box has no ttl, so Upstash's idle auto-pause is the only other bound. A server-side idle cap would close this.
+- A retained box past its delete-at is deleted only while an ocode process runs.
+- Untested: `PauseBox` racing an in-flight `Start` of the same box. The `parkRetained` ordering fix has no deterministic test.
+- Fixed 2026-11-22: the shared credential store (`internal/auth/store.go`) loaded once and wrote its whole cache, so a second ocode process with an older copy could erase a key saved by the first. Writes are now load-modify-write under a cross-process file lock. See [auth.json multi-process credential loss](../../gotchas/auth-json-multi-process-credential-loss.md).
 
 ## 6. References
 
@@ -257,4 +279,62 @@ On 2026-11-21 the user asked for every review finding, minor ones included, to b
 18. The secret store was unnamed. See 4.1 (secret storage).
 19. Phase 2 was too large. It is split across phases 2 and 3. See 4.9.
 
-A second, code-level review on 2026-11-21 found 8 major and 9 minor defects in the phase 1 and 2 code. All were fixed except the credential-store issue in section 5 and the residual egress limits in 4.4.
+A second, code-level review on 2026-11-21 found 8 major and 9 minor defects in the phase 1 and 2 code. All were fixed except the residual egress limits in 4.4. The credential-store issue in section 5 was fixed on 2026-11-22.
+
+## 8. Status after phase 5 (2026-11-22)
+
+- **Built in phases 3 to 5 (uncommitted).**
+  - Phase 3: `backend` (`local` or `upstash`) on `browser` and `browser_run`, with the
+    session flag `upstash_browser` fixed at creation. `start` and `terminate` on `browser`.
+    The `browser.box_start` ask. The `internal/boxsession` Manager with
+    its journal, lease, sweep, idle timer and hard cap. `GET /api/upstash/boxes`, with pause,
+    resume and delete. The boxes list in the Upstash Box settings section, which polls every
+    15 s while the page is visible.
+  - Phase 4: the login-state store (`internal/boxsession/loginstate.go`) with the file layout
+    in 4.6. The driver calls in `internal/browse/cdp/attach_storage.go`. The Manager's restore,
+    checkpoint, final-save and hold logic (`internal/boxsession/manager_loginstate.go`). The
+    re-dial context check. Per-project assignment, with `GET`/`PUT /api/upstash/login-state`,
+    `GET /api/upstash/login-states` (counts only, never content) and
+    `DELETE /api/upstash/login-states/{name}` (409 while held). The `UpstashLoginStates`
+    settings component. A `login_state` column on the boxes list. The notes in the `start`
+    result. The protection in `internal/agent/permissions.go` (`isLoginStatePath`,
+    `loginStateBashHit`, `IsLoginStateRequest`) with the judge veto in `internal/agent/agent.go`.
+    The refusal of a Pulse `permission_resolve` on a login-state ask. The `upstash_box` sync.
+  - Phase 5: `retain` on `start` (`StartOptions.Retain`, `startRetained`, `resumeRetained`,
+    `createRetained`), with the retained box as 4.5 describes it. Every teardown of a retained
+    box pauses it through `retireBox` and `parkRetained`. The `unpaused` retry set and the `Tick`
+    sweep over `RetainedDue` and `ClaimDue`. `Journal.Resume` is a compare-and-set. `leaseAliveWith`
+    also covers a reused pid, for ephemeral orphans too. `shutdownSaveFloor` (2 s) guarantees a
+    retained box's final save. The `browser.box_start` ask text for a retained start.
+    `POST .../resume` answers 409 for a retained box. `POST .../pause` goes through
+    `Manager.PauseBox`. `DELETE` deletes the box and then calls `Manager.ForgetBox`. The boxes list
+    shows a "retained" badge and "Deleted if unused until". `handlerBoxes.Surfaces` now surfaces
+    `ErrPaused` and `ErrExpired` instead of masking them.
+- **Not built.**
+  - No network policy is set on the box (4.4, part 3; decided in phase 3, and an open decision
+    in section 5).
+  - Per-session login-state assignment. The design says "session or project"; only project is built.
+  - Assignment for remote (SSH/WSL) projects.
+- **Known limits.**
+  - localStorage is captured only for origins with a tab open at capture time. The design's
+    "each visited origin" is a deviation.
+  - Approved reads of a login-state file are redacted only when a tier-2 redaction scanner is
+    configured. auth.json is handled the same way, and a probe showed it is returned raw by default.
+  - Yolo does not guard the login-state directory.
+  - Paths built from shell variables, or read inside an interpreter, are not caught by the
+    static checks.
+  - A corrupt holder file makes the login-state list fail.
+  - A restored cookie that the browser silently rejects is only counted. It is not reported by name.
+  - From phase 3, still open: a cancelled start is cleaned up by the next reaper pass, up to
+    20 s later.    `boxSurfaces.Surface`, the navigate-and-load path, has only a fake-page test. The boxes
+    list has not been checked in a browser. No full agent turn has been run against a live box.
+    Name resolution still runs on the ocode machine (4.4, residual limits).
+  - Phase 5: a crash leaves a retained box running until an ocode start or a sweep pauses it,
+    and Upstash's idle auto-pause is the only backstop. Deleting an unused retained box needs a
+    running ocode. Yolo starts a retained box without an ask. After an idle pause, browser calls
+    return `ErrPaused` until the next start or terminate. `PauseBox` racing an in-flight `Start`
+    of the same box is untested, and the `parkRetained` ordering fix has no deterministic test.
+- **Live evidence.**
+  - [Spike findings, phase 3 live findings](../../concepts/upstash-box-browser-spike-findings.md#phase-3-live-findings-2026-11-21).
+  - [Spike findings, phase 4 live findings](../../concepts/upstash-box-browser-spike-findings.md#phase-4-live-findings-2026-11-22).
+  - [Spike findings, phase 5 live findings](../../concepts/upstash-box-browser-spike-findings.md#phase-5-live-findings-2026-11-22).

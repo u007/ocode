@@ -241,6 +241,84 @@ func TestPermissionResolveToolDeniesPendingAsk(t *testing.T) {
 	})
 }
 
+// TestPermissionResolveToolRefusesApprovingABoxStart pins that the Pulse assistant
+// cannot approve a browser box start, which creates a paid box, but may still deny
+// it. The ask stays pending after the refused allow.
+func TestPermissionResolveToolRefusesApprovingABoxStart(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	boxStart := agent.PermissionRequest{
+		ToolName: "browser",
+		Args:     json.RawMessage(`{"action":"start","backend":"upstash"}`),
+		Scope:    agent.PermissionScopeTool,
+		Rule:     agent.BrowserBoxStartRule,
+		Command:  "start",
+	}
+	as.mu.Lock()
+	as.messages = append(as.messages, toolCallMessage("browser", `{"action":"start","backend":"upstash"}`),
+		permissionAskMessage("bs1", boxStart))
+	as.mu.Unlock()
+
+	_, err := runPulseTool(t, h, "permission_resolve", `{"session_id":"`+id+`","request_id":"bs1","decision":"allow"}`)
+	if err == nil || !strings.Contains(err.Error(), "must be approved by the user in that session") {
+		t.Fatalf("allow on a box start: err = %v, want the user-approval refusal", err)
+	}
+	as.mu.Lock()
+	stillPending := false
+	for _, m := range as.messages {
+		if m.ToolID == "bs1" && strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			stillPending = true
+		}
+	}
+	as.mu.Unlock()
+	if !stillPending {
+		t.Fatal("the refused box start is no longer pending: the allow reached the resolver")
+	}
+
+	if _, err := runPulseTool(t, h, "permission_resolve", `{"session_id":"`+id+`","request_id":"bs1","decision":"deny"}`); err != nil {
+		t.Fatalf("deny on a box start must still pass: %v", err)
+	}
+}
+
+// TestPermissionResolveToolRefusesApprovingALoginStateAccess pins that the Pulse
+// assistant cannot approve a login-state access, which hands a saved browser identity
+// to a box, but may still deny it. The ask stays pending after the refused allow.
+func TestPermissionResolveToolRefusesApprovingALoginStateAccess(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	loginAsk := agent.PermissionRequest{
+		ToolName: "browser",
+		Args:     json.RawMessage(`{"action":"start","backend":"upstash"}`),
+		Scope:    agent.PermissionScopeTool,
+		Rule:     "tool.browser.login_state",
+		Command:  "login-state",
+	}
+	as.mu.Lock()
+	as.messages = append(as.messages, toolCallMessage("browser", `{"action":"start","backend":"upstash"}`),
+		permissionAskMessage("ls1", loginAsk))
+	as.mu.Unlock()
+
+	_, err := runPulseTool(t, h, "permission_resolve", `{"session_id":"`+id+`","request_id":"ls1","decision":"allow"}`)
+	if err == nil || !strings.Contains(err.Error(), "a login-state access must be approved by the user in that session") {
+		t.Fatalf("allow on a login-state access: err = %v, want the user-approval refusal", err)
+	}
+	as.mu.Lock()
+	stillPending := false
+	for _, m := range as.messages {
+		if m.ToolID == "ls1" && strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			stillPending = true
+		}
+	}
+	as.mu.Unlock()
+	if !stillPending {
+		t.Fatal("the refused login-state access is no longer pending: the allow reached the resolver")
+	}
+
+	if _, err := runPulseTool(t, h, "permission_resolve", `{"session_id":"`+id+`","request_id":"ls1","decision":"deny"}`); err != nil {
+		t.Fatalf("deny on a login-state access must still pass: %v", err)
+	}
+}
+
 func TestQuestionAnswerCustomAndMultiple(t *testing.T) {
 	h, id, _ := writeTarget(t)
 	as := h.lookupAgentSession(id)

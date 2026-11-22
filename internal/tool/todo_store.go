@@ -281,6 +281,16 @@ func WithTodoScope(ctx context.Context, scope TodoScope) context.Context {
 	return context.WithValue(ctx, todoScopeKey{}, scope)
 }
 
+// SessionIDFromContext returns the session id the agent attached to this call, or
+// "" when none was attached. It reads the same scope WithTodoScope carries. A
+// sub-agent's calls carry its parent's session id (subagent.go sets it from the
+// parent), so a per-session resource such as a browser box is reached from the
+// main agent and from every sub-agent alike.
+func SessionIDFromContext(ctx context.Context) string {
+	scope, _ := ctx.Value(todoScopeKey{}).(TodoScope)
+	return scope.SessionID
+}
+
 // todoScopeFromContext returns the scope the agent attached, or an error when
 // the tool was invoked without one. There is deliberately no fallback to the
 // TUI's current session: that global is unset on the server, and answering

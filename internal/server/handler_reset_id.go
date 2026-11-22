@@ -109,6 +109,11 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 	// the old id would read "no preview open" until the user next scrolls.
 	h.rekeyViewerState(id, newID)
 
+	// Move the session's Upstash box. The box manager is keyed by session id, so a
+	// box left under the old id could not be reached and would idle-reap. Best
+	// effort, like the moves above: a failure is logged and the reset still succeeds.
+	h.rekeyBoxSession(id, newID)
+
 	// Move the session's todo plan (<root>/.ocode/todo/<id>.md): the todo tools
 	// address it by session id, so a plan left under the deleted id would read
 	// as "No todo list found" on the next turn. No-op when none exists.

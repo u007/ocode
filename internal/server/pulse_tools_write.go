@@ -503,6 +503,17 @@ func (h *Handler) pulsePermissionResolveTool(raw json.RawMessage) (string, error
 			if perm.RequestID == args.RequestID && agent.IsElevationRequest(agent.PermissionRequest{ToolName: perm.Tool, ElevationCommand: perm.ElevationCommand}) {
 				return "", fmt.Errorf("elevation ask %s requires an interactive session; the Pulse assistant cannot resolve it", args.RequestID)
 			}
+			// A box start creates a paid cloud box. It is human-only, so the Pulse
+			// assistant may refuse it but never approve it. A deny passes: it stops
+			// the start and spends nothing.
+			if perm.RequestID == args.RequestID && args.Decision != PermDecisionDeny && agent.IsBrowserBoxStartRequest(agent.PermissionRequest{ToolName: perm.Tool, Rule: perm.Rule}) {
+				return "", fmt.Errorf("box start ask %s must be approved by the user in that session; the Pulse assistant cannot approve it", args.RequestID)
+			}
+			// A login-state access hands a saved browser identity to a box. Like a box
+			// start it is human-only: the Pulse assistant may deny it, never approve it.
+			if perm.RequestID == args.RequestID && args.Decision != PermDecisionDeny && agent.IsLoginStateRequest(agent.PermissionRequest{ToolName: perm.Tool, Rule: perm.Rule}) {
+				return "", fmt.Errorf("login-state ask %s: a login-state access must be approved by the user in that session; the Pulse assistant cannot approve it", args.RequestID)
+			}
 		}
 	}
 	if _, err := pulseCall(http.MethodPost, "/api/permissions/resolve",

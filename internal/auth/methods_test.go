@@ -14,6 +14,10 @@ import (
 // around a test that mutates the process-global store.
 func preserveProviderCredential(t *testing.T, providerID string) {
 	t.Helper()
+	// Isolate first: the Set/Remove calls below must land in a temp home, never
+	// in the developer's real auth.json. Each loop iteration gets a fresh home,
+	// so no iteration depends on an earlier one's stored credentials.
+	resetStoreForTest(t)
 	prev, had := Get(providerID)
 	t.Cleanup(func() {
 		if had {

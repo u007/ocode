@@ -9,8 +9,10 @@ import (
 // provider-specific logic (e.g. Grok's cookie-based x.com SSO refresh). It
 // returns the (possibly refreshed) credential and whether this provider was
 // handled by a registered hook. When handled is false the caller falls back to
-// the generic refresh-token path.
-type RefreshHook func(ctx context.Context, cred Credential) (Credential, bool)
+// the generic refresh-token path. store is the store cred was read from; a hook
+// must re-read and save through it (see RefreshLocked), never through the base
+// store directly.
+type RefreshHook func(ctx context.Context, cred Credential, store CredentialStore) (Credential, bool)
 
 // ProbeHook verifies a stored credential for a single provider using
 // provider-specific logic. It returns nil on success or an error describing the
@@ -45,14 +47,14 @@ func RegisterProbeHook(id string, fn ProbeHook) {
 }
 
 // refreshViaHook runs the registered refresh hook for id, if any.
-func refreshViaHook(id string, cred Credential) (Credential, bool) {
+func refreshViaHook(id string, cred Credential, store CredentialStore) (Credential, bool) {
 	refreshHooksMu.RLock()
 	fn, ok := refreshHooks[id]
 	refreshHooksMu.RUnlock()
 	if !ok {
 		return cred, false
 	}
-	return fn(context.Background(), cred)
+	return fn(context.Background(), cred, store)
 }
 
 // probeViaHook runs the registered probe hook for id, if any. The second

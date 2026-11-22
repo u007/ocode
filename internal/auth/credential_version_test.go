@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // A base-store write must move the credential version, because live agents
 // snapshot that version at build time and rebuild only when it changes
@@ -11,6 +14,7 @@ import "testing"
 // profile change happened to rebuild it.
 
 func TestBaseCredentialWriteBumpsCredentialVersion(t *testing.T) {
+	resetCrossProcessStores(t)
 	preserveProviderCredential(t, "opencode-go")
 
 	before := CredentialVersion()
@@ -33,6 +37,7 @@ func TestBaseCredentialWriteBumpsCredentialVersion(t *testing.T) {
 // The version is ONE counter covering both stores, so a base write and a
 // profile write are each independently visible to a caller that snapshotted it.
 func TestCredentialVersionCoversBothStores(t *testing.T) {
+	resetCrossProcessStores(t)
 	preserveProviderCredential(t, "opencode-go")
 	const profile = "versiontest"
 	t.Cleanup(func() { _ = DeleteProfileCredentials(profile) })
@@ -54,14 +59,16 @@ func TestCredentialVersionCoversBothStores(t *testing.T) {
 	}
 }
 
-// Two successive base writes must produce two distinct versions; a caller
-// comparing snapshot-to-current would otherwise miss the second edit.
+// Each successive base write of a DIFFERENT key must produce a new version; a
+// caller comparing snapshot-to-current would otherwise miss the edit. Re-storing
+// the identical key is a no-op by design and is covered in store_format_test.go.
 func TestCredentialVersionChangesOnEveryWrite(t *testing.T) {
 	preserveProviderCredential(t, "opencode-go")
 
 	var seen []int64
 	for i := 0; i < 3; i++ {
-		if err := Set("opencode-go", Credential{Kind: KindAPIKey, Key: "sk-iter"}); err != nil {
+		key := fmt.Sprintf("sk-iter-%d", i)
+		if err := Set("opencode-go", Credential{Kind: KindAPIKey, Key: key}); err != nil {
 			t.Fatalf("Set %d: %v", i, err)
 		}
 		seen = append(seen, CredentialVersion())

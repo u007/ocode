@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -14,20 +13,10 @@ func resetStoreForTest(t *testing.T) string {
 	t.Helper()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	setHomeTree(t, home)
 
-	storeMu.Lock()
-	cache = nil
-	cacheLoaded = false
-	storeMu.Unlock()
-
-	t.Cleanup(func() {
-		storeMu.Lock()
-		cache = nil
-		cacheLoaded = false
-		storeMu.Unlock()
-	})
+	resetAuthCacheForTest()
+	t.Cleanup(resetAuthCacheForTest)
 
 	return home
 }
@@ -70,7 +59,11 @@ func TestHydrateEnvSkipsOAuthCredentials(t *testing.T) {
 
 func TestReadLegacyOcodeFormatRejectsFlatJSON(t *testing.T) {
 	dst := map[string]Credential{}
-	if readLegacyOcodeFormat([]byte(`{"openai":{"kind":"api_key","key":"legacy-key"}}`), dst) {
+	wrapped, err := readLegacyOcodeFormat([]byte(`{"openai":{"kind":"api_key","key":"legacy-key"}}`), dst)
+	if err != nil {
+		t.Fatalf("flat legacy JSON returned an error: %v", err)
+	}
+	if wrapped {
 		t.Fatal("expected flat legacy JSON to be rejected by wrapper parser")
 	}
 }
@@ -86,7 +79,7 @@ func TestRefreshPreservesAccountID(t *testing.T) {
 	}
 	Set("test-preserve", cred)
 
-	result := refreshIfExpiring("test-preserve", cred)
+	result := refreshIfExpiring("test-preserve", cred, baseCredentialStore)
 	if result.AccountID != "acct-123" {
 		t.Errorf("expected AccountID preserved, got %q", result.AccountID)
 	}
@@ -108,7 +101,7 @@ func TestConcurrentRefresh(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			refreshIfExpiring("test-concurrent", cred)
+			refreshIfExpiring("test-concurrent", cred, baseCredentialStore)
 		}()
 	}
 	wg.Wait()

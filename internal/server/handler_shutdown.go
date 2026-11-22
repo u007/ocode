@@ -22,6 +22,8 @@ import (
 // must not be killed with a bare SIGKILL on desktop exit.
 func (h *Handler) Shutdown(ctx context.Context) {
 	h.shutdownAgentSessions(ctx)
+	// After the agents: no turn can start a box once they are down.
+	h.shutdownBoxes(ctx)
 	// MCP clients live in a process-wide registry, not on any agent, so a
 	// session teardown does not reach them: close them here or every local MCP
 	// subprocess outlives the server that spawned it.

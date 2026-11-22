@@ -55,7 +55,7 @@ func TestRefreshLocked_SerializesConcurrentRefreshes(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			out, handled := RefreshLocked(id, seed, refresh)
+			out, handled := RefreshLocked(id, seed, baseCredentialStore, refresh)
 			if !handled {
 				t.Errorf("RefreshLocked returned handled=false")
 			}

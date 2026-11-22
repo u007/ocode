@@ -53,6 +53,12 @@ func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id 
 	// burn spend and hold the child's bash processes past the tab's close.
 	h.cancelBtwRun(id, true)
 
+	// Tear down the session's Upstash box in the background, with the in-flight work
+	// cancelled: an ephemeral box is deleted, and a retained box is paused so its login
+	// state can be resumed later. The request does not wait for it, and its failure is
+	// logged and never fails the close.
+	h.terminateSessionBox(id)
+
 	// 2. Release the resident agent now if possible. The agent must go away
 	// even when a turn is in flight or bootstrap is still registering it, so
 	// if this release cannot run, mark the session close-pending: the turn

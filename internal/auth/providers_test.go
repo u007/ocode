@@ -161,8 +161,7 @@ func TestResolveKeyWithConfig_StoredCredential(t *testing.T) {
 
 	// Reset store for test
 	home := t.TempDir()
-	os.Setenv("HOME", home)
-	os.Setenv("APPDATA", home)
+	setHomeTree(t, home)
 
 	storeMu.Lock()
 	cache = nil

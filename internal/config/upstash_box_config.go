@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -72,11 +73,82 @@ type UpstashBoxAccount struct {
 }
 
 // UpstashBoxConfig is the persisted "upstash_box" section of ocodeconfig.json.
-// Accounts are kept sorted by name (case-insensitive), then id.
+// Accounts are kept sorted by name (case-insensitive), then id. LoginStates maps
+// a project root to the name of the login state assigned to it. A login state
+// is a saved set of cookies and site storage kept on this machine; its data is
+// never in this file.
 type UpstashBoxConfig struct {
 	DefaultBackend   string              `json:"default_backend,omitempty"`
 	DefaultAccountID string              `json:"default_account_id,omitempty"`
 	Accounts         []UpstashBoxAccount `json:"accounts,omitempty"`
+	LoginStates      map[string]string   `json:"login_states,omitempty"`
+}
+
+// loginStateNamePattern is the one login-state name rule. It is defined here,
+// not in internal/boxsession, because boxsession imports the browser stack and
+// config must stay below it. boxsession.ValidLoginStateName delegates here.
+var loginStateNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
+
+// LoginStateNone is the reserved login-state name that means "no login state".
+// It is never a saved state, and assigning it clears the assignment.
+const LoginStateNone = "none"
+
+// ValidLoginStateName checks a login-state name: 1 to 40 characters from a-z,
+// 0-9, '_' and '-', starting with a letter or digit. "none" is reserved.
+func ValidLoginStateName(name string) error {
+	if name == LoginStateNone {
+		return invalidf("login state name %q is reserved", LoginStateNone)
+	}
+	if !loginStateNamePattern.MatchString(name) {
+		return invalidf("login state name must be 1 to 40 characters of a-z, 0-9, _ or -, starting with a letter or digit")
+	}
+	return nil
+}
+
+// LoginStateFor returns the login state assigned to a project root, or "" when
+// none is assigned.
+func (c UpstashBoxConfig) LoginStateFor(projectRoot string) string {
+	if projectRoot == "" {
+		return ""
+	}
+	return c.LoginStates[projectRoot]
+}
+
+// SetLoginState assigns a login state to a project root. An empty name or
+// "none" removes the assignment. Any other name must pass ValidLoginStateName.
+// The name need not exist as a saved state yet: it is created on first save.
+func (c *UpstashBoxConfig) SetLoginState(projectRoot, name string) error {
+	if projectRoot == "" {
+		return invalidf("project is required")
+	}
+	if name == "" || name == LoginStateNone {
+		delete(c.LoginStates, projectRoot)
+		c.normalize()
+		return nil
+	}
+	if err := ValidLoginStateName(name); err != nil {
+		return err
+	}
+	if c.LoginStates == nil {
+		c.LoginStates = map[string]string{}
+	}
+	c.LoginStates[projectRoot] = name
+	c.normalize()
+	return nil
+}
+
+// ClearLoginStateAssignments removes every project's assignment of the named
+// login state. It reports whether any assignment was removed.
+func (c *UpstashBoxConfig) ClearLoginStateAssignments(name string) bool {
+	changed := false
+	for root, assigned := range c.LoginStates {
+		if assigned == name {
+			delete(c.LoginStates, root)
+			changed = true
+		}
+	}
+	c.normalize()
+	return changed
 }
 
 // Validate checks one account's non-secret fields. It does not check name
@@ -241,6 +313,16 @@ func (c *UpstashBoxConfig) SetSettings(backend, accountID *string) error {
 // default account is one that exists (first account when unset or stale), and
 // no accounts means the local backend with no default account.
 func (c *UpstashBoxConfig) normalize() {
+	// Dropping an empty or "none" assignment is order-independent, so the
+	// result does not depend on map iteration order.
+	for root, name := range c.LoginStates {
+		if name == "" || name == LoginStateNone {
+			delete(c.LoginStates, root)
+		}
+	}
+	if len(c.LoginStates) == 0 {
+		c.LoginStates = nil
+	}
 	sort.SliceStable(c.Accounts, func(i, j int) bool {
 		a, b := c.Accounts[i], c.Accounts[j]
 		la, lb := strings.ToLower(a.Name), strings.ToLower(b.Name)

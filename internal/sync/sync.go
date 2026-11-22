@@ -208,20 +208,39 @@ func writeMergedLocal(blob BlobType, localPath string, mergeBase json.RawMessage
 }
 
 // writeMergedLocalLocked is writeMergedLocal for callers that already hold
-// blobLock(blob).
+// blobLock(blob). The read-compare-write runs under withLocalFileLock, so for
+// auth.json it cannot interleave with an auth.Set or auth.Remove.
 func writeMergedLocalLocked(localPath string, mergeBase json.RawMessage, merged []byte) (bool, error) {
-	current, err := readLocalConfigFile(localPath)
+	wrote := false
+	err := withLocalFileLock(localPath, func() error {
+		current, err := readLocalConfigFile(localPath)
+		if err != nil {
+			return err
+		}
+		if normalizeLocalJSON(current) != normalizeLocalJSON(mergeBase) {
+			// The file moved under us — do not overwrite the newer edit.
+			return nil
+		}
+		if err := writeLocalConfigFileAtomic(localPath, merged); err != nil {
+			return err
+		}
+		wrote = true
+		return nil
+	})
+	return wrote, err
+}
+
+// withLocalFileLock runs fn under the lock internal/auth takes for its own
+// writes of auth.json. Other local files have no such lock and run fn directly.
+func withLocalFileLock(localPath string, fn func() error) error {
+	authPath, err := auth.AuthPath()
 	if err != nil {
-		return false, err
+		return fmt.Errorf("resolve auth path: %w", err)
 	}
-	if normalizeLocalJSON(current) != normalizeLocalJSON(mergeBase) {
-		// The file moved under us — do not overwrite the newer edit.
-		return false, nil
+	if filepath.Clean(localPath) != filepath.Clean(authPath) {
+		return fn()
 	}
-	if err := writeLocalConfigFileAtomic(localPath, merged); err != nil {
-		return false, err
-	}
-	return true, nil
+	return auth.WithStoreFileLock(fn)
 }
 
 // localConfigPathFor returns the path to the actual local config file that

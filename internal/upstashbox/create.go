@@ -64,6 +64,11 @@ type CreateOptions struct {
 	TTLSeconds    int
 	Labels        []string
 	NetworkPolicy *NetworkPolicy
+	// OnCreated, when set, is called once with the box id as soon as the POST
+	// returns it, before any poll. An error aborts Create, which returns the box
+	// with its id and that error, so the caller can delete the box. It is never
+	// part of the request body: createRequest is built field by field in wire.
+	OnCreated func(id string) error
 }
 
 // createRequest is the JSON body of POST /v2/box. Keys are snake_case, as the
@@ -109,17 +114,26 @@ func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Box, error) {
 	if err := c.do(ctx, http.MethodPost, pathBoxCreate, nil, body, &wire); err != nil {
 		return nil, err
 	}
-	b, err := wire.toBox()
-	if err != nil {
-		err = fmt.Errorf("upstashbox: create box: %w", err)
-		if wire.ID == nil || *wire.ID == "" {
-			return nil, fmt.Errorf("%w: the response has no id, so the new box cannot be identified", err)
+	b, convErr := wire.toBox()
+	if wire.ID == nil || *wire.ID == "" {
+		if convErr != nil {
+			return nil, fmt.Errorf("upstashbox: create box: %w: the response has no id, so the new box cannot be identified", convErr)
 		}
-		partial := &Box{ID: *wire.ID}
-		if wire.Status != nil {
-			partial.Status = *wire.Status
+		return nil, errors.New("upstashbox: create box: the response has no id, so the new box cannot be identified")
+	}
+	// The box exists from here on. OnCreated runs before validation and polling,
+	// so the caller can record the id even if the rest of Create fails.
+	partial := &Box{ID: *wire.ID}
+	if wire.Status != nil {
+		partial.Status = *wire.Status
+	}
+	if opts.OnCreated != nil {
+		if err := opts.OnCreated(partial.ID); err != nil {
+			return partial, fmt.Errorf("upstashbox: create box %s: record the box: %w", partial.ID, err)
 		}
-		return partial, err
+	}
+	if convErr != nil {
+		return partial, fmt.Errorf("upstashbox: create box: %w", convErr)
 	}
 	return c.awaitReady(ctx, &b)
 }

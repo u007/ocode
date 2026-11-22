@@ -394,7 +394,10 @@ func (t *Target) startHandlers() error {
 	// the first moment a freshly parsed <title> can be read. Probing there makes
 	// a loaded page's title land immediately instead of at the next poll tick.
 	chLoad, c14 := t.conn.Subscribe(t.sessionID, "Page.loadEventFired")
-	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14)
+	// The login-state restore script reports each origin it applied through
+	// this binding. Lossless, so a report is never dropped (attach_storage.go).
+	chBind, c15 := t.conn.SubscribeLossless(t.sessionID, "Runtime.bindingCalled")
+	t.cancels = append(t.cancels, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15)
 	stop := make(chan struct{})
 	t.mu.Lock()
 	t.titleStop = stop
@@ -422,6 +425,7 @@ func (t *Target) startHandlers() error {
 	go t.handleRequestPaused(chPaused)
 	go t.handleJavaScriptDialog(chDialog)
 	go t.handleLoadEvent(chLoad)
+	go t.handleLoginBinding(chBind)
 
 	// Enable Fetch auth handling (proxy 407). Must be after the subscriptions
 	// above so no auth challenge is missed before the handler is live. Also

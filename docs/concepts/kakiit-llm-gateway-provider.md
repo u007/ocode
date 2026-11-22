@@ -10,7 +10,7 @@ tags:
   - gateway
   - models-registry
   - auth
-timestamp: 2026-11-21T11:32:08Z
+timestamp: 2026-11-22T07:21:22Z
 ---
 # kakiit LLM Gateway Provider
 
@@ -34,7 +34,7 @@ live end-to-end call has been made yet** (the gateway is not deployed — see
 
 - **Connect:** `ocode /connect kakiit` → stores an auth.json `kakiit` entry
   (API-key credential). Env fallback: `KAKIIT_API_KEY`
-  (`internal/auth/providers.go:159` — the `Providers` slice entry — and the
+  (the kakiit entry in the `Providers` slice, `internal/auth/providers.go` — and the
   providers map `internal/agent/client.go:4616`). Key resolution is the
   standard order every keyed provider follows: env var wins over auth.json
   (pinned by `TestKakiitAPIKeyResolutionPrecedence`).
@@ -268,7 +268,7 @@ commit `8ab8d978` touched, in the order that matters:
 
 1. **Providers map** (`internal/agent/client.go:4616`): `id → {envKey,
    baseURL}`. `NewClient`/`NewClientWithProfile` read env + auth.json from it.
-2. **`auth.Providers`** (`internal/auth/providers.go:159`): the `/connect`
+2. **`auth.Providers`** (`internal/auth/providers.go`, the `Providers` slice): the `/connect`
    dialog list — and note the **positional pin**: kakiit had to be appended
    LAST (index 30) because `internal/tui/connect_filter_test.go:79` pins
    `codex` at index 29 for the "OPENAI" fuzzy-match assertion. Adding a

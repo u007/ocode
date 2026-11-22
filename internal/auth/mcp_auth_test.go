@@ -17,11 +17,7 @@ func resetMCPAuthForTest(t *testing.T) string {
 	t.Helper()
 
 	home := t.TempDir()
-	dataHome := filepath.Join(home, "data")
-	appData := filepath.Join(home, "AppData", "Roaming")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("APPDATA", appData)
+	setHomeTree(t, home)
 
 	mcpAuthMu.Lock()
 	mcpCache = nil
@@ -34,9 +30,9 @@ func resetMCPAuthForTest(t *testing.T) string {
 	})
 
 	if runtime.GOOS == "windows" {
-		return filepath.Join(appData, "opencode", "mcp-auth.json")
+		return filepath.Join(home, "AppData", "Roaming", "opencode", "mcp-auth.json")
 	}
-	return filepath.Join(dataHome, "opencode", "mcp-auth.json")
+	return filepath.Join(home, ".local", "share", "opencode", "mcp-auth.json")
 }
 
 func writeMCPAuthFixture(t *testing.T, path string, value any) {

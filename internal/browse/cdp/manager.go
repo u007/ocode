@@ -200,16 +200,26 @@ type Manager struct {
 	// else: no proxyServer, no proxy auth handler, one shared browser context,
 	// request blocking, and Close never sends Browser.close.
 	attachMode bool
-	// sharedBC is attach mode's single browser context, created on first use
-	// and cleared when the connection ends. attachContexts lists every context
-	// this Manager created, so a redial and Close can dispose them. Both are
-	// guarded by mu.
+	// sharedBC is attach mode's single browser context, created on first use.
+	// It is remembered across a dropped connection, so the next connection can
+	// ask the browser whether it still exists (browserContextFor). sharedBCOwner
+	// is the connection it is live on, nil once that connection ends. Close
+	// clears sharedBC. attachContexts lists every context this Manager created,
+	// so a replacement and Close can dispose them. attachHad is set once a
+	// shared context has existed, and never cleared. contextLost is set when a
+	// replacement had no restore hook, and is never cleared. contextRestore is
+	// the hook that fills a replacement (SetContextRestore). All are guarded by mu.
 	sharedBC       string
 	sharedBCOwner  *Conn
 	attachContexts []string
+	attachHad      bool
+	contextLost    bool
+	contextRestore func(ctx context.Context) ([]json.RawMessage, map[string]map[string]string, error)
 	// resolveHost judges name-based request hosts in attach mode. Set by
 	// NewAttachManager; tests replace it.
 	resolveHost resolveFunc
+	// login is attach mode's localStorage restore state (attach_storage.go).
+	login loginSeedState
 
 	// launch injection for tests
 	launchFn func(context.Context) (*Conn, <-chan int, func(), error)
@@ -401,7 +411,8 @@ func (m *Manager) handleChromeExit(conn *Conn) {
 	}
 	m.conn = nil
 	m.exited = nil
-	m.sharedBC = ""
+	// sharedBC is kept: the next connection checks whether the browser still
+	// has it. Only its owner is cleared.
 	m.sharedBCOwner = nil
 	// Do not clear proxy — keep it for next launch? Spec says Close closes proxy.
 	// Keep proxy alive across relaunches; only Close() closes it.
@@ -674,6 +685,15 @@ func (m *Manager) maybeRegisterNewTab(targetID, targetType, url, browserContextI
 		m.abandonTarget(t, targetID)
 		return
 	}
+	// The login-state seed goes on before the popup's first navigation can be
+	// judged; a popup that cannot take it is closed, never opened without it.
+	if err := m.registerLoginSeed(context.Background(), conn, sessionID, targetID, stateKey); err != nil {
+		m.abandonTarget(t, targetID)
+		if m.opts.Log != nil {
+			m.opts.Log.Printf("browse: login-state seed on a new tab failed; the tab was closed: %v", err)
+		}
+		return
+	}
 	if m.attachMode && m.popupBlocked(conn, targetID, url) {
 		m.abandonTarget(t, targetID)
 		return
@@ -924,6 +944,12 @@ func (m *Manager) attachLocked(ctx context.Context, stateKey string, sink FrameS
 	t.perfRecording = true
 	// Setup per-target event handlers + screencast
 	if err := t.startHandlers(); err != nil {
+		m.abandonTarget(t, targetID)
+		return nil, err
+	}
+	// The login-state seed goes on before the tab is registered, so it is in
+	// place before the caller's first navigation. A tab without it is closed.
+	if err := m.registerLoginSeed(ctx, conn, sessionID, targetID, stateKey); err != nil {
 		m.abandonTarget(t, targetID)
 		return nil, err
 	}

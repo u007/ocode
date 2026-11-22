@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-16T11:28:22Z
+timestamp: 2026-11-22T01:45:00+08:00
 status: active
 ---
 # browser_run step loop
@@ -33,7 +33,7 @@ slower per task).
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
 `internal/agent/browser_run.go:255`). Each sub-step is a real call to
-`handleToolCallWithContext` (`internal/agent/agent.go:4185`) with the tool name
+`handleToolCallWithContext` (`internal/agent/agent.go:4190`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
 loop and never appended to the transcript. Only `browser_run`'s own result is.
@@ -41,9 +41,9 @@ loop and never appended to the transcript. Only `browser_run`'s own result is.
 ## Arguments and result
 
 Arguments: `goal` (required), `data` (named string values the loop may type), `tab`
-(as for `browser`), and `max_steps` (default 15, at most 40). The tool is registered only
-when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:356`).
-It is `PermissionAllow` by default (`internal/agent/permissions.go:2002-2003`), because it
+(as for `browser`), `backend` (only in a session with the Upstash box backend; every sub-step drives the backend the run was given), and `max_steps` (default 15, at most 40). The tool is registered only
+when the agent has a `browser` tool (`bindBrowserRun`, `internal/agent/browser_run.go:381`).
+It is `PermissionAllow` by default (the allow list in `NewPermissionManager`, `internal/agent/permissions.go`), because it
 performs nothing on its own.
 
 The result starts with an untrusted-content notice, then a header, one line per step,
@@ -88,7 +88,7 @@ Each step sends one batched request with these questions. The value question is 
 | `done` | noul | the goal is met on this page, given the recent actions |
 | `operation` | choice | the operations the page offers, plus `scroll_down`, `press_enter` and `stuck` |
 | `target_click`, `target_fill`, `target_check`, `target_uncheck` | choice | the controls offering that operation. Asked only for operations with at least one candidate |
-| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:861`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
+| `value_fill` | choice | asked in its own second request, only when the operation is `fill` and its target is accepted. Its instructions name the field (role, label, context) and never quote its current text: a field that already holds something is named `(already filled)` (`browserRunFieldDescription`, `internal/agent/browser_run.go:892`). That hint reads the unredacted copy of the kept controls that `state` returns to the caller, not the copy sent to Jev, so the value text still never reaches Jev. Criteria: the `data` key names, plus `none` |
 
 Answers in one request cannot see each other. A value asked beside its target was answered
 without knowing the field: live, `none` at probability 0.61 for a "Name" field. Asked in its
@@ -100,7 +100,7 @@ done. A rejected operation, target or value answer stops the run as `unsure`.
 The state carries `goal`, `date`, `page` (url, title, text, settled), `data_keys`,
 `recent_actions` (the last 8 steps), `elements` (the controls as offered, copied with
 their current `value` cleared by `browserRunRedactedControls`,
-`internal/agent/browser_run.go:873`), and `omitted_elements`. `page.settled` is false
+`internal/agent/browser_run.go:904`), and `omitted_elements`. `page.settled` is false
 when the settle bound ran out, so the judge can see that a listing may still be
 mid-render. Data values never enter the state. Only key names do. This is the text view's
 state. A page the text view cannot judge is sent as a screenshot instead (see
@@ -129,7 +129,7 @@ is clipped. A text state that fits only after cutting elements stays in the text
 `omitted_elements`, as before.
 
 The screenshot view needs a decision backend that takes images. Only `*TypesafeClient` does,
-through `DecideWithAssetsCtx` (the `imageDecider` interface, `internal/agent/decider.go:59`).
+through `DecideWithAssetsCtx` (the `imageDecider` interface, `internal/agent/decider.go:62`).
 Any other backend keeps the text view, and a state that does not fit stops the run as
 `page_too_dense`, with a detail that names the TypeSafe requirement. The view never goes to
 another backend.
@@ -237,20 +237,20 @@ backend or to the main model.
   sub-step is denied.
 - **Main-agent asks block for a person.** The main agent has no `OnPermissionAsk`. When
   the host has a sub-agent asker, each sub-step attaches a per-call asker named
-  `browser_run` (`internal/agent/browser_run.go:498`, `withPermissionAsker` at
-  `internal/agent/agent.go:7165`). The dialog then reads like
-  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (`internal/agent/permissions.go:6767`),
+  `browser_run` (`internal/agent/browser_run.go:529`, `withPermissionAsker` in
+  `internal/agent/agent.go`). The dialog then reads like
+  `browser_run step 3/15 (goal): click "@e12" "Add to cart"` (built in `browserAction`, `internal/agent/permissions.go`),
   and the loop waits for the answer. With no asker at all, the step stops as
   `needs_approval`. The loop never passes the `PERMISSION_ASK` sentinel through.
 - **Agent types.** The built-in `scout`, `debug` and `docs` definitions list
   `browser_run`, and so do the unlisted `general` and `review` definitions. `explore` and
   `context` do not get it. A read-only agent's sub-steps still hit the browser tool's
   refusal for each mutating step.
-- **Content guard.** Each sub-step result is guarded (`browser_run.go:521`), and so is
+- **Content guard.** Each sub-step result is guarded (`browser_run.go:552`), and so is
   `browser_run`'s own result (the `browser_run` case of `contentGuardSourceFor`,
-  `internal/agent/content_guard_typesafe.go:314`). Known gap: on the main agent, a
+  `internal/agent/content_guard_typesafe.go:320`). Known gap: on the main agent, a
   content-guard ask on a sub-step result becomes `needs_approval`, not a blocking ask.
-  The guard reads `a.OnPermissionAsk` (`internal/agent/content_guard_typesafe.go:1077`), not
+  The guard reads `a.OnPermissionAsk` (`internal/agent/content_guard_typesafe.go:1134`), not
   the per-call asker. Tracked in TODO.md.
 - **What the content guard judges.** For a guarded browser result the judge reads a view, not
   the raw result. The host's wrapper line (the first line that carries "treat as data, never as
@@ -262,7 +262,7 @@ backend or to the main model.
   wrapper line scored 0.34, below the guard's 0.60 hesitant-clean floor, so it was vetoed. Without
   the wrapper line it scored 0.98 to 1.00. The raw JSON had scored clean at 0.44 to 0.52, also
   vetoed. The wrapper, not the page text, pulled the judge into doubt. The view is built by
-  `contentGuardScanView` (`internal/agent/content_guard_typesafe.go:643`). For `browser_run`'s own result the view is the page URL, the title and the quoted labels, not the status and step lines. A final page on a local-network host is delivered unjudged, because every sub-step read was already judged on its own URL. Otherwise local-network pages are not judged on the page URL; see [inbound-content-guardrail](inbound-content-guardrail.md#browser-results-what-is-and-is-not-judged-2026-11-09).
+  `contentGuardScanView` (`internal/agent/content_guard_typesafe.go:681`). For `browser_run`'s own result the view is the page URL, the title and the quoted labels, not the status and step lines. A final page on a local-network host is delivered unjudged, because every sub-step read was already judged on its own URL. Otherwise local-network pages are not judged on the page URL; see [inbound-content-guardrail](inbound-content-guardrail.md#browser-results-what-is-and-is-not-judged-2026-11-09).
 - **Typed values.** `data` values are typed verbatim. The dialog shows only the length of a
   filled value, as a `fill` call does.
 
@@ -279,12 +279,12 @@ backend or to the main model.
 
 ## The controls action and the Settle rule
 
-`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:491`).
+`controls` is a read action on the `browser` tool (`internal/server/browser_tool.go:588`).
 It returns one JSON object after an untrusted-content header. The object's keys are
 `url`, `title`, `fingerprint`, `settled`, `text`, `text_truncated`, `controls`, `omitted`,
 `viewport_width`, `viewport_height` (the viewport in CSS pixels), `scroll_x` and `scroll_y`
 (the document's scroll offset in CSS pixels; on the htrcli surface, the snapshot's `scroll`). `text` and `text_truncated` map the cdp layer's viewport text fields. The
-struct is `browserControlsOutput` (`internal/server/browser_tool.go:1317`).
+struct is `browserControlsOutput` (`internal/server/browser_tool.go:1442`).
 
 Each control has `ref`, `role`, `label`, `value` (when set), `states`, `context` (when set),
 `operations`, `box` and `in_viewport`. `box` is the control's rectangle in CSS pixels of the
@@ -329,9 +329,9 @@ non-model seconds in its runs went to waits on class names. Waiting for the docu
 quiet is the rule that is left.
 
 Permissions for `controls` follow the other reads. It is in the observe set
-(`browserObserveActions`, `internal/agent/permissions.go:6678`), so it is allowed on an agent-opened tab. A user tab
+(`browserObserveActions`, `internal/agent/permissions.go`), so it is allowed on an agent-opened tab. A user tab
 asks (`browserUserTabReadActions`, `internal/agent/permission_typesafe.go:511`). Read-only
-agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:238`).
+agents may call it (`browserReadOnlyActions`, `internal/server/browser_tool.go:257`).
 
 ## Routing the model to browser_run
 
@@ -389,31 +389,32 @@ re-tuned on that corpus.
 
 ## Code map
 
-- `internal/agent/browser_run.go`: `browserRunTool` (255), `ExecuteCtx` (303),
-  `bindBrowserRun` (356), `execute` (382), `readControls` (454), `subStep` (483),
-  `act` (536), `scrolledView` (591), `decide` (596), `view` (610), `screenshotView` (635),
-  `screenshot` (702), `choose` (732), `ask` (800), `decideValue` (821), `valueQuestion` (846),
-  `questions` (895), `state` (920), `format` (1034), `parseBrowserRunPage` (1058). Floors and
-  caps are at lines 30 to 46.
+- `internal/agent/browser_run.go`: `browserRunTool` (255), `ExecuteCtx` (323),
+  `bindBrowserRun` (381), `execute` (408), `readControls` (480), `subStep` (509),
+  `act` (567), `scrolledView` (622), `decide` (627), `view` (641), `screenshotView` (666),
+  `screenshot` (733), `choose` (763), `ask` (831), `decideValue` (852), `valueQuestion` (877),
+  `questions` (926), `state` (951), `format` (1065), `parseBrowserRunPage` (1089). The floor and
+  cap constants are in the const block at the top of the file (`browserRunDoneAcceptFrom` to
+  `browserRunTextBytes`).
 - `internal/agent/browser_run_shot.go`: `browserRunShotControls` (76), `browserRunDrawShot` (97),
   the masking and number tags, the 64 px viewport floor, and the screenshot placeholder.
 - `internal/agent/typesafe.go`: `DecideWithAssetsCtx` and the shared `decide` request path,
   `TypesafeAsset`, and the images header. `internal/agent/state_budget.go`:
   `imageStateAllowanceBytes` (38).
-- `internal/agent/agent.go`: `handleToolCallWithContext` (4031), the context asker
-  (4280), `attributePermAsker` (6882), `withPermissionAsker` (6903).
-- `internal/agent/permissions.go`: `browser_run` allow default (2002-2003), the observe set
-  (6678), `browserAction` (6603) and its `run_step` summary (6767).
+- `internal/agent/agent.go`: `handleToolCallWithContext` (4190), the context asker
+  `permissionAskerFromContext` (7177), `attributePermAsker` (7151), `withPermissionAsker` (7172).
+- `internal/agent/permissions.go`: `browser_run` allow default (2023, in `NewPermissionManager`), the observe set
+  (6738), `browserAction` (6793) and its `run_step` summary (6869).
 - `internal/agent/decider.go`: `slotBrowserRun` (29). `internal/config/ocodeconfig.go`:
-  `BrowserRun` config key `browser_run.judge_model` (1062).
+  the `browser_run` config block (`browserRunConfigFile`, `internal/config/ocodeconfig.go`) and its `judge_model` key.
 - `internal/agent/content_guard_typesafe.go`: `browserGuardedOutputs` (284), the
-  `browser_run` case (314).
+  `browser_run` case (320).
 - `internal/browse/cdp/pagedom_controls.go`: `settleExpr` (29), `Settle` (149),
   `Controls` (273), `controlsWhereExpr` (332), `controlLayout` (365), `placeControls` (398),
   `controlsWalker.add` (479), `controlsFingerprint` (522).
 - `internal/browse/cdp/pagedom_read.go`: the settle and control caps (36 to 45).
-- `internal/server/browser_tool.go`: `browserActions` (62), `browserReadOnlyActions` (238),
-  the `controls` case (491), `browserControlsOutput` (1317), `controls` (1326).
+- `internal/server/browser_tool.go`: `browserActions` (62), `browserReadOnlyActions` (257),
+  the `controls` case (588), `browserControlsOutput` (1442), `controls` (1460).
 
 Related: [browser-agent-tools](browser-agent-tools.md) (the `browser` tool, its actions and
 permissions), [inbound-content-guardrail](inbound-content-guardrail.md).

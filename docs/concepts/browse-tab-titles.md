@@ -10,7 +10,7 @@ tags:
   - chrome
   - titles
   - sse
-timestamp: 2026-11-17T12:02:53Z
+timestamp: 2026-11-22T01:45:00+08:00
 status: active
 ---
 
@@ -72,9 +72,9 @@ immediate probe on the top document's load, and a 2 s poll as a backstop.
 top document's load — the first moment a freshly parsed `<title>` can be read.
 
 - `startHandlers` registers it as `chLoad, c14`
-  (`internal/browse/cdp/target.go:381`) and starts
-  `go t.handleLoadEvent(chLoad)` (`target.go:407`).
-- `handleLoadEvent` (`target.go:1388`) calls `probeTitle()` for every event.
+  (`internal/browse/cdp/target.go`) and starts
+  `go t.handleLoadEvent(chLoad)` (`target.go`).
+- `handleLoadEvent` (`target.go`) calls `probeTitle()` for every event.
 - A probe at `Page.frameNavigated` was deliberately **not** added: it would race
   the document's own `<title>` parse.
 
@@ -90,14 +90,14 @@ entries are Chrome's own pre-`<title>` placeholder reported by
 
 ### Poll backstop
 
-- `titlePollInterval = 2 * time.Second` (`target.go:358`) is a package var so
+- `titlePollInterval = 2 * time.Second` (`target.go`) is a package var so
   tests can shorten it.
-- `Target.startHandlers` starts `go t.watchTitle(stop)` (`target.go:387`) with a
-  `titleStop` channel (`target.go:153-155`) closed by `stopHandlers`
-  (`target.go:1325-1338`); the loop also exits on `t.conn.Done()`.
-- `watchTitle` (`target.go:1343`) probes **immediately** (a restored tab
+- `Target.startHandlers` starts `go t.watchTitle(stop)` (`target.go`) with a
+  `titleStop` channel (`target.go`) closed by `stopHandlers`
+  (`target.go`); the loop also exits on `t.conn.Done()`.
+- `watchTitle` (`target.go`) probes **immediately** (a restored tab
   navigates right after Attach) and then once per interval.
-- The probe is **sink-gated** (`target.go:1348-1361`): only a target whose
+- The probe is **sink-gated** (`target.go`): only a target whose
   `FrameSink` is live is probed. Agent headless tabs (`EnsureHeadless` /
   `OpenHeadless` attach with a nil sink) are not rendered in the strip, so
   polling them would be pure CDP traffic on the shared browser connection —
@@ -105,10 +105,10 @@ entries are Chrome's own pre-`<title>` placeholder reported by
   life, serialized against renderer-bound commands. A sink attached later
   re-arms at the next tick, so a panel opened onto an existing tab still gets
   titles.
-- `probeTitle` (`target.go:1365`) calls `Target.getTargetInfo` at the **browser
+- `probeTitle` (`target.go`) calls `Target.getTargetInfo` at the **browser
   level** (empty session id, `targetId` only) and ignores non-`page` target
   types.
-- `emitTitleIfChanged(title, url)` (`target.go:1401`) is the single change gate:
+- `emitTitleIfChanged(title, url)` (`target.go`) is the single change gate:
   it keeps **both** `lastTitle` and `lastURL` under `titleMu` and emits when
   either differs. The URL is part of the gate because the SPA's
   `browserStore.applyNavEvent` sets `pageTitle: null` on every URL change, so
@@ -123,15 +123,16 @@ entries are Chrome's own pre-`<title>` placeholder reported by
 
 Delivery chain:
 
-1. `Target.probeTitle` (called by `handleLoadEvent` and by `watchTitle`) →
-   `m.emitTitle` (`internal/browse/cdp/manager.go:1102`) → `ManagerOptions.EmitTitle`.
+1. `Target.probeTitle` (`internal/browse/cdp/target.go`, called by `handleLoadEvent` and by
+   `watchTitle`) → `Target.emitTitleIfChanged` (same file) → `Manager.emitTitle`
+   (`internal/browse/cdp/manager.go`) → `ManagerOptions.EmitTitle`.
 2. Wired in `internal/browse/server.go:328` → `Server.emitTitle`
    (`internal/browse/server.go:583`). This also records the last non-empty
    title and last non-empty URL per stateKey (`procTitle`/`procURL`), which label
    `BrowserProcesses` rows — a clear does not delete that label.
-3. `SetTitlePublisher` (`internal/browse/server.go:573`, wired in
-   `internal/server/server.go:1169`) → `publishBrowseTitle`
-   (`internal/server/server.go:1273`) → `bus.Publish("browse_title", "", "", ev)`.
+3. `SetTitlePublisher` (`internal/browse/server.go:573`, wired in the server's browse setup in
+   `internal/server/server.go`) → `publishBrowseTitle` (`internal/server/server.go`) →
+   `bus.Publish("browse_title", "", "", ev)`.
 4. `browse_title` is a **global/project-scoped** event: it must never be added to
    `sessionScopedEvents` (`internal/server/event_bus.go:56`); the stateKey rides
    in the payload.
@@ -139,9 +140,9 @@ Delivery chain:
    `routeBusEnvelope`'s `browse_title` branch (`sessionEvents.ts:497`) →
    `browserActions.setPageTitle(t.state_key, t.title, t.url)`.
 
-`handleTargetInfoChanged` (`internal/browse/cdp/manager.go:673`) is kept: it
+`handleTargetInfoChanged` (`internal/browse/cdp/manager.go`) is kept: it
 still carries URL changes, and a Chrome build that reports a title there would
-still deliver it through `emitTargetTitle` (`manager.go:692`) **with** a URL.
+still deliver it through `emitTargetTitle` (`internal/browse/cdp/manager.go`) **with** a URL.
 
 ## The stale-event URL guard, and why the poll omits the URL
 

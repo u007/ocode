@@ -478,7 +478,7 @@ func (h *Handler) projectHostFor(projectRoot string) string {
 // has a host, so it never hands a remote project the local Chrome. The check
 // depends only on the wiring and the project's host, never on whether tabs are
 // open, so the cached tools array stays stable.
-func (h *Handler) browserToolFor(projectRoot string, cfg *config.Config) tool.Tool {
+func (h *Handler) browserToolFor(projectRoot string, cfg *config.Config, boxes browserBoxes) tool.Tool {
 	if h.browseSurfaces == nil || h.projectHostFor(projectRoot) != "" {
 		return nil
 	}
@@ -492,7 +492,12 @@ func (h *Handler) browserToolFor(projectRoot string, cfg *config.Config) tool.To
 	if h.browserTabsStore != nil {
 		strip = stripPublisher{store: h.browserTabsStore, bus: h.bus}
 	}
-	return newBrowserTool(projectRoot, agent.ResolveImageMaxDim(maxDim), strip, h.browseSurfaces)
+	bt := newBrowserTool(projectRoot, agent.ResolveImageMaxDim(maxDim), strip, h.browseSurfaces)
+	// boxes is nil for every session without the creation flag, so their tool is exactly the local one.
+	if boxes != nil {
+		return bt.withBoxes(boxes)
+	}
+	return bt
 }
 
 // buildAgentSession constructs a fresh agent session, emitting observable
@@ -608,6 +613,26 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if projectRoot == "" {
 		projectRoot = h.workDir
 	}
+	// The session's persisted metadata decides whether its browser tool gets the
+	// Upstash box backend, so it is read before any tool is built. The same load
+	// feeds the seeding further down.
+	prev, prevErr := session.LoadForDir(projectRoot, sessionID)
+	upstashBrowser := false
+	// Only a session with no transcript yet is new, and a new session has no flag.
+	// Any other load error fails the build: reading it as "no flag" would drop the
+	// box backend from a session that has it and change its tools array mid-session.
+	if prevErr != nil && !errors.Is(prevErr, os.ErrNotExist) {
+		slog.Error("session load for the upstash browser flag failed; session not built", "session", sessionID, "err", prevErr)
+		return nil, "session-load", fmt.Errorf("session %s load: %w", sessionID, prevErr)
+	}
+	if prevErr == nil {
+		on, ferr := upstashBrowserFromMetadata(prev.Metadata)
+		if ferr != nil {
+			slog.Error("session upstash browser flag unreadable; session not built", "session", sessionID, "err", ferr)
+			return nil, "upstash-browser", fmt.Errorf("session %s upstash browser flag: %w", sessionID, ferr)
+		}
+		upstashBrowser = on
+	}
 	lspMgr := h.lspManagerFor(projectRoot)
 	// The Pulse assistant gets no builtin tools (no bash, file, edit or task):
 	// configurePulseAgent installs only its read-only tool set below.
@@ -620,7 +645,12 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			computerDriver, computerDriverErr = computer.New(h.computerSup)
 		}
 		tools = tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
-		if bt := h.browserToolFor(projectRoot, effCfg); bt != nil {
+		// boxes stays a nil interface unless the session has the creation flag.
+		var boxes browserBoxes
+		if upstashBrowser {
+			boxes = handlerBoxes{h: h}
+		}
+		if bt := h.browserToolFor(projectRoot, effCfg, boxes); bt != nil {
 			tools = append(tools, bt)
 		}
 		// Built under this session's id, so a /reset-id rebuild gets the rekeyed
@@ -638,6 +668,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetProfile(prof)
+	if upstashBrowser {
+		ag.SetBrowserBoxBackend(true)
+	}
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
 	}
@@ -745,7 +778,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
 	// sidebar would show only the current turn's usage after a rebuild/resume.
-	if prev, err := session.LoadForDir(projectRoot, sessionID); err == nil {
+	if prevErr == nil {
 		as.seedSpend(sessionSpendFromMetadata(prev.Metadata))
 		in, out, cached, total := sessionUsageFromMetadata(prev.Metadata)
 		as.seedUsage(in, out, cached, total)

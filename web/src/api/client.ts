@@ -92,6 +92,9 @@ import type {
   UpstashAccount,
   UpstashAccountInput,
   UpstashAccountsResponse,
+  UpstashBoxesResponse,
+  UpstashLoginStateAssignment,
+  UpstashLoginStatesResponse,
   UpstashSettings,
   UpstashSettingsInput,
   ChatVerbosityConfig,
@@ -1282,6 +1285,13 @@ function appearanceThemePath(id: string): string {
 /** Hub routes read `host` from the query; fetchJSON's host only routes the request. */
 function hubQuery(project: string, host?: string): string {
   return `project=${encodeURIComponent(project)}${host ? `&host=${encodeURIComponent(host)}` : ""}`;
+}
+
+/** `/api/upstash/boxes/{id}[/action]?account=` for the box row actions. */
+function upstashBoxPath(boxId: string, action: "pause" | "resume" | "", accountId: string): string {
+  const base = `/api/upstash/boxes/${encodeURIComponent(boxId)}`;
+  const path = action ? `${base}/${action}` : base;
+  return `${path}?${new URLSearchParams({ account: accountId }).toString()}`;
 }
 
 export const api = {
@@ -5248,6 +5258,38 @@ export const api = {
     fetchJSON<UpstashSettings>("/api/upstash/settings", {
       method: "PUT",
       body: JSON.stringify(body),
+    }),
+  // Boxes on one Upstash account (Settings → Upstash Box). Every call names the
+  // account, because the same box id can exist on two accounts.
+  upstashListBoxes: (accountId: string, page: number, pageSize: number) => {
+    const params = new URLSearchParams({
+      account: accountId,
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return fetchJSON<UpstashBoxesResponse>(`/api/upstash/boxes?${params.toString()}`);
+  },
+  upstashPauseBox: (boxId: string, accountId: string) =>
+    fetchEmpty(upstashBoxPath(boxId, "pause", accountId), { method: "POST" }),
+  upstashResumeBox: (boxId: string, accountId: string) =>
+    fetchEmpty(upstashBoxPath(boxId, "resume", accountId), { method: "POST" }),
+  upstashDeleteBox: (boxId: string, accountId: string) =>
+    fetchEmpty(upstashBoxPath(boxId, "", accountId), { method: "DELETE" }),
+  // Login states (Settings → Upstash Box → Login states). Stored on this
+  // machine; the list carries counts only. A 409 on delete names the holder.
+  upstashListLoginStates: () =>
+    fetchJSON<UpstashLoginStatesResponse>("/api/upstash/login-states"),
+  upstashDeleteLoginState: (name: string) =>
+    fetchEmpty(`/api/upstash/login-states/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  upstashGetLoginState: (project: string) =>
+    fetchJSON<UpstashLoginStateAssignment>(
+      `/api/upstash/login-state?${new URLSearchParams({ project }).toString()}`,
+    ),
+  /** name "" or "none" clears the project's assignment. */
+  upstashSetLoginState: (project: string, name: string) =>
+    fetchJSON<UpstashLoginStateAssignment>("/api/upstash/login-state", {
+      method: "PUT",
+      body: JSON.stringify({ project, name }),
     }),
   listArtifacts: (opts: any, host: any) => {
     const params = new URLSearchParams();

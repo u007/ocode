@@ -3295,9 +3295,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if len(cfg.LocalModels) > 0 {
 		payload["local_models"] = cfg.LocalModels
 	}
-	// Written only once an account or a non-default backend exists, so an
-	// untouched install gains no key.
-	if len(cfg.UpstashBox.Accounts) > 0 || cfg.UpstashBox.Backend() != UpstashBoxBackendLocal {
+	// Written only once an account, a non-default backend or a login-state
+	// assignment exists, so an untouched install gains no key.
+	if len(cfg.UpstashBox.Accounts) > 0 || cfg.UpstashBox.Backend() != UpstashBoxBackendLocal || len(cfg.UpstashBox.LoginStates) > 0 {
 		payload["upstash_box"] = cfg.UpstashBox
 	}
 	if len(cfg.DB.Connections) > 0 {

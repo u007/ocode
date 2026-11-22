@@ -400,11 +400,11 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1758`, the `GoalEvaluable`
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1797`, the `GoalEvaluable`
   stand-aside inside the function), TUI `streamDoneMsg` (`internal/tui/model.go:5673`, the
   `goalEvaluable` branch; the RC branches at `:5435` and `:5512` use the same gate).
 - **A pending permission or question ask never auto-resumes a goal.** Server
-  `agent_session.go:1583` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
+  `agent_session.go:1622` (`!h.sessionHasOutstandingAsk(as)` in `runTurn`); TUI post-turn
   decisions sit behind `queueDrainBlocked()`. The one thing that may run on a pending
   `question` ask is the auto-continue QUESTION judge (below), and it runs under a goal
   too: it either rewrites the ask into an answered tool result (after which the loop

@@ -1,21 +1,24 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/u007/ocode/internal/paths"
 )
 
 var (
-	profileStoreMu sync.Mutex
-	profileCache   map[string]map[string]Credential // profile -> provider -> cred
-	profileLoaded  bool
+	profileStoreMu   sync.Mutex
+	profileCache     map[string]map[string]Credential // profile -> provider -> cred
+	profileLoaded    bool
+	profileCacheInfo os.FileInfo // stat of auth.profiles.json the cache was read from
+	profileLoadErr   errLogOnce
 )
 
 // ProfileCredentialVersion is the LEGACY name for CredentialVersion, kept so
@@ -48,79 +51,186 @@ func ProfileAuthPath() (string, error) {
 	return filepath.Join(base, "auth.profiles.json"), nil
 }
 
-func loadProfileStoreLocked() error {
-	path, err := ProfileAuthPath()
+// readProfileFile reads auth.profiles.json as it is on disk now. An absent or
+// empty file is an empty store. The stat comes before the read, as in
+// readAuthFile. The parse error never quotes file content.
+func readProfileFile(path string) (map[string]map[string]Credential, os.FileInfo, error) {
+	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("resolve profile auth path: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create profile auth dir: %w", err)
+		if os.IsNotExist(err) {
+			return make(map[string]map[string]Credential), nil, nil
+		}
+		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			profileCache = make(map[string]map[string]Credential)
-			profileLoaded = true
-			return nil
+			return make(map[string]map[string]Credential), nil, nil
 		}
-		return fmt.Errorf("read profile auth store: %w", err)
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if len(data) == 0 {
-		profileCache = make(map[string]map[string]Credential)
-		profileLoaded = true
-		return nil
+	if len(bytes.TrimSpace(data)) == 0 {
+		return make(map[string]map[string]Credential), info, nil
 	}
 	var raw map[string]map[string]Credential
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse profile auth store: %w", err)
+		return nil, nil, fmt.Errorf("parse %s: invalid JSON", path)
 	}
 	if raw == nil {
 		raw = make(map[string]map[string]Credential)
 	}
-	profileCache = raw
+	return raw, info, nil
+}
+
+// equalProfileStores reports whether two profile maps hold the same credentials.
+func equalProfileStores(a, b map[string]map[string]Credential) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, m := range a {
+		other, ok := b[name]
+		if !ok || !maps.Equal(m, other) {
+			return false
+		}
+	}
+	return true
+}
+
+// setProfileCacheLocked replaces the profile cache with state just read from,
+// or written to, disk. Callers hold profileStoreMu.
+func setProfileCacheLocked(m map[string]map[string]Credential, info os.FileInfo) {
+	profileCache = m
+	profileCacheInfo = info
 	profileLoaded = true
+}
+
+// profileLoadFailed logs a failed load and returns err. Like loadFailed it keeps
+// the last good cache and its stamp, so readers keep seeing it and the next call
+// retries. Writers still refuse, since they return err from the reload.
+func profileLoadFailed(err error) error {
+	if err != nil {
+		profileLoadErr.log("load profile credentials", err)
+	}
+	return err
+}
+
+// profileReadableLocked refreshes the profile cache and reports whether it holds
+// a loaded state to read. As readableLocked does for the base store, a failed
+// reload keeps the last good state, and only a never-loaded store reads nothing.
+func profileReadableLocked() bool {
+	_ = ensureProfileStoreLocked()
+	return profileLoaded
+}
+
+// reloadProfileLocked reads the profile store from disk. A change against a
+// loaded cache bumps the credential version. Callers hold profileStoreMu.
+func reloadProfileLocked() error {
+	path, err := ProfileAuthPath()
+	if err != nil {
+		return fmt.Errorf("resolve profile auth path: %w", err)
+	}
+	disk, info, err := readProfileFile(path)
+	if err != nil {
+		return err
+	}
+	changed := profileLoaded && !equalProfileStores(profileCache, disk)
+	setProfileCacheLocked(disk, info)
+	if changed {
+		credentialVersion.Add(1)
+	}
 	return nil
 }
 
+// ensureProfileStoreLocked loads the profile store on first use and afterwards
+// reloads it only when another process changed the file (one stat per call).
 func ensureProfileStoreLocked() error {
-	if profileLoaded {
+	if !profileLoaded {
+		return profileLoadFailed(reloadProfileLocked())
+	}
+	path, err := ProfileAuthPath()
+	if err != nil {
+		return profileLoadFailed(fmt.Errorf("resolve profile auth path: %w", err))
+	}
+	info, err := os.Stat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return profileLoadFailed(fmt.Errorf("stat %s: %w", path, err))
+	}
+	if err != nil {
+		info = nil
+	}
+	if sameAuthFile(info, profileCacheInfo) {
 		return nil
 	}
-	return loadProfileStoreLocked()
+	return profileLoadFailed(reloadProfileLocked())
 }
 
-func writeProfileStoreLocked() error {
+// mutateProfileStoreLocked is the profile store's load-modify-write. Under the
+// file lock it re-reads the disk, applies mutate, and writes only when mutate
+// reports a change. It fires the save hook and bumps the version after the
+// write, never before it. Callers hold profileStoreMu.
+func mutateProfileStoreLocked(mutate func(map[string]map[string]Credential) (bool, error)) error {
 	path, err := ProfileAuthPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(profileCache, "", "  ")
+	var disk map[string]map[string]Credential
+	var info os.FileInfo
+	wrote := false
+	err = withAuthFileLock(path, func() error {
+		cur, curInfo, rerr := readProfileFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		changed, merr := mutate(cur)
+		if merr != nil {
+			return merr
+		}
+		if !changed {
+			disk, info = cur, curInfo
+			return nil
+		}
+		data, serr := json.MarshalIndent(cur, "", "  ")
+		if serr != nil {
+			return fmt.Errorf("marshal profile auth: %w", serr)
+		}
+		data = append(data, '\n')
+		if werr := writeFileAtomic(path, data); werr != nil {
+			return fmt.Errorf("write profile auth store: %w", werr)
+		}
+		stat, serr := os.Stat(path)
+		if serr != nil {
+			return fmt.Errorf("stat %s: %w", path, serr)
+		}
+		disk, info, wrote = cur, stat, true
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write profile auth tmp: %w", err)
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		// best effort
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename profile auth: %w", err)
-	}
-	OnCredentialsSaved.Fire()
+	adoptProfileStateLocked(disk, info, wrote)
 	return nil
+}
+
+// adoptProfileStateLocked is adoptAuthStateLocked for the profile store: it bumps
+// the version when this call wrote or when the re-read differs from the cached
+// profile state, so a peer write absorbed by a no-op still invalidates clients.
+// Caller holds profileStoreMu.
+func adoptProfileStateLocked(disk map[string]map[string]Credential, info os.FileInfo, wrote bool) {
+	changed := profileLoaded && !equalProfileStores(profileCache, disk)
+	setProfileCacheLocked(disk, info)
+	if wrote {
+		OnCredentialsSaved.Fire()
+	}
+	if wrote || changed {
+		credentialVersion.Add(1)
+	}
 }
 
 // GetProfileCredential returns the credential for profile/provider if present.
 func GetProfileCredential(profile, provider string) (Credential, bool) {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	if err := ensureProfileStoreLocked(); err != nil {
+	if !profileReadableLocked() {
 		return Credential{}, false
 	}
 	m, ok := profileCache[profile]
@@ -135,46 +245,47 @@ func GetProfileCredential(profile, provider string) (Credential, bool) {
 func SetProfileCredential(profile, provider string, cred Credential) error {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	if err := ensureProfileStoreLocked(); err != nil {
-		return err
-	}
-	if profileCache == nil {
-		profileCache = make(map[string]map[string]Credential)
-	}
-	m, ok := profileCache[profile]
-	if !ok {
-		m = make(map[string]Credential)
-		profileCache[profile] = m
-	}
-	m[provider] = cred
-	credentialVersion.Add(1)
-	return writeProfileStoreLocked()
+	return mutateProfileStoreLocked(func(m map[string]map[string]Credential) (bool, error) {
+		pm, ok := m[profile]
+		if !ok {
+			pm = make(map[string]Credential)
+			m[profile] = pm
+		} else if prev, had := pm[provider]; had && sameCredential(prev, cred) {
+			return false, nil
+		}
+		pm[provider] = cred
+		return true, nil
+	})
 }
 
-// RemoveProfileCredential deletes a provider credential from a profile.
+// RemoveProfileCredential deletes a provider credential from a profile. A
+// provider the profile does not hold writes nothing.
 func RemoveProfileCredential(profile, provider string) error {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	if err := ensureProfileStoreLocked(); err != nil {
-		return err
-	}
-	m, ok := profileCache[profile]
-	if !ok {
-		return nil
-	}
-	delete(m, provider)
-	if len(m) == 0 {
-		delete(profileCache, profile)
-	}
-	credentialVersion.Add(1)
-	return writeProfileStoreLocked()
+	return mutateProfileStoreLocked(func(m map[string]map[string]Credential) (bool, error) {
+		pm, ok := m[profile]
+		if !ok {
+			return false, nil
+		}
+		if _, had := pm[provider]; !had {
+			return false, nil
+		}
+		delete(pm, provider)
+		if len(pm) == 0 {
+			delete(m, profile)
+		}
+		return true, nil
+	})
 }
 
 // ListProfileCredentials returns provider->cred map for a profile (copy).
 func ListProfileCredentials(profile string) map[string]Credential {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	_ = ensureProfileStoreLocked()
+	if !profileReadableLocked() {
+		return nil
+	}
 	m, ok := profileCache[profile]
 	if !ok {
 		return nil
@@ -190,8 +301,10 @@ func ListProfileCredentials(profile string) map[string]Credential {
 func ListProfileNames() []string {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	_ = ensureProfileStoreLocked()
-	names := make([]string, 0, len(profileCache))
+	names := []string{}
+	if !profileReadableLocked() {
+		return names
+	}
 	for n := range profileCache {
 		names = append(names, n)
 	}
@@ -203,77 +316,47 @@ func ListProfileNames() []string {
 func DeleteProfileCredentials(profile string) error {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	if err := ensureProfileStoreLocked(); err != nil {
-		return err
-	}
-	delete(profileCache, profile)
-	credentialVersion.Add(1)
-	return writeProfileStoreLocked()
+	return mutateProfileStoreLocked(func(m map[string]map[string]Credential) (bool, error) {
+		if _, ok := m[profile]; !ok {
+			return false, nil
+		}
+		delete(m, profile)
+		return true, nil
+	})
 }
 
 // RenameProfileCredentials moves credentials from old to new profile name.
 func RenameProfileCredentials(oldName, newName string) error {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	if err := ensureProfileStoreLocked(); err != nil {
-		return err
-	}
-	m, ok := profileCache[oldName]
-	if !ok {
-		return fmt.Errorf("profile %q not found in auth sidecar", oldName)
-	}
-	if _, exists := profileCache[newName]; exists {
-		return fmt.Errorf("profile %q already exists in auth sidecar", newName)
-	}
-	profileCache[newName] = m
-	delete(profileCache, oldName)
-	credentialVersion.Add(1)
-	return writeProfileStoreLocked()
+	return mutateProfileStoreLocked(func(m map[string]map[string]Credential) (bool, error) {
+		pm, ok := m[oldName]
+		if !ok {
+			return false, fmt.Errorf("profile %q not found in auth sidecar", oldName)
+		}
+		if _, exists := m[newName]; exists {
+			return false, fmt.Errorf("profile %q already exists in auth sidecar", newName)
+		}
+		m[newName] = pm
+		delete(m, oldName)
+		return true, nil
+	})
 }
 
 // ProfileCredentialCount returns number of provider credentials for a profile.
 func ProfileCredentialCount(profile string) int {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	_ = ensureProfileStoreLocked()
+	if !profileReadableLocked() {
+		return 0
+	}
 	return len(profileCache[profile])
 }
 
-// ReloadProfileStore forces reload from disk (useful for tests).
+// ReloadProfileStore forces reload from disk (useful for tests). A change in
+// content bumps the credential version, as any other reload does.
 func ReloadProfileStore() error {
 	profileStoreMu.Lock()
 	defer profileStoreMu.Unlock()
-	profileLoaded = false
-	return loadProfileStoreLocked()
-}
-
-// lockProfileAuth acquires a file lock similar to ocodeconfig lock.
-func lockProfileAuth() (func(), error) {
-	path, err := ProfileAuthPath()
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	lockPath := path + ".lock"
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(lockPath) }, nil
-		}
-		if !os.IsExist(err) {
-			return nil, err
-		}
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 10*time.Second {
-			os.Remove(lockPath)
-			continue
-		}
-		if time.Now().After(deadline) {
-			return func() {}, nil
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	return profileLoadFailed(reloadProfileLocked())
 }

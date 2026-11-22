@@ -10,7 +10,7 @@ import (
 
 func withTempHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 }
 
 func TestSnapshotPathDiffersPerBlobType(t *testing.T) {

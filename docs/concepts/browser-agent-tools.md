@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Browser agent tool — agents see and drive the browser tabs of their session's machine
-description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), the backend-neutral tool schema and the static [ocode:htr_routing] shell-htrcli availability fragment, element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome or, with an htrcli token, the client''s browser over htrcli, subagents (own instances, same permission asks), the screenshot coordinate contract, timed frames contact sheets (view-only) and then_text waits, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
+description: 'The single browser tool (action enum) that any agent of a web/desktop session can use to list, open, screenshot, read, snapshot, find, controls, click, fill, type, check, select, pick, fill forms, upload files, wait on, and read the console and network of browser tabs. Covers how a session reaches tabs (the browsertabs strip, tab:<id> stateKeys, headless attach-if-absent that never replaces a panel sink, agent-opened tabs), the backend-neutral tool schema and the static [ocode:htr_routing] shell-htrcli availability fragment, element refs and their stale rule, same-origin iframe frames, upload confinement, remote-project sessions driving their host''s Chrome or, with an htrcli token, the client''s browser over htrcli, subagents (own instances, same permission asks), the optional Upstash box backend (the backend field, start and terminate, retained boxes, the box start ask, login states), the screenshot coordinate contract, timed frames contact sheets (view-only) and then_text waits, permission classes, which page-derived results the inbound guard scans, Stop cancellation on the image path, and known limits.'
 tags:
   - browser
   - agent
@@ -15,7 +15,7 @@ tags:
   - desktop
   - htr
   - htrcli
-timestamp: 2026-11-17T02:59:20Z
+timestamp: 2026-11-22T13:48:30+08:00
 ---
 # Browser agent tool
 
@@ -47,12 +47,14 @@ htrcli token (see Wiring and the htrcli section). The TUI's own chat agent does 
   remote project's session runs on its host. So this server never hands a remote
   project its local Chrome.
 - The tool is bound to the session's project root (`newBrowserTool`). Its
-  `Definition` is static: the action enum and the named-key enum are sorted, and
-  no tab id is ever in the schema.
+  `Definition` is fixed for the session: the action enum and the named-key enum are
+  sorted, and no tab id is ever in the schema. Only a session created with the
+  Upstash flag adds the backend property, the start and terminate actions, and the
+  `retain` property on start (see the Upstash box backend section).
 
 ## Tool schema and the HTR routing prompt
 
-- **The schema names no backend.** `browserTool.Definition` describes the tool as
+- **The base schema names no backend.** `browserTool.Definition` describes the tool as
   "Drive browser tabs on the machine running this session."
   (`internal/server/browser_tool.go`), and `Description()` as "Drive browser tabs
   on this machine: the project's Browser-panel tabs and tabs opened with
@@ -94,6 +96,77 @@ htrcli token (see Wiring and the htrcli section). The TUI's own chat agent does 
   the `browser` tool: it describes the machine's shell CLI availability, not this
   agent's toolset. `TestHTRRoutingPromptGatedOnConfig` pins the on/off/nil-config cases and
   the `system` role.
+
+## Upstash box backend
+
+A web/desktop session can also drive a headless Chromium in an Upstash Box, a cloud
+box that the server creates and deletes. It is a second backend beside `local`. The
+box is the `internal/boxsession` Manager's; the box itself is `internal/upstashbox`.
+Status, known limits and the open network-policy decision are in
+[the design spec](../superpowers/specs/2026-11-21-upstash-box-browser-backend-design.md)
+(section 8). Measurements are in [the spike findings](upstash-box-browser-spike-findings.md).
+
+- **Flag, fixed at creation.** A new session gets the box backend only when an
+  Upstash account exists. `HandleChat` writes the session metadata key
+  `upstash_browser` once, at creation (`upstashBrowserAtCreation`). A session created
+  with a preset id never gets it. `buildAgentSession` reads it on every rebuild
+  (`upstashBrowserFromMetadata`), so adding or removing an account never changes a
+  live session's tools array. Without the flag the `browser` and `browser_run`
+  definitions are byte-identical to before; tests pin a SHA-256.
+- **The `backend` field.** `browser` and `browser_run` take an optional `backend`,
+  `local` or `upstash`. Omitted, the session's default backend setting applies
+  (`backendFor`); an unreadable setting is a tool error. There is no fallback
+  between backends: an upstash failure is returned as an error, and a local call
+  never reaches a box. `browser_run` gets the field only in a flagged session and
+  passes the run's backend to every sub-step (see
+  [browser_run](browser-run-jev-step-loop.md)).
+- **Box actions.** `browser` gets `start` and `terminate`, valid only with
+  `backend=upstash`. `start` is the only call that creates a box. Any other upstash
+  call with no running box returns an error that tells the model to call `start`.
+  `start` takes `retain` (phase 5): a persistent box kept per login state, paused rather than
+  deleted when it goes idle or is terminated. `retain` is valid only with `action=start` on the
+  upstash backend (`browserRetainRule`), and a sub-agent cannot use it.
+- **Tabs and refs.** The box has no Browser-panel strip. Its tab state is namespaced
+  per backend and bound to the box id (`bindBox`), so a replaced box drops the
+  agent's remembered upstash tabs and element refs.
+- **Refusals on upstash.** `upload`, and a file list in a `fill_form` field, are
+  refused (`refuseBoxUploads`). A URL that names loopback, private, link-local,
+  CGNAT, ULA, NAT64 or 6to4 addresses is refused by `tool.BoxBrowserURLDenyReason`
+  before any navigate or open (`checkBoxBrowserURL`); hosts are mapped with IDNA
+  first.
+- **Login states.** A login state is a named file under
+  `<GlobalDataDir>/browse/login-states/` that holds the box's cookies and the localStorage
+  of each origin with a tab open at capture time. It lives on the ocode machine, never in
+  the box, and never syncs. The user assigns one per project (`upstash_box.login_states`,
+  set in the Upstash Box settings). Per-session assignment is not built, and no tool
+  argument names a login state; `none` gives a clean browser. `start` restores the state
+  before the box is published, and its result reports the notes (rejected cookies, skipped
+  origins). Each box teardown saves the state before it deletes or pauses the box, and a debounced
+  checkpoint runs after browser calls. A second session that asks for a state in use is
+  refused with the holder named, and no box is created. File tools and bash lines that name
+  the directory are an Ask in normal and sandbox modes, a Deny in locked and an Allow in
+  yolo; the Ask is human-only. Storage, restore, the hold and protection are in
+  [the design spec](../superpowers/specs/2026-11-21-upstash-box-browser-backend-design.md)
+  (4.6), and [sandbox permission mode](sandbox-permission-mode.md) lists the directory
+  with the other protected paths.
+- **Sub-agents.** A sub-agent may use the session's running box. `Refusal` blocks
+  `start`, `terminate` and `retain` for every sub-agent.
+- **Permission: `browser.box_start`.** `start` asks under its own category
+  (`agent.BrowserBoxStartRule`). It is a static ask in normal and sandbox modes,
+  denied in locked mode and allowed in YOLO. A `retain` start's ask says the box is RETAINED
+  (kept between sessions, paused when idle). The auto-permission judge is never
+  consulted for it, it offers no always-allow choice, no tool allow rule covers it,
+  and Pulse's `permission_resolve` refuses to approve it.
+- **Lifecycle.** An ephemeral box has a ttl equal to the hard cap. The Manager deletes it on
+  session close, server shutdown, the idle timeout, the hard cap, and `terminate`. A retained
+  box (`retain`, one per login state, named `ocode-ls-<login state>`) is paused instead on
+  session close, shutdown, the idle timeout and `terminate`. It has no hard cap. Its delete-at
+  is its last use plus the account's retained-box period (default 14 days). The `Tick` sweep
+  deletes it when that passes, which needs a running ocode. After an idle pause, browser calls
+  return `ErrPaused` until the next start or terminate. The Settings boxes list shows a
+  retained badge and no Resume button. Its resume route answers 409, because a retained start
+  resumes the box instead. `/reset-id` moves the box to the new session id (`rekeyBoxSession`).
+  `browser_run` never calls `start`.
 
 ## Subagents
 
@@ -219,7 +292,9 @@ ask is what gates that network access, as it does for bash.
   [the allowed-hosts list](permissions-allowed-hosts.md).
 - **Sandbox mode does not apply.** Sandbox confines bash writes and checks bash
   commands statically. The browser tool is not a shell, so sandbox mode leaves it
-  alone; the permission rules above still apply.
+  alone; the permission rules above still apply. The one exception is the box
+  `start` action, which is a static ask in sandbox mode (see the Upstash box backend
+  section).
 
 ## Actions and permission classes
 
@@ -785,6 +860,16 @@ open.
 
 ## Code map
 
+- Upstash box backend: `internal/server/browser_boxes.go` (`backendFor`, `targetFor`,
+  `bindBox`, `refuseBoxUploads`, `checkURLFor`), `internal/server/browser_boxes_manager.go`
+  (`boxSurfaces`, `handlerBoxes`, `boxManager`, `terminateSessionBox`, `shutdownBoxes`,
+  `rekeyBoxSession`, `upstashBrowserAtCreation`, `upstashBrowserFromMetadata`),
+  `internal/server/browser_tool.go` (`withBoxes`, the sub-agent `Refusal`),
+  `internal/boxsession/manager.go` (`Manager`, `Start`, `startRetained`, `retireBox`,
+  `parkRetained`, `Tick`, `sweepRetained`), `internal/boxsession/journal.go` (`Journal`,
+  `Resume`, `RetainedDue`, `ClaimDue`), `internal/tool/browser_url.go`
+  (`BoxBrowserURLDenyReason`), `internal/agent/permissions.go` (`BrowserBoxStartRule`,
+  `IsBrowserBoxStartRequest`).
 - `internal/browse/cdp/manager.go`: `attachMu`, `Attach`, `attachLocked`,
   `EnsureHeadless`, `OpenHeadless`, `CloseTarget`, `closeTarget`, `LookupTarget`.
 - `internal/browse/cdp/target_agent.go`: `Screenshot`, `PageText`, `Click`,
