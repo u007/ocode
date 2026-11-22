@@ -166,8 +166,12 @@ type handlerBoxes struct {
 	h *Handler
 }
 
-// Start creates the session's box, or reports the one already running.
+// Start creates the session's box, or reports the one already running. It holds
+// the account read lock, so an account delete (write lock) cannot remove the key
+// between this start and the box it creates.
 func (b handlerBoxes) Start(ctx context.Context, sessionID string, retain bool) (browserBoxStatus, error) {
+	b.h.boxAccountMu.RLock()
+	defer b.h.boxAccountMu.RUnlock()
 	mgr, err := b.h.boxManager()
 	if err != nil {
 		return browserBoxStatus{}, err
@@ -425,6 +429,119 @@ func (h *Handler) resumeBoxSweepIfJournaled() {
 	if _, err := h.boxManager(); err != nil {
 		log.Printf("server: upstash box sweep: %v", err)
 	}
+}
+
+const (
+	// boxReconcileGrace keeps the startup reconcile away from a box another ocode
+	// process has just created and not yet journaled.
+	boxReconcileGrace = 10 * time.Minute
+	// boxReconcileListTimeout and boxReconcileDeleteTimeout bound each remote call
+	// so a slow or dead account cannot hold the reconcile, or a startup goroutine.
+	boxReconcileListTimeout   = 15 * time.Second
+	boxReconcileDeleteTimeout = 15 * time.Second
+)
+
+// startBoxReconcile runs the orphan sweep once at startup, off the serve path.
+func (h *Handler) startBoxReconcile() {
+	crashguard.Go(func() { h.reconcileOrphanBoxes(context.Background()) })
+}
+
+// reconcileOrphanBoxes deletes this installation's boxes that no journal row and
+// no live session knows about. The window it covers is a crash between a box
+// create and its journal rename: the box bills but nothing will ever sweep it.
+// The list is scoped to this installation's random label, so a box of another
+// installation on the same Upstash account is never seen, let alone deleted. A
+// box younger than boxReconcileGrace is left alone, because another ocode
+// process on this installation may be between create and journal. Each account
+// is independent: a failure is logged and the next account still runs.
+func (h *Handler) reconcileOrphanBoxes(ctx context.Context) {
+	cfg, err := config.LoadUpstashBoxConfig()
+	if err != nil {
+		log.Printf("upstash boxes: reconcile: read settings: %v", err)
+		return
+	}
+	if len(cfg.Accounts) == 0 {
+		return
+	}
+	label, err := h.boxInstallationLabel()
+	if err != nil {
+		log.Printf("upstash boxes: reconcile: installation label: %v", err)
+		return
+	}
+	for _, acc := range cfg.Accounts {
+		if err := h.reconcileAccountBoxes(ctx, acc.ID, label); err != nil {
+			log.Printf("upstash boxes: reconcile: account %s: %v", acc.ID, err)
+		}
+	}
+}
+
+// reconcileAccountBoxes deletes the orphaned boxes of one account. The journal
+// and live statuses are re-read under the account write lock, so a start that
+// completed while the list was in flight is never deleted.
+func (h *Handler) reconcileAccountBoxes(ctx context.Context, accountID, label string) error {
+	key, ok := auth.UpstashBoxAPIKey(accountID)
+	if !ok {
+		return errors.New("no API key is stored")
+	}
+	client, err := h.upstashBoxClient(key)
+	if err != nil {
+		return fmt.Errorf("build the box client: %w", err)
+	}
+	listCtx, cancel := context.WithTimeout(ctx, boxReconcileListTimeout)
+	boxes, err := client.List(listCtx, label)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("list boxes: %w", err)
+	}
+	for _, b := range boxes {
+		if b.CreatedAt.IsZero() || time.Since(b.CreatedAt) < boxReconcileGrace {
+			continue
+		}
+		h.boxAccountMu.Lock()
+		if h.boxKnown(b.ID) {
+			h.boxAccountMu.Unlock()
+			continue
+		}
+		delCtx, cancel := context.WithTimeout(ctx, boxReconcileDeleteTimeout)
+		err := client.Delete(delCtx, b.ID)
+		cancel()
+		h.boxAccountMu.Unlock()
+		if err != nil && !upstashBoxGone(err) {
+			log.Printf("upstash boxes: reconcile: delete box %s: %v", b.ID, err)
+			continue
+		}
+		log.Printf("upstash boxes: reconcile: deleted orphaned box %s", b.ID)
+	}
+	return nil
+}
+
+// boxKnown reports whether a journal row or a live session still owns boxID. A
+// journal it cannot read counts as known: the reconcile never deletes a box it
+// cannot prove is orphaned.
+func (h *Handler) boxKnown(boxID string) bool {
+	if mgr := h.boxManagerIfBuilt(); mgr != nil {
+		for _, st := range mgr.Statuses() {
+			if st.BoxID == boxID {
+				return true
+			}
+		}
+	}
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		log.Printf("upstash boxes: reconcile: open journal: %v", err)
+		return true
+	}
+	rows, err := journal.List()
+	if err != nil {
+		log.Printf("upstash boxes: reconcile: read journal: %v", err)
+		return true
+	}
+	for _, e := range rows {
+		if e.BoxID == boxID {
+			return true
+		}
+	}
+	return false
 }
 
 // boxLoginStateFor returns the login state assigned to a session's project, or ""

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"time"
 
@@ -609,5 +611,26 @@ func (j *Journal) save(entries []Entry) error {
 	if err := os.Rename(tmpName, j.path); err != nil {
 		return fmt.Errorf("boxsession: replace journal: %w", err)
 	}
+	syncParentDir(j.path)
 	return nil
+}
+
+// syncParentDir makes a completed rename durable. A directory fsync is not
+// supported on every platform (Windows), and the bytes are already written, so a
+// failure is logged rather than returned: the caller must not treat a persisted
+// journal (or login state) as lost.
+func syncParentDir(path string) {
+	if runtime.GOOS == "windows" {
+		return // os.Open on a directory fails there; the rename is as durable as Windows offers
+	}
+	dirPath := filepath.Dir(path)
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		log.Printf("boxsession: open %s to sync it: %v", dirPath, err)
+		return
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		log.Printf("boxsession: sync %s: %v", dirPath, err)
+	}
 }

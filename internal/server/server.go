@@ -229,6 +229,9 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	s.registerRoutes()
 	// Sweep an earlier process's orphaned Upstash boxes now, when the journal has rows.
 	h.resumeBoxSweepIfJournaled()
+	// Delete boxes a crashed earlier process created but never journaled. Off the
+	// serve path: it lists each account over the network.
+	h.startBoxReconcile()
 	return s
 }
 

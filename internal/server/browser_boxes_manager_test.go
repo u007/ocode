@@ -783,3 +783,44 @@ func TestBuildAgentSessionRefusesAnUnreadableSessionFile(t *testing.T) {
 		t.Fatalf("unreadable transcript: stage %q err %v, want the session-load stage failing", stage, err)
 	}
 }
+
+// TestReconcileBoxesDeletesOnlyOldOrphans covers the crash window between a box
+// create and its journal rename: a labelled box older than the grace with no
+// journal row is deleted, while a journaled box and a just-created one are kept.
+func TestReconcileBoxesDeletesOnlyOldOrphans(t *testing.T) {
+	mux, h := upstashTestServer(t)
+	id := upstashCreate(t, mux, "Work", "ubx-k-reconcile123456")
+	fake := &fakeUpstashBoxAPI{}
+	wireUpstashBoxClient(t, h, fake)
+	label, err := h.boxInstallationLabel()
+	if err != nil {
+		t.Fatalf("boxInstallationLabel: %v", err)
+	}
+	now := time.Now()
+	fake.boxes = []map[string]any{
+		wireBox("orphan-old", now.Add(-time.Hour), true, []string{label}),
+		wireBox("known", now.Add(-time.Hour), true, []string{label}),
+		wireBox("orphan-young", now, true, []string{label}),
+	}
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Add(boxsession.Entry{
+		BoxID: "known", AccountID: id, Kind: boxsession.KindEphemeral, SessionID: "ses-1",
+	}); err != nil {
+		t.Fatalf("journal.Add: %v", err)
+	}
+
+	h.reconcileOrphanBoxes(context.Background())
+
+	var deleted []string
+	for _, c := range fake.calls {
+		if strings.HasPrefix(c, "DELETE /v2/box/") {
+			deleted = append(deleted, strings.TrimPrefix(c, "DELETE /v2/box/"))
+		}
+	}
+	if len(deleted) != 1 || deleted[0] != "orphan-old" {
+		t.Fatalf("deleted = %v, want [orphan-old]", deleted)
+	}
+}

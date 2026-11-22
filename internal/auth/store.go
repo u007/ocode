@@ -374,10 +374,31 @@ func writeFileAtomic(path string, data []byte) error {
 		removeTempFile(tmp)
 		return fmt.Errorf("rename %s: %w", path, err)
 	}
+	syncParentDir(path)
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	return nil
+}
+
+// syncParentDir makes a completed rename durable. A directory fsync is not
+// supported on every platform (Windows), and the file bytes are already written,
+// so a failure is logged rather than returned: returning it would report a saved
+// credential as lost and leave the in-memory cache on the old value.
+func syncParentDir(path string) {
+	if runtime.GOOS == "windows" {
+		return // os.Open on a directory fails there; the rename is as durable as Windows offers
+	}
+	dirPath := filepath.Dir(path)
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		log.Printf("auth: open %s to sync it: %v", dirPath, err)
+		return
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		log.Printf("auth: sync %s: %v", dirPath, err)
+	}
 }
 
 func writeSyncedFile(name string, data []byte) (err error) {

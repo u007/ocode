@@ -318,6 +318,10 @@ func (h *Handler) HandleUpstashAccountUpdate(w http.ResponseWriter, r *http.Requ
 // is restored, so the two never disagree.
 func (h *Handler) HandleUpstashAccountDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Held across the box cleanup AND the key removal, so a Start cannot create a
+	// box after the cleanup and then lose its account key.
+	h.boxAccountMu.Lock()
+	defer h.boxAccountMu.Unlock()
 	if err := h.deleteAccountBoxes(r.Context(), id); err != nil {
 		log.Printf("upstash accounts: delete %s: %v", id, err)
 		writeError(w, http.StatusBadGateway, err.Error())

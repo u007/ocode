@@ -267,6 +267,13 @@ type Handler struct {
 	// boxMu guards the Upstash box fields below. It is never held across box IO
 	// that a request waits on beyond the one-time manager build, and never with h.mu.
 	boxMu sync.Mutex
+	// boxAccountMu excludes an account delete from box starts for the same
+	// installation. handlerBoxes.Start holds it for read, so starts run in
+	// parallel; HandleUpstashAccountDelete holds it for write across its box
+	// cleanup AND the key/config removal, which is what closes the window where a
+	// Start could create a box after the cleanup and lose its key. Lock order:
+	// boxAccountMu before boxMu and before any session gate; never the reverse.
+	boxAccountMu sync.RWMutex
 	// boxes is the Upstash box manager. Nil until a box is first needed (see boxManager).
 	boxes *boxsession.Manager
 	// boxStop cancels the manager's reaper loop; shutdownBoxes calls it.

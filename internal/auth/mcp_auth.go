@@ -161,6 +161,7 @@ func writeMCPAuthFile(path string, authFile mcpAuthFile) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename mcp auth file: %w", err)
 	}
+	syncParentDir(path)
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("chmod mcp auth file: %w", err)
 	}

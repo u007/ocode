@@ -509,6 +509,7 @@ func (s *LoginStateStore) writeAtomic(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("login states: rename into place: %w", err)
 	}
+	syncParentDir(path)
 	return nil
 }
 

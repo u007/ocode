@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/boxsession"
@@ -815,5 +817,70 @@ func TestUpstashAccountDeleteTreatsAGoneBoxAsDeleted(t *testing.T) {
 	}
 	if _, ok := auth.UpstashBoxAPIKey(id); ok {
 		t.Fatal("the account key is still stored")
+	}
+}
+
+// TestUpstashAccountDeleteWaitsForAnInFlightStart: the delete takes the account
+// write lock across its box cleanup and key removal, so a box start that is
+// already in flight finishes first and cannot slip a new box past the cleanup.
+func TestUpstashAccountDeleteWaitsForAnInFlightStart(t *testing.T) {
+	mux, h := upstashTestServer(t)
+	id := upstashCreate(t, mux, "Work", "ubx-k-lock1234567890ab")
+	fake := &fakeUpstashBoxAPI{}
+	wireUpstashBoxClient(t, h, fake)
+	journal, err := upstashBoxJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Add(boxsession.Entry{
+		BoxID: "box-1", AccountID: id, Kind: boxsession.KindRetained,
+		LoginState: "work", SessionID: "ses-1",
+	}); err != nil {
+		t.Fatalf("journal.Add: %v", err)
+	}
+
+	h.boxAccountMu.RLock() // a Start is in flight
+	done := make(chan int, 1)
+	go func() {
+		code, _ := upstashDo(t, mux, http.MethodDelete, "/api/upstash/accounts/"+id, nil)
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("delete returned %d while a start held the read lock", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	h.boxAccountMu.RUnlock()
+	select {
+	case code := <-done:
+		if code != http.StatusNoContent {
+			t.Fatalf("delete after the start = %d, want 204", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("delete did not resume after the start released the lock")
+	}
+}
+
+// TestHandlerBoxesStartWaitsForTheAccountLock: a Start takes the account read
+// lock, so while a delete holds the write lock no box can be created.
+func TestHandlerBoxesStartWaitsForTheAccountLock(t *testing.T) {
+	_, h := upstashTestServer(t)
+	h.boxes = newTestBoxManager(t, &fakeBoxAPI{}, "ocode-test-lock")
+	h.boxAccountMu.Lock()
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = handlerBoxes{h: h}.Start(context.Background(), "ses-1", false)
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+		t.Fatal("Start ran while the account write lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	h.boxAccountMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not resume after the write lock was released")
 	}
 }
