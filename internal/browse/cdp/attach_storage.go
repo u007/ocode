@@ -618,7 +618,7 @@ func (m *Manager) loginIdentities(s *loginSeedState) map[string]*loginTab {
 // current connection, for the committed generation, and for an origin that is
 // still unapplied. The origin's script is then removed from every tab, so no
 // later document of that origin is seeded. A removal that fails is logged by
-// origin name and retried at the next seed change.
+// origin name and retried at the next report from that origin.
 func (m *Manager) loginOriginApplied(t *Target, payload string) {
 	var rep struct {
 		Origin string `json:"origin"`
@@ -645,19 +645,35 @@ func (m *Manager) loginOriginApplied(t *Target, payload string) {
 	if s.applied == nil {
 		s.applied = make(map[string]bool)
 	}
-	s.applied[rep.Origin] = true
-	delete(s.sources, rep.Origin)
 	for _, tab := range s.tabs {
 		id, ok := tab.ids[rep.Origin]
 		if !ok {
 			continue
 		}
 		if err := removeLoginSeedScript(context.Background(), tab.conn, tab.sessionID, id); err != nil {
-			m.logLogin("browse: attach: could not remove the login-state seed for %s from tab %s; the next seed change retries: %v", rep.Origin, tab.key, err)
+			m.logLogin("browse: attach: could not remove the login-state seed for %s from tab %s; the next report retries: %v", rep.Origin, tab.key, err)
 			continue
 		}
 		delete(tab.ids, rep.Origin)
 	}
+	// Only mark the origin applied once every registered script is gone. A failed
+	// removal must leave it unapplied: its script is still registered, so a later
+	// document applies it again and reports again, which retries the removal.
+	if loginSeedRemovalPending(s.tabs, rep.Origin) {
+		return
+	}
+	s.applied[rep.Origin] = true
+	delete(s.sources, rep.Origin)
+}
+
+// loginSeedRemovalPending reports whether any tab still holds a script for origin.
+func loginSeedRemovalPending(tabs map[string]*loginTab, origin string) bool {
+	for _, tab := range tabs {
+		if _, ok := tab.ids[origin]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // LoginSeedUnapplied returns the origins the committed seed still holds for

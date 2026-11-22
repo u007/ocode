@@ -1249,3 +1249,60 @@ func loginGenOf(m *Manager) uint64 {
 	defer s.mu.Unlock()
 	return s.gen
 }
+
+// TestLoginSeedFailedRemovalOnReportIsRetried pins that a failed removal on the
+// report path leaves the origin unapplied. Marking it applied first leaves its
+// script registered, so every later document in the tab re-applies stale
+// localStorage with no retry until the next seed change.
+func TestLoginSeedFailedRemovalOnReportIsRetried(t *testing.T) {
+	stub := newStubChrome()
+	defer stub.Close()
+	m := attachTestManager(t, stub)
+	ctx := context.Background()
+
+	var failRemove atomic.Bool
+	failRemove.Store(true)
+	stub.SetResponder(func(method, _ string, params json.RawMessage) (any, string, bool) {
+		switch {
+		case method == "Page.removeScriptToEvaluateOnNewDocument" && failRemove.Load():
+			return nil, "remove refused", true
+		case method == "Page.addScriptToEvaluateOnNewDocument" && strings.Contains(string(params), `"worldName"`):
+			return map[string]string{"identifier": "seed-1"}, "", true
+		}
+		return nil, "", false
+	})
+	if _, err := m.SetLocalStorageSeed(ctx, map[string]map[string]string{"https://example.com": {"k": "v"}}); err != nil {
+		t.Fatalf("SetLocalStorageSeed: %v", err)
+	}
+	tab, _, err := m.EnsureHeadless(ctx, "tab:1")
+	if err != nil {
+		t.Fatalf("EnsureHeadless: %v", err)
+	}
+	report := func() {
+		stub.InjectEvent(tab.sessionID, "Runtime.bindingCalled", map[string]any{
+			"name":               loginSeedBinding,
+			"payload":            fmt.Sprintf(`{"origin":"https://example.com","gen":%d}`, loginGenOf(m)),
+			"executionContextId": 7,
+		})
+	}
+	unapplied := func(list []string) bool {
+		for _, s := range list {
+			if s == "https://example.com" {
+				return true
+			}
+		}
+		return false
+	}
+
+	report()
+	waitForCall(t, stub, "Page.removeScriptToEvaluateOnNewDocument", func(c stubCall) bool {
+		return c.SessionID == tab.sessionID && paramOf(c, "identifier") == "seed-1"
+	})
+	if got := m.LoginSeedUnapplied(); !unapplied(got) {
+		t.Fatalf("Unapplied = %v after a failed removal, want example.com still listed", got)
+	}
+
+	failRemove.Store(false)
+	report()
+	waitFor(t, func() bool { return !unapplied(m.LoginSeedUnapplied()) })
+}
