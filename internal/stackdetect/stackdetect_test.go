@@ -1,6 +1,7 @@
 package stackdetect
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -178,6 +179,16 @@ func TestDetect(t *testing.T) {
 			files: map[string]string{"a.pdf": "%PDF", "b.docx": "PK", "c.pptx": "PK"},
 			want:  []string{"docx", "pdf", "pptx"},
 		},
+		{
+			name:  "xlsx inside a dot-directory one level down → xlsx",
+			files: map[string]string{".hidden/a.xlsx": "PK"},
+			want:  []string{"xlsx"},
+		},
+		{
+			name:  "docx three levels down is not detected",
+			files: map[string]string{"a/b/c/deep.docx": "PK"},
+			want:  nil,
+		},
 	}
 
 	for _, tc := range cases {
@@ -204,5 +215,56 @@ func TestDetect_missingRoot(t *testing.T) {
 	// A root that doesn't exist must be treated as "no stacks", not a panic.
 	if got := Detect(filepath.Join(t.TempDir(), "does-not-exist")); got != nil {
 		t.Fatalf("Detect(missing) = %v, want nil", got)
+	}
+}
+
+func TestDetect_depthMarkersFollowSymlinksAndMatchNames(t *testing.T) {
+	t.Run("docx two levels down through a symlinked directory", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(t.TempDir(), "dir")
+		write(t, target, "sub/x.docx", "PK")
+		if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if got, want := Detect(root), []string{"docx"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("Detect() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("directory named x.pdf at root matches by name", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "x.pdf"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := Detect(root), []string{"pdf"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("Detect() = %v, want %v", got, want)
+		}
+	})
+}
+
+func BenchmarkDetect(b *testing.B) {
+	root := b.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		for j := 0; j < 30; j++ {
+			dir := filepath.Join(root, fmt.Sprintf("d%02d", i), fmt.Sprintf("s%02d", j))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				b.Fatal(err)
+			}
+			for k := 0; k < 3; k++ {
+				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.txt", k)), nil, 0o644); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+	if got := Detect(root); !reflect.DeepEqual(got, []string{"golang"}) {
+		b.Fatalf("Detect() = %v, want [golang]", got)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Detect(root)
 	}
 }

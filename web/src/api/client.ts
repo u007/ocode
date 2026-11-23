@@ -4750,23 +4750,26 @@ export const api = {
       undefined,
       host,
     ),
-  getChangeDiff: (session: string | undefined, path: string, host?: string) =>
+  getChangeDiff: (session: string | undefined, path: string, host?: string, projectRoot?: string) =>
     fetchJSON<ChangeDiff>(
       `/api/changes/diff?${session ? `session=${encodeURIComponent(session)}&` : ""}path=${encodeURIComponent(path)}`,
       undefined,
       host,
+      projectRoot,
     ),
-  undoChangeFile: (session: string | undefined, path: string, host?: string) =>
+  undoChangeFile: (session: string | undefined, path: string, host?: string, projectRoot?: string) =>
     fetchJSON<Record<string, never>>(
       `/api/changes/undo-file${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST", body: JSON.stringify({ path }) },
       host,
+      projectRoot,
     ),
-  undoChangeBlock: (session: string | undefined, path: string, host?: string) =>
+  undoChangeBlock: (session: string | undefined, path: string, host?: string, projectRoot?: string) =>
     fetchJSON<Record<string, never>>(
       `/api/changes/undo-block${session ? `?session=${encodeURIComponent(session)}` : ""}`,
       { method: "POST", body: JSON.stringify({ path }) },
       host,
+      projectRoot,
     ),
 
   // ── UML tab (AST symbol index) ──

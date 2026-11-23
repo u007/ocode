@@ -792,15 +792,16 @@ function HomeApp() {
       line?: number,
       query?: string,
       fallbackQuickOpen = false,
+      hostOverride?: string,
     ) => {
       // Resolve the host for this project root. When the root is the ACTIVE
       // project's, the active project is authoritative — a path-only lookup
       // would be ambiguous if a remote SSH project and a local project share an
       // absolute path, and could route a local open through the remote host.
       const activeProject = projectState.activeProject;
-      const host = activeProject && activeProject.path === projectRoot
+      const host = hostOverride ?? (activeProject && activeProject.path === projectRoot
         ? activeProject.host
-        : projectState.projects.find((p) => p.path === projectRoot)?.host;
+        : projectState.projects.find((p) => p.path === projectRoot)?.host);
       if (query && query.trim()) {
         setPendingHighlight(path, query.trim(), line, projectRoot);
       } else if (line && line > 0) {
@@ -2320,7 +2321,7 @@ function HomeApp() {
                               host={resolveSessionHost(projectState, tab.id)}
                               active={isActive}
                               projectRoot={tab.projectPath}
-                              onOpenFile={openFileAndShow}
+                              onOpenFile={(path, projectRoot) => openFileAndShow(path, projectRoot, undefined, undefined, false, resolveSessionHost(projectState, tab.id))}
                               loadingKey={changesLoadingKey}
                               onLoadingEvent={handleTabLoadingEvent}
                             />

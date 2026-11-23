@@ -5,10 +5,13 @@ interface Props {
   session?: string;
   /** SSH/WSL host of the session's project (undefined for local). */
   host?: string;
+  /** Project root the session belongs to; carried as the proxy admission
+   *  identity for remote hosts so ?path= (the file) is not misread. */
+  projectRoot?: string;
   path: string;
 }
 
-export default function ChangesDiffView({ session, host, path }: Props) {
+export default function ChangesDiffView({ session, host, path, projectRoot }: Props) {
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -17,7 +20,7 @@ export default function ChangesDiffView({ session, host, path }: Props) {
     setPatch(null);
     setError(null);
     api
-      .getChangeDiff(session, path, host)
+      .getChangeDiff(session, path, host, projectRoot)
       .then((res) => {
         if (!cancelled) setPatch(res.patch);
       })
@@ -27,7 +30,7 @@ export default function ChangesDiffView({ session, host, path }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [session, host, path]);
+  }, [session, host, path, projectRoot]);
 
   if (error) return <div className="p-2 text-xs text-red-400">{error}</div>;
   if (patch === null) return <div className="p-2 text-xs text-muted-foreground">Loading diff…</div>;

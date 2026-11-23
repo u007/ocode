@@ -80,9 +80,9 @@ function ChangesPanel({ session, host, active = true, projectRoot, onOpenFile, l
     if (!pendingUndo) return;
     try {
       if (pendingUndo.kind === "file") {
-        await api.undoChangeFile(session, pendingUndo.path, host);
+        await api.undoChangeFile(session, pendingUndo.path, host, projectRoot);
       } else {
-        await api.undoChangeBlock(session, pendingUndo.path, host);
+        await api.undoChangeBlock(session, pendingUndo.path, host, projectRoot);
       }
       await refresh();
     } catch (err) {
@@ -114,7 +114,7 @@ function ChangesPanel({ session, host, active = true, projectRoot, onOpenFile, l
       </div>
       {selectedPath && (
         <div className="border-t border-border max-h-[40vh] overflow-y-auto">
-          <ChangesDiffView session={session} host={host} path={selectedPath} />
+          <ChangesDiffView session={session} host={host} path={selectedPath} projectRoot={projectRoot} />
         </div>
       )}
       <Dialog open={pendingUndo !== null} onOpenChange={(open) => !open && setPendingUndo(null)}>

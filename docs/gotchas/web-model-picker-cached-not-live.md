@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Web model picker must open from the cached model list, not a live refresh
-description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter; 2026-11-19 dialog open state moved out of App, Radix menu only on removable rows, deferred row mount on reopen'
+description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter; 2026-11-19 dialog open state moved out of App, Radix menu only on removable rows, deferred row mount on reopen; 2026-11-23 model label lag was server time: stackdetect.Detect re-walked the project tree on every status snapshot, fixed with a per-call directory cache'
 resource: ""
 tags:
   - gotcha
@@ -21,14 +21,19 @@ tags:
   - context-menu
   - deferred-value
   - host-component
-timestamp: 2026-11-19T15:25:32Z
+  - stack-detection
+  - glob
+  - status-snapshot
+  - profiling
+  - label-lag
+timestamp: 2026-11-23T06:01:28Z
 ---
 # Web model picker must open from the cached model list, not a live refresh
 
 **Type:** Gotcha  
-**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer; on 2026-11-19 also the dialog's open state in the root App re-rendering the whole app, a Radix menu on every row, and the full row list mounting inside the click  
-**Resource:** web/src/components/Layout/ModelDialog.tsx; web/src/components/Layout/ModelDialogHost.tsx; web/src/App.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go  
-**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload, re-render, radix, context-menu, deferred-value, host-component  
+**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer; on 2026-11-19 also the dialog's open state in the root App re-rendering the whole app, a Radix menu on every row, and the full row list mounting inside the click; on 2026-11-23 the sidebar model label lagged because `stackdetect.Detect` re-walked the project tree on every status snapshot (fixed with a per-call directory cache)  
+**Resource:** web/src/components/Layout/ModelDialog.tsx; web/src/components/Layout/ModelDialogHost.tsx; web/src/App.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go; internal/stackdetect/stackdetect.go; internal/server/model_context.go; internal/server/handler_session_state.go; internal/skill/loader.go  
+**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload, re-render, radix, context-menu, deferred-value, host-component, stack-detection, glob, status-snapshot, profiling, label-lag  
 
 ---
 
@@ -60,6 +65,8 @@ payload 1.2–1.3 MB / ~8,207 models / 223 providers.
    Filter server-side behind a `configured=true` opt-in so other consumers are unaffected.
 6. **Keep a dialog's open state in a small host component, not in a large root component.** Opening or closing it re-renders everything below the root. Expose `open(purpose)` through a ref (§6).
 7. **Do not wrap every list row in a Radix menu root when only a few rows have a menu.** Wrap only the rows that have menu content (§7).
+8. **A helper documented as cheap, once per session, must be profiled on a real repo when it sits on a status or poll path.** `stackdetect.Detect` describes itself as a cheap, non-walking check, but its depth-limited `filepath.Glob` patterns each re-read the directories below the project root, and it ran several times per status snapshot (about 170 ms per call on the ocode repo). See §9.
+9. **Measure the server before blaming the dialog when a label updates late.** Time the PUT with curl and take a CPU profile from `/debug/pprof/profile` on a private `ocode serve`. A dialog that paints in under 100 ms can still leave the sidebar label stale for 0.6-0.9 s (§9).
 
 ## 1. Dialog opened with `refresh: true` — live provider fetch on every open
 
@@ -179,6 +186,36 @@ dialog's first paint (~330 ms open-to-paint in dev). `listReady = useDeferredVal
 modelNavIds : NO_NAV_IDS`, an empty `readonly string[]`), so a keypress in that window cannot target a
 row that is not mounted.
 
+## 9. Model pick label lag was server time: stackdetect.Detect on every status snapshot (2026-11-23)
+
+Symptom: after the 2026-11-19 client fixes, choosing a model on the web and desktop UI still lagged, and closing the dialog still lagged.
+
+**The client was not the cause.** A production build served by a private `ocode serve` on :4197, measured in headless Chromium and in Playwright WebKit: dialog open-to-paint 45-90 ms, close first paint 30-60 ms, dialog gone after ~200-250 ms (the 200 ms exit animation of the shared dialog, `duration-200` in `web/src/components/ui/dialog.tsx`), no long tasks, worst frame gap ~40 ms, even with a 600-message session open.
+
+**The cause was the server.** For a real session, `ModelDialog.handleSelect` makes no optimistic write, so the sidebar Model label changes only when the server's session-tagged `status` SSE event arrives. `HandleSetSessionModel` (`internal/server/handler_session_state.go`) runs the metadata write, `config.SaveRecentModel`, `reconcileProfileAgent` (an agent rebuild when the session is resident) and then `pushSessionStatusSnapshot`. It took 0.5-0.8 s per pick. A pprof CPU profile put 84% of handler CPU in `pushSessionStatusSnapshot`, almost all of it in `buildModelPromptInfo` (`internal/server/model_context.go`), which calls `skill.KaizenSkillsForModel` (`internal/skill/loader.go`) and so `stackdetect.Detect`.
+
+**Why `Detect` was slow.** It ran twice per session snapshot (`buildStatusSnapshot` in `internal/server/handler_tui_status.go`, and again through `applySessionModelPrompt`), once more on the agent's discovery path (`internal/agent/discovery_glue.go`), and again for `/api/models` through `skill.KaizenDigestAdmittedForModels`. Each call ran `stackMatches`, which made one `filepath.Glob` per file marker. The registry has 16 depth-limited patterns (`*/*.ext` and `*/*/*.ext`), all in the pdf, docx, pptx and xlsx stacks, and each Glob re-read every directory one and two levels below the project root, `node_modules` included. That was about 170 ms per `Detect` on the ocode repo.
+
+**Fix** (`internal/stackdetect/stackdetect.go`). `Detect` builds one `dirCache` per call (`newDirCache`), which lists each directory at most once, with the levels built lazily. A pattern whose directory parts are all `*` is matched with `filepath.Match` against the cached names (`fileMarkerMatches`, `starDepth`). Literal names and globs with a literal directory stay on `filepath.Glob`, which Lstats, so macOS case-insensitive matching is unchanged. The registry and the results are unchanged. Tests: `TestDetect_depthMarkersFollowSymlinksAndMatchNames` in `internal/stackdetect/stackdetect_test.go`, the `.hidden/a.xlsx` and `a/b/c/deep.docx` table cases, and `BenchmarkDetect` (synthetic 30x30 tree: 660 ms → 68 ms per call).
+
+Measured with the fix on a private `ocode serve`, before → after:
+
+- `GET /api/tui-status`: 240 ms → 35-100 ms
+- `GET /api/sessions/{id}/status`: 450-800 ms → 130-170 ms
+- `GET /api/models?configured=true`: 295 ms → 96 ms
+- `PUT /api/sessions/{id}/model`: 480-790 ms → 265-350 ms
+- Click to label updated, in WebKit: 620-910 ms → 230-290 ms
+
+**Still open (not changed).**
+
+- About 80 ms of CPU per pick is `session.LoadForDir` loading the whole transcript several times, only to read metadata: `sessionThinkingBudget`, the advisor and auto-continue seeds, and the created-at value in `pushSessionStatusSnapshot`.
+- `Detect` still runs three times per pick (about 15 ms each), with no cache across calls.
+- The status push waits for the agent rebuild (about 60 ms).
+
+**Rule.** A helper documented as cheap that sits under a status or poll path must be profiled on a real repo, because depth-limited `filepath.Glob` patterns re-walk the tree once per pattern. Before blaming the dialog for a late label, time the PUT with curl and take a CPU profile from `/debug/pprof/profile` on a private `ocode serve`.
+
+**Measurement gotcha.** There is no `DELETE /api/sessions/{id}` route. A probe session copied into the project's sessions dir must be removed by hand: the `.sqlite` file plus its row in `index.sqlite`. `PUT` model on a real session bumps its `updated_at` and writes the shared recent-models list, so never time it on a user's session.
+
 ## Open: duplicate Radix dismissable-layer versions (not fixed)
 
 `pnpm why @radix-ui/react-dismissable-layer` in `web/` shows two versions. The app's own Radix packages
@@ -198,3 +235,4 @@ resolve 1.1.19; 1.2.1 is pulled only through `@univerjs/design` (dropdown-menu a
   exclusion, Flusher/Hijacker delegation, Unwrap, Vary header, small-body skip)
 - `internal/server/handler_models_configured_test.go` (configured filter: credential-based
   inclusion, recents/favorites preservation, current-model provider kept, default full registry)
+- `internal/stackdetect/stackdetect_test.go` `TestDetect_depthMarkersFollowSymlinksAndMatchNames` (depth markers through a symlinked directory, and a directory named `x.pdf` matching by name), the `.hidden/a.xlsx` and `a/b/c/deep.docx` table cases, and `BenchmarkDetect` (synthetic 30x30 tree).

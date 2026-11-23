@@ -12,9 +12,11 @@ package stackdetect
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // markerKind distinguishes the two supported marker types.
@@ -217,10 +219,11 @@ func Detect(root string) []string {
 		return nil
 	}
 	deps := readPackageJSONDeps(root) // parsed once, reused across dep markers
+	dirs := newDirCache(root)
 
 	var found []string
 	for _, s := range registry {
-		if stackMatches(root, s, deps) {
+		if stackMatches(root, s, deps, dirs) {
 			found = append(found, s.id)
 		}
 	}
@@ -228,7 +231,7 @@ func Detect(root string) []string {
 	return found
 }
 
-func stackMatches(root string, s stack, deps map[string]struct{}) bool {
+func stackMatches(root string, s stack, deps map[string]struct{}, dirs *dirCache) bool {
 	for _, m := range s.markers {
 		switch m.kind {
 		case markerDep:
@@ -236,16 +239,101 @@ func stackMatches(root string, s stack, deps map[string]struct{}) bool {
 				return true
 			}
 		case markerFile:
-			matches, err := filepath.Glob(filepath.Join(root, m.glob))
-			// filepath.Glob only errors on a malformed pattern (a static
-			// registry bug), never on I/O. Treat as no-match and move on;
-			// the registry is covered by tests so a bad pattern surfaces there.
-			if err == nil && len(matches) > 0 {
+			if fileMarkerMatches(root, m.glob, dirs) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func fileMarkerMatches(root, glob string, dirs *dirCache) bool {
+	depth, last, ok := starDepth(glob)
+	if !ok {
+		matches, err := filepath.Glob(filepath.Join(root, glob))
+		// filepath.Glob only errors on a malformed pattern (a static
+		// registry bug), never on I/O. Treat as no-match and move on;
+		// the registry is covered by tests so a bad pattern surfaces there.
+		return err == nil && len(matches) > 0
+	}
+	for _, ent := range dirs.level(depth) {
+		if matched, err := filepath.Match(last, ent.name); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+// A bare literal name stays on filepath.Glob: it Lstats, which is case-insensitive on macOS.
+func starDepth(glob string) (depth int, last string, ok bool) {
+	parts := strings.Split(glob, "/")
+	for _, p := range parts[:len(parts)-1] {
+		if p != "*" {
+			return 0, "", false
+		}
+	}
+	depth = len(parts) - 1
+	last = parts[depth]
+	if depth == 0 && !strings.ContainsAny(last, "*?[\\") {
+		return 0, "", false
+	}
+	return depth, last, true
+}
+
+// dirCache lists each directory at most once per Detect; filepath.Glob re-read the
+// tree for every glob.
+type dirCache struct {
+	root   string
+	levels [][]cachedEntry
+}
+
+type cachedEntry struct {
+	name string
+	path string
+	e    fs.DirEntry
+}
+
+func newDirCache(root string) *dirCache {
+	return &dirCache{root: root}
+}
+
+// level returns every entry at depth d below root, building the shallower levels
+// on first use. A level's directories are the directories among the previous
+// level's entries, so an entry is stat'ed only when the level below it is needed.
+func (c *dirCache) level(d int) []cachedEntry {
+	for len(c.levels) <= d {
+		var parents []string
+		if n := len(c.levels); n == 0 {
+			parents = []string{c.root}
+		} else {
+			for _, ent := range c.levels[n-1] {
+				if isDirEntry(ent.path, ent.e) {
+					parents = append(parents, ent.path)
+				}
+			}
+		}
+		var next []cachedEntry
+		for _, dir := range parents {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				next = append(next, cachedEntry{name: e.Name(), path: filepath.Join(dir, e.Name()), e: e})
+			}
+		}
+		c.levels = append(c.levels, next)
+	}
+	return c.levels[d]
+}
+
+// Symlinks need a stat to tell whether they point at a directory.
+func isDirEntry(p string, e fs.DirEntry) bool {
+	if e.Type()&fs.ModeSymlink != 0 {
+		fi, err := os.Stat(p)
+		return err == nil && fi.IsDir()
+	}
+	return e.IsDir()
 }
 
 // readPackageJSONDeps returns the union of dependencies and devDependencies
