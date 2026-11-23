@@ -378,3 +378,56 @@ one is `TestRemoteConnectionKeyAgreesWithMuxIdentity` (§2).
 - "Where does the proxy stamp the profile?" → `grep -n "injectProxiedActiveProfile" internal/server/handler_remote_proxy.go`
 - "Which routes are remote-proxied?" → `grep -n "api/remote" internal/server/server.go`
 - "Is this a remote or local path?" → check whether `host` is empty **before** touching any path allowlist
+
+## 12. Reverse port forwards that outlive their client
+
+The htr relay is `ssh -R <port>:127.0.0.1:<port>` (host-scoped, `internal/server/htr_reverse.go`).
+Its remote listener is owned by sshd's **privilege-separated monitor, which runs as
+root**, so `ss -ltnp` and `lsof` show no pid for the user: `remote.FindPortHolder`
+returns "no visible listener", no holder is recorded, and the Ports panel used to
+offer nothing but the raw `remote port forwarding failed for listen port N`.
+
+**Detection without root** (`internal/remote/staleforward.go`): the listening
+socket still carries its logind cgroup, so `ss -ltnpe` attributes it to
+`session-N.scope` even though the pid is hidden. `FindStaleReverseForward` reaps
+only when every step is proven:
+
+- the listener's session is attributable (both address families must agree);
+- that session runs **nothing but sshd** (a shell there means it is in use);
+- the session's `RemoteHost` peer has an established `:22` connection with
+  `Send-Q > 0` on a retransmit timer (`timer:(on,…)`), and **no healthy
+  connection** — a reconnect makes the peer alive again and the reap refuses.
+
+Termination is `kill -TERM` on the session's **non-root** sshd process (the
+`[priv]` monitor and uid 0 are never signalled), then the port must free within
+the poll budget. `openHTRReverse` runs this once and retries the open exactly
+once; `ErrNoStaleForward` is the ordinary "not provably stale" answer.
+
+The guard and the signal are **one** remote command: `for p in …; do case
+"$(cat /proc/$p/cgroup)" in *session-N.scope*) kill -TERM "$p";; esac; done`. A
+pid recycled since enumeration belongs to another session and is skipped, a
+missing cgroup matches nothing (fail-closed), and there is no `-9` path — so no
+term-then-kill grace window reopens the recycle race.
+
+Two `loginctl` traps: `-p Remote` is a **boolean** (`Remote=yes`); the peer IP is
+`-p RemoteHost`. And `ss -t` omits LISTEN sockets — use `ss -ltn` to see them.
+
+**Root-cause setup step (recommended, one `sudo` per host).** A client that
+vanishes without a FIN (laptop sleep, network partition) leaves the forward
+bound forever when the host has no keepalive, because sshd never notices. This
+host had none:
+
+```sh
+sudo tee /etc/ssh/sshd_config.d/10-clientalive.conf >/dev/null <<'EOF'
+ClientAliveInterval 30
+ClientAliveCountMax 3
+EOF
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+A vanished client's `-R` then disappears within ~90 s, and the htr auto-start
+re-maps on its next list poll (15 s base backoff). `sudo -n ss -ltnp` is *not*
+required by anything above — the reaper is root-free by design.
+
+Tests: `go test ./internal/remote -run Stale` and
+`go test ./internal/server -run 'HTR|Reclaim'`.

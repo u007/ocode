@@ -232,13 +232,18 @@ func (hh *htrHost) dropHolderIfLive(live bool) {
 
 // Seams for the remote holder probe/kill, replaced by tests.
 var (
-	findRemotePortHolder = remote.FindPortHolder
-	killRemotePortHolder = remote.KillPortHolder
+	findRemotePortHolder    = remote.FindPortHolder
+	killRemotePortHolder    = remote.KillPortHolder
+	reapStaleReverseForward = remote.ReapStaleReverseForward
 )
 
 // htrHolderProbeTimeout bounds the holder probe. The probe runs inside the open
 // request after a busy-port failure, so a hung ssh must not hold that request.
 var htrHolderProbeTimeout = 5 * time.Second
+
+// htrStaleReapTimeout bounds the stale-forward reap. It runs once, only after a
+// busy-port failure whose holder is invisible to the probe.
+var htrStaleReapTimeout = 10 * time.Second
 
 func (reg *portMapRegistry) htrHost(target remote.Target) *htrHost {
 	key := target.String()
@@ -272,6 +277,16 @@ func (h *Handler) openHTRReverse(ref projects.ProjectRef, target remote.Target, 
 	var busy *remote.PortBusyError
 	if errors.As(err, &busy) {
 		h.recordHTRHolder(hh, target, port)
+		// A stale reverse forward leaves a listener the probe cannot see: its
+		// socket belongs to sshd's root-owned monitor. Reap the dead session and
+		// retry exactly once; a second refusal is reported unchanged.
+		if hh.getHolder() == nil && h.reapStaleHTRForward(target, port) {
+			err = htrReverseForwardOpener()(hh.fm, maps)
+			hh.record(port, err)
+			if errors.As(err, &busy) {
+				h.recordHTRHolder(hh, target, port)
+			}
+		}
 	}
 	return err
 }
@@ -288,6 +303,28 @@ func (h *Handler) recordHTRHolder(hh *htrHost, target remote.Target, port int) {
 		return
 	}
 	hh.setHolder(holder)
+}
+
+// reapStaleHTRForward terminates a dead SSH session still holding the port and
+// reports whether it was reaped. Only a provably-dead session is signalled
+// (remote.FindStaleReverseForward owns the predicate); anything else is a no-op
+// so the original busy-port error reaches the user unchanged.
+func (h *Handler) reapStaleHTRForward(target remote.Target, port int) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), htrStaleReapTimeout)
+	defer cancel()
+	tr := remote.NewSSHTransport(target, h.portMaps.sup)
+	st, err := reapStaleReverseForward(ctx, tr, port)
+	if err != nil {
+		// ErrNoStaleForward is the ordinary "not provably stale" answer (a live
+		// squatter, or a port that freed itself); only a real failure is logged.
+		if !errors.Is(err, remote.ErrNoStaleForward) {
+			log.Printf("htr: reap stale forward on %s port %d: %v", target, port, err)
+		}
+		return false
+	}
+	log.Printf("htr: reaped stale forward session %s (peer %s, pids %v) holding %s port %d",
+		st.Session, st.Peer, st.PIDs, target, port)
+	return true
 }
 
 // autoStartHTRReverse is the list-triggered open: it honours the

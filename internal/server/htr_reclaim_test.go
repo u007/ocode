@@ -127,6 +127,12 @@ func TestOpenHTRReverseProbeTimeoutRecordsNoHolder(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	t.Cleanup(func() { findRemotePortHolder = origFind })
+	// No holder was found, so the stale-forward reap runs; keep it off the wire.
+	origReap := reapStaleReverseForward
+	reapStaleReverseForward = func(context.Context, remote.BoundedTransport, int) (*remote.StaleForward, error) {
+		return nil, remote.ErrNoStaleForward
+	}
+	t.Cleanup(func() { reapStaleReverseForward = origReap })
 
 	start := time.Now()
 	err := h.openHTRReverse(ref, target, 3845)

@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Shared HTR daemon (htrcli serve)
-description: 'Why one shared htrcli daemon serves both ocode and the user''s extension: coordinates from ~/.htrcli/config.json, browser.htr_shared/htr_token config keys (incl. htr_token precedence over htrcli''s config), AdoptOnly, the StartedByPID stop rule, Settings endpoints addressing the resolved port, and lifecycle limits.'
+description: 'Why one shared htrcli daemon serves both ocode and the user''s extension: coordinates from ~/.htrcli/config.json, browser.htr_shared/htr_token config keys (incl. htr_token precedence over htrcli''s config), AdoptOnly, the StartedByPID stop rule, Settings endpoints addressing the resolved port, lifecycle limits, and reaping a stale ssh -R relay whose root-owned listener the holder probe cannot see.'
 tags:
   - browser
   - htr
@@ -11,7 +11,7 @@ tags:
   - native-host
   - settings
   - lifecycle
-timestamp: 2026-10-03T01:13:06Z
+timestamp: 2026-11-23T05:15:06Z
 ---
 ## Why this exists
 
@@ -90,6 +90,46 @@ A `(false, nil)` answer is a **refusal, not a failure**: `StopHTRServe` reports 
 - **Death resets the verification dedupe.** `noteHTRVerifyOutcome` dedupes on `(port, ready)` and knows nothing about which process answered, so after a daemon died a REPLACEMENT daemon failing verification on the same port was silently swallowed as a repeat of its predecessor's. `resetHTRVerifyOutcome` now runs from the death path. Bounded by construction: there is no auto-restart, so one reset buys one extra report per ensure, and an ensure is a user action.
 - **A marker written for a pid that died mid-startup is retracted.** `watchHTRExitNotify` does a SECOND marker sweep AFTER the death signal — the original sweep runs before it, so a boot path mid-ensure could write a marker for a dead pid in the gap between them — and `EnsureHTRServe` re-checks `<-died` after `htrWriteOwner` and fails instead of returning `Running: true`. Honest gap: **neither half has a regression test.** The post-signal sweep survives mutation because a test cannot land inside the window between the two sweeps (`TestDaemonDeathRetractsAMarkerWrittenForIt` writes its marker before the watcher starts, so the pre-signal sweep already removes it), and `sharedSpawnConfirmBudget` is a `const` so the boot-path check cannot be scheduled. The death path being the authoritative cleanup is the intended design; the gap is recorded in `TODO.md`.
 
+## Reaping a stale `ssh -R` relay on the remote host
+
+The remote listener for `ssh -R <port>:127.0.0.1:<port>` is owned by sshd's privilege-separated monitor, which runs as **root**. A non-root `ss -ltnp` / `lsof` therefore shows no pid for it: `remote.FindPortHolder` answered "no visible listener", `htrHost.holder` stayed nil, and the Ports panel's existing "Kill holder" button never rendered. The user saw only `remote port forwarding failed for listen port N`. A client that vanishes without sending a FIN (laptop sleep, network partition) leaves the forward bound forever when the host sets no `ClientAliveInterval`.
+
+### Detection (`internal/remote/staleforward.go`)
+
+The listening socket still carries its logind cgroup, so `ss -ltnpe` attributes it to `session-N.scope` without root. `FindStaleReverseForward` (`internal/remote/staleforward.go:51`) refuses with `ErrNoStaleForward` unless every step is proven:
+
+1. the listener is attributable to a session, and both address families agree (`parseListenerSession`, `internal/remote/staleforward.go:139`);
+2. that session runs **nothing but sshd** — a shell there means it is in use (`sessionSSHPIDs`, `internal/remote/staleforward.go:200`);
+3. the session's `RemoteHost` peer has an established `:22` connection with `Send-Q > 0` on a retransmit timer (`timer:(on,…)`) **and** no healthy connection from that peer (`checkPeerDead`, `internal/remote/staleforward.go:254`). A reconnect makes the peer alive and the reap refuses; a healthy `ssh -N` forward is a legitimate mapping, not a stale one.
+
+`ReapStaleReverseForward` (`internal/remote/staleforward.go:96`) sends `kill -TERM` to the session's **non-root** sshd process only (the `[priv]` monitor and uid 0 are never signalled), then polls `ss -ltn` until the port frees. SIGTERM only, never `-9`. The guard and the signal are a single remote command — `for p in …; do case "$(cat /proc/$p/cgroup)" in *session-N.scope*) kill -TERM "$p";; esac; done` — so a pid recycled since enumeration belongs to another session and is skipped, a missing or unreadable cgroup matches nothing and fails closed, and with no `-9` path there is no term-then-kill grace window to reopen the recycle race.
+
+### Wiring (`internal/server/htr_reverse.go`)
+
+In `openHTRReverse` (`internal/server/htr_reverse.go:262`), when the open fails with `remote.PortBusyError` and `recordHTRHolder` found no holder, the handler reaps once (`reapStaleHTRForward`, `internal/server/htr_reverse.go:312`, under `htrStaleReapTimeout` = 10 s, `internal/server/htr_reverse.go:246`) and retries the open **exactly once** (`internal/server/htr_reverse.go:277-290`); a second busy answer is reported unchanged. The visible-holder path is unchanged. On the list path this runs inside `remote.RunAsync` (`internal/server/handler_portmaps.go:318-320`), so the ports list is never blocked; `POST /api/portmaps/htr/start` (the panel's Start button) runs it inline.
+
+### Prevent it on the host (documented setup step)
+
+The reap is the recovery, not the cure. Put
+
+```
+ClientAliveInterval 30
+ClientAliveCountMax 3
+```
+
+in `/etc/ssh/sshd_config.d/`, then `sshd -t` and reload sshd. A vanished client's forward then disappears within ~90 s, and the htr auto-start re-maps on its next list poll.
+
+### Two traps
+
+- `loginctl show-session N -p Remote` is a **boolean** (`Remote=yes`); the peer IP is `-p RemoteHost`.
+- `ss -t` omits LISTEN sockets — use `ss -ltn` / `ss -ltnpe`.
+
+### Evidence and tests
+
+Verified live on `james@217.216.72.49` (2026-11-23): port 3845 was bound by `session-63.scope`, which held only `sshd: james [priv]` (uid 0) and `sshd: james` (uid 1001) with no shell; its peer `161.142.139.239` had one established `:22` connection with Send-Q 460 and `timer:(on,1min37sec,10)`, and did not answer ICMP. `kill -TERM` on the non-root session pid freed the port immediately; a fresh `ssh -R` then came up and the relay answered. The cgroup→session attribution reproduced on two clean throwaway forwards.
+
+`internal/remote/staleforward_test.go` (18 tests) drives the refusals and the reap from live-captured `ss`/`loginctl` fixtures, and pins that a non-numeric cgroup session id is refused before it is interpolated into a shell command (`TestSessionFromCgroupRejectsShellSyntax`), and that the emitted kill command carries the `/proc/$p/cgroup` guard, names the session, never includes the root monitor pid, and contains no `-9` (`TestStaleForwardKillCommandGuardsTheSession`); `internal/server/htr_stale_reap_test.go` (4 tests) pins the wiring: retry after a reap, no reap when the holder is visible, retry exactly once, and no retry when the port is not provably stale. Three branches are mutation-verified (live-peer refusal, shell-in-session refusal, retry wiring). `go build ./...` passes and both suites are green. `go vet ./internal/remote` reports one pre-existing `bufio.Scanner.Err` warning at `internal/remote/connect.go:445`, unrelated to this path.
+
 ## Never touches `com.htrcontrol.host`
 
 ocode keeps its own `com.ocode.htrcontrol` native host (default `HTRNativeHostName`), so the user's personal extension's manifest is never rewritten. The invariant is guarded at three layers:
@@ -107,6 +147,8 @@ ocode keeps its own `com.ocode.htrcontrol` native host (default `HTRNativeHostNa
 - `internal/config/ocodeconfig_htr_test.go` — defaults (`HTRShared` true, `HTRToken` empty), `TestBrowserConfigHTRSharedExplicitFalseBeatsDefault`, native-host rejection.
 - `internal/server/htr_shared_daemon_test.go`, `internal/server/handler_htr_shared_test.go` — server-side ensure and the Settings status body (`daemon_pid`, `adopt_only`, `notice`, `started_by_ocode`).
 - `internal/server/handler_config_htr_port_test.go` — the Settings lifecycle endpoints address the RESOLVED descriptor: `TestHTRSettingsEndpointsTargetResolvedPortInSharedMode`, `TestHTRSettingsEndpointsKeepConfiguredPortInPrivateMode` (private mode echoes `browser.htr_port` verbatim), `TestHTRSettingsEndpointsFollowHtrcliConfiguredPort`, `TestHTRStatusReportsResolvedPort`.
+- `internal/remote/staleforward_test.go` — stale reverse-forward detection and refusals over live-captured `ss`/`loginctl` fixtures, plus the `kill -TERM`/poll path.
+- `internal/server/htr_stale_reap_test.go` — `openHTRReverse` reaps an invisible stale holder and retries exactly once; no reap for a visible holder; no retry when the port is not provably stale.
 - `internal/browse/cdp/htr_verify_outcome_test.go` — death resets the verification dedupe and retracts markers: `TestVerifyOutcomeIsReportedAgainAfterTheDaemonDies`, `TestVerifyOutcomeResetClearsTheRememberedPort`, `TestDaemonDeathResetsTheVerificationOutcome`, `TestDaemonDeathRetractsAMarkerWrittenForIt`, `TestDaemonDeathLeavesAnotherDaemonsMarkerAlone`.
 - `web/src/components/Settings/BrowserForm.htrShared.test.tsx` — read-only config-file-only rendering.
 
@@ -115,5 +157,6 @@ ocode keeps its own `com.ocode.htrcontrol` native host (default `HTRNativeHostNa
 - Resolver: `cdp.ResolveSharedDaemon`, `SharedDaemon`, `HTRSharedInput`, `loadHTRcliConfig`, `loopbackEndpoint`, `sharedSocketPath` (`internal/browse/cdp/htr_shared.go`)
 - Lifecycle: `EnsureHTRServe`, `adoptHTRServe`, `shouldStopSharedDaemon`, `StopHTRServe`, `htrWriteOwner`, `watchHTRExit`, `watchHTRExitNotify`, `noteHTRVerifyOutcome`, `resetHTRVerifyOutcome`, `verifySharedDaemonAsync`, `confirmSharedSpawnAlive`, `sharedServeEnv` (`internal/browse/cdp/htr.go`)
 - Server wiring: `resolveManagedHTROptions`, `EnsureSharedHTRDaemon`, `ensureSharedSocketDir` (`internal/server/htr.go`); `resolveHTRShared`, `htrStatusFor`, `stopManagedHTR`, `HandleListHTRTabs`, `htrStatusResponse` (`internal/server/handler_config.go`)
+- Stale remote relay: `FindStaleReverseForward`, `ReapStaleReverseForward`, `ErrNoStaleForward`, `parseListenerSession`, `sessionSSHPIDs`, `checkPeerDead` (`internal/remote/staleforward.go`); `openHTRReverse`, `reapStaleHTRForward`, `recordHTRHolder`, `htrStaleReapTimeout` (`internal/server/htr_reverse.go`)
 - Config: `BrowserConfig`, `BrowserConfigOverride` (`htr_shared` `*bool`), `SaveOcodeHTRConfig` (`internal/config/ocodeconfig.go`)
 - Settings UI: `web/src/components/Settings/BrowserForm.tsx`

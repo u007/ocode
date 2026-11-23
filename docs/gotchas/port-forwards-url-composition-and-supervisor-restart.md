@@ -14,7 +14,7 @@ tags:
   - capability-probe
   - background-autostart
   - gotcha
-timestamp: 2026-11-09T09:44:45Z
+timestamp: 2026-11-23T04:51:53Z
 ---
 # Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor
 
@@ -359,12 +359,12 @@ The sweep and the first list share **one** guard: `portMapAutoStartOnce`
 (`internal/server/handler_portmaps.go:311`). It wraps `entry.autoStartOnce` (a `sync.Once`)
 — so a project already swept at boot is never opened a second time by a later list request.
 The open still runs in the background (`remote.RunAsync`) and never blocks the list response;
-the row reports `live: false` until the open lands (`HandleListPortMaps:305` →
+the row reports `live: false` until the open lands (`HandleListPortMaps:400` →
 `portMapAutoStartOnce(entry, ref, true)`).
 
 The **ephemeral reverse (`-R`) htrcli forward** (`openHTRReverseForward`) is **deliberately**
-**not** opened by the sweep: `portMapAutoStartOnce` passes `withHTR = false` (`portMapAutoStartAll`:286 — the `withHTR = false` argument);
-the list handler passes `withHTR = true` (`HandleListPortMaps`:305). The reverse forward is a
+**not** opened by the sweep: `portMapAutoStartOnce` passes `withHTR = false` (`portMapAutoStartAll`:380 — the `withHTR = false` argument);
+the list handler passes `withHTR = true` (`HandleListPortMaps`:400). The reverse forward is a
 relay for the project the user is actually working in; opening it for every saved remote
 project at boot would add one extra reverse ssh child per project, each exposing a local port
 (`:<htrPort>`) to the remote host's loopback. The reverse forward has no `Once` guard
@@ -487,6 +487,8 @@ probe's own 5s, the reclaim's request-scoped `portReclaimTimeout` (10s). A hung 
 the deadline and cannot pin the request. A socket shared by a master and its workers lists all of
 them: the kill signals every listener, after checking none is pid <= 1. Only the ssh user's own
 processes are visible, so a port held by another user shows no holder and no kill button.
+
+**Invisible holder: reap and retry (2026-11-23).** When the busy port's listener is `ssh -R`'s, its socket belongs to sshd's root-owned monitor, so the probe above finds no holder and no kill button appears. `openHTRReverse` now reaps a *provably dead* forward session (`remote.FindStaleReverseForward`: session-attributable, sshd-only, peer retransmitting with no healthy connection), SIGTERMs the non-root sshd pid, and retries the open exactly once; anything unproven is reported unchanged. Details, the `ClientAliveInterval` host setting, and the evidence: [Shared HTR daemon (htrcli serve)](../concepts/htr-shared-daemon.md).
 
 **Same prompt for `-L` rows (local holder).** A squatter on the LOCAL port answers the readiness
 dial, so a refused `ssh -L` bind can surface either as the "did not become ready" error or as
