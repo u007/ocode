@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/browse"
@@ -157,5 +160,38 @@ func TestBrowseProxyGateRateLimits(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429 after lockout", resp.StatusCode)
+	}
+}
+
+// TestBrowseProxyServesCaptureLib: the main browse proxy mux (built in
+// StartBrowse) must route the capture library path to the browse origin. The
+// test drives the real wiring, not a copy of it, so a missing registration fails
+// here. Any ocode_browse cookie passes the gate; the origin serves the bundle
+// without auth, and the upstream it would otherwise fall through to is unused.
+func TestBrowseProxyServesCaptureLib(t *testing.T) {
+	s := New("127.0.0.1:0", "", "", nil)
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+	if err := StartBrowse(s, "apitoken", "http://127.0.0.1:1", nil); err != nil {
+		t.Fatalf("StartBrowse: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/__ocode_capture_lib.js", s.browseProxyPort), nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "ocode_browse", Value: "x"})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get capture lib: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capture lib status = %d, want 200 body %.120q", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Fatalf("capture lib content-type = %q", ct)
+	}
+	if !strings.Contains(string(body), "window.htmlToImage") {
+		t.Fatalf("capture lib reply is not the embedded bundle: %.120q", body)
 	}
 }

@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, X } from "lucide-react";
-import { isLocalRequestId, type ConsoleEvent, type NetworkEvent, type ResponseBody } from "../../lib/browserStore";
+import { Check, Copy, Crosshair, RotateCw, X } from "lucide-react";
+import {
+  isLocalRequestId,
+  type ConsoleEvent,
+  type DomInspectState,
+  type NetworkEvent,
+  type ResponseBody,
+} from "../../lib/browserStore";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { findNode, selectorFor, serializeNode } from "../../lib/domInspector";
+import { DomTree } from "./DomTree";
 
 export interface DevConsoleProps {
   consoleEvents: ConsoleEvent[];
@@ -17,6 +25,12 @@ export interface DevConsoleProps {
   onClearPerformance: () => void;
   onTogglePerfRecording: () => void;
   onRequestBody: (requestId: string) => void;
+  /** DOM inspector state for the active surface (absent until the page is inspected). */
+  dom?: DomInspectState | null;
+  onSelectNode?: (id: string | null) => void;
+  onHoverNode?: (id: string | null) => void;
+  onSetPick?: (on: boolean) => void;
+  onRefreshDom?: () => void;
 }
 
 const levelColor: Record<string, string> = {
@@ -41,6 +55,16 @@ const MAX_HEIGHT_RATIO = 0.6;
 const COPY_FLASH_MS = 1500;
 
 type CopyState = "idle" | "copied" | "failed";
+
+/** Tab order is fixed: console, network, dom, performance. */
+type DevTab = "console" | "network" | "dom" | "performance";
+
+const TAB_LABELS: Record<DevTab, string> = {
+  console: "Console",
+  network: "Network",
+  dom: "DOM",
+  performance: "Performance",
+};
 
 function statusClass(status: number): string {
   if (status >= 500) return "text-red-400";
@@ -90,11 +114,13 @@ function formatPerfValue(key: string, value: number): string {
 
 /** Plain-text lines for the rows the active tab shows (filtered, in display order). */
 function tabCopyLines(
-  tab: "console" | "network" | "performance",
+  tab: DevTab,
   consoleRows: ConsoleEvent[],
   netRows: NetworkEvent[],
   perfRows: [string, number][],
 ): string[] {
+  // The DOM tab has its own per-node copy actions in the toolbar.
+  if (tab === "dom") return [];
   if (tab === "console") return consoleRows.map((e) => `${e.level.toUpperCase()} ${e.text}`);
   if (tab === "network") {
     return netRows.map((e) =>
@@ -107,10 +133,10 @@ function tabCopyLines(
 }
 
 export function DevConsole(props: DevConsoleProps) {
-  const [tab, setTab] = useState<"console" | "network" | "performance">("console");
+  const [tab, setTab] = useState<DevTab>("console");
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState(false);
-  const selectTab = (t: "console" | "network" | "performance") => {
+  const selectTab = (t: DevTab) => {
     setTab(t);
     setOpen(true);
   };
@@ -119,7 +145,38 @@ export function DevConsole(props: DevConsoleProps) {
   const [bodyTab, setBodyTab] = useState<"headers" | "body">("headers");
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [domCopy, setDomCopy] = useState<{ which: "selector" | "html"; state: CopyState } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const dom = props.dom;
+  const domReady = dom?.status === "ready" && !!dom.root;
+  const selectedId = dom?.selectedId ?? null;
+  const selectedNode = useMemo(
+    () => (dom?.root && selectedId ? findNode(dom.root, selectedId) : null),
+    [dom?.root, selectedId],
+  );
+  const selectedSelector = useMemo(
+    () => (dom?.root && selectedId ? selectorFor(dom.root, selectedId) : null),
+    [dom?.root, selectedId],
+  );
+  const selectedHtml = useMemo(() => (selectedNode ? serializeNode(selectedNode) : null), [selectedNode]);
+
+  // A DOM inspection started from the page (context menu "Inspect element",
+  // annotation) must be visible: open the console on the DOM tab when a fetch
+  // begins or a node becomes selected. Only the transition fires, so a user
+  // who then switches tab or collapses the console is left alone. The refs
+  // start at the mount values, so mounting onto an existing selection does not
+  // force the console open.
+  const prevDomLoad = useRef({ status: dom?.status ?? null, gen: dom?.gen ?? null });
+  const prevSelectedId = useRef(selectedId);
+  useEffect(() => {
+    const prev = prevDomLoad.current;
+    const startedLoading = dom?.status === "loading" && (prev.status !== "loading" || prev.gen !== (dom?.gen ?? null));
+    const selectedNow = selectedId !== null && selectedId !== prevSelectedId.current;
+    prevDomLoad.current = { status: dom?.status ?? null, gen: dom?.gen ?? null };
+    prevSelectedId.current = selectedId;
+    if (startedLoading || selectedNow) selectTab("dom");
+  }, [dom?.status, dom?.gen, selectedId, selectTab]);
 
   const consoleRows = useMemo(
     () => props.consoleEvents.filter((e) => e.text.toLowerCase().includes(filter.toLowerCase())),
@@ -144,8 +201,19 @@ export function DevConsole(props: DevConsoleProps) {
     return () => window.clearTimeout(timer);
   }, [copyState]);
 
+  useEffect(() => {
+    if (!domCopy) return;
+    const timer = window.setTimeout(() => setDomCopy(null), COPY_FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [domCopy]);
+
   const onCopy = () => {
     void copyTextToClipboard(copyLines.join("\n")).then((ok) => setCopyState(ok ? "copied" : "failed"));
+  };
+
+  const copyDom = (which: "selector" | "html", text: string | null) => {
+    if (!text) return;
+    void copyTextToClipboard(text).then((ok) => setDomCopy({ which, state: ok ? "copied" : "failed" }));
   };
 
   const onDragStart = useCallback((e: React.PointerEvent) => {
@@ -217,19 +285,19 @@ export function DevConsole(props: DevConsoleProps) {
         >
           {open ? "▾" : "▸"}
         </button>
-        {(["console", "network", "performance"] as const).map((t) => (
+        {(["console", "network", "dom", "performance"] as const).map((t) => (
           <button
             key={t}
             role="tab"
             aria-selected={tab === t}
             onClick={() => selectTab(t)}
-            className={`px-3 py-1.5 text-[11px] transition-colors border-b-2 capitalize ${
+            className={`px-3 py-1.5 text-[11px] transition-colors border-b-2 ${
               tab === t
                 ? "border-sky-500 text-neutral-100"
                 : "border-transparent text-neutral-400 hover:text-neutral-200"
             }`}
           >
-            {t}
+            {TAB_LABELS[t]}
           </button>
         ))}
         <div className="flex-1" />
@@ -264,6 +332,72 @@ export function DevConsole(props: DevConsoleProps) {
               Clear
             </button>
           </>
+        ) : tab === "dom" ? (
+          <>
+            <button
+              type="button"
+              aria-label="Pick element"
+              aria-pressed={!!dom?.pick}
+              title={domReady ? "Click an element on the page to select it" : "Inspect an element first"}
+              disabled={!domReady}
+              onClick={() => props.onSetPick?.(!dom?.pick)}
+              className={`flex items-center px-2 py-0.5 ml-1 text-[11px] rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                dom?.pick
+                  ? "bg-sky-900/50 text-sky-200"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+              }`}
+            >
+              <Crosshair className="h-3 w-3 mr-1" />
+              Pick
+            </button>
+            <button
+              type="button"
+              aria-label="Refresh DOM"
+              title={dom ? "Fetch the DOM tree again" : "Inspect an element first"}
+              disabled={!dom}
+              onClick={props.onRefreshDom}
+              className="flex items-center px-2 py-0.5 ml-1 text-[11px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <RotateCw className="h-3 w-3 mr-1" />
+              Refresh
+            </button>
+            <button
+              type="button"
+              aria-label="Copy selector"
+              title="Copy this node's CSS selector"
+              data-state={domCopy?.which === "selector" ? domCopy.state : "idle"}
+              disabled={!selectedSelector}
+              onClick={() => copyDom("selector", selectedSelector)}
+              className="flex items-center px-2 py-0.5 ml-1 text-[11px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {domCopy?.which === "selector" && domCopy.state === "copied" ? (
+                <Check className="h-3 w-3 mr-1 text-green-400" />
+              ) : domCopy?.which === "selector" && domCopy.state === "failed" ? (
+                <X className="h-3 w-3 mr-1 text-red-400" />
+              ) : (
+                <Copy className="h-3 w-3 mr-1" />
+              )}
+              Selector
+            </button>
+            <button
+              type="button"
+              aria-label="Copy HTML"
+              title="Copy this node's outer HTML"
+              data-state={domCopy?.which === "html" ? domCopy.state : "idle"}
+              disabled={!selectedHtml}
+              onClick={() => copyDom("html", selectedHtml)}
+              className="flex items-center px-2 py-0.5 ml-1 text-[11px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {domCopy?.which === "html" && domCopy.state === "copied" ? (
+                <Check className="h-3 w-3 mr-1 text-green-400" />
+              ) : domCopy?.which === "html" && domCopy.state === "failed" ? (
+                <X className="h-3 w-3 mr-1 text-red-400" />
+              ) : (
+                <Copy className="h-3 w-3 mr-1" />
+              )}
+              HTML
+            </button>
+          </>
         ) : (
           <>
             <input
@@ -282,23 +416,25 @@ export function DevConsole(props: DevConsoleProps) {
             </button>
           </>
         )}
-        <button
-          type="button"
-          aria-label={`Copy ${tab} output`}
-          title={`Copy ${tab} output`}
-          data-state={copyState}
-          disabled={copyLines.length === 0}
-          onClick={onCopy}
-          className="flex items-center px-1 py-0.5 ml-1 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {copyState === "copied" ? (
-            <Check className="h-3 w-3 text-green-400" />
-          ) : copyState === "failed" ? (
-            <X className="h-3 w-3 text-red-400" />
-          ) : (
-            <Copy className="h-3 w-3" />
-          )}
-        </button>
+        {tab !== "dom" && (
+          <button
+            type="button"
+            aria-label={`Copy ${tab} output`}
+            title={`Copy ${tab} output`}
+            data-state={copyState}
+            disabled={copyLines.length === 0}
+            onClick={onCopy}
+            className="flex items-center px-1 py-0.5 ml-1 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {copyState === "copied" ? (
+              <Check className="h-3 w-3 text-green-400" />
+            ) : copyState === "failed" ? (
+              <X className="h-3 w-3 text-red-400" />
+            ) : (
+              <Copy className="h-3 w-3" />
+            )}
+          </button>
+        )}
       </div>
       {/* Content */}
       {open && (
@@ -463,6 +599,28 @@ export function DevConsole(props: DevConsoleProps) {
                     </div>
                   );
                 })
+              )}
+            </div>
+          )}
+          {/* DOM inspector tab */}
+          {tab === "dom" && (
+            <div className="py-1">
+              {!dom || dom.status === "idle" ? (
+                <div className="px-2 py-1 text-neutral-500 italic">Right-click the page and choose Inspect</div>
+              ) : dom.status === "loading" ? (
+                <div className="px-2 py-1 text-neutral-500 italic">Loading DOM…</div>
+              ) : dom.status === "error" ? (
+                <div className="px-2 py-1 text-red-400 break-all">{dom.error ?? "Could not load the DOM"}</div>
+              ) : dom.root ? (
+                <DomTree
+                  root={dom.root}
+                  selectedId={dom.selectedId}
+                  truncated={dom.truncated}
+                  onSelectNode={props.onSelectNode}
+                  onHoverNode={props.onHoverNode}
+                />
+              ) : (
+                <div className="px-2 py-1 text-neutral-500 italic">Right-click the page and choose Inspect</div>
               )}
             </div>
           )}

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useCdpSocket, type NodeDescription } from "./useCdpSocket";
-import { useBrowserStore, useBrowserActions, type StateKey } from "../../lib/browserStore";
+import { useBrowserStore, useBrowserActions, type StateKey, browserStore } from "../../lib/browserStore";
+import { findNode, normalizeChromeTree, selectorFor, type DomNode } from "../../lib/domInspector";
+import { AnnotationPopover } from "./AnnotationPopover";
+import { ANNOTATION_NO_CHAT_ERROR, annotationFileName, composeAnnotationText, cropScreencast, dispatchBrowserAnnotation, type BoxRect } from "./annotation";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { uploadBrowseFiles } from "../../api/client";
 import { ContextMenu, type ContextMenuItem } from "../Layout/ContextMenu";
@@ -92,6 +95,17 @@ function nodeAttribute(node: NodeDescription | null, name: string): string | und
   return key ? node.attributes[key] : undefined;
 }
 
+/** DOM.getBoxModel reports the box as a quad [x,y,x,y,x,y,x,y] in layout CSS
+ *  pixels. The inspector only needs the axis-aligned bounds. */
+function quadRect(quad: number[] | undefined): BoxRect | null {
+  if (!quad || quad.length < 8) return null;
+  const xs = [quad[0], quad[2], quad[4], quad[6]];
+  const ys = [quad[1], quad[3], quad[5], quad[7]];
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return { left, top, width: Math.max(1, Math.max(...xs) - left), height: Math.max(1, Math.max(...ys) - top) };
+}
+
 export interface ChromeViewportProps {
   stateKey: StateKey;
   browseBase: string | null;
@@ -117,7 +131,7 @@ export interface ChromeViewportProps {
  *  are CSS pixels relative to the canvas rect (Chrome expects CSS px; the
  *  screencast frames are device px and are only used for the backing store). */
 export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active = true }: ChromeViewportProps) {
-  const { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode } = useCdpSocket(stateKey, browseBase, host, true, active);
+  const { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode, getDocument, getBoxModel, pushNodesByBackendIds } = useCdpSocket(stateKey, browseBase, host, true, active);
   const surface = useBrowserStore(stateKey);
   const actions = useBrowserActions();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -186,6 +200,21 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
   const findDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextRequestRef = useRef(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: NodeDescription | null; loading: boolean; error: string | null } | null>(null);
+  // DOM inspector: the outline for the tree row under the pointer, and the
+  // annotation composer opened from the context menu.
+  const [domHighlight, setDomHighlight] = useState<BoxRect | null>(null);
+  const highlightSeq = useRef(0);
+  const [annotation, setAnnotation] = useState<{
+    x: number;
+    y: number;
+    nodeId: number;
+    label: string;
+    selector: string | null;
+    busy: boolean;
+    error: string | null;
+  } | null>(null);
+  // Request token for the annotation popover; see submitAnnotation.
+  const annotationSeqRef = useRef(0);
 
   // Navigate whenever the user requests it (address bar, back/forward,
   // reload, chrome hand-off) — i.e. when navSeq moves. The store is the
@@ -428,9 +457,14 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
     setContextMenu(null);
   }, []);
 
+  // The page is laid out at viewportWidth / zoom and scaled up by zoom on the
+  // canvas, so layout CSS pixels and canvas CSS pixels differ by this factor.
+  const zoomFactor = surface?.zoom ?? 1;
+
   const openContextMenuAt = useCallback((clientX: number, clientY: number) => {
     if (!active) return;
     const { x, y } = canvasPos({ clientX, clientY });
+    const z = zoomFactor || 1;
     const request = ++contextRequestRef.current;
     setContextMenu({
       x: Number.isFinite(clientX) ? clientX : 0,
@@ -439,11 +473,9 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
       loading: true,
       error: null,
     });
-    void getNodeAt(x, y)
-      .then((location) => {
-        if (location.nodeId === 0) throw new Error("no_node");
-        return describeNode(location.nodeId);
-      })
+    // Canvas px -> layout CSS px, the same conversion the picker uses.
+    void getNodeAt(x / z, y / z)
+      .then((location) => describeNode(location.backendNodeId).then((node) => ({ ...node, backendNodeId: location.backendNodeId })))
       .then((node) => {
         if (contextRequestRef.current !== request) return;
         setContextMenu((current) => current ? { ...current, node, loading: false, error: null } : current);
@@ -452,7 +484,7 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
         if (contextRequestRef.current !== request) return;
         setContextMenu((current) => current ? { ...current, node: null, loading: false, error: err instanceof Error ? err.message : String(err) } : current);
       });
-  }, [active, canvasPos, describeNode, getNodeAt]);
+  }, [active, canvasPos, describeNode, getNodeAt, zoomFactor]);
 
   const onContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault();
@@ -467,6 +499,174 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
     ? nodeAttribute(contextMenu?.node ?? null, contextNodeName === "A" || contextNodeName === "AREA" ? "href" : "src") ?? null
     : null;
   const contextReady = status === "open" && !contextMenu?.loading;
+
+  const fetchedGen = useRef(0);
+
+  const fetchTreeForGen = useCallback(async (gen: number): Promise<DomNode | null> => {
+    try {
+      const tree = normalizeChromeTree(await getDocument());
+      actions.setDomTree(stateKey, gen, { root: tree.root, truncated: tree.truncated });
+      return tree.root;
+    } catch (err) {
+      actions.setDomError(stateKey, gen, err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, [actions, getDocument, stateKey]);
+
+  const ensureDomTree = useCallback(async (force = false): Promise<DomNode | null> => {
+    const cur = browserStore.state.byKey[stateKey]?.dom;
+    if (!force && cur?.status === "ready" && cur.root) return cur.root;
+    const gen = actions.beginDomInspect(stateKey, "chrome");
+    fetchedGen.current = gen;
+    return fetchTreeForGen(gen);
+  }, [actions, fetchTreeForGen, stateKey]);
+
+  /** Map a stable backendNodeId to the nodeId of the current tree, returned
+   *  with that tree. nodeIds are only valid for the document fetch they came
+   *  from, so a node missing from the cached tree (a modal opened after the
+   *  fetch) gets one forced refetch and one more mapping. Null when the node is
+   *  still absent. */
+  const resolveBackendNode = useCallback(async (backendNodeId: number): Promise<{ root: DomNode; id: string } | null> => {
+    const mapIn = async (root: DomNode): Promise<{ root: DomNode; id: string } | null> => {
+      const pushed = await pushNodesByBackendIds([backendNodeId]);
+      if (!Array.isArray(pushed.nodeIds)) throw new Error("push_nodes_failed");
+      const nodeId = pushed.nodeIds[0];
+      // 0 means Chrome no longer has the node in the document.
+      if (!nodeId) return null;
+      const id = String(nodeId);
+      return findNode(root, id) ? { root, id } : null;
+    };
+    const root = await ensureDomTree();
+    if (!root) return null;
+    const found = await mapIn(root);
+    if (found) return found;
+    const fresh = await ensureDomTree(true);
+    return fresh ? mapIn(fresh) : null;
+  }, [ensureDomTree, pushNodesByBackendIds]);
+
+  // A refresh started outside this component (DevConsole's Refresh button lives
+  // in BrowserPanel) bumps the store generation and leaves the surface loading;
+  // this is the only component holding the socket, so it performs the fetch.
+  // `fetchedGen` keeps our own inspect/annotation fetch from being duplicated.
+  const domGen = surface?.dom?.gen ?? 0;
+  const domLoading = surface?.dom?.status === "loading" && surface?.dom?.mode === "chrome";
+  useEffect(() => {
+    if (!domLoading || !domGen || fetchedGen.current === domGen) return;
+    fetchedGen.current = domGen;
+    void fetchTreeForGen(domGen);
+  }, [domGen, domLoading, fetchTreeForGen]);
+
+
+  /** Fetch the tree once per page, select `nodeId`, and hand the tree back so
+   *  the caller can derive a selector. A failed fetch selects nothing. */
+  const inspectNode = useCallback((backendNodeId: number) => {
+    void resolveBackendNode(backendNodeId).then((found) => {
+      if (found) actions.selectDomNode(stateKey, found.id);
+    }).catch((err: unknown) => {
+      actions.pushConsole(stateKey, {
+        level: "warn",
+        text: `Inspect failed: ${err instanceof Error ? err.message : String(err)}`,
+        ts: Date.now(),
+      });
+    });
+  }, [actions, resolveBackendNode, stateKey]);
+
+  const openAnnotation = useCallback((backendNodeId: number, label: string, x: number, y: number) => {
+    // A new popover supersedes an in-flight submit: its late capture must not dispatch.
+    annotationSeqRef.current++;
+    void resolveBackendNode(backendNodeId).then((found) => {
+      // A node that is not in the tree opens the annotation without a selector;
+      // its screenshot step then reports the missing node in the console.
+      const nodeId = found ? Number(found.id) : 0;
+      const selector = found ? selectorFor(found.root, found.id) : null;
+      if (found) actions.selectDomNode(stateKey, found.id);
+      setAnnotation({ x, y, nodeId, label, selector, busy: false, error: null });
+    }).catch((err: unknown) => {
+      actions.pushConsole(stateKey, {
+        level: "warn",
+        text: `Annotation failed: ${err instanceof Error ? err.message : String(err)}`,
+        ts: Date.now(),
+      });
+    });
+  }, [actions, resolveBackendNode, stateKey]);
+
+  const submitAnnotation = useCallback(async (note: string, includeShot: boolean) => {
+    if (!annotation) return;
+    const seq = ++annotationSeqRef.current;
+    const { nodeId, selector, label } = annotation;
+    setAnnotation((cur) => (cur ? { ...cur, busy: true, error: null } : cur));
+    let image: Blob | null = null;
+    if (includeShot) {
+      const canvas = canvasRef.current;
+      try {
+        if (!canvas) throw new Error("the page canvas is unavailable");
+        const box = await getBoxModel(nodeId);
+        const rect = quadRect(box?.model?.content);
+        if (!rect) throw new Error("the element has no layout box");
+        const z = zoomFactor || 1;
+        image = await cropScreencast(canvas, {
+          left: rect.left * z,
+          top: rect.top * z,
+          width: rect.width * z,
+          height: rect.height * z,
+        });
+      } catch (err) {
+        // The note is still useful without a picture; say so in the console
+        // instead of blocking the annotation. A superseded request says nothing.
+        if (seq === annotationSeqRef.current) {
+          actions.pushConsole(stateKey, {
+            level: "warn",
+            text: `Annotation screenshot failed: ${err instanceof Error ? err.message : String(err)}`,
+            ts: Date.now(),
+          });
+        }
+      }
+      if (seq !== annotationSeqRef.current) return;
+    }
+    const text = composeAnnotationText({ title: surface?.pageTitle ?? "", url: pageUrl, selector, label, note });
+    const accepted = dispatchBrowserAnnotation({ stateKey, text, image, imageName: annotationFileName() });
+    if (accepted) {
+      setAnnotation(null);
+      return;
+    }
+    // Nothing received the note: keep the popover (and the typed text) open.
+    setAnnotation((cur) => (cur && seq === annotationSeqRef.current ? { ...cur, busy: false, error: ANNOTATION_NO_CHAT_ERROR } : cur));
+  }, [actions, annotation, getBoxModel, pageUrl, stateKey, surface?.pageTitle, zoomFactor]);
+
+  const hoverId = surface?.dom?.hoverId ?? null;
+  useEffect(() => {
+    if (!hoverId || !/^\d+$/.test(hoverId)) {
+      setDomHighlight(null);
+      return;
+    }
+    const seq = ++highlightSeq.current;
+    const z = zoomFactor || 1;
+    getBoxModel(Number(hoverId)).then((box) => {
+      if (highlightSeq.current !== seq) return;
+      const rect = quadRect(box?.model?.content);
+      setDomHighlight(rect
+        ? { left: rect.left * z, top: rect.top * z, width: rect.width * z, height: rect.height * z }
+        : null);
+    }).catch(() => {
+      if (highlightSeq.current === seq) setDomHighlight(null);
+    });
+    return () => {
+      highlightSeq.current++;
+    };
+  }, [getBoxModel, hoverId, zoomFactor]);
+
+  const pickOn = surface?.dom?.pick === true;
+  useEffect(() => {
+    if (!pickOn) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      actions.setDomPick(stateKey, false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [actions, pickOn, stateKey]);
+
 
   const copyContextText = async (text: string): Promise<boolean> => {
     if (!navigator.clipboard) {
@@ -518,11 +718,23 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
       onClick: () => contextLink && copyContextText(contextLink),
     },
     {
-      label: "Inspect",
-      disabled: !contextReady || !contextMenu?.node,
+      label: "Inspect element",
+      disabled: !contextReady || contextMenu?.node?.backendNodeId === undefined,
       onClick: () => {
-        if (!contextMenu?.node) return;
-        actions.pushConsole(stateKey, { level: "info", text: `Inspect: ${JSON.stringify(contextMenu.node)}`, ts: Date.now() });
+        const backendNodeId = contextMenu?.node?.backendNodeId;
+        if (backendNodeId === undefined) return;
+        inspectNode(backendNodeId);
+      },
+    },
+    {
+      label: "Add annotation…",
+      disabled: !contextReady || contextMenu?.node?.backendNodeId === undefined,
+      onClick: () => {
+        const node = contextMenu?.node;
+        const at = contextMenu;
+        if (!node || !at || node.backendNodeId === undefined) return;
+        closeContextMenu();
+        openAnnotation(node.backendNodeId, contextNodeName.toLowerCase() || "element", at.x, at.y);
       },
     },
     { label: "", separator: true, onClick: () => undefined },
@@ -685,6 +897,19 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    // Element picker: this click chooses an element instead of reaching the
+    // page, so the page's own handlers must not see it.
+    if (pickOn && e.button === 0) {
+      const { x, y } = canvasPos(e);
+      const z = zoomFactor || 1;
+      void getNodeAt(x / z, y / z)
+        .then((loc) => resolveBackendNode(loc.backendNodeId))
+        .then((found) => {
+          if (found) actions.selectDomNode(stateKey, found.id);
+        })
+        .catch(() => actions.setDomPick(stateKey, false));
+      return;
+    }
     keyboardRef.current?.focus({ preventScroll: true });
     if (e.pointerType === "touch") {
       onTouchDown(e);
@@ -749,6 +974,8 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // Picking must not move the remote page's cursor around under the pointer.
+    if (pickOn) return;
     if (e.pointerType === "touch") {
       onTouchMove(e);
       return;
@@ -969,7 +1196,7 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
     <div className="absolute inset-0">
       <canvas
         ref={canvasRef}
-        className="block w-full h-full outline-none touch-none"
+        className={`block w-full h-full outline-none touch-none${pickOn ? " cursor-crosshair" : ""}`}
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
@@ -977,12 +1204,36 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
         onWheel={onWheel}
         onContextMenu={onContextMenu}
       />
+      {domHighlight && (
+        <div
+          data-testid="cdp-dom-highlight"
+          aria-hidden="true"
+          className="pointer-events-none absolute border-2 border-sky-500 bg-sky-500/10"
+          style={{ left: domHighlight.left, top: domHighlight.top, width: domHighlight.width, height: domHighlight.height }}
+        />
+      )}
       <ContextMenu
         items={contextItems}
         open={contextMenu !== null}
         position={contextMenu ?? { x: 0, y: 0 }}
         onClose={closeContextMenu}
       />
+      {annotation && (
+        <AnnotationPopover
+          x={annotation.x}
+          y={annotation.y}
+          label={annotation.selector ?? annotation.label}
+          canScreenshot={status === "open"}
+          busy={annotation.busy}
+          error={annotation.error}
+          onSubmit={(note, includeShot) => void submitAnnotation(note, includeShot)}
+          onCancel={() => {
+            // Cancel supersedes an in-flight submit so its late capture cannot inject the note.
+            annotationSeqRef.current++;
+            setAnnotation(null);
+          }}
+        />
+      )}
       {detached && (
         <div
           data-testid="cdp-detached"

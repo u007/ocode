@@ -194,6 +194,27 @@ htrcli-bundle:
 	  cat "$$src_kit"; } > "$$dst/formkit.js"; \
 	echo "wrote $$dst/htrcli-dom.js and $$dst/formkit.js from htrcli $$sha"
 
+## capture-lib: refresh the committed html-to-image UMD bundle that capture.js
+## loads for local-mode annotation screenshots. Requires npm.
+HTML_TO_IMAGE_VERSION := 1.11.13
+capture-lib:
+	@set -e; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	(cd "$$tmp" && npm pack html-to-image@$(HTML_TO_IMAGE_VERSION) --silent >/dev/null); \
+	tar -xzf "$$tmp"/html-to-image-*.tgz -C "$$tmp"; \
+	src="$$tmp/package/dist/html-to-image.js"; \
+	test -f "$$src" || (echo "html-to-image dist missing at $$src" >&2; exit 1); \
+	sha=$$(shasum -a 256 "$$src" 2>/dev/null | cut -d' ' -f1 || sha256sum "$$src" | cut -d' ' -f1); \
+	{ printf '%s\n' \
+		'// Vendored html-to-image (UMD dist bundle) for local-mode annotation' \
+		'// screenshots. Do not edit by hand; refresh with: make capture-lib' \
+		"// version: $(HTML_TO_IMAGE_VERSION)   sha256: $$sha   copied: $$(date -u +%Y-%m-%d)" \
+		'// License: MIT (https://github.com/bubkoo/html-to-image). Exposes' \
+		'// window.htmlToImage in the page that loads it.'; \
+	  grep -v '^//# sourceMappingURL=' "$$src"; } > internal/browse/capture_lib.js; \
+	echo "wrote internal/browse/capture_lib.js (html-to-image $(HTML_TO_IMAGE_VERSION), sha256 $$sha)"
+
 ## desktop-icon-windows: regenerate the committed Windows .exe icon resource
 ## (cmd/ocode-desktop/rsrc_windows_*.syso) from cmd/ocode-desktop/winres/.
 ## go build auto-links these .syso files for GOOS=windows builds on any host;

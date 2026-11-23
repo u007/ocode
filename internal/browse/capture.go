@@ -11,6 +11,9 @@ import (
 //go:embed capture.js
 var captureJS []byte
 
+//go:embed capture_lib.js
+var captureLibJS []byte
+
 // injectCapture inserts the bootstrap + capture <script> as the first children
 // of <head> so wrapping happens before any page script runs. Falls back to
 // before </body>, </html>, or append so capture is never silently skipped.
@@ -95,5 +98,17 @@ func (s *Server) serveCapture(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	if _, err := w.Write(captureJS); err != nil {
 		s.log.Printf("browse: serve capture bundle: %v", err)
+	}
+}
+
+// serveCaptureLib returns the vendored html-to-image bundle. capture.js loads
+// it lazily (only for a local-mode annotation screenshot), so it is a separate
+// request rather than part of the always-injected bundle. Like capture.js it
+// carries no secrets and is served unauthenticated for cacheability.
+func (s *Server) serveCaptureLib(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	if _, err := w.Write(captureLibJS); err != nil {
+		s.log.Printf("browse: serve capture lib: %v", err)
 	}
 }

@@ -60,11 +60,14 @@ export type CdpClientMessage =
       autoRepeat?: boolean;
     };
 
-/** CDP request messages (client→server) for DOM.getNodeForLocation /
- *  DOM.describeNode. These reuse the string requestId correlation. */
+/** CDP request messages (client→server) for node lookup, the DOM inspector and
+ *  the annotation highlight. These reuse the string requestId correlation. */
 export type CdpRequest =
   | { t: "cdp_request"; method: "DOM.getNodeForLocation"; params: { x: number; y: number }; requestId: string }
-  | { t: "cdp_request"; method: "DOM.describeNode"; params: { nodeId: number; depth?: number; pierce?: boolean }; requestId: string };
+  | { t: "cdp_request"; method: "DOM.describeNode"; params: { backendNodeId: number; depth?: number; pierce?: boolean }; requestId: string }
+  | { t: "cdp_request"; method: "DOM.getDocument"; params?: { depth?: number; pierce?: boolean }; requestId: string }
+  | { t: "cdp_request"; method: "DOM.getBoxModel"; params: { nodeId: number }; requestId: string }
+  | { t: "cdp_request"; method: "DOM.pushNodesByBackendIdsToFrontend"; params: { backendNodeIds: number[] }; requestId: string };
 
 /** CDP response messages (server→client) for the above requests. */
 type CdpNodePayload = {
@@ -77,8 +80,39 @@ type CdpNodePayload = {
   contentDocument?: { nodeId: number };
 };
 
+/** DOM.getDocument's reply: a document node whose children hold the page. */
+export type CdpDocumentPayload = {
+  root: {
+    nodeId: number;
+    nodeType?: number;
+    children?: CdpDocumentNode[];
+  };
+};
+
+export interface CdpDocumentNode {
+  nodeId: number;
+  backendNodeId?: number;
+  nodeType?: number;
+  nodeName?: string;
+  localName?: string;
+  nodeValue?: string;
+  attributes?: string[];
+  children?: CdpDocumentNode[];
+}
+
+/** DOM.getBoxModel's reply. Quads are [x,y,x,y,x,y,x,y] in CSS pixels. */
+export type CdpBoxModelPayload = {
+  model?: { content?: number[]; padding?: number[]; border?: number[]; margin?: number[] };
+};
+
+/** DOM.pushNodesByBackendIdsToFrontend's reply: one nodeId per requested
+ *  backendNodeId, in order. A 0 means that node is not in the document. */
+export type CdpPushNodesPayload = {
+  nodeIds?: number[];
+};
+
 export type CdpResponse =
-  | { t: "cdp_response"; requestId: string; result: CdpNodePayload | { node: CdpNodePayload }; error?: never }
+  | { t: "cdp_response"; requestId: string; result: CdpNodePayload | CdpDocumentPayload | CdpBoxModelPayload | CdpPushNodesPayload | { node: CdpNodePayload }; error?: never }
   | { t: "cdp_response"; requestId: string; result?: never; error: string };
 
 /** Server→client JSON telemetry (binary frames are handled separately). */

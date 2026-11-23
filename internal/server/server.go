@@ -1490,6 +1490,9 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	proxyMux.Handle("/__ocode_capture.js", srv.browseProxyGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		srv.browseProxy.ServeHTTP(w, r)
 	})))
+	proxyMux.Handle("/__ocode_capture_lib.js", srv.browseProxyGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.browseProxy.ServeHTTP(w, r)
+	})))
 	proxyMux.HandleFunc("/api/remote/{host}/browse/{rest...}", srv.browseProxyGate(func(w http.ResponseWriter, r *http.Request) {
 		srv.handleRemoteBrowseProxy(w, r, r.PathValue("host"))
 	}))

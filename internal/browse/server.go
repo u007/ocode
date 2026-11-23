@@ -92,6 +92,16 @@ type describeNodeTarget interface {
 	DescribeNode(ctx context.Context, nodeId int, opts any) (map[string]any, error)
 }
 
+// Optional interface: DOM.getDocument (used by the DOM inspector tab).
+type getDocumentTarget interface {
+	GetDocument(ctx context.Context, depth int) (map[string]any, error)
+}
+
+// Optional interface: DOM.getBoxModel (used by the DOM inspector highlight).
+type getBoxModelTarget interface {
+	GetBoxModel(ctx context.Context, nodeId int) (map[string]any, error)
+}
+
 // chromeTarget is the subset of cdp.Target used by the browse WS. Defined
 // as an interface so tests can inject a fake without a real Chrome.
 type chromeTarget interface {
@@ -282,6 +292,7 @@ func New(apiToken string, logger *log.Logger, opts ...Options) *Server {
 	s.conns = newConnLimiter(maxUpstreamConnsPerKey)
 	s.mux.HandleFunc("/b/", s.handleBrowse)
 	s.mux.HandleFunc("GET /__ocode_capture.js", s.serveCapture)
+	s.mux.HandleFunc("GET "+captureLibPath, s.serveCaptureLib)
 	s.mux.HandleFunc("GET /b/{stateKey}/__cdp", s.handleCDP)
 	s.mux.HandleFunc("POST /b/{stateKey}/__bypass", s.handleBypass)
 	// Everything else is a root-relative subresource escaping the /b/ mount

@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBrowseBase, getBrowseHTRNotice, getBrowseRemoteMode, getBrowseStreamViaMain, mintBrowseGrant, browseSrc, normalizeBrowseURL, bypassBrowseTLS, openBrowseTabOrigin } from "../../api/client";
-import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey } from "../../lib/browserStore";
+import { useBrowserStore, useBrowserActions, isPrivateHost, type StateKey, browserStore } from "../../lib/browserStore";
 import { AddressBar } from "./AddressBar";
 import { DevConsole } from "./DevConsole";
 import { useBrowserMessages } from "./useBrowserMessages";
+import { useLocalInspector } from "./useLocalInspector";
 import { browseOriginOf } from "./browseOrigin";
 import { REMOTE_STALL_AFTER_MS } from "../../hooks/useRemoteHostStatus";
 import { ChromeViewport } from "./ChromeViewport";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { openExternalURL } from "../../lib/externalLinks";
+import { ContextMenu, type ContextMenuItem } from "../Layout/ContextMenu";
+import { AnnotationPopover } from "./AnnotationPopover";
+import { ANNOTATION_NO_CHAT_ERROR, annotationFileName, composeAnnotationText, dataUrlToBlob, dispatchBrowserAnnotation } from "./annotation";
+import { selectorFor, type DomNode } from "../../lib/domInspector";
+import { copyTextToClipboard } from "../../lib/clipboard";
 
 /** What the iframe was last pointed at (see loadedRef). */
 interface LoadRecord {
@@ -71,6 +77,109 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   const connectRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connecting = useRef<{ url: string; since: number } | null>(null);
 
+  // Local-mode inspector: the right-click menu, the note composer, and the RPC
+  // to capture.js (tree, in-page highlight, picker, screenshot). All of it is
+  // scoped to this iframe's own page by the hook's origin + frame gate.
+  const { fetchTree: fetchLocalTree, capture: captureLocal, highlight: highlightLocal, setPick: setLocalPick } = useLocalInspector(stateKey, iframeRef, pageOriginRef);
+  const [localMenu, setLocalMenu] = useState<{ x: number; y: number; path: string; label: string } | null>(null);
+  const [localAnnotation, setLocalAnnotation] = useState<{
+    x: number;
+    y: number;
+    path: string;
+    label: string;
+    selector: string | null;
+    busy: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const loadLocalTree = useCallback(async (): Promise<DomNode | null> => {
+    const gen = actions.beginDomInspect(stateKey, "local");
+    try {
+      const tree = await fetchLocalTree();
+      actions.setDomTree(stateKey, gen, { root: tree.root, truncated: tree.truncated });
+      return tree.root;
+    } catch (err) {
+      actions.setDomError(stateKey, gen, err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, [actions, fetchLocalTree, stateKey]);
+
+  const inspectLocal = useCallback((path: string) => {
+    void loadLocalTree().then((root) => {
+      if (root) actions.selectDomNode(stateKey, path);
+    });
+  }, [actions, loadLocalTree, stateKey]);
+
+  // Request token for the annotation popover. Bumped when a popover opens,
+  // when it is cancelled and when a submit starts; every await checks it, so a
+  // capture that finishes after the user cancelled (or after a newer annotation
+  // opened) neither injects its note nor touches the popover.
+  const annotationSeq = useRef(0);
+
+  const openLocalAnnotation = useCallback((path: string, label: string, x: number, y: number) => {
+    const seq = ++annotationSeq.current;
+    void loadLocalTree().then((root) => {
+      if (seq !== annotationSeq.current) return;
+      const selector = root ? selectorFor(root, path) : null;
+      if (root) actions.selectDomNode(stateKey, path);
+      setLocalAnnotation({ x, y, path, label, selector, busy: false, error: null });
+    });
+  }, [actions, loadLocalTree, stateKey]);
+
+  const submitLocalAnnotation = useCallback(async (note: string, includeShot: boolean) => {
+    if (!localAnnotation) return;
+    const seq = ++annotationSeq.current;
+    const { path, selector, label } = localAnnotation;
+    setLocalAnnotation((cur) => (cur ? { ...cur, busy: true, error: null } : cur));
+    let image: Blob | null = null;
+    if (includeShot) {
+      try {
+        image = dataUrlToBlob(await captureLocal(path));
+      } catch (err) {
+        // The note is still useful without a picture; say so and carry on.
+        console.warn("browser annotation: local screenshot failed", err);
+      }
+      if (seq !== annotationSeq.current) return;
+    }
+    const text = composeAnnotationText({ title: s?.pageTitle ?? "", url: s?.url ?? "", selector, label, note });
+    const accepted = dispatchBrowserAnnotation({ stateKey, text, image, imageName: annotationFileName() });
+    if (accepted) {
+      setLocalAnnotation(null);
+      return;
+    }
+    // Nothing received the note: keep the popover (and the typed text) open.
+    setLocalAnnotation((cur) => (cur && seq === annotationSeq.current ? { ...cur, busy: false, error: ANNOTATION_NO_CHAT_ERROR } : cur));
+  }, [captureLocal, localAnnotation, s?.pageTitle, s?.url, stateKey]);
+
+  const refreshDom = useCallback(() => {
+    // Chrome mode's socket lives in ChromeViewport: bumping the generation is
+    // what tells that component to refetch. Local mode is a direct request.
+    const mode = browserStore.state.byKey[stateKey]?.dom?.mode;
+    if (mode === "chrome") {
+      actions.beginDomInspect(stateKey, "chrome");
+      return;
+    }
+    void loadLocalTree();
+  }, [actions, loadLocalTree, stateKey]);
+
+  // Local-mode tree-row hover → in-page outline (drawn by capture.js, so it
+  // follows nested scroll containers without coordinate maths here).
+  const localHoverId = s?.dom?.mode === "local" ? s.dom.hoverId : null;
+  useEffect(() => {
+    if (s?.dom?.mode !== "local") return;
+    highlightLocal(localHoverId);
+  }, [highlightLocal, localHoverId, s?.dom?.mode]);
+
+  // Local-mode picker: capture.js owns the pointer interaction in the page.
+  const localPick = s?.dom?.mode === "local" ? s.dom.pick : false;
+  useEffect(() => {
+    if (s?.dom?.mode !== "local") return;
+    setLocalPick(localPick);
+    return () => setLocalPick(false);
+  }, [localPick, setLocalPick, s?.dom?.mode]);
+
+
+
   // Ends the load in flight. Its awaits compare the generation after each step and
   // stop without committing src, pageOriginRef or the record once it moved on; a
   // scheduled connect retry for it is cancelled.
@@ -129,6 +238,26 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
       if (frame && base) {
         loadedRef.current = { key, frame, base, origin: new URL(applied.url).origin, idx: applied.idx };
       }
+    },
+    onContextMenu: (_key, ev) => {
+      const frame = iframeRef.current;
+      if (!frame) return;
+      // capture.js reports viewer-relative coordinates; the menu is portalled
+      // at viewport coordinates.
+      const rect = frame.getBoundingClientRect();
+      setLocalMenu({ x: rect.left + ev.x, y: rect.top + ev.y, path: ev.path, label: ev.label });
+    },
+    onPicked: (key, ev) => {
+      if (ev.cancelled || !ev.path) {
+        actions.setDomPick(key, false);
+        return;
+      }
+      // selectDomNode clears the armed picker.
+      actions.selectDomNode(key, ev.path);
+    },
+    onReset: (key) => {
+      // A new document invalidated every path in the tree.
+      actions.clearDom(key);
     },
   });
 
@@ -302,6 +431,15 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
     setDismissedLoopbackWarning(false);
   }, [s?.url]);
 
+  // A mode flip replaces the DOM source (Chrome nodeIds vs capture.js paths),
+  // so the tree and any armed picker from the other mode are invalid.
+  const modeRef = useRef(effectiveMode);
+  useEffect(() => {
+    if (modeRef.current === effectiveMode) return;
+    modeRef.current = effectiveMode;
+    actions.clearDom(stateKey);
+  }, [actions, effectiveMode, stateKey]);
+
   // A different surface (stateKey) starts its own first-load lifecycle.
   useEffect(() => {
     setEverLoaded(false);
@@ -369,6 +507,27 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
   }, [bypassHost, host, stateKey, s?.url, base, loadInto, actions, s]);
 
   if (!s) return null;
+
+  // Local-mode page menu. Chrome mode builds its own inside ChromeViewport
+  // (the canvas receives the right-click there); a cross-origin iframe cannot,
+  // so capture.js reports the event and this menu answers it.
+  const localMenuItems: ContextMenuItem[] = localMenu
+    ? [
+        { label: "Back", disabled: s.historyIndex <= 0, onClick: () => actions.back(stateKey) },
+        { label: "Forward", disabled: s.historyIndex >= s.history.length - 1, onClick: () => actions.forward(stateKey) },
+        { label: "Reload", onClick: () => actions.navigate(stateKey, s.url) },
+        { label: "", separator: true, onClick: () => undefined },
+        { label: "Copy URL", disabled: !s.url, onClick: () => void copyTextToClipboard(s.url) },
+        { label: "Inspect element", disabled: !localMenu.path, onClick: () => inspectLocal(localMenu.path) },
+        {
+          label: "Add annotation…",
+          disabled: !localMenu.path,
+          onClick: () => openLocalAnnotation(localMenu.path, localMenu.label, localMenu.x, localMenu.y),
+        },
+        { label: "", separator: true, onClick: () => undefined },
+        { label: "Open External", disabled: !s.url, onClick: () => openExternalURL(s.url) },
+      ]
+    : [];
 
   return (
     <div ref={rootRef} className="flex flex-col h-full min-h-0 min-w-0" data-testid={`browser-${mode}`} aria-hidden={!active}>
@@ -500,6 +659,27 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
           </div>
         )}
       </div>
+      <ContextMenu
+        items={localMenuItems}
+        open={localMenu !== null}
+        position={localMenu ?? { x: 0, y: 0 }}
+        onClose={() => setLocalMenu(null)}
+      />
+      {localAnnotation && (
+        <AnnotationPopover
+          x={localAnnotation.x}
+          y={localAnnotation.y}
+          label={localAnnotation.selector ?? localAnnotation.label}
+          canScreenshot
+          busy={localAnnotation.busy}
+          error={localAnnotation.error}
+          onSubmit={(note, includeShot) => void submitLocalAnnotation(note, includeShot)}
+          onCancel={() => {
+            annotationSeq.current++;
+            setLocalAnnotation(null);
+          }}
+        />
+      )}
       <DevConsole
         consoleEvents={s.consoleEvents}
         networkEvents={s.networkEvents}
@@ -510,6 +690,11 @@ export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey
         onClearConsole={() => actions.clearConsole(stateKey)}
         onClearNetwork={() => actions.clearNetwork(stateKey)}
         onClearPerformance={() => actions.clearPerformance(stateKey)}
+        dom={s.dom}
+        onSelectNode={(id) => actions.selectDomNode(stateKey, id)}
+        onHoverNode={(id) => actions.hoverDomNode(stateKey, id)}
+        onSetPick={(on) => actions.setDomPick(stateKey, on)}
+        onRefreshDom={refreshDom}
         onTogglePerfRecording={() => {
           // State-key scoped: ChromeViewport only forwards events addressed
           // to its own surface, so one tab's toggle never leaks into another.

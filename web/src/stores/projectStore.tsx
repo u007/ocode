@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
@@ -138,15 +138,29 @@ const initialState: ProjectState = {
   groups: [],
 };
 
+/** Shared empty tab list. Selectors must return a stable reference: a fresh
+ *  `[]` per call would re-render every subscriber on every store change. */
+const EMPTY_TABS: Tab[] = [];
+
 /** Tabs of the active project (derived so consumers can keep reading `tabs`). */
 function activeTabs(state: ProjectState): Tab[] {
-  if (!state.activeProject) return [];
-  return state.tabsByProject[state.activeProject.path] || [];
+  if (!state.activeProject) return EMPTY_TABS;
+  return state.tabsByProject[state.activeProject.path] || EMPTY_TABS;
 }
 
 function activeTabId(state: ProjectState): string | null {
   if (!state.activeProject) return null;
   return state.activeTabByProject[state.activeProject.path] || null;
+}
+
+/** Selector: tabs of the active project (stable reference). */
+export function selectActiveTabs(state: ProjectState): Tab[] {
+  return activeTabs(state);
+}
+
+/** Selector: active tab id of the active project. */
+export function selectActiveTabId(state: ProjectState): string | null {
+  return activeTabId(state);
 }
 
 /** Finds which project's tab list contains this tab id, regardless of which
@@ -731,6 +745,20 @@ const ProjectContext = createContext<ProjectContextType | null>(null);
  *  `memo`-able: they re-render for their own chat slice, not for every tab or
  *  project switch. */
 export const ProjectDispatchContext = createContext<React.Dispatch<ProjectAction> | null>(null);
+
+/** Every `ProjectContext` member except the state and the two derived values.
+ *  Served through `ProjectActionsContext` as one memoised object. */
+export type ProjectActions = Omit<ProjectContextType, "state" | "tabs" | "activeTabId">;
+
+/** The store instance itself. Read by `useProjectSelector` / `useProjectStateRef`
+ *  so a consumer can subscribe to one field instead of the whole state. */
+const ProjectStoreContext = createContext<Store<ProjectState> | null>(null);
+
+/** Callback-only sibling of `ProjectContext`. Its value is one object whose
+ *  members never change identity while their own deps are stable, so a
+ *  component that only fires actions subscribes here and does not re-render on
+ *  project state changes. */
+const ProjectActionsContext = createContext<ProjectActions | null>(null);
 
 
 /** How often an offline project list is re-requested while `offline` is set. */
@@ -1504,43 +1532,80 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     })();
   }, [state.loading, state.activeProject, refreshProjects, selectProject]);
 
+  const actions = useMemo<ProjectActions>(
+    () => ({
+      dispatch,
+      refreshProjects,
+      refreshGroups,
+      selectProject,
+      prefetchProjectSessions,
+      openSessionTab,
+      closeSessionTab,
+      addProject,
+      openProjectPath,
+      addRemoteProject,
+      duplicateProjectAsRemote,
+      updateRemoteProject,
+      removeProject,
+      renameProject,
+      reorderProjects,
+      setProjectGroup,
+      setProjectProfile,
+      createGroup,
+      deleteGroup,
+      renameGroup,
+      reorderGroups,
+      setGroupCollapsed,
+      toggleSessionPicker,
+      openNewSessionTab,
+      openDeepLinkSession,
+    }),
+    [
+      dispatch,
+      refreshProjects,
+      refreshGroups,
+      selectProject,
+      prefetchProjectSessions,
+      openSessionTab,
+      closeSessionTab,
+      addProject,
+      openProjectPath,
+      addRemoteProject,
+      duplicateProjectAsRemote,
+      updateRemoteProject,
+      removeProject,
+      renameProject,
+      reorderProjects,
+      setProjectGroup,
+      setProjectProfile,
+      createGroup,
+      deleteGroup,
+      renameGroup,
+      reorderGroups,
+      setGroupCollapsed,
+      toggleSessionPicker,
+      openNewSessionTab,
+      openDeepLinkSession,
+    ],
+  );
+
   return (
-    <ProjectDispatchContext.Provider value={dispatch}>
-      <ProjectContext.Provider
-        value={{
-          state,
-          tabs: activeTabs(state),
-          activeTabId: activeTabId(state),
-          dispatch,
-          refreshProjects,
-          refreshGroups,
-          selectProject,
-          prefetchProjectSessions,
-          openSessionTab,
-          closeSessionTab,
-          addProject,
-          openProjectPath,
-          addRemoteProject,
-          duplicateProjectAsRemote,
-          updateRemoteProject,
-          removeProject,
-          renameProject,
-          reorderProjects,
-          setProjectGroup,
-          setProjectProfile,
-          createGroup,
-          deleteGroup,
-          renameGroup,
-          reorderGroups,
-          setGroupCollapsed,
-          toggleSessionPicker,
-          openNewSessionTab,
-          openDeepLinkSession,
-        }}
-      >
-        {children}
-      </ProjectContext.Provider>
-    </ProjectDispatchContext.Provider>
+    <ProjectStoreContext.Provider value={store}>
+      <ProjectDispatchContext.Provider value={dispatch}>
+        <ProjectActionsContext.Provider value={actions}>
+          <ProjectContext.Provider
+            value={{
+              state,
+              tabs: activeTabs(state),
+              activeTabId: activeTabId(state),
+              ...actions,
+            }}
+          >
+            {children}
+          </ProjectContext.Provider>
+        </ProjectActionsContext.Provider>
+      </ProjectDispatchContext.Provider>
+    </ProjectStoreContext.Provider>
   );
 }
 
@@ -1562,4 +1627,46 @@ export function useProjectDispatch(): React.Dispatch<ProjectAction> {
   const dispatch = useContext(ProjectDispatchContext);
   if (!dispatch) throw new Error("useProjectDispatch must be used within ProjectProvider");
   return dispatch;
+}
+
+function useProjectStore(hookName: string): Store<ProjectState> {
+  const store = useContext(ProjectStoreContext);
+  if (!store) throw new Error(`${hookName} must be used within ProjectProvider`);
+  return store;
+}
+
+/** Subscribes only to the projection `selector` returns, re-rendering when that
+ *  value changes (default Object.is compare). The selector must return a stored
+ *  field, a primitive, or a stable reference (see `selectActiveTabs`); never a
+ *  new object, array, or `.filter()`/`.map()` result. */
+export function useProjectSelector<T>(
+  selector: (state: ProjectState) => T,
+  isEqual?: (a: T, b: T) => boolean,
+): T {
+  return useSelector(useProjectStore("useProjectSelector"), selector, isEqual ? { compare: isEqual } : undefined);
+}
+
+/** Every project action (dispatch, selectProject, openSessionTab, ...) as one
+ *  memoised object. Never re-renders the caller on project state changes, only
+ *  when an action's own dependencies change. */
+export function useProjectActions(): ProjectActions {
+  const actions = useContext(ProjectActionsContext);
+  if (!actions) throw new Error("useProjectActions must be used within ProjectProvider");
+  return actions;
+}
+
+/** For consumers that read the latest project state only imperatively (inside a
+ *  callback, effect, or event handler) and never use it to drive JSX or hook
+ *  dependencies. Subscribes without re-rendering the caller. */
+export function useProjectStateRef(): { readonly current: ProjectState } {
+  const store = useProjectStore("useProjectStateRef");
+  const ref = useRef(store.state);
+  ref.current = store.state;
+  useEffect(() => {
+    const sub = store.subscribe(() => {
+      ref.current = store.state;
+    });
+    return () => sub.unsubscribe();
+  }, [store]);
+  return ref;
 }

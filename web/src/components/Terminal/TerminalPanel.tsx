@@ -2551,7 +2551,7 @@ export default function TerminalPanel({
           <div
             ref={ctxMenuRef}
             role="menu"
-            className="fixed z-50 min-w-[200px] bg-popover border border-border rounded-md shadow-md py-1 animate-in fade-in-0 zoom-in-95"
+            className="fixed z-50 min-w-[200px] bg-popover border border-border rounded-md shadow-md py-1 animate-in fade-in-0 duration-100"
             style={{ left: clampedMenuPos.x, top: clampedMenuPos.y }}
             onClick={(e) => e.stopPropagation()}
           >

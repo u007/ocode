@@ -10,7 +10,7 @@ tags:
   - cdp
   - tailscale
   - remote
-timestamp: 2026-11-17T06:47:28Z
+timestamp: 2026-11-23T10:55:46Z
 status: active
 ---
 
@@ -150,4 +150,5 @@ WebSocket passes that check.
 - [Browser agent tool](browser-agent-tools.md) - agent-side access to the same Chrome tabs.
 - [Embedded Browser — Tab-Strip Page Titles](browse-tab-titles.md) - how the tab title is fed in this Chrome mode (a per-target `Target.getTargetInfo` poll) and in local mode.
 - [Embedded Browser — Root-Relative Redirect](browse-root-relative-redirect.md) - the other browse-listener redirect path.
+- [Embedded browser DOM inspector and annotations (local vs Chrome)](browser-dom-inspector-annotations.md) - the right-click inspector and composer annotation, and how the local iframe captures its own events.
 - [Embedded Browser — WebSocket Proxy 404](../gotchas/embedded-browser-websocket-proxy-404.md) - the listener-side WebSocket failure mode this path avoids for stream clients.

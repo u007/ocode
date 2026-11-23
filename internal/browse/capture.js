@@ -22,6 +22,10 @@
   var spaOrigin = cfg.spaOrigin || "";
   if (!spaOrigin) return; // nothing to report to; do not touch the page.
 
+  // This script tag's own URL, so the lazily-loaded capture library resolves
+  // through the SAME mount prefix (a remote project's browse origin is served
+  // under a path, not at the origin root).
+  var scriptSrc = (document.currentScript && document.currentScript.src) || "";
   // Root mode: the document is served from its own per-tab origin, mounted at
   // the upstream root, so location.pathname IS the upstream path and there is
   // no /b/ route. The server sets rootMode and the bound scheme/host only for
@@ -883,6 +887,340 @@
       lastScrollY = y;
     } catch (err) { /* benign teardown/restriction noise */ }
   });
-  // First report after load settles (images/fonts shift layout).
-  window.addEventListener("load", function () { setTimeout(reportScroll, 500); });
+  // --- DOM inspector + annotations (LOCAL MODE) ---
+  // The SPA's DOM tab, element picker and annotation screenshot read the page
+  // through these messages. Node paths ("0/3/1") are indices into childNodes
+  // from documentElement, assigned here and resolved here, so the SPA never
+  // needs a second traversal implementation. Every payload is display data:
+  // the SPA renders node text as text, never as HTML.
+  var INSPECT_MAX_NODES = 5000;
+  var INSPECT_MAX_TEXT = 200;
+  var pickOn = false;
+  var hlEl = null;
+  var libState = 0; // 0 = untouched, 1 = loading, 2 = ready, 3 = failed
+  var libWaiters = [];
+  var libURL = scriptSrc.replace(/\/__ocode_capture\.js(\?[^#]*)?$/, "/__ocode_capture_lib.js");
+
+  function elOf(node) {
+    if (!node) return null;
+    return node.nodeType === 1 ? node : node.parentElement || null;
+  }
+
+  // pathOf / nodeAtPath share one addressing scheme: the root documentElement
+  // is "0", and each further segment is the index in parent.childNodes (text
+  // and comment nodes included), so a path resolves to the SAME node later.
+  function pathOf(node) {
+    var segs = [];
+    while (node && node !== document.documentElement) {
+      var parent = node.parentNode;
+      if (!parent) return "";
+      var idx = 0;
+      var sib = node;
+      while ((sib = sib.previousSibling)) idx++;
+      segs.unshift(String(idx));
+      node = parent;
+    }
+    return node ? "0" + (segs.length ? "/" + segs.join("/") : "") : "";
+  }
+
+  function nodeAtPath(path) {
+    if (typeof path !== "string" || path.indexOf("0") !== 0) return null;
+    var segs = path.split("/").slice(1);
+    var node = document.documentElement;
+    for (var i = 0; i < segs.length; i++) {
+      if (!node) return null;
+      var idx = Number(segs[i]);
+      if (!(idx >= 0) || !node.childNodes[idx]) return null;
+      node = node.childNodes[idx];
+    }
+    return node || null;
+  }
+
+  function labelOf(el) {
+    if (!el) return "";
+    var out = String(el.tagName || "").toLowerCase();
+    if (el.id) out += "#" + el.id;
+    var cls = String(el.getAttribute("class") || "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    for (var i = 0; i < cls.length; i++) out += "." + cls[i];
+    return out;
+  }
+
+  function isInjectedScript(node) {
+    if (node.nodeType !== 1 || String(node.tagName || "").toLowerCase() !== "script") return false;
+    var src = node.getAttribute("src") || "";
+    if (src.indexOf("__ocode_capture") >= 0) return true;
+    var text = node.textContent || "";
+    return text.indexOf("__OCODE_BROWSE__") >= 0;
+  }
+
+  function sendTree(requestId) {
+    var count = 0;
+    var truncated = false;
+    var root = document.documentElement;
+    function walk(node, path) {
+      var out = { id: path, tag: "node", attrs: {} };
+      if (node.nodeType === 1) {
+        out.tag = String(node.tagName || "").toLowerCase();
+        for (var a = 0; a < node.attributes.length; a++) {
+          out.attrs[node.attributes[a].name] = node.attributes[a].value;
+        }
+      } else if (node.nodeType === 3) {
+        out.tag = "#text";
+        out.text = String(node.nodeValue || "").trim().slice(0, INSPECT_MAX_TEXT);
+        return out;
+      } else {
+        out.tag = "#" + String(node.nodeName || "").toLowerCase();
+        return out;
+      }
+      if (count >= INSPECT_MAX_NODES) { truncated = true; return out; }
+      var kids = [];
+      for (var i = 0; i < node.childNodes.length; i++) {
+        var kid = node.childNodes[i];
+        if (kid.nodeType !== 1 && !(kid.nodeType === 3 && String(kid.nodeValue || "").trim() !== "")) continue;
+        if (isInjectedScript(kid)) continue;
+        count++;
+        kids.push(walk(kid, path + "/" + i));
+        if (count >= INSPECT_MAX_NODES) { truncated = true; break; }
+      }
+      if (kids.length) out.children = kids;
+      return out;
+    }
+    post({ type: "ocode:browse:inspector-tree", requestId: requestId, root: walk(root, "0"), truncated: truncated, ts: Date.now() });
+  }
+
+  function ensureHighlight() {
+    if (hlEl && hlEl.parentNode) return hlEl;
+    hlEl = document.createElement("div");
+    hlEl.setAttribute("data-ocode-inspect", "");
+    hlEl.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;display:none;z-index:2147483647;pointer-events:none;box-sizing:border-box;border:2px solid #0ea5e9;background:rgba(14,165,233,0.12);border-radius:2px;";
+    (document.body || document.documentElement).appendChild(hlEl);
+    return hlEl;
+  }
+
+  function highlightEl(el) {
+    if (!el) { hideHighlight(); return; }
+    var r = el.getBoundingClientRect();
+    var box = ensureHighlight();
+    box.style.left = r.left + "px";
+    box.style.top = r.top + "px";
+    box.style.width = Math.max(1, r.width) + "px";
+    box.style.height = Math.max(1, r.height) + "px";
+    box.style.display = "block";
+  }
+
+  function hideHighlight() {
+    if (hlEl) hlEl.style.display = "none";
+  }
+
+  function setPick(on) {
+    pickOn = !!on;
+    if (!pickOn) { hideHighlight(); try { document.documentElement.style.cursor = ""; } catch (e) { /* detached */ } return; }
+    try { document.documentElement.style.cursor = "crosshair"; } catch (e) { /* detached */ }
+  }
+
+  function flushLib(err) {
+    var waiters = libWaiters;
+    libWaiters = [];
+    for (var i = 0; i < waiters.length; i++) {
+      try { waiters[i](err); } catch (e) { /* one waiter must not block the rest */ }
+    }
+  }
+
+  function loadLib(cb) {
+    if (window.htmlToImage) { cb(null); return; }
+    if (libState === 3) { cb(new Error("capture library unavailable")); return; }
+    libWaiters.push(cb);
+    if (libState === 1) return;
+    if (!libURL) { libState = 3; flushLib(new Error("capture library URL unresolved")); return; }
+    libState = 1;
+    var s = document.createElement("script");
+    s.src = libURL;
+    s.async = true;
+    s.onload = function () {
+      libState = window.htmlToImage ? 2 : 3;
+      flushLib(libState === 2 ? null : new Error("capture library did not initialize"));
+    };
+    s.onerror = function () {
+      libState = 3;
+      flushLib(new Error("capture library failed to load"));
+    };
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // clampRect fits a rect to an image of imgW x imgH px. Edges are rounded to
+  // whole pixels and clipped to the image, so a rect hanging off any edge keeps
+  // only the part that exists; nothing left gives a zero-size rect.
+  function clampRect(r, imgW, imgH) {
+    var x0 = Math.min(imgW, Math.max(0, Math.round(r.x)));
+    var y0 = Math.min(imgH, Math.max(0, Math.round(r.y)));
+    var x1 = Math.min(imgW, Math.max(x0, Math.round(r.x + r.w)));
+    var y1 = Math.min(imgH, Math.max(y0, Math.round(r.y + r.h)));
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // cropToDataUrl copies `crop` (clamped to the image) onto a canvas with
+  // `margin` px of white around it, then strokes `outline` at its place inside
+  // the copy. Both rects are in image px, so the outline lands on the element
+  // whether or not the crop was clamped at an edge.
+  function cropToDataUrl(url, crop, outline, margin) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var c = clampRect(crop, img.width, img.height);
+          if (!(c.w > 0) || !(c.h > 0)) { reject(new Error("capture region is outside the page")); return; }
+          var m = Math.round(margin);
+          var ox = Math.round(outline.x) - c.x + m;
+          var oy = Math.round(outline.y) - c.y + m;
+          var out = document.createElement("canvas");
+          out.width = c.w + m * 2;
+          out.height = c.h + m * 2;
+          var ctx = out.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, out.width, out.height);
+          ctx.drawImage(img, c.x, c.y, c.w, c.h, m, m, c.w, c.h);
+          ctx.strokeStyle = "#0ea5e9";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(ox + 1, oy + 1, Math.round(outline.w) - 2, Math.round(outline.h) - 2);
+          resolve(out.toDataURL("image/png"));
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = function () { reject(new Error("captured image did not decode")); };
+      img.src = url;
+    });
+  }
+
+  function capturePath(requestId, path) {
+    var el = elOf(nodeAtPath(path));
+    if (!el) {
+      post({ type: "ocode:browse:inspector-capture", requestId: requestId, error: "element not found", ts: Date.now() });
+      return;
+    }
+    loadLib(function (err) {
+      if (err) {
+        post({ type: "ocode:browse:inspector-capture", requestId: requestId, error: String(err.message || err), ts: Date.now() });
+        return;
+      }
+      var rect = el.getBoundingClientRect();
+      var docEl = document.documentElement;
+      var ratio = Math.min(2, window.devicePixelRatio || 1);
+      var pad = 16 * ratio;
+      var fullW = Math.max(docEl.scrollWidth, docEl.clientWidth);
+      var fullH = Math.max(docEl.scrollHeight, docEl.clientHeight);
+      // Above this size a whole-document render is not reliable (browser canvas
+      // caps sit near 16M px), so the element alone is captured. Same outline,
+      // less context.
+      var full = fullW * ratio <= 12000 && fullH * ratio <= 12000 && fullW * fullH * ratio * ratio <= 16000000;
+      var opts = {
+        backgroundColor: "#ffffff",
+        pixelRatio: ratio,
+        cacheBust: true,
+        // The inspector's own outline is chrome, not page content.
+        filter: function (node) {
+          return !(node && node.getAttribute && node.getAttribute("data-ocode-inspect") !== null);
+        },
+      };
+      if (full) { opts.width = fullW; opts.height = fullH; }
+      hideHighlight();
+      window.htmlToImage.toPng(full ? docEl : el, opts).then(function (url) {
+        var sw = Math.max(1, rect.width * ratio);
+        var sh = Math.max(1, rect.height * ratio);
+        if (full) {
+          // Context is real page pixels: the crop is the element grown by pad,
+          // clamped to the page image inside cropToDataUrl. The outline stays on
+          // the element itself.
+          var ex = (rect.left + (window.scrollX || 0)) * ratio;
+          var ey = (rect.top + (window.scrollY || 0)) * ratio;
+          return cropToDataUrl(url,
+            { x: ex - pad, y: ey - pad, w: sw + pad * 2, h: sh + pad * 2 },
+            { x: ex, y: ey, w: sw, h: sh }, 0);
+        }
+        // The element-only render is the element alone, so there are no
+        // surrounding pixels to keep: white margin around the element.
+        var own = { x: 0, y: 0, w: sw, h: sh };
+        return cropToDataUrl(url, own, own, pad);
+      }).then(function (dataUrl) {
+        post({ type: "ocode:browse:inspector-capture", requestId: requestId, dataUrl: dataUrl, ts: Date.now() });
+      }).catch(function (captureErr) {
+        post({ type: "ocode:browse:inspector-capture", requestId: requestId, error: String((captureErr && captureErr.message) || captureErr), ts: Date.now() });
+      });
+    });
+  }
+
+  // Right-click is handled in the BUBBLE phase on purpose: a page that builds
+  // its own context menu sets defaultPrevented, and then it keeps its menu.
+  // Only a page that left the native menu alone gets the ocode menu.
+  // Native menu wins outside a panel, on Shift, on text fields and selections:
+  // the replacement menu has no Copy, Paste or spellcheck.
+  function wantsNativeMenu(embedded, shiftKey, editable, selectedText) {
+    return !embedded || !!shiftKey || !!editable || selectedText !== "";
+  }
+
+  function isEditableTarget(node) {
+    var el = elOf(node);
+    if (!el) return false;
+    var tag = String(el.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || !!el.isContentEditable;
+  }
+
+  window.addEventListener("contextmenu", function (e) {
+    if (pickOn || e.defaultPrevented) return;
+    var selected = window.getSelection ? String(window.getSelection() || "") : "";
+    if (wantsNativeMenu(window.parent !== window, e.shiftKey, isEditableTarget(e.target), selected)) return;
+    var el = elOf(e.target);
+    if (!el) return;
+    e.preventDefault();
+    post({ type: "ocode:browse:contextmenu", x: e.clientX, y: e.clientY, path: pathOf(el), label: labelOf(el), ts: Date.now() });
+  });
+
+  // Element picker: permanent capture listeners that early-return unless a
+  // pick is in flight, so turning picking on never re-registers handlers.
+  document.addEventListener("mousemove", function (e) {
+    if (!pickOn) return;
+    highlightEl(elOf(document.elementFromPoint(e.clientX, e.clientY)));
+  }, true);
+  document.addEventListener("mousedown", function (e) {
+    if (!pickOn) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+  document.addEventListener("click", function (e) {
+    if (!pickOn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var el = elOf(document.elementFromPoint(e.clientX, e.clientY));
+    setPick(false);
+    post({ type: "ocode:browse:inspector-picked", path: el ? pathOf(el) : "", label: el ? labelOf(el) : "", ts: Date.now() });
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    if (!pickOn || e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    setPick(false);
+    post({ type: "ocode:browse:inspector-picked", path: "", cancelled: true, ts: Date.now() });
+  }, true);
+
+  window.addEventListener("message", function (e) {
+    if (e.origin !== spaOrigin) return;
+    var d = e.data;
+    if (!d || typeof d !== "object" || d.stateKey !== stateKey) return;
+    // Replies reuse their request's type and carry the payload. Treating one as
+    // a new request would loop forever whenever parent === window (a page
+    // opened directly rather than embedded) and redo work already done.
+    if (d.root || "dataUrl" in d || "error" in d) return;
+    if (d.type === "ocode:browse:inspector-tree") { sendTree(d.requestId); return; }
+    if (d.type === "ocode:browse:inspector-highlight") { highlightEl(d.path ? elOf(nodeAtPath(d.path)) : null); return; }
+    if (d.type === "ocode:browse:inspector-pick-set") { setPick(d.on); return; }
+    if (d.type === "ocode:browse:inspector-capture") { capturePath(d.requestId, d.path); return; }
+  });
+
+  // First report after load settles (images/fonts shift layout). A load also
+  // means a NEW document: the SPA's local DOM tree and any armed picker point
+  // at the old one, so it is told to drop them.
+  window.addEventListener("load", function () {
+    setTimeout(reportScroll, 500);
+    post({ type: "ocode:browse:inspector-reset", ts: Date.now() });
+  });
 })();

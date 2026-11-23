@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, act } from "@testing-library/react";
+import { render, fireEvent, act, screen } from "@testing-library/react";
 
 // jsdom has no PointerEvent (see UnifiedTabBar.drag.test.tsx) — clientX/Y are
 // lost without a polyfill, which the viewport's coordinate mapping relies on.
@@ -44,8 +44,11 @@ const mockApi = {
     mockApi.findResultCbs.add(cb);
     return () => mockApi.findResultCbs.delete(cb);
   },
-  getNodeAt: vi.fn((_x: number, _y: number): Promise<{ nodeId: number }> => new Promise(() => {})),
-  describeNode: vi.fn((_nodeId: number): Promise<{ nodeId: number; nodeName?: string; attributes?: string[] }> => new Promise(() => {})),
+  getNodeAt: vi.fn((_x: number, _y: number): Promise<{ backendNodeId: number; nodeId?: number }> => new Promise(() => {})),
+  describeNode: vi.fn((_backendNodeId: number): Promise<{ nodeId: number; backendNodeId?: number; nodeName?: string; attributes?: string[] }> => new Promise(() => {})),
+  getDocument: vi.fn((): Promise<unknown> => new Promise(() => {})),
+  getBoxModel: vi.fn((_nodeId: number): Promise<unknown> => new Promise(() => {})),
+  pushNodesByBackendIds: vi.fn((_ids: number[]): Promise<{ nodeIds?: number[] }> => new Promise(() => {})),
 };
 
 const mockUpload = vi.hoisted(() => vi.fn(async (_key: string, _files: File[]) => {}));
@@ -59,6 +62,7 @@ vi.mock("./useCdpSocket", () => ({
 
 import { ChromeViewport } from "./ChromeViewport";
 import { browserStore, browserActions } from "../../lib/browserStore";
+import { BROWSER_ANNOTATION_EVENT, type BrowserAnnotationDetail } from "./annotation";
 
 // Minimal ImageBitmap double (jsdom has neither createImageBitmap nor
 // ImageBitmap; the component only uses .width/.height/.close() + drawImage).
@@ -81,6 +85,9 @@ beforeEach(() => {
   mockApi.findResultCbs.clear();
   mockApi.getNodeAt.mockClear();
   mockApi.describeNode.mockClear();
+  mockApi.getDocument.mockClear();
+  mockApi.getBoxModel.mockClear();
+  mockApi.pushNodesByBackendIds.mockClear();
   mockUpload.mockClear();
   vi.useFakeTimers();
   // Stub ResizeObserver: capture the callback for manual triggering.
@@ -576,7 +583,8 @@ describe("ChromeViewport", () => {
   });
 
   it("opens the host menu after resolving the node under the pointer", async () => {
-    mockApi.getNodeAt.mockResolvedValue({ nodeId: 7 });
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
     mockApi.describeNode.mockResolvedValue({
       nodeId: 7,
       nodeName: "A",
@@ -594,12 +602,13 @@ describe("ChromeViewport", () => {
     });
 
     expect(mockApi.getNodeAt).toHaveBeenCalledWith(40, 50);
-    expect(mockApi.describeNode).toHaveBeenCalledWith(7);
+    expect(mockApi.describeNode).toHaveBeenCalledWith(8);
     expect(document.body.textContent).toContain("Copy Link or Image");
   });
 
   it("keeps the menu open with an inline clipboard error", async () => {
-    mockApi.getNodeAt.mockResolvedValue({ nodeId: 7 });
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
     mockApi.describeNode.mockResolvedValue({
       nodeId: 7,
       nodeName: "A",
@@ -879,4 +888,306 @@ describe("ChromeViewport find-in-page", () => {
     const finds = mockApi.send.mock.calls.filter((c) => (c[0] as { t: string }).t === "find");
     expect(finds.length).toBe(1);
   });
+
+  // ── DOM inspector + annotation ──────────────────────────────────────────
+  const DOCUMENT_REPLY = {
+    root: {
+      nodeId: 1,
+      nodeType: 9,
+      children: [{
+        nodeId: 2,
+        nodeType: 1,
+        localName: "html",
+        nodeName: "HTML",
+        attributes: [],
+        children: [{
+          nodeId: 3,
+          nodeType: 1,
+          localName: "body",
+          nodeName: "BODY",
+          attributes: [],
+          children: [{
+            nodeId: 7,
+            nodeType: 1,
+            localName: "button",
+            nodeName: "BUTTON",
+            attributes: ["id", "save", "class", "primary"],
+          }],
+        }],
+      }],
+    },
+  };
+
+  function seedDom(overrides: Record<string, unknown>, surface: Record<string, unknown> = {}) {
+    browserStore.setState(() => ({
+      byKey: {
+        "tab:abc": {
+          url: "https://example.com/", status: 200, loading: false, mode: "chrome", userMode: null, error: null,
+          history: ["https://example.com/"], historyIndex: 0, panelOpen: true, collapsed: false, reader: false,
+          consoleEvents: [], networkEvents: [], responseBodies: {}, pageTitle: "Example", scrollY: 0, scrollByUrl: {},
+          perfMetrics: {}, perfRecording: true, zoom: 1,
+          ...surface,
+          dom: {
+            mode: "chrome", status: "ready", error: null, truncated: false, selectedId: null, hoverId: null, pick: false, gen: 1,
+            root: { id: "2", tag: "html", attrs: {}, children: [{ id: "7", tag: "button", attrs: { id: "save" } }] },
+            ...overrides,
+          },
+        },
+      },
+    }));
+  }
+
+  async function openMenuAt(canvas: HTMLCanvasElement, x = 40, y = 50) {
+    await act(async () => {
+      fireEvent.contextMenu(canvas, { clientX: x, clientY: y });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("Inspect element loads the tree and selects the clicked node", async () => {
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    mockApi.getDocument.mockResolvedValue(DOCUMENT_REPLY);
+    seedDom({ status: "idle", root: null, selectedId: null });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    await openMenuAt(canvas);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Inspect element"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockApi.getDocument).toHaveBeenCalledTimes(1);
+    expect(mockApi.pushNodesByBackendIds).toHaveBeenCalledWith([8]);
+    const dom = browserStore.state.byKey["tab:abc"].dom!;
+    expect(dom.status).toBe("ready");
+    expect(dom.selectedId).toBe("7");
+    expect(dom.root?.children?.[0]?.tag).toBe("body");
+  });
+
+  it("Add annotation injects the sanitized note + screenshot into the composer event", async () => {
+    seedDom({ status: "idle", root: null, selectedId: null });
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    mockApi.getDocument.mockResolvedValue(DOCUMENT_REPLY);
+    mockApi.getBoxModel.mockResolvedValue({ model: { content: [10, 20, 110, 20, 110, 70, 10, 70] } });
+    const ctx = (globalThis as unknown as { __ctx: Record<string, unknown> }).__ctx;
+    ctx.fillRect = vi.fn();
+    ctx.strokeRect = vi.fn();
+    const toBlob = vi.fn((cb: BlobCallback) => cb(new Blob(["png"], { type: "image/png" })));
+    (HTMLCanvasElement.prototype as unknown as { toBlob: unknown }).toBlob = toBlob;
+
+    const events: CustomEvent[] = [];
+    const onEvent = (e: Event) => events.push(e as CustomEvent);
+    window.addEventListener("ocode:annotation", onEvent);
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 480 }) as DOMRect;
+    Object.defineProperty(canvas, "clientWidth", { configurable: true, value: 640 });
+    Object.defineProperty(canvas, "clientHeight", { configurable: true, value: 480 });
+    fireFrame(640, 480);
+    await openMenuAt(canvas);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Add annotation…"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const note = screen.getByLabelText("Note");
+    fireEvent.change(note, { target: { value: "Fix the button\nand its label" } });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Add"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    window.removeEventListener("ocode:annotation", onEvent);
+    expect(events).toHaveLength(1);
+    const detail = events[0].detail as { stateKey: string; text: string; image: Blob | null; imageName: string };
+    expect(detail.stateKey).toBe("tab:abc");
+    expect(detail.text).toContain("Element: `#save`");
+    expect(detail.text).toContain("Note: Fix the button\nand its label");
+    expect(detail.image).toBeInstanceOf(Blob);
+    expect(detail.imageName).toMatch(/^annotation-.*\.png$/);
+  });
+
+  it("cancelling while the screenshot is pending dispatches no annotation", async () => {
+    seedDom({ status: "idle", root: null, selectedId: null });
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    mockApi.getDocument.mockResolvedValue(DOCUMENT_REPLY);
+    // Hold the screenshot's layout read open until the test resolves it.
+    let resolveBox: (value: unknown) => void = () => {};
+    mockApi.getBoxModel.mockImplementation(
+      () => new Promise((resolve) => { resolveBox = resolve; }),
+    );
+    const ctx = (globalThis as unknown as { __ctx: Record<string, unknown> }).__ctx;
+    ctx.fillRect = vi.fn();
+    ctx.strokeRect = vi.fn();
+    (HTMLCanvasElement.prototype as unknown as { toBlob: unknown }).toBlob = vi.fn((cb: BlobCallback) =>
+      cb(new Blob(["png"], { type: "image/png" })),
+    );
+
+    const events: BrowserAnnotationDetail[] = [];
+    const onEvent = (e: Event) => {
+      const detail = (e as CustomEvent<BrowserAnnotationDetail>).detail;
+      events.push(detail);
+      detail.accepted = true;
+    };
+    window.addEventListener(BROWSER_ANNOTATION_EVENT, onEvent);
+    try {
+      const { container } = render(
+        <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+      );
+      const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+      canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 480 }) as DOMRect;
+      Object.defineProperty(canvas, "clientWidth", { configurable: true, value: 640 });
+      Object.defineProperty(canvas, "clientHeight", { configurable: true, value: 480 });
+      fireFrame(640, 480);
+      await openMenuAt(canvas);
+
+      await act(async () => {
+        fireEvent.click(screen.getByText("Add annotation…"));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      fireEvent.change(screen.getByLabelText("Note"), { target: { value: "Fix the button" } });
+      await act(async () => {
+        fireEvent.click(screen.getByText("Add"));
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // The submit is now awaiting the screenshot's layout read.
+      expect(mockApi.getBoxModel).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel annotation" }));
+      expect(screen.queryByTestId("annotation-popover")).toBeNull();
+
+      await act(async () => {
+        resolveBox({ model: { content: [10, 20, 110, 20, 110, 70, 10, 70] } });
+        // Fake timers are on in this file, so flush microtasks only.
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+      });
+
+      expect(events).toHaveLength(0);
+      expect(screen.queryByTestId("annotation-popover")).toBeNull();
+    } finally {
+      window.removeEventListener(BROWSER_ANNOTATION_EVENT, onEvent);
+    }
+  });
+
+  it("outlines the hovered tree node, scaled by page zoom", async () => {
+    seedDom({ hoverId: "7" }, { zoom: 2 });
+    mockApi.getBoxModel.mockResolvedValue({ model: { content: [10, 20, 110, 20, 110, 70, 10, 70] } });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockApi.getBoxModel).toHaveBeenCalledWith(7);
+    const overlay = container.querySelector("[data-testid='cdp-dom-highlight']") as HTMLElement;
+    expect(overlay).toBeTruthy();
+    expect(overlay.style.left).toBe("20px");
+    expect(overlay.style.top).toBe("40px");
+    expect(overlay.style.width).toBe("200px");
+    expect(overlay.style.height).toBe("100px");
+  });
+
+  it("picker mode selects the element under a click and forwards no mouse event", async () => {
+    seedDom({ pick: true });
+    mockApi.getNodeAt.mockResolvedValue({ backendNodeId: 8 });
+    mockApi.pushNodesByBackendIds.mockResolvedValue({ nodeIds: [7] });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    fireEvent.pointerDown(canvas, { clientX: 30, clientY: 40, button: 0, pointerId: 1 });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockApi.getNodeAt).toHaveBeenCalledWith(30, 40);
+    expect(mockApi.send).not.toHaveBeenCalledWith(expect.objectContaining({ t: "mouse" }));
+    const dom = browserStore.state.byKey["tab:abc"].dom!;
+    expect(dom.selectedId).toBe("7");
+    expect(dom.pick).toBe(false);
+  });
+
+  it("refetches the tree once when the node is missing from the cached tree, then selects it", async () => {
+    seedDom({ status: "ready", root: { id: "2", tag: "html", attrs: {} }, selectedId: null });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    mockApi.getDocument.mockResolvedValue(DOCUMENT_REPLY);
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    await openMenuAt(canvas);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Inspect element"));
+      await flushPromises();
+    });
+
+    expect(mockApi.getDocument).toHaveBeenCalledTimes(1);
+    expect(mockApi.pushNodesByBackendIds).toHaveBeenCalledTimes(2);
+    expect(browserStore.state.byKey["tab:abc"].dom!.selectedId).toBe("7");
+  });
+
+  it("does not loop: a node still absent after the one refetch is not selected", async () => {
+    seedDom({ status: "ready", root: { id: "2", tag: "html", attrs: {} }, selectedId: null });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    mockApi.getDocument.mockResolvedValue({
+      root: { nodeId: 1, nodeType: 9, children: [{ nodeId: 2, nodeType: 1, localName: "html", nodeName: "HTML", attributes: [] }] },
+    });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    await openMenuAt(canvas);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Inspect element"));
+      await flushPromises();
+    });
+
+    expect(mockApi.getDocument).toHaveBeenCalledTimes(1);
+    expect(mockApi.pushNodesByBackendIds).toHaveBeenCalledTimes(2);
+    expect(browserStore.state.byKey["tab:abc"].dom!.selectedId).toBeNull();
+  });
+
+  it("looks the context-menu node up in layout CSS px, dividing canvas px by zoom", async () => {
+    seedDom({}, { zoom: 2 });
+    mockApi.describeNode.mockResolvedValue({ nodeId: 7, nodeName: "BUTTON", attributes: [] });
+    const { container } = render(
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />,
+    );
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 600 }) as DOMRect;
+    await openMenuAt(canvas, 40, 50);
+
+    expect(mockApi.getNodeAt).toHaveBeenCalledWith(20, 25);
+  });
 });
+
+/** Drain the microtask chain of the async resolve-and-select path. */
+async function flushPromises() {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+}

@@ -1,5 +1,6 @@
 import { render, waitFor, act, fireEvent, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { ANNOTATION_NO_CHAT_ERROR } from "./annotation";
 
 const mockBypass = vi.hoisted(() => vi.fn(async () => {}));
 const mockHtrNotice = vi.hoisted(() => vi.fn(() => ""));
@@ -28,6 +29,13 @@ const actions = {
   setCollapsed: vi.fn(), close: vi.fn(),
   setError: vi.fn(), setUserMode: vi.fn(),
   syncPageURL: vi.fn((_key: string, _url: string, _kind: string): { url: string; idx: number } | null => null),
+  beginDomInspect: vi.fn(() => 1),
+  setDomTree: vi.fn(),
+  setDomError: vi.fn(),
+  selectDomNode: vi.fn(),
+  hoverDomNode: vi.fn(),
+  setDomPick: vi.fn(),
+  clearDom: vi.fn(),
 };
 vi.mock("../../lib/browserStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserStore")>();
@@ -568,5 +576,224 @@ describe("BrowserPanel", () => {
     });
     expect(iframe.getAttribute("src")).toContain("__grant=GA");
     expect(iframe.getAttribute("src")).not.toContain("GB");
+  });
+
+  // ── local-mode inspector ────────────────────────────────────────────────
+  function localFrame(container: HTMLElement) {
+    return container.querySelector("iframe") as HTMLIFrameElement;
+  }
+
+  function captureMessage(frame: HTMLIFrameElement, data: Record<string, unknown>) {
+    return new MessageEvent("message", {
+      data: { stateKey: "tab:abc", ...data },
+      origin: "http://127.0.0.1:54321",
+      source: frame.contentWindow,
+    });
+  }
+
+  it("local right-click opens the host menu and Inspect requests the DOM tree", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
+    const iframe = await waitFor(() => localFrame(container));
+    await waitFor(() => expect(iframe.getAttribute("src")).toContain("__grant=GRANT123"));
+    const post = vi.fn();
+    Object.defineProperty(iframe.contentWindow!, "postMessage", { configurable: true, value: post });
+
+    act(() => {
+      window.dispatchEvent(
+        captureMessage(iframe, { type: "ocode:browse:contextmenu", x: 10, y: 20, path: "0/1/2", label: "button#save" }),
+      );
+    });
+    fireEvent.click(await screen.findByText("Inspect element"));
+
+    const call = post.mock.calls.find((c) => (c[0] as { type: string }).type === "ocode:browse:inspector-tree");
+    expect(call).toBeTruthy();
+    expect(call![0]).toMatchObject({ stateKey: "tab:abc", type: "ocode:browse:inspector-tree" });
+    expect(call![1]).toBe("http://127.0.0.1:54321");
+
+    act(() => {
+      window.dispatchEvent(
+        captureMessage(iframe, {
+          type: "ocode:browse:inspector-tree",
+          requestId: (call![0] as { requestId: string }).requestId,
+          root: { id: "0", tag: "html", attrs: {}, children: [{ id: "0/1", tag: "body", attrs: {}, children: [{ id: "0/1/2", tag: "button", attrs: { id: "save" } }] }] },
+          truncated: false,
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(actions.setDomTree).toHaveBeenCalledWith("tab:abc", 1, expect.objectContaining({ truncated: false })),
+    );
+    expect(actions.selectDomNode).toHaveBeenCalledWith("tab:abc", "0/1/2");
+  });
+
+  it("local Add annotation injects the note and the capture.js screenshot into the chat event", async () => {
+    (state as unknown as Record<string, unknown>).mode = "local";
+    (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
+    const { container } = render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
+    const iframe = await waitFor(() => localFrame(container));
+    await waitFor(() => expect(iframe.getAttribute("src")).toContain("__grant=GRANT123"));
+    const post = vi.fn();
+    Object.defineProperty(iframe.contentWindow!, "postMessage", { configurable: true, value: post });
+
+    act(() => {
+      window.dispatchEvent(
+        captureMessage(iframe, { type: "ocode:browse:contextmenu", x: 10, y: 20, path: "0/1/2", label: "button#save" }),
+      );
+    });
+    fireEvent.click(await screen.findByText("Add annotation…"));
+
+    // The tree is fetched before the popover opens.
+    await waitFor(() => {
+      const call = post.mock.calls.find((c) => (c[0] as { type: string }).type === "ocode:browse:inspector-tree");
+      expect(call).toBeTruthy();
+      act(() => {
+        window.dispatchEvent(
+          captureMessage(iframe, {
+            type: "ocode:browse:inspector-tree",
+            requestId: (call![0] as { requestId: string }).requestId,
+            root: { id: "0", tag: "html", attrs: {}, children: [{ id: "0/1/2", tag: "button", attrs: { id: "save" } }] },
+            truncated: false,
+          }),
+        );
+      });
+    });
+
+    const note = await screen.findByLabelText("Note");
+    fireEvent.change(note, { target: { value: "Fix the label" } });
+
+    const events: CustomEvent[] = [];
+    const onEvent = (e: Event) => events.push(e as CustomEvent);
+    window.addEventListener("ocode:annotation", onEvent);
+    fireEvent.click(screen.getByText("Add"));
+
+    await waitFor(() => {
+      const call = post.mock.calls.find((c) => (c[0] as { type: string }).type === "ocode:browse:inspector-capture");
+      expect(call).toBeTruthy();
+      act(() => {
+        window.dispatchEvent(
+          captureMessage(iframe, {
+            type: "ocode:browse:inspector-capture",
+            requestId: (call![0] as { requestId: string }).requestId,
+            dataUrl: "data:image/png;base64,aGk=",
+          }),
+        );
+      });
+    });
+
+    await waitFor(() => expect(events).toHaveLength(1));
+    window.removeEventListener("ocode:annotation", onEvent);
+    const detail = events[0].detail as { text: string; image: Blob | null };
+    expect(detail.text).toContain("Element: `#save`");
+    expect(detail.text).toContain("Note: Fix the label");
+    expect(detail.image).toBeInstanceOf(Blob);
+  });
+
+  describe("local annotation popover", () => {
+    // Local mode must be set before the panel renders (the mount decides the surface).
+    function renderLocal() {
+      (state as unknown as Record<string, unknown>).mode = "local";
+      (state as unknown as Record<string, unknown>).url = "http://localhost:3000/";
+      return render(<BrowserPanel stateKey={"tab:abc" as any} mode="full" host="" />);
+    }
+
+    // Opens the popover on the iframe's element and answers the tree request.
+    async function openLocalPopover(container: HTMLElement) {
+      const iframe = await waitFor(() => localFrame(container));
+      await waitFor(() => expect(iframe.getAttribute("src")).toContain("__grant=GRANT123"));
+      const post = vi.fn();
+      Object.defineProperty(iframe.contentWindow!, "postMessage", { configurable: true, value: post });
+      act(() => {
+        window.dispatchEvent(
+          captureMessage(iframe, { type: "ocode:browse:contextmenu", x: 10, y: 20, path: "0/1/2", label: "button#save" }),
+        );
+      });
+      fireEvent.click(await screen.findByText("Add annotation…"));
+      await waitFor(() => {
+        const call = post.mock.calls.find((c) => (c[0] as { type: string }).type === "ocode:browse:inspector-tree");
+        expect(call).toBeTruthy();
+        act(() => {
+          window.dispatchEvent(
+            captureMessage(iframe, {
+              type: "ocode:browse:inspector-tree",
+              requestId: (call![0] as { requestId: string }).requestId,
+              root: { id: "0", tag: "html", attrs: {}, children: [{ id: "0/1/2", tag: "button", attrs: { id: "save" } }] },
+              truncated: false,
+            }),
+          );
+        });
+      });
+      return { iframe, post };
+    }
+
+    it("cancelling while the screenshot is pending injects nothing", async () => {
+      const { container } = renderLocal();
+      const { iframe, post } = await openLocalPopover(container);
+      fireEvent.change(await screen.findByLabelText("Note"), { target: { value: "Fix the label" } });
+
+      const events: Event[] = [];
+      const onEvent = (e: Event) => events.push(e);
+      window.addEventListener("ocode:annotation", onEvent);
+      try {
+        fireEvent.click(screen.getByText("Add"));
+        const call = await waitFor(() => {
+          const c = post.mock.calls.find((x) => (x[0] as { type: string }).type === "ocode:browse:inspector-capture");
+          expect(c).toBeTruthy();
+          return c!;
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "Cancel annotation" }));
+        expect(screen.queryByTestId("annotation-popover")).toBeNull();
+
+        act(() => {
+          window.dispatchEvent(
+            captureMessage(iframe, {
+              type: "ocode:browse:inspector-capture",
+              requestId: (call[0] as { requestId: string }).requestId,
+              dataUrl: "data:image/png;base64,aGk=",
+            }),
+          );
+        });
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(events).toHaveLength(0);
+        expect(screen.queryByTestId("annotation-popover")).toBeNull();
+      } finally {
+        window.removeEventListener("ocode:annotation", onEvent);
+      }
+    });
+
+    it("with no composer to take it, keeps the popover and the note open with an error", async () => {
+      const { container } = renderLocal();
+      await openLocalPopover(container);
+      fireEvent.change(await screen.findByLabelText("Note"), { target: { value: "Fix the label" } });
+      fireEvent.click(screen.getByLabelText(/Attach screenshot/));
+
+      fireEvent.click(screen.getByText("Add"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(ANNOTATION_NO_CHAT_ERROR);
+      expect(screen.getByLabelText("Note")).toHaveValue("Fix the label");
+      expect(screen.getByRole("button", { name: "Add" })).toBeEnabled();
+    });
+
+    it("closes the popover once a composer accepts the note", async () => {
+      const { container } = renderLocal();
+      await openLocalPopover(container);
+      fireEvent.change(await screen.findByLabelText("Note"), { target: { value: "Fix the label" } });
+      fireEvent.click(screen.getByLabelText(/Attach screenshot/));
+
+      const onAccept = (e: Event) => {
+        (e as CustomEvent<{ accepted?: boolean }>).detail.accepted = true;
+      };
+      window.addEventListener("ocode:annotation", onAccept);
+      try {
+        fireEvent.click(screen.getByText("Add"));
+        await waitFor(() => expect(screen.queryByTestId("annotation-popover")).toBeNull());
+      } finally {
+        window.removeEventListener("ocode:annotation", onAccept);
+      }
+    });
   });
 });

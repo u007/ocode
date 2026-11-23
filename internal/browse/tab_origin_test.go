@@ -416,3 +416,34 @@ func TestTabOriginSpoofedForwardedProtoStaysForeign(t *testing.T) {
 	default:
 	}
 }
+
+// TestTabOriginServesCaptureLib: the capture bundle loads its html-to-image
+// library from a sibling path, so a tab origin must answer that path itself,
+// unauthenticated, instead of forwarding it to the upstream app.
+func TestTabOriginServesCaptureLib(t *testing.T) {
+	upstream, seen := tabUpstream(t)
+	s := tabNewServer(t)
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	_, base, err := s.ListenTab("tab:lib", "http", host, "127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatalf("ListenTab: %v", err)
+	}
+	resp := tabGet(t, base, captureLibPath)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capture lib status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Fatalf("capture lib content-type = %q", ct)
+	}
+	if !strings.Contains(string(body), "window.htmlToImage") {
+		t.Fatalf("capture lib reply is not the embedded bundle: %.120q", body)
+	}
+	select {
+	case got := <-seen:
+		if got.path == captureLibPath {
+			t.Fatalf("capture lib was forwarded to the upstream")
+		}
+	default:
+	}
+}

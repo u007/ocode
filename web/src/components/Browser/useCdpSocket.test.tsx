@@ -309,15 +309,16 @@ describe("useCdpSocket", () => {
     const request = JSON.parse(ws.sent[0] as string) as { requestId: string; method: string; params: unknown };
     expect(request.method).toBe("DOM.getNodeForLocation");
     expect(request.params).toEqual({ x: 12, y: 34 });
-    act(() => ws.serverMessage(JSON.stringify({ t: "cdp_response", requestId: request.requestId, result: { nodeId: 7 } })));
-    await expect(nodePromise).resolves.toEqual({ nodeId: 7 });
+    act(() => ws.serverMessage(JSON.stringify({ t: "cdp_response", requestId: request.requestId, result: { backendNodeId: 8 } })));
+    await expect(nodePromise).resolves.toEqual({ backendNodeId: 8 });
 
     let descriptionPromise!: Promise<unknown>;
     act(() => {
-      descriptionPromise = lastApi!.describeNode(7);
+      descriptionPromise = lastApi!.describeNode(8);
     });
     const descriptionRequest = JSON.parse(ws.sent[1] as string) as { requestId: string; method: string; params: unknown };
     expect(descriptionRequest.method).toBe("DOM.describeNode");
+    expect(descriptionRequest.params).toEqual({ backendNodeId: 8, depth: 0, pierce: false });
     act(() => ws.serverMessage(JSON.stringify({
       t: "cdp_response",
       requestId: descriptionRequest.requestId,
@@ -352,6 +353,58 @@ describe("useCdpSocket", () => {
       ws.serverClose();
     });
     await expect(requestPromise).rejects.toThrow("disconnected");
+  });
+
+  it("maps backendNodeIds with DOM.pushNodesByBackendIdsToFrontend", async () => {
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+
+    let pushPromise!: Promise<unknown>;
+    act(() => {
+      pushPromise = lastApi!.pushNodesByBackendIds([8]);
+    });
+    const request = JSON.parse(ws.sent[0] as string) as { requestId: string; method: string; params: unknown };
+    expect(request.method).toBe("DOM.pushNodesByBackendIdsToFrontend");
+    expect(request.params).toEqual({ backendNodeIds: [8] });
+    act(() => ws.serverMessage(JSON.stringify({ t: "cdp_response", requestId: request.requestId, result: { nodeIds: [42] } })));
+    await expect(pushPromise).resolves.toEqual({ nodeIds: [42] });
+  });
+
+  it("times DOM.getDocument out at 15 s, while other requests still time out at 5 s", async () => {
+    render(<Harness stateKey="tab:abc" host="" base="http://127.0.0.1:54321" enabled />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    const ws = lastSocket();
+    act(() => ws.serverOpen());
+
+    const outcomes: Record<string, string> = {};
+    act(() => {
+      lastApi!.getDocument().then(() => { outcomes.doc = "resolved"; }, (err: Error) => { outcomes.doc = err.message; });
+      lastApi!.getNodeAt(1, 2).then(() => { outcomes.node = "resolved"; }, (err: Error) => { outcomes.node = err.message; });
+    });
+
+    // Past 5 s: the node lookup has timed out, the whole-document fetch has not.
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(outcomes).toEqual({ node: "timeout" });
+
+    // Still inside the 15 s bound (well short of it, so real-clock drift
+    // under shouldAdvanceTime cannot flip the result).
+    await act(async () => {
+      vi.advanceTimersByTime(9000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(outcomes).toEqual({ node: "timeout" });
+
+    // Past 15 s: the document request has timed out too.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(outcomes).toEqual({ node: "timeout", doc: "timeout" });
   });
 
   it("reconnects with new grant + backoff on close without error", async () => {

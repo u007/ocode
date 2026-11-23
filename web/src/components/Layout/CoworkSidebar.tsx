@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api, apiPath, authHeaders, type DiscoveryConfig } from "../../api/client";
 import { useChatSelector, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
@@ -12,7 +12,7 @@ import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSu
 import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus, ManageableSkill } from "../../api/types";
 import { reloadDynamicCommands, setDynamicCommandsScope } from "../Chat/commands";
-import PluginsPanel from "./PluginsPanel";
+import { PluginsPanelHost, type PluginsPanelHostHandle } from "./PluginsPanelHost";
 import SidebarTodoSection from "./SidebarTodoSection";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
@@ -152,7 +152,7 @@ export default function CoworkSidebar({
   // parent, so switching agents is reflected via this optimistic state.
   const [selectedAgent, setSelectedAgent] = useState<string>(activeAgent);
   const [agentBusy, setAgentBusy] = useState(false);
-  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const pluginsPanelRef = useRef<PluginsPanelHostHandle>(null);
   // MCP servers for the active chat + which one is mid-toggle. The list is
   // session-scoped (the server applies this chat's per-session overrides), so
   // the sidebar reflects the toggle state for THIS conversation.
@@ -192,9 +192,10 @@ export default function CoworkSidebar({
   // authoritative model for a real session is `tuiStatus.main_model`, which is
   // that tab's own status snapshot (per-session since the multiproject event
   // work), so switching tabs shows each session's own model, not one global.
-  const { tuiStatus, messages, model: sessionModel, advisorEnabled: sessionAdvisorEnabled, autoContinueEnabled: sessionAutoContinueEnabled } = useChatSelector((s) =>
-    getSessionSlice(s, sessionId),
-  );
+  const tuiStatus = useChatSelector((s) => getSessionSlice(s, sessionId).tuiStatus);
+  const sessionModel = useChatSelector((s) => getSessionSlice(s, sessionId).model);
+  const sessionAdvisorEnabled = useChatSelector((s) => getSessionSlice(s, sessionId).advisorEnabled);
+  const sessionAutoContinueEnabled = useChatSelector((s) => getSessionSlice(s, sessionId).autoContinueEnabled);
   // Draft ("new-*") tab's locally-picked permission mode. Hook lives here
   // (before the early return below) to respect the rules of hooks.
   const draftPermissionMode = useChatSelector(
@@ -230,12 +231,13 @@ export default function CoworkSidebar({
   // Truncation mirrors the TUI/server's maxGeneratedTitleLen (80 chars) and
   // collapses newlines so the header stays single-line (web uses line-clamp-3
   // instead of TUI's wordWrap, but the underlying title string is the same).
-  const displayTitle = (() => {
-    const rawTitle = tuiStatus?.session_title?.trim() || "";
-    if (rawTitle) return truncateTitle(rawTitle, 80);
-    // Fallback: first visible user message, excluding slash commands (mirrors
-    // TUI's isCommandHistoryMessage / firstUserPromptText). Slash-only sessions
-    // intentionally show no title until a real prompt or LLM title exists.
+  // Fallback: first visible user message, excluding slash commands (mirrors
+  // TUI's isCommandHistoryMessage / firstUserPromptText). Slash-only sessions
+  // intentionally show no title until a real prompt or LLM title exists. The
+  // selector returns the final string so the sidebar re-renders only when the
+  // title changes, not on every streamed token that grows `messages`.
+  const fallbackTitle = useChatSelector((s) => {
+    const { messages } = getSessionSlice(s, sessionId);
     for (const m of messages) {
       const text = m.content?.trim() || "";
       if (m.role === "user" && text && !text.startsWith("/")) {
@@ -244,6 +246,11 @@ export default function CoworkSidebar({
     }
     if (messages.length === 0) return "Untitled";
     return "";
+  });
+  const displayTitle = (() => {
+    const rawTitle = tuiStatus?.session_title?.trim() || "";
+    if (rawTitle) return truncateTitle(rawTitle, 80);
+    return fallbackTitle;
   })();
 
   const canGenerateTitle = !!sessionId && !sessionId.startsWith("new-");
@@ -1747,7 +1754,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
         {/* Plugins Section — opens the full plugin manager dialog. */}
         <div className="border-b border-border">
           <button
-            onClick={() => setPluginsOpen(true)}
+            onClick={() => pluginsPanelRef.current?.open()}
             className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
           >
             <ChevronRight className="w-4 h-4" />
@@ -1799,7 +1806,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
         </div>
       </div>
 
-      <PluginsPanel open={pluginsOpen} onOpenChange={setPluginsOpen} />
+      <PluginsPanelHost ref={pluginsPanelRef} />
     </>
   );
 

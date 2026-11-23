@@ -432,3 +432,34 @@ func TestForwardTabWebSocketSubprotocolPassesThrough(t *testing.T) {
 		t.Fatalf("Sec-WebSocket-Protocol = %q, want the upstream's selection vite-hmr", got)
 	}
 }
+
+// TestForwardTabServesCaptureLib: a forwarded tab answers the capture library
+// path itself, like a local tab. The tunnel refuses every request with a 502, so
+// a forwarded lib request shows up as a 502 instead of the bundle.
+func TestForwardTabServesCaptureLib(t *testing.T) {
+	s := New("local-token", nil)
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	tunnel := func(w http.ResponseWriter, r *http.Request) (string, bool) {
+		http.Error(w, "forwarded", http.StatusBadGateway)
+		return "", false
+	}
+	_, base, err := s.ListenForwardTab("proj.example", "tab:fwdlib", "http", "app.example", "127.0.0.1:0", nil, tunnel)
+	if err != nil {
+		t.Fatalf("listen forward tab: %v", err)
+	}
+	resp, err := http.Get(base + captureLibPath)
+	if err != nil {
+		t.Fatalf("get capture lib: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capture lib status = %d, want 200 (forwarded?) body %.120q", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Fatalf("capture lib content-type = %q", ct)
+	}
+	if !strings.Contains(string(body), "window.htmlToImage") {
+		t.Fatalf("capture lib reply is not the embedded bundle: %.120q", body)
+	}
+}

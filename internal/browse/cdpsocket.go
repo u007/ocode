@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -126,6 +127,63 @@ func marshalError(msg string) []byte {
 	m := map[string]any{"t": "error", "message": msg}
 	b, _ := json.Marshal(m)
 	return b
+}
+
+// domNodeIDParam reads the "nodeId" param a client sent. JSON numbers decode
+// as float64; a string form is accepted too so a caller that kept the id as a
+// string still resolves.
+func domNodeIDParam(params map[string]interface{}) int {
+	v, ok := params["nodeId"]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case string:
+		if parsed, err := strconv.Atoi(n); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+// Optional interface: DOM.pushNodesByBackendIdsToFrontend (the context menu and
+// picker map a stable backendNodeId to the current document's nodeId). Kept
+// out of chromeTarget so test fakes need not implement it.
+type pushNodesTarget interface {
+	PushNodesByBackendIdsToFrontend(ctx context.Context, backendNodeIds []int) (map[string]any, error)
+}
+
+// domPositiveInt decodes a JSON number that must be a positive integer id.
+// Anything else (missing, fractional, zero, negative, a string) reports false,
+// so a malformed id never reaches Chrome as a 0.
+func domPositiveInt(v interface{}) (int, bool) {
+	n, ok := v.(float64)
+	if !ok || n < 1 || n != math.Trunc(n) || n > math.MaxInt32 {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// domBackendNodeIDsParam reads the "backendNodeIds" array a client sent. It
+// must be non-empty and every entry a positive integer id.
+func domBackendNodeIDsParam(params map[string]interface{}) ([]int, error) {
+	raw, ok := params["backendNodeIds"].([]interface{})
+	if !ok || len(raw) == 0 {
+		return nil, errors.New("invalid_backend_node_ids")
+	}
+	ids := make([]int, 0, len(raw))
+	for _, v := range raw {
+		id, ok := domPositiveInt(v)
+		if !ok {
+			return nil, errors.New("invalid_backend_node_ids")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // marshalDetached tells an older viewer that another client took the shared
@@ -468,9 +526,15 @@ func (s *Server) ServeCDP(w http.ResponseWriter, r *http.Request, respHeader htt
 				}
 			}
 		case "cdp_request":
-			// DOM.getNodeForLocation / DOM.describeNode (context-menu lookup).
-			// Reuse string requestId correlation from the client.
-			reqCtx, reqCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// DOM.* requests used by the inspector and context-menu lookup.
+			// Reuse string requestId correlation from the client. A whole-page
+			// getDocument is much slower than a node lookup, so it gets its own
+			// bound rather than widening every request's timeout.
+			timeout := 5 * time.Second
+			if cm.Method == "DOM.getDocument" {
+				timeout = 15 * time.Second
+			}
+			reqCtx, reqCancel := context.WithTimeout(context.Background(), timeout)
 			crashguard.Go(func() {
 				defer reqCancel()
 				resp := map[string]any{"t": "cdp_response", "requestId": cm.RequestID}
@@ -488,22 +552,54 @@ func (s *Server) ServeCDP(w http.ResponseWriter, r *http.Request, respHeader htt
 					}
 				case "DOM.describeNode":
 					if dn, ok := target.(describeNodeTarget); ok {
-						nodeId := 0
-						if nid, ok := cm.Params["nodeId"]; ok {
-							switch v := nid.(type) {
-							case float64:
-								nodeId = int(v)
-							case int:
-								nodeId = v
-							case string:
-								if n, err := strconv.Atoi(v); err == nil {
-									nodeId = n
-								}
-							}
-						}
 						opts := map[string]any{"depth": 0, "pierce": false}
-						result, err := dn.DescribeNode(reqCtx, nodeId, opts)
+						// backendNodeId is the stable form; the context menu sends it
+						// because a fresh getNodeForLocation may carry no nodeId.
+						if v, has := cm.Params["backendNodeId"]; has {
+							bid, ok := domPositiveInt(v)
+							if !ok {
+								resp["error"] = "invalid_backend_node_id"
+								break
+							}
+							opts["backendNodeId"] = bid
+						}
+						result, err := dn.DescribeNode(reqCtx, domNodeIDParam(cm.Params), opts)
 						if err != nil {
+							resp["error"] = err.Error()
+						} else {
+							resp["result"] = result
+						}
+					} else {
+						resp["error"] = cdp.ErrDisconnected
+					}
+				case "DOM.getDocument":
+					if gd, ok := target.(getDocumentTarget); ok {
+						result, err := gd.GetDocument(reqCtx, -1)
+						if err != nil {
+							resp["error"] = err.Error()
+						} else {
+							resp["result"] = result
+						}
+					} else {
+						resp["error"] = cdp.ErrDisconnected
+					}
+				case "DOM.getBoxModel":
+					if gb, ok := target.(getBoxModelTarget); ok {
+						result, err := gb.GetBoxModel(reqCtx, domNodeIDParam(cm.Params))
+						if err != nil {
+							resp["error"] = err.Error()
+						} else {
+							resp["result"] = result
+						}
+					} else {
+						resp["error"] = cdp.ErrDisconnected
+					}
+				case "DOM.pushNodesByBackendIdsToFrontend":
+					if pn, ok := target.(pushNodesTarget); ok {
+						ids, err := domBackendNodeIDsParam(cm.Params)
+						if err != nil {
+							resp["error"] = err.Error()
+						} else if result, err := pn.PushNodesByBackendIdsToFrontend(reqCtx, ids); err != nil {
 							resp["error"] = err.Error()
 						} else {
 							resp["result"] = result

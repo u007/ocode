@@ -43,6 +43,10 @@ type fakeTarget struct {
 	selection     string
 	zooms         []float64
 	touches       []cdp.TouchEvent
+	// DOM inspector requests (DOM.getDocument / DOM.getBoxModel).
+	docDepths      []int
+	boxModelNodeID []int
+	pushCalls      [][]int
 }
 
 type fakeResponseBody struct {
@@ -172,6 +176,52 @@ func (f *fakeTarget) DescribeNode(_ context.Context, nodeID int, opts any) (map[
 			"opts":       opts,
 		},
 	}, nil
+}
+
+func (f *fakeTarget) GetDocument(_ context.Context, depth int) (map[string]any, error) {
+	f.mu.Lock()
+	f.docDepths = append(f.docDepths, depth)
+	f.mu.Unlock()
+	return map[string]any{"root": map[string]any{"nodeId": 1, "nodeName": "HTML"}}, nil
+}
+
+func (f *fakeTarget) GetBoxModel(_ context.Context, nodeID int) (map[string]any, error) {
+	f.mu.Lock()
+	f.boxModelNodeID = append(f.boxModelNodeID, nodeID)
+	f.mu.Unlock()
+	return map[string]any{"model": map[string]any{"width": 16, "height": 8}}, nil
+}
+
+func (f *fakeTarget) docDepthCalls() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.docDepths...)
+}
+
+// PushNodesByBackendIdsToFrontend records the backendNodeIds it was asked to
+// map and answers with nodeId = backendNodeId + 100, so a test can see the
+// mapping was applied rather than echoed.
+func (f *fakeTarget) PushNodesByBackendIdsToFrontend(_ context.Context, backendNodeIds []int) (map[string]any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushCalls = append(f.pushCalls, append([]int(nil), backendNodeIds...))
+	nodeIDs := make([]int, 0, len(backendNodeIds))
+	for _, id := range backendNodeIds {
+		nodeIDs = append(nodeIDs, id+100)
+	}
+	return map[string]any{"nodeIds": nodeIDs}, nil
+}
+
+func (f *fakeTarget) pushCallsSnapshot() [][]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]int(nil), f.pushCalls...)
+}
+
+func (f *fakeTarget) boxModelNodeIDCalls() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.boxModelNodeID...)
 }
 
 func (f *fakeTarget) GetResponseBody(_ context.Context, requestID string) (body string, isBase64 bool, truncated bool, err error) {

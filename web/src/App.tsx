@@ -6,11 +6,12 @@ import { useIsMobile } from "./hooks/useIsMobile";
 import { useOfflineStatus } from "./hooks/useOfflineStatus";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
-import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
+import { ProjectProvider, findProjectPathForTab, selectActiveTabId, selectActiveTabs, useProjectSelector, useProjectState } from "./stores/projectStore";
 import { PulseProvider } from "./stores/pulseStore";
 import { TerminalProvider, useTerminalState } from "./stores/terminalStore";
 import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
+import { BROWSER_ANNOTATION_EVENT, resolveAnnotationTarget, type BrowserAnnotationDetail } from "./components/Browser/annotation";
 import PreviewHost from "./components/Preview/PreviewHost";
 import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
@@ -1696,6 +1697,42 @@ function HomeApp() {
   const terminalRefs = useRef<Map<string, TerminalTabsHandle>>(new Map());
   const chatInputRefs = useRef<Map<string, import("./components/Chat/ChatInput").ChatInputHandle>>(new Map());
 
+  // A browser annotation (note + optional screenshot) is handed to the CHAT
+  // COMPOSER, never sent: the user edits it before pressing Enter. The event
+  // names the surface's state key (`tab:<browserTabId>` for a browser tab,
+  // `side:chat:<sessionId>` for the side pane), so the owning chat is resolved
+  // here. Live tab data sits in a ref and the listener is registered once, so
+  // a streaming turn does not re-subscribe on every render.
+  const annotationTargetsRef = useRef({ allChatTabs, activeTabId, allBrowserTabs });
+  useEffect(() => {
+    annotationTargetsRef.current = { allChatTabs, activeTabId, allBrowserTabs };
+  }, [allChatTabs, activeTabId, allBrowserTabs]);
+  useEffect(() => {
+    // The sender reads `detail.accepted` to decide whether to close its popover.
+    // Routing (and the no-cross-project rule) lives in resolveAnnotationTarget.
+    const onAnnotation = (event: Event) => {
+      const detail = (event as CustomEvent<BrowserAnnotationDetail>).detail;
+      if (!detail || typeof detail.stateKey !== "string" || typeof detail.text !== "string") return;
+      const { allChatTabs: chatTabs, activeTabId: activeId, allBrowserTabs: browserTabs } = annotationTargetsRef.current;
+      const targetId = resolveAnnotationTarget({
+        stateKey: detail.stateKey,
+        activeTabId: activeId,
+        chatTabs,
+        browserTabs,
+        hasComposer: (id) => chatInputRefs.current.has(id),
+      });
+      if (!targetId) return;
+      chatInputRefs.current.get(targetId)?.addAnnotation({
+        text: detail.text,
+        image: detail.image,
+        imageName: detail.imageName,
+      });
+      detail.accepted = true;
+    };
+    window.addEventListener(BROWSER_ANNOTATION_EVENT, onAnnotation);
+    return () => window.removeEventListener(BROWSER_ANNOTATION_EVENT, onAnnotation);
+  }, []);
+
   return (
     // `app-viewport` (index.css) — 100dvh, not 100vh: on a phone the large
     // viewport pushed the StatusBar, the speech toolbar and the bottom of the
@@ -2759,13 +2796,14 @@ function HomeApp() {
  * in something below it too.
  */
 function SpeechProviderInsideProject({ children }: { children: ReactNode }) {
-  const { activeTabId, tabs, state } = useProjectState();
+  const activeTabId = useProjectSelector(selectActiveTabId);
+  const tabs = useProjectSelector(selectActiveTabs);
   const host = useSessionHost(activeTabId ?? undefined);
   // Labelled for the speech toolbar: while a queued message plays, the bar says
   // which project and chat session it came from. Read here, at the bridge,
   // because the provider itself is rendered bare (no ProjectProvider) in its
   // own tests and must not reach for this store.
-  const projectTitle = state.activeProject?.name;
+  const projectTitle = useProjectSelector((s) => s.activeProject?.name);
   const sessionTitle = tabs.find((tab) => tab.id === activeTabId)?.title;
   return (
     <SpeechProvider

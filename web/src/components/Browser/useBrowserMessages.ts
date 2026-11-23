@@ -16,6 +16,13 @@ interface Handlers {
   /** Same-document navigation hint (capture.js pushState/replaceState/popstate/
    *  hashchange). Display-untrusted; the receiver must apply its own same-origin check. */
   onNav?: (key: StateKey, url: string, kind: PageURLKind) => void;
+  /** Local-mode right-click on the page (viewer-relative coordinates). The page
+   *  already ensured it did not suppress the event itself. */
+  onContextMenu?: (key: StateKey, ev: { x: number; y: number; path: string; label: string }) => void;
+  /** Local-mode element picker result. `cancelled` means Escape. */
+  onPicked?: (key: StateKey, ev: { path: string; cancelled: boolean }) => void;
+  /** The page document (re)loaded: any local DOM tree/pick state is now stale. */
+  onReset?: (key: StateKey) => void;
 }
 
 /** The hint kind capture.js sent. Anything unrecognised is a replace, the
@@ -37,7 +44,7 @@ export interface BrowseMessageSource {
 // tabs' origins, other frames — is dropped. "ocode:browse:nav" is a same-document
 // hint only: the receiver accepts it solely for the tab's current origin.
 export function useBrowserMessages(stateKey: StateKey, browseBase: string | null, source: BrowseMessageSource, h: Handlers) {
-  const { pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav } = h;
+  const { pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav, onContextMenu, onPicked, onReset } = h;
   const { originRef, frameRef } = source;
   useEffect(() => {
     if (!browseBase) return;
@@ -123,11 +130,28 @@ export function useBrowserMessages(stateKey: StateKey, browseBase: string | null
         case "ocode:browse:nav":
           if (typeof d.url === "string" && d.url) onNav?.(stateKey, d.url, navKind(d.kind));
           break;
+        case "ocode:browse:contextmenu":
+          onContextMenu?.(stateKey, {
+            x: Number(d.x) || 0,
+            y: Number(d.y) || 0,
+            path: typeof d.path === "string" ? d.path : "",
+            label: typeof d.label === "string" ? d.label : "",
+          });
+          break;
+        case "ocode:browse:inspector-picked":
+          onPicked?.(stateKey, {
+            path: typeof d.path === "string" ? d.path : "",
+            cancelled: d.cancelled === true,
+          });
+          break;
+        case "ocode:browse:inspector-reset":
+          onReset?.(stateKey);
+          break;
         default:
           break;
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav]);
+  }, [stateKey, browseBase, originRef, frameRef, pushConsole, pushNetwork, pushResponseBody, fillNetworkStatus, onTitle, onScroll, onNav, onContextMenu, onPicked, onReset]);
 }

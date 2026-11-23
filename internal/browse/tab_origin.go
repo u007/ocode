@@ -21,6 +21,11 @@ const maxTabListenersPerState = 8
 // origin serves it before the upstream path is read.
 const captureScriptPath = "/__ocode_capture.js"
 
+// captureLibPath is the root-relative path of the lazily loaded html-to-image
+// bundle. capture.js derives it from its own src, so every mount that serves
+// the capture script must serve this path too, before the upstream is read.
+const captureLibPath = "/__ocode_capture_lib.js"
+
 // foreignRoutePrefix is the reserved path on every tab origin that names a
 // foreign upstream: /__ocode/b/{scheme}/{host}/{path...}. A request under it is
 // proxied as that upstream, through the same pipeline as prefix mode.
@@ -141,9 +146,15 @@ func (s *Server) tabHandler(key tabKey) http.Handler {
 // request's absolute-form URI and the basePath header are ignored, and the Host
 // header only recognises such a route: it never selects an upstream of its own.
 func (s *Server) serveTab(w http.ResponseWriter, r *http.Request, key tabKey, cookieName string) {
-	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == captureScriptPath {
-		s.serveCapture(w, r)
-		return
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		switch r.URL.Path {
+		case captureScriptPath:
+			s.serveCapture(w, r)
+			return
+		case captureLibPath:
+			s.serveCaptureLib(w, r)
+			return
+		}
 	}
 	// A grant is redeemed only on a binding's own origin, where it names the
 	// panel's own document (refuseGrantOnForeignRoute).

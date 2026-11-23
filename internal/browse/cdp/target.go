@@ -59,7 +59,9 @@ func (t *Target) GetNodeForLocation(ctx context.Context, x, y int) (*NodeLocatio
 		}
 		return nil, errors.New(ErrTargetUnavailable + ": " + err.Error())
 	}
-	if res.NodeId == 0 {
+	// Chrome omits nodeId until the document has been requested, but always
+	// returns backendNodeId: that is the identifier callers can rely on.
+	if res.BackendNodeId == 0 {
 		return nil, errors.New(ErrNoNode)
 	}
 	return &NodeLocation{
@@ -69,9 +71,71 @@ func (t *Target) GetNodeForLocation(ctx context.Context, x, y int) (*NodeLocatio
 	}, nil
 }
 
-// DescribeNode asks Chrome to describe a node by its nodeId.
+// GetDocument returns the page's DOM tree, as DOM.getDocument does. depth -1
+// asks for the whole document in one reply; the caller bounds what it renders.
+// The raw map is forwarded untransformed so the wire shape stays Chrome's.
+func (t *Target) GetDocument(ctx context.Context, depth int) (map[string]any, error) {
+	var res map[string]any
+	if err := t.conn.Call(ctx, t.sessionID, "DOM.getDocument", map[string]any{
+		"depth":  depth,
+		"pierce": false,
+	}, &res); err != nil {
+		return nil, t.domError(ctx, err)
+	}
+	return res, nil
+}
+
+// GetBoxModel returns the node's layout boxes (content, padding, border,
+// margin) in CSS pixels, relative to the main frame viewport. The inspector
+// draws its own highlight from these coordinates instead of enabling the
+// Overlay domain, so no extra CDP event plumbing is needed.
+func (t *Target) GetBoxModel(ctx context.Context, nodeId int) (map[string]any, error) {
+	var res map[string]any
+	if err := t.conn.Call(ctx, t.sessionID, "DOM.getBoxModel", map[string]any{
+		"nodeId": nodeId,
+	}, &res); err != nil {
+		return nil, t.domError(ctx, err)
+	}
+	return res, nil
+}
+
+// PushNodesByBackendIdsToFrontend maps stable backendNodeIds to the nodeIds
+// valid in the current document tree (DOM.pushNodesByBackendIdsToFrontend).
+// Chrome requires the document to have been requested first, and the ids it
+// returns are invalidated by a later DOM.getDocument. The raw reply is
+// forwarded untransformed, so the caller reads its "nodeIds" array.
+func (t *Target) PushNodesByBackendIdsToFrontend(ctx context.Context, backendNodeIds []int) (map[string]any, error) {
+	var res map[string]any
+	if err := t.conn.Call(ctx, t.sessionID, "DOM.pushNodesByBackendIdsToFrontend", map[string]any{
+		"backendNodeIds": backendNodeIds,
+	}, &res); err != nil {
+		return nil, t.domError(ctx, err)
+	}
+	return res, nil
+}
+
+// domError maps a conn.Call failure to the DOM error vocabulary shared with
+// the node-lookup calls above.
+func (t *Target) domError(ctx context.Context, err error) error {
+	if errors.Is(err, ErrConnClosed) {
+		return errors.New(ErrDisconnected)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return errors.New(ErrTimeout)
+	}
+	if ce, ok := err.(*CDPError); ok && ce != nil {
+		return errors.New(ErrProtocolError + ": " + ce.Message)
+	}
+	return errors.New(ErrTargetUnavailable + ": " + err.Error())
+}
+
+// DescribeNode asks Chrome to describe a node. nodeId 0 is omitted so a node
+// known only by backendNodeId (passed in opts) is addressed by that alone.
 func (t *Target) DescribeNode(ctx context.Context, nodeId int, opts any) (map[string]any, error) {
-	params := map[string]any{"nodeId": nodeId}
+	params := map[string]any{}
+	if nodeId != 0 {
+		params["nodeId"] = nodeId
+	}
 	if opts != nil {
 		if o, ok := opts.(map[string]any); ok {
 			for k, v := range o {

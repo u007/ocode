@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useProjectState } from "../stores/projectStore";
+import { useProjectActions } from "../stores/projectStore";
 
 /**
  * SessionPage is the deep-link entry point for /session/:id — including the
@@ -14,7 +14,7 @@ import { useProjectState } from "../stores/projectStore";
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { openDeepLinkSession } = useProjectState();
+  const { openDeepLinkSession } = useProjectActions();
 
   useEffect(() => {
     if (!id) return;

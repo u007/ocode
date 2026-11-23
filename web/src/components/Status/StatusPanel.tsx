@@ -1,5 +1,5 @@
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
-import { useProjectState } from "../../stores/projectStore";
+import { selectActiveTabId, useProjectSelector } from "../../stores/projectStore";
 import { useSessionHost } from "../../hooks/useSessionHost";
 import { api } from "../../api/client";
 import { useEffect, useState } from "react";
@@ -14,7 +14,7 @@ interface Props {
 // the model/session metadata. Opened from the "status" button in the
 // StatusBar so the user can drill in without leaving the chat.
 export default function StatusPanel({ onClose }: Props) {
-  const { activeTabId } = useProjectState();
+  const activeTabId = useProjectSelector(selectActiveTabId);
   // SSH/WSL host of the active tab (undefined for local). These status
   // sources are per-server, so a remote project must query its own host or it
   // shows the local machine's LSP/modified/spend data.

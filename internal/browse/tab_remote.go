@@ -48,9 +48,15 @@ func (s *Server) ListenForwardTab(projectHost, stateKey, scheme, host, addr stri
 // the same reserved-route checks a local tab applies first.
 func (s *Server) forwardTabHandler(key tabKey, tunnel TunnelFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == captureScriptPath {
-			s.serveCapture(w, r)
-			return
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			switch r.URL.Path {
+			case captureScriptPath:
+				s.serveCapture(w, r)
+				return
+			case captureLibPath:
+				s.serveCaptureLib(w, r)
+				return
+			}
 		}
 		if refuseGrantOnForeignRoute(w, r, strings.HasPrefix(r.URL.Path, foreignRoutePrefix)) {
 			return

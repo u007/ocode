@@ -1,3 +1,18 @@
+## Open: Chrome-mode inspector overlay/crop not live-checked at zoom ≠ 1 (2026-11-23)
+
+- Local-mode inspector paths WERE live-checked in a real Chromium (root-mounted page served over HTTP): `inspector-tree` replied with the page tree, the in-page outline drew and cleared, a trusted right-click posted `contextmenu` with the button path, a trusted picker click posted `inspector-picked`, and `inspector-capture` returned a 114×75 PNG of the 82×43 button (16 px padding + outline), visually confirmed. That run also caught and fixed a real bug: replies reuse their request type, so a page opened directly (parent === window) re-asked forever; the listener now ignores payload-bearing messages (pinned in `capture_test.go`).
+- Chrome/CDP mode's overlay position and screenshot crop at zoom ≠ 1 are unit-tested (`ChromeViewport.test.tsx` hover-zoom, `annotation.test.ts` crop math) but NOT verified against a running app + Chrome. Check with the app at 150% zoom: hover a tree row (outline must sit on the element), pick an element, and add an annotation (crop must frame the element).
+
+## Open: `internal/browse/cdp` network test is timing-flaky without `-race` (2026-11-23)
+
+- `TestNetworkRowMarksProxyBlockedResponses` fails 5/5 without `-race` and passes with it: only `loadingFinished` is processed, so the emitted row has a request id but no URL/status (`pendingReqs` empty). Proven PRE-EXISTING, not from the inspector work: `go test -overlay` (HEAD's `target.go` restored from the working tree minus the added methods, plus an empty replacement for the new DOM test file) still fails 5/5. No repo file was changed for that experiment.
+- Not investigated further (outside this feature). Likely the request/response handler goroutines losing the race against the injected stub events; the `-race` slowdown hides it. Do not "fix" by adding sleeps.
+
+## Open: Chrome-mode mouse coordinates ignore page zoom (2026-11-23)
+
+- The DOM inspector's new paths are zoom-corrected: `DOM.getBoxModel`/`DOM.getNodeForLocation` work in layout CSS px, so the SPA divides pick/context-menu coordinates by `zoom` and multiplies box rects by it. The EXISTING input path does not: `ChromeViewport` sends canvas px straight to `Input.dispatchMouseEvent`, while `Emulation.setDeviceMetricsOverride` lays the page out at `viewport/zoom` (`internal/browse/cdp/target.go` ~1208-1225). At zoom ≠ 1 a forwarded click therefore lands off-target.
+- Not fixed in the inspector change (out of scope). Fix by dividing `canvasPos` coordinates by the live zoom factor for mouse/touch, or by having the Go side scale them; then re-check drag, long-press, and the context menu together.
+
 ## Open: `/docs cleanup` LLM audit never run against a real model (2026-11-18)
 
 - The new audit path is covered by unit tests only: `internal/commandctx/docs_test.go` pins the prompt contract and the deterministic `--yes` delete, and `web/src/components/Chat/commands.docsCleanup.test.tsx` pins the SPA dispatch. No run has driven a real `context` sub-agent over an actual bundle, so the judgment quality (what it deprecates, false positives) and the rendered report on both surfaces are unverified.

@@ -68,8 +68,17 @@ interface ChatInputProps {
   quickActions?: boolean;
 }
 
+/** A browser annotation handed to the composer by App (never auto-sent). */
+export interface BrowserAnnotation {
+  text: string;
+  image?: Blob | null;
+  imageName?: string;
+}
+
 export interface ChatInputHandle {
   focus: () => void;
+  /** Append an annotation to the draft (and upload its screenshot, if any). */
+  addAnnotation: (annotation: BrowserAnnotation) => void;
 }
 
 export interface SlashCommandResult {
@@ -212,6 +221,26 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   useImperativeHandle(ref, () => ({
     focus: () => {
       textareaRef.current?.focus();
+    },
+    // Browser annotation → draft, never a send: the user edits it (and can
+    // drop the screenshot chip) before pressing Enter. The TEXT goes in FIRST
+    // so a slow/failed screenshot upload can never lose it; `uploadFiles`
+    // already logs a failure and appends nothing, so no bogus `@` ref appears.
+    addAnnotation: ({ text, image, imageName }) => {
+      const merged = input.trim() ? input.replace(/\s+$/, "") + "\n\n" + text : text;
+      updateDraft(merged);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(merged.length, merged.length);
+      });
+      if (image) {
+        const file = new File([image], imageName || "annotation.png", {
+          type: image.type || "image/png",
+        });
+        void uploadFiles([file]);
+      }
     },
   }));
 

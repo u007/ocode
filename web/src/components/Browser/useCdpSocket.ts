@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { mintBrowseGrant, getBrowseStreamViaMain, browseCdpWsConnection } from "../../api/client";
-import type { CdpClientMessage, CdpServerMessage } from "./cdpProtocol";
+import type { CdpClientMessage, CdpServerMessage, CdpRequest, CdpDocumentPayload, CdpBoxModelPayload, CdpPushNodesPayload } from "./cdpProtocol";
 import { decodeFrame } from "./cdpProtocol";
 import { browserActions, type StateKey } from "../../lib/browserStore";
 
-/** Result of DOM.getNodeForLocation via the cdp_request wire path. */
+/** Result of DOM.getNodeForLocation via the cdp_request wire path. Chrome
+ *  omits nodeId until a document tree was requested, so the stable
+ *  backendNodeId is the identifier to keep; map it with pushNodesByBackendIds. */
 export interface NodeResult {
-  nodeId: number;
-  backendNodeId?: number;
+  nodeId?: number;
+  backendNodeId: number;
   frameId?: string;
   href?: string;
   src?: string;
@@ -51,8 +53,15 @@ export interface CdpSocketApi {
   onFindResult(cb: (res: { query?: string; found: boolean; active: number; total: number }) => void): () => void;
   /** Ask the page for the deepest node at (x,y). Resolves with node info; rejects with timeout/disconnected/error. */
   getNodeAt(x: number, y: number): Promise<NodeResult>;
-  /** Describe a node returned by getNodeAt. */
-  describeNode(nodeId: number): Promise<NodeDescription>;
+  /** Describe a node by the backendNodeId returned by getNodeAt. */
+  describeNode(backendNodeId: number): Promise<NodeDescription>;
+  /** Whole-document tree for the DOM inspector tab (Chrome mode). */
+  getDocument(): Promise<CdpDocumentPayload>;
+  /** Layout boxes for the inspector highlight, in viewport CSS pixels. */
+  getBoxModel(nodeId: number): Promise<CdpBoxModelPayload>;
+  /** Map backendNodeIds to the nodeIds of the current document tree. Only valid
+   *  after getDocument; a later getDocument invalidates the returned nodeIds. */
+  pushNodesByBackendIds(backendNodeIds: number[]): Promise<CdpPushNodesPayload>;
   /** Non-null when another window/device took this shared tab's screencast.
    *  The socket is closed and will NOT reconnect until `reconnect()` is called,
    *  so the viewer keeps its panel and offers an explicit "Take over". */
@@ -63,6 +72,13 @@ export interface CdpSocketApi {
 
 // Reconnect backoff sequence; caps at the last value.
 const BACKOFF_MS = [500, 1000, 2000, 5000];
+
+/** Client-side reply bound for a cdp_request, mirroring the server's per-method
+ *  context in cdpsocket.go: a whole-document DOM.getDocument gets 15 s, every
+ *  other request 5 s. */
+function cdpRequestTimeoutMs(method: CdpRequest["method"]): number {
+  return method === "DOM.getDocument" ? 15_000 : 5_000;
+}
 
 /** One WebSocket per stateKey carrying screencast frames, telemetry, and
  *  input (Part 05 wire format). Grants are minted per attempt — the server
@@ -396,9 +412,10 @@ export function useCdpSocket(
     };
   }, []);
   /** Send one context-menu CDP request, correlated by string requestId with
-   *  a 5s timeout. All terminal paths remove the pending entry and timer. */
+   *  a per-method timeout (cdpRequestTimeoutMs). All terminal paths remove the
+   *  pending entry and timer. */
   const requestCdp = useCallback(
-    (method: "DOM.getNodeForLocation" | "DOM.describeNode", params: Record<string, unknown>): Promise<unknown> => {
+    (method: CdpRequest["method"], params: Record<string, unknown>): Promise<unknown> => {
       return new Promise((resolve, reject) => {
         const ws = wsRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -406,13 +423,14 @@ export function useCdpSocket(
           return;
         }
         const requestId = `node:${Date.now()}:${requestSeqRef.current++}`;
-        // 5s timeout — matches the server-side context in cdpsocket.go.
+        // Same bound the server applies to this method (cdpsocket.go), so a
+        // slow whole-document reply is answered rather than dropped here first.
         const timer = setTimeout(() => {
           const pending = pendingRef.current.get(requestId);
           if (!pending) return;
           pendingRef.current.delete(requestId);
           reject(new Error("timeout"));
-        }, 5000);
+        }, cdpRequestTimeoutMs(method));
         const pending: PendingRequest = { resolve, reject, timer, socket: ws };
         pendingRef.current.set(requestId, pending);
 
@@ -438,19 +456,34 @@ export function useCdpSocket(
   const getNodeAt = useCallback(
     (x: number, y: number) => requestCdp("DOM.getNodeForLocation", { x, y }).then((result) => {
       const location = result as Partial<NodeResult> | undefined;
-      if (typeof location?.nodeId !== "number") throw new Error("no_node");
+      if (typeof location?.backendNodeId !== "number") throw new Error("no_node");
       return location as NodeResult;
     }),
     [requestCdp],
   );
 
   const describeNode = useCallback(
-    (nodeId: number) => requestCdp("DOM.describeNode", { nodeId, depth: 0, pierce: false }).then((result) => {
+    (backendNodeId: number) => requestCdp("DOM.describeNode", { backendNodeId, depth: 0, pierce: false }).then((result) => {
       const response = result as { node?: NodeDescription } | NodeDescription;
       return ("node" in response && response.node ? response.node : response) as NodeDescription;
     }),
     [requestCdp],
   );
 
-  return { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode };
+  const getDocument = useCallback(
+    () => requestCdp("DOM.getDocument", { depth: -1, pierce: false }).then((result) => result as CdpDocumentPayload),
+    [requestCdp],
+  );
+
+  const getBoxModel = useCallback(
+    (nodeId: number) => requestCdp("DOM.getBoxModel", { nodeId }).then((result) => result as CdpBoxModelPayload),
+    [requestCdp],
+  );
+
+  const pushNodesByBackendIds = useCallback(
+    (backendNodeIds: number[]) => requestCdp("DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds }).then((result) => result as CdpPushNodesPayload),
+    [requestCdp],
+  );
+
+  return { send, status, error, detached, reconnect, onFrame, onFileChooser, onSelection, onFindResult, getNodeAt, describeNode, getDocument, getBoxModel, pushNodesByBackendIds };
 }

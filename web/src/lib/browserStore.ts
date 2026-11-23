@@ -1,5 +1,6 @@
 import { Store, useSelector } from "@tanstack/react-store";
 import { normalizeBrowseURL } from "./browseURL";
+import type { DomNode } from "./domInspector";
 // Same function the client's browseSrc uses, so stored URLs and proxied URLs
 // never diverge. Re-exported for existing importers of browserStore.
 export { normalizeBrowseURL };
@@ -113,6 +114,27 @@ export interface NewTabEvent {
  *  (private hosts), chrome = headless-Chrome screencast (public hosts). */
 export type BrowseMode = "local" | "chrome";
 
+/** DOM inspector state for one browser surface. Display-only and per-tab: never
+ *  persisted (a node id/path does not survive a reload) and cleared whenever
+ *  the surface loads a different document. */
+export type DomInspectStatus = "idle" | "loading" | "ready" | "error";
+
+export interface DomInspectState {
+  mode: BrowseMode;
+  status: DomInspectStatus;
+  error: string | null;
+  root: DomNode | null;
+  truncated: boolean;
+  /** Selected node: the tree highlight, the annotation anchor, the copy target. */
+  selectedId: string | null;
+  /** Row the pointer is over in the DOM tab; the page surface outlines it. */
+  hoverId: string | null;
+  /** Element picker armed; the page surface owns the interaction. */
+  pick: boolean;
+  /** Bumped per fetch so a reply for an older page/tree is dropped. */
+  gen: number;
+}
+
 export interface BrowserTabState {
   url: string; // authoritative current URL (server-driven once loaded)
   status: number; // last HTTP status (0 = loading)
@@ -149,6 +171,8 @@ export interface BrowserTabState {
    *  remount (e.g. switching tabs, which remounts ChromeViewport by key)
    *  reapplies it instead of silently dropping back to 100%. */
   zoom: number;
+  /** DOM inspector state (Chrome/CDP or local iframe). Never persisted. */
+  dom?: DomInspectState | null;
 }
 
 interface BrowserState {
@@ -197,6 +221,7 @@ function defaultTab(persistedUrl = ""): BrowserTabState {
     perfMetrics: {},
     perfRecording: true,
     zoom: 1,
+    dom: null,
   };
 }
 
@@ -391,7 +416,7 @@ export const browserActions = {
     url = normalizeBrowseURL(url);
     mutate(key, (t) => {
       const pushed = pushHistory(t.history, t.historyIndex, url);
-      return { ...t, url, history: pushed.history, historyIndex: pushed.idx, loading: true, error: null, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+      return { ...t, url, history: pushed.history, historyIndex: pushed.idx, loading: true, error: null, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0, dom: null };
     });
   },
 
@@ -415,7 +440,7 @@ export const browserActions = {
     mutate(key, (t) => {
       if (t.historyIndex <= 0) return t;
       const url = t.history[t.historyIndex - 1];
-      return { ...t, historyIndex: t.historyIndex - 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+      return { ...t, historyIndex: t.historyIndex - 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0, dom: null };
     });
   },
 
@@ -423,7 +448,7 @@ export const browserActions = {
     mutate(key, (t) => {
       if (t.historyIndex >= t.history.length - 1) return t;
       const url = t.history[t.historyIndex + 1];
-      return { ...t, historyIndex: t.historyIndex + 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0 };
+      return { ...t, historyIndex: t.historyIndex + 1, url, loading: true, pageTitle: null, scrollY: t.scrollByUrl[url] ?? 0, dom: null };
     });
   },
 
@@ -573,6 +598,7 @@ export const browserActions = {
         next.loading = true;
         next.error = null;
         next.scrollY = t.scrollByUrl[snap.url] ?? 0;
+        next.dom = null;
       }
       return next;
     });
@@ -588,6 +614,60 @@ export const browserActions = {
 
   clearPerformance(key: StateKey) {
     mutate(key, (t) => ({ ...t, perfMetrics: {} }));
+  },
+
+  /** Start a DOM-tree fetch for this surface. Returns the generation to pass
+   *  back with the reply so a slow response for an older page cannot overwrite
+   *  a newer tree. */
+  beginDomInspect(key: StateKey, mode: BrowseMode): number {
+    const gen = (browserStore.state.byKey[key]?.dom?.gen ?? 0) + 1;
+    mutate(key, (t) => ({
+      ...t,
+      dom: { mode, status: "loading", error: null, root: null, truncated: false, selectedId: null, hoverId: null, pick: false, gen },
+    }));
+    return gen;
+  },
+
+  setDomTree(key: StateKey, gen: number, tree: { root: DomNode; truncated: boolean }) {
+    mutate(key, (t) => {
+      if (!t.dom || t.dom.gen !== gen) return t;
+      return { ...t, dom: { ...t.dom, status: "ready", error: null, root: tree.root, truncated: tree.truncated } };
+    });
+  },
+
+  setDomError(key: StateKey, gen: number, error: string) {
+    mutate(key, (t) => {
+      if (!t.dom || t.dom.gen !== gen) return t;
+      return { ...t, dom: { ...t.dom, status: "error", error, root: null, selectedId: null, hoverId: null } };
+    });
+  },
+
+  selectDomNode(key: StateKey, id: string | null) {
+    mutate(key, (t) => {
+      if (!t.dom || t.dom.selectedId === id) return t;
+      // Selecting ends the pick: the page surface must stop drawing its own
+      // hover outline as soon as a node is committed.
+      return { ...t, dom: { ...t.dom, selectedId: id, pick: id ? false : t.dom.pick } };
+    });
+  },
+
+  hoverDomNode(key: StateKey, id: string | null) {
+    mutate(key, (t) => {
+      if (!t.dom || t.dom.hoverId === id) return t;
+      return { ...t, dom: { ...t.dom, hoverId: id } };
+    });
+  },
+
+  setDomPick(key: StateKey, on: boolean) {
+    mutate(key, (t) => {
+      if (!t.dom || t.dom.pick === on) return t;
+      return { ...t, dom: { ...t.dom, pick: on } };
+    });
+  },
+
+  /** Drop the tree and pick state (navigation, panel close, picker cancel). */
+  clearDom(key: StateKey) {
+    mutate(key, (t) => (t.dom === null ? t : { ...t, dom: null }));
   },
 
   setError(key: StateKey, error: string) {
@@ -608,6 +688,7 @@ export const browserActions = {
         // updates (loading → loaded) keep it.
         pageTitle: url !== t.url ? null : t.pageTitle,
         scrollY: url !== t.url ? (t.scrollByUrl[url] ?? 0) : t.scrollY,
+        dom: url !== t.url ? null : t.dom,
       };
     });
   },
