@@ -9,7 +9,7 @@ tags:
   - browser
   - devtools
   - network
-timestamp: 2026-11-23T12:20:33Z
+timestamp: 2026-11-24T09:20:00Z
 ---
 # Browser DevConsole network capture (local vs CDP)
 
@@ -18,7 +18,7 @@ and they have very different fidelity. In **Chrome/CDP mode** the browser's own
 network stack reports `cdp.NetworkEvent` values (`internal/browse/cdp/manager.go:67`)
 with request/response headers, post data, size and content type, and response
 **bodies are fetched lazily** via `Network.getResponseBody` (`Target.GetResponseBody`,
-`internal/browse/cdp/target.go:861`) only when a row is expanded. In **local mode**
+`internal/browse/cdp/target.go:864`) only when a row is expanded. In **local mode**
 (the reverse-proxy iframe) there is no CDP session at all, so
 `internal/browse/capture.js`, injected into the page, is the only source: it wraps
 `fetch`/`XMLHttpRequest`, reports response bodies (fetch: as a follow-up message;
@@ -117,7 +117,7 @@ display state pushed to `browserStore`; nothing is persisted.
   `responseType` `""`/`text` (`capture.js:680`). An opaque cross-origin response is
   reported with status and timing and NO headers/body — never invented.
 - **Bounds and redaction** (header rule mirrors the CDP side,
-  `target.go:311` `redactHeaders`; local copy `redactHeader`, `capture.js:187`):
+  `target.go:314` `redactHeaders`; local copy `redactHeader`, `capture.js:187`):
   20 headers per side, 200-char values, and
   `authorization`/`proxy-authorization`/`cookie`/`set-cookie`/`x-api-key`/
   `x-auth-token`/`x-csrf-token` → `[redacted]`. Request bodies cap at 64K
