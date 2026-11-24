@@ -43,6 +43,8 @@ type fakeTarget struct {
 	selection     string
 	zooms         []float64
 	touches       []cdp.TouchEvent
+	// inputScale simulates an applied page zoom (1 = 100%).
+	inputScale float64
 	// DOM inspector requests (DOM.getDocument / DOM.getBoxModel).
 	docDepths      []int
 	boxModelNodeID []int
@@ -154,6 +156,13 @@ func (f *fakeTarget) Touch(_ context.Context, ev cdp.TouchEvent) error {
 	f.touches = append(f.touches, ev)
 	return nil
 }
+
+// InputScale simulates an applied page zoom.
+func (f *fakeTarget) InputScale() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inputScale
+}
 func (f *fakeTarget) SelectionText(_ context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -264,7 +273,7 @@ func (m *fakeManager) Attach(_ context.Context, stateKey string, sink cdp.FrameS
 	m.mu.Lock()
 	m.attachCalls = append(m.attachCalls, stateKey)
 	m.sinks[stateKey] = sink
-	t := &fakeTarget{perfRecording: true}
+	t := &fakeTarget{perfRecording: true, inputScale: 1}
 	m.targets[stateKey] = t
 	m.mu.Unlock()
 	return t, nil
@@ -1067,5 +1076,49 @@ func TestAllowBypassTrustsHostInChromeMode(t *testing.T) {
 	defer fake.mu.Unlock()
 	if len(fake.trusted) != 1 || fake.trusted[0] != "tab:x 192.168.1.5:8443" {
 		t.Fatalf("trusted = %v", fake.trusted)
+	}
+}
+
+// TestCDP_InputScaledFromCanvasToLayout pins the zoom correction at the socket
+// boundary: the SPA sends canvas CSS pixels, Chrome takes layout CSS pixels.
+func TestCDP_InputScaledFromCanvasToLayout(t *testing.T) {
+	s, fake, ts := newBrowseWithFake(t, "http://example.com")
+	grant := s.MintGrant("tab:z", "http://example.com")
+	conn, _, err := (&websocket.Dialer{}).Dial(wsURL(ts, "tab:z", grant), http.Header{"Origin": []string{"http://example.com"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	target := fake.targetFor("tab:z")
+	if target == nil {
+		t.Fatal("no target")
+	}
+	target.mu.Lock()
+	target.inputScale = 0.5 // zoom 2
+	target.mu.Unlock()
+
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"mouse","kind":"wheel","x":100,"y":50,"deltaX":30,"deltaY":40}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	if len(target.mouses) != 1 {
+		t.Fatalf("mouses = %+v", target.mouses)
+	}
+	m := target.mouses[0]
+	target.mu.Unlock()
+	if m.X != 50 || m.Y != 25 || m.DeltaX != 15 || m.DeltaY != 20 {
+		t.Fatalf("mouse = %+v, want x=50 y=25 dx=15 dy=20", m)
+	}
+
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"t":"touch","kind":"start","points":[{"id":1,"x":100,"y":50}]}`))
+	time.Sleep(50 * time.Millisecond)
+	target.mu.Lock()
+	if len(target.touches) != 1 || len(target.touches[0].Points) != 1 {
+		t.Fatalf("touches = %+v", target.touches)
+	}
+	p := target.touches[0].Points[0]
+	target.mu.Unlock()
+	if p.X != 50 || p.Y != 25 {
+		t.Fatalf("touch point = %+v, want (50,25)", p)
 	}
 }

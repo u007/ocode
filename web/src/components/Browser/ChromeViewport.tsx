@@ -166,9 +166,9 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
   const held = useRef<{ button: string; buttons: number; x: number; y: number } | null>(null);
   // Physical keys currently down, so a blur mid-press can release them.
   const pressedKeys = useRef(new Map<string, { key: string; code: string }>());
-  // Page zoom (1 = 100%) as currently applied to the live CDP target — a
-  // fresh target always starts at 100%, regardless of what the surface has
-  // persisted; the sync effect below reapplies the persisted value.
+  // Page zoom (1 = 100%) as last sent to the live CDP target. A target outlives
+  // the socket, so its actual zoom is unknown on (re)connect; the sync effect
+  // below sends the surface value on every open.
   const zoom = useRef(1);
   // Active touch contacts by pointerId; the remote page gets real touch
   // events (native scroll/pinch) instead of synthesized mouse presses.
@@ -783,18 +783,18 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
     actions.setZoom(stateKey, clamped);
   };
 
-  // Reapply the surface's persisted zoom to the live target: on mount (a
-  // fresh CDP target/remount always starts at 100%) and whenever the stored
-  // value changes from outside this component (the address bar's reset).
-  // Self-triggered changes (setZoom above) already match zoom.current, so
-  // this is a no-op for them — no feedback loop.
+  // Reapply the surface's persisted zoom to the live target. A target outlives
+  // the socket (the manager reuses it for a stateKey), so a reconnect can find
+  // the previous viewer's zoom: send ours on EVERY open, 100% included. Later
+  // changes flow through surface.zoom; self-triggered ones already match
+  // zoom.current, so this does not loop.
+  const surfaceZoom = surface?.zoom ?? 1;
   useEffect(() => {
-    const z = surface?.zoom ?? 1;
-    if (Math.abs(z - zoom.current) < 0.001) return;
-    zoom.current = z;
-    send({ t: "zoom", factor: z });
+    if (status !== "open") return;
+    zoom.current = surfaceZoom;
+    send({ t: "zoom", factor: surfaceZoom });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [surface?.zoom]);
+  }, [status, surfaceZoom]);
 
   const touchPoints = (ids: Iterable<number>) => {
     const out: { id: number; x: number; y: number }[] = [];

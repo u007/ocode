@@ -11,7 +11,7 @@ tags:
   - inspector
   - annotation
   - cdp
-timestamp: 2026-11-23T12:12:17Z
+timestamp: 2026-11-24T01:46:51Z
 ---
 # Embedded browser DOM inspector and annotations (local vs Chrome)
 
@@ -150,6 +150,44 @@ page is embedded and the reply goes to the SPA, so the loop does not appear
 there; the guard is what makes the direct-open case safe.
 `TestCaptureBundleInspectorBlock` asserts the exact guard line.
 
+### Zoom authority
+
+Chrome-mode input has to agree with the layout
+`Emulation.setDeviceMetricsOverride` created, and the page zoom is owned by the
+surface, not by the CDP target.
+
+- **A target outlives its socket.** `Manager.Attach` reuses the target for a
+  `stateKey`, and `DetachSink` only stops the screencast — it does not reset
+  zoom. A reconnecting viewer can therefore find the previous viewer's zoom, so
+  `ChromeViewport` sends its surface zoom on EVERY socket open, 100% included,
+  instead of assuming a fresh target starts at 100%. Pinned by the
+  `ChromeViewport.test.tsx` case "sends the surface zoom on every socket open,
+  100% included".
+- **Zoom is published only after the layout accepted it.** `Resize` and
+  `SetZoom` both call `Target.applyViewportAt` directly (no `applyViewport`
+  wrapper remains). It commits `t.zoom` AND sets `zoomApplied` in the same
+  critical section immediately after `Emulation.setDeviceMetricsOverride`
+  succeeds, BEFORE `restartScreencastWith`: the screencast restart is a separate
+  best-effort step, so a failure there must not leave the page laid out at the
+  new zoom while `InputScale()` still reports the old one. `InputScale()` returns
+  `1/zoom` only once metrics were actually accepted (`zoomApplied`), else `1`, so
+  a failed first resize does not scale input and a failed zoom change keeps the
+  previously applied factor. `SetZoom` is a no-op when
+  `t.zoomApplied && t.zoom == factor`, so the SPA's per-socket-open re-send does
+  not re-run `Emulation.setDeviceMetricsOverride` or restart the screencast when
+  the layout already carries that factor; a stale factor still applies. Pinned by
+  `TestTargetSetZoomKeepsAppliedFactorOnMetricsFailure`,
+  `TestTargetSetZoomCommitsFactorBeforeScreencastRestart`,
+  `TestTargetSetZoomSkipsRedundantApply` and
+  `TestTargetInputScaleStaysOneForUnsizedZoomThenFailedResize`.
+- **Only the socket scales.** The `mouse` and `touch` messages in
+  `internal/browse/cdpsocket.go` multiply mouse `x`/`y`, wheel `deltaX`/`deltaY`
+  and touch points by `InputScale()`, converting the SPA's canvas CSS px into the
+  layout px `Input.*` takes. DOM-quad callers (`Target.Click`, `ClickElement`,
+  the browser tool) are already layout px and must NOT be scaled. Pinned by
+  `TestTargetInputScaleTracksAppliedZoom`, `TestTargetClickKeepsLayoutCoordinates`
+  and `TestCDP_InputScaledFromCanvasToLayout`.
+
 ## Highlight and picker
 
 - **Chrome highlight** is an SPA div positioned from the `content` quad, scaled
@@ -162,12 +200,13 @@ there; the guard is what makes the direct-open case safe.
 - **Local pick:** `capture.js` installs capture-phase `mousedown`/`click`
   listeners that swallow the event, outlines the hovered element, and posts
   `inspector-picked`; Esc posts a `cancelled` result.
-- **Zoom invariant.** `Target.applyViewport` calls
+- **Zoom invariant.** `Target.applyViewportAt` calls
   `Emulation.setDeviceMetricsOverride` with `width = viewport/zoom`, so the page
   is laid out at `viewport / zoom` and the canvas is `viewport` CSS px wide:
   layout CSS px = canvas CSS px / zoom. The picker, the context-menu node
-  lookup, the hover outline and the annotation crop all apply that factor. The
-  mouse-forwarding path does not; see the limits below.
+  lookup, the hover outline and the annotation crop all apply that factor, and
+  the socket applies the same factor to forwarded mouse and touch input (see
+  Zoom authority).
 
 ## Annotation
 
@@ -272,9 +311,27 @@ same-document keep.
   only** (`ChromeViewport.test.tsx` hover-zoom, `annotation.test.ts` crop math).
   They need an app-level check at a real zoom. `TODO.md` records the gap as
   "Chrome-mode inspector overlay/crop not live-checked at zoom ≠ 1".
-- The same `TODO.md` records two neighbouring facts that are NOT this feature's
-  regressions: Chrome mouse forwarding ignores page zoom (pre-existing, see
-  Known limits), and `TestNetworkRowMarksProxyBlockedResponses` in
+- **Zoom input is test-covered end to end and live-verified against a real
+  browser**, including the socket boundary: the `InputScale()` factor and its
+  publish-after-apply rule (`TestTargetInputScaleTracksAppliedZoom`,
+  `TestTargetSetZoomKeepsAppliedFactorOnMetricsFailure`,
+  `TestTargetSetZoomCommitsFactorBeforeScreencastRestart`,
+  `TestTargetInputScaleStaysOneForUnsizedZoomThenFailedResize`), the DOM-quad
+  callers staying in layout px (`TestTargetClickKeepsLayoutCoordinates`), and the
+  canvas-to-layout conversion at the socket
+  (`TestCDP_InputScaledFromCanvasToLayout`). `TestCDP_InputScalingLiveAtZoom`
+  (`internal/browse/live_zoom_test.go`, gated on `OCODE_CHROME_PATH` like
+  `internal/server/browser_frames_live_test.go`) proves the same conversion
+  against headless Chrome: it starts a real `cdp.Manager`, serves a page with a
+  button at layout (100,100,120,40), sends `resize 800x600 dpr 1`, `zoom 1.5`
+  and `nav` over the per-tab CDP socket, clicks at canvas (240,180), and
+  asserts the page logged `HIT 160,120` — the canvas click arrived as the
+  layout point. It passed locally (2.9 s) and skips without
+  `OCODE_CHROME_PATH`. What remains unverified is only the SPA's overlay and
+  crop at zoom ≠ 1 (unit-tested math, bullet above and `TODO.md`), not the
+  input path.
+- The same `TODO.md` records one neighbouring fact that is NOT this feature's
+  regression: `TestNetworkRowMarksProxyBlockedResponses` in
   `internal/browse/cdp` is a pre-existing timing flake — it fails without
   `-race` and passes with it, reproduced at HEAD via `go test -overlay`.
 - **The live run was root-mounted only** (`rootMode: true`). The prefixed mount
@@ -284,12 +341,6 @@ same-document keep.
 
 ## Known limits
 
-- **Mouse forwarding is not zoom-corrected.** The mouse-forwarding path
-  (`send({t:"mouse"})` in `ChromeViewport`) sends raw canvas px to
-  `Input.dispatchMouseEvent`, while the page is laid out at `viewport / zoom`, so
-  a forwarded click lands off-target at zoom ≠ 1. Recorded in TODO.md ("Chrome-mode
-  mouse coordinates ignore page zoom"). The picker, the context-menu node lookup,
-  the hover outline and the annotation crop are zoom-corrected.
 - **Local screenshots depend on html-to-image.** Cross-origin images, fonts and
   stylesheets taint or go missing; `cacheBust: true` rewrites URLs (some servers
   reject the added query); iframes, `<video>` and `<canvas>` do not render;
@@ -317,7 +368,9 @@ same-document keep.
   hover outline scaled by zoom, picker (`getNodeAt(x/z, y/z)`, no forwarded
   mouse event), the context-menu lookup in CSS px ("looks the context-menu node
   up in layout CSS px, dividing canvas px by zoom"), the refetch-once remap
-  ("refetches the tree once when the node is missing from the cached tree").
+  ("refetches the tree once when the node is missing from the cached tree"), and
+  sending the surface zoom on every socket open ("sends the surface zoom on
+  every socket open, 100% included").
 - `web/src/components/Browser/useCdpSocket.test.tsx` — DOM request correlation,
   the per-method timeout (rejects on timeout, ignores late replies) and
   `pushNodesByBackendIds` (`DOM.pushNodesByBackendIdsToFrontend`).
@@ -337,6 +390,15 @@ same-document keep.
   and `internal/browse/cdp/target_dom_test.go` (document depth, box model node id,
   backendNodeId kept without a nodeId, push-nodes round trip, describe by backend
   id, shared error vocabulary).
+- `internal/browse/cdp/target_agent_test.go` —
+  `TestTargetInputScaleTracksAppliedZoom`, `TestTargetClickKeepsLayoutCoordinates`,
+  `TestTargetSetZoomKeepsAppliedFactorOnMetricsFailure`,
+  `TestTargetSetZoomCommitsFactorBeforeScreencastRestart`,
+  `TestTargetSetZoomSkipsRedundantApply` and
+  `TestTargetInputScaleStaysOneForUnsizedZoomThenFailedResize` pin the zoom
+  authority rules.
+- `internal/browse/cdpsocket_test.go` — `TestCDP_InputScaledFromCanvasToLayout`
+  pins the canvas-to-layout conversion at the socket boundary.
 
 ## Related
 

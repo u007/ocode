@@ -469,9 +469,9 @@ describe("ChromeViewport", () => {
     fireEvent.keyDown(keyboard, { key: "=", code: "Equal", ctrlKey: true });
     expect(browserStore.state.byKey["tab:abc"].zoom).toBe(1.1);
 
-    // Remount (e.g. switching tabs, which remounts ChromeViewport by key): a
-    // fresh CDP target starts at 100%, so the mount effect must reapply the
-    // persisted zoom instead of leaving it at 100% with no explanation.
+    // Remount (e.g. switching tabs, which remounts ChromeViewport by key): the
+    // target may still hold any zoom, so opening the socket re-sends the
+    // persisted one instead of leaving the page at a stale factor.
     unmount();
     mockApi.send.mockClear();
     const { container: c2 } = render(
@@ -487,6 +487,33 @@ describe("ChromeViewport", () => {
     });
     expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1 });
     void c2;
+  });
+
+  it("sends the surface zoom on every socket open, 100% included", () => {
+    mockApi.status = "connecting";
+    const view = () => (
+      <ChromeViewport stateKey="tab:abc" browseBase="http://b" host="" url="https://example.com/" navSeq={0} />
+    );
+    const { rerender } = render(view());
+    mockApi.send.mockClear();
+    // Opening at 100% must still send: a reused target can hold an old zoom.
+    act(() => {
+      mockApi.status = "open";
+      rerender(view());
+    });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1 });
+    // A reconnect re-sends for the same reason.
+    mockApi.send.mockClear();
+    act(() => {
+      mockApi.status = "reconnecting";
+      rerender(view());
+    });
+    expect(mockApi.send).not.toHaveBeenCalled();
+    act(() => {
+      mockApi.status = "open";
+      rerender(view());
+    });
+    expect(mockApi.send).toHaveBeenCalledWith({ t: "zoom", factor: 1 });
   });
 
   it("forwards touch contacts as touch events, not mouse presses", () => {

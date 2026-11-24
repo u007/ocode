@@ -181,6 +181,9 @@ type Target struct {
 	// layout viewport shrinks by zoom, device scale grows by zoom, so the
 	// screencast stays the same pixel size.
 	zoom float64
+	// zoomApplied is set once device metrics were actually accepted at some
+	// zoom; until then the page is still laid out at 100%.
+	zoomApplied bool
 	// touchEmulated is set once Emulation.setTouchEmulationEnabled ran; only
 	// hosts that actually send touch contacts turn it on.
 	touchEmulated bool
@@ -1249,27 +1252,40 @@ func (t *Target) Resize(ctx context.Context, w, h int, dpr float64) error {
 	t.vpW = w
 	t.vpH = h
 	t.vpDPR = dpr
+	zoom := t.zoom
 	t.mu.Unlock()
-	return t.applyViewport(ctx)
+	return t.applyViewportAt(ctx, zoom)
 }
 
 // SetZoom applies a page zoom factor (clamped to 25%–500%) to the stored
-// viewport and re-emits device metrics. No-op before the first Resize.
+// viewport and re-emits device metrics. An unsized target stores the factor for
+// the next Resize; a factor the layout already has is a no-op.
 func (t *Target) SetZoom(ctx context.Context, factor float64) error {
 	factor = math.Min(5, math.Max(0.25, factor))
 	t.mu.Lock()
-	t.zoom = factor
-	sized := t.vpW > 0 && t.vpH > 0
-	t.mu.Unlock()
-	if !sized {
+	if t.zoomApplied && t.zoom == factor {
+		// The SPA re-sends its zoom on every socket open; re-applying an
+		// unchanged factor would restart the screencast for nothing.
+		t.mu.Unlock()
 		return nil
 	}
-	return t.applyViewport(ctx)
+	if t.vpW == 0 || t.vpH == 0 {
+		// Nothing is laid out yet; Resize applies this factor later.
+		t.zoom = factor
+		t.mu.Unlock()
+		return nil
+	}
+	t.mu.Unlock()
+	return t.applyViewportAt(ctx, factor)
 }
 
-func (t *Target) applyViewport(ctx context.Context) error {
+// applyViewportAt lays the stored viewport out at zoom and keeps the screencast
+// at full pixel size. It commits the factor the moment device metrics are
+// accepted, so InputScale matches the layout even if the screencast restart
+// afterwards fails.
+func (t *Target) applyViewportAt(ctx context.Context, zoom float64) error {
 	t.mu.Lock()
-	w, h, dpr, zoom := t.vpW, t.vpH, t.vpDPR, t.zoom
+	w, h, dpr := t.vpW, t.vpH, t.vpDPR
 	t.mu.Unlock()
 	if zoom == 0 {
 		zoom = 1
@@ -1290,6 +1306,10 @@ func (t *Target) applyViewport(ctx context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
+	t.mu.Lock()
+	t.zoom = zoom
+	t.zoomApplied = true
+	t.mu.Unlock()
 	return t.restartScreencastWith(ctx, maxW, maxH)
 }
 
@@ -1354,6 +1374,18 @@ func (t *Target) Mouse(ctx context.Context, ev MouseEvent) error {
 		params["deltaY"] = ev.DeltaY
 	}
 	return t.conn.Call(ctx, t.sessionID, "Input.dispatchMouseEvent", params, nil)
+}
+
+// InputScale converts the SPA's canvas CSS px into the layout px Input.* takes
+// (1/zoom once a viewport is applied, 1 before). DOM-quad callers are already
+// layout px and must not apply it.
+func (t *Target) InputScale() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.zoomApplied {
+		return 1
+	}
+	return 1 / t.zoom
 }
 
 func (t *Target) Key(ctx context.Context, ev KeyEvent) error {

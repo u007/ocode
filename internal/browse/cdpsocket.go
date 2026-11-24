@@ -157,6 +157,13 @@ type pushNodesTarget interface {
 	PushNodesByBackendIdsToFrontend(ctx context.Context, backendNodeIds []int) (map[string]any, error)
 }
 
+// Optional interface: canvas CSS px -> layout CSS px for forwarded input,
+// declared like the other capability interfaces below so a fake target that
+// never receives input need not implement it.
+type inputScaleTarget interface {
+	InputScale() float64
+}
+
 // domPositiveInt decodes a JSON number that must be a positive integer id.
 // Anything else (missing, fractional, zero, negative, a string) reports false,
 // so a malformed id never reaches Chrome as a 0.
@@ -194,6 +201,16 @@ func marshalDetached(reason string) []byte {
 	m := map[string]any{"t": "detached", "reason": reason}
 	b, _ := json.Marshal(m)
 	return b
+}
+
+// socketInputScale converts the canvas CSS pixels the SPA sends into the
+// layout CSS pixels Chrome accepts for input (the page is laid out at
+// viewport/zoom). A target that exposes no zoom reports 1.
+func socketInputScale(target chromeTarget) float64 {
+	if st, ok := target.(inputScaleTarget); ok {
+		return st.InputScale()
+	}
+	return 1
 }
 
 // handleCDP upgrades the per-stateKey WebSocket that carries screencast frames,
@@ -417,15 +434,16 @@ func (s *Server) ServeCDP(w http.ResponseWriter, r *http.Request, respHeader htt
 			}
 			_ = target.Resize(context.Background(), cm.W, cm.H, dpr)
 		case "mouse":
+			scale := socketInputScale(target)
 			_ = target.Mouse(context.Background(), cdp.MouseEvent{
 				Kind:       cm.Kind,
-				X:          cm.X,
-				Y:          cm.Y,
+				X:          cm.X * scale,
+				Y:          cm.Y * scale,
 				Button:     cm.Button,
 				Buttons:    cm.Buttons,
 				ClickCount: cm.ClickCount,
-				DeltaX:     cm.DeltaX,
-				DeltaY:     cm.DeltaY,
+				DeltaX:     cm.DeltaX * scale,
+				DeltaY:     cm.DeltaY * scale,
 				Modifiers:  cm.Modifiers,
 			})
 		case "key":
@@ -450,8 +468,9 @@ func (s *Server) ServeCDP(w http.ResponseWriter, r *http.Request, respHeader htt
 				Touch(context.Context, cdp.TouchEvent) error
 			}); ok {
 				ev := cdp.TouchEvent{Kind: cm.Kind, Modifiers: cm.Modifiers}
+				scale := socketInputScale(target)
 				for _, p := range cm.Points {
-					ev.Points = append(ev.Points, cdp.TouchPoint{ID: p.ID, X: p.X, Y: p.Y})
+					ev.Points = append(ev.Points, cdp.TouchPoint{ID: p.ID, X: p.X * scale, Y: p.Y * scale})
 				}
 				if err := tt.Touch(context.Background(), ev); err != nil {
 					s.log.Printf("browse cdp: touch for %s: %v", stateKey, err)

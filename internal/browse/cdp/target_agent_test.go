@@ -247,3 +247,160 @@ func TestManagerLookupTargetNeverCreatesOrReplaces(t *testing.T) {
 		t.Fatalf("LookupTarget changed the target map: %d entries", len(m.targets))
 	}
 }
+
+// TestTargetInputScaleTracksAppliedZoom pins the factor the socket applies to
+// the SPA's canvas pixels: a viewport apply lays the page out at viewport/zoom,
+// so a visual point maps to layout point/zoom. It stays 1 until a viewport is
+// actually applied, because no device metrics have changed yet.
+func TestTargetInputScaleTracksAppliedZoom(t *testing.T) {
+	tgt, _ := newAgentTestTarget(t)
+	ctx := context.Background()
+	if got := tgt.InputScale(); got != 1 {
+		t.Fatalf("InputScale before resize = %v, want 1", got)
+	}
+	if err := tgt.Resize(ctx, 1000, 600, 1); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	// Resized at 100% is the normal no-zoom state: the apply commits zoom 1, so
+	// this must still read as 1.
+	if got := tgt.InputScale(); got != 1 {
+		t.Fatalf("InputScale after resize without zoom = %v, want 1", got)
+	}
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	if got := tgt.InputScale(); got != 0.5 {
+		t.Fatalf("InputScale at zoom 2 = %v, want 0.5", got)
+	}
+	// A zoom that arrives before any viewport is inert: no metrics applied.
+	unsized, _ := newAgentTestTarget(t)
+	if err := unsized.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	if got := unsized.InputScale(); got != 1 {
+		t.Fatalf("InputScale after unsized SetZoom = %v, want 1", got)
+	}
+}
+
+// TestTargetClickKeepsLayoutCoordinates pins that Target.Click/Mouse take
+// layout CSS pixels (DOM quads, element clicks). Only the SPA socket converts
+// canvas pixels, so this must stay unscaled even at zoom != 1.
+func TestTargetClickKeepsLayoutCoordinates(t *testing.T) {
+	tgt, stub := newAgentTestTarget(t)
+	ctx := context.Background()
+	if err := tgt.Resize(ctx, 1000, 600, 1); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	if err := tgt.Click(ctx, 100, 50); err != nil {
+		t.Fatalf("Click: %v", err)
+	}
+	calls := stub.CallsFor("Input.dispatchMouseEvent")
+	if len(calls) != 3 {
+		t.Fatalf("click dispatched %d mouse events, want 3", len(calls))
+	}
+	for _, c := range calls {
+		var p struct {
+			Type string  `json:"type"`
+			X    float64 `json:"x"`
+			Y    float64 `json:"y"`
+		}
+		if err := json.Unmarshal(c.Params, &p); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if p.X != 100 || p.Y != 50 {
+			t.Errorf("%s at (%v,%v), want (100,50): layout pixels are not rescaled", p.Type, p.X, p.Y)
+		}
+	}
+}
+
+// TestTargetSetZoomKeepsAppliedFactorOnMetricsFailure pins publish-after-apply:
+// a failed Emulation.setDeviceMetricsOverride must not leave InputScale
+// reporting a zoom the page never received.
+func TestTargetSetZoomKeepsAppliedFactorOnMetricsFailure(t *testing.T) {
+	tgt, stub := newAgentTestTarget(t)
+	ctx := context.Background()
+	if err := tgt.Resize(ctx, 1000, 600, 1); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	stub.SetFailure("Emulation.setDeviceMetricsOverride", "Target closed")
+	if err := tgt.SetZoom(ctx, 3); err == nil {
+		t.Fatal("SetZoom swallowed the metrics failure")
+	}
+	if got := tgt.InputScale(); got != 0.5 {
+		t.Fatalf("InputScale after a failed zoom = %v, want the applied 0.5", got)
+	}
+}
+
+// TestTargetSetZoomSkipsRedundantApply pins the no-op guard: the SPA re-sends
+// its zoom on every socket open, so a factor the layout already has must not
+// re-apply metrics or restart the screencast.
+func TestTargetSetZoomSkipsRedundantApply(t *testing.T) {
+	tgt, stub := newAgentTestTarget(t)
+	tgt.sink = &testSink{}
+	ctx := context.Background()
+	if err := tgt.Resize(ctx, 1000, 600, 1); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	metrics := len(stub.CallsFor("Emulation.setDeviceMetricsOverride"))
+	starts := len(stub.CallsFor("Page.startScreencast"))
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("repeated SetZoom: %v", err)
+	}
+	if got := len(stub.CallsFor("Emulation.setDeviceMetricsOverride")); got != metrics {
+		t.Fatalf("metrics calls = %d, want %d (an unchanged factor must not reapply)", got, metrics)
+	}
+	if got := len(stub.CallsFor("Page.startScreencast")); got != starts {
+		t.Fatalf("startScreencast calls = %d, want %d (an unchanged factor must not restart)", got, starts)
+	}
+}
+
+// TestTargetInputScaleStaysOneForUnsizedZoomThenFailedResize pins the applied
+// latch rather than a zero zoom: an unsized SetZoom stores the factor, and a
+// resize whose metrics then fail must still report scale 1 because the page is
+// laid out at 100%.
+func TestTargetInputScaleStaysOneForUnsizedZoomThenFailedResize(t *testing.T) {
+	tgt, stub := newAgentTestTarget(t)
+	ctx := context.Background()
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	stub.SetFailure("Emulation.setDeviceMetricsOverride", "Target closed")
+	if err := tgt.Resize(ctx, 1000, 600, 1); err == nil {
+		t.Fatal("Resize swallowed the metrics failure")
+	}
+	if got := tgt.InputScale(); got != 1 {
+		t.Fatalf("InputScale = %v, want 1 while no metrics were applied", got)
+	}
+}
+
+// TestTargetSetZoomCommitsFactorBeforeScreencastRestart pins that a screencast
+// restart failure after accepted device metrics does not desync input scaling:
+// the page IS laid out at the new zoom, so InputScale must report it even though
+// SetZoom returned an error.
+func TestTargetSetZoomCommitsFactorBeforeScreencastRestart(t *testing.T) {
+	tgt, stub := newAgentTestTarget(t)
+	tgt.sink = &testSink{}
+	ctx := context.Background()
+	if err := tgt.Resize(ctx, 1000, 600, 1); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if err := tgt.SetZoom(ctx, 2); err != nil {
+		t.Fatalf("SetZoom: %v", err)
+	}
+	stub.SetFailure("Page.startScreencast", "renderer busy")
+	if err := tgt.SetZoom(ctx, 4); err == nil {
+		t.Fatal("SetZoom swallowed the screencast failure")
+	}
+	if got := tgt.InputScale(); got != 0.25 {
+		t.Fatalf("InputScale after metrics applied at zoom 4 = %v, want 0.25", got)
+	}
+}
