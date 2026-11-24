@@ -29,6 +29,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.7
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stretchr/testify v1.12.0
+	github.com/u007/dataprotect v0.1.0
 	github.com/wailsapp/wails/v3 v3.1.0
 	go.mau.fi/whatsmeow v0.0.0-20261110152934-c88388f983b4
 	golang.org/x/crypto v0.58.0

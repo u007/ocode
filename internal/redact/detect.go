@@ -3,6 +3,7 @@ package redact
 import (
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -23,6 +24,9 @@ type DetectOpts struct {
 	// config files (.env, YAML) are a primary secret-hiding spot and the
 	// detection is name-gated (low false-positive).
 	FileContent bool
+	// PIICategories enables the opt-in PII groups. DetectSecrets ignores this
+	// field entirely; only Detect runs the PII pass.
+	PIICategories []PIICategory
 }
 
 // Known-format patterns compiled once at package init.
@@ -136,8 +140,10 @@ func init() {
 	keywordRe = regexp.MustCompile(kwPattern)
 }
 
-// Detect finds secret spans in text.
-func Detect(text string, customWords []string, opts DetectOpts) []Span {
+// DetectSecrets finds secret spans in text. It is the secrets-only pass and
+// never reads DetectOpts.PIICategories, so a caller that must stay secrets-only
+// cannot accidentally enable PII.
+func DetectSecrets(text string, customWords []string, opts DetectOpts) []Span {
 	var spans []Span
 
 	// Known format detectors (both modes)
@@ -184,6 +190,89 @@ func Detect(text string, customWords []string, opts DetectOpts) []Span {
 	spans = filterFalsePositives(spans, text)
 
 	return spans
+}
+
+// Detect finds secret spans and, when opts.PIICategories is non-empty, opt-in
+// PII spans. The error comes only from PII detection; it is fatal, never a
+// reason to fall back to unredacted text.
+func Detect(text string, customWords []string, opts DetectOpts) ([]Span, error) {
+	secretSpans := DetectSecrets(text, customWords, opts)
+	if len(opts.PIICategories) == 0 {
+		return secretSpans, nil
+	}
+	piiSpans, err := detectPII(text, opts.PIICategories, customWords, opts.FileContent)
+	if err != nil {
+		return nil, err
+	}
+	return mergeSpans(secretSpans, piiSpans), nil
+}
+
+// mergeSpans combines both passes into one total order: sort by (Start, End,
+// Kind), then resolve overlaps secret first, then longest, then earliest.
+func mergeSpans(secretSpans, piiSpans []Span) []Span {
+	all := make([]Span, 0, len(secretSpans)+len(piiSpans))
+	all = append(all, secretSpans...)
+	all = append(all, piiSpans...)
+	return resolveSpans(all)
+}
+
+func sortSpans(spans []Span) {
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].Start != spans[j].Start {
+			return spans[i].Start < spans[j].Start
+		}
+		if spans[i].End != spans[j].End {
+			return spans[i].End < spans[j].End
+		}
+		return spans[i].Kind < spans[j].Kind
+	})
+}
+
+func isPIIKind(kind string) bool {
+	return strings.HasPrefix(kind, piiKindPrefix)
+}
+
+// spanOutranks orders overlapping spans by keep-priority: secret before PII,
+// then the longer span, then the earlier start, then kind for a total order.
+func spanOutranks(a, b Span) bool {
+	aPII, bPII := isPIIKind(a.Kind), isPIIKind(b.Kind)
+	if aPII != bPII {
+		return !aPII
+	}
+	aLen, bLen := a.End-a.Start, b.End-b.Start
+	if aLen != bLen {
+		return aLen > bLen
+	}
+	if a.Start != b.Start {
+		return a.Start < b.Start
+	}
+	return a.Kind < b.Kind
+}
+
+// resolveSpans picks a deterministic non-overlapping subset and returns it in
+// (Start, End, Kind) order.
+func resolveSpans(spans []Span) []Span {
+	if len(spans) == 0 {
+		return spans
+	}
+	ranked := append([]Span(nil), spans...)
+	sort.Slice(ranked, func(i, j int) bool { return spanOutranks(ranked[i], ranked[j]) })
+
+	kept := make([]Span, 0, len(ranked))
+	for _, cand := range ranked {
+		conflict := false
+		for _, k := range kept {
+			if cand.Start < k.End && k.Start < cand.End {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			kept = append(kept, cand)
+		}
+	}
+	sortSpans(kept)
+	return kept
 }
 
 // addSpans appends spans derived from index pairs to the slice.

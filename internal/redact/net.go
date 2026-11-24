@@ -24,7 +24,7 @@ func (nh *NetHook) ScanText(text string) string {
 // redactKnownFormats applies known-format detection and substitution.
 func (nh *NetHook) redactKnownFormats(text string) string {
 	// Only detect known formats (not keyword/entropy) - system prompts are file-like
-	spans := Detect(text, nil, DetectOpts{FileContent: true})
+	spans := DetectSecrets(text, nil, DetectOpts{FileContent: true})
 
 	if len(spans) == 0 {
 		return text

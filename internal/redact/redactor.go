@@ -65,7 +65,7 @@ func (r *Redactor) RedactChat(text string) (string, error) {
 	}
 
 	// Tier-1: known format + assignment-style env-var + keyword/entropy detection
-	spans := Detect(text, r.config.CustomWords, DetectOpts{FileContent: false})
+	spans := DetectSecrets(text, r.config.CustomWords, DetectOpts{FileContent: false})
 
 	// Register detected secrets
 	for _, span := range spans {
@@ -110,7 +110,7 @@ func (r *Redactor) RedactFile(text string) (string, error) {
 	}
 
 	// Tier-1: file mode (no generic keyword/entropy heuristic)
-	spans := Detect(text, r.config.CustomWords, DetectOpts{FileContent: true})
+	spans := DetectSecrets(text, r.config.CustomWords, DetectOpts{FileContent: true})
 
 	// Register detected secrets
 	for _, span := range spans {

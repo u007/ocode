@@ -14,7 +14,7 @@ func TestEndToEndRedactionFlow(t *testing.T) {
 
 	// 2. Simulate detecting secrets in user input
 	text := "My AWS key is AKIAIOSFODNN7EXAMPLE and my GitHub token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"
-	spans := Detect(text, nil, DetectOpts{FileContent: false})
+	spans := DetectSecrets(text, nil, DetectOpts{FileContent: false})
 	if len(spans) < 2 {
 		t.Fatalf("Expected at least 2 spans, got %d", len(spans))
 	}

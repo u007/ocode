@@ -25,7 +25,7 @@ func TestDetectKnownFormats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			spans := Detect(tt.text, nil, DetectOpts{})
+			spans := DetectSecrets(tt.text, nil, DetectOpts{})
 			if len(spans) == 0 {
 				t.Errorf("Detect(%q) returned no spans", tt.text)
 				return
@@ -51,7 +51,7 @@ func TestDetectFalsePositives(t *testing.T) {
 	text := "commit SHA: " + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" +
 		"\nsha512-abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456abc123def456"
 
-	spans := Detect(text, nil, DetectOpts{})
+	spans := DetectSecrets(text, nil, DetectOpts{})
 	for _, s := range spans {
 		if s.Kind == "aws_key" || s.Kind == "github_token" || s.Kind == "slack_token" ||
 			s.Kind == "stripe_key" || s.Kind == "jwt" || s.Kind == "openai_key" ||
@@ -68,7 +68,7 @@ func TestDetectFalsePositives(t *testing.T) {
 func TestDetectKeywordEntropyChatMode(t *testing.T) {
 	// High-entropy string adjacent to keyword should match in chat mode
 	text := "password = AbC123456789012345678901234567890"
-	spans := Detect(text, nil, DetectOpts{FileContent: false})
+	spans := DetectSecrets(text, nil, DetectOpts{FileContent: false})
 
 	keywordSpan := false
 	for _, s := range spans {
@@ -82,7 +82,7 @@ func TestDetectKeywordEntropyChatMode(t *testing.T) {
 	}
 
 	// In file mode, keyword entropy should NOT match
-	spans = Detect(text, nil, DetectOpts{FileContent: true})
+	spans = DetectSecrets(text, nil, DetectOpts{FileContent: true})
 	for _, s := range spans {
 		if s.Kind == "keyword_entropy: password" {
 			t.Error("keyword_entropy should not match in file mode")
@@ -92,7 +92,7 @@ func TestDetectKeywordEntropyChatMode(t *testing.T) {
 
 func TestDetectCustomWords(t *testing.T) {
 	text := "my-secret-value is here"
-	spans := Detect(text, []string{"my-secret-value"}, DetectOpts{})
+	spans := DetectSecrets(text, []string{"my-secret-value"}, DetectOpts{})
 
 	if len(spans) != 1 {
 		t.Errorf("Expected 1 span for custom word, got %d: %v", len(spans), spans)
@@ -195,7 +195,7 @@ func TestDetectEnvSecretAssignments(t *testing.T) {
 		{"file", DetectOpts{FileContent: true}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			spans := Detect(text, nil, mode.opts)
+			spans := DetectSecrets(text, nil, mode.opts)
 			for _, c := range cases {
 				if !hasEnvSecretSpan(spans, text, c.value) {
 					t.Errorf("[%s] expected env_secret span for %s, got spans %v", mode.name, c.name, spans)
@@ -240,7 +240,7 @@ func TestDetectEnvSecretEmptyValue(t *testing.T) {
 		{"file", DetectOpts{FileContent: true}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			spans := Detect(text, nil, mode.opts)
+			spans := DetectSecrets(text, nil, mode.opts)
 			for _, c := range cases {
 				// Find the line start for this assignment
 				var lineStart int
@@ -297,7 +297,7 @@ func TestDetectEnvSecretNoNewlineLeak(t *testing.T) {
 		{"file", DetectOpts{FileContent: true}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			spans := Detect(text, nil, mode.opts)
+			spans := DetectSecrets(text, nil, mode.opts)
 			// Must find exactly 2 env_secret spans (one per line).
 			var envSpans []Span
 			for _, s := range spans {
@@ -345,7 +345,7 @@ func TestDetectEnvSecretFalsePositives(t *testing.T) {
 		`APP_URL="http://localhost:3201"`,
 	}, "\n")
 
-	spans := Detect(text, nil, DetectOpts{})
+	spans := DetectSecrets(text, nil, DetectOpts{})
 	for _, c := range []string{
 		"us-east-1", "localhost", "5432", "http://localhost:3201",
 		"mercstudio", "s12.mercstudio.com", "prod", "1234567890",
@@ -362,7 +362,7 @@ func TestDetectEnvSecretPaddedBase64AndPunct(t *testing.T) {
 	// includes '=', so the trailing padding is part of the span).
 	value := hiEntropy(32) + "==="
 	text := "WEBHOOK_SECRET=" + value
-	spans := Detect(text, nil, DetectOpts{})
+	spans := DetectSecrets(text, nil, DetectOpts{})
 	if !hasEnvSecretSpan(spans, text, value) {
 		t.Errorf("expected env_secret span covering padded base64 value %q, got %v", value, spans)
 	}
@@ -385,7 +385,7 @@ func TestDetectEnvSecretJSONBlobValue(t *testing.T) {
 		{"file", DetectOpts{FileContent: true}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			spans := Detect(text, nil, mode.opts)
+			spans := DetectSecrets(text, nil, mode.opts)
 			if !hasEnvSecretSpan(spans, text, value) {
 				t.Errorf("[%s] expected env_secret span covering full JSON blob %q, got %v", mode.name, value, spans)
 			}
