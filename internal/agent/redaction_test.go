@@ -31,6 +31,17 @@ type failingScanner struct{ err error }
 
 func (s *failingScanner) Scan(string) ([]redact.Span, error) { return nil, s.err }
 
+// scanForTest reads scanToolResult's two return values and fails on error; no
+// test here configures PII, so the error path must stay unreachable.
+func scanForTest(t *testing.T, a *Agent, toolName, toolArgs, content string) string {
+	t.Helper()
+	out, err := a.scanToolResult(toolName, toolArgs, content)
+	if err != nil {
+		t.Fatalf("scanToolResult(%s): %v", toolName, err)
+	}
+	return out
+}
+
 func TestScanToolResult(t *testing.T) {
 	const novel = "zzqxNovelSecretValue9999" // no known format, no keyword → tier-1 misses it
 
@@ -42,7 +53,7 @@ func TestScanToolResult(t *testing.T) {
 		a.SetRedactionScanner(sc)
 
 		content := "API_BASE=https://api.example.com\nCUSTOM=" + novel + "\n"
-		out := a.scanToolResult("read", `{"path":"/proj/.env.local"}`, content)
+		out := scanForTest(t, a, "read", `{"path":"/proj/.env.local"}`, content)
 
 		if sc.calls != 1 {
 			t.Fatalf("expected scanner called once, got %d", sc.calls)
@@ -60,7 +71,7 @@ func TestScanToolResult(t *testing.T) {
 		a.SetRedactionScanner(sc)
 
 		content := "var token = \"" + novel + "\""
-		out := a.scanToolResult("read", `{"path":"/proj/main.go"}`, content)
+		out := scanForTest(t, a, "read", `{"path":"/proj/main.go"}`, content)
 
 		if sc.calls != 0 {
 			t.Errorf("scanner must not run for non-sensitive read, got %d calls", sc.calls)
@@ -80,7 +91,7 @@ func TestScanToolResult(t *testing.T) {
 		// (Low-entropy/dictionary passwords are a documented gap — see PLAN.)
 		secret := "aK39fjZ20vQ81mLpWx"
 		content := "connecting with password=" + secret + " to db"
-		out := a.scanToolResult("bash", `{"command":"psql ..."}`, content)
+		out := scanForTest(t, a, "bash", `{"command":"psql ..."}`, content)
 
 		if sc.calls != 0 {
 			t.Errorf("bash output must not invoke the LLM scanner, got %d calls", sc.calls)
@@ -93,7 +104,7 @@ func TestScanToolResult(t *testing.T) {
 	t.Run("nil registry is a no-op", func(t *testing.T) {
 		a := &Agent{}
 		content := "password=hunter2secret"
-		if out := a.scanToolResult("bash", `{}`, content); out != content {
+		if out := scanForTest(t, a, "bash", `{}`, content); out != content {
 			t.Errorf("expected no-op with nil registry, got %q", out)
 		}
 	})
@@ -106,7 +117,7 @@ func TestScanToolResult(t *testing.T) {
 
 		rawSecret := "sk-ant-12345678901234567890"
 		content := "API_KEY=" + rawSecret + "\n"
-		out := a.scanToolResult("read", `{"path":"/proj/.env"}`, content)
+		out := scanForTest(t, a, "read", `{"path":"/proj/.env"}`, content)
 
 		if strings.Contains(out, rawSecret) {
 			t.Fatalf("expected masked fallback on scanner error, got %q", out)

@@ -246,7 +246,7 @@ func redactText(text string, reg *redact.Registry) string {
 	if reg == nil || text == "" {
 		return text
 	}
-	spans := redact.Detect(text, nil, redact.DetectOpts{FileContent: false})
+	spans := redact.DetectSecrets(text, nil, redact.DetectOpts{FileContent: false})
 	agent.DebugAppendf("REDACT", "redactText: Detect found %d spans in %q", len(spans), text)
 	if len(spans) == 0 {
 		return text

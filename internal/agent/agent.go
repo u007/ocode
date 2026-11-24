@@ -615,6 +615,10 @@ type Agent struct {
 	redactionScanner redact.Scanner
 	// redactionEnabled gates all runtime redaction behaviour for the agent.
 	redactionEnabled bool
+	// redactionPII is the opt-in PII category set. It is written only onto the
+	// main conversation client (applyPIIToClient); every judge, guard and side
+	// client stays secrets-only.
+	redactionPII []redact.PIICategory
 	// OnDiscovery, if set, is called by RunDiscovery with the names of
 	// newly attached skills/MCP tools after each turn's ranking. Names are
 	// space-separated to avoid allocating a slice per turn when only an
@@ -2282,7 +2286,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							// disk-caches the full text via TruncateToolResult,
 							// so secrets must be masked first or the cache file
 							// (and its read-back notice) hand back raw content.
-							result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+							// A redaction error is fatal for the node: publish
+							// the error, never the unmasked result.
+							if masked, rerr := a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result); rerr != nil {
+								result, err = "", rerr
+							} else {
+								result = masked
+							}
 							result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 							content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display, MCPApp: a.takeMCPAppRef(tc.ID, result)}
@@ -2350,8 +2360,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						a.activity.toolDone(tc.Function.Name)
 						// Redact BEFORE shapeToolResult/TruncateToolResult caches
 						// the full text to disk — see comment at the DAG-fallback
-						// call site above.
-						result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+						// call site above. A redaction error is fatal.
+						if masked, rerr := a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result); rerr != nil {
+							result, err = "", rerr
+						} else {
+							result = masked
+						}
 						result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 						content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display, MCPApp: a.takeMCPAppRef(tc.ID, result)}
@@ -2413,8 +2427,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				}
 			}
 			// Redact BEFORE truncation/disk-caching — see comment at the
-			// parallel-dispatch call sites above.
-			result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+			// parallel-dispatch call sites above. A redaction error is fatal:
+			// surface it as the tool's result instead of unmasked content.
+			if masked, rerr := a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result); rerr != nil {
+				result = fmt.Sprintf("Error: %v", rerr)
+				notice = ""
+			} else {
+				result = masked
+			}
 			result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 			fullResult := result
 			result = TruncateToolResult(tc.ID, result)
@@ -3902,6 +3922,24 @@ func (a *Agent) SetRedactionHook(hook *redact.NetHook) {
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.Redaction = hook
 	}
+	a.applyPIIToClient(a.client)
+}
+
+// SetRedactionPIICategories stores the opt-in PII groups and applies them to
+// the main conversation client. Categories never reach a side client: those go
+// through bindSideClient/attachRedactionHook, which write only the NetHook.
+func (a *Agent) SetRedactionPIICategories(cats []redact.PIICategory) {
+	a.redactionPII = cats
+	a.applyPIIToClient(a.client)
+}
+
+// applyPIIToClient writes the agent's PII categories onto a *GenericClient.
+// Non-*GenericClient implementations (custom/mock) are left alone — they have
+// no PIICategories field, and a test double shipping real content is not a leak.
+func (a *Agent) applyPIIToClient(client LLMClient) {
+	if gc, ok := client.(*GenericClient); ok {
+		gc.PIICategories = a.redactionPII
+	}
 }
 
 // SetRedactionScanner stores the tier-2 LLM scanner for use in the tool-result
@@ -3918,14 +3956,16 @@ func (a *Agent) SetRedactionEnabled(enabled bool) {
 // scanToolResult applies redaction to a tool result's content.
 // For "read" of sensitive files (when a tier-2 scanner is configured), runs
 // ScanAndMask via the LLM scanner (both lenient and full modes). For all other
-// results, runs tier-1 Detect in chat mode (keyword+entropy, no LLM) and
-// substitutes in-place via the registry.
+// results, runs the PII-capable tier-1 pass (secrets plus the agent's opt-in
+// PII groups) and substitutes in-place via the registry.
 //
 // This must be called BEFORE the result is appended to messages and before
-// OnMessage fires, so the LLM never sees raw secrets.
-func (a *Agent) scanToolResult(toolName string, toolArgs string, content string) string {
+// OnMessage fires, so the LLM never sees raw secrets or PII. A PII detection
+// error is FATAL: it is returned and no content is published, never a fallback
+// to unmasked text.
+func (a *Agent) scanToolResult(toolName string, toolArgs string, content string) (string, error) {
 	if content == "" || !a.redactionEnabled || a.redactionRegistry == nil {
-		return content
+		return content, nil
 	}
 
 	// Determine if this is a sensitive-file read.
@@ -3949,25 +3989,20 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 	}
 
 	if isSensitiveRead && a.redactionScanner != nil {
-		masked := redactText(content, a.redactionRegistry)
-		masked, err := redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
+		masked, err := piiRedactForToolResult(content, a.redactionRegistry, a.redactionPII)
+		if err != nil {
+			return "", err
+		}
+		masked, err = redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
 		if err != nil {
 			a.emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", sensitiveReadPath, err))
-			return masked
+			return masked, nil
 		}
-		return masked
+		return masked, nil
 	}
 
-	// All other tool results: tier-1 chat-mode regex (keyword+entropy, no LLM).
-	spans := redact.Detect(content, nil, redact.DetectOpts{FileContent: false})
-	if len(spans) == 0 {
-		return content
-	}
-	for _, span := range spans {
-		value := content[span.Start:span.End]
-		a.redactionRegistry.GetOrAssign(value, span.Kind, "tool-result")
-	}
-	return a.redactionRegistry.Substitute(content)
+	// All other tool results: PII-capable tier-1 pass (keyword+entropy + PII).
+	return piiRedactForToolResult(content, a.redactionRegistry, a.redactionPII)
 }
 
 // bashFileReadCmds are shell commands that read and print file contents.
@@ -6118,7 +6153,11 @@ func (a *Agent) HandleApprovedToolCallCtx(ctx context.Context, name string, args
 	if err != nil {
 		return result, err
 	}
-	result = a.scanToolResult(name, string(args), result)
+	masked, rerr := a.scanToolResult(name, string(args), result)
+	if rerr != nil {
+		return "", rerr
+	}
+	result = masked
 	guardCtx, cancel := contextGuardBackground()
 	defer cancel()
 	return a.guardExecutedToolResult(guardCtx, toolCallID, name, string(args), result), nil
@@ -6663,6 +6702,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 				}
 			}
 			a.client = client
+			// bindSideClient attaches only the tier-1 hook; the opt-in PII
+			// categories belong to the main client and must survive the swap.
+			a.applyPIIToClient(a.client)
 			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
 			a.preloadedModelContextKind = ""

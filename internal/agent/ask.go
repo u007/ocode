@@ -272,14 +272,16 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	child.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
 		return PermissionResponse{Level: PermissionDeny}
 	}
-	// Redaction inheritance: registry, enabled state, tier-1 net hook
-	// (re-applied onto the child's OWN client), tier-2 scanner.
+	// Redaction inheritance: registry, enabled state, tier-1 net hook and the
+	// opt-in PII groups (both re-applied onto the child's OWN client), tier-2
+	// scanner.
 	child.redactionRegistry = a.redactionRegistry
 	child.redactionEnabled = a.redactionEnabled
 	child.redactionScanner = a.redactionScanner
 	if a.redactionHook != nil {
 		child.SetRedactionHook(a.redactionHook)
 	}
+	child.SetRedactionPIICategories(a.redactionPII)
 	// Track child bash processes under the shared supervisor so they are
 	// cleaned up on session teardown, namespaced so IDs cannot collide.
 	if sup := a.Supervisor(); sup != nil {

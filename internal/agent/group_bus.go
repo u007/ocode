@@ -68,8 +68,22 @@ func (a *Agent) maybeBuildGroupBus(tcs []ToolCall, parallelTCs []int) (*notebus.
 	// Wire secret redaction BEFORE Start: every note body is
 	// scrubbed before it reaches the log, the sidecar, the delta,
 	// or the reconcile hand-off, so a secret in a reviewed diff
-	// never propagates to peer agents' prompts or to disk.
-	bus.SetRedactor(notebus.RedactBody)
+	// never propagates to peer agents' prompts or to disk. The bus has
+	// no registry, so a PII detection failure cannot fall back to
+	// tokenizing: fail CLOSED with a fully redacted body rather than
+	// appending an unmasked note.
+	bus.SetRedactor(func(text string) string {
+		cats := a.redactionPII
+		if !a.redactionEnabled {
+			cats = nil // PII is dormant unless redaction is enabled.
+		}
+		body, err := notebus.RedactBodyWith(text, cats)
+		if err != nil {
+			a.emitDebug("NOTEBUS", fmt.Sprintf("note redaction failed, dropping body: %v", err))
+			return "[REDACTED:pii-error]"
+		}
+		return body
+	})
 
 	// Wire the UI observer: when the main agent has set an
 	// OnNoteBusEntry callback, forward every bus append to it

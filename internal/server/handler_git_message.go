@@ -93,7 +93,7 @@ func (h *Handler) HandleGitCommitMessage(w http.ResponseWriter, r *http.Request)
 // newlines, collapses to single spaces.
 func commitMessageErrorDetail(err error) string {
 	line := strings.Join(strings.Fields(err.Error()), " ")
-	spans := redact.Detect(line, nil, redact.DetectOpts{})
+	spans := redact.DetectSecrets(line, nil, redact.DetectOpts{})
 	var b strings.Builder
 	cursor := 0
 	for _, s := range spans {

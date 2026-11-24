@@ -3,6 +3,8 @@ package notebus
 import (
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/redact"
 )
 
 // TestRedaction_NoteBodyScrubbedBeforeAppend: a note body
@@ -133,5 +135,34 @@ func TestRedaction_SidecarHoldsRedactedForm(t *testing.T) {
 	}
 	if strings.Contains(entries[0].Body, raw) {
 		t.Errorf("raw secret present in sidecar:\n%s", entries[0].Body)
+	}
+}
+
+// TestNotebusRedactsPII: RedactBodyWith masks a configured PII category and
+// stays secrets-only with no categories, so the bus closure can pass the
+// agent's categories without widening every other use.
+func TestNotebusRedactsPII(t *testing.T) {
+	const email = "jane@example.com"
+	out, err := RedactBodyWith("reach "+email+" for details", []redact.PIICategory{redact.PIIContact})
+	if err != nil {
+		t.Fatalf("RedactBodyWith: %v", err)
+	}
+	if strings.Contains(out, email) {
+		t.Errorf("PII email survived RedactBodyWith: %q", out)
+	}
+	if !strings.Contains(out, "REDACTED") {
+		t.Errorf("body not marked as redacted: %q", out)
+	}
+
+	secret := email + " ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+	out, err = RedactBodyWith(secret, nil)
+	if err != nil {
+		t.Fatalf("RedactBodyWith (no categories): %v", err)
+	}
+	if !strings.Contains(out, email) {
+		t.Errorf("nil categories must stay secrets-only: %q", out)
+	}
+	if strings.Contains(out, "ghp_1234567890abcdefghijklmnopqrstuvwxyz") {
+		t.Errorf("secret survived RedactBodyWith: %q", out)
 	}
 }

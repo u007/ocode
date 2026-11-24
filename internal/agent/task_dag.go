@@ -361,8 +361,9 @@ type dagScheduler struct {
 	// so both buildResults (via shapeToolResult/TruncateToolResult, which
 	// disk-caches overflow verbatim) and buildPredecessorContext (which
 	// stitches raw perNode output into a dependent node's context) only ever
-	// see already-masked text.
-	redact func(toolName, toolArgs, content string) string
+	// see already-masked text. A non-nil error is a fatal PII detection
+	// failure: the node is recorded as failed with no result.
+	redact func(toolName, toolArgs, content string) (string, error)
 
 	// guard, when non-nil, vets the SAME content the redact hook just masked and
 	// returns either the original text or a PERMISSION_ASK sentinel. It is a
@@ -411,7 +412,7 @@ type dagScheduler struct {
 // newDAGScheduler wires the parsed graph, the stop channel, and the
 // dispatch closure. It does not start any work — the caller invokes
 // `run`.
-func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string, guard ...func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string) *dagScheduler {
+func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) (string, error), guard ...func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string) *dagScheduler {
 	var guardFn func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string
 	if len(guard) > 0 {
 		guardFn = guard[0]
@@ -634,7 +635,13 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 			// node's raw output straight into a dependent's context). Both
 			// must only ever see already-masked text.
 			if s.redact != nil && err == nil {
-				result = s.redact(n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
+				var redactErr error
+				result, redactErr = s.redact(n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
+				if redactErr != nil {
+					// PII detection is fatal: drop the content and record the
+					// failure so no unmasked text reaches perNode.
+					result, err = "", redactErr
+				}
 			}
 
 			// Vet AFTER redaction, so the judge never receives raw secrets.
@@ -938,7 +945,7 @@ func runDAGFromValidated(
 	groupAgentIDs []string,
 	groupTracker *groupTracker,
 	dispatch dagDispatchFn,
-	redact func(toolName, toolArgs, content string) string,
+	redact func(toolName, toolArgs, content string) (string, error),
 	guard ...func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string,
 ) ([]Message, error) {
 	parsed, err := buildDAG(parallelCalls)

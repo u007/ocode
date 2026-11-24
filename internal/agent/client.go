@@ -274,6 +274,12 @@ type GenericClient struct {
 	// secrets and redacts them before sending to the provider.
 	Redaction *redact.NetHook
 
+	// PIICategories enables the opt-in PII groups in the egress safety net.
+	// The zero value (nil) is secrets-only. Only Agent.applyPIIToClient writes
+	// it, and only onto the main conversation client: every side client stays
+	// secrets-only.
+	PIICategories []redact.PIICategory
+
 	// sessionID tags this client's debug-log entries with the owning agent's
 	// session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
@@ -830,7 +836,11 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 
 	// Chokepoint safety net: scan all messages for known-format secrets
 	if c.Redaction != nil && c.Redaction.Enabled && c.Redaction.Registry != nil {
-		messages = c.applyRedactionSafetyNet(messages)
+		var redactErr error
+		messages, redactErr = c.applyRedactionSafetyNet(messages)
+		if redactErr != nil {
+			return nil, redactErr
+		}
 	}
 
 	baseCtx := ctx
@@ -5431,11 +5441,15 @@ func mustMarshal(v interface{}) json.RawMessage {
 }
 
 // applyRedactionSafetyNet scans all message contents for known-format secrets
-// and returns a new slice with redacted content. This is the chokepoint that
-// catches secrets in system prompts, context files, and LSP diagnostic injections.
-func (c *GenericClient) applyRedactionSafetyNet(messages []Message) []Message {
+// and (when PIICategories is set) the opt-in PII groups, and returns a new
+// slice with redacted content. This is the chokepoint that catches secrets in
+// system prompts, context files, and LSP diagnostic injections.
+//
+// The error comes only from PII detection. It is FATAL — the caller must abort
+// the request rather than send unmasked content.
+func (c *GenericClient) applyRedactionSafetyNet(messages []Message) ([]Message, error) {
 	if c.Redaction == nil || !c.Redaction.Enabled || c.Redaction.Registry == nil {
-		return messages
+		return messages, nil
 	}
 
 	result := make([]Message, len(messages))
@@ -5445,8 +5459,12 @@ func (c *GenericClient) applyRedactionSafetyNet(messages []Message) []Message {
 			continue
 		}
 
-		// Scan for known-format secrets (file mode - no keyword/entropy)
-		spans := redact.Detect(msg.Content, nil, redact.DetectOpts{FileContent: true})
+		// Scan for known-format secrets (file mode - no keyword/entropy) plus
+		// the configured PII groups.
+		spans, err := redact.Detect(msg.Content, nil, redact.DetectOpts{FileContent: true, PIICategories: c.PIICategories})
+		if err != nil {
+			return nil, err
+		}
 		if len(spans) == 0 {
 			continue
 		}
@@ -5459,5 +5477,5 @@ func (c *GenericClient) applyRedactionSafetyNet(messages []Message) []Message {
 		result[i].Content = c.Redaction.Registry.Substitute(msg.Content)
 	}
 
-	return result
+	return result, nil
 }

@@ -307,7 +307,7 @@ func (a *Agent) redactJudgeRecord(rec *permissionJudgeRecord) {
 	rec.Reason = scrub(rec.Reason)
 	rec.Error = scrub(rec.Error)
 
-	// Backstop for when /mask is off. redact.Detect is used rather than
+	// Backstop for when /mask is off. redact.DetectSecrets is used rather than
 	// QuickSecretPatterns because the latter only matches a fixed list of vendor
 	// formats; it misses, for example, a `curl -H "Authorization: Bearer <opaque>"`
 	// whose token shape it does not know. Detect additionally covers
@@ -321,7 +321,7 @@ func (a *Agent) redactJudgeRecord(rec *permissionJudgeRecord) {
 	// small diagnostic loss in exchange for never persisting a credential in a
 	// file that outlives the session and is likely to be pasted into a report.
 	if rec.Command != "" {
-		if spans := redact.Detect(rec.Command, nil, redact.DetectOpts{}); len(spans) > 0 {
+		if spans := redact.DetectSecrets(rec.Command, nil, redact.DetectOpts{}); len(spans) > 0 {
 			kinds := make([]string, 0, len(spans))
 			for _, sp := range spans {
 				kinds = append(kinds, sp.Kind)

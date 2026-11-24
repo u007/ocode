@@ -280,7 +280,7 @@ func maskSecretsForDigest(text string) string {
 	if text == "" {
 		return text
 	}
-	spans := redact.Detect(text, nil, redact.DetectOpts{FileContent: true})
+	spans := redact.DetectSecrets(text, nil, redact.DetectOpts{FileContent: true})
 	if len(spans) == 0 {
 		return text
 	}
