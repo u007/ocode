@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/skill"
 )
 
@@ -710,5 +711,30 @@ func TestAdvisorCheckpoint_PlanValueIsValid(t *testing.T) {
 	}
 	if !a.advisorCheckpointEnabled(checkpointDone) {
 		t.Fatal("a configured plan value must not disable done")
+	}
+}
+
+// TestAdvisorCheckpoint_PIIDormantWhenRedactionDisabled pins the per-site
+// dormancy reset: with redaction disabled, the configured PII categories must
+// not be applied to the advisor's advice, so a raw email survives into the
+// transcript. Enabling redaction would mask it, which is why this test names
+// the checkpoint rather than the shared helper.
+func TestAdvisorCheckpoint_PIIDormantWhenRedactionDisabled(t *testing.T) {
+	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
+	a, fake := checkpointTestAgent(t, []string{"plan"})
+	fake.advice = "reach jane@example.com before committing"
+
+	// Redaction is off, but a live registry and an opt-in PII set are present:
+	// the checkpoint must reset the categories itself.
+	a.redactionEnabled = false
+	a.redactionRegistry = redact.NewRegistry("advisor")
+	a.redactionPII = []redact.PIICategory{redact.PIIContact}
+
+	advice, ok := a.runAdvisorCheckpoint(checkpointPlan, "review the batch")
+	if !ok {
+		t.Fatal("checkpoint returned no advice")
+	}
+	if !strings.Contains(advice, "jane@example.com") {
+		t.Fatalf("PII was masked while redaction is disabled: %q", advice)
 	}
 }

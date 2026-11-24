@@ -313,3 +313,32 @@ func TestApplySpecModelReappliesPII(t *testing.T) {
 		t.Errorf("swapped client redaction hook = %v, want the tier-1 hook", got.Redaction)
 	}
 }
+
+// TestSafetyNetPropagatesPIIError forces the egress safety net's PII detector to
+// fail and requires a non-nil error with no unmasked messages returned: the net
+// must abort the request, never pass the raw content through as a success.
+func TestSafetyNetPropagatesPIIError(t *testing.T) {
+	orig := piiDetectForSafetyNet
+	piiDetectForSafetyNet = func(string, []string, redact.DetectOpts) ([]redact.Span, error) {
+		return nil, errors.New("pii detector failed")
+	}
+	defer func() { piiDetectForSafetyNet = orig }()
+
+	reg := redact.NewRegistry("neterr")
+	c := &GenericClient{
+		Redaction:     &redact.NetHook{Registry: reg, Enabled: true},
+		PIICategories: []redact.PIICategory{redact.PIIContact},
+	}
+	const raw = "contact jane@example.com please"
+
+	out, err := c.applyRedactionSafetyNet([]Message{{Role: "user", Content: raw}})
+	if err == nil {
+		t.Fatal("safety net swallowed a PII detection error")
+	}
+	if out != nil {
+		t.Fatalf("safety net returned messages alongside the error: %#v", out)
+	}
+	if reg.Substitute(raw) != raw {
+		t.Fatalf("safety net registered a span despite the detection error: %q", reg.Substitute(raw))
+	}
+}

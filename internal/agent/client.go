@@ -5440,6 +5440,10 @@ func mustMarshal(v interface{}) json.RawMessage {
 	return data
 }
 
+// piiDetectForSafetyNet is redact.Detect in production. It is a var only so a
+// test can force a PII detection failure and prove this net is fatal.
+var piiDetectForSafetyNet = redact.Detect
+
 // applyRedactionSafetyNet scans all message contents for known-format secrets
 // and (when PIICategories is set) the opt-in PII groups, and returns a new
 // slice with redacted content. This is the chokepoint that catches secrets in
@@ -5461,7 +5465,7 @@ func (c *GenericClient) applyRedactionSafetyNet(messages []Message) ([]Message, 
 
 		// Scan for known-format secrets (file mode - no keyword/entropy) plus
 		// the configured PII groups.
-		spans, err := redact.Detect(msg.Content, nil, redact.DetectOpts{FileContent: true, PIICategories: c.PIICategories})
+		spans, err := piiDetectForSafetyNet(msg.Content, nil, redact.DetectOpts{FileContent: true, PIICategories: c.PIICategories})
 		if err != nil {
 			return nil, err
 		}
