@@ -3,8 +3,10 @@ package redact
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/u007/dataprotect/analyzer"
@@ -77,11 +79,20 @@ func spansEqual(a, b []Span) bool {
 	return true
 }
 
-func resetPIICache(t *testing.T) {
-	t.Helper()
+// resetPIICache empties the process-wide memo. Tests use it so a key left by an
+// earlier test (or by the baseline call in the same test) cannot satisfy a
+// later lookup and hide the analyzer or stub under test.
+func resetPIICache() {
 	piiMemo.mu.Lock()
 	piiMemo.entries = make(map[string][]Span)
 	piiMemo.mu.Unlock()
+}
+
+// piiMemoSize reports the number of live memo entries.
+func piiMemoSize() int {
+	piiMemo.mu.Lock()
+	defer piiMemo.mu.Unlock()
+	return len(piiMemo.entries)
 }
 
 func TestPIICategoryDetection(t *testing.T) {
@@ -146,6 +157,9 @@ func TestDetectSkipsTokenOverlaps(t *testing.T) {
 	}
 
 	// Force a recognizer result over the token itself: the engine must drop it.
+	// Clear the memo first so the stub is actually reached.
+	resetPIICache()
+	t.Cleanup(resetPIICache)
 	old := piiAnalyzerFor
 	t.Cleanup(func() { piiAnalyzerFor = old })
 	onlyToken := "[[OCSEC:abc123:1]]"
@@ -194,7 +208,8 @@ func TestDetectIsIdempotentAfterRender(t *testing.T) {
 }
 
 func TestDetectMemoKeyChanges(t *testing.T) {
-	resetPIICache(t)
+	resetPIICache()
+	t.Cleanup(resetPIICache)
 	old := piiAnalyzerFor
 	t.Cleanup(func() { piiAnalyzerFor = old })
 
@@ -306,9 +321,21 @@ func TestDetectTotalOrder(t *testing.T) {
 		{PIIFinancial, PIIContact},
 	}
 
+	t.Cleanup(resetPIICache)
+	old := piiAnalyzerFor
+	t.Cleanup(func() { piiAnalyzerFor = old })
+	var analyzes atomic.Int64
+	piiAnalyzerFor = func(cats []PIICategory) *analyzer.Analyzer {
+		analyzes.Add(1)
+		return analyzerFor(cats)
+	}
+
 	var first []Span
 	var firstIndexes map[string]int
 	for i, order := range orders {
+		// Both orders canonicalize to one memo key, so without a reset the
+		// second pass would replay the first and prove nothing about order.
+		resetPIICache()
 		spans, err := Detect(text, nil, DetectOpts{PIICategories: order})
 		if err != nil {
 			t.Fatalf("Detect order %v: %v", order, err)
@@ -331,9 +358,15 @@ func TestDetectTotalOrder(t *testing.T) {
 			}
 		}
 	}
+	// Both passes must have scanned; a memo replay would leave this at 1.
+	if got := analyzes.Load(); got != int64(len(orders)) {
+		t.Errorf("analyzer provider called %d times, want %d", got, len(orders))
+	}
 }
 
 func TestDetectErrorPropagates(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
 	old := piiAnalyzerFor
 	t.Cleanup(func() { piiAnalyzerFor = old })
 
@@ -365,41 +398,74 @@ func TestDetectErrorPropagates(t *testing.T) {
 }
 
 func TestDetectConcurrent(t *testing.T) {
-	text := "mail jane@example.com or call 555-123-4567"
+	const (
+		goroutines = 8
+		iterations = 50
+	)
 	opts := DetectOpts{PIICategories: []PIICategory{PIIContact}}
 
-	want, err := Detect(text, nil, opts)
-	if err != nil {
-		t.Fatalf("baseline Detect: %v", err)
+	// Count provider calls (one per genuine memo miss). The baselines below miss
+	// eight times and the goroutines must miss all eight again after the reset;
+	// without that reset this stays at eight.
+	var analyzes atomic.Int64
+	piiAnalyzerFor = func(cats []PIICategory) *analyzer.Analyzer {
+		analyzes.Add(1)
+		return analyzerFor(cats)
 	}
+	t.Cleanup(func() { piiAnalyzerFor = analyzerFor })
+
+	texts := make([]string, goroutines)
+	wants := make([][]Span, goroutines)
+	for g := range texts {
+		// One distinct text per goroutine, so each one's first call misses the
+		// memo and shares *analyzer.Analyzer with the other goroutines.
+		texts[g] = fmt.Sprintf("mail jane%d@example.com or call 555-123-4567", g)
+		want, err := Detect(texts[g], nil, opts)
+		if err != nil {
+			t.Fatalf("baseline Detect: %v", err)
+		}
+		if !hasPIISpan(want) {
+			t.Fatalf("baseline found no PII in %q", texts[g])
+		}
+		wants[g] = want
+	}
+	// The baselines warmed all eight keys; clear them so the goroutines reach
+	// Analyze instead of replaying memo entries.
+	resetPIICache()
+	t.Cleanup(resetPIICache)
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 8)
-	for g := 0; g < 8; g++ {
+	errs := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
 		wg.Add(1)
-		go func() {
+		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < 50; i++ {
-				got, err := Detect(text, nil, opts)
+			for i := 0; i < iterations; i++ {
+				got, err := Detect(texts[g], nil, opts)
 				if err != nil {
 					errs <- err
 					return
 				}
-				if !spansEqual(want, got) {
+				if !spansEqual(wants[g], got) {
 					errs <- errors.New("concurrent result differs from baseline")
 					return
 				}
 			}
-		}()
+		}(g)
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		t.Error(err)
 	}
+	if got := analyzes.Load(); got != int64(2*goroutines) {
+		t.Errorf("analyzer provider called %d times, want %d: goroutines did not reach Analyze", got, 2*goroutines)
+	}
 }
 
 func TestNoAnalyzerWhenCategoriesEmpty(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
 	old := piiAnalyzerFor
 	t.Cleanup(func() { piiAnalyzerFor = old })
 
@@ -428,9 +494,122 @@ func TestNoAnalyzerWhenCategoriesEmpty(t *testing.T) {
 	}
 }
 
+func TestPIICacheOverflowClears(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	old := piiAnalyzerFor
+	t.Cleanup(func() { piiAnalyzerFor = old })
+	piiAnalyzerFor = func([]PIICategory) *analyzer.Analyzer { return analyzer.New() }
+
+	cats := []PIICategory{PIIContact}
+	for i := 0; i < piiMemoMaxSize; i++ {
+		if _, err := detectPII(fmt.Sprintf("probe %d", i), cats, nil, false); err != nil {
+			t.Fatalf("detectPII probe %d: %v", i, err)
+		}
+	}
+	if got := piiMemoSize(); got != piiMemoMaxSize {
+		t.Fatalf("memo holds %d entries, want %d", got, piiMemoMaxSize)
+	}
+	if _, ok := piiMemoGet(piiMemoKey("probe 0", cats, nil, false)); !ok {
+		t.Fatal("first probe missing from a full memo")
+	}
+
+	// One more insert crosses the bound and must drop every old entry.
+	if _, err := detectPII("overflow probe", cats, nil, false); err != nil {
+		t.Fatalf("detectPII overflow probe: %v", err)
+	}
+	if got := piiMemoSize(); got != 1 {
+		t.Fatalf("memo holds %d entries after overflow, want 1", got)
+	}
+	if _, ok := piiMemoGet(piiMemoKey("probe 0", cats, nil, false)); ok {
+		t.Error("pre-overflow entry survived the clear")
+	}
+	if _, ok := piiMemoGet(piiMemoKey("overflow probe", cats, nil, false)); !ok {
+		t.Error("overflowing entry was not stored")
+	}
+}
+
+func TestPIICacheReturnsCopies(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	old := piiAnalyzerFor
+	t.Cleanup(func() { piiAnalyzerFor = old })
+
+	const email = "jane@example.com"
+	const text = "mail " + email
+	piiAnalyzerFor = func([]PIICategory) *analyzer.Analyzer {
+		a := analyzer.New()
+		a.AddRecognizer(spanRecognizer{
+			start: strings.Index(text, email),
+			end:   strings.Index(text, email) + len(email),
+			typ:   recognizers.EntityEmail,
+		})
+		return a
+	}
+	cats := []PIICategory{PIIContact}
+	key := piiMemoKey(text, cats, nil, false)
+
+	// Put path: the cache must snapshot the slice it is handed, so a later
+	// mutation of that slice cannot rewrite the entry.
+	posted := []Span{{Start: 5, End: 21, Kind: "pii:EMAIL"}}
+	piiMemoPut(key, posted)
+	posted[0] = Span{Start: 0, End: 1, Kind: "mutated"}
+	stored, ok := piiMemoGet(key)
+	if !ok || len(stored) != 1 {
+		t.Fatalf("memo entry = %v, ok=%v", stored, ok)
+	}
+	if stored[0].Kind != "pii:EMAIL" {
+		t.Errorf("put mutation reached the stored entry: %v", stored)
+	}
+
+	// Miss path: mutating what detectPII returned must not touch the entry.
+	resetPIICache()
+	got, err := detectPII(text, cats, nil, false)
+	if err != nil {
+		t.Fatalf("detectPII: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("detectPII returned %v, want one span", got)
+	}
+	got[0] = Span{Start: 0, End: 1, Kind: "mutated"}
+
+	stored, ok = piiMemoGet(key)
+	if !ok || len(stored) != 1 {
+		t.Fatalf("memo entry = %v, ok=%v", stored, ok)
+	}
+	if stored[0].Kind != "pii:EMAIL" {
+		t.Errorf("caller mutation reached the stored entry: %v", stored)
+	}
+
+	// Get path: two reads must not share backing storage.
+	first, ok := piiMemoGet(key)
+	if !ok || len(first) != 1 {
+		t.Fatalf("memo read = %v, ok=%v", first, ok)
+	}
+	first[0] = Span{Start: 0, End: 1, Kind: "mutated"}
+	second, _ := piiMemoGet(key)
+	if second[0].Kind != "pii:EMAIL" {
+		t.Errorf("read mutation reached the stored entry: %v", second)
+	}
+
+	// detectPII's hit path returns a copy too.
+	hit, err := detectPII(text, cats, nil, false)
+	if err != nil {
+		t.Fatalf("detectPII hit: %v", err)
+	}
+	if len(hit) != 1 {
+		t.Fatalf("detectPII hit returned %v, want one span", hit)
+	}
+	hit[0] = Span{Start: 0, End: 1, Kind: "mutated"}
+	after, _ := piiMemoGet(key)
+	if after[0].Kind != "pii:EMAIL" {
+		t.Errorf("hit-path mutation reached the stored entry: %v", after)
+	}
+}
+
 func benchmarkPIIText() string {
 	const line = "Contact jane@example.com or call 555-123-4567. Card 4111111111111111. IBAN GB82 WEST 1234 5698 7654 32. "
-	return strings.Repeat(line, 400)
+	return strings.Repeat(line, 500) // 104 bytes * 500 = ~50 KB
 }
 
 func BenchmarkDetectPII_50KB(b *testing.B) {
@@ -447,8 +626,9 @@ func BenchmarkDetectPII_50KB(b *testing.B) {
 		b.Run(set.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				// Vary the text so the memo cannot satisfy the scan.
-				text := base + string(rune('a'+i%26))
+				// A unique suffix per iteration: a fixed 26-rune cycle would be
+				// satisfied by the memo after the first 26 and measure hashing.
+				text := base + fmt.Sprintf("#%d", i)
 				if _, err := Detect(text, nil, DetectOpts{PIICategories: set.cats}); err != nil {
 					b.Fatalf("Detect: %v", err)
 				}
