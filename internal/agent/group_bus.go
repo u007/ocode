@@ -9,6 +9,15 @@ import (
 	"github.com/u007/ocode/internal/notebus"
 )
 
+// noteBusRedactBodyWith is notebus.RedactBodyWith in production. It is a var
+// only so a test can force a PII detection failure and prove the redactor
+// fails closed instead of appending the raw body.
+var noteBusRedactBodyWith = notebus.RedactBodyWith
+
+// noteBusPIIErrorBody is what a note body becomes when PII detection fails.
+// The bus has no token registry, so the only safe body is a marker.
+const noteBusPIIErrorBody = "[REDACTED:pii-error]"
+
 // maybeBuildGroupBus inspects the parallel batch and returns a
 // fresh bus + per-call agent id map if the batch qualifies as a
 // "group" (2+ subagent calls with shared_notes:true). The return
@@ -77,10 +86,10 @@ func (a *Agent) maybeBuildGroupBus(tcs []ToolCall, parallelTCs []int) (*notebus.
 		if !a.redactionEnabled {
 			cats = nil // PII is dormant unless redaction is enabled.
 		}
-		body, err := notebus.RedactBodyWith(text, cats)
+		body, err := noteBusRedactBodyWith(text, cats)
 		if err != nil {
 			a.emitDebug("NOTEBUS", fmt.Sprintf("note redaction failed, dropping body: %v", err))
-			return "[REDACTED:pii-error]"
+			return noteBusPIIErrorBody
 		}
 		return body
 	})

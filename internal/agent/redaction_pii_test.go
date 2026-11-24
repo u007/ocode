@@ -2,10 +2,13 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/redact"
 )
 
@@ -16,9 +19,9 @@ func (fakeScanner) Scan(string) ([]redact.Span, error) { return nil, nil }
 
 // TestPermissionJudgePayloadKeepsRawPII pins the carve-out on the exact
 // helpers the permission judge uses: redactText is the arguments path and
-// redactFileText is the project-context path in permission_typesafe.go. With
-// PII configured on the agent, a judge payload must still carry the raw email
-// while a credential in the same payload is masked.
+// redactFileText is the project-context path in permission_typesafe.go. They
+// take a registry, not an agent, so no PII categories can reach them: a judge
+// payload must carry the raw email while a credential in it is masked.
 func TestPermissionJudgePayloadKeepsRawPII(t *testing.T) {
 	reg := redact.NewRegistry("judgetest")
 	payload := `{"email":"jane@example.com","aws":"AKIAIOSFODNN7EXAMPLE"}`
@@ -179,5 +182,134 @@ func TestChildInheritsPIIAndSideClientsDoNot(t *testing.T) {
 	}
 	if len(side.PIICategories) != 0 {
 		t.Errorf("side client must stay secrets-only, got PII categories %v", side.PIICategories)
+	}
+}
+
+// startNoteBusGroup builds a real bus through maybeBuildGroupBus so the test
+// exercises the production wiring (not just a detached closure) and registers
+// the production teardown.
+func startNoteBusGroup(t *testing.T, a *Agent) *notebus.Bus {
+	t.Helper()
+	a.noteBusFactory = func(id string) *notebus.Bus { return notebus.NewBus(id) }
+	calls := make([]ToolCall, 2)
+	for i := range calls {
+		calls[i].ID = fmt.Sprintf("call-%d", i)
+		calls[i].Function.Name = "task"
+		calls[i].Function.Arguments = `{"prompt":"x","shared_notes":true}`
+	}
+	bus, ids := a.maybeBuildGroupBus(calls, []int{0, 1})
+	if bus == nil || len(ids) != 2 {
+		t.Fatalf("maybeBuildGroupBus: bus=%v ids=%v", bus, ids)
+	}
+	t.Cleanup(func() { a.teardownGroupBus(bus) })
+	return bus
+}
+
+// TestNoteBusRedactor pins the closure wired onto every group bus: a PII
+// detection failure fails CLOSED (marker body, never the raw text), and the
+// categories are niled out while redaction is disabled.
+func TestNoteBusRedactor(t *testing.T) {
+	orig := noteBusRedactBodyWith
+	t.Cleanup(func() { noteBusRedactBodyWith = orig })
+
+	const marker = "[REDACTED:pii-error]"
+	const body = "jane@example.com"
+
+	t.Run("PII failure fails closed", func(t *testing.T) {
+		noteBusRedactBodyWith = func(string, []redact.PIICategory) (string, error) {
+			return "", errors.New("pii detector down")
+		}
+		a := &Agent{
+			redactionEnabled: true,
+			redactionPII:     []redact.PIICategory{redact.PIIContact},
+		}
+		bus := startNoteBusGroup(t, a)
+
+		if _, err := bus.Append(notebus.Note(0, "a1", "x.go", body, 0)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		snap := bus.Snapshot()
+		if len(snap) != 1 {
+			t.Fatalf("snapshot entries = %d, want 1", len(snap))
+		}
+		if snap[0].Body != marker {
+			t.Errorf("body = %q, want the fail-closed marker %q", snap[0].Body, marker)
+		}
+		if strings.Contains(snap[0].Body, body) {
+			t.Errorf("raw body reached the bus after a PII failure: %q", snap[0].Body)
+		}
+	})
+
+	t.Run("disabled redaction passes nil categories and the body through", func(t *testing.T) {
+		var gotCats []redact.PIICategory
+		noteBusRedactBodyWith = func(text string, cats []redact.PIICategory) (string, error) {
+			gotCats = cats
+			return text, nil
+		}
+		a := &Agent{
+			redactionEnabled: false,
+			redactionPII:     []redact.PIICategory{redact.PIIContact},
+		}
+		bus := startNoteBusGroup(t, a)
+
+		if _, err := bus.Append(notebus.Note(0, "a1", "x.go", body, 0)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if gotCats != nil {
+			t.Errorf("categories = %v, want nil while redaction is disabled", gotCats)
+		}
+		snap := bus.Snapshot()
+		if len(snap) != 1 || snap[0].Body != body {
+			t.Errorf("body = %v, want unchanged %q", snap, body)
+		}
+	})
+
+	t.Run("enabled redaction forwards the agent's categories", func(t *testing.T) {
+		var gotCats []redact.PIICategory
+		noteBusRedactBodyWith = func(text string, cats []redact.PIICategory) (string, error) {
+			gotCats = cats
+			return text, nil
+		}
+		a := &Agent{
+			redactionEnabled: true,
+			redactionPII:     []redact.PIICategory{redact.PIIContact},
+		}
+		bus := startNoteBusGroup(t, a)
+
+		if _, err := bus.Append(notebus.Note(0, "a1", "x.go", body, 0)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if len(gotCats) != 1 || gotCats[0] != redact.PIIContact {
+			t.Errorf("categories = %v, want %v", gotCats, a.redactionPII)
+		}
+	})
+}
+
+// TestApplySpecModelReappliesPII: applySpecModel swaps the client through
+// bindSideClient, which attaches only the tier-1 hook; the PII categories must
+// be re-applied onto the new *GenericClient.
+func TestApplySpecModelReappliesPII(t *testing.T) {
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	swapped := &GenericClient{Model: "openai/gpt-4o", Provider: "openai"}
+	newClientFn = func(*config.Config, string) LLMClient { return swapped }
+
+	hook := redact.NetHookEnabled(redact.NewRegistry("spec"))
+	cats := []redact.PIICategory{redact.PIIContact}
+	a := NewAgent(&MockClient{}, nil, &config.Config{}, nil)
+	a.SetRedactionHook(hook)
+	a.SetRedactionPIICategories(cats)
+
+	a.applySpecModel(&AgentSpec{Name: "spec-test", Model: "openai/gpt-4o"})
+
+	got, ok := a.client.(*GenericClient)
+	if !ok || got != swapped {
+		t.Fatalf("client = %T, want the swapped *GenericClient", a.client)
+	}
+	if len(got.PIICategories) != 1 || got.PIICategories[0] != redact.PIIContact {
+		t.Errorf("swapped client PIICategories = %v, want %v", got.PIICategories, cats)
+	}
+	if got.Redaction != hook {
+		t.Errorf("swapped client redaction hook = %v, want the tier-1 hook", got.Redaction)
 	}
 }
