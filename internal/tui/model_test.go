@@ -3978,6 +3978,43 @@ func TestNewModelRecordsMissingSessionLoadError(t *testing.T) {
 	}
 }
 
+// TestNewModelShowsConfigLoadErrorNotice pins the boot notice for a malformed
+// config: newModel must surface the load error once, as a transient chat
+// notice (never a system-role prompt message), and it must not echo the file
+// contents.
+func TestNewModelShowsConfigLoadErrorNotice(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, filepath.Join(tmpDir, "home"))
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"model": "SENTINEL-CONTENT`)
+
+	m := newTestModel()
+	var notices []string
+	for _, msg := range m.messages {
+		text := stripANSI(msg.text)
+		if !strings.Contains(text, "config:") {
+			continue
+		}
+		notices = append(notices, text)
+		if !msg.transient {
+			t.Fatalf("config load notice must be transient, got %#v", msg)
+		}
+	}
+	if len(notices) != 1 {
+		t.Fatalf("want exactly one config load notice, got %d: %v", len(notices), notices)
+	}
+	if !strings.Contains(notices[0], "failed to parse OPENCODE_CONFIG_CONTENT") {
+		t.Fatalf("notice does not carry the load error: %q", notices[0])
+	}
+	if strings.Contains(notices[0], "SENTINEL-CONTENT") {
+		t.Fatalf("notice echoed config contents: %q", notices[0])
+	}
+}
+
 func TestOpenSessionPickerLoadsRefsAsync(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

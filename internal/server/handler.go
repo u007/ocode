@@ -104,6 +104,11 @@ type Handler struct {
 	remoteHosts *remoteHostRegistry
 	agents      map[string]*agentSession
 	cfg         *config.Config
+	// configLoadErr is config.Load's error string from process boot ("" when the
+	// config loaded cleanly). It is a plain message, never file contents, and is
+	// surfaced by GET /api/config/mask as config_load_error so Settings can warn
+	// that defaults are in use.
+	configLoadErr string
 	// pluginMCP maps each MCP server merged into cfg from an enabled plugin to
 	// that plugin's name (plugins.MergeMCPServers). Guarded by mu, like cfg.
 	pluginMCP    map[string]string
@@ -770,11 +775,13 @@ type agentSession struct {
 
 func NewHandler() *Handler {
 	cfg, err := config.Load()
+	configLoadErr := ""
 	if err != nil {
 		// A malformed ocodeconfig (e.g. the reserved browser.extensions key)
 		// must not be silently ignored; surface it on the desktop/web boot path
 		// that browser-mode consumers ride on. Other load sites (TUI, auth)
 		// may still swallow; this is the one serving path that must not.
+		configLoadErr = err.Error()
 		log.Printf("config: load ocode config: %v", err)
 	}
 	agent.ApplyAgentConfig(cfg)
@@ -851,6 +858,7 @@ func NewHandler() *Handler {
 	h := &Handler{
 		agents:              make(map[string]*agentSession),
 		cfg:                 cfg,
+		configLoadErr:       configLoadErr,
 		pluginMCP:           pluginMCP,
 		officeAddinPaths:    paths.OfficeAddinPaths,
 		advisorEnabled:      advisorEnabled,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -56,6 +57,13 @@ type sessionEntry struct {
 	// turn; released by EvictIdle. Mirrored in Handler.agents for the legacy
 	// lookup paths.
 	agent *agentSession
+
+	// carriedRedactionRegistry is the /reset-id carry: the released agent's
+	// token registry, kept on the entry so the rebuilt agent resolves [[OCSEC:…]]
+	// tokens already in the rekeyed transcript under the same nonce. It is
+	// consumed once by the next enabled build and dropped with the entry, so no
+	// separate Handler map can outlive the session.
+	carriedRedactionRegistry *redact.Registry
 
 	// bootstrapStage is the current bootstrap stage: "" (idle/not started),
 	// "tools", "mcp", "model", or "ready" (terminal). On a failed bootstrap it
@@ -401,6 +409,46 @@ func (m *SessionManager) setAgent(sessionID string, as *agentSession) {
 		if as != nil {
 			e.lastActivity = time.Now()
 		}
+	}
+	m.mu.Unlock()
+}
+
+// SetCarriedRedactionRegistry records a released agent's token registry on the
+// session entry. /reset-id uses it to hand the registry to the rebuild that
+// happens on the next turn; the entry owns it, so dropping the entry (session
+// teardown) drops the registry too.
+func (m *SessionManager) SetCarriedRedactionRegistry(sessionID string, reg *redact.Registry) {
+	sessionID = session.CanonicalID(sessionID)
+	m.mu.Lock()
+	if e := m.entries[sessionID]; e != nil {
+		e.carriedRedactionRegistry = reg
+	}
+	m.mu.Unlock()
+}
+
+// TakeCarriedRedactionRegistry returns and clears the /reset-id carry. The
+// rebuild consumes it once, and only when redaction is enabled, so a disabled
+// session keeps it for a later enabled build.
+func (m *SessionManager) TakeCarriedRedactionRegistry(sessionID string) *redact.Registry {
+	sessionID = session.CanonicalID(sessionID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		return nil
+	}
+	reg := e.carriedRedactionRegistry
+	e.carriedRedactionRegistry = nil
+	return reg
+}
+
+// ClearCarriedRedactionRegistry drops an unconsumed carry (a failed rekey, or
+// the session being torn down) so the registry never outlives the session.
+func (m *SessionManager) ClearCarriedRedactionRegistry(sessionID string) {
+	sessionID = session.CanonicalID(sessionID)
+	m.mu.Lock()
+	if e := m.entries[sessionID]; e != nil {
+		e.carriedRedactionRegistry = nil
 	}
 	m.mu.Unlock()
 }

@@ -1324,6 +1324,89 @@ func TestHandleSetCompactConfigDoesNotHoldMuAcrossSave(t *testing.T) {
 	}
 }
 
+// TestHandleSetMaskAdvancedDoesNotHoldMuAcrossSave pins the same lock scope for
+// the redaction save: it is a cross-process read-modify-write, and h.mu is the
+// map lock every session send / run-state poll takes. While the save is
+// blocked, an h.mu-taking request must still complete.
+func TestHandleSetMaskAdvancedDoesNotHoldMuAcrossSave(t *testing.T) {
+	h := testConfigHandler(t)
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	orig := saveSecurityRedactionPatch
+	saveSecurityRedactionPatch = func(mutate func(*config.RedactionConfig)) error {
+		close(entered)
+		<-release
+		mutate(&config.RedactionConfig{})
+		return nil
+	}
+	defer func() { saveSecurityRedactionPatch = orig }()
+
+	putDone := make(chan struct{})
+	go func() {
+		defer close(putDone)
+		w := httptest.NewRecorder()
+		body := `{"base_url":"http://127.0.0.1:1234/v1","fail_mode":"warn","allow_remote_tier2":false,"custom_words":["acme"],"pii_categories":["contact"]}`
+		r := httptest.NewRequest("PUT", "/api/config/mask/advanced", strings.NewReader(body))
+		h.HandleSetMaskAdvanced(w, r)
+	}()
+	<-entered
+
+	muDone := make(chan struct{})
+	go func() {
+		defer close(muDone)
+		w := httptest.NewRecorder()
+		h.HandleGetMaskConfig(w, httptest.NewRequest("GET", "/api/config/mask", nil))
+	}()
+	select {
+	case <-muDone:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("h.mu was held across the redaction save; a concurrent request stalled")
+	}
+	close(release)
+	select {
+	case <-putDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mask advanced PUT did not finish after the save was released")
+	}
+
+	// The PUT still applied its fields to the in-memory config.
+	h.mu.Lock()
+	got := h.cfg.Ocode.Security.Redaction
+	h.mu.Unlock()
+	if got.BaseURL != "http://127.0.0.1:1234/v1" || got.FailMode != "warn" || len(got.PIICategories) != 1 || got.PIICategories[0] != "contact" {
+		t.Fatalf("redaction config not applied: %+v", got)
+	}
+}
+
+// TestHandleGetMaskConfigReportsConfigLoadError pins the boot-error surface: a
+// malformed config must not be silent, but only the error string may reach the
+// client — never config file contents.
+func TestHandleGetMaskConfigReportsConfigLoadError(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"model": "SENTINEL-CONTENT`)
+
+	h := NewHandler()
+	w := httptest.NewRecorder()
+	h.HandleGetMaskConfig(w, httptest.NewRequest("GET", "/api/config/mask", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ConfigLoadError string `json:"config_load_error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(resp.ConfigLoadError, "OPENCODE_CONFIG_CONTENT") {
+		t.Fatalf("config_load_error = %q, want the load failure", resp.ConfigLoadError)
+	}
+	if strings.Contains(resp.ConfigLoadError, "SENTINEL-CONTENT") {
+		t.Fatalf("config_load_error echoed config contents: %q", resp.ConfigLoadError)
+	}
+}
+
 // TestMaskAdvancedRoundTripsPII covers the PII payload on the existing mask
 // endpoints: GET returns the slice, PUT persists it (in memory and on disk),
 // and an unknown name is rejected with a 4xx without changing state.

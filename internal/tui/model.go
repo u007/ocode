@@ -2585,7 +2585,7 @@ func newModel(opts ...RunOptions) model {
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	cfg, _ := config.Load()
+	cfg, loadErr := config.Load()
 	// Seed the LLM harness identity from persisted config so /fake-agent
 	// survives restarts; per-request reads stay lock-free after this.
 	if cfg != nil {
@@ -2942,6 +2942,18 @@ func newModel(opts ...RunOptions) model {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
 			text:      hintStyle.Render("◆ advisor: " + cfg.Ocode.Advisor.Provider + "/" + cfg.Ocode.Advisor.Model),
+			transient: true,
+		})
+	}
+
+	// A malformed config must not be silent: Load returns nil, so ocode would
+	// otherwise start agentless on defaults with no explanation. transient
+	// keeps this out of the prompt and persistence (never a system-role
+	// message — prompt-cache rule).
+	if loadErr != nil {
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("⚠ config: " + loadErr.Error() + " (using defaults)"),
 			transient: true,
 		})
 	}

@@ -3915,6 +3915,13 @@ func (a *Agent) SetRedactionRegistry(reg *redact.Registry) {
 	a.redactionRegistry = reg
 }
 
+// RedactionRegistry returns the session's token registry, or nil when redaction
+// is disabled. The server reads it after releasing an agent on /reset-id so the
+// rebuilt agent reuses the same nonce instead of minting a fresh one.
+func (a *Agent) RedactionRegistry() *redact.Registry {
+	return a.redactionRegistry
+}
+
 // SetRedactionHook wires the tier-1 safety-net hook onto the active LLM client
 // and stores it so it is re-applied if the client is swapped later.
 func (a *Agent) SetRedactionHook(hook *redact.NetHook) {

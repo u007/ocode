@@ -24,6 +24,7 @@ import (
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
@@ -726,6 +727,14 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// on the web/desktop server, not just the TUI.
 	if effCfg != nil && effCfg.Ocode.Security.Redaction.Enabled {
 		h.applyRedactionToAgent(ag, effCfg.Ocode.Security.Redaction)
+		// A /reset-id rebuild reuses the released agent's registry so tokens
+		// already in the rekeyed transcript keep resolving under its nonce.
+		// Consumed only here (redaction enabled); a disabled session leaves the
+		// carry on its entry for a later enabled build.
+		if carried := h.sessions.TakeCarriedRedactionRegistry(sessionID); carried != nil {
+			ag.SetRedactionRegistry(carried)
+			ag.SetRedactionHook(redact.NetHookEnabled(carried))
+		}
 	}
 
 	// Stage "tools": external/plugin tools.

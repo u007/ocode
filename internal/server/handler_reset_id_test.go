@@ -220,3 +220,98 @@ func TestHandleResetSessionIDRekeysVault(t *testing.T) {
 		t.Errorf("rekeyed vault entry = %+v (ok=%v), want hunter2-secret", entry, ok)
 	}
 }
+
+// TestHandleResetSessionIDCarriesRedactionRegistry pins the registry carry: a
+// value registered on the released agent's registry before the reset must still
+// resolve through the rebuilt agent's registry under the SAME nonce, so [[OCSEC:…]]
+// tokens already in the rekeyed transcript do not become unresolvable.
+func TestHandleResetSessionIDCarriesRedactionRegistry(t *testing.T) {
+	h := testConfigHandler(t)
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction.Enabled = true
+	h.mu.Unlock()
+
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	if _, err := h.sessions.BindNewOrVerify(id, proj, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	as, stage, err := h.buildAgentSession(id, "opencode-go/deepseek-v4-flash", nil, proj)
+	if err != nil {
+		t.Fatalf("buildAgentSession: %v (stage %s)", err, stage)
+	}
+	t.Cleanup(as.agent.Shutdown)
+	h.registerAgentSession(id, as, proj)
+
+	reg := as.agent.RedactionRegistry()
+	if reg == nil {
+		t.Fatal("redaction-enabled build has no registry")
+	}
+	idx := reg.GetOrAssign("hunter2-secret", "password", "session")
+	token := redact.FormatToken(reg.Nonce(), idx)
+
+	rec := httptest.NewRecorder()
+	h.HandleResetSessionID(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/reset-id", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var raw map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	newID := raw["new_id"]
+	if newID == "" || newID == id {
+		t.Fatalf("new_id = %q, want a fresh id", newID)
+	}
+
+	// Rebuild exactly as the next turn does: it must consume the carry.
+	rebuilt, stage, err := h.buildAgentSession(newID, "opencode-go/deepseek-v4-flash", nil, proj)
+	if err != nil {
+		t.Fatalf("rebuild after reset: %v (stage %s)", err, stage)
+	}
+	t.Cleanup(rebuilt.agent.Shutdown)
+
+	got := rebuilt.agent.RedactionRegistry()
+	if got == nil {
+		t.Fatal("rebuilt agent has no registry")
+	}
+	if got.Nonce() != reg.Nonce() {
+		t.Fatalf("rebuilt registry nonce = %q, want the carried nonce %q", got.Nonce(), reg.Nonce())
+	}
+	if value := got.Resolve(token); value != "hunter2-secret" {
+		t.Fatalf("token %s resolved to %q through the rebuilt registry, want hunter2-secret", token, value)
+	}
+}
+
+// TestCloseSessionClearsRedactionCarry pins the teardown side of the /reset-id
+// carry: closing the session (the server's session teardown; the transcript
+// entry stays for a reopen) must drop the registry so it cannot outlive the
+// work it describes.
+func TestCloseSessionClearsRedactionCarry(t *testing.T) {
+	h := testConfigHandler(t)
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	if _, err := h.sessions.BindNewOrVerify(id, proj, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := redact.NewRegistry(redact.NewNonce())
+	reg.GetOrAssign("hunter2-secret", "password", "session")
+	h.sessions.SetCarriedRedactionRegistry(id, reg)
+
+	rec := httptest.NewRecorder()
+	h.HandleCloseSession(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/close", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := h.sessions.TakeCarriedRedactionRegistry(id); got != nil {
+		t.Fatal("session teardown left the carried redaction registry on the entry")
+	}
+}

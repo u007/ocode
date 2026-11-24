@@ -82,8 +82,23 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 	// h.turnLocks[id], and shut the agent down, so only the registry entry
 	// still needs moving.
 
+	// Capture the released agent's token registry AFTER ReleaseAgent returns: a
+	// turn still in flight can keep registering values until it quiesces.
+	// The carry lets the rebuilt agent resolve [[OCSEC:…]] tokens already in
+	// the rekeyed transcript under the same nonce. It lives on the session
+	// entry, never a Handler map, and is consumed only when redaction is
+	// enabled.
+	var carriedReg *redact.Registry
+	if as != nil && as.agent != nil {
+		carriedReg = as.agent.RedactionRegistry()
+	}
+	if carriedReg != nil {
+		h.sessions.SetCarriedRedactionRegistry(id, carriedReg)
+	}
+
 	newID, err := session.RekeyForDir(projectRoot, id)
 	if err != nil {
+		h.sessions.ClearCarriedRedactionRegistry(id)
 		if errors.Is(err, session.ErrNoStoredSession) {
 			writeError(w, http.StatusNotFound, "session has no stored transcript to re-key")
 			return
@@ -95,6 +110,7 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 	// Move the registry entry to the new id so every session-scoped lookup
 	// (status, transcript, next turn) resolves under it.
 	if h.sessions.Rekey(id, newID, projectRoot) == nil {
+		h.sessions.ClearCarriedRedactionRegistry(id)
 		writeError(w, http.StatusInternalServerError, "failed to rekey session registry entry")
 		return
 	}

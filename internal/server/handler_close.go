@@ -48,6 +48,11 @@ func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id 
 	// agent.Cancel + sub-agent CancelAll).
 	h.interruptSessionWork(id)
 
+	// Drop any unconsumed /reset-id redaction carry: the session is being torn
+	// down, and a registry left on the entry would outlive the work it
+	// describes. The transcript entry itself stays for a later reopen.
+	h.sessions.ClearCarriedRedactionRegistry(id)
+
 	// Stop and forget any in-flight /btw side query. It is independent of the
 	// turn, so interruptSessionWork does not touch it; leaving it running would
 	// burn spend and hold the child's bash processes past the tab's close.

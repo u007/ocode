@@ -1002,6 +1002,7 @@ func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 		"skip_llm_if_clean":  skipLLMIfClean,
 		"custom_words":       customWords,
 		"pii_categories":     piiCategories,
+		"config_load_error":  h.configLoadErr,
 	})
 }
 
@@ -1622,6 +1623,13 @@ func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request)
 // the write.
 var saveCompactConfigPatch = func(patch config.CompactConfigPatch) (config.CompactConfig, error) {
 	return config.SaveOcodeCompactConfigPatch(patch)
+}
+
+// saveSecurityRedactionPatch is the disk write used by HandleSetMaskAdvanced, a
+// package-level var so a test can block it and prove h.mu is not held across
+// the write.
+var saveSecurityRedactionPatch = func(mutate func(*config.RedactionConfig)) error {
+	return config.SaveSecurityRedaction(mutate)
 }
 
 // HandleGetPermissionConcerns reports the catalog of judge concern categories the
@@ -2813,49 +2821,62 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Build the next redaction config and persist it BEFORE taking h.mu. The
+	// save is a cross-process read-modify-write that can wait ~5s on a
+	// contended config lock, and h.mu is the map lock every session send and
+	// run-state poll takes. Holding it across the save froze the whole server
+	// behind one Settings PUT (same rule as HandleSetCompactConfig).
 	h.mu.Lock()
 	if h.cfg == nil {
 		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "config not loaded")
 		return
 	}
-	if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
-		rc.BaseURL = req.BaseURL
+	next := h.cfg.Ocode.Security.Redaction
+	h.mu.Unlock()
+
+	next.BaseURL = req.BaseURL
+	if req.FailMode != "" {
+		next.FailMode = req.FailMode
+	}
+	next.AllowRemoteTier2 = req.AllowRemoteTier2
+	next.CustomWords = req.CustomWords
+	if req.PIICategories != nil {
+		next.PIICategories = *req.PIICategories
+	}
+	if err := config.ValidatePIICategories(next.PIICategories); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := saveSecurityRedactionPatch(func(rc *config.RedactionConfig) {
+		rc.BaseURL = next.BaseURL
 		if req.FailMode != "" {
-			rc.FailMode = req.FailMode
+			rc.FailMode = next.FailMode
 		}
-		rc.AllowRemoteTier2 = req.AllowRemoteTier2
-		rc.CustomWords = req.CustomWords
+		rc.AllowRemoteTier2 = next.AllowRemoteTier2
+		rc.CustomWords = next.CustomWords
 		if req.PIICategories != nil {
-			rc.PIICategories = *req.PIICategories
+			rc.PIICategories = next.PIICategories
 		}
 	}); err != nil {
-		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.cfg.Ocode.Security.Redaction.BaseURL = req.BaseURL
-	if req.FailMode != "" {
-		h.cfg.Ocode.Security.Redaction.FailMode = req.FailMode
-	}
-	h.cfg.Ocode.Security.Redaction.AllowRemoteTier2 = req.AllowRemoteTier2
-	h.cfg.Ocode.Security.Redaction.CustomWords = req.CustomWords
-	if req.PIICategories != nil {
-		h.cfg.Ocode.Security.Redaction.PIICategories = *req.PIICategories
-	}
-	piiCategories := h.cfg.Ocode.Security.Redaction.PIICategories
+
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction = next
 	h.mu.Unlock()
 
 	// Rebuild the tier-2 scanner for live sessions (e.g. a new base URL pointing
 	// at a local model server) without restarting the server.
-	h.applyRedactionToLiveSessions(h.cfg.Ocode.Security.Redaction)
+	h.applyRedactionToLiveSessions(next)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"base_url":           req.BaseURL,
 		"fail_mode":          req.FailMode,
 		"allow_remote_tier2": req.AllowRemoteTier2,
 		"custom_words":       req.CustomWords,
-		"pii_categories":     piiCategories,
+		"pii_categories":     next.PIICategories,
 	})
 }
 
