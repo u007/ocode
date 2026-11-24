@@ -238,6 +238,33 @@ exfiltration. The live mode is per chat session on the web/desktop server.
 Writable roots, the full Ask list, platform matrix and persistence:
 `docs/concepts/sandbox-permission-mode.md`.
 
+## Secret and PII redaction (`internal/redact`)
+
+Secrets are redacted unconditionally on the way to a model. PII is **opt-in**
+per category group (`contact`, `financial`, `identity`, `legal`, `network`,
+`money`) and dormant unless `security.redaction.enabled` is on. Design, limits
+and the per-group recognizer table:
+`docs/superpowers/specs/2026-11-24-pii-redaction-design.md`.
+
+- **Judge, guard, explain-digest and commit-error payloads stay secrets-only.**
+  They reach `redact.DetectSecrets` (via `redactText`/`redactFileText`), which
+  takes no category input, so PII cannot reach them by construction. `Detect` is
+  the only PII-capable entry point; adding categories to a judge call site is a
+  security regression, not a feature.
+- **PII attaches only to the main conversation client.** `GenericClient.PIICategories`
+  is written by `Agent.applyPIIToClient` alone. Side clients built through
+  `bindSideClient`/`attachRedactionHook` stay secrets-only — never set categories
+  there.
+- **`detectPII` is the only memoized detector**, keyed on the text hash, the
+  canonical category set, custom words and `FileContent`. It stores offsets and
+  kinds only, never matched text. Never memoize `DetectSecrets`: its result
+  depends on the session registry.
+- **A PII detection error is fatal.** `scanToolResult`, the egress safety net
+  and the note bus fail closed; no unmasked fallback in either `fail_mode`,
+  which governs only the tier-2 scanner.
+- **`/reset-id` moves the vault** (`redact.RekeyVault`) and keeps the in-memory
+  registry, so tokens already in the transcript still resolve.
+
 ## Context Loading
 
 - `CLAUDE.md`, `AGENTS.md`, `OCODE.md`, and `.cursorrules` (plus every
