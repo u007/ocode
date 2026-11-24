@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -185,5 +187,96 @@ func TestRedactionConfigRoundTrip(t *testing.T) {
 	// Verify other sections are preserved
 	if cfg2.Ocode.Permissions.Mode != "normal" {
 		t.Errorf("Expected permissions.mode 'normal', got %q", cfg2.Ocode.Permissions.Mode)
+	}
+}
+
+func TestPIICategoriesRoundTrip(t *testing.T) {
+	chdirTempForConfigTest(t)
+	setHomeTree(t, t.TempDir())
+
+	if err := SaveSecurityRedaction(func(rc *RedactionConfig) {
+		rc.PIICategories = []string{"contact", "legal"}
+	}); err != nil {
+		t.Fatalf("SaveSecurityRedaction() error = %v", err)
+	}
+
+	got, err := LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("LoadOcodeConfigCopy() error = %v", err)
+	}
+	want := []string{"contact", "legal"}
+	if !slices.Equal(got.Security.Redaction.PIICategories, want) {
+		t.Errorf("PIICategories = %v, want %v", got.Security.Redaction.PIICategories, want)
+	}
+}
+
+func TestValidatePIICategories(t *testing.T) {
+	for _, name := range []string{"contact", "financial", "identity", "legal", "network", "money"} {
+		if err := ValidatePIICategories([]string{name}); err != nil {
+			t.Errorf("ValidatePIICategories(%q) = %v, want nil", name, err)
+		}
+	}
+	if err := ValidatePIICategories([]string{"contact", "financial", "identity", "legal", "network", "money"}); err != nil {
+		t.Errorf("ValidatePIICategories(all six) = %v, want nil", err)
+	}
+	if err := ValidatePIICategories(nil); err != nil {
+		t.Errorf("ValidatePIICategories(nil) = %v, want nil", err)
+	}
+	if err := ValidatePIICategories([]string{}); err != nil {
+		t.Errorf("ValidatePIICategories(empty) = %v, want nil", err)
+	}
+
+	for _, tc := range []struct {
+		label string
+		names []string
+	}{
+		{"uppercase", []string{"CONTACT"}},
+		{"unknown", []string{"bogus"}},
+		{"duplicate", []string{"contact", "contact"}},
+	} {
+		if err := ValidatePIICategories(tc.names); err == nil {
+			t.Errorf("%s: ValidatePIICategories(%q) = nil, want error", tc.label, tc.names)
+		}
+	}
+}
+
+func TestLoadRejectsUnknownPIICategory(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	setHomeTree(t, tmp)
+
+	dir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := `{"security":{"redaction":{"pii_categories":["bogus"]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "ocodeconfig.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := LoadOcodeConfigCopy()
+	if err == nil {
+		t.Fatal("LoadOcodeConfigCopy() = nil, want unknown pii category error")
+	}
+	if !strings.Contains(err.Error(), "unknown pii category") {
+		t.Fatalf("LoadOcodeConfigCopy() error = %v, want an unknown pii category error", err)
+	}
+}
+
+func TestPIICategoriesDefaultEmpty(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "ocode.json")
+	configJSON := `{"security":{"redaction":{"enabled":true}}}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	cfg := &Config{}
+	cfg.Ocode = defaultOcodeConfig()
+	if err := loadOcodeConfigFile(configPath, &cfg.Ocode); err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfg.Ocode.Security.Redaction.PIICategories != nil {
+		t.Errorf("PIICategories = %v, want nil when the key is absent", cfg.Ocode.Security.Redaction.PIICategories)
 	}
 }

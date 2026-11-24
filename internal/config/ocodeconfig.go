@@ -1032,6 +1032,7 @@ type RedactionConfig struct {
 	AllowRemoteTier2 bool     `json:"allow_remote_tier2"`          // allow non-local endpoints for tier-2 scanner
 	SkipLLMIfClean   *bool    `json:"skip_llm_if_clean,omitempty"` // DEPRECATED: use Mode; nil = derive from Mode
 	CustomWords      []string `json:"custom_words"`
+	PIICategories    []string `json:"pii_categories"` // opt-in PII categories; all off when empty
 }
 
 type OcodeConfig struct {
@@ -1550,6 +1551,7 @@ type redactionConfigFile struct {
 	AllowRemoteTier2 *bool    `json:"allow_remote_tier2,omitempty"`
 	SkipLLMIfClean   *bool    `json:"skip_llm_if_clean,omitempty"`
 	CustomWords      []string `json:"custom_words"`
+	PIICategories    []string `json:"pii_categories"`
 }
 
 type securityConfigFile struct {
@@ -2106,7 +2108,9 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 
 	if _, ok := raw["security"]; ok {
-		applySecurityConfig(&cfg.Security, file.Security)
+		if err := applySecurityConfig(&cfg.Security, file.Security); err != nil {
+			return err
+		}
 		delete(raw, "security")
 	}
 
@@ -2889,7 +2893,7 @@ func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionCon
 	}
 }
 
-func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) {
+func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) error {
 	if src.Redaction.Enabled != nil {
 		dst.Redaction.Enabled = *src.Redaction.Enabled
 	}
@@ -2914,6 +2918,10 @@ func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) {
 	if src.Redaction.CustomWords != nil {
 		dst.Redaction.CustomWords = append([]string(nil), src.Redaction.CustomWords...)
 	}
+	if src.Redaction.PIICategories != nil {
+		dst.Redaction.PIICategories = append([]string(nil), src.Redaction.PIICategories...)
+	}
+	return ValidatePIICategories(dst.Redaction.PIICategories)
 }
 
 func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
@@ -4569,11 +4577,31 @@ func ResolveRedactionMode(rc RedactionConfig) string {
 	return "lenient"
 }
 
+// piiCategories is the closed set of PII categories the redaction detector
+// understands. Wire and in-memory values must match these exactly.
+var piiCategories = []string{"contact", "financial", "identity", "legal", "network", "money"}
+
+// ValidatePIICategories rejects names outside piiCategories and duplicate
+// names. An empty or nil list is valid: every category is opt-in.
+func ValidatePIICategories(names []string) error {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !slices.Contains(piiCategories, name) {
+			return fmt.Errorf("unknown pii category %q (want one of %s)", name, strings.Join(piiCategories, ", "))
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate pii category %q", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
 // SaveSecurityRedaction persists the security.redaction config via a targeted load-modify-save.
 func SaveSecurityRedaction(mutate func(*RedactionConfig)) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		mutate(&cfg.Security.Redaction)
-		return nil
+		return ValidatePIICategories(cfg.Security.Redaction.PIICategories)
 	})
 }
 
