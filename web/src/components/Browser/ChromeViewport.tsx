@@ -785,9 +785,9 @@ export function ChromeViewport({ stateKey, browseBase, host, url, navSeq, active
 
   // Reapply the surface's persisted zoom to the live target. A target outlives
   // the socket (the manager reuses it for a stateKey), so a reconnect can find
-  // the previous viewer's zoom: send ours on EVERY open, 100% included. Later
-  // changes flow through surface.zoom; self-triggered ones already match
-  // zoom.current, so this does not loop.
+  // the previous viewer's zoom: send ours on EVERY open, 100% included. No
+  // `!active` guard on purpose: a backgrounded keep-alive tab owns this target,
+  // and the resize effect re-sends the viewport when it becomes active.
   const surfaceZoom = surface?.zoom ?? 1;
   useEffect(() => {
     if (status !== "open") return;
