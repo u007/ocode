@@ -1,5 +1,9 @@
 # Directory Update Log
 
+## 2026-11-25
+
+* **Update**: Replaced the clear-on-overflow memo with the two-generation cache (256-entry generations; a hit survives one rotation, gone after two) and documented the post-Analyze per-group confidence floors (network 0.90, money 0.85, all others 0.70, kept at `score >= floor`; upstream IP/URL 0.99, MONEY 0.85) plus the piiEntityGroups completeness test. Recorded that `/reset-id` on the server now carries the released agent's `*redact.Registry` on the session entry for the next redaction-enabled rebuild (cleared on session close and on a failed rekey, never a Handler map), so rekeyed tokens keep resolving; that a malformed config is no longer silent (one-time transient TUI notice, `config_load_error` on `GET /api/config/mask`, app runs on defaults); and that NLP entities are deliberately unshipped because `recognizers/nlp` POSTs raw pre-redaction text to an external sidecar and a down sidecar fails closed. Re-derived every cited anchor against HEAD. ([concepts/redaction.md](/concepts/redaction.md))
+
 ## 2026-11-24
 
 * **Update**: Fixed the last stale anchor on the web/desktop terminal page: the pty-write sentence cited `internal/server/handler_terminal.go:591` for `serveTerminalSocket`, but line 591 is now a bare `//` — `func (h *Handler) serveTerminalSocket(...)` is at `:597` (the `sess.ptmx.Write` call is at `:651`, which is not the symbol the sentence names). Both lines were printed from source before editing. Only that one anchor and the frontmatter `timestamp` changed; prose, tags, title and description unchanged, so `index.md` was left untouched. ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
