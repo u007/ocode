@@ -328,6 +328,45 @@ func TestMergeSpansKeepsSecretsResolvesPIIOverlaps(t *testing.T) {
 	}
 }
 
+// TestDetectZeroLengthSecretDoesNotVetoPII pins the empty-value edge case: an
+// env assignment with an empty value (`PASSWORD=`) yields a zero-length secret
+// span that registers nothing (Registry.GetOrAssign("") returns 0), so it must
+// not veto a PII span over the same position or that PII value stays unmasked.
+func TestDetectZeroLengthSecretDoesNotVetoPII(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	old := piiAnalyzerFor
+	t.Cleanup(func() { piiAnalyzerFor = old })
+
+	const text = "PASSWORD=\nmail jane@example.com"
+	secrets := DetectSecrets(text, nil, DetectOpts{})
+	if len(secrets) != 1 || secrets[0].Start != secrets[0].End {
+		t.Fatalf("DetectSecrets spans = %v, want one zero-length env span", secrets)
+	}
+	if idx := NewRegistry(NewNonce()).GetOrAssign("", secrets[0].Kind, "test"); idx != 0 {
+		t.Fatalf("GetOrAssign(empty) = %d, want 0", idx)
+	}
+
+	// The stub only supplies a PII range covering the empty value's offset; a
+	// real email recognizer cannot emit a span containing an assignment.
+	piiAnalyzerFor = func([]PIICategory) *analyzer.Analyzer {
+		a := analyzer.New()
+		a.AddRecognizer(spanRecognizer{start: 0, end: len(text), typ: recognizers.EntityEmail})
+		return a
+	}
+	spans, err := Detect(text, nil, DetectOpts{PIICategories: []PIICategory{PIIContact}})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	want := []Span{
+		{Start: 0, End: len(text), Kind: "pii:EMAIL"},
+		{Start: secrets[0].Start, End: secrets[0].End, Kind: secrets[0].Kind},
+	}
+	if !spansEqual(spans, want) {
+		t.Fatalf("Detect spans = %v, want %v (PII kept beside the zero-length secret)", spans, want)
+	}
+}
+
 // TestDetectKeepsPartiallyOverlappingSecrets pins the registry-coverage fix:
 // two custom words at [0,8) and [2,10) both come back from Detect and both are
 // registered, so a later standalone occurrence of either value is masked.

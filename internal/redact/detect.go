@@ -214,6 +214,8 @@ func Detect(text string, customWords []string, opts DetectOpts) ([]Span, error) 
 // duplicates (Start/End/Kind) are deduped. A PII span is added only when it
 // overlaps no kept span (secret or already-kept PII); PII-vs-PII conflicts
 // resolve by the existing priority (longer, then earlier start, then Kind).
+// A zero-length kept span (an empty env assignment, which GetOrAssign reports
+// as index 0 and so masks nothing) never vetoes a PII span.
 func mergeSpans(secretSpans, piiSpans []Span) []Span {
 	kept := make([]Span, 0, len(secretSpans)+len(piiSpans))
 	seen := make(map[Span]bool, len(secretSpans))
@@ -229,6 +231,9 @@ func mergeSpans(secretSpans, piiSpans []Span) []Span {
 		for _, cand := range ranked {
 			conflict := false
 			for _, k := range kept {
+				if k.End <= k.Start {
+					continue
+				}
 				if cand.Start < k.End && k.Start < cand.End {
 					conflict = true
 					break

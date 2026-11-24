@@ -413,7 +413,7 @@ func TestTUITypedInputUsesPII(t *testing.T) {
 	}
 }
 
-// TestTier1RedactionPIIIsDormantWhenDisabled pins invariant 7: after redaction
+// TestTier1RedactionPIIIsDormantWhenDisabled pins invariant 1: after redaction
 // is turned off the session registry is still non-nil (it outlives the toggle),
 // so the tier-1 sites must pass nil categories. Otherwise PII keeps masking
 // typed input with /mask off.
