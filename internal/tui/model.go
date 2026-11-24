@@ -13210,7 +13210,7 @@ func (m *model) handleBtwCmd(args []string) {
 	// Tier-1 redaction parity with streamStep: mask secrets in the aside
 	// before it reaches the side-query LLM.
 	if m.redactionRegistry != nil {
-		if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.redactionPII); err != nil {
+		if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.tier1PIICategories()); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: redaction failed: %v", err)})
 			return
 		}
@@ -16778,7 +16778,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		//
 		// applyTier1UserRedaction mutates agentMsgs in-place.
 		if m.redactionRegistry != nil {
-			if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.redactionPII); err != nil {
+			if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.tier1PIICategories()); err != nil {
 				close(msgCh)
 				errCh <- err
 				return

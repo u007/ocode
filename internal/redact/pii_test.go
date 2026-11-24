@@ -11,6 +11,7 @@ import (
 
 	"github.com/u007/dataprotect/analyzer"
 	"github.com/u007/dataprotect/recognizers"
+	"github.com/u007/ocode/internal/config"
 )
 
 // errRecognizer always fails, so Analyze returns an error.
@@ -284,33 +285,143 @@ func TestParsePIICategories(t *testing.T) {
 	}
 }
 
-func TestMergeSpansOverlapPrecedence(t *testing.T) {
-	// A secret beats a longer PII span that contains it.
+func TestMergeSpansKeepsSecretsResolvesPIIOverlaps(t *testing.T) {
+	// A secret beats a PII span that overlaps it: the secret is kept and the
+	// PII span is dropped (the secret covers the same bytes).
 	secret := Span{Start: 5, End: 8, Kind: "aws_key"}
 	pii := Span{Start: 4, End: 12, Kind: "pii:EMAIL"}
 	if got := mergeSpans([]Span{secret}, []Span{pii}); !spansEqual(got, []Span{secret}) {
 		t.Errorf("secret vs PII = %v, want %v", got, []Span{secret})
 	}
 
-	// Among secrets, the longer span wins.
+	// Secret-vs-secret overlaps are ALL kept: substitution masks by value, so
+	// dropping one left its bytes unmasked and the value unregistered.
 	short := Span{Start: 0, End: 5, Kind: "custom"}
 	long := Span{Start: 0, End: 9, Kind: "env_secret"}
-	if got := mergeSpans([]Span{short, long}, nil); !spansEqual(got, []Span{long}) {
-		t.Errorf("longer secret = %v, want %v", got, []Span{long})
+	if got := mergeSpans([]Span{short, long}, nil); !spansEqual(got, []Span{short, long}) {
+		t.Errorf("overlapping secrets = %v, want both %v", got, []Span{short, long})
 	}
 
-	// Equal lengths: the earlier start wins.
-	early := Span{Start: 0, End: 4, Kind: "custom"}
-	late := Span{Start: 2, End: 6, Kind: "custom"}
-	if got := mergeSpans([]Span{late, early}, nil); !spansEqual(got, []Span{early}) {
-		t.Errorf("earlier secret = %v, want %v", got, []Span{early})
+	// Exact duplicates are deduped by (Start, End, Kind).
+	dup := Span{Start: 1, End: 3, Kind: "custom"}
+	if got := mergeSpans([]Span{dup, dup}, nil); !spansEqual(got, []Span{dup}) {
+		t.Errorf("duplicate secrets = %v, want %v", got, []Span{dup})
 	}
 
-	// Non-overlapping spans are all kept in (Start, End, Kind) order.
+	// PII-vs-PII keeps the priority winner: longer, then earlier start.
+	pShort := Span{Start: 0, End: 4, Kind: "pii:EMAIL"}
+	pLong := Span{Start: 0, End: 9, Kind: "pii:PHONE"}
+	if got := mergeSpans(nil, []Span{pShort, pLong}); !spansEqual(got, []Span{pLong}) {
+		t.Errorf("longer PII = %v, want %v", got, []Span{pLong})
+	}
+	pEarly := Span{Start: 0, End: 4, Kind: "pii:EMAIL"}
+	pLate := Span{Start: 2, End: 6, Kind: "pii:PHONE"}
+	if got := mergeSpans(nil, []Span{pLate, pEarly}); !spansEqual(got, []Span{pEarly}) {
+		t.Errorf("earlier PII = %v, want %v", got, []Span{pEarly})
+	}
+
+	// A PII span that overlaps no kept span is kept, and the result is sorted.
 	a := Span{Start: 10, End: 12, Kind: "custom"}
-	b := Span{Start: 0, End: 2, Kind: "custom"}
+	b := Span{Start: 0, End: 2, Kind: "pii:EMAIL"}
 	if got := mergeSpans([]Span{a}, []Span{b}); !spansEqual(got, []Span{b, a}) {
 		t.Errorf("non-overlap order = %v, want %v", got, []Span{b, a})
+	}
+}
+
+// TestDetectKeepsPartiallyOverlappingSecrets pins the registry-coverage fix:
+// two custom words at [0,8) and [2,10) both come back from Detect and both are
+// registered, so a later standalone occurrence of either value is masked.
+// Before the fix mergeSpans dropped the loser and it stayed unmasked. A PII
+// group must be enabled: with no groups Detect returns the secret spans
+// directly and never reaches mergeSpans (see Detect).
+func TestDetectKeepsPartiallyOverlappingSecrets(t *testing.T) {
+	// Each value also appears standalone, so substitution yields one token per
+	// registered value regardless of the equal-length replacement order.
+	text := "abcdefghij / abcdefgh / cdefghij"
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	spans, err := Detect(text, []string{"abcdefgh", "cdefghij"}, DetectOpts{PIICategories: []PIICategory{PIIContact}})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	want := []Span{
+		{Start: 0, End: 8, Kind: "custom"},
+		{Start: 2, End: 10, Kind: "custom"},
+		{Start: 13, End: 21, Kind: "custom"},
+		{Start: 24, End: 32, Kind: "custom"},
+	}
+	if !spansEqual(spans, want) {
+		t.Fatalf("Detect spans = %v, want %v", spans, want)
+	}
+
+	reg := NewRegistry(NewNonce())
+	for _, s := range spans {
+		reg.GetOrAssign(text[s.Start:s.End], s.Kind, "test")
+	}
+	if got := len(reg.Snapshot()); got != 2 {
+		t.Fatalf("registered %d values, want 2 (both overlapping custom words)", got)
+	}
+	masked := reg.Substitute(text)
+	tokens := TokenPattern.FindAllString(masked, -1)
+	distinct := make(map[string]bool, len(tokens))
+	for _, tok := range tokens {
+		distinct[tok] = true
+	}
+	if len(distinct) != 2 {
+		t.Errorf("substituted text %q has %d distinct tokens, want 2", masked, len(distinct))
+	}
+	for _, v := range []string{"abcdefgh", "cdefghij"} {
+		if strings.Contains(masked, v) {
+			t.Errorf("substituted text still leaks registered value %q: %q", v, masked)
+		}
+	}
+}
+
+// TestDetectCustomWordsAndPIICoexist covers a value that is both a custom word
+// and an email: one span, one registration, one token, and the value covered.
+func TestDetectCustomWordsAndPIICoexist(t *testing.T) {
+	const addr = "jane@example.com"
+	text := "mail " + addr
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	spans, err := Detect(text, []string{addr}, DetectOpts{PIICategories: []PIICategory{PIIContact}})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	want := []Span{{Start: 5, End: 5 + len(addr), Kind: "custom"}}
+	if !spansEqual(spans, want) {
+		t.Fatalf("Detect spans = %v, want only the custom span %v", spans, want)
+	}
+
+	reg := NewRegistry(NewNonce())
+	for _, s := range spans {
+		reg.GetOrAssign(text[s.Start:s.End], s.Kind, "test")
+	}
+	if got := len(reg.Snapshot()); got != 1 {
+		t.Fatalf("registered %d values, want 1", got)
+	}
+	masked := reg.Substitute(text)
+	if n := len(TokenPattern.FindAllString(masked, -1)); n != 1 {
+		t.Errorf("substituted text %q has %d tokens, want 1", masked, n)
+	}
+	if strings.Contains(masked, addr) {
+		t.Errorf("substituted text leaked the address: %q", masked)
+	}
+}
+
+// TestAllPIICategoriesMatchConfig pins the closed set against the config
+// validator. It lives here because internal/config cannot import this package
+// (redact imports config), so the two lists can only drift silently.
+func TestAllPIICategoriesMatchConfig(t *testing.T) {
+	names := make([]string, 0, len(AllPIICategories))
+	for _, c := range AllPIICategories {
+		names = append(names, string(c))
+	}
+	if err := config.ValidatePIICategories(names); err != nil {
+		t.Fatalf("ValidatePIICategories(%v) = %v, want nil", names, err)
+	}
+	if err := config.ValidatePIICategories([]string{"not_a_category"}); err == nil {
+		t.Fatal("ValidatePIICategories accepted an unknown category")
 	}
 }
 

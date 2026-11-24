@@ -7,6 +7,10 @@
 - **Address and free-text location detection** (spec §11): deferred — piiscrub covers them only through the sidecar NLP path above, and regex address detection has an unacceptable false-positive rate on code.
 - **Image/OCR PII** (spec §11): deferred; out of scope for a text-only detector and needs an OCR pipeline.
 - **User-visible per-group redaction report** (spec §11): deferred — `/mask list` shows registered tokens, not per-session counts; a report needs counters in the registry and a UI surface, and the value was not demonstrated.
+- **`HandleSetMaskAdvanced` holds `h.mu` across `config.SaveSecurityRedaction`** (`internal/server/handler_config.go:2816-2833`). `h.mu` is a map lock, so a slow config write freezes every session. Fix it the way the compact handler already does (build outside the lock, then swap under it), and copy that handler's test.
+- **A bad `pii_categories` value in `ocodeconfig.json` is silently ignored at boot.** Both boot paths discard the load error (`cfg, _ := config.Load()`), so an unknown category turns redaction off with no user-visible signal even though `LoadOcodeConfigCopy` rejects it. Decide whether to surface it (boot log line, `/mask status`, or web settings) instead of swallowing.
+- **The PII memo clears wholesale at 512 entries** (`piiMemoMaxSize`, `internal/redact/pii.go`), so a session with more than 512 distinct messages loses its cache and re-runs the analyzer for repeats. Replace the wipe with an LRU/ring (the concept page now documents this cliff).
+- **Two PII-adjacent sites still have no per-site pin:** the permission judge's arguments/context masking and the server `/reset-id` token resolution. Each has only its transitively-reached tests; add a direct test per site so a future refactor cannot drop the categories or the vault rekey unnoticed.
 
 ## Open: Chrome-mode inspector overlay/crop not live-checked at zoom ≠ 1 (2026-11-23)
 

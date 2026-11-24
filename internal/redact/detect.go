@@ -207,13 +207,40 @@ func Detect(text string, customWords []string, opts DetectOpts) ([]Span, error) 
 	return mergeSpans(secretSpans, piiSpans), nil
 }
 
-// mergeSpans combines both passes into one total order: sort by (Start, End,
-// Kind), then resolve overlaps secret first, then longest, then earliest.
+// mergeSpans combines both passes into one (Start, End, Kind) order. EVERY
+// secret span is kept, because Registry.Substitute masks by registered value:
+// dropping a partially overlapping secret would leave it out of the registry,
+// so it stays unmasked wherever else it appears in the session. Exact
+// duplicates (Start/End/Kind) are deduped. A PII span is added only when it
+// overlaps no kept span (secret or already-kept PII); PII-vs-PII conflicts
+// resolve by the existing priority (longer, then earlier start, then Kind).
 func mergeSpans(secretSpans, piiSpans []Span) []Span {
-	all := make([]Span, 0, len(secretSpans)+len(piiSpans))
-	all = append(all, secretSpans...)
-	all = append(all, piiSpans...)
-	return resolveSpans(all)
+	kept := make([]Span, 0, len(secretSpans)+len(piiSpans))
+	seen := make(map[Span]bool, len(secretSpans))
+	for _, s := range secretSpans {
+		if !seen[s] {
+			seen[s] = true
+			kept = append(kept, s)
+		}
+	}
+	if len(piiSpans) > 0 {
+		ranked := append([]Span(nil), piiSpans...)
+		sort.Slice(ranked, func(i, j int) bool { return spanOutranks(ranked[i], ranked[j]) })
+		for _, cand := range ranked {
+			conflict := false
+			for _, k := range kept {
+				if cand.Start < k.End && k.Start < cand.End {
+					conflict = true
+					break
+				}
+			}
+			if !conflict {
+				kept = append(kept, cand)
+			}
+		}
+	}
+	sortSpans(kept)
+	return kept
 }
 
 func sortSpans(spans []Span) {
@@ -247,32 +274,6 @@ func spanOutranks(a, b Span) bool {
 		return a.Start < b.Start
 	}
 	return a.Kind < b.Kind
-}
-
-// resolveSpans picks a deterministic non-overlapping subset and returns it in
-// (Start, End, Kind) order.
-func resolveSpans(spans []Span) []Span {
-	if len(spans) == 0 {
-		return spans
-	}
-	ranked := append([]Span(nil), spans...)
-	sort.Slice(ranked, func(i, j int) bool { return spanOutranks(ranked[i], ranked[j]) })
-
-	kept := make([]Span, 0, len(ranked))
-	for _, cand := range ranked {
-		conflict := false
-		for _, k := range kept {
-			if cand.Start < k.End && k.Start < cand.End {
-				conflict = true
-				break
-			}
-		}
-		if !conflict {
-			kept = append(kept, cand)
-		}
-	}
-	sortSpans(kept)
-	return kept
 }
 
 // addSpans appends spans derived from index pairs to the slice.

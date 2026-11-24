@@ -412,3 +412,37 @@ func TestTUITypedInputUsesPII(t *testing.T) {
 		t.Fatalf("sent message = %q, want the unmodified text with no PII group", got)
 	}
 }
+
+// TestTier1RedactionPIIIsDormantWhenDisabled pins invariant 7: after redaction
+// is turned off the session registry is still non-nil (it outlives the toggle),
+// so the tier-1 sites must pass nil categories. Otherwise PII keeps masking
+// typed input with /mask off.
+func TestTier1RedactionPIIIsDormantWhenDisabled(t *testing.T) {
+	const email = "please mail jane@example.com"
+	m := &model{
+		redactionEnabled:  false,
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactionPII:      []redact.PIICategory{redact.PIIContact},
+	}
+	if cats := m.tier1PIICategories(); cats != nil {
+		t.Fatalf("tier1PIICategories() = %v with redaction disabled, want nil", cats)
+	}
+	msgs := []agent.Message{{Role: "user", Content: email}}
+	if err := applyTier1UserRedaction(msgs, m.redactionRegistry, m.tier1PIICategories()); err != nil {
+		t.Fatalf("applyTier1UserRedaction: %v", err)
+	}
+	if msgs[0].Content != email {
+		t.Fatalf("typed input = %q with redaction disabled, want it unmodified", msgs[0].Content)
+	}
+
+	// Same state with redaction ON must mask, so this asserts dormancy rather
+	// than a helper that never returns categories.
+	m.redactionEnabled = true
+	msgs = []agent.Message{{Role: "user", Content: email}}
+	if err := applyTier1UserRedaction(msgs, m.redactionRegistry, m.tier1PIICategories()); err != nil {
+		t.Fatalf("applyTier1UserRedaction (enabled): %v", err)
+	}
+	if !redact.TokenPattern.MatchString(msgs[0].Content) {
+		t.Fatalf("typed input = %q with redaction enabled, want an OCSEC token", msgs[0].Content)
+	}
+}

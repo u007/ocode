@@ -288,6 +288,17 @@ func (m *model) setRedactionModel(modelName string) error {
 	return nil
 }
 
+// tier1PIICategories returns the PII groups a tier-1 call site may apply. PII
+// is dormant unless redaction is enabled, and the session registry outlives a
+// /mask off, so call sites must not read m.redactionPII directly (mirrors the
+// note-bus redactor in internal/agent/group_bus.go).
+func (m *model) tier1PIICategories() []redact.PIICategory {
+	if m == nil || !m.redactionEnabled {
+		return nil
+	}
+	return m.redactionPII
+}
+
 // redactText applies redaction (secrets plus the opt-in PII groups) to a text
 // string using the session registry. A PII detection error is returned to the
 // caller: there is no fallback to unmasked text. Debug output carries counts

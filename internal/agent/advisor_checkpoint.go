@@ -223,8 +223,13 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	advice = strings.TrimSpace(advice)
 	// Mask secrets and the opt-in PII groups before the advice reaches a
 	// transcript: the advisor reads repo files, and both callers persist what it
-	// returns. A detection error is fatal (no unredacted advice).
-	advice, err = redactWithPII(advice, a.redactionRegistry, a.redactionPII)
+	// returns. A detection error is fatal (no unredacted advice). PII stays
+	// dormant unless redaction is enabled (mirrors group_bus.go).
+	cats := a.redactionPII
+	if !a.redactionEnabled {
+		cats = nil
+	}
+	advice, err = redactWithPII(advice, a.redactionRegistry, cats)
 	if err != nil {
 		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint redaction failed: %v", kind, err))
 		return "", false
