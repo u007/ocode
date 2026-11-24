@@ -192,16 +192,24 @@ func analyzerFor(cats []PIICategory) *analyzer.Analyzer {
 var piiAnalyzerFor = analyzerFor
 
 const (
-	piiKindPrefix  = "pii:"
-	piiMemoMaxSize = 512
+	piiKindPrefix = "pii:"
+	// piiMemoGenerationSize bounds each memo generation. Two generations are
+	// live (512 entries total), so an entry survives exactly one rotation.
+	piiMemoGenerationSize = 256
 )
 
 // piiMemo is a process-wide cache of PII detections keyed by the full input
-// fingerprint. It stores only offsets and kinds, never matched text.
+// fingerprint. It stores only offsets and kinds, never matched text. Two
+// generations are kept: a put that fills "current" rotates it into "previous",
+// so recently used keys survive one rotation instead of a full clear.
 var piiMemo = struct {
-	mu      sync.Mutex
-	entries map[string][]Span
-}{entries: make(map[string][]Span)}
+	mu       sync.Mutex
+	current  map[string][]Span
+	previous map[string][]Span
+}{
+	current:  make(map[string][]Span),
+	previous: make(map[string][]Span),
+}
 
 func piiMemoKey(text string, cats []PIICategory, customWords []string, fileContent bool) string {
 	sum := sha256.Sum256([]byte(text))
@@ -214,23 +222,90 @@ func piiMemoKey(text string, cats []PIICategory, customWords []string, fileConte
 func piiMemoGet(key string) ([]Span, bool) {
 	piiMemo.mu.Lock()
 	defer piiMemo.mu.Unlock()
-	spans, ok := piiMemo.entries[key]
-	if !ok {
-		return nil, false
+	if spans, ok := piiMemo.current[key]; ok {
+		return append([]Span(nil), spans...), true
 	}
-	return append([]Span(nil), spans...), true
+	if spans, ok := piiMemo.previous[key]; ok {
+		return append([]Span(nil), spans...), true
+	}
+	return nil, false
 }
 
 func piiMemoPut(key string, spans []Span) {
 	piiMemo.mu.Lock()
 	defer piiMemo.mu.Unlock()
-	if piiMemo.entries == nil {
-		piiMemo.entries = make(map[string][]Span)
+	if piiMemo.current == nil {
+		piiMemo.current = make(map[string][]Span)
 	}
-	if len(piiMemo.entries) >= piiMemoMaxSize {
-		piiMemo.entries = make(map[string][]Span)
+	if len(piiMemo.current) >= piiMemoGenerationSize {
+		piiMemo.previous = piiMemo.current
+		piiMemo.current = make(map[string][]Span)
 	}
-	piiMemo.entries[key] = append([]Span(nil), spans...)
+	piiMemo.current[key] = append([]Span(nil), spans...)
+}
+
+// piiEntityGroups maps every entity type wired in recognizersFor to its
+// group. A recognizer added without an entry here cannot have a confidence
+// floor, so TestPIIEntityGroupsCoverRecognizers fails loudly rather than
+// letting the new type bypass group filtering.
+var piiEntityGroups = map[recognizers.EntityType]PIICategory{
+	// contact
+	recognizers.EntityEmail: PIIContact,
+	recognizers.EntityPhone: PIIContact,
+
+	// financial
+	recognizers.EntityCreditCard:  PIIFinancial,
+	recognizers.EntityIBAN:        PIIFinancial,
+	recognizers.EntitySWIFTBIC:    PIIFinancial,
+	recognizers.EntityUSRouting:   PIIFinancial,
+	recognizers.EntityCardCVV:     PIIFinancial,
+	recognizers.EntityBankAccount: PIIFinancial,
+	recognizers.EntityPIN:         PIIFinancial,
+	recognizers.EntityLEI:         PIIFinancial,
+	recognizers.EntityISIN:        PIIFinancial,
+	recognizers.EntityEthereum:    PIIFinancial,
+	recognizers.EntityBitcoin:     PIIFinancial,
+
+	// identity
+	recognizers.EntitySSN:           PIIIdentity,
+	recognizers.EntityPassport:      PIIIdentity,
+	recognizers.EntityDriverLicense: PIIIdentity,
+	recognizers.EntityTaxID:         PIIIdentity,
+	recognizers.EntityDateOfBirth:   PIIIdentity,
+	recognizers.EntitySGNRIC:        PIIIdentity,
+	recognizers.EntityMYIC:          PIIIdentity,
+	recognizers.EntityTHID:          PIIIdentity,
+	recognizers.EntityPHTIN:         PIIIdentity,
+	recognizers.EntityINGSTIN:       PIIIdentity,
+	recognizers.EntityINPAN:         PIIIdentity,
+	recognizers.EntitySGUEN:         PIIIdentity,
+	recognizers.EntityMYSSM:         PIIIdentity,
+	recognizers.EntityMYTIN:         PIIIdentity,
+	recognizers.EntityMYPassport:    PIIIdentity,
+	recognizers.EntitySGPassport:    PIIIdentity,
+
+	// legal
+	recognizers.EntityCaseNumber: PIILegal,
+
+	// network
+	recognizers.EntityIP:  PIINetwork,
+	recognizers.EntityURL: PIINetwork,
+
+	// money
+	recognizers.EntityMoney: PIIMoney,
+}
+
+// piiGroupFloor is the confidence an entity must reach to stay in its group.
+// network and money are the highest-noise groups, so they demand more than the
+// analyzer's own 0.7 floor; every other group keeps that floor.
+func piiGroupFloor(cat PIICategory) float64 {
+	switch cat {
+	case PIINetwork:
+		return 0.90
+	case PIIMoney:
+		return 0.85
+	}
+	return 0.7
 }
 
 // detectPII runs the PII analyzer for the given category set and returns spans
@@ -262,6 +337,12 @@ func detectPII(text string, cats []PIICategory, customWords []string, fileConten
 	out := make([]Span, 0, len(entities))
 	for _, e := range entities {
 		if e.Start < 0 || e.End > len(text) || e.Start >= e.End {
+			continue
+		}
+		// Drop an entity that does not reach its group's floor. An unmapped
+		// type has no floor to apply and is kept; the map completeness test is
+		// what catches a recognizer wired without a group.
+		if group, ok := piiEntityGroups[e.Type]; ok && e.Confidence < piiGroupFloor(group) {
 			continue
 		}
 		s := Span{Start: e.Start, End: e.End, Kind: piiKindPrefix + string(e.Type)}

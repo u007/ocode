@@ -49,6 +49,25 @@ func (r spanRecognizer) Recognize(context.Context, string) ([]recognizers.Entity
 	}}, nil
 }
 
+// scoreRecognizer reports one entity covering [start,end) at a fixed
+// confidence, so a floor boundary can be pinned exactly.
+type scoreRecognizer struct {
+	start, end int
+	typ        recognizers.EntityType
+	confidence float64
+}
+
+func (scoreRecognizer) Name() string { return "score_recognizer" }
+
+func (r scoreRecognizer) Recognize(context.Context, string) ([]recognizers.Entity, error) {
+	return []recognizers.Entity{{
+		Type:       r.typ,
+		Start:      r.start,
+		End:        r.end,
+		Confidence: r.confidence,
+	}}, nil
+}
+
 func countPIIKinds(spans []Span, kind string) int {
 	n := 0
 	for _, s := range spans {
@@ -85,15 +104,16 @@ func spansEqual(a, b []Span) bool {
 // later lookup and hide the analyzer or stub under test.
 func resetPIICache() {
 	piiMemo.mu.Lock()
-	piiMemo.entries = make(map[string][]Span)
+	piiMemo.current = make(map[string][]Span)
+	piiMemo.previous = make(map[string][]Span)
 	piiMemo.mu.Unlock()
 }
 
-// piiMemoSize reports the number of live memo entries.
+// piiMemoSize reports the number of live memo entries across both generations.
 func piiMemoSize() int {
 	piiMemo.mu.Lock()
 	defer piiMemo.mu.Unlock()
-	return len(piiMemo.entries)
+	return len(piiMemo.current) + len(piiMemo.previous)
 }
 
 func TestPIICategoryDetection(t *testing.T) {
@@ -644,38 +664,97 @@ func TestNoAnalyzerWhenCategoriesEmpty(t *testing.T) {
 	}
 }
 
-func TestPIICacheOverflowClears(t *testing.T) {
+// fillPIIMemo puts n distinct filler keys, forcing at least one rotation if n
+// crosses a generation boundary.
+func fillPIIMemo(prefix string, n int) {
+	for i := 0; i < n; i++ {
+		piiMemoPut(fmt.Sprintf("%s %d", prefix, i), []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+	}
+}
+
+func TestPIICacheSurvivesOneRotation(t *testing.T) {
 	resetPIICache()
 	t.Cleanup(resetPIICache)
-	old := piiAnalyzerFor
-	t.Cleanup(func() { piiAnalyzerFor = old })
-	piiAnalyzerFor = func([]PIICategory) *analyzer.Analyzer { return analyzer.New() }
 
-	cats := []PIICategory{PIIContact}
-	for i := 0; i < piiMemoMaxSize; i++ {
-		if _, err := detectPII(fmt.Sprintf("probe %d", i), cats, nil, false); err != nil {
-			t.Fatalf("detectPII probe %d: %v", i, err)
-		}
+	keep := piiMemoKey("keep me", []PIICategory{PIIContact}, nil, false)
+	piiMemoPut(keep, []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+
+	// Fill the current generation to its bound, then cross it: the next put
+	// rotates the full generation into "previous".
+	fillPIIMemo("filler", piiMemoGenerationSize-1)
+	if got := len(piiMemo.current); got != piiMemoGenerationSize {
+		t.Fatalf("current generation holds %d entries, want %d", got, piiMemoGenerationSize)
 	}
-	if got := piiMemoSize(); got != piiMemoMaxSize {
-		t.Fatalf("memo holds %d entries, want %d", got, piiMemoMaxSize)
+	piiMemoPut("rotate now", []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+
+	if _, ok := piiMemoGet(keep); !ok {
+		t.Fatal("entry did not survive one rotation")
 	}
-	if _, ok := piiMemoGet(piiMemoKey("probe 0", cats, nil, false)); !ok {
-		t.Fatal("first probe missing from a full memo")
+	if got := len(piiMemo.current); got != 1 {
+		t.Errorf("current generation holds %d entries after rotation, want 1", got)
+	}
+	if got := len(piiMemo.previous); got != piiMemoGenerationSize {
+		t.Errorf("previous generation holds %d entries, want %d", got, piiMemoGenerationSize)
+	}
+}
+
+func TestPIICacheGoneAfterTwoRotations(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+
+	keep := piiMemoKey("keep me", []PIICategory{PIIContact}, nil, false)
+	piiMemoPut(keep, []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+
+	// Rotation one: keep moves into previous.
+	fillPIIMemo("first", piiMemoGenerationSize-1)
+	piiMemoPut("rotate one", []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+	if _, ok := piiMemoGet(keep); !ok {
+		t.Fatal("precondition failed: entry did not survive the first rotation")
 	}
 
-	// One more insert crosses the bound and must drop every old entry.
-	if _, err := detectPII("overflow probe", cats, nil, false); err != nil {
-		t.Fatalf("detectPII overflow probe: %v", err)
+	// Rotation two: previous is replaced, so keep is evicted.
+	fillPIIMemo("second", piiMemoGenerationSize-1)
+	piiMemoPut("rotate two", []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+	if _, ok := piiMemoGet(keep); ok {
+		t.Fatal("entry survived two rotations")
 	}
-	if got := piiMemoSize(); got != 1 {
-		t.Fatalf("memo holds %d entries after overflow, want 1", got)
+	if _, ok := piiMemoGet("rotate two"); !ok {
+		t.Error("the newest entry is missing from the current generation")
 	}
-	if _, ok := piiMemoGet(piiMemoKey("probe 0", cats, nil, false)); ok {
-		t.Error("pre-overflow entry survived the clear")
+}
+
+func TestPIICacheConcurrentRotation(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+
+	const goroutines = 8
+	// Each goroutine writes two full generations of its own keys, so rotations
+	// happen while every other goroutine reads and writes. A key put by one
+	// goroutine can be evicted by another goroutine's rotation at any moment,
+	// so this test asserts only that the cache stays consistent and bounded;
+	// the -race detector is what proves the locking.
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 2*piiMemoGenerationSize; i++ {
+				key := fmt.Sprintf("rotator %d %d", g, i)
+				piiMemoPut(key, []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+				piiMemoGet(key)
+			}
+		}(g)
 	}
-	if _, ok := piiMemoGet(piiMemoKey("overflow probe", cats, nil, false)); !ok {
-		t.Error("overflowing entry was not stored")
+	wg.Wait()
+
+	// Two generations cap the live set at 2*size, and a fresh put is readable.
+	if got := piiMemoSize(); got > 2*piiMemoGenerationSize {
+		t.Errorf("memo holds %d entries, want at most %d", got, 2*piiMemoGenerationSize)
+	}
+	probe := "concurrent probe"
+	piiMemoPut(probe, []Span{{Start: 0, End: 1, Kind: "pii:EMAIL"}})
+	if _, ok := piiMemoGet(probe); !ok {
+		t.Error("a put made after all goroutines finished is not readable")
 	}
 }
 
@@ -784,6 +863,185 @@ func BenchmarkDetectPII_50KB(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestPIIGroupFloorBoundary(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+	old := piiAnalyzerFor
+	t.Cleanup(func() { piiAnalyzerFor = old })
+
+	cases := []struct {
+		name       string
+		typ        recognizers.EntityType
+		category   PIICategory
+		confidence float64
+		wantKept   bool
+	}{
+		{"network below floor", recognizers.EntityIP, PIINetwork, 0.89, false},
+		{"network at floor", recognizers.EntityIP, PIINetwork, 0.90, true},
+		{"network url below floor", recognizers.EntityURL, PIINetwork, 0.85, false},
+		{"network url above floor", recognizers.EntityURL, PIINetwork, 0.99, true},
+		{"money below floor", recognizers.EntityMoney, PIIMoney, 0.84, false},
+		{"money at floor", recognizers.EntityMoney, PIIMoney, 0.85, true},
+		{"default group at analyzer floor", recognizers.EntityEmail, PIIContact, 0.70, true},
+		{"default group below analyzer floor", recognizers.EntityEmail, PIIContact, 0.69, false},
+	}
+
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			text := fmt.Sprintf("floor probe %d", i)
+			piiAnalyzerFor = func([]PIICategory) *analyzer.Analyzer {
+				a := analyzer.New()
+				a.AddRecognizer(scoreRecognizer{start: 0, end: len(text), typ: c.typ, confidence: c.confidence})
+				return a
+			}
+			got, err := detectPII(text, []PIICategory{c.category}, nil, false)
+			if err != nil {
+				t.Fatalf("detectPII: %v", err)
+			}
+			if kept := len(got) == 1; kept != c.wantKept {
+				t.Fatalf("kept=%v, want %v (spans %v)", kept, c.wantKept, got)
+			}
+		})
+	}
+}
+
+// TestPIIGroupFloorsKeepCanonicalSamples pins that the per-group floors sit
+// below the upstream scores of every canonical sample, so enabling a group
+// never silently stops redacting it.
+func TestPIIGroupFloorsKeepCanonicalSamples(t *testing.T) {
+	resetPIICache()
+	t.Cleanup(resetPIICache)
+
+	cases := []struct {
+		group  PIICategory
+		sample string
+		typ    recognizers.EntityType
+	}{
+		{PIIContact, "mail jane@example.com", recognizers.EntityEmail},
+		{PIIContact, "call +447911123456 now", recognizers.EntityPhone},
+		{PIIFinancial, "card 4111111111111111", recognizers.EntityCreditCard},
+		{PIIFinancial, "IBAN: DE89370400440532013000", recognizers.EntityIBAN},
+		{PIIIdentity, "ssn 123-45-6789", recognizers.EntitySSN},
+		{PIIIdentity, "Passport Number: 322996077 is shown.", recognizers.EntityPassport},
+		{PIILegal, "case 23-CV-0001", recognizers.EntityCaseNumber},
+		{PIINetwork, "host 10.0.0.1", recognizers.EntityIP},
+		{PIINetwork, "see https://example.com/x now", recognizers.EntityURL},
+		{PIIMoney, "total $1,234.56 due", recognizers.EntityMoney},
+	}
+
+	for _, c := range cases {
+		t.Run(string(c.group)+"/"+string(c.typ), func(t *testing.T) {
+			ents, err := analyzerFor([]PIICategory{c.group}).Analyze(context.Background(), c.sample)
+			if err != nil {
+				t.Fatalf("Analyze: %v", err)
+			}
+			var score float64
+			found := false
+			for _, e := range ents {
+				if e.Type == c.typ {
+					found = true
+					score = e.Confidence
+				}
+			}
+			if !found {
+				t.Fatalf("analyzer produced no %s in %q: %+v", c.typ, c.sample, ents)
+			}
+			if floor := piiGroupFloor(c.group); score < floor {
+				t.Fatalf("%s scored %v, below its group floor %v", c.typ, score, floor)
+			}
+
+			spans, err := detectPII(c.sample, []PIICategory{c.group}, nil, false)
+			if err != nil {
+				t.Fatalf("detectPII: %v", err)
+			}
+			if got := countPIIKinds(spans, piiKindPrefix+string(c.typ)); got == 0 {
+				t.Fatalf("floor filter dropped %s from %q: %v", c.typ, c.sample, spans)
+			}
+		})
+	}
+}
+
+// TestPIIEntityGroupsCoverRecognizers fails when a recognizer is wired without
+// an entry in piiEntityGroups, or a mapped type no recognizer can emit.
+func TestPIIEntityGroupsCoverRecognizers(t *testing.T) {
+	samples := map[string]struct {
+		text string
+		typ  recognizers.EntityType
+	}{
+		"regex_email":             {"mail jane@example.com", recognizers.EntityEmail},
+		"regex_phone":             {"call +447911123456 now", recognizers.EntityPhone},
+		"checksum_luhn":           {"4111111111111111", recognizers.EntityCreditCard},
+		"checksum_iban":           {"IBAN: DE89370400440532013000", recognizers.EntityIBAN},
+		"finance_swift_bic":       {"Send to SWIFT code DEUTDEFF today.", recognizers.EntitySWIFTBIC},
+		"finance_us_routing":      {"Bank routing number: 123456780 here.", recognizers.EntityUSRouting},
+		"finance_card_cvv":        {"CVV 123 was entered.", recognizers.EntityCardCVV},
+		"finance_bank_account":    {"account number 093-284359714 is open", recognizers.EntityBankAccount},
+		"finance_pin":             {"The account PIN is 482913 for phone banking.", recognizers.EntityPIN},
+		"finance_lei":             {"Entity LEI 54930084UKLVMY22DS16 registered.", recognizers.EntityLEI},
+		"finance_isin":            {"ISIN US0378331005", recognizers.EntityISIN},
+		"finance_ethereum":        {"Send to 0x1a2B3C4d5e6F70819a2B3C4d5E6F70819a2B3C4D today.", recognizers.EntityEthereum},
+		"regex_bitcoin":           {"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", recognizers.EntityBitcoin},
+		"regex_ssn":               {"123-45-6789", recognizers.EntitySSN},
+		"identity_passport":       {"Passport Number: 322996077 is shown.", recognizers.EntityPassport},
+		"identity_driver_license": {"Driver's license number: D42533932 checked.", recognizers.EntityDriverLicense},
+		"identity_tax_id":         {"My tax ID is 43-5478236 for filing.", recognizers.EntityTaxID},
+		"identity_date_of_birth":  {"Date of birth: 1984-03-02, next of kin.", recognizers.EntityDateOfBirth},
+		"national_sg_nric":        {"Applicant NRIC S1234567D is on file.", recognizers.EntitySGNRIC},
+		"national_my_ic":          {"Her MyKad 630916-12-3456 was copied.", recognizers.EntityMYIC},
+		"national_th_id":          {"Citizen ID 3-1006-00445-63-5 on the form.", recognizers.EntityTHID},
+		"national_ph_tin":         {"TIN 123-456-789 for the head office", recognizers.EntityPHTIN},
+		"national_in_gstin":       {"Supplier GSTIN 27AAACR5055K1Z7 on the invoice.", recognizers.EntityINGSTIN},
+		"national_in_pan":         {"PAN AAAPZ1234C", recognizers.EntityINPAN},
+		"national_sg_uen":         {"UEN 53412378W", recognizers.EntitySGUEN},
+		"national_my_ssm":         {"SSM 1312525-A", recognizers.EntityMYSSM},
+		"national_my_tin":         {"TIN IG4455667788", recognizers.EntityMYTIN},
+		"national_my_passport":    {"Passport No: A12345678", recognizers.EntityMYPassport},
+		"national_sg_passport":    {"Passport Number: E1234567A on file.", recognizers.EntitySGPassport},
+		"legal_case_number":       {"23-CV-0001", recognizers.EntityCaseNumber},
+		"regex_ip":                {"10.0.0.1", recognizers.EntityIP},
+		"regex_url":               {"https://example.com/x", recognizers.EntityURL},
+		"finance_money":           {"$1,234.56", recognizers.EntityMoney},
+	}
+
+	wired := 0
+	for _, cat := range AllPIICategories {
+		for _, r := range recognizersFor(cat) {
+			wired++
+			s, ok := samples[r.Name()]
+			if !ok {
+				t.Fatalf("recognizer %q has no canonical sample; add one and map its entity type in piiEntityGroups", r.Name())
+			}
+			ents, err := r.Recognize(context.Background(), s.text)
+			if err != nil {
+				t.Fatalf("%s.Recognize: %v", r.Name(), err)
+			}
+			found := false
+			for _, e := range ents {
+				group, mapped := piiEntityGroups[e.Type]
+				if !mapped {
+					t.Errorf("entity type %q from %s is not in piiEntityGroups", e.Type, r.Name())
+					continue
+				}
+				if e.Type == s.typ {
+					found = true
+					if group != cat {
+						t.Errorf("%s emitted %s mapped to %q, want group %q", r.Name(), e.Type, group, cat)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("%s produced no %s in %q: %+v", r.Name(), s.typ, s.text, ents)
+			}
+		}
+	}
+	if len(samples) != wired {
+		t.Fatalf("sample table has %d entries but %d recognizers are wired", len(samples), wired)
+	}
+	if len(piiEntityGroups) != wired {
+		t.Fatalf("piiEntityGroups has %d entries but %d recognizers are wired", len(piiEntityGroups), wired)
 	}
 }
 
