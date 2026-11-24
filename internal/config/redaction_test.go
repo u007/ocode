@@ -280,3 +280,44 @@ func TestPIICategoriesDefaultEmpty(t *testing.T) {
 		t.Errorf("PIICategories = %v, want nil when the key is absent", cfg.Ocode.Security.Redaction.PIICategories)
 	}
 }
+
+func TestSaveRejectsUnknownPIICategory(t *testing.T) {
+	chdirTempForConfigTest(t)
+	home := t.TempDir()
+	setHomeTree(t, home)
+
+	// Seed a valid value first, so "bogus was not written" is a real assertion
+	// rather than "the file never existed".
+	if err := SaveSecurityRedaction(func(rc *RedactionConfig) {
+		rc.PIICategories = []string{"contact"}
+	}); err != nil {
+		t.Fatalf("seed SaveSecurityRedaction() error = %v", err)
+	}
+
+	err := SaveSecurityRedaction(func(rc *RedactionConfig) {
+		rc.PIICategories = []string{"bogus"}
+	})
+	if err == nil {
+		t.Fatal("SaveSecurityRedaction(bogus) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "unknown pii category") {
+		t.Fatalf("SaveSecurityRedaction(bogus) error = %v, want an unknown pii category error", err)
+	}
+
+	configPath := filepath.Join(home, ".config", "opencode", "ocodeconfig.json")
+	raw, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read persisted config: %v", readErr)
+	}
+	if strings.Contains(string(raw), "bogus") {
+		t.Fatalf("rejected save wrote bogus into %s", configPath)
+	}
+
+	got, loadErr := LoadOcodeConfigCopy()
+	if loadErr != nil {
+		t.Fatalf("LoadOcodeConfigCopy() error = %v", loadErr)
+	}
+	if want := []string{"contact"}; !slices.Equal(got.Security.Redaction.PIICategories, want) {
+		t.Errorf("PIICategories = %v, want the seeded %v after a rejected save", got.Security.Redaction.PIICategories, want)
+	}
+}
