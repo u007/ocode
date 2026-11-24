@@ -19,7 +19,7 @@ timestamp: 2026-11-24T10:59:11Z
 
 ocode already redacts **secrets** on their way to a model. PII redaction adds a second, opt-in detector beside it, supplied by `github.com/u007/dataprotect` (package `piiscrub`, MIT, pinned `v0.1.0`). Detection is offline (regex and checksums), so it adds no network call and no tier-2 model.
 
-A detected value is replaced by the same per-session `OCSEC` vault token secrets use. The model can still operate on it: `Registry.Resolve` (`internal/redact/registry.go:160`) restores tokens in tool arguments before execution (`internal/agent/agent.go:6227`), the registry renders them back for display (`Redactor.Render`, `internal/redact/redactor.go:133`), and the plaintext stays in the session's `0600` vault file.
+A detected value is replaced by the same per-session `OCSEC` vault token secrets use. The model can still operate on it: `Registry.Resolve` (`internal/redact/registry.go:160`) restores tokens in tool arguments before execution (`internal/agent/agent.go:6227`), the registry renders them back for display (`Redactor.Render`, `internal/redact/redactor.go:133`), and the plaintext lives in the session's in-memory `Registry`. A vault-file persistence path exists (`Redactor.persistVault` → `SaveVault`/`LoadVault`, `internal/redact/redactor.go:141`) but is not wired in production: `persistVault` is reachable only through `Redactor.RedactChat`/`RedactFile`, and `agent.NewSessionRedactor` (`internal/agent/redaction.go:18`), the wrapper over `redact.NewSessionRedactor`, has no production caller. The TUI (`internal/tui/model.go:2714`) and the server (`internal/server/handler_config.go:2951`) each build a bare `redact.NewRegistry` and keep it in memory.
 
 The feature is **dormant** in two independent senses. A group that is not configured constructs no recognizer and no analyzer. A configured group still does nothing unless `security.redaction.enabled` is true: `GenericClient.applyRedactionSafetyNet` returns before scanning, and the group bus forces its category list to nil (`internal/agent/group_bus.go`).
 
@@ -92,9 +92,14 @@ Categories ride on `GenericClient.PIICategories` (`internal/agent/client.go:281`
 
 ## Vault and `/reset-id`
 
-Replacement reuses the `OCSEC` token vault; no second placeholder format exists. The registry resolves tokens back for display (`Redactor.Render`, `internal/redact/redactor.go:133`), and the vault file is per session under `secrets/<session-id>.vault.json`.
+Replacement reuses the `OCSEC` token vault; no second placeholder format exists. The registry resolves tokens back for display (`Redactor.Render`, `internal/redact/redactor.go:133`). The planned vault-file path is per project and session at `<data>/project/<slug>/secrets/<session-id>.vault.json` (`VaultPath`, `internal/redact/vault.go:55`), but it stays unwritten until the persistence path in the Overview is wired.
 
-`/reset-id` re-keys the conversation, so the vault must move with it: `redact.RekeyVault` (`internal/redact/vault.go:203`) renames the old vault file to the new session path and leaves the in-memory registry intact, so tokens already in the transcript still resolve. The TUI calls it in `internal/tui/model.go:12542`; the server in `internal/server/handler_reset_id.go:124`. This closed a pre-existing hole where every other session-keyed surface moved and the vault did not.
+`/reset-id` re-keys the conversation, so `redact.RekeyVault` (`internal/redact/vault.go:203`) renames the old vault file to the new session path; a missing source is not an error, so it is a no-op while persistence is unwired. The vault move is groundwork called by the TUI in `internal/tui/model.go:12542` and the server in `internal/server/handler_reset_id.go:124`.
+
+The in-memory registry moves differently on each surface, and only one keeps existing tokens resolving:
+
+- **TUI:** `m.redactionRegistry` is kept across the reset, so tokens already in the transcript still resolve (`internal/tui/model.go:12538`).
+- **Server:** `HandleResetSessionID` releases the resident agent (`h.sessions.ReleaseAgent`), and the next turn rebuilds it with a fresh `redact.NewRegistry` (`internal/server/handler_config.go:2951`), so tokens written by the old registry no longer resolve.
 
 ## Invariants
 
@@ -112,6 +117,8 @@ Replacement reuses the `OCSEC` token vault; no second placeholder format exists.
 Reference measurements with the shipped feature on an Apple M1 Max, 50 KB of prose: `contact` ≈ 19 ms, `contact` + `financial` ≈ 31 ms, all six groups ≈ 107 ms; a short chat message with all groups ≈ 0.71 ms. Exact wall time varies with machine and load, but the order of magnitude is tens of milliseconds for a large document.
 
 A memo hit costs ≈ 23 µs: the `sha256` of the text plus the map probe. It is **not** sub-microsecond — hashing the input is unavoidable because the key is a content fingerprint. That still makes a repeated scan of unchanged history effectively free next to the initial tens of milliseconds.
+
+That bound is per session, not per message: the memo holds `piiMemoMaxSize` (512) entries and `piiMemoPut` clears the whole map when a new entry would exceed it (`internal/redact/pii.go:230`). A session with more than ~512 distinct message contents therefore thrashes the cache, and the egress safety net (`applyRedactionSafetyNet`) re-analyses nearly every message on every request instead of hitting the memo. The "repeats are free" figure above holds only while the distinct content count stays under the cap; a bounded LRU or ring in place of the wholesale clear is the follow-up.
 
 With no category enabled there is no analyzer, no memo entry, and no new code path in `DetectSecrets`; the cost is zero.
 
