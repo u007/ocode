@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -445,4 +447,88 @@ func TestTier1RedactionPIIIsDormantWhenDisabled(t *testing.T) {
 	if !redact.TokenPattern.MatchString(msgs[0].Content) {
 		t.Fatalf("typed input = %q with redaction enabled, want an OCSEC token", msgs[0].Content)
 	}
+}
+
+// TestRedactTextForcedDetectionErrorFailsClosed forces the tuiDetect seam to
+// fail and requires redactText to return the error with NO text at all: never
+// the raw input, so no caller can send unmasked content. The wrappers that
+// call it must propagate the same error instead of continuing.
+func TestRedactTextForcedDetectionErrorFailsClosed(t *testing.T) {
+	orig := tuiDetect
+	t.Cleanup(func() { tuiDetect = orig })
+	tuiDetect = func(string, []string, redact.DetectOpts) ([]redact.Span, error) {
+		return nil, errors.New("pii detector unavailable")
+	}
+
+	const raw = "please mail jane@example.com"
+	reg := redact.NewRegistry(redact.NewNonce())
+	cats := []redact.PIICategory{redact.PIIContact}
+
+	got, err := redactText(raw, reg, cats)
+	if err == nil {
+		t.Fatal("redactText swallowed the detection error")
+	}
+	if got != "" {
+		t.Fatalf("redactText returned text after a detection error: %q", got)
+	}
+	if strings.Contains(got, "jane@example.com") {
+		t.Fatalf("redactText leaked the raw input after a detection error: %q", got)
+	}
+
+	msgs := []agent.Message{{Role: "user", Content: raw}}
+	if err := applyTier1UserRedaction(msgs, reg, cats); err == nil {
+		t.Fatal("applyTier1UserRedaction swallowed the detection error")
+	}
+
+	m := &model{
+		redactionEnabled:  true,
+		redactionRegistry: reg,
+		messages:          []message{{role: roleUser, text: raw}},
+	}
+	if err := m.scrubExistingMessages(); err == nil {
+		t.Fatal("scrubExistingMessages swallowed the detection error")
+	}
+}
+
+// TestTier1CallSitesUseTier1PIICategories pins the WIRING, not the helper:
+// tier1PIICategories() returns nil while redaction is off, so both tier-1 call
+// sites in model.go must pass it rather than m.redactionPII. Reverting either
+// site to m.redactionPII leaves the helper test green but masks PII again after
+// /mask off. The sites live in model.go (owned by another change), so this
+// reads the source; the second half feeds the same scan a reverted snippet to
+// prove the check actually fails on that revert.
+func TestTier1CallSitesUseTier1PIICategories(t *testing.T) {
+	src, err := os.ReadFile("model.go")
+	if err != nil {
+		t.Fatalf("read model.go: %v", err)
+	}
+	sites := strings.Count(string(src), "applyTier1UserRedaction(")
+	if sites < 2 {
+		t.Fatalf("found %d applyTier1UserRedaction call site(s) in model.go, want both tier-1 sites", sites)
+	}
+	if bad := tier1WiringViolations(string(src)); len(bad) != 0 {
+		t.Fatalf("tier-1 call sites bypass tier1PIICategories():\n%s", strings.Join(bad, "\n"))
+	}
+
+	reverted := strings.ReplaceAll(string(src),
+		"m.redactionRegistry, m.tier1PIICategories()",
+		"m.redactionRegistry, m.redactionPII")
+	if got := tier1WiringViolations(reverted); len(got) == 0 {
+		t.Fatal("the wiring check did not flag a reverted call site; it is vacuous")
+	}
+}
+
+// tier1WiringViolations lists applyTier1UserRedaction calls that do not pass
+// the dormancy-aware tier1PIICategories() helper.
+func tier1WiringViolations(src string) []string {
+	var bad []string
+	for i, line := range strings.Split(src, "\n") {
+		if !strings.Contains(line, "applyTier1UserRedaction(") {
+			continue
+		}
+		if !strings.Contains(line, "m.tier1PIICategories()") {
+			bad = append(bad, fmt.Sprintf("model.go:%d: %s", i+1, strings.TrimSpace(line)))
+		}
+	}
+	return bad
 }

@@ -299,6 +299,11 @@ func (m *model) tier1PIICategories() []redact.PIICategory {
 	return m.redactionPII
 }
 
+// tuiDetect is redactText's PII-capable detector. A var only so a test can
+// force a detection failure and prove the error reaches the caller instead of
+// an unmasked fallback; production always uses redact.Detect.
+var tuiDetect = redact.Detect
+
 // redactText applies redaction (secrets plus the opt-in PII groups) to a text
 // string using the session registry. A PII detection error is returned to the
 // caller: there is no fallback to unmasked text. Debug output carries counts
@@ -307,7 +312,7 @@ func redactText(text string, reg *redact.Registry, cats []redact.PIICategory) (s
 	if reg == nil || text == "" {
 		return text, nil
 	}
-	spans, err := redact.Detect(text, nil, redact.DetectOpts{FileContent: false, PIICategories: cats})
+	spans, err := tuiDetect(text, nil, redact.DetectOpts{FileContent: false, PIICategories: cats})
 	if err != nil {
 		return "", err
 	}
