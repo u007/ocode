@@ -169,3 +169,96 @@ func TestVaultDirPermissions(t *testing.T) {
 		t.Errorf("File permissions = %o, want 0600", info.Mode().Perm())
 	}
 }
+
+func TestRekeyVaultMovesFile(t *testing.T) {
+	base := t.TempDir()
+	const slug = "rekey-slug"
+	const oldID = "ses_2026-01-02-030405-aaaaaaaa"
+	const newID = "ses_2026-01-02-030405-bbbbbbbb"
+
+	reg := NewRegistry("nonce-rekey")
+	reg.GetOrAssign("hunter2", "password", "test")
+
+	oldPath := VaultPath(base, slug, oldID)
+	if err := SaveVault(oldPath, reg); err != nil {
+		t.Fatalf("SaveVault() error: %v", err)
+	}
+
+	if err := RekeyVault(base, slug, oldID, newID); err != nil {
+		t.Fatalf("RekeyVault() error: %v", err)
+	}
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("old vault still present after rekey (err=%v)", err)
+	}
+
+	loaded, err := LoadVault(VaultPath(base, slug, newID))
+	if err != nil {
+		t.Fatalf("LoadVault(new) error: %v", err)
+	}
+	if loaded.Nonce() != "nonce-rekey" {
+		t.Errorf("loaded nonce = %q, want %q", loaded.Nonce(), "nonce-rekey")
+	}
+	entry, ok := loaded.Lookup(1)
+	if !ok {
+		t.Fatal("Lookup(1) not found in rekeyed vault")
+	}
+	if entry.Value != "hunter2" || entry.Kind != "password" {
+		t.Errorf("entry = %+v, want value=hunter2 kind=password", entry)
+	}
+}
+
+func TestRekeyVaultMissingSourceIsNil(t *testing.T) {
+	base := t.TempDir()
+	const slug = "absent-slug"
+
+	if err := RekeyVault(base, slug, "ses_old", "ses_new"); err != nil {
+		t.Fatalf("RekeyVault() on missing source = %v, want nil", err)
+	}
+	if _, err := os.Stat(VaultPath(base, slug, "ses_new")); !os.IsNotExist(err) {
+		t.Errorf("rekey created a destination (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "project", slug)); !os.IsNotExist(err) {
+		t.Errorf("rekey created the project dir (err=%v)", err)
+	}
+}
+
+func TestRekeyVaultRefusesExistingTarget(t *testing.T) {
+	base := t.TempDir()
+	const slug = "clash-slug"
+	const oldID = "ses_old"
+	const newID = "ses_new"
+
+	oldReg := NewRegistry("nonce-old")
+	oldReg.GetOrAssign("old-secret", "password", "test")
+	oldPath := VaultPath(base, slug, oldID)
+	if err := SaveVault(oldPath, oldReg); err != nil {
+		t.Fatalf("SaveVault(old) error: %v", err)
+	}
+
+	newReg := NewRegistry("nonce-new")
+	newReg.GetOrAssign("new-secret", "password", "test")
+	newPath := VaultPath(base, slug, newID)
+	if err := SaveVault(newPath, newReg); err != nil {
+		t.Fatalf("SaveVault(new) error: %v", err)
+	}
+
+	if err := RekeyVault(base, slug, oldID, newID); err == nil {
+		t.Fatal("RekeyVault() with existing destination = nil, want an error")
+	}
+
+	oldLoaded, err := LoadVault(oldPath)
+	if err != nil {
+		t.Fatalf("old vault damaged by refused rekey: %v", err)
+	}
+	if oldLoaded.Nonce() != "nonce-old" {
+		t.Errorf("old nonce = %q, want %q", oldLoaded.Nonce(), "nonce-old")
+	}
+	newLoaded, err := LoadVault(newPath)
+	if err != nil {
+		t.Fatalf("destination vault damaged by refused rekey: %v", err)
+	}
+	if newLoaded.Nonce() != "nonce-new" {
+		t.Errorf("destination nonce = %q, want %q", newLoaded.Nonce(), "nonce-new")
+	}
+}

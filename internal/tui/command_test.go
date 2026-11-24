@@ -1846,3 +1846,63 @@ func TestNewSessionClearsGoal(t *testing.T) {
 		t.Fatal("expected /new to clear the goal")
 	}
 }
+
+// TestMaskListSeparatesPII pins that PII entries (kind "pii:<TYPE>") are listed
+// under their own heading instead of being mixed into the secrets list.
+func TestMaskListSeparatesPII(t *testing.T) {
+	reg := redact.NewRegistry(redact.NewNonce())
+	reg.GetOrAssign("secret1234", "api_key", "session")
+	reg.GetOrAssign("jane@example.com", "pii:EMAIL", "tool")
+
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: reg,
+	}
+
+	updated, cmd := m.handleCommand("/mask list")
+	if cmd != nil {
+		t.Fatalf("expected /mask list to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	if len(got.messages) == 0 {
+		t.Fatal("expected /mask list to append a message")
+	}
+	msg := got.messages[len(got.messages)-1].text
+
+	secretsIdx := strings.Index(msg, "Registered secrets (1):")
+	piiIdx := strings.Index(msg, "Registered PII (1):")
+	if secretsIdx < 0 {
+		t.Fatalf("expected a secrets header, got %q", msg)
+	}
+	if piiIdx < 0 {
+		t.Fatalf("expected a PII header, got %q", msg)
+	}
+	piiRow := "1. [pii:EMAIL] " + redact.MaskedPreview("jane@example.com")
+	rowIdx := strings.Index(msg, piiRow)
+	if rowIdx < 0 {
+		t.Fatalf("expected the PII row under the PII heading, got %q", msg)
+	}
+	if rowIdx < piiIdx {
+		t.Fatalf("PII row appears before the PII heading, got %q", msg)
+	}
+	if strings.Contains(msg[secretsIdx:piiIdx], "pii:EMAIL") {
+		t.Fatalf("PII entry listed under secrets, got %q", msg)
+	}
+
+	// A PII-only registry must not print an empty secrets section.
+	piiOnly := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+	}
+	piiOnly.redactionRegistry.GetOrAssign("jane@example.com", "pii:EMAIL", "tool")
+	updated, _ = piiOnly.handleCommand("/mask list")
+	piiMsg := derefTestModel(t, updated).messages[len(derefTestModel(t, updated).messages)-1].text
+	if strings.Contains(piiMsg, "Registered secrets") {
+		t.Fatalf("PII-only list printed a secrets section, got %q", piiMsg)
+	}
+	if !strings.Contains(piiMsg, "Registered PII (1):") {
+		t.Fatalf("expected a PII header for a PII-only registry, got %q", piiMsg)
+	}
+}

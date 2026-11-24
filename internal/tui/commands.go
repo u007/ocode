@@ -1805,31 +1805,51 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			return m.openRedactionModelPicker()
 		}
 	case "list":
-		// List registered secrets
+		// List registered secrets, keeping PII entries in their own section.
 		if m.redactionRegistry == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No secrets registered in this session."})
+		} else if entries := m.redactionRegistry.All(); len(entries) == 0 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No secrets registered in this session."})
 		} else {
-			entries := m.redactionRegistry.All()
-			if len(entries) == 0 {
-				m.messages = append(m.messages, message{role: roleAssistant, text: "No secrets registered in this session."})
-			} else {
-				var b strings.Builder
-				b.WriteString(fmt.Sprintf("Registered secrets (%d):\n", len(entries)))
-				for i, e := range entries {
-					preview := redact.MaskedPreview(e.Value)
-					source := e.Source
-					if source == "" {
-						source = "(unknown)"
-					}
-					b.WriteString(fmt.Sprintf("  %d. [%s] %s (source=%s)\n", i+1, e.Kind, preview, source))
-				}
-				m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
-			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: maskListText(entries)})
 		}
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|mode [lenient|full]|model [name]|list]"})
 	}
 	return nil
+}
+
+// maskListText renders /mask list, keeping PII entries (kind "pii:<TYPE>") in
+// their own section instead of mixing them into the secrets list.
+func maskListText(entries []redact.Entry) string {
+	var secrets, pii []redact.Entry
+	for _, e := range entries {
+		if strings.HasPrefix(e.Kind, "pii:") {
+			pii = append(pii, e)
+		} else {
+			secrets = append(secrets, e)
+		}
+	}
+	var b strings.Builder
+	writeSection := func(header string, list []redact.Entry) {
+		if len(list) == 0 {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(fmt.Sprintf("%s (%d):\n", header, len(list)))
+		for i, e := range list {
+			source := e.Source
+			if source == "" {
+				source = "(unknown)"
+			}
+			b.WriteString(fmt.Sprintf("  %d. [%s] %s (source=%s)\n", i+1, e.Kind, redact.MaskedPreview(e.Value), source))
+		}
+	}
+	writeSection("Registered secrets", secrets)
+	writeSection("Registered PII", pii)
+	return b.String()
 }
 
 func runMaxStepCmd(m *model, args []string) tea.Cmd {

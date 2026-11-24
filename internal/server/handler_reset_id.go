@@ -2,9 +2,11 @@ package server
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -113,6 +115,15 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 	// box left under the old id could not be reached and would idle-reap. Best
 	// effort, like the moves above: a failure is logged and the reset still succeeds.
 	h.rekeyBoxSession(id, newID)
+
+	// Move the session's redaction vault so OCSEC tokens already in the rekeyed
+	// transcript keep resolving under the new id. Best-effort, like the moves
+	// above: most sessions never wrote a vault, so a missing file is normal.
+	if vaultBase, verr := redact.DefaultVaultBase(); verr != nil {
+		log.Printf("server: reset session id %s: redaction vault base: %v", id, verr)
+	} else if verr := redact.RekeyVault(vaultBase, session.ProjectSlugForPath(projectRoot), id, newID); verr != nil {
+		log.Printf("server: reset session id %s: move its redaction vault: %v", id, verr)
+	}
 
 	// Move the session's todo plan (<root>/.ocode/todo/<id>.md): the todo tools
 	// address it by session id, so a plan left under the deleted id would read

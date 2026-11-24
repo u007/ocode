@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -152,5 +154,69 @@ func TestHandleResetSessionIDUnknownSession(t *testing.T) {
 	h.HandleResetSessionID(rec, httptest.NewRequest("POST", "/api/sessions/ses_missing/reset-id", nil), "ses_missing")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleResetSessionIDRekeysVault pins the vault move on the server path:
+// a session's redaction vault follows the new id, keeping its nonce and entries
+// so OCSEC tokens already in the transcript still resolve.
+func TestHandleResetSessionIDRekeysVault(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+
+	id := session.NewSessionID()
+	session.SetWorkDir(proj)
+	t.Cleanup(func() { session.SetWorkDir("") })
+	if err := session.Save(id, "Vault", []agent.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.sessions.BindNewOrVerify(id, proj, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	base, err := redact.DefaultVaultBase()
+	if err != nil {
+		t.Fatalf("DefaultVaultBase() error: %v", err)
+	}
+	slug := session.ProjectSlugForPath(proj)
+	reg := redact.NewRegistry(redact.NewNonce())
+	reg.GetOrAssign("hunter2-secret", "password", "session")
+	nonce := reg.Nonce()
+	oldVault := redact.VaultPath(base, slug, id)
+	if err := redact.SaveVault(oldVault, reg); err != nil {
+		t.Fatalf("SaveVault(old) error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleResetSessionID(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/reset-id", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var raw map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	newID := raw["new_id"]
+	if newID == "" || newID == id {
+		t.Fatalf("new_id = %q, want a fresh id", newID)
+	}
+
+	if _, err := os.Stat(oldVault); !os.IsNotExist(err) {
+		t.Errorf("old vault still present after reset (err=%v)", err)
+	}
+	loaded, err := redact.LoadVault(redact.VaultPath(base, slug, newID))
+	if err != nil {
+		t.Fatalf("LoadVault(new) error: %v", err)
+	}
+	if loaded.Nonce() != nonce {
+		t.Errorf("vault nonce = %q, want %q", loaded.Nonce(), nonce)
+	}
+	if entry, ok := loaded.Lookup(1); !ok || entry.Value != "hunter2-secret" {
+		t.Errorf("rekeyed vault entry = %+v (ok=%v), want hunter2-secret", entry, ok)
 	}
 }

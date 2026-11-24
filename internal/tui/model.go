@@ -12532,6 +12532,14 @@ func (m *model) handleResetIDCmd(args []string) {
 		m.agent.ResetSelectScores()
 	}
 	tool.RekeyTodoSession(tool.TodoProjectRootFor(m.workDir), oldID, newID)
+	// Move the redaction vault so OCSEC tokens already in the transcript keep
+	// resolving under the new id; m.redactionRegistry itself is kept. Best-effort,
+	// like the todo plan: most sessions never wrote a vault.
+	if vaultBase, err := redact.DefaultVaultBase(); err != nil {
+		agent.DebugAppendf("REDACT", "reset-id: vault base: %v", err)
+	} else if err := redact.RekeyVault(vaultBase, session.ProjectSlugForPath(m.workDir), oldID, newID); err != nil {
+		agent.DebugAppendf("REDACT", "reset-id: rekey vault: %v", err)
+	}
 	m.broadcastTUIStatus()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Reset session id: %s → %s\nThe conversation is unchanged; the provider will treat it as a new chat.", oldID, newID)})
 	m.rerenderTranscriptAndMaybeScroll()

@@ -197,6 +197,35 @@ func LoadVault(path string) (*Registry, error) {
 	return reg, nil
 }
 
+// RekeyVault moves a session's vault from oldID to newID. A missing source is
+// nil (most sessions never wrote a vault) and creates nothing; an existing
+// destination is refused so neither file changes.
+func RekeyVault(base, slug, oldID, newID string) error {
+	oldPath := VaultPath(base, slug, oldID)
+	newPath := VaultPath(base, slug, newID)
+	if oldPath == newPath {
+		return nil
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat vault: %w", err)
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return fmt.Errorf("rekey vault: destination already exists: %s", newPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat vault destination: %w", err)
+	}
+	// shortcut: stat-then-rename can race a concurrent writer; the vault is
+	// per-session and written by one process, so upgrade to link+Rename if that
+	// ever stops holding.
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("rename vault: %w", err)
+	}
+	return nil
+}
+
 // DeleteVault removes a vault file.
 func DeleteVault(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

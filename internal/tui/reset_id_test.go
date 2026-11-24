@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tui/fastviewport"
@@ -98,5 +100,63 @@ func TestHandleResetIDCmdRefusesWhileRemoteControl(t *testing.T) {
 
 	if m.sessionID != oldID {
 		t.Fatalf("sessionID changed to %q while /rc active, want %q", m.sessionID, oldID)
+	}
+}
+
+// TestResetIDKeepsTokenResolution pins the vault half of /reset-id: the
+// registry object is kept (same nonce), so an OCSEC token already written into
+// the transcript still resolves, and the vault file moves to the new id.
+func TestResetIDKeepsTokenResolution(t *testing.T) {
+	dir := t.TempDir()
+	oldID := "ses_2026-01-02-030405-cafebabe"
+	m := newResetIDTestModel(t, dir, oldID)
+
+	reg := redact.NewRegistry(redact.NewNonce())
+	reg.GetOrAssign("hunter2-secret", "password", "session")
+	m.redactionRegistry = reg
+	nonce := reg.Nonce()
+	tokenised := reg.Substitute("the password is hunter2-secret")
+	if tokenised == "the password is hunter2-secret" {
+		t.Fatal("test setup: value was not tokenised")
+	}
+
+	base, err := redact.DefaultVaultBase()
+	if err != nil {
+		t.Fatalf("DefaultVaultBase() error: %v", err)
+	}
+	slug := session.ProjectSlugForPath(dir)
+	oldVault := redact.VaultPath(base, slug, oldID)
+	if err := redact.SaveVault(oldVault, reg); err != nil {
+		t.Fatalf("SaveVault(old) error: %v", err)
+	}
+
+	m.handleResetIDCmd(nil)
+
+	newID := m.sessionID
+	if newID == oldID || newID == "" {
+		t.Fatalf("sessionID = %q, want a fresh id", newID)
+	}
+	if m.redactionRegistry != reg {
+		t.Fatal("/reset-id replaced the in-memory registry")
+	}
+	if m.redactionRegistry.Nonce() != nonce {
+		t.Fatalf("nonce changed across reset: %q -> %q", nonce, m.redactionRegistry.Nonce())
+	}
+	if got := m.redactionRegistry.Resolve(tokenised); got != "the password is hunter2-secret" {
+		t.Fatalf("token no longer resolves after reset: %q", got)
+	}
+
+	if _, err := os.Stat(oldVault); !os.IsNotExist(err) {
+		t.Errorf("old vault still present after reset (err=%v)", err)
+	}
+	loaded, err := redact.LoadVault(redact.VaultPath(base, slug, newID))
+	if err != nil {
+		t.Fatalf("LoadVault(new) error: %v", err)
+	}
+	if loaded.Nonce() != nonce {
+		t.Errorf("vault nonce = %q, want %q", loaded.Nonce(), nonce)
+	}
+	if entry, ok := loaded.Lookup(1); !ok || entry.Value != "hunter2-secret" {
+		t.Errorf("rekeyed vault entry = %+v (ok=%v), want hunter2-secret", entry, ok)
 	}
 }
