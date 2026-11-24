@@ -2017,12 +2017,14 @@ export const api = {
       fail_mode: string;
       allow_remote_tier2: boolean;
       custom_words: string[];
+      pii_categories: string[];
     }>("/api/config/mask"),
   setMaskAdvanced: (fields: {
     base_url: string;
     fail_mode: string;
     allow_remote_tier2: boolean;
     custom_words: string[];
+    pii_categories: string[];
   }) =>
     fetchJSON<typeof fields>("/api/config/mask/advanced", {
       method: "PUT",

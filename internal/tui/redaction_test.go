@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/redact"
 )
 
@@ -123,7 +124,7 @@ func TestApplyTier2Scan_NilScanner(t *testing.T) {
 		{Role: "user", Content: "my key is AKIAIOSFODNN7EXAMPLE"},
 	}
 	// Should not panic.
-	applyTier2Scan(msgs, nil, reg, "block", "full")
+	applyTier2Scan(msgs, nil, reg, "block", "full", nil)
 }
 
 func TestApplyTier2Scan_ScannerErrorWarnMode(t *testing.T) {
@@ -133,7 +134,7 @@ func TestApplyTier2Scan_ScannerErrorWarnMode(t *testing.T) {
 		{Role: "user", Content: "my key is AKIAIOSFODNN7EXAMPLE"},
 	}
 	// "warn" mode: error is logged, call returns nil.
-	if err := applyTier2Scan(msgs, scanner, reg, "warn", "full"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "warn", "full", nil); err != nil {
 		t.Errorf("expected nil error in warn mode, got %v", err)
 	}
 }
@@ -149,7 +150,7 @@ func TestApplyTier2Scan_ScannerReturnsSpans(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: input},
 	}
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	// The original message should now be substituted with a token.
@@ -173,7 +174,7 @@ func TestApplyTier2Scan_AlreadyTokenizedSpanSkipped(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: masked},
 	}
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	// No panic, token is not double-registered.
@@ -192,7 +193,7 @@ func TestApplyTier2Scan_OnlyScansLastUserMessage(t *testing.T) {
 		{Role: "assistant", Content: "response"},
 		{Role: "user", Content: "second message"},
 	}
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	// Should scan exactly once (the last user message).
@@ -219,7 +220,7 @@ func TestApplyTier2Scan_BlockModeReturnsError(t *testing.T) {
 		{Role: "user", Content: "my api key is sk-test12345678901234567890"},
 	}
 	// "block" mode: error should be propagated.
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err == nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err == nil {
 		t.Error("expected error in block mode, got nil")
 	}
 }
@@ -235,7 +236,7 @@ func TestApplyTier2Scan_LenientSkipsScannerOnCleanText(t *testing.T) {
 		{Role: "user", Content: "hello, this is a normal message with no secrets"},
 	}
 	// With lenient mode and no sensitive keywords/patterns, scanner is not called.
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "lenient"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "lenient", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if callCount != 0 {
@@ -254,7 +255,7 @@ func TestApplyTier2Scan_FullStillScansCleanText(t *testing.T) {
 		{Role: "user", Content: "this also has no secrets but mode is full"},
 	}
 	// With full mode, scanner runs even on clean text.
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if callCount != 1 {
@@ -274,7 +275,7 @@ func TestApplyTier2Scan_LenientSkipsAlreadyMaskedMessage(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: "my api key is sk-test12345678901234567890"},
 	}
-	if err := applyTier2Scan(msgs, scanner, reg, "block", "lenient"); err != nil {
+	if err := applyTier2Scan(msgs, scanner, reg, "block", "lenient", nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if callCount != 0 {
@@ -289,7 +290,7 @@ func TestApplyTier1UserRedaction_MasksPasswordInUserMessage(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: `my password: "` + longPwd + `"`},
 	}
-	applyTier1UserRedaction(msgs, reg)
+	applyTier1UserRedaction(msgs, reg, nil)
 
 	if !redact.TokenPattern.MatchString(msgs[0].Content) {
 		t.Errorf("expected message to contain OCSEC token after tier-1 redaction, got: %q", msgs[0].Content)
@@ -307,7 +308,7 @@ func TestApplyTier1UserRedaction_ShortPasswordNotMasked(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: `whats in this password: "abc123"`},
 	}
-	applyTier1UserRedaction(msgs, reg)
+	applyTier1UserRedaction(msgs, reg, nil)
 
 	if redact.TokenPattern.MatchString(msgs[0].Content) {
 		t.Errorf("expected short password NOT to be masked (below thresholds), got OCSEC token: %q", msgs[0].Content)
@@ -318,7 +319,7 @@ func TestApplyTier1UserRedaction_NoopWhenRegNil(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: "user", Content: "my secret password is hunter2"},
 	}
-	applyTier1UserRedaction(msgs, nil)
+	applyTier1UserRedaction(msgs, nil, nil)
 	// Should not panic and should not change content.
 	if msgs[0].Content != "my secret password is hunter2" {
 		t.Errorf("expected content unchanged when reg is nil, got: %q", msgs[0].Content)
@@ -331,7 +332,7 @@ func TestApplyTier1UserRedaction_SkipsNonUserMessages(t *testing.T) {
 		{Role: "system", Content: `password: "abc123"`},
 		{Role: "user", Content: "hello"},
 	}
-	applyTier1UserRedaction(msgs, reg)
+	applyTier1UserRedaction(msgs, reg, nil)
 	// System message should not be touched.
 	if redact.TokenPattern.MatchString(msgs[0].Content) {
 		t.Errorf("expected system message to remain untouched, got: %q", msgs[0].Content)
@@ -352,12 +353,62 @@ func TestApplyTier2Scan_NothingToScanSkipsScanner(t *testing.T) {
 			reg := redact.NewRegistry(redact.NewNonce())
 			callCount := 0
 			scanner := &countingScanner{inner: &mockScanner{spans: []redact.Span{{Start: 0, End: 5, Kind: "test"}}}, count: &callCount}
-			if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+			if err := applyTier2Scan(msgs, scanner, reg, "block", "full", nil); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if callCount != 0 {
 				t.Fatalf("scanner called %d times, want 0", callCount)
 			}
 		})
+	}
+}
+
+// TestTUITypedInputUsesPII pins the typed-input path: with a PII group enabled
+// the agent-bound message carries an OCSEC token while the on-screen message
+// keeps the original text; with no group enabled the text is untouched.
+func TestTUITypedInputUsesPII(t *testing.T) {
+	const email = "please mail jane@example.com"
+	findUser := func(msgs []agent.Message) string {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "user" {
+				return msgs[i].Content
+			}
+		}
+		return ""
+	}
+
+	on := model{
+		agent:             newTestAgent(&staticLLMClient{}, nil, &config.Config{}, nil),
+		redactionEnabled:  true,
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactionPII:      []redact.PIICategory{redact.PIIContact},
+	}
+	in := []agent.Message{{Role: "user", Content: email}}
+	out, err := on.prepareAgentMessages(in)
+	if err != nil {
+		t.Fatalf("prepareAgentMessages: %v", err)
+	}
+	sent := findUser(out)
+	if !redact.TokenPattern.MatchString(sent) {
+		t.Fatalf("sent message = %q, want an OCSEC token", sent)
+	}
+	if strings.Contains(sent, "jane@example.com") {
+		t.Fatalf("sent message leaked the email: %q", sent)
+	}
+	if in[0].Content != email {
+		t.Fatalf("input message was mutated: %q", in[0].Content)
+	}
+
+	off := model{
+		agent:             newTestAgent(&staticLLMClient{}, nil, &config.Config{}, nil),
+		redactionEnabled:  true,
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+	}
+	out, err = off.prepareAgentMessages([]agent.Message{{Role: "user", Content: email}})
+	if err != nil {
+		t.Fatalf("prepareAgentMessages (no PII): %v", err)
+	}
+	if got := findUser(out); got != email {
+		t.Fatalf("sent message = %q, want the unmodified text with no PII group", got)
 	}
 }

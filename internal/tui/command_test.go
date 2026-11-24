@@ -681,7 +681,7 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
-	for _, want := range []string{"/models [name], /model", "/mask [on|off|status|mode [lenient|full]|model [name]|list]", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
+	for _, want := range []string{"/models [name], /model", "/mask [on|off|status|mode [lenient|full]|model [name]|pii [on|off <group>|none]|list]", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("expected help text to include %q, got %q", want, help)
 		}
@@ -713,7 +713,7 @@ func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 		t.Fatal("expected /mask to append a status message")
 	}
 	msg := got.messages[len(got.messages)-1].text
-	for _, want := range []string{"Secret redaction: enabled", "Scan mode: lenient", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|mode [lenient|full]|model [name]|list]"} {
+	for _, want := range []string{"Secret redaction: enabled", "Scan mode: lenient", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|mode [lenient|full]|model [name]|pii [on|off <group>|none]|list]"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("expected /mask output to include %q, got %q", want, msg)
 		}
@@ -1904,5 +1904,124 @@ func TestMaskListSeparatesPII(t *testing.T) {
 	}
 	if !strings.Contains(piiMsg, "Registered PII (1):") {
 		t.Fatalf("expected a PII header for a PII-only registry, got %q", piiMsg)
+	}
+}
+
+// setHomeTree points HOME and the XDG variables at one temp tree so every
+// platform resolves the ocode config to the same place. It mirrors
+// internal/config's setHomeTree (the tui package has none).
+func setHomeTree(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+}
+
+// TestMaskPIICommand covers the /mask pii subcommand: six groups listed off,
+// on/off toggling that persists, `none` clearing everything, and a bad group
+// name rejected without changing state.
+func TestMaskPIICommand(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	m := model{input: newTestTextarea(), viewport: fastviewport.New(80, 20)}
+	m.config = &config.Config{}
+
+	updated, cmd := m.handleCommand("/mask pii")
+	if cmd != nil {
+		t.Fatalf("expected no command from /mask pii, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	if len(got.messages) == 0 {
+		t.Fatal("expected /mask pii to append a status message")
+	}
+	msg := got.messages[len(got.messages)-1].text
+	for _, group := range []string{"contact", "financial", "identity", "legal", "network", "money"} {
+		if !strings.Contains(msg, group+": off") {
+			t.Fatalf("expected %q listed off, got %q", group, msg)
+		}
+	}
+	if !strings.Contains(msg, "high-noise") {
+		t.Fatalf("expected the high-noise warning, got %q", msg)
+	}
+
+	// on contact persists.
+	updated, _ = got.handleCommand("/mask pii on contact")
+	got = derefTestModel(t, updated)
+	if len(got.redactionPII) != 1 || got.redactionPII[0] != redact.PIIContact {
+		t.Fatalf("redactionPII = %v, want [contact]", got.redactionPII)
+	}
+	loaded, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if names := strings.Join(loaded.Security.Redaction.PIICategories, ","); names != "contact" {
+		t.Fatalf("persisted PII categories = %q, want contact", names)
+	}
+
+	// off contact clears it.
+	updated, _ = got.handleCommand("/mask pii off contact")
+	got = derefTestModel(t, updated)
+	if len(got.redactionPII) != 0 {
+		t.Fatalf("redactionPII = %v, want none after off", got.redactionPII)
+	}
+	loaded, err = config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if len(loaded.Security.Redaction.PIICategories) != 0 {
+		t.Fatalf("persisted PII categories = %v, want none", loaded.Security.Redaction.PIICategories)
+	}
+
+	// Two groups, then `none` clears all.
+	updated, _ = got.handleCommand("/mask pii on financial")
+	got = derefTestModel(t, updated)
+	updated, _ = got.handleCommand("/mask pii on legal")
+	got = derefTestModel(t, updated)
+	if len(got.redactionPII) != 2 {
+		t.Fatalf("redactionPII = %v, want two groups", got.redactionPII)
+	}
+	updated, _ = got.handleCommand("/mask pii none")
+	got = derefTestModel(t, updated)
+	if len(got.redactionPII) != 0 {
+		t.Fatalf("redactionPII = %v, want none after none", got.redactionPII)
+	}
+	loaded, err = config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if len(loaded.Security.Redaction.PIICategories) != 0 {
+		t.Fatalf("persisted PII after none = %v, want none", loaded.Security.Redaction.PIICategories)
+	}
+
+	// A bad group is rejected with a visible error and no state change.
+	updated, _ = got.handleCommand("/mask pii on bogus")
+	got = derefTestModel(t, updated)
+	last := got.messages[len(got.messages)-1].text
+	if !strings.Contains(last, "unknown pii category") {
+		t.Fatalf("expected an unknown-category error, got %q", last)
+	}
+	if len(got.redactionPII) != 0 {
+		t.Fatalf("redactionPII = %v after a rejected group, want none", got.redactionPII)
+	}
+}
+
+// TestMaskStatusShowsPIIGroups pins that the default status output names the
+// enabled PII groups (and the /mask usage string advertises the subcommand).
+func TestMaskStatusShowsPIIGroups(t *testing.T) {
+	m := model{
+		input:        newTestTextarea(),
+		viewport:     fastviewport.New(80, 20),
+		redactionPII: []redact.PIICategory{redact.PIIContact, redact.PIILegal},
+	}
+	msg := maskStatusText(&m, true)
+	if !strings.Contains(msg, "PII categories: contact, legal") {
+		t.Fatalf("expected enabled PII groups in status, got %q", msg)
+	}
+	if !strings.Contains(msg, "pii [on|off <group>|none]") {
+		t.Fatalf("expected /mask usage to advertise pii, got %q", msg)
 	}
 }

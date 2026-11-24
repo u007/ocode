@@ -17,6 +17,7 @@ import (
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -1320,5 +1321,87 @@ func TestHandleSetCompactConfigDoesNotHoldMuAcrossSave(t *testing.T) {
 	case <-putDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("compact PUT did not finish after the save was released")
+	}
+}
+
+// TestMaskAdvancedRoundTripsPII covers the PII payload on the existing mask
+// endpoints: GET returns the slice, PUT persists it (in memory and on disk),
+// and an unknown name is rejected with a 4xx without changing state.
+func TestMaskAdvancedRoundTripsPII(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction.PIICategories = []string{"contact"}
+	h.mu.Unlock()
+
+	get := func() []string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.HandleGetMaskConfig(w, httptest.NewRequest("GET", "/api/config/mask", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET mask status = %d, body=%s", w.Code, w.Body.String())
+		}
+		var resp struct {
+			PIICategories []string `json:"pii_categories"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal GET: %v", err)
+		}
+		return resp.PIICategories
+	}
+
+	if got := strings.Join(get(), ","); got != "contact" {
+		t.Fatalf("GET pii_categories = %q, want contact", got)
+	}
+
+	body := `{"pii_categories":["contact","legal"]}`
+	w := httptest.NewRecorder()
+	h.HandleSetMaskAdvanced(w, httptest.NewRequest("PUT", "/api/config/mask/advanced", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := strings.Join(h.cfg.Ocode.Security.Redaction.PIICategories, ",")
+	h.mu.Unlock()
+	if got != "contact,legal" {
+		t.Fatalf("in-memory PII = %q, want contact,legal", got)
+	}
+	persisted, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got := strings.Join(persisted.Security.Redaction.PIICategories, ","); got != "contact,legal" {
+		t.Fatalf("persisted PII = %q, want contact,legal", got)
+	}
+	if got := strings.Join(get(), ","); got != "contact,legal" {
+		t.Fatalf("GET after PUT pii_categories = %q, want contact,legal", got)
+	}
+
+	// An unknown name is a 4xx and leaves the stored value untouched.
+	bad := `{"pii_categories":["bogus"]}`
+	w = httptest.NewRecorder()
+	h.HandleSetMaskAdvanced(w, httptest.NewRequest("PUT", "/api/config/mask/advanced", strings.NewReader(bad)))
+	if w.Code < 400 || w.Code >= 500 {
+		t.Fatalf("PUT bad group status = %d, want 4xx, body=%s", w.Code, w.Body.String())
+	}
+	if got := strings.Join(get(), ","); got != "contact,legal" {
+		t.Fatalf("GET after rejected PUT = %q, want contact,legal", got)
+	}
+}
+
+// TestLiveReapplyKeepsPII pins that applying the redaction config to a live
+// agent writes the PII groups onto its main conversation client.
+func TestLiveReapplyKeepsPII(t *testing.T) {
+	h := testConfigHandler(t)
+	gc := &agent.GenericClient{Model: "openai/gpt-4o", Provider: "openai"}
+	ag := agent.NewAgent(gc, nil, &config.Config{}, nil)
+
+	h.applyRedactionToAgent(ag, config.RedactionConfig{
+		Enabled:       true,
+		PIICategories: []string{"contact", "legal"},
+	})
+
+	if len(gc.PIICategories) != 2 ||
+		gc.PIICategories[0] != redact.PIIContact || gc.PIICategories[1] != redact.PIILegal {
+		t.Fatalf("client PIICategories = %v, want [contact legal]", gc.PIICategories)
 	}
 }

@@ -1929,11 +1929,13 @@ type model struct {
 
 	// Secret redaction state (see internal/redact).
 	redactionEnabled  bool
-	redactionModel    string             // local model for tier-2 scanning
-	redactionRegistry *redact.Registry   // session registry for token resolution
-	llmScanner        *redact.LLMScanner // tier-2 scanner, nil when no model configured
-	redactFailMode    string             // "block" or "warn" — how tier-2 scanner errors are handled
-	redactMode        string             // "lenient" (default) or "full" — typed-user-message LLM aggressiveness
+	redactionModel    string               // local model for tier-2 scanning
+	redactionRegistry *redact.Registry     // session registry for token resolution
+	llmScanner        *redact.LLMScanner   // tier-2 scanner, nil when no model configured
+	redactFailMode    string               // "block" or "warn" — how tier-2 scanner errors are handled
+	redactMode        string               // "lenient" (default) or "full" — typed-user-message LLM aggressiveness
+	redactionPII      []redact.PIICategory // opt-in PII groups applied to typed input and the main client
+	redactionPIIErr   error                // invalid configured category; surfaced by /mask status
 }
 
 type modelCleanupState struct {
@@ -13208,7 +13210,10 @@ func (m *model) handleBtwCmd(args []string) {
 	// Tier-1 redaction parity with streamStep: mask secrets in the aside
 	// before it reaches the side-query LLM.
 	if m.redactionRegistry != nil {
-		applyTier1UserRedaction(agentMsgs, m.redactionRegistry)
+		if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.redactionPII); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: redaction failed: %v", err)})
+			return
+		}
 	}
 
 	m.btwGen++
@@ -14875,20 +14880,25 @@ func (m model) buildSelectionSidebarData(width int) ([]string, []string) {
 	return body, filePaths
 }
 
-func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
-	if m.agent == nil {
-		return msgs
+func (m model) prepareAgentMessages(msgs []agent.Message) ([]agent.Message, error) {
+	result := msgs
+	if m.agent != nil {
+		result = m.agent.PrepareMessages(msgs, m.buildSelectionContext())
 	}
-	result := m.agent.PrepareMessages(msgs, m.buildSelectionContext())
-	// Apply secret redaction to user messages before sending to agent
+	// Apply secret + opt-in PII redaction to user messages before sending to
+	// the agent. A detection error is returned: never send unmasked text.
 	if m.redactionEnabled && m.redactionRegistry != nil {
 		for i := range result {
 			if result[i].Role == "user" && result[i].Content != "" {
-				result[i].Content = redactText(result[i].Content, m.redactionRegistry)
+				text, err := redactText(result[i].Content, m.redactionRegistry, m.redactionPII)
+				if err != nil {
+					return nil, err
+				}
+				result[i].Content = text
 			}
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
@@ -14906,7 +14916,10 @@ func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 	// must stand down for it too.
 	m.syncPendingAskFlag()
 	agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
-	agentMsgs = m.prepareAgentMessages(agentMsgs)
+	agentMsgs, err := m.prepareAgentMessages(agentMsgs)
+	if err != nil {
+		return func() tea.Msg { return errorMsg(err) }
+	}
 	return m.streamStep(agentMsgs)
 }
 
@@ -16765,7 +16778,11 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		//
 		// applyTier1UserRedaction mutates agentMsgs in-place.
 		if m.redactionRegistry != nil {
-			applyTier1UserRedaction(agentMsgs, m.redactionRegistry)
+			if err := applyTier1UserRedaction(agentMsgs, m.redactionRegistry, m.redactionPII); err != nil {
+				close(msgCh)
+				errCh <- err
+				return
+			}
 		}
 
 		// Tier-2 LLM scan: run on the most recent user message before the
@@ -16779,7 +16796,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		// When failMode is "block" and the scanner errors, the error is
 		// returned and the message is NOT sent to the LLM.
 		if m.redactionEnabled && m.llmScanner != nil && m.redactionRegistry != nil {
-			if err := applyTier2Scan(agentMsgs, m.resolveLiveScanner(), m.redactionRegistry, m.redactFailMode, m.redactMode); err != nil {
+			if err := applyTier2Scan(agentMsgs, m.resolveLiveScanner(), m.redactionRegistry, m.redactFailMode, m.redactMode, m.redactionPII); err != nil {
 				close(msgCh)
 				errCh <- err
 				return
@@ -17542,7 +17559,10 @@ func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 				Content: msg.text,
 			})
 		}
-		agentMsgs = m.prepareAgentMessages(agentMsgs)
+		agentMsgs, err := m.prepareAgentMessages(agentMsgs)
+		if err != nil {
+			return errorMsg(err)
+		}
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
 			return errorMsg(err)

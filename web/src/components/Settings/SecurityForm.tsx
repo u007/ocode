@@ -5,6 +5,17 @@ import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
 import ModelDialog from "../Layout/ModelDialog";
 
+// The six opt-in PII groups. network and money are flagged high-noise because
+// URLs, IPs and numeric literals are legitimate coding content.
+const PII_GROUPS: { name: string; label: string; highNoise?: boolean }[] = [
+  { name: "contact", label: "Contact (email, phone)" },
+  { name: "financial", label: "Financial (cards, IBAN, SWIFT, bank IDs)" },
+  { name: "identity", label: "Identity (national IDs, passport, DOB)" },
+  { name: "legal", label: "Legal (case numbers)" },
+  { name: "network", label: "Network (IPs, URLs)", highNoise: true },
+  { name: "money", label: "Money amounts", highNoise: true },
+];
+
 export default function SecurityForm() {
   const [enabled, setEnabled] = useState(false);
   const [mode, setMode] = useState("lenient");
@@ -14,6 +25,7 @@ export default function SecurityForm() {
   const [failMode, setFailMode] = useState("warn");
   const [allowRemoteTier2, setAllowRemoteTier2] = useState(false);
   const [customWords, setCustomWords] = useState("");
+  const [piiCategories, setPiiCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +42,7 @@ export default function SecurityForm() {
       setFailMode(cfg.fail_mode);
       setAllowRemoteTier2(cfg.allow_remote_tier2);
       setCustomWords((cfg.custom_words ?? []).join(", "));
+      setPiiCategories(cfg.pii_categories ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -53,6 +66,7 @@ export default function SecurityForm() {
         fail_mode: failMode,
         allow_remote_tier2: allowRemoteTier2,
         custom_words: customWords.split(",").map((w) => w.trim()).filter(Boolean),
+        pii_categories: piiCategories,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -123,6 +137,34 @@ export default function SecurityForm() {
       <div className="space-y-1.5">
         <label className="text-xs text-muted-foreground">Custom words (comma-separated)</label>
         <Input value={customWords} onChange={(e) => setCustomWords(e.target.value)} className="h-8 text-xs" />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs text-muted-foreground">PII (opt-in)</label>
+        <div className="space-y-1">
+          {PII_GROUPS.map((group) => (
+            <label key={group.name} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                aria-label={`PII ${group.name}`}
+                checked={piiCategories.includes(group.name)}
+                onChange={(e) =>
+                  setPiiCategories((prev) =>
+                    e.target.checked
+                      ? [...prev, group.name]
+                      : prev.filter((n) => n !== group.name),
+                  )
+                }
+              />
+              {group.label}
+              {group.highNoise && <span className="text-[10px] text-amber-500">high-noise</span>}
+            </label>
+          ))}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Off by default; enabled groups mask detected values before text reaches a model.
+          Network and money are high-noise in code (URLs, IPs, numeric literals).
+        </p>
       </div>
 
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

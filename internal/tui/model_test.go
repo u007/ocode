@@ -6664,7 +6664,10 @@ func TestBuildSidebarRenderDataIncludesSelectionSection(t *testing.T) {
 func TestPrepareAgentMessagesSkipsWhenNoAgent(t *testing.T) {
 	m := model{}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
-	got := m.prepareAgentMessages(msgs)
+	got, err := m.prepareAgentMessages(msgs)
+	if err != nil {
+		t.Fatalf("prepareAgentMessages: %v", err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("expected no new messages, got %d", len(got))
 	}
@@ -6676,7 +6679,10 @@ func TestPrepareAgentMessagesIncludesSelectionContext(t *testing.T) {
 	m.files.selectedFiles = map[int]bool{0: true}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
 
-	got := m.prepareAgentMessages(msgs)
+	got, err := m.prepareAgentMessages(msgs)
+	if err != nil {
+		t.Fatalf("prepareAgentMessages: %v", err)
+	}
 	var selection string
 	for _, msg := range got {
 		if strings.Contains(msg.Content, "[ocode:selection]") {

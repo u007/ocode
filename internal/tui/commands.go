@@ -160,7 +160,7 @@ func init() {
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
 		{name: "/agents", usage: "/agents [status|limit <n>]", help: "Show active/queued subagents, or set max concurrent subagents (0 = unlimited)", handler: runAgentsCmd},
-		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
+		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|pii [on|off <group>|none]|list]", help: "Show secret/PII redaction status, manage the tier-2 model, opt into PII groups, or list secrets", handler: runMaskCmd},
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/paths", help: "Show all relevant filesystem paths: root, extra allowed paths, config files, and data directories", handler: runPathsCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
@@ -1632,9 +1632,53 @@ func maskStatusText(m *model, includeHint bool) string {
 		b.WriteString("Tier-2 scanner: not configured")
 	}
 
+	b.WriteString("\n")
+	b.WriteString(maskPIISummary(m))
+
 	if includeHint {
-		b.WriteString("\n\nTry: /mask [on|off|status|mode [lenient|full]|model [name]|list]")
+		b.WriteString("\n\nTry: /mask [on|off|status|mode [lenient|full]|model [name]|pii [on|off <group>|none]|list]")
 	}
+	return b.String()
+}
+
+// maskPIISummary renders the opt-in PII groups on one line for the status view.
+func maskPIISummary(m *model) string {
+	if m.redactionPIIErr != nil {
+		return fmt.Sprintf("PII categories: invalid (%v)", m.redactionPIIErr)
+	}
+	if len(m.redactionPII) == 0 {
+		return "PII categories: none"
+	}
+	names := make([]string, 0, len(m.redactionPII))
+	for _, c := range m.redactionPII {
+		names = append(names, string(c))
+	}
+	return "PII categories: " + strings.Join(names, ", ")
+}
+
+// maskPIIStatusText lists every group and its state for `/mask pii`.
+func maskPIIStatusText(m *model) string {
+	enabled := make(map[redact.PIICategory]bool, len(m.redactionPII))
+	for _, c := range m.redactionPII {
+		enabled[c] = true
+	}
+	var b strings.Builder
+	b.WriteString("PII redaction groups (opt-in; dormant unless redaction is enabled):\n")
+	for _, c := range redact.AllPIICategories {
+		state := "off"
+		if enabled[c] {
+			state = "on"
+		}
+		note := ""
+		if c == redact.PIINetwork || c == redact.PIIMoney {
+			note = " (high-noise: may mask legitimate code)"
+		}
+		b.WriteString(fmt.Sprintf("  %s: %s%s\n", c, state, note))
+	}
+	if m.redactionPIIErr != nil {
+		b.WriteString(fmt.Sprintf("\nInvalid configuration: %v", m.redactionPIIErr))
+	}
+	b.WriteString("\nTry: /mask pii [on|off <group>|none] — high-noise groups are network and money")
 	return b.String()
 }
 
@@ -1804,6 +1848,8 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			// Open the model picker to select the tier-2 scanning model
 			return m.openRedactionModelPicker()
 		}
+	case "pii":
+		m.handleMaskPIICmd(args[1:])
 	case "list":
 		// List registered secrets, keeping PII entries in their own section.
 		if m.redactionRegistry == nil {
@@ -1814,9 +1860,63 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: maskListText(entries)})
 		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|mode [lenient|full]|model [name]|list]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|mode [lenient|full]|model [name]|pii [on|off <group>|none]|list]"})
 	}
 	return nil
+}
+
+// handleMaskPIICmd implements /mask pii [on|off <group>|none]. Group names are
+// validated against the closed set; an invalid name is reported verbatim and
+// changes nothing.
+func (m *model) handleMaskPIICmd(args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "", "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: maskPIIStatusText(m)})
+	case "none":
+		if err := m.setRedactionPIICategories(nil); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "PII categories: none"})
+	case "on", "off":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask pii [on|off <group>|none]"})
+			return
+		}
+		group := strings.ToLower(args[1])
+		if err := config.ValidatePIICategories([]string{group}); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return
+		}
+		want := redact.PIICategory(group)
+		// Rebuild in the canonical order so the persisted list is deterministic.
+		var cats []redact.PIICategory
+		for _, c := range redact.AllPIICategories {
+			if c == want {
+				if sub == "on" {
+					cats = append(cats, c)
+				}
+				continue
+			}
+			for _, have := range m.redactionPII {
+				if have == c {
+					cats = append(cats, c)
+					break
+				}
+			}
+		}
+		if err := m.setRedactionPIICategories(cats); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: maskPIISummary(m)})
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask pii [on|off <group>|none]"})
+	}
 }
 
 // maskListText renders /mask list, keeping PII entries (kind "pii:<TYPE>") in

@@ -28,6 +28,24 @@ func (m *model) initRedaction() {
 	}
 	m.redactionEnabled = m.config.Ocode.Security.Redaction.Enabled
 	m.redactionModel = normalizeRedactionModelName(m.config.Ocode.Security.Redaction.Model, m.config.Ocode.Security.Redaction.BaseURL)
+	m.reloadRedactionPII()
+}
+
+// reloadRedactionPII parses the configured opt-in PII groups. An invalid name
+// is recorded so /mask status can surface it; it never falls back to a
+// partially-applied set.
+func (m *model) reloadRedactionPII() {
+	m.redactionPII = nil
+	m.redactionPIIErr = nil
+	if m.config == nil {
+		return
+	}
+	cats, err := redact.ParsePIICategories(m.config.Ocode.Security.Redaction.PIICategories)
+	if err != nil {
+		m.redactionPIIErr = err
+		return
+	}
+	m.redactionPII = cats
 }
 
 // toggleRedaction enables/disables redaction and persists the setting.
@@ -37,18 +55,23 @@ func (m *model) toggleRedaction() error {
 
 // scrubExistingMessages applies redaction to all existing user messages in the session.
 // This is called when redaction is enabled mid-session.
-func (m *model) scrubExistingMessages() {
+func (m *model) scrubExistingMessages() error {
 	if m.redactionRegistry == nil {
-		return
+		return nil
 	}
 	for i := range m.messages {
 		if m.messages[i].role == roleUser && m.messages[i].text != "" {
 			// Check if already redacted (contains OCSEC tokens)
 			if !redact.TokenPattern.MatchString(m.messages[i].text) {
-				m.messages[i].text = redactText(m.messages[i].text, m.redactionRegistry)
+				text, err := redactText(m.messages[i].text, m.redactionRegistry, m.redactionPII)
+				if err != nil {
+					return err
+				}
+				m.messages[i].text = text
 			}
 		}
 	}
+	return nil
 }
 
 // isRedactionEnabled returns whether redaction is currently enabled.
@@ -80,6 +103,8 @@ func (m *model) syncRedactionRuntime() {
 	if m == nil || m.agent == nil {
 		return
 	}
+	m.reloadRedactionPII()
+	m.agent.SetRedactionPIICategories(m.redactionPII)
 	m.agent.SetRedactionEnabled(m.redactionEnabled)
 	m.agent.SetRedactionRegistry(m.redactionRegistry)
 	if m.redactionEnabled && m.redactionRegistry != nil {
@@ -106,7 +131,9 @@ func (m *model) setRedactionEnabled(enabled bool) error {
 		if m.redactionRegistry == nil {
 			m.redactionRegistry = redact.NewRegistry(redact.NewNonce())
 		}
-		m.scrubExistingMessages()
+		if err := m.scrubExistingMessages(); err != nil {
+			return err
+		}
 		m.rebuildRedactionScanner()
 	}
 	m.redactionEnabled = enabled
@@ -125,6 +152,27 @@ func (m *model) setRedactionMode(mode string) error {
 		return err
 	}
 	m.redactMode = mode
+	return nil
+}
+
+// setRedactionPIICategories persists the opt-in PII groups and applies them to
+// the live agent. Names are validated by SaveSecurityRedaction before the write
+// lands; a rejected write leaves the previous set in place.
+func (m *model) setRedactionPIICategories(cats []redact.PIICategory) error {
+	names := make([]string, 0, len(cats))
+	for _, c := range cats {
+		names = append(names, string(c))
+	}
+	if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
+		rc.PIICategories = names
+	}); err != nil {
+		return err
+	}
+	if m.config != nil {
+		m.config.Ocode.Security.Redaction.PIICategories = names
+	}
+	m.reloadRedactionPII()
+	m.syncRedactionRuntime()
 	return nil
 }
 
@@ -240,25 +288,27 @@ func (m *model) setRedactionModel(modelName string) error {
 	return nil
 }
 
-// redactText applies redaction to a text string using the session registry.
-// Returns the redacted text and the registry for later resolution.
-func redactText(text string, reg *redact.Registry) string {
+// redactText applies redaction (secrets plus the opt-in PII groups) to a text
+// string using the session registry. A PII detection error is returned to the
+// caller: there is no fallback to unmasked text. Debug output carries counts
+// only, never raw content.
+func redactText(text string, reg *redact.Registry, cats []redact.PIICategory) (string, error) {
 	if reg == nil || text == "" {
-		return text
+		return text, nil
 	}
-	spans := redact.DetectSecrets(text, nil, redact.DetectOpts{FileContent: false})
-	agent.DebugAppendf("REDACT", "redactText: Detect found %d spans in %q", len(spans), text)
+	spans, err := redact.Detect(text, nil, redact.DetectOpts{FileContent: false, PIICategories: cats})
+	if err != nil {
+		return "", err
+	}
 	if len(spans) == 0 {
-		return text
+		return text, nil
 	}
 	for _, span := range spans {
 		value := text[span.Start:span.End]
-		agent.DebugAppendf("REDACT", "redactText: registering %q kind=%q", value, span.Kind)
 		reg.GetOrAssign(value, span.Kind, "tui")
 	}
-	result := reg.Substitute(text)
-	agent.DebugAppendf("REDACT", "redactText: substituted → %q", result)
-	return result
+	agent.DebugAppendf("REDACT", "redactText: masked %d span(s)", len(spans))
+	return reg.Substitute(text), nil
 }
 
 // buildLLMScanner creates a tier-2 LLM scanner that calls a local model server.
@@ -380,7 +430,7 @@ func extractProvider(model string) string {
 // MUTATES: overwrites msg.Content for the scanned message with token-substituted text.
 // Returns nil on success or when the scanner is skipped; returns an error when
 // failMode is "block" and the scanner actually fails.
-func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *redact.Registry, failMode string, mode string) error {
+func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *redact.Registry, failMode string, mode string, cats []redact.PIICategory) error {
 	if scanner == nil {
 		return nil
 	}
@@ -391,7 +441,10 @@ func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *reda
 			continue
 		}
 		// Apply tier-1 to get the masked text for the scanner.
-		masked := redactText(msg.Content, reg)
+		masked, err := redactText(msg.Content, reg, cats)
+		if err != nil {
+			return err
+		}
 
 		// Mode gate: "lenient" skips the LLM when the message has no
 		// sensitive keywords or value patterns; "full" always scans.
@@ -428,27 +481,25 @@ func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *reda
 // even when no tier-2 scanner is configured.
 //
 // MUTATES: overwrites msg.Content for the last user message with token-substituted text.
-func applyTier1UserRedaction(agentMsgs []agent.Message, reg *redact.Registry) {
+func applyTier1UserRedaction(agentMsgs []agent.Message, reg *redact.Registry, cats []redact.PIICategory) error {
 	if reg == nil {
 		agent.DebugAppendf("REDACT", "tier-1 skip: registry is nil")
-		return
+		return nil
 	}
 	for i := len(agentMsgs) - 1; i >= 0; i-- {
 		msg := &agentMsgs[i]
 		if msg.Role != "user" || strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
-		agent.DebugAppendf("REDACT", "tier-1 user scan: %q", msg.Content)
-		masked := redactText(msg.Content, reg)
-		changed := masked != msg.Content
-		if changed {
-			agent.DebugAppendf("REDACT", "tier-1 user redacted: %q → %q", msg.Content, masked)
-		} else {
-			agent.DebugAppendf("REDACT", "tier-1 user: no secrets found in %d chars", len(msg.Content))
+		masked, err := redactText(msg.Content, reg, cats)
+		if err != nil {
+			return err
 		}
+		agent.DebugAppendf("REDACT", "tier-1 user: %d chars, masked=%t", len(msg.Content), masked != msg.Content)
 		msg.Content = masked
-		return
+		return nil
 	}
+	return nil
 }
 
 // renderSecrets replaces OCSEC tokens in text with masked previews for display.

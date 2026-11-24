@@ -972,6 +972,7 @@ func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 	allowRemoteTier2 := false
 	var skipLLMIfClean *bool
 	customWords := []string{}
+	piiCategories := []string{}
 	if h.cfg != nil {
 		rc := h.cfg.Ocode.Security.Redaction
 		enabled = rc.Enabled
@@ -982,10 +983,14 @@ func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 		allowRemoteTier2 = rc.AllowRemoteTier2
 		skipLLMIfClean = rc.SkipLLMIfClean
 		customWords = rc.CustomWords
+		piiCategories = rc.PIICategories
 	}
 	h.mu.Unlock()
 	if customWords == nil {
 		customWords = []string{}
+	}
+	if piiCategories == nil {
+		piiCategories = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"enabled":            enabled,
@@ -996,6 +1001,7 @@ func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 		"allow_remote_tier2": allowRemoteTier2,
 		"skip_llm_if_clean":  skipLLMIfClean,
 		"custom_words":       customWords,
+		"pii_categories":     piiCategories,
 	})
 }
 
@@ -2786,10 +2792,11 @@ func (h *Handler) HandleSetLocalModelsConfig(w http.ResponseWriter, r *http.Requ
 // from Mode via ResolveRedactionMode.
 func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BaseURL          string   `json:"base_url"`
-		FailMode         string   `json:"fail_mode"`
-		AllowRemoteTier2 bool     `json:"allow_remote_tier2"`
-		CustomWords      []string `json:"custom_words"`
+		BaseURL          string    `json:"base_url"`
+		FailMode         string    `json:"fail_mode"`
+		AllowRemoteTier2 bool      `json:"allow_remote_tier2"`
+		CustomWords      []string  `json:"custom_words"`
+		PIICategories    *[]string `json:"pii_categories"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -2798,6 +2805,12 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 	if req.FailMode != "" && req.FailMode != "block" && req.FailMode != "warn" {
 		writeError(w, http.StatusBadRequest, "fail_mode must be \"block\" or \"warn\"")
 		return
+	}
+	if req.PIICategories != nil {
+		if err := config.ValidatePIICategories(*req.PIICategories); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	h.mu.Lock()
@@ -2813,6 +2826,9 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 		}
 		rc.AllowRemoteTier2 = req.AllowRemoteTier2
 		rc.CustomWords = req.CustomWords
+		if req.PIICategories != nil {
+			rc.PIICategories = *req.PIICategories
+		}
 	}); err != nil {
 		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -2824,6 +2840,10 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 	}
 	h.cfg.Ocode.Security.Redaction.AllowRemoteTier2 = req.AllowRemoteTier2
 	h.cfg.Ocode.Security.Redaction.CustomWords = req.CustomWords
+	if req.PIICategories != nil {
+		h.cfg.Ocode.Security.Redaction.PIICategories = *req.PIICategories
+	}
+	piiCategories := h.cfg.Ocode.Security.Redaction.PIICategories
 	h.mu.Unlock()
 
 	// Rebuild the tier-2 scanner for live sessions (e.g. a new base URL pointing
@@ -2835,6 +2855,7 @@ func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) 
 		"fail_mode":          req.FailMode,
 		"allow_remote_tier2": req.AllowRemoteTier2,
 		"custom_words":       req.CustomWords,
+		"pii_categories":     piiCategories,
 	})
 }
 
@@ -2912,6 +2933,14 @@ func (h *Handler) applyRedactionToAgent(ag *agent.Agent, rc config.RedactionConf
 	if ag == nil {
 		return
 	}
+	cats, err := redact.ParsePIICategories(rc.PIICategories)
+	if err != nil {
+		// Config load/save validation should prevent this; fail closed to
+		// secrets-only rather than applying a partial set.
+		log.Printf("redaction: ignoring invalid PII categories %v: %v", rc.PIICategories, err)
+		cats = nil
+	}
+	ag.SetRedactionPIICategories(cats)
 	if !rc.Enabled {
 		ag.SetRedactionEnabled(false)
 		ag.SetRedactionRegistry(nil)
