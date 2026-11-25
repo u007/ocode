@@ -36,6 +36,11 @@ const rgMaxRetainedOutput = 2 << 20 // 2MiB
 // second; this is a runaway guard, not a working budget.
 const rgTimeout = 60 * time.Second
 
+// rgWaitDelay bounds how long Wait keeps draining rg's output after the search
+// is cancelled and its process group killed. A grandchild that escaped the
+// kill cannot hold the call open past it.
+const rgWaitDelay = 2 * time.Second
+
 // rgFallbackPaths are probed when `rg` is not on PATH. GUI launches on macOS
 // inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that misses
 // /opt/homebrew/bin, where Homebrew installs ripgrep.
@@ -261,6 +266,15 @@ func (t *RgrepTool) run(ctx context.Context, args json.RawMessage, name string) 
 		}
 		argv = append(argv, "--glob", "!"+ig)
 	}
+	// Policy excludes come last so they win over the include glob. They are
+	// case-insensitive because the sensitive-name rules fold case.
+	pol := searchPolicyFromContext(ctx)
+	for _, ig := range pol.IgnoreGlobs {
+		if strings.TrimSpace(ig) == "" {
+			continue
+		}
+		argv = append(argv, "--iglob", "!"+ig)
+	}
 	switch p.OutputMode {
 	case "files_with_matches":
 		argv = append(argv, "--files-with-matches")
@@ -280,15 +294,27 @@ func (t *RgrepTool) run(ctx context.Context, args json.RawMessage, name string) 
 	// positional is the search target.
 	argv = append(argv, "-e", pattern, "--", searchArg)
 
-	runCtx, cancel := context.WithTimeout(context.Background(), rgTimeout)
+	// The caller's context bounds the search as well as the 60-second ceiling.
+	// The search runs in its own process group so a cancel kills every
+	// descendant, not only rg, and WaitDelay stops a stray grandchild that
+	// escaped the kill from holding Wait open.
+	runCtx, cancel := context.WithTimeout(ctx, rgTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, bin, argv...)
+	setProcGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	cmd.WaitDelay = rgWaitDelay
 	cmd.Dir = runDir
 	stdout := &cappedBuffer{limit: rgMaxRetainedOutput}
 	var stderr bytes.Buffer
 	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// A caller cancel is reported as such. It must not reach the
+		// errRgUnavailable branch, which would fall back to the walker.
+		if cerr := ctx.Err(); cerr != nil {
+			return "", fmt.Errorf("%s: search cancelled: %w", name, cerr)
+		}
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
 			// rg could not be started: the cached path went stale.
 			forgetRgBin(bin)
@@ -313,7 +339,21 @@ func (t *RgrepTool) run(ctx context.Context, args json.RawMessage, name string) 
 	// Group rg's output into per-file results, then run the relevance judge
 	// between grouping and formatting. A nil judge leaves the output
 	// byte-identical to before; a failure is disclosed in a footer.
+	if cerr := ctx.Err(); cerr != nil {
+		return "", fmt.Errorf("%s: search cancelled: %w", name, cerr)
+	}
 	results := t.groupResults(p, runDir, stdout)
+	if pol.Blocked != nil {
+		// Defense in depth: the ignore globs keep blocked files out of rg's
+		// walk, and any hit that still names one is dropped before it is kept.
+		kept := make([]rgrepResult, 0, len(results))
+		for _, r := range results {
+			if !pol.blocks(r.path) {
+				kept = append(kept, r)
+			}
+		}
+		results = kept
+	}
 
 	judgeResults := make([]SearchResult, len(results))
 	for i, r := range results {

@@ -851,6 +851,24 @@ type ideUpdateMsg struct {
 // user focus, selection, or cursor position.
 type autoRefreshTickMsg struct{}
 
+// toolResultsSweepTickMsg fires hourly so a long TUI session releases finished
+// background-process spools instead of keeping them until quit.
+type toolResultsSweepTickMsg struct{}
+
+// toolResultsSweepInterval is how often the TUI prunes the tool-results cache.
+const toolResultsSweepInterval = time.Hour
+
+// sweepToolResultsCmd prunes tool-result files older than two days. A failure is
+// logged, never shown, because the sweep is housekeeping.
+func sweepToolResultsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if err := agent.CleanupToolResults(48 * time.Hour); err != nil {
+			log.Printf("tui: cleaning tool-results cache failed: %v", err)
+		}
+		return nil
+	}
+}
+
 // lspDiagChangedMsg is sent when the LSP DiagnosticStore receives new
 // publishDiagnostics from a language server. The TUI handles this by
 // re-rendering so the sidebar LSP count updates proactively.
@@ -1670,6 +1688,7 @@ type model struct {
 	permDigestErr            string              // explanation failure, shown inside the dialog body
 	permDigestBusy           bool                // one explanation in flight
 	permDigestSeq            int                 // generation; a stale permDigestMsg is dropped
+	permDigestCancel         context.CancelFunc  // cancels the in-flight explanation; nil when none
 	permAskQueue             []queuedPermAsk     // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
 	questionAskQueue         []queuedQuestionAsk // question prompts waiting for the dialog, in arrival order (see queuedQuestionAsk)
 	styles                   Styles
@@ -3148,6 +3167,7 @@ func (m model) Init() tea.Cmd {
 	}
 	// Start quiet background refresh for git/files tabs.
 	cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
+	cmds = append(cmds, tea.Tick(toolResultsSweepInterval, func(time.Time) tea.Msg { return toolResultsSweepTickMsg{} }))
 	// Fire the initial async diff load if the git model queued one during construction.
 	if m.initDiffCmd != nil {
 		cmds = append(cmds, m.initDiffCmd)
@@ -4826,6 +4846,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
 		return m, tea.Batch(cmds...)
+	case toolResultsSweepTickMsg:
+		return m, tea.Batch(sweepToolResultsCmd(), tea.Tick(toolResultsSweepInterval, func(time.Time) tea.Msg { return toolResultsSweepTickMsg{} }))
 	case lspDiagChangedMsg:
 		// LSP diagnostics changed — re-render the sidebar with the updated
 		// count and re-arm the listener for the next change.
@@ -5228,12 +5250,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.permDigestBusy = false
-		if msg.err != nil {
+		switch {
+		case errors.Is(msg.err, agent.ErrToolDigestSuperseded):
+			// Another surface explained the same call first. That is benign: no
+			// error banner, the spinner is simply gone.
+			m.permDigest = ""
+			m.permDigestModel = ""
+			m.permDigestErr = ""
+		case msg.err != nil:
 			m.permDigestErr = msg.err.Error()
 			m.permDigest = ""
 			m.permDigestModel = ""
-		} else {
-			m.permDigest = msg.summary
+		default:
+			// Model output is untrusted: strip its ANSI first, then the TUI's
+			// control/bidi sanitiser, before anything is rendered.
+			m.permDigest = sanitizeForTUI(stripANSI(msg.summary))
 			m.permDigestModel = msg.model
 			m.permDigestErr = ""
 		}
@@ -18237,11 +18268,21 @@ func (m *model) permDigestActionAvailable() bool {
 // resetPermDigest empties the explanation slot and invalidates any in-flight
 // reply (the generation bump makes the stale permDigestMsg a no-op).
 func (m *model) resetPermDigest() {
+	m.cancelPermDigest()
 	m.permDigest = ""
 	m.permDigestModel = ""
 	m.permDigestErr = ""
 	m.permDigestBusy = false
 	m.permDigestSeq++
+}
+
+// cancelPermDigest cancels the in-flight explanation, if any. The cancel is
+// cleared as it runs, so a second reset cannot cancel anything again.
+func (m *model) cancelPermDigest() {
+	if m.permDigestCancel != nil {
+		m.permDigestCancel()
+		m.permDigestCancel = nil
+	}
 }
 
 // startPermDigest kicks off one explanation. It is an ACTION, never a decision:
@@ -18255,16 +18296,22 @@ func (m *model) startPermDigest() tea.Cmd {
 	m.permDigestBusy = true
 	m.permDigestErr = ""
 	req := m.pendingPermission
+	callID := m.pendingToolCallID
 	a := m.agent
+	// The run is cancelled by closing the dialog, a change of ask, a reset, or
+	// a newer run for the same tool call. Only one run is ever in flight.
+	m.cancelPermDigest()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.permDigestCancel = cancel
 	m.layout()
 	return func() tea.Msg {
-		d, err := a.SummarizeToolCall(agent.ToolCallDigestInput{
+		d, err := a.SummarizeToolCallWithKeyCtx(ctx, agent.ToolCallDigestInput{
 			Tool:    req.ToolName,
 			Command: req.Command,
 			Args:    req.Args,
 			Rule:    req.Rule,
 			Scope:   string(req.Scope),
-		})
+		}, callID)
 		if err != nil {
 			return permDigestMsg{seq: seq, err: err}
 		}
@@ -18292,9 +18339,10 @@ func (m *model) renderPermDigest(contentWidth int) string {
 		header += " · " + m.permDigestModel
 	}
 	header += " · not a safety verdict"
-	// The viewport does not soft-wrap, so wrap the prose here: a 1200-char
-	// explanation must not run off the right edge with no way to read it.
-	prose := lipgloss.NewStyle().Width(width).Render(m.permDigest)
+	// The viewport does not soft-wrap. The answer is already sanitised; render it
+	// as Markdown, then wrap it to the dialog width so a long explanation neither
+	// runs off the right edge nor gets cut short.
+	prose := wrapView(renderMarkdown(m.permDigest, m.styles.Text), width)
 	return "\n\n" + dimStyle.Render(header) + "\n" + prose
 }
 

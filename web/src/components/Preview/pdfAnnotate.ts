@@ -54,19 +54,41 @@ export function canvasToPdfRect(
   };
 }
 
-export async function addHighlight(pdfBytes: Uint8Array, pageIndex: number, rect: PdfRect): Promise<Uint8Array> {
+/** SHA-256 of the bytes as lowercase hex: the `expected_hash` the file save
+ *  endpoint compares against the file on disk. */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Draws one translucent yellow highlight per item and returns the new PDF
+ * bytes. The document is loaded and saved once, so a multi-rect selection costs
+ * one round trip through pdf-lib. Flattened into the page content, like
+ * `addHighlight`.
+ */
+export async function addHighlights(
+  pdfBytes: Uint8Array,
+  items: { pageIndex: number; rect: PdfRect }[],
+): Promise<Uint8Array> {
   const doc = await PDFDocument.load(pdfBytes);
-  const page = doc.getPage(pageIndex);
-  page.drawRectangle({
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
-    color: rgb(1, 0.92, 0.2),
-    opacity: 0.35,
-    borderWidth: 0,
-  });
+  for (const { pageIndex, rect } of items) {
+    const page = doc.getPage(pageIndex);
+    page.drawRectangle({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      color: rgb(1, 0.92, 0.2),
+      opacity: 0.35,
+      borderWidth: 0,
+    });
+  }
   return doc.save();
+}
+
+export async function addHighlight(pdfBytes: Uint8Array, pageIndex: number, rect: PdfRect): Promise<Uint8Array> {
+  return addHighlights(pdfBytes, [{ pageIndex, rect }]);
 }
 
 /**

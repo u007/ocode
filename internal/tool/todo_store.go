@@ -810,6 +810,15 @@ func todoUpdate(scope TodoScope, citedRevision int, args todoOpArgs, store *snap
 	return fmt.Sprintf("updated rev=%d", newRev), nil
 }
 
+// todoIDList returns a comma-separated list of valid item ids for error messages.
+func todoIDList(items []todoItem) string {
+	ids := make([]string, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.id)
+	}
+	return strings.Join(ids, ", ")
+}
+
 // applyTodoOp applies one targeted mutation to items and returns the new
 // slice. Split out of todoUpdate so the whole read-verify-apply-write
 // sequence can sit inside a single file-lock hold.
@@ -825,7 +834,10 @@ func applyTodoOp(newItems []todoItem, args todoOpArgs) ([]todoItem, error) {
 		}
 		idx := findIdx(itemID)
 		if idx < 0 {
-			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+			return nil, fmt.Errorf("todo_update: no item with id %q; valid ids: %s", itemID, todoIDList(newItems))
+		}
+		if args.Result == "" && strings.TrimSpace(args.Text) != "" {
+			return nil, fmt.Errorf("todo_update: set_status: you sent the value in \"text\"; use \"result\" instead")
 		}
 		result, err := modelTodoResult(args.Result)
 		if err != nil {
@@ -840,16 +852,28 @@ func applyTodoOp(newItems []todoItem, args todoOpArgs) ([]todoItem, error) {
 	case todoOpEditText:
 		idx := findIdx(itemID)
 		if idx < 0 {
-			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+			return nil, fmt.Errorf("todo_update: no item with id %q; valid ids: %s", itemID, todoIDList(newItems))
 		}
 		newItems[idx].text = text
 	case todoOpSetDeps:
 		idx := findIdx(itemID)
 		if idx < 0 {
-			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+			return nil, fmt.Errorf("todo_update: no item with id %q; valid ids: %s", itemID, todoIDList(newItems))
 		}
 		if args.Deps == nil {
-			return nil, fmt.Errorf("todo_update: set_deps requires deps (an empty array clears them)")
+			cur := []string{}
+			if newItems[idx].deps != nil {
+				cur = newItems[idx].deps
+			}
+			marshaled, _ := json.Marshal(cur)
+			example := "<id>"
+			for _, it := range newItems {
+				if it.id != itemID {
+					example = it.id
+					break
+				}
+			}
+			return nil, fmt.Errorf("todo_update: set_deps requires \"deps\". %s currently depends on %s. Send {\"op\":\"set_deps\",\"item_id\":\"%s\",\"deps\":[\"%s\"]} with the ids, or \"deps\":[] to clear.", itemID, string(marshaled), itemID, example)
 		}
 		deps, err := parseTodoDepsInput(*args.Deps)
 		if err != nil {
@@ -859,11 +883,18 @@ func applyTodoOp(newItems []todoItem, args todoOpArgs) ([]todoItem, error) {
 	case todoOpSetResult:
 		idx := findIdx(itemID)
 		if idx < 0 {
-			return nil, fmt.Errorf("todo_update: no item with id %q", itemID)
+			return nil, fmt.Errorf("todo_update: no item with id %q; valid ids: %s", itemID, todoIDList(newItems))
 		}
-		result, err := modelTodoResult(text)
+		result, err := modelTodoResult(args.Result)
 		if err != nil {
 			return nil, err
+		}
+		if result == "" {
+			msg := "todo_update: set_result requires a non-empty \"result\" (one line)."
+			if strings.TrimSpace(args.Text) != "" {
+				msg += " You sent the value in \"text\"; use \"result\" instead."
+			}
+			return nil, fmt.Errorf("%s", msg)
 		}
 		newItems[idx].result = result
 	case todoOpAppend:
@@ -886,7 +917,7 @@ func applyTodoOp(newItems []todoItem, args todoOpArgs) ([]todoItem, error) {
 		}
 		idx := findIdx(itemID)
 		if idx < 0 {
-			return nil, fmt.Errorf("todo_update: no item with id %q to insert after", itemID)
+			return nil, fmt.Errorf("todo_update: no item with id %q to insert after; valid ids: %s", itemID, todoIDList(newItems))
 		}
 		canon := " "
 		if status != "" {
@@ -1006,7 +1037,7 @@ func (t TodoUpdateTool) Parallel() bool { return false }
 func (t TodoUpdateTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todo_update",
-		"description": "Apply a targeted update to one todo item by its id. Ops: set_status (status: pending|in_progress|done, optional result; in_progress/done are refused while a dependency is not done), edit_text (text), append (text, new item at end), insert_after (item_id + text, new item after the anchor), set_deps (item_id + deps: ids this item waits for; [] clears), set_result (item_id + text, one line). Every call must cite the revision from the most recent todoread; a stale revision is rejected.",
+		"description": "Apply a targeted update to one todo item by its id. Every call must cite the revision from the most recent todoread; a stale revision is rejected.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1016,28 +1047,30 @@ func (t TodoUpdateTool) Definition() map[string]interface{} {
 				},
 				"op": map[string]interface{}{
 					"type":        "string",
-					"description": "set_status | edit_text | append | insert_after | set_deps | set_result",
+					"enum":        []string{"set_status", "edit_text", "append", "insert_after", "set_deps", "set_result"},
+					"description": "set_status | edit_text | append | insert_after | set_deps | set_result. Required params per op: set_status: item_id, status (result optional); edit_text: item_id, text; append: text; insert_after: item_id, text; set_deps: item_id, deps (required, [] clears); set_result: item_id, result.",
 				},
 				"item_id": map[string]interface{}{
 					"type":        "string",
-					"description": "The stable item id from todoread (required for set_status, edit_text, insert_after).",
+					"description": "The stable item id from todoread (required for set_status, edit_text, insert_after, set_deps, set_result).",
 				},
 				"status": map[string]interface{}{
 					"type":        "string",
+					"enum":        []string{"pending", "in_progress", "done"},
 					"description": "pending | in_progress | done (for set_status, or the new item's status for append/insert_after).",
 				},
 				"text": map[string]interface{}{
 					"type":        "string",
-					"description": "New text for edit_text, or the new item's text for append/insert_after, or the one-line result for set_result.",
+					"description": "New text for edit_text, or the new item's text for append/insert_after.",
 				},
 				"deps": map[string]interface{}{
 					"type":        "array",
 					"items":       map[string]interface{}{"type": "string"},
-					"description": "For set_deps: ids of the items this item depends on. Replaces the list; an empty array clears it.",
+					"description": "REQUIRED for set_deps: ids of the items this item depends on. Replaces the list; an empty array clears it. Omitting deps is an error.",
 				},
 				"result": map[string]interface{}{
 					"type":        "string",
-					"description": "For set_status: optional one-line result recorded in the same update.",
+					"description": "One-line result. For set_status: optional, recorded in the same update. For set_result: required (the value to store).",
 				},
 			},
 			"required": []string{"revision", "op"},

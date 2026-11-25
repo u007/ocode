@@ -1275,6 +1275,51 @@ describe("projectStore worktree checkout binding", () => {
     tabs = result.current.state.tabsByProject["/proj-a"];
     expect(tabs.find((t) => t.id === "sess-w")?.worktreeMissing).toBeFalsy();
   });
+
+  it("treats an empty worktree listing as a failed discovery", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt");
+    });
+
+    await act(async () => {
+      result.current.applyWorktreeAvailability("/proj-a", []);
+    });
+    expect(result.current.state.tabsByProject["/proj-a"][0].worktreeMissing).toBeFalsy();
+  });
+
+  it("does not let another host's listing disable a local worktree tab", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt");
+    });
+
+    await act(async () => {
+      result.current.applyWorktreeAvailability("/proj-a", ["/proj-a"], "me@host");
+    });
+    expect(result.current.state.tabsByProject["/proj-a"][0].worktreeMissing).toBeFalsy();
+  });
+
+  it("matches a checkout that differs only by a trailing separator", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt/");
+    });
+
+    await act(async () => {
+      result.current.applyWorktreeAvailability("/proj-a", ["/proj-a", "/proj-a-wt"]);
+    });
+    expect(result.current.state.tabsByProject["/proj-a"][0].worktreeMissing).toBeFalsy();
+  });
 });
 
 describe("projectStore keeps one tab per session across projects", () => {

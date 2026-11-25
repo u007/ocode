@@ -127,6 +127,62 @@ export function isDesktopShell(target: Window = window): boolean {
   return Boolean((target as WailsWindow)._wails?.invoke);
 }
 
+/** How long a save waits for the shell's ack of one message. A refusal the shell cannot tie to a session never acks, so this bounds the wait. */
+const SAVE_ACK_TIMEOUT_MS = 60_000;
+
+/** Identifies one save message: the session id, the step, and the chunk seq (0 for start and end). */
+type SaveAckKey = { id: string; step: "start" | "chunk" | "end"; seq: number };
+
+/** The ack the shell dispatches after handling one save message (cmd/ocode-desktop/save_file.go, saveAckScript). */
+type SaveAck = SaveAckKey & { ok: boolean };
+
+const saveAckWaiters = new Map<string, (ok: boolean) => void>();
+const saveAckListened = new WeakSet<Window>();
+
+function saveAckId(key: SaveAckKey): string {
+  return `${key.id}|${key.step}|${key.seq}`;
+}
+
+/**
+ * Post one save message and wait for the shell's ack before the caller sends
+ * the next one. Wails runs each page message on its own goroutine, so messages
+ * sent back to back can be handled out of order (start, chunk and end from one
+ * save would then fail); the ack per message keeps them in order and reports a
+ * refusal or a failed write back to the page.
+ */
+async function postSaveStep(message: string, key: SaveAckKey, name: string, target: Window): Promise<void> {
+  if (!saveAckListened.has(target)) {
+    saveAckListened.add(target);
+    target.addEventListener("ocode:save-ack", (event) => {
+      const ack = (event as CustomEvent<SaveAck>).detail;
+      const id = saveAckId(ack);
+      const settle = saveAckWaiters.get(id);
+      // intentionally not logged: a late ack for a save already timed out
+      if (!settle) return;
+      saveAckWaiters.delete(id);
+      settle(ack.ok);
+    });
+  }
+  if (!invokeWails(message, target)) {
+    throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
+  }
+  // The shell acks in a later task, so the waiter is registered before any ack can arrive.
+  const ok = await new Promise<boolean>((resolve, reject) => {
+    const id = saveAckId(key);
+    const timer = setTimeout(() => {
+      saveAckWaiters.delete(id);
+      reject(new Error(`save: ${name} got no ${key.step} ack from the desktop shell within ${SAVE_ACK_TIMEOUT_MS} ms`));
+    }, SAVE_ACK_TIMEOUT_MS);
+    saveAckWaiters.set(id, (acked) => {
+      clearTimeout(timer);
+      resolve(acked);
+    });
+  });
+  if (!ok) {
+    throw new Error(`save: ${name} refused by the desktop shell at ${key.step}`);
+  }
+}
+
 /**
  * Send a Blob to the desktop shell as a stream of start → chunk* → end
  * messages; the shell appends the chunks to a temp file and shows the native
@@ -136,16 +192,14 @@ export function isDesktopShell(target: Window = window): boolean {
  * stays ~SAVE_CHUNK_BYTES regardless of file size; the bytes never exist as
  * one string.
  *
- * The bridge has no acknowledgement: this returns when the messages were
- * posted, not when the shell accepted or wrote them. Refusals (bad nonce,
- * over-cap chunk, a chunk arriving out of order) are only logged by the
- * shell; a failed write is surfaced by the shell as a native error dialog.
+ * Each message waits for the shell's ack (postSaveStep), so this resolves when
+ * the shell has accepted the whole transfer. A failed write is still shown by
+ * the shell as a native error dialog.
  *
  * Throws when the page has no clipboard nonce (the shell refuses the save), when
- * the bridge goes missing mid-stream, or when the file exceeds
- * MAX_DESKTOP_SAVE_BYTES. Nothing is sent in those cases (except that an
- * interrupted stream leaves a dead session in the shell, which its stale-save
- * reaper deletes).
+ * the bridge goes missing, when the shell refuses a message or does not ack it
+ * in time, or when the file exceeds MAX_DESKTOP_SAVE_BYTES. Nothing is sent in
+ * the last case.
  */
 export async function saveDesktopBlob(name: string, blob: Blob, target: Window = window): Promise<void> {
   if (!clipboardNonce) {
@@ -154,20 +208,15 @@ export async function saveDesktopBlob(name: string, blob: Blob, target: Window =
   assertDesktopSaveSize(name, blob.size);
   const id = uuidv4();
   const start = JSON.stringify({ id, name, size: blob.size });
-  if (!invokeWails(`ocode:save-file-start:${clipboardNonce}:${start}`, target)) {
-    throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
-  }
+  await postSaveStep(`ocode:save-file-start:${clipboardNonce}:${start}`, { id, step: "start", seq: 0 }, name, target);
   for (let offset = 0; offset < blob.size; offset += SAVE_CHUNK_BYTES) {
     const end = Math.min(offset + SAVE_CHUNK_BYTES, blob.size);
     const bytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
-    const body = JSON.stringify({ id, seq: offset / SAVE_CHUNK_BYTES, data: bytesToBase64(bytes) });
-    if (!invokeWails(`ocode:save-file-chunk:${clipboardNonce}:${body}`, target)) {
-      throw new Error(`save: ${name} interrupted, the desktop bridge is missing`);
-    }
+    const seq = offset / SAVE_CHUNK_BYTES;
+    const body = JSON.stringify({ id, seq, data: bytesToBase64(bytes) });
+    await postSaveStep(`ocode:save-file-chunk:${clipboardNonce}:${body}`, { id, step: "chunk", seq }, name, target);
   }
-  if (!invokeWails(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, target)) {
-    throw new Error(`save: ${name} not finished, the desktop bridge is missing`);
-  }
+  await postSaveStep(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, { id, step: "end", seq: 0 }, name, target);
 }
 
 /**
@@ -178,9 +227,10 @@ export async function saveDesktopBlob(name: string, blob: Blob, target: Window =
  * Content-Length (the shell verifies the final byte count); callers fall back
  * to saveDesktopBlob when the stream or the length is missing.
  *
- * As with saveDesktopBlob, the bridge has no acknowledgement; a mid-stream
- * refusal is only logged by the shell. Throws when the stream ends early or
- * runs long (the shell session is then abandoned to its stale-save reaper).
+ * As with saveDesktopBlob, each message waits for the shell's ack. Throws when
+ * the stream ends early or runs long, or when the shell refuses a message; the
+ * shell deletes the session on a refusal, and its stale-save reaper covers one
+ * that never ends.
  */
 export async function saveDesktopStream(
   name: string,
@@ -197,14 +247,10 @@ export async function saveDesktopStream(
   assertDesktopSaveSize(name, size);
   const id = uuidv4();
   const start = JSON.stringify({ id, name, size });
-  if (!invokeWails(`ocode:save-file-start:${clipboardNonce}:${start}`, target)) {
-    throw new Error(`save: ${name} not sent, the desktop bridge is missing`);
-  }
-  const sendChunk = async (bytes: Uint8Array, seq: number): Promise<void> => {
+  await postSaveStep(`ocode:save-file-start:${clipboardNonce}:${start}`, { id, step: "start", seq: 0 }, name, target);
+  const sendChunk = (bytes: Uint8Array, seq: number): Promise<void> => {
     const body = JSON.stringify({ id, seq, data: bytesToBase64(bytes) });
-    if (!invokeWails(`ocode:save-file-chunk:${clipboardNonce}:${body}`, target)) {
-      throw new Error(`save: ${name} interrupted, the desktop bridge is missing`);
-    }
+    return postSaveStep(`ocode:save-file-chunk:${clipboardNonce}:${body}`, { id, step: "chunk", seq }, name, target);
   };
 
   const reader = body.getReader();
@@ -236,9 +282,7 @@ export async function saveDesktopStream(
     if (received !== size) {
       throw new Error(`save: ${name} ended at ${received} of ${size} bytes`);
     }
-    if (!invokeWails(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, target)) {
-      throw new Error(`save: ${name} not finished, the desktop bridge is missing`);
-    }
+    await postSaveStep(`ocode:save-file-end:${clipboardNonce}:${JSON.stringify({ id })}`, { id, step: "end", seq: 0 }, name, target);
   } finally {
     // Every exit path releases the response, or a failed download holds a
     // WKWebView connection slot (~6 per origin) until GC.

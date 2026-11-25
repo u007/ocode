@@ -200,11 +200,11 @@ func TestTodoSetDepsSetResultAndStatusResult(t *testing.T) {
 		t.Fatalf("empty deps must clear, got %v", got)
 	}
 
-	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Text: "  parser added  "})
+	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Result: "  parser added  "})
 	if got := readItems(t, "s")[0].result; got != "parser added" {
 		t.Fatalf("result = %q", got)
 	}
-	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Text: "two\nlines"}); err == nil {
+	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Result: "two\nlines"}); err == nil {
 		t.Error("multi-line result must be rejected")
 	}
 
@@ -220,7 +220,7 @@ func TestTodoRewriteKeepsDetailOfEchoedItems(t *testing.T) {
 	fixedTodoClock(t, t1Stamp)
 	seedPlan(t, "s", "- [ ] a\n- [ ] b\n")
 	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetDeps, ItemID: "t2", Deps: &[]string{"t1"}})
-	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t2", Text: "kept"})
+	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t2", Result: "kept"})
 
 	// Rewrite by id (reworded) and by text (reordered, id-less): both keep detail.
 	rewrite := "- [ ] t2 b reworded\n- [ ] a\n"
@@ -403,5 +403,80 @@ func TestTodoDoneItemNotDispatchable(t *testing.T) {
 	}
 	if err := CheckTodoItemDispatchable(todoScopeFor("s"), "t1"); err != nil {
 		t.Fatalf("open item refused: %v", err)
+	}
+}
+func TestTodoSetResultRequiresResultField(t *testing.T) {
+	chdirTemp(t)
+	fixedTodoClock(t, t1Stamp)
+	seedPlan(t, "s", "- [ ] a\n- [ ] b\n")
+
+	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Result: ""}); err == nil {
+		t.Error("set_result with empty result must be an error")
+	} else if !strings.Contains(err.Error(), "requires a non-empty") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Text: "hello"}); err == nil {
+		t.Error("set_result with only text must be an error")
+	} else if !strings.Contains(err.Error(), "use \"result\" instead") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetResult, ItemID: "t1", Result: "done"})
+	if got := readItems(t, "s")[0].result; got != "done" {
+		t.Fatalf("result = %q", got)
+	}
+}
+
+func TestTodoSetDepsMissingShowsCurrentAndExample(t *testing.T) {
+	chdirTemp(t)
+	fixedTodoClock(t, t1Stamp)
+	seedPlan(t, "s", "- [ ] a\n- [ ] b\n")
+
+	mustUpdate(t, "s", todoOpArgs{Op: todoOpSetDeps, ItemID: "t2", Deps: &[]string{"t1"}})
+	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetDeps, ItemID: "t2"}); err == nil {
+		t.Error("set_deps without deps must be an error")
+	} else {
+		msg := err.Error()
+		if !strings.Contains(msg, "currently depends on") {
+			t.Errorf("missing current deps in error: %v", err)
+		}
+		if !strings.Contains(msg, "\"deps\":[]") {
+			t.Errorf("missing example in error: %v", err)
+		}
+	}
+}
+
+func TestTodoMissingIdListsValidIds(t *testing.T) {
+	chdirTemp(t)
+	fixedTodoClock(t, t1Stamp)
+	seedPlan(t, "s", "- [ ] a\n- [ ] b\n")
+
+	if _, err := updateOp(t, "s", todoOpArgs{Op: todoOpSetStatus, ItemID: "t9", Status: "done"}); err == nil {
+		t.Error("missing id must be an error")
+	} else if !strings.Contains(err.Error(), "valid ids: t1, t2") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestTodoUpdateOpEnumMatchesConstants(t *testing.T) {
+	def := TodoUpdateTool{}.Definition()
+	params := def["parameters"].(map[string]interface{})
+	props := params["properties"].(map[string]interface{})
+	op := props["op"].(map[string]interface{})
+	enum := op["enum"].([]string)
+	want := []string{todoOpSetStatus, todoOpEditText, todoOpAppend, todoOpInsertAfter, todoOpSetDeps, todoOpSetResult}
+	if len(enum) != len(want) {
+		t.Fatalf("enum len %d != %d", len(enum), len(want))
+	}
+	for i, v := range want {
+		if enum[i] != v {
+			t.Errorf("enum[%d] = %q, want %q", i, enum[i], v)
+		}
+	}
+	status := props["status"].(map[string]interface{})
+	senum := status["enum"].([]string)
+	if len(senum) != 3 || senum[0] != "pending" || senum[1] != "in_progress" || senum[2] != "done" {
+		t.Errorf("status enum = %v", senum)
 	}
 }

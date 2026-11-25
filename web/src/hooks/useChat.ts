@@ -7,7 +7,8 @@ import {
   getSessionSlice,
   extractAskContext,
 } from "../stores/chatStore";
-import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
+import { useProjectState, findTabForSession } from "../stores/projectStore";
+import { tabRoot } from "../lib/tabRoot";
 import { api, ApiError } from "../api/client";
 import { resolveSessionHost } from "./useSessionHost";
 import { clearPendingRewind, loadPendingRewind } from "../lib/pendingRewindStore";
@@ -139,9 +140,10 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // machine, so an ambiguous path sends no host (the server runs it locally).
   // useChat falls back to the active project for brand-new draft tabs.
   const projectHost = resolveSessionHost(projectState, sessionId ?? undefined, { fallbackToActive: true });
-  const projectPath = sessionId
-    ? findProjectPathForTab(projectState, sessionId) ?? projectState.activeProject?.path
-    : projectState.activeProject?.path;
+  // Session-scoped calls (new-session create, shell cwd, retry, rewind) run in
+  // the tab's own checkout, not the owning project's main checkout.
+  const tab = sessionId ? findTabForSession(projectState, sessionId) : undefined;
+  const projectPath = tab ? tabRoot(tab) : projectState.activeProject?.path;
 
   // Recover the pending ask when a send is refused because the session is
   // already paused on one (HTTP 409 ErrPermissionPending). The live

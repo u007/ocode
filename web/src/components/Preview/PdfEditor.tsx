@@ -3,18 +3,13 @@ import { ensureReadableStreamAsyncIterator } from "../../lib/readableStreamAsync
 import * as pdfjsLib from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { PDFDocument, degrees } from "pdf-lib";
-import { addHighlight, addTextNote, canvasToPdfRect } from "./pdfAnnotate";
+import { addHighlight, addTextNote, canvasToPdfRect, sha256Hex } from "./pdfAnnotate";
 import { api as apiClient, authHeaders, apiPath } from "../../api/client";
 
 ensureReadableStreamAsyncIterator();
 
 if (typeof window !== "undefined" && pdfjsLib.GlobalWorkerOptions.workerSrc !== workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export default function PdfEditor({

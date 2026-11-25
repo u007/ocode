@@ -1295,6 +1295,146 @@ func TestMatchSubcommandAllow_FormatterLinterTools(t *testing.T) {
 	}
 }
 
+// TestDevelopmentToolFlagGate_NodeOptions: NODE_OPTIONS code loading (-r,
+// --require, --import, loader hooks) must never auto-allow, and only the known
+// benign Node/V8 tuning flags may pass.
+func TestDevelopmentToolFlagGate_NodeOptions(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	level := func(command string) PermissionLevel {
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pm.Decide("bash", args).Level
+	}
+	for _, cmd := range []string{
+		`NODE_OPTIONS="--require ./x.js" npx vitest run`,
+		"NODE_OPTIONS=-r./x.js npx vitest run",
+		`NODE_OPTIONS="-r ./x.js" npx vitest run`,
+		"NODE_OPTIONS=-r=./x.js npx vitest run",
+		"NODE_OPTIONS=--import=./x.mjs npx vitest run",
+		`NODE_OPTIONS="--import ./x.mjs" npx vitest run`,
+		"NODE_OPTIONS=--loader=./x.mjs npx vitest run",
+		"NODE_OPTIONS=--experimental-loader=./x.mjs npx vitest run",
+		`NODE_OPTIONS="--experimental-loader ./x.mjs" npx vitest run`,
+		"env NODE_OPTIONS=-r./x.js npx vitest run",
+		"NODE_OPTIONS=--max-old-space-size npx vitest run",
+		"NODE_OPTIONS=--inspect=0.0.0.0:9229 npx vitest run",
+		"NODE_OPTIONS=--require=./x.js npm run build",
+		"NODE_OPTIONS=--import=./x.mjs tsc --noEmit",
+		"NODE_OPTIONS=--import=./x.mjs go build ./...",
+		"NODE_OPTIONS=--import=./x.mjs make build",
+	} {
+		if got := level(cmd); got == PermissionAllow {
+			t.Errorf("Decide(%q)=allow — NODE_OPTIONS code loading must not auto-allow", cmd)
+		}
+	}
+	for _, cmd := range []string{
+		"NODE_OPTIONS=--max-old-space-size=4096 npx vitest run",
+		"NODE_OPTIONS=--max-semi-space-size=64 npx vitest run",
+		"NODE_OPTIONS=--stack-size=2048 npx vitest run",
+		`NODE_OPTIONS="--enable-source-maps --no-warnings" npx vitest run`,
+		`NODE_OPTIONS="--no-deprecation --trace-warnings" npx vitest run`,
+		"NODE_OPTIONS=--unhandled-rejections=strict npx vitest run",
+	} {
+		if got := level(cmd); got != PermissionAllow {
+			t.Errorf("Decide(%q)=%v — benign NODE_OPTIONS tuning must stay auto-allowed", cmd, got)
+		}
+	}
+}
+
+// TestDevelopmentToolFlagGate_GoDoubleDash: Go accepts -flag and --flag alike,
+// so the code-running flags (-exec, -toolexec, -vettool) and the path-checked
+// flags must be enforced for every go subcommand, in argv and in GOFLAGS.
+func TestDevelopmentToolFlagGate_GoDoubleDash(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	level := func(command string) PermissionLevel {
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pm.Decide("bash", args).Level
+	}
+	for _, cmd := range []string{
+		"go test --exec ./evil ./...",
+		"go test --exec=./evil ./...",
+		"go test --toolexec=/tmp/evil ./...",
+		"go test -toolexec /tmp/evil ./...",
+		"go vet --vettool=/tmp/evil-vet ./...",
+		"go vet --vettool /tmp/evil-vet ./...",
+		"go build -toolexec /tmp/evil ./...",
+		"go build --toolexec=/tmp/evil ./...",
+		"go run --exec=/tmp/evil ./cmd/x",
+		"go list -toolexec=/tmp/evil ./...",
+		"GOFLAGS=--toolexec=/tmp/evil go build ./...",
+		"GOFLAGS=--toolexec=/tmp/evil go test ./...",
+		"GOFLAGS=-toolexec=/tmp/evil go vet ./...",
+		"GOFLAGS=-exec=/tmp/evil go test ./...",
+		"GOFLAGS=--toolexec=/tmp/evil golangci-lint run ./...",
+		"GOFLAGS=--toolexec=/tmp/evil make test",
+		"GOFLAGS=-coverprofile=/etc/x.out go test ./...",
+		"go test --coverprofile=/etc/cover.out ./...",
+		"go test --modfile=/etc/go.mod ./...",
+	} {
+		if got := level(cmd); got == PermissionAllow {
+			t.Errorf("Decide(%q)=allow — go code-running flag must not auto-allow", cmd)
+		}
+	}
+	for _, cmd := range []string{
+		"go test ./...",
+		"go vet ./...",
+		"go build ./...",
+		"GOFLAGS=-mod=vendor go test ./...",
+		"go build -x ./...",
+		"go build -o bin/x ./cmd/x",
+		"go test -cover -count=1 -race ./...",
+	} {
+		if got := level(cmd); got != PermissionAllow {
+			t.Errorf("Decide(%q)=%v — benign go command must stay auto-allowed", cmd, got)
+		}
+	}
+}
+
+// TestDevelopmentToolFlagGate_PytestBundles: pytest parses single-dash bundles
+// like argparse, so -xp evil is -x then -p evil. A bundle carrying p (plugin),
+// c (config path) or o (override-ini) must fall through to the judge.
+func TestDevelopmentToolFlagGate_PytestBundles(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	level := func(command string) PermissionLevel {
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pm.Decide("bash", args).Level
+	}
+	for _, cmd := range []string{
+		"pytest -xp evil_plugin tests",
+		"pytest -vpevil_plugin tests",
+		"pytest -qp evil_plugin tests",
+		"pytest -xp=evil_plugin tests",
+		"pytest -xc/etc/pytest.ini tests",
+		"pytest -xo addopts=-pevil_plugin tests",
+		"pytest -oaddopts=-pevil_plugin tests",
+		`PYTEST_ADDOPTS="-xp evil_plugin" pytest -q`,
+	} {
+		if got := level(cmd); got == PermissionAllow {
+			t.Errorf("Decide(%q)=allow — pytest bundled plugin/config/override flag must not auto-allow", cmd)
+		}
+	}
+	for _, cmd := range []string{
+		"pytest -vvs -k smoke tests",
+		"pytest -rA tests",
+		"pytest -q tests",
+	} {
+		if got := level(cmd); got != PermissionAllow {
+			t.Errorf("Decide(%q)=%v — benign pytest bundle must stay auto-allowed", cmd, got)
+		}
+	}
+}
+
 // A Settings PUT replaces the grant list on live agents via
 // SetAutoPermissionConfig; the matcher must see the new set, not the one
 // captured at LoadFromOcode time.

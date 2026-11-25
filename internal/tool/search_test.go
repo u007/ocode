@@ -3,9 +3,12 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -177,5 +180,127 @@ func TestSearchToolsUseContextWorkDir(t *testing.T) {
 	}
 	if contains(res, "decoy.txt") {
 		t.Errorf("list read process cwd instead of project root: %s", res)
+	}
+}
+
+// TestSearchTools_CancelPromptly proves glob, grep (fallback walker) and list
+// stop as soon as the caller's context is cancelled: a pre-cancelled call
+// returns the cancellation with no output, and a cancel fired from inside the
+// walk stops the walk before it visits another entry.
+func TestSearchTools_CancelPromptly(t *testing.T) {
+	dir := t.TempDir()
+	for d := 0; d < 40; d++ {
+		sub := filepath.Join(dir, fmt.Sprintf("d%02d", d))
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f := 0; f < 200; f++ {
+			if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%03d.txt", f)), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	prevRg := rgBinResolver
+	rgBinResolver = func() string { return "" } // force the in-process walker
+	t.Cleanup(func() { rgBinResolver = prevRg })
+
+	base := WithWorkDir(context.Background(), dir)
+	tools := []struct {
+		name string
+		t    interface {
+			ExecuteCtx(context.Context, json.RawMessage) (string, error)
+		}
+		args string
+	}{
+		{"glob", GlobTool{}, `{"pattern":"**/*.txt"}`},
+		{"grep", GrepTool{}, `{"pattern":"x","intent":"test"}`},
+		{"list", ListTool{}, `{"path":"d00"}`},
+	}
+
+	for _, tc := range tools {
+		t.Run(tc.name+"/pre_cancelled", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(base)
+			cancel()
+			out, err := tc.t.ExecuteCtx(ctx, json.RawMessage(tc.args))
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			if out != "" {
+				t.Fatalf("cancelled call returned output %q", out)
+			}
+		})
+	}
+
+	// Cancel from inside the walk via the search policy's Blocked callback:
+	// the walk must not visit any entry after the cancel fires.
+	for _, tc := range []struct {
+		name string
+		t    interface {
+			ExecuteCtx(context.Context, json.RawMessage) (string, error)
+		}
+		args string
+	}{
+		{"glob", GlobTool{}, `{"pattern":"**/*.txt"}`},
+		{"grep", GrepTool{}, `{"pattern":"x","intent":"test"}`},
+		{"list", ListTool{}, `{"path":"d00"}`},
+	} {
+		t.Run(tc.name+"/mid_walk", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(base)
+			defer cancel()
+			var calls, afterCancel int
+			cancelled := false
+			pol := SearchPolicy{Blocked: func(string) bool {
+				if cancelled {
+					afterCancel++
+				}
+				calls++
+				if calls == 25 {
+					cancel()
+					cancelled = true
+				}
+				return false
+			}}
+			out, err := tc.t.ExecuteCtx(WithSearchPolicy(ctx, pol), json.RawMessage(tc.args))
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			if out != "" {
+				t.Fatalf("cancelled walk returned output %q", out)
+			}
+			if afterCancel != 0 {
+				t.Fatalf("walk visited %d entries after cancel", afterCancel)
+			}
+		})
+	}
+}
+
+// TestGrepFallback_BlockedBeforeOpen drives the in-process grep walker with a
+// policy that blocks a FIFO. Opening a FIFO blocks until a writer appears, so
+// if the walker opened the blocked entry this test would hang instead of
+// returning.
+func TestGrepFallback_BlockedBeforeOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfifo is POSIX-only")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("mkfifo", filepath.Join(dir, "pipe.txt")).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ok.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prevRg := rgBinResolver
+	rgBinResolver = func() string { return "" }
+	t.Cleanup(func() { rgBinResolver = prevRg })
+
+	ctx := WithSearchPolicy(WithWorkDir(context.Background(), dir), SearchPolicy{
+		Blocked: func(p string) bool { return filepath.Base(p) == "pipe.txt" },
+	})
+	out, err := GrepTool{}.ExecuteCtx(ctx, json.RawMessage(`{"pattern":"needle","intent":"test"}`))
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if !contains(out, "ok.txt") {
+		t.Fatalf("expected ok.txt match, got %q", out)
 	}
 }

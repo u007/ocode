@@ -150,8 +150,8 @@ func startPendingSave(message string, origin *application.OriginInfo, appHost, n
 }
 
 // refuseSaveStart logs a refused start and shows the native error dialog. The
-// bridge has no acknowledgement, so the SPA cannot learn that its start was
-// refused and would otherwise report the download as done.
+// ack for the start carries ok:false, so the SPA fails the save instead of
+// reporting it as done.
 func refuseSaveStart(name, format string, args ...any) {
 	log.Printf("ocode-desktop: refused save file %q: "+format, append([]any{name}, args...)...)
 	// intentionally not logged: the dialog is the user-visible half of the same failure
@@ -280,12 +280,75 @@ func finishPendingSave(message string, origin *application.OriginInfo, appHost, 
 	return finishedSave{name: s.name, path: s.tmp.Name(), size: s.received}, true
 }
 
+// handleSaveMessage routes one save message to its handler, then acks the page.
+// The page sends the next message only after this ack (see saveAckScript).
+func handleSaveMessage(window application.Window, message string, origin *application.OriginInfo, appHost, nonce string) {
+	var ok bool
+	switch {
+	case strings.HasPrefix(message, msgSaveFileStart):
+		var name string
+		var expected int64
+		if name, expected, ok = startPendingSave(message, origin, appHost, nonce); ok {
+			log.Printf("ocode-desktop: started save of %q (%d bytes)", name, expected)
+		}
+	case strings.HasPrefix(message, msgSaveFileChunk):
+		// quiet: one log line per 8 MiB chunk would spam desktop.log
+		ok = appendSaveChunk(message, origin, appHost, nonce)
+	case strings.HasPrefix(message, msgSaveFileEnd):
+		var fin finishedSave
+		if fin, ok = finishPendingSave(message, origin, appHost, nonce); ok {
+			openFinishedSave(window, fin)
+		}
+	default:
+		return
+	}
+	script, built := saveAckScript(message, ok)
+	if !built {
+		log.Printf("ocode-desktop: save ack not sent: message has no usable session id")
+		return
+	}
+	window.ExecJS(script)
+}
+
+// saveAck is the per-message ack the page waits for. Wails runs each page
+// message on its own goroutine, so start, chunk and end sent back to back can
+// be handled out of order; the page waiting for each ack keeps them ordered.
+type saveAck struct {
+	ID   string `json:"id"`
+	Step string `json:"step"`
+	Seq  int64  `json:"seq"`
+	OK   bool   `json:"ok"`
+}
+
+// saveAckScript builds the ExecJS that dispatches the ack for one save message.
+// The message is split as ocode:save-file-<step>:<nonce>:<json>; the nonce has
+// no colon, so the JSON body is the fourth field. It returns false when the
+// body carries no session id, so the page waits for a timeout instead.
+func saveAckScript(message string, ok bool) (string, bool) {
+	parts := strings.SplitN(message, ":", 4)
+	if len(parts) != 4 {
+		return "", false
+	}
+	var req struct {
+		ID  string `json:"id"`
+		Seq int64  `json:"seq"`
+	}
+	if err := json.Unmarshal([]byte(parts[3]), &req); err != nil || req.ID == "" {
+		return "", false
+	}
+	detail, err := json.Marshal(saveAck{ID: req.ID, Step: strings.TrimPrefix(parts[1], "save-file-"), Seq: req.Seq, OK: ok})
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf(`window.dispatchEvent(new CustomEvent("ocode:save-ack",{detail:%s}))`, detail), true
+}
+
 // openFinishedSave shows the native save panel for a completed transfer and
 // moves the temp file to the chosen path. The panel blocks on the Wails main
 // thread, so the work runs in its own goroutine (the same rule as the print
 // ready path). Cancelling deletes the temp file: no partial downloads land in
-// the user's folders. The panel runs after the transfer completes because the
-// bridge has no channel back to the page to tell it when to start.
+// the user's folders. The panel runs only after the end message is accepted, so
+// a transfer that never completes shows no panel.
 func openFinishedSave(window application.Window, fin finishedSave) {
 	app := application.Get()
 	if app == nil {
@@ -437,8 +500,9 @@ func saveFileBaseName(raw string) string {
 	return base
 }
 
-// showSaveError surfaces a failed save as a native alert. The bridge has no
-// acknowledgement, so a log line alone would look like the download did nothing.
+// showSaveError surfaces a failed save as a native alert. The page's save promise
+// rejects too, but nothing in the page shows that to the user, so a log line
+// alone would look like the download did nothing.
 func showSaveError(app *application.App, name string, err error) {
 	app.Dialog.Error().
 		SetTitle("Could not save file").

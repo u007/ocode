@@ -2202,7 +2202,22 @@ func TestPermissions_TempDirAutoAllowed(t *testing.T) {
 		{"mkdir_tmp", "mkdir -p /tmp/subdir", PermissionAllow},
 		{"rm_tmp_file", "rm /tmp/test.txt", PermissionAllow},
 		{"ls_var_tmp", "ls /var/tmp", PermissionAllow},
-		{"read_tmp_tool", "read", PermissionDeny},
+		{"read_tmp_file", "read", PermissionAllow},
+		{"read_missing_tmp_file", "read", PermissionDeny},
+	}
+
+	// The read cases use a file this test creates, so the result does not depend
+	// on what is already in the temp directory. The missing path is denied by the
+	// "target does not exist" rule.
+	existing, err := os.CreateTemp("", "ocode-perm-read-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing.Close()
+	t.Cleanup(func() { _ = os.Remove(existing.Name()) })
+	readPaths := map[string]string{
+		"read_tmp_file":         existing.Name(),
+		"read_missing_tmp_file": existing.Name() + ".missing",
 	}
 
 	for _, tc := range cases {
@@ -2210,14 +2225,16 @@ func TestPermissions_TempDirAutoAllowed(t *testing.T) {
 			pm := NewPermissionManager()
 			pm.SetWorkDir("/Users/test/project")
 			var args json.RawMessage
-			if tc.name == "read_tmp_tool" {
-				args = json.RawMessage(`{"path":"/tmp/test.txt"}`)
+			tool := "bash"
+			if path, ok := readPaths[tc.name]; ok {
+				raw, err := json.Marshal(map[string]string{"path": path})
+				if err != nil {
+					t.Fatal(err)
+				}
+				args = raw
+				tool = "read"
 			} else {
 				args = json.RawMessage(fmt.Sprintf(`{"command":"%s"}`, tc.command))
-			}
-			tool := "bash"
-			if tc.name == "read_tmp_tool" {
-				tool = "read"
 			}
 			dec := pm.Decide(tool, args)
 			if dec.Level != tc.want {

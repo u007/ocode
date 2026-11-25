@@ -60,6 +60,13 @@ export function projectSessionKey(path: string, host?: string): string {
   return host ? `${host}::${path}` : path;
 }
 
+/** Spelling-tolerant key for matching a tab's checkout against a discovery
+ *  listing: the server canonicalises both, but a trailing separator or a
+ *  Windows backslash must not make one look absent. */
+function checkoutPathKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
 /** Turn a session-list failure into one readable line for the Sessions dialog.
  *  `ApiError` already carries the route, status and a content-type hint (see
  *  api/client.ts fetchJSON), so a message is preferred over a bare fallback; an
@@ -130,7 +137,7 @@ export type ProjectAction =
   | { type: "START_CHECKOUT_SESSIONS"; key: string; request: number }
   | { type: "SET_CHECKOUT_SESSIONS"; key: string; request: number; sessions: SessionInfo[]; fetchedAt: number }
   | { type: "SET_CHECKOUT_SESSIONS_ERROR"; key: string; request: number; error: string }
-  | { type: "SET_WORKTREE_AVAILABILITY"; projectPath: string; available: string[] }
+  | { type: "SET_WORKTREE_AVAILABILITY"; projectPath: string; available: string[]; host?: string }
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
@@ -415,14 +422,20 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "SET_WORKTREE_AVAILABILITY": {
       const list = state.tabsByProject[action.projectPath];
-      if (!list) return state;
-      const available = new Set(action.available);
+      // An empty list is a failed discovery, not "every linked checkout is
+      // gone": keep the flags as they are rather than disabling every tab.
+      if (!list || action.available.length === 0) return state;
+      const available = new Set(action.available.map(checkoutPathKey));
+      const host = action.host ?? "";
       let changed = false;
       const next = list.map((tab) => {
+        // A local and a remote project can share a path; only mark this
+        // host's tabs from this host's listing.
+        if ((tab.host ?? "") !== host) return tab;
         // A legacy or main-checkout tab resolves through `projectPath`, which is
         // the saved root; only a named linked checkout can be missing.
         if (!tab.worktreePath || tab.worktreePath === tab.projectPath) return tab;
-        const missing = !available.has(tab.worktreePath);
+        const missing = !available.has(checkoutPathKey(tab.worktreePath));
         if (!!tab.worktreeMissing === missing) return tab;
         changed = true;
         if (missing) return { ...tab, worktreeMissing: true };
@@ -799,7 +812,7 @@ interface ProjectContextType {
   /** Mark tabs of `projectPath` whose named checkout is absent from `available`
    *  as disabled, and clear the flag once it reappears. `worktreePath` itself is
    *  never changed, so a missing checkout is never retargeted. */
-  applyWorktreeAvailability: (projectPath: string, available: string[]) => void;
+  applyWorktreeAvailability: (projectPath: string, available: string[], host?: string) => void;
   /** Open (or focus) a session tab, bound to `projectPath` when given (for a
    *  session picked from a non-active project's list) or to the active project
    *  otherwise. `worktreePath` names the checkout the session is rooted at
@@ -1279,8 +1292,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   );
 
   const applyWorktreeAvailability = useCallback(
-    (projectPath: string, available: string[]) => {
-      dispatch({ type: "SET_WORKTREE_AVAILABILITY", projectPath, available });
+    (projectPath: string, available: string[], host?: string) => {
+      dispatch({ type: "SET_WORKTREE_AVAILABILITY", projectPath, available, host });
     },
     [dispatch],
   );

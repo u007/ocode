@@ -926,6 +926,8 @@ func NewHandler() *Handler {
 		as := h.agents[agentKey(sessionID)]
 		delete(h.agents, agentKey(sessionID))
 		h.mu.Unlock()
+		// An evicted session's explanations go with it (in flight and cached).
+		invalidateToolDigests(as)
 		// Drop the per-session turn lock too — otherwise one mutex leaks per
 		// session id the process has ever served (the map is keyed by id and
 		// nothing else removed entries).

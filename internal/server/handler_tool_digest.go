@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -9,12 +10,12 @@ import (
 	"github.com/u007/ocode/internal/agent"
 )
 
-// toolDigestBodyMaxBytes caps the explain request. The agent clamps what it
-// SENDS to the model, but an unbounded JSON body is still decoded into memory
-// on an authenticated endpoint, so cap it before decoding.
-const toolDigestBodyMaxBytes = 64 << 10
+// toolDigestBodyMaxBytes caps the explain request before it is decoded. An
+// oversize body is refused with 413, never truncated: a clipped fallback would
+// explain a call the user did not see in full.
+const toolDigestBodyMaxBytes = 1 << 20
 
-// HandleToolCallDigest explains a PENDING tool call in plain prose.
+// HandleToolCallDigest explains a PENDING tool call as Markdown.
 //
 //	POST /api/sessions/{id}/tool-call-digest
 //	{request_id?, tool?, command?, args?, rule?, scope?} -> {summary, model}
@@ -30,6 +31,10 @@ const toolDigestBodyMaxBytes = 64 << 10
 //     asks that are not in the parent transcript (sub-agent asks) or that
 //     resolved between render and click.
 //
+// Statuses: 404 ask_unavailable when request_id names no live ask and no usable
+// fallback was posted (nothing starts); 409 explanation_superseded when a newer
+// run took the same ask (benign for the caller); 413 for an oversize body.
+//
 // Errors are real HTTP errors, not a 200 carrying an `error` field: the dialog
 // treats a failed explanation as a failed action, and fetchJSON already turns a
 // non-2xx body into a message the dialog can render.
@@ -44,10 +49,16 @@ func (h *Handler) HandleToolCallDigest(w http.ResponseWriter, r *http.Request, i
 		Scope     string          `json:"scope,omitempty"`
 	}
 	if err := readBodyJSON(r, &body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "explanation request is larger than 1 MiB")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
+	requestID := strings.TrimSpace(body.RequestID)
 	in := agent.ToolCallDigestInput{
 		Tool:    strings.TrimSpace(body.Tool),
 		Command: body.Command,
@@ -55,8 +66,18 @@ func (h *Handler) HandleToolCallDigest(w http.ResponseWriter, r *http.Request, i
 		Rule:    body.Rule,
 		Scope:   body.Scope,
 	}
-	if authoritative, ok := h.pendingAskDigestInput(id, strings.TrimSpace(body.RequestID)); ok {
+	// The authoritative ask (or an accepted fallback) is resolved first, so an
+	// input that cannot be explained never reaches coordinator admission, a
+	// cache lookup or a semaphore slot.
+	if authoritative, ok := h.pendingAskDigestInput(id, requestID); ok {
 		in = authoritative
+	} else if requestID != "" && !usableFallbackDigest(in) {
+		writeExpectedErrorCode(w, http.StatusNotFound, "ask_unavailable",
+			"this request is no longer pending, and no fallback parameters were posted")
+		return
+	} else if !usableFallbackDigest(in) {
+		writeError(w, http.StatusBadRequest, "tool or a pending request_id is required; a bare tool name needs command or args")
+		return
 	}
 	if in.Tool == "" {
 		writeError(w, http.StatusBadRequest, "tool or a pending request_id is required")
@@ -68,16 +89,10 @@ func (h *Handler) HandleToolCallDigest(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	// TryLock, never Lock: a running turn holds as.mu for its whole duration, so
-	// a blocking read here would pin this HTTP request behind the turn. The
-	// dialog is shown while an ask is pending (no turn running), so TryLock
-	// normally succeeds; when it does not, failing fast is the honest answer.
-	if !as.mu.TryLock() {
-		writeError(w, http.StatusConflict, "session is busy; try again when the current turn finishes")
-		return
-	}
+	// as.agent is set once when the session is built and never reassigned, so it
+	// is read without a lock. The explanation is independent of whether a chat
+	// turn holds as.mu: a busy session is never a conflict.
 	a := as.agent
-	as.mu.Unlock()
 	if a == nil {
 		writeError(w, http.StatusServiceUnavailable, "session has no agent to explain the call")
 		return
@@ -85,7 +100,12 @@ func (h *Handler) HandleToolCallDigest(w http.ResponseWriter, r *http.Request, i
 
 	// r.Context() cancels the provider call when the dialog closes or the
 	// browser navigates away, so an abandoned click does not keep paying.
-	digest, err := a.SummarizeToolCallCtx(r.Context(), in)
+	digest, err := a.SummarizeToolCallWithKeyCtx(r.Context(), in, requestID)
+	if errors.Is(err, agent.ErrToolDigestSuperseded) {
+		writeExpectedErrorCode(w, http.StatusConflict, "explanation_superseded",
+			"this explanation was replaced by a newer request for the same tool call")
+		return
+	}
 	if err != nil {
 		log.Printf("serve: tool-call digest failed: session=%s tool=%s err=%v", id, in.Tool, err)
 		writeError(w, http.StatusBadGateway, "explain failed: "+err.Error())
@@ -135,4 +155,28 @@ func (h *Handler) pendingAskDigestInput(sessionID, requestID string) (agent.Tool
 		}, true
 	}
 	return agent.ToolCallDigestInput{}, false
+}
+
+// usableFallbackDigest reports whether posted parameters can stand in for an ask
+// that is no longer in the transcript: a tool name plus something to explain
+// (arguments or a command). A bare tool name explains nothing.
+func usableFallbackDigest(in agent.ToolCallDigestInput) bool {
+	return in.Tool != "" && (in.Command != "" || len(in.Args) > 0)
+}
+
+// invalidateToolDigests drops the explanations owned by as's agent. It reads only
+// the agent pointer, which is never reassigned, and takes no session lock, so it
+// is safe on every path that already holds as.mu.
+func invalidateToolDigests(as *agentSession) {
+	if as == nil || as.agent == nil {
+		return
+	}
+	agent.InvalidateToolDigests(as.agent.OpenCodeSessionID())
+}
+
+// writeExpectedErrorCode answers a normal dialog race (a stale ask or a
+// superseded explanation). It is not logged as "serve error": these are expected
+// outcomes, not server faults.
+func writeExpectedErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }

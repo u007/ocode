@@ -171,6 +171,89 @@ func TestCleanupToolResults(t *testing.T) {
 	}
 }
 
+// TestCleanupToolResultsKeepsLiveOwnerSpool: a spool whose owner pid is alive
+// survives past maxAge, while a dead owner's spool and a plain stale result
+// are removed.
+func TestCleanupToolResultsKeepsLiveOwnerSpool(t *testing.T) {
+	savedAlive, savedOpen := spoolOwnerAlive, spoolIsOpen
+	defer func() { spoolOwnerAlive, spoolIsOpen = savedAlive, savedOpen }()
+
+	writeFile := func(t *testing.T, dir, name string, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("stale", func(t *testing.T) {
+		cacheDir := isolateToolResultCache(t)
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		spoolOwnerAlive = func(pid int) bool { return pid == 111 }
+		old := time.Now().Add(-72 * time.Hour)
+		live := writeFile(t, cacheDir, "proc-111-1-proc-1.log", old)
+		dead := writeFile(t, cacheDir, "proc-222-1-proc-1.log", old)
+		plain := writeFile(t, cacheDir, "call_x.txt", old)
+
+		if err := CleanupToolResults(48 * time.Hour); err != nil {
+			t.Fatalf("CleanupToolResults: %v", err)
+		}
+		if _, err := os.Stat(live); err != nil {
+			t.Errorf("live owner's spool should remain: %v", err)
+		}
+		for _, p := range []string{dead, plain} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("%s should have been removed, err=%v", filepath.Base(p), err)
+			}
+		}
+	})
+
+	t.Run("own process: finished spool removed, open spool kept", func(t *testing.T) {
+		cacheDir := isolateToolResultCache(t)
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		spoolOwnerAlive = func(pid int) bool { return true }
+		openName := fmt.Sprintf("proc-%d-2-proc-2.log", os.Getpid())
+		spoolIsOpen = func(name string) bool { return name == openName }
+		old := time.Now().Add(-72 * time.Hour)
+		finished := writeFile(t, cacheDir, fmt.Sprintf("proc-%d-1-proc-1.log", os.Getpid()), old)
+		open := writeFile(t, cacheDir, openName, old)
+
+		if err := CleanupToolResults(48 * time.Hour); err != nil {
+			t.Fatalf("CleanupToolResults: %v", err)
+		}
+		if _, err := os.Stat(finished); !os.IsNotExist(err) {
+			t.Errorf("finished spool of this process should be removed, err=%v", err)
+		}
+		if _, err := os.Stat(open); err != nil {
+			t.Errorf("running process's spool should remain at any age: %v", err)
+		}
+	})
+
+	t.Run("fresh live owner", func(t *testing.T) {
+		cacheDir := isolateToolResultCache(t)
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		spoolOwnerAlive = func(pid int) bool { return pid == 111 }
+		live := writeFile(t, cacheDir, "proc-111-1-proc-1.log", time.Now())
+
+		if err := CleanupToolResults(48 * time.Hour); err != nil {
+			t.Fatalf("CleanupToolResults: %v", err)
+		}
+		if _, err := os.Stat(live); err != nil {
+			t.Errorf("fresh live owner's spool should remain: %v", err)
+		}
+	})
+}
+
 // TestTruncateToolResultCharCapHintsActualCutLine guards the resume hint: when
 // the char cap trips inside line 3 of a 200-line output, the model must be told
 // to continue at line 3 (and the byte offset of the cut), not at line 101.

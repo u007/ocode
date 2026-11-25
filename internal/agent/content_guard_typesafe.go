@@ -66,8 +66,8 @@ var contentGuardJudgeTimeout = 4 * time.Second
 const contentGuardChunkChars = 6000
 
 // contentGuardChunkCap bounds how many chunks one result may be split into
-// (32 x 6000 = 192KB). It aligns with the bash tool's existing procBufferCap
-// (256KB) so a bash result can never reach it in practice. It exists because
+// (32 x 6000 = 192KB). It sits above the bash tool's procBufferCap (50KB) so a
+// bash result can never reach it in practice. It exists because
 // MCP responses have NO size cap anywhere in internal/mcp — a server can return
 // as much as it likes — so an unbounded split would let one fat result stall a
 // turn indefinitely.

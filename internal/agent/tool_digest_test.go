@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,23 +12,34 @@ import (
 	"github.com/u007/ocode/internal/config"
 )
 
-// newToolDigestTestAgent builds an Agent whose resolved digest client IS the
-// stub: the small model is disabled and no provider key is set, so
-// smallModelOrMainClient falls through to a.client.
+// newToolDigestTestAgent builds an Agent whose explainer side client IS the
+// stub. The side client is built through newClientFn (the production factory
+// seam) for an explicit small model, because the explainer never falls back to
+// the live main client: a stub main client has no side-client clone.
+//
+// It also gives the agent a fresh coordinator, so a cached success from one
+// test can never satisfy another test's call.
 //
 // Unlike the speech-summary tests there is no on-disk cache to redirect: the
-// digest is deliberately uncached (an ask is answered once, and caching a
-// model's prose about a live command would risk showing stale text for the same
-// command in a later session).
+// digest is deliberately uncached across sessions (an ask is answered once, and
+// caching a model's prose about a live command would risk showing stale text for
+// the same command in a later session).
 func newToolDigestTestAgent(t *testing.T, stub LLMClient) *Agent {
 	t.Helper()
 	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
 		t.Setenv(key, "")
 	}
+	prevFactory := newClientFn
+	newClientFn = func(*config.Config, string) LLMClient { return stub }
+	t.Cleanup(func() { newClientFn = prevFactory })
+	prevCoord := toolDigestCoord
+	toolDigestCoord = newToolDigestCoordinator(time.Now)
+	t.Cleanup(func() { toolDigestCoord = prevCoord })
 	return &Agent{
 		client: stub,
 		config: &config.Config{Ocode: config.OcodeConfig{
-			SmallModelEnabled: false,
+			SmallModelEnabled: true,
+			SmallModel:        "testprov/test-model",
 		}},
 	}
 }
@@ -65,7 +77,7 @@ func TestSummarizeToolCallReturnsProse(t *testing.T) {
 	if !strings.Contains(stub.gotUser, "go test ./...") {
 		t.Errorf("command missing from the payload: %q", stub.gotUser)
 	}
-	if !strings.Contains(stub.gotUser, "tool: bash") {
+	if !strings.Contains(stub.gotUser, `"tool":"bash"`) {
 		t.Errorf("tool name missing from the payload: %q", stub.gotUser)
 	}
 	if !strings.Contains(stub.gotUser, "bash.prefix.npm") {
@@ -96,21 +108,21 @@ func TestToolDigestClientUsesTheSmallModel(t *testing.T) {
 	}
 }
 
-// TestSummarizeToolCallFallsBackToMainModel pins the chosen product behaviour:
-// with the small-model gate off the button still works, on the main model.
-func TestSummarizeToolCallFallsBackToMainModel(t *testing.T) {
+// TestSummarizeToolCallRefusesUncloneableMainClient pins the no-fallback rule:
+// with the small-model gate off and a main client that cannot be cloned into a
+// distinct no-thinking client, the explainer fails explicitly and never sends
+// a request on the live main client.
+func TestSummarizeToolCallRefusesUncloneableMainClient(t *testing.T) {
 	main := &speechSummaryTestClient{reply: "from main"}
 	a := newToolDigestTestAgent(t, main)
+	a.config.Ocode.SmallModelEnabled = false
 
-	got, err := a.SummarizeToolCall(bashDigestInput("ls -la"))
-	if err != nil {
-		t.Fatalf("SummarizeToolCall: %v", err)
+	_, err := a.SummarizeToolCall(bashDigestInput("ls -la"))
+	if err == nil {
+		t.Fatal("expected an explicit error instead of reusing the live main client")
 	}
-	if got.Summary != "from main" {
-		t.Fatalf("summary = %q", got.Summary)
-	}
-	if main.calls != 1 {
-		t.Errorf("main model calls = %d, want 1", main.calls)
+	if main.calls != 0 {
+		t.Errorf("live main client was called %d times, want 0", main.calls)
 	}
 }
 
@@ -149,24 +161,33 @@ func TestSummarizeToolCallTreatsInjectedCommandAsData(t *testing.T) {
 	}
 }
 
-// TestSummarizeToolCallTruncatesHugeInput keeps one click from becoming a large
-// bill, and marks the cut so the model knows it saw a partial command.
-func TestSummarizeToolCallTruncatesHugeInput(t *testing.T) {
+// TestSummarizeToolCallPagesHugeInput: the old one-click input clamp is gone.
+// The manifest states the exact masked payload size, the first request carries
+// only one parameter page, and the rest stays pageable through call_parameters.
+func TestSummarizeToolCallPagesHugeInput(t *testing.T) {
 	stub := &speechSummaryTestClient{reply: "A very long command."}
 	a := newToolDigestTestAgent(t, stub)
 
 	command := strings.Repeat("echo abcdefghij; ", 3000)
-	if _, err := a.SummarizeToolCall(bashDigestInput(command)); err != nil {
+	in := bashDigestInput(command)
+	if _, err := a.SummarizeToolCall(in); err != nil {
 		t.Fatalf("SummarizeToolCall: %v", err)
 	}
-	if !strings.Contains(stub.gotUser, "…[truncated]") {
-		t.Error("truncation marker missing from the payload")
+	want, err := buildToolDigestPayload(in, digestTestIdentity)
+	if err != nil {
+		t.Fatalf("buildToolDigestPayload: %v", err)
 	}
-	if n := len([]rune(stub.gotUser)); n > toolDigestMaxInputChars {
-		t.Errorf("payload is %d runes, over the %d budget", n, toolDigestMaxInputChars)
+	if !strings.Contains(stub.gotUser, fmt.Sprintf("total_bytes=%d", want.totalBytes)) {
+		t.Errorf("manifest does not state the exact payload size %d:\n%s", want.totalBytes, stub.gotUser)
+	}
+	if !strings.Contains(stub.gotUser, want.sha256) {
+		t.Error("manifest does not carry the payload sha256")
+	}
+	if strings.Contains(stub.gotUser, "…[truncated]") {
+		t.Error("the input clamp marker must not appear on the explainer path")
 	}
 	if strings.Contains(stub.gotUser, command) {
-		t.Error("the full oversized command must not be sent")
+		t.Error("the full oversized command must not fit in the first request; pages carry the rest")
 	}
 }
 
@@ -228,9 +249,9 @@ func TestSummarizeToolCallPropagatesProviderError(t *testing.T) {
 }
 
 func TestSummarizeToolCallTimesOut(t *testing.T) {
-	prev := toolDigestTimeout
-	toolDigestTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { toolDigestTimeout = prev })
+	prev := toolDigestModelCallTimeout
+	toolDigestModelCallTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { toolDigestModelCallTimeout = prev })
 
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
@@ -266,7 +287,7 @@ func TestCleanToolDigestStripsFencesAndLabels(t *testing.T) {
 		{"plain", "Runs the tests.", "Runs the tests."},
 		{"fence", "```\nRuns the tests.\n```", "Runs the tests."},
 		{"labelled", "Here is the explanation:\nRuns the tests.", "Runs the tests."},
-		{"wrapped", "Runs\nthe tests.", "Runs the tests."},
+		{"line breaks kept", "Runs\nthe tests.", "Runs\nthe tests."},
 		{"empty", "   ", ""},
 	}
 	for _, tc := range cases {
@@ -278,12 +299,12 @@ func TestCleanToolDigestStripsFencesAndLabels(t *testing.T) {
 	}
 }
 
-func TestCleanToolDigestClampsOutput(t *testing.T) {
-	got := cleanToolDigest(strings.Repeat("a", toolDigestMaxOutputChars+500))
-	if n := len([]rune(got)); n > toolDigestMaxOutputChars+1 {
-		t.Fatalf("clamped output is %d runes, want <= %d (+ellipsis)", n, toolDigestMaxOutputChars)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Error("clamped output should end with an ellipsis")
+// TestCleanToolDigestKeepsFullMarkdown: the 1200-rune output clamp is gone and
+// the answer keeps its Markdown structure, so a long answer comes back whole.
+func TestCleanToolDigestKeepsFullMarkdown(t *testing.T) {
+	long := "## What it does\n\n- " + strings.Repeat("a", 1500) + "\n\n## Touches\n\n- none\n"
+	got := cleanToolDigest(long)
+	if got != strings.TrimSpace(long) {
+		t.Fatalf("long Markdown was altered: got %d bytes, want %d unchanged", len(got), len(strings.TrimSpace(long)))
 	}
 }

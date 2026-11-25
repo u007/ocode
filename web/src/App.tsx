@@ -1909,15 +1909,17 @@ function HomeApp() {
                               }
                             >
                               {metadata.known ? (
-                                <TerminalTabs
-                                  ref={(handle) => {
-                                    if (handle) terminalRefs.current.set(pp, handle);
-                                    else terminalRefs.current.delete(pp);
-                                  }}
-                                  active={pp === activeProjectPath && terminalFocused}
-                                  projectPath={pp}
-                                  host={metadata.host}
-                                />
+                                <ErrorBoundary scope={`terminal:${pp}`}>
+                                  <TerminalTabs
+                                    ref={(handle) => {
+                                      if (handle) terminalRefs.current.set(pp, handle);
+                                      else terminalRefs.current.delete(pp);
+                                    }}
+                                    active={pp === activeProjectPath && terminalFocused}
+                                    projectPath={pp}
+                                    host={metadata.host}
+                                  />
+                                </ErrorBoundary>
                               ) : (
                                 <div
                                   data-testid="terminal-project-unavailable"
@@ -1937,6 +1939,15 @@ function HomeApp() {
               })()}
 
               <div className={activeView === "sessions" && focusedKind === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
+                <ErrorBoundary resetKey={activeProjectPath ?? "none"} scope={`project:${activeProjectPath ?? ""}`} fallback={(err, reset) => (
+                  <div className="flex h-full w-full items-center justify-center p-4">
+                    <div className="text-center max-w-md">
+                      <h2 className="text-lg font-semibold mb-2">This project failed to render</h2>
+                      <p className="text-muted-foreground text-sm mb-4 break-words">{err?.message ?? "Unknown error"}</p>
+                      <button type="button" className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted" onClick={reset}>Retry</button>
+                    </div>
+                  </div>
+                )}>
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex" aria-busy={filesBusy}>
                 <div className="relative flex min-h-0 flex-1 overflow-hidden">
                 {/* Mobile: the file tree is an overlay drawer, so a backdrop
@@ -2274,6 +2285,7 @@ function HomeApp() {
                               className="relative flex min-h-0 min-w-0 flex-1 flex-col"
                               style={readerHere ? { width: readerChatPane.width, flex: "none" } : undefined}
                             >
+                              <ErrorBoundary scope={`chat-surface:${tab.projectPath ?? ""}:${tab.id}`}>
                               {readerHere && (
                                 <ReaderChatHeader
                                   onToggleSidebar={() => setSidebarOpen((open) => !open)}
@@ -2300,11 +2312,13 @@ function HomeApp() {
                                 data-testid="chat-transcript-slot"
                                 className="relative flex-[1_1_10rem] min-h-0"
                               >
-                                <OwnerChatPanel
-                                  sessionId={tab.id}
-                                  host={resolveSessionHost(projectState, tab.id)}
-                                  onContinueInterrupted={stableHandleContinueInterrupted}
-                                />
+                                <ErrorBoundary scope={`chat:${tab.projectPath ?? ""}:${tab.id}`}>
+                                  <OwnerChatPanel
+                                    sessionId={tab.id}
+                                    host={resolveSessionHost(projectState, tab.id)}
+                                    onContinueInterrupted={stableHandleContinueInterrupted}
+                                  />
+                                </ErrorBoundary>
                               </div>
                               <PlanPanel
                                 sessionId={tab.id}
@@ -2337,7 +2351,8 @@ function HomeApp() {
                                 onSessionCreated={stableHandleSessionCreated}
                                 isOffline={offlineStatus.isOffline}
                               />
-                            </div>
+                                                          </ErrorBoundary>
+</div>
                           </div>
                         </div>
                       );
@@ -2478,6 +2493,7 @@ function HomeApp() {
                   </div>
                 </div>
               </TabsContent>
+                </ErrorBoundary>
               </div>
             </div>
 
@@ -2860,7 +2876,7 @@ export default function App() {
     return <RemoteReconnect />;
   }
 	return (
-	    <ErrorBoundary>
+	    <ErrorBoundary allowReload>
 	      <ChatProvider>
         <PulseProvider>
 	        <ProjectProvider>

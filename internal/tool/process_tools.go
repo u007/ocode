@@ -50,6 +50,9 @@ func (t BashOutputTool) Execute(args json.RawMessage) (string, error) {
 	if status != ProcRunning {
 		header += fmt.Sprintf(" exit=%d", code)
 	}
+	if path := t.Procs.SpoolPath(params.ID); path != "" {
+		header += " log=" + path
+	}
 	header += "]\n"
 	if text == "" {
 		return header + "(no new output)", nil

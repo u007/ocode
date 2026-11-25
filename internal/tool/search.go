@@ -247,9 +247,13 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 
 	ign := NewIgnoreMatcher(searchDir, params.Ignore)
 	gm := newGlobMatcher(params.Pattern)
+	pol := searchPolicyFromContext(ctx)
 
 	var matches []globMatch
 	walkErr := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			return nil
 		}
@@ -258,6 +262,12 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 
 		if ign.IsIgnored(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if pol.blocks(path) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -285,6 +295,9 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 		return nil
 	})
+	if cerr := ctx.Err(); cerr != nil {
+		return "", cerr
+	}
 	if walkErr != nil {
 		return "", fmt.Errorf("glob failed: %w", walkErr)
 	}
@@ -542,8 +555,19 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		includeMatcher = newGlobMatcher(params.Include)
 	}
 
+	pol := searchPolicyFromContext(ctx)
 	walkErr := filepath.Walk(searchRoot, func(p string, info os.FileInfo, werr error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if werr != nil {
+			return nil
+		}
+		// A blocked entry is never opened: the check precedes readGrepPrefix.
+		if pol.blocks(p) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if ign.IsIgnored(p, info.IsDir()) {
@@ -637,6 +661,9 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return nil
 	})
 
+	if cerr := ctx.Err(); cerr != nil {
+		return "", cerr
+	}
 	if walkErr != nil {
 		return "", fmt.Errorf("grep failed: %w", walkErr)
 	}
@@ -740,6 +767,9 @@ func (t ListTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	if err != nil {
 		return "", err
 	}
+	if cerr := ctx.Err(); cerr != nil {
+		return "", cerr
+	}
 
 	ign := NewIgnoreMatcher(listDir, params.Ignore)
 	entries, err := os.ReadDir(listDir)
@@ -747,11 +777,18 @@ func (t ListTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "", fmt.Errorf("failed to list directory %s: %w", listDir, err)
 	}
 
+	pol := searchPolicyFromContext(ctx)
 	var results []string
 	for _, e := range entries {
+		if cerr := ctx.Err(); cerr != nil {
+			return "", cerr
+		}
 		name := e.Name()
 		fullPath := filepath.Join(listDir, name)
 		if ign.IsIgnored(fullPath, e.IsDir()) {
+			continue
+		}
+		if pol.blocks(fullPath) {
 			continue
 		}
 

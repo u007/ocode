@@ -15,6 +15,7 @@ import { useViewerController, useViewerReport } from "../../lib/viewerContext";
 import { throttleTrailing } from "../../lib/viewerDom";
 import { isDesktopShell } from "../../lib/desktopShell";
 import { documentShell, printDocument } from "./printDocument";
+import { addHighlights, sha256Hex, type PdfRect } from "./pdfAnnotate";
 
 // WebKit has no ReadableStream async iteration, which pdf.js's getTextContent()
 // needs (`for await … of streamTextContent()`). Install it before the first
@@ -65,6 +66,8 @@ const PDF_PRINT_SCALE = 2;
 const PDF_PRINT_DESKTOP_MAX_PAGES = 50;
 /** Desktop print: how long the failed indicator stays on the Print button. */
 const PDF_PRINT_FAILED_RESET_MS = 2500;
+/** Highlight: how long the "Select text on a page first" hint stays beside the button. */
+const PDF_HIGHLIGHT_HINT_MS = 2500;
 /** Desktop print: one page per sheet, no margins, no break after the last page. */
 const PDF_PRINT_CSS =
   "@page { margin: 0 } html, body { margin: 0; background: #fff } main img { display: block; width: 100%; page-break-after: always } main img:last-child { page-break-after: auto }";
@@ -179,6 +182,7 @@ export default function PdfViewer({
   page,
   onPageChange,
   active = true,
+  allowHighlight = false,
 }: {
   path: string;
   projectRoot?: string;
@@ -190,6 +194,10 @@ export default function PdfViewer({
    *  projects) and release their rasterized window so a backgrounded PDF does
    *  not pin tens of MB of canvas backing stores indefinitely. */
   active?: boolean;
+  /** Show the "Highlight selection" toolbar button, which rewrites the file on
+   *  disk. Only the Files tab opts in; sidebar and Preview-tab hosts stay
+   *  read-only. */
+  allowHighlight?: boolean;
 }) {
   const [total, setTotal] = useState(0);
   /** Per-page geometry in CSS px at the default view (PAGE_SCALE, zoom 1).
@@ -216,6 +224,14 @@ export default function PdfViewer({
   const [printState, setPrintState] = useState<"idle" | "busy" | "failed">("idle");
   const [printFailure, setPrintFailure] = useState("");
   const printResetTimer = useRef<number | undefined>(undefined);
+  /** Highlight of the selected text: `busy` while the file is rewritten. A
+   *  note (hint or failure) shows beside the button; it never touches `error`,
+   *  so the viewer stays loaded. */
+  const [highlightBusy, setHighlightBusy] = useState(false);
+  const [highlightNote, setHighlightNote] = useState<{ tone: "hint" | "error"; text: string } | null>(null);
+  const highlightNoteTimer = useRef<number | undefined>(undefined);
+  /** Bumped after a highlight is saved: the load effect re-fetches the file. */
+  const [reloadTick, setReloadTick] = useState(0);
 
   const docRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -242,6 +258,9 @@ export default function PdfViewer({
   const renderGenRef = useRef(0);
   const zoomRef = useRef(1);
   const rotationRef = useRef(0);
+  /** Rotation to keep across the reload that follows a highlight save; null
+   *  for an ordinary load, which starts unrotated. */
+  const keepRotationRef = useRef<number | null>(null);
   /** Zoom scroll remap, consumed in a layout effect once the new geometry
    *  has been committed (before paint, so there is no flicker). */
   const pendingRemapRef = useRef<ZoomRemap | null>(null);
@@ -838,6 +857,95 @@ export default function PdfViewer({
 
   useEffect(() => () => window.clearTimeout(printResetTimer.current), []);
 
+  /** Highlight the selected text in the file. Each selection rectangle is
+   *  matched to the rendered page whose canvas contains its centre, then
+   *  converted to PDF points through that page's own viewport (the same
+   *  rotation expression the renderer uses), so a rotated page maps correctly.
+   *  The marks are drawn into a copy of the bytes this view loaded and saved
+   *  against their hash, so a file changed on disk fails as a conflict instead
+   *  of being overwritten. On success the reader reloads at the same page, zoom
+   *  and scroll position. */
+  const highlightSelection = useCallback(async () => {
+    window.clearTimeout(highlightNoteTimer.current);
+    setHighlightNote(null);
+    // A hint is transient; a failure stays until the next attempt.
+    const showHint = () => {
+      setHighlightNote({ tone: "hint", text: "Select text on a page first" });
+      highlightNoteTimer.current = window.setTimeout(() => setHighlightNote(null), PDF_HIGHLIGHT_HINT_MS);
+    };
+    const sel = window.getSelection();
+    const scroll = scrollRef.current;
+    const range = sel && sel.rangeCount > 0 && !sel.isCollapsed ? sel.getRangeAt(0) : null;
+    if (!range || !scroll || !scroll.contains(range.commonAncestorContainer)) {
+      showHint();
+      return;
+    }
+    setHighlightBusy(true);
+    try {
+      const doc = docRef.current;
+      const blob = blobRef.current;
+      if (!doc || !blob) throw new Error("the document is not loaded");
+      const items: { pageIndex: number; rect: PdfRect }[] = [];
+      for (const r of Array.from(range.getClientRects())) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        let hit: { n: number; box: DOMRect } | null = null;
+        for (const [n, canvas] of canvasRefs.current) {
+          const box = canvas.getBoundingClientRect();
+          if (box.width > 0 && box.height > 0 && cx >= box.left && cx <= box.right && cy >= box.top && cy <= box.bottom) {
+            hit = { n, box };
+            break;
+          }
+        }
+        // Not over a rendered page (a gap between pages, or the toolbar): no text to mark.
+        if (!hit) continue;
+        const { n, box } = hit;
+        const pg = await doc.getPage(n);
+        const vp = pg.getViewport({ scale: 1, rotation: (((pg.rotate as number) || 0) + rotationRef.current) % 360 });
+        const toPdf = (x: number, y: number): number[] =>
+          vp.convertToPdfPoint(((x - box.left) / box.width) * vp.width, ((y - box.top) / box.height) * vp.height);
+        const [x1, y1] = toPdf(r.left, r.top);
+        const [x2, y2] = toPdf(r.right, r.bottom);
+        items.push({
+          pageIndex: n - 1,
+          rect: { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) },
+        });
+      }
+      if (items.length === 0) {
+        showHint();
+        return;
+      }
+      const original = new Uint8Array(await blob.arrayBuffer());
+      const expectedHash = await sha256Hex(original);
+      const out = await addHighlights(original, items);
+      const bytes = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+      const res = await api.saveFileRaw(path, bytes, { projectRoot, host: projectHost, expectedHash });
+      if (!res.saved) throw new Error("the file was not saved");
+      sel?.removeAllRanges();
+      // Write the reading position now (the debounce may still be pending) so
+      // the reload restores this page, zoom and scroll offset.
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      savePreviewViewState(viewKeyRef.current, {
+        page: visibleRef.current,
+        zoom: zoomRef.current,
+        scrollTop: scroll.scrollTop,
+      });
+      keepRotationRef.current = rotationRef.current;
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      console.error("pdf highlight failed", e);
+      setHighlightNote({ tone: "error", text: `Highlight failed: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setHighlightBusy(false);
+    }
+  }, [path, projectRoot, projectHost]);
+
+  useEffect(() => () => window.clearTimeout(highlightNoteTimer.current), []);
+
   const rotate = useCallback(() => {
     const doc = docRef.current;
     if (!doc || !totalRef.current) return;
@@ -997,8 +1105,10 @@ export default function PdfViewer({
     const restoredZoom = stored?.zoom && stored.zoom > 0 ? Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, stored.zoom)) : 1;
     zoomRef.current = restoredZoom;
     setZoom(restoredZoom);
-    rotationRef.current = 0;
-    setRotation(0);
+    const keepRotation = keepRotationRef.current;
+    keepRotationRef.current = null;
+    rotationRef.current = keepRotation === null ? 0 : keepRotation;
+    setRotation(rotationRef.current);
     pendingRemapRef.current = null;
     restoreDoneRef.current = false;
     setDocVersion((v) => v + 1); // resets the find state
@@ -1065,7 +1175,7 @@ export default function PdfViewer({
     };
     // `page` intentionally omitted — see the comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, projectRoot, projectHost]);
+  }, [path, projectRoot, projectHost, reloadTick]);
 
   // First placement, once the page geometry exists. Also restores the stored
   // scroll offset so a remounted viewer resumes mid-page, not just at the
@@ -1161,6 +1271,31 @@ export default function PdfViewer({
           {printState === "busy" ? "Printing…" : printState === "failed" ? "Print failed" : "Print"}
         </button>
         <button type="button" disabled={!total} onClick={downloadPdf} className={idleBtn} aria-label="Download" title={`Download ${pdfFileName}`}>Download</button>
+        {allowHighlight && (
+          <>
+            {/* mousedown is cancelled so the click does not clear the text selection it acts on. */}
+            <button
+              type="button"
+              disabled={!total || highlightBusy || loading}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void highlightSelection()}
+              className={idleBtn}
+              aria-label="Highlight selection"
+              title="Highlight selected text"
+            >
+              {highlightBusy ? "Highlighting…" : "Highlight"}
+            </button>
+            {highlightNote && (
+              <span
+                role="status"
+                title={highlightNote.text}
+                className={highlightNote.tone === "error" ? "max-w-64 truncate text-destructive" : "max-w-64 truncate text-muted-foreground"}
+              >
+                {highlightNote.text}
+              </span>
+            )}
+          </>
+        )}
         <button type="button" disabled={!total} onClick={find.show} className={idleBtn} aria-label="Find in document" title="Find (Ctrl/⌘ F)">Find</button>
       </div>
       {find.active && (

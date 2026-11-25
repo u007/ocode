@@ -579,7 +579,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/speech-summary", s.authMiddleware(s.handleSessionSpeechSummary))
-	// Ask-dialog "Explain this tool call": a plain-prose digest of a PENDING
+	// Ask-dialog "Explain this tool call": a Markdown digest of a PENDING
 	// tool call's parameters. Not a judge — it cannot approve or deny anything.
 	s.mux.HandleFunc("POST /api/sessions/{id}/tool-call-digest", s.authMiddleware(s.handleToolCallDigest))
 	// MCP Apps widgets: the view's HTML (read-only) and tool calls the view
@@ -2351,11 +2351,34 @@ func (s *Server) Listen() (net.Listener, error) {
 }
 
 func (s *Server) Start() error {
+	// Background-process spool files live in the tool-results cache, which only
+	// the TUI cleaned before; a long-running server must prune it too.
+	if err := agent.CleanupToolResults(48 * time.Hour); err != nil {
+		log.Printf("serve: cleaning tool-results cache failed: %v", err)
+	}
 	ln, err := s.Listen()
 	if err != nil {
 		return err
 	}
 	return s.Serve(ln)
+}
+
+// sweepToolResultsLoop prunes the tool-results cache hourly until stop is
+// closed, so a long-running server releases finished background-process
+// spools without a restart.
+func sweepToolResultsLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := agent.CleanupToolResults(48 * time.Hour); err != nil {
+				log.Printf("serve: cleaning tool-results cache failed: %v", err)
+			}
+		}
+	}
 }
 
 // Addr returns the actual listen address after Listen succeeds.
@@ -2514,6 +2537,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	stop := make(chan struct{})
 	defer close(stop)
 	go s.handler.evictIdleLoop(stop)
+	go sweepToolResultsLoop(stop)
 	go s.handler.portMapWatchdogLoop(stop)
 	// Open the persisted, enabled port forwards of every saved remote project.
 	// Without this sweep a forward was only ever opened by the first list

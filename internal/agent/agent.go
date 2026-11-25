@@ -286,8 +286,9 @@ func (a *Agent) SetOpenCodeSessionID(sessionID string) {
 	}
 	a.opencodeSessionMu.Lock()
 	a.opencodeSessionID = sessionID
+	client := a.clientSnapshot()
 	a.opencodeSessionMu.Unlock()
-	if gc, ok := a.client.(*GenericClient); ok {
+	if gc, ok := client.(*GenericClient); ok {
 		gc.setOpencodeSessionID(sessionID)
 	}
 }
@@ -307,12 +308,39 @@ func (a *Agent) OpenCodeSessionID() string {
 	if a.opencodeSessionID != "" {
 		return a.opencodeSessionID
 	}
-	if gc, ok := a.client.(*GenericClient); ok {
+	if gc, ok := a.clientSnapshot().(*GenericClient); ok {
 		a.opencodeSessionID = gc.opencodeSessionID()
 	} else {
 		a.opencodeSessionID = newOpencodeFallbackID()
 	}
 	return a.opencodeSessionID
+}
+
+// clientSnapshot returns the current main client pointer under clientSnapshotMu.
+// It holds no lock after returning, so the caller may use the client freely.
+func (a *Agent) clientSnapshot() LLMClient {
+	a.clientSnapshotMu.RLock()
+	defer a.clientSnapshotMu.RUnlock()
+	return a.client
+}
+
+// snapshotToolDigestState copies the state one side explainer run needs. It
+// takes only short, ordered locks (projectCtxMu, opencodeSessionMu, then
+// clientSnapshotMu) and holds none of them across model or tool work.
+func (a *Agent) snapshotToolDigestState() toolDigestSnapshot {
+	snap := toolDigestSnapshot{
+		WorkDir:           a.WorkDir(),
+		SessionID:         a.OpenCodeSessionID(),
+		Profile:           a.profile,
+		RedactionHook:     a.redactionHook,
+		RedactionRegistry: a.redactionRegistry,
+		Client:            a.clientSnapshot(),
+		OnSideUsage:       a.OnSideUsage,
+	}
+	if a.config != nil {
+		snap.Config = *a.config
+	}
+	return snap
 }
 
 func (a *Agent) bindOpenCodeSessionID(client LLMClient) LLMClient {
@@ -559,6 +587,12 @@ type Agent struct {
 	// process-global debug log while still sending a stable request identity.
 	opencodeSessionID string
 	opencodeSessionMu sync.Mutex
+	// clientSnapshotMu guards the main client pointer (a.client). applySpecModel
+	// swaps it under the write lock; the OpenCode identity accessors and
+	// snapshotToolDigestState read it under the read lock. It is a LEAF lock:
+	// build clients and take opencodeSessionMu BEFORE it, never while holding it.
+	// Lock order: opencodeSessionMu -> clientSnapshotMu.
+	clientSnapshotMu sync.RWMutex
 	// lspMgr, when non-nil, is the project-wide LSP manager. Diagnostics
 	// reach the model on the message level only: appended to write-tool
 	// results (appendEditDiagnostics) and as a user-role delta block in
@@ -6708,7 +6742,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 					gc.setSessionID(sid)
 				}
 			}
+			a.clientSnapshotMu.Lock()
 			a.client = client
+			a.clientSnapshotMu.Unlock()
 			// bindSideClient attaches only the tier-1 hook; the opt-in PII
 			// categories belong to the main client and must survive the swap.
 			a.applyPIIToClient(a.client)

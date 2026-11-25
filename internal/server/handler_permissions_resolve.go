@@ -332,6 +332,9 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		h.persistAlwaysAllow(decision, chosenPrefix, permReq, as.agent.Permissions())
 	}
 
+	// The ask is answered: its explanation (in flight or cached) is stale now.
+	invalidateToolDigests(as)
+
 	working := append([]agent.Message(nil), as.messages...)
 
 	// Tell every watcher the dialog can be dismissed NOW — before the approved
@@ -588,6 +591,8 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 		}
 		return false
 	}
+	// The child ask is answered: the owning session's explanations are stale.
+	invalidateToolDigests(as)
 	sessID := sessionID
 	if sessID == "" {
 		// findChildPermAsk scanned, so recover the owning session's id for the

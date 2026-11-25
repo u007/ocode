@@ -302,17 +302,9 @@ func main() {
 				if html, ok := pagePrintHTML(message, origin, dw.host, dw.clipNonce); ok {
 					openPrintWindow(html)
 				}
-				// The desktop save streams as start → chunk* → end messages;
-				// each is answered or refused independently. A chunk message
-				// fails the start-prefix match silently, so the chain below
-				// reaches its own handler without double logging.
-				if name, expected, ok := startPendingSave(message, origin, dw.host, dw.clipNonce); ok {
-					log.Printf("ocode-desktop: started save of %q (%d bytes)", name, expected)
-				} else if ok := appendSaveChunk(message, origin, dw.host, dw.clipNonce); ok {
-					// quiet: one log line per 8 MiB chunk would spam desktop.log
-				} else if fin, ok := finishPendingSave(message, origin, dw.host, dw.clipNonce); ok {
-					openFinishedSave(window, fin)
-				}
+				// The desktop save streams as start → chunk* → end messages,
+				// each handled and acked to the page by handleSaveMessage.
+				handleSaveMessage(window, message, origin, dw.host, dw.clipNonce)
 			} else if strings.HasPrefix(message, msgClipboardWrite) {
 				log.Printf("ocode-desktop: refused clipboard write: window not ready")
 			} else if strings.HasPrefix(message, msgPrintDocument) {

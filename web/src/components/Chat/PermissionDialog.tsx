@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import MarkdownLink from "@/components/common/MarkdownLink";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,7 +21,7 @@ import {
   Sparkles,
   Loader2,
 } from "lucide-react";
-import { api } from "@/api/client";
+import { api, ApiError } from "@/api/client";
 import type { PermissionDecision } from "@/api/types";
 import type { AskContext } from "@/stores/chatStore";
 import type { ContentGuardScore } from "@/stores/chatStore";
@@ -37,6 +40,52 @@ const SHELL_CONTROL_KEYWORDS = new Set([
 // grows with its size (measured headless Chrome: ~86 ms at 50 KB, ~6 s at 500 KB),
 // so the rest of the result is revealed a page at a time, never dropped.
 const CONTENT_PAGE_CHARS = 32_000;
+
+// Markdown for the explainer's answer. Module scope on purpose: react-markdown
+// compares element types by identity, so inline components would remount the
+// subtree on every render (the rule MessageBubble documents). Raw HTML is never
+// parsed (no rehype-raw, and skipHtml), and images render nothing, so model
+// output cannot create an outbound image request. Anchors go through
+// MarkdownLink, which sends http(s) through the URL confirmation chooser.
+const DIGEST_REMARK_PLUGINS = [remarkGfm];
+const DIGEST_COMPONENTS: Components = {
+  a: MarkdownLink,
+  img: () => null,
+  pre: ({ children }) => (
+    <pre className="max-w-full rounded-md bg-card p-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs">
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    <div className="max-w-full overflow-x-auto">
+      <table className="w-full table-fixed border-collapse text-xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-border px-2 py-1 text-left break-words [overflow-wrap:anywhere]">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border border-border px-2 py-1 align-top break-words [overflow-wrap:anywhere]">
+      {children}
+    </td>
+  ),
+};
+
+/** Machine-readable code the explain endpoint sends with its error JSON. */
+function explainErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined;
+  const body = err.body as { code?: unknown } | undefined;
+  return typeof body?.code === "string" ? body.code : undefined;
+}
+
+function explainFailureMessage(err: unknown): string {
+  if (err instanceof ApiError && err.status === 413) {
+    return "This call's parameters are too large to send for an explanation.";
+  }
+  return err instanceof Error ? err.message : "the explanation failed";
+}
 
 interface Props {
   open: boolean;
@@ -334,9 +383,11 @@ export default function PermissionDialog({
   const toolIcon =
     tool === "bash" || tool === "bash_output" ? Terminal : FileCode;
 
-  // Ask the small model (main-model fallback) what this call will do. The
-  // request_id doubles as the authoritative key: while the ask is live the
-  // server explains ITS copy of the parameters, not this component's props.
+  // Ask the small model (main-model fallback) what this call will do. A live
+  // ask is sent as its request_id alone: the server explains ITS copy of the
+  // parameters. Only when that ask is no longer in the transcript (a stale or
+  // sub-agent ask) is the call retried once with the complete props this dialog
+  // holds.
   const handleExplain = async () => {
     if (!sessionId || digestLoading) return;
     digestAbort.current?.abort();
@@ -345,18 +396,40 @@ export default function PermissionDialog({
     setDigestLoading(true);
     setDigestError(null);
     try {
-      const res = await api.explainToolCall(
-        sessionId,
-        { request_id: requestId, tool, command, args, rule, scope },
-        host,
-        controller.signal,
-      );
-      if (controller.signal.aborted) return;
+      let res: { summary: string; model: string };
+      try {
+        res = await api.explainToolCall(
+          sessionId,
+          { request_id: requestId, tool },
+          host,
+          controller.signal,
+        );
+      } catch (err) {
+        const askUnavailable =
+          err instanceof ApiError &&
+          err.status === 404 &&
+          explainErrorCode(err) === "ask_unavailable";
+        const hasFullProps = args !== undefined || command !== undefined;
+        if (!askUnavailable || !hasFullProps || controller.signal.aborted) throw err;
+        res = await api.explainToolCall(
+          sessionId,
+          { request_id: requestId, tool, command, args, rule, scope },
+          host,
+          controller.signal,
+        );
+      }
+      if (controller.signal.aborted || digestAbort.current !== controller) return;
       setDigest(res);
     } catch (err) {
-      // A superseded/aborted click is not a failure to report.
-      if (controller.signal.aborted) return;
-      setDigestError(err instanceof Error ? err.message : "the explanation failed");
+      // A reply from a superseded or aborted run is not a failure to report.
+      if (controller.signal.aborted || digestAbort.current !== controller) return;
+      // 409 explanation_superseded means another run for this same call replaced
+      // this one (this tab or another surface). It is benign: no banner, and the
+      // spinner clears in finally. A previously shown digest is kept.
+      if (err instanceof ApiError && err.status === 409 && explainErrorCode(err) === "explanation_superseded") {
+        return;
+      }
+      setDigestError(explainFailureMessage(err));
     } finally {
       if (digestAbort.current === controller) {
         digestAbort.current = null;
@@ -427,6 +500,9 @@ export default function PermissionDialog({
       container={container}
       open={open}
       onOpenChange={(isOpen) => {
+        // Closing abandons any in-flight explanation, even while a decision is
+        // submitting; a late reply must not land on a dismissed dialog.
+        if (!isOpen) digestAbort.current?.abort();
         if (!isOpen && !loading) {
           setConfirming(null);
           // X / Escape / overlay-close: hide locally when the caller supplied an
@@ -716,7 +792,18 @@ export default function PermissionDialog({
                       <div className="mb-1 text-xs font-medium tracking-wide text-blue-300 uppercase">
                         AI summary{digest.model ? ` · ${digest.model}` : ""} · not a safety verdict
                       </div>
-                      <p className="break-words [overflow-wrap:anywhere]">{digest.summary}</p>
+                      <div
+                        tabIndex={0}
+                        className="prose prose-invert prose-sm max-w-none max-h-64 overflow-y-auto break-words [overflow-wrap:anywhere] text-blue-100"
+                      >
+                        <ReactMarkdown
+                          remarkPlugins={DIGEST_REMARK_PLUGINS}
+                          skipHtml
+                          components={DIGEST_COMPONENTS}
+                        >
+                          {digest.summary}
+                        </ReactMarkdown>
+                      </div>
                     </div>
                   )}
                   {digestError && (

@@ -3,10 +3,14 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -420,5 +424,138 @@ func TestCachedRgBinRechecksAMiss(t *testing.T) {
 	rgBinMu.Unlock()
 	if !cleared {
 		t.Fatal("forgetRgBin did not clear the stale path")
+	}
+}
+
+// writeFakeRg writes a POSIX shell stand-in for rg into dir and returns its
+// path. body runs with rg's argv in "$@".
+func writeFakeRg(t *testing.T, dir, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, "rg")
+	script := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRgrep_CancelTerminatesProcess runs a fake rg that holds its stdout open
+// through a background sleep, then cancels the caller's context. The search
+// must return well before its 60-second ceiling, and both the shell and the
+// sleep grandchild must be gone.
+func TestRgrep_CancelTerminatesProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake rg is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pids")
+	fake := writeFakeRg(t, dir, `echo $$ > "`+pidFile+`"; sleep 60 & echo $! >> "`+pidFile+`"; wait`)
+	prev := rgBinResolver
+	rgBinResolver = func() string { return fake }
+	t.Cleanup(func() { rgBinResolver = prev })
+
+	ctx, cancel := context.WithCancel(WithWorkDir(context.Background(), dir))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&RgrepTool{}).ExecuteCtx(ctx, json.RawMessage(`{"pattern":"x"}`))
+		done <- err
+	}()
+
+	var pids []int
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, _ := os.ReadFile(pidFile)
+		pids = pids[:0]
+		for _, f := range strings.Fields(string(raw)) {
+			var n int
+			if _, err := fmt.Sscan(f, &n); err == nil {
+				pids = append(pids, n)
+			}
+		}
+		if len(pids) == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(pids) != 2 {
+		t.Fatalf("fake rg did not report its pids; got %v", pids)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("rgrep did not return after cancel; it waited out its search")
+	}
+
+	for _, pid := range pids {
+		if !waitProcessGone(pid, 5*time.Second) {
+			t.Fatalf("pid %d still running after cancel", pid)
+		}
+	}
+}
+
+// waitProcessGone polls until pid no longer exists or the timeout passes.
+func waitProcessGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		p, err := os.FindProcess(pid)
+		if err != nil {
+			return true
+		}
+		if err := p.Signal(syscall.Signal(0)); err != nil {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// TestRgrep_SensitiveIgnoresInArgv checks that policy ignore globs reach the
+// real ripgrep argv as case-insensitive excludes, after the include glob so
+// they take precedence.
+func TestRgrep_SensitiveIgnoresInArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake rg is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv.txt")
+	fake := writeFakeRg(t, dir, `printf '%s\n' "$@" > "`+argvFile+`"`)
+	prev := rgBinResolver
+	rgBinResolver = func() string { return fake }
+	t.Cleanup(func() { rgBinResolver = prev })
+
+	ctx := WithSearchPolicy(WithWorkDir(context.Background(), dir), SearchPolicy{
+		IgnoreGlobs: []string{"**/.env", "**/id_rsa*"},
+	})
+	if _, err := (&RgrepTool{}).ExecuteCtx(ctx, json.RawMessage(`{"pattern":"x","include":"*.go"}`)); err != nil {
+		t.Fatalf("rgrep: %v", err)
+	}
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("fake rg did not record argv: %v", err)
+	}
+	argv := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	idx := func(s string) int {
+		for i, a := range argv {
+			if a == s {
+				return i
+			}
+		}
+		return -1
+	}
+	incl := idx("*.go")
+	for _, pat := range []string{"**/.env", "**/id_rsa*"} {
+		i := idx("!" + pat)
+		if i < 1 || argv[i-1] != "--iglob" {
+			t.Fatalf("argv lacks --iglob !%s; argv=%q", pat, argv)
+		}
+		if i < incl {
+			t.Fatalf("--iglob !%s precedes the include glob; argv=%q", pat, argv)
+		}
 	}
 }

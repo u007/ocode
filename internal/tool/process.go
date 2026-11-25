@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,8 +48,38 @@ const (
 	ProcKilled  ProcStatus = "killed"
 )
 
-// procBufferCap bounds the per-process combined stdout+stderr buffer.
-const procBufferCap = 256 * 1024
+// procBufferCap bounds the in-memory per-process stdout+stderr ring. Output past
+// it is spooled to disk in full (see appendOutput).
+const procBufferCap = 50 * 1024
+
+// procSpoolCap bounds the bytes written to one process's spool file. A var so
+// tests can reach the cap without writing 32 MiB.
+var procSpoolCap = 32 * 1024 * 1024
+
+// spoolNameReplacer keeps a spool file name a single path element.
+var spoolNameReplacer = strings.NewReplacer("/", "_", `\`, "_")
+
+// openSpools holds the base names of spool files whose process is still
+// running in this ocode process. Cleanup must never remove one, whatever its age.
+var (
+	openSpoolsMu sync.Mutex
+	openSpools   = map[string]bool{}
+)
+
+// KillProcessGroup force-kills the process group rooted at proc, so a grandchild
+// that ignores SIGTERM does not outlive its leader. Only call it on a process
+// that has not been reaped, so its pid still names the group.
+func KillProcessGroup(proc *os.Process) error {
+	return killProcessGroup(proc)
+}
+
+// SpoolIsOpen reports whether the spool file with this base name belongs to a
+// process still running in this ocode process.
+func SpoolIsOpen(fileName string) bool {
+	openSpoolsMu.Lock()
+	defer openSpoolsMu.Unlock()
+	return openSpools[fileName]
+}
 
 // Process is one background shell process.
 type Process struct {
@@ -68,9 +101,14 @@ type Process struct {
 	supKey string
 
 	mu           sync.Mutex
-	buf          []byte // last <=procBufferCap bytes of the logical stream
-	dropped      int    // count of bytes dropped off the front
-	readCursor   int    // logical offset already returned by readSince
+	buf          []byte   // last <=procBufferCap bytes of the logical stream
+	dropped      int      // count of bytes dropped off the front
+	readCursor   int      // logical offset already returned by readSince
+	spool        *os.File // full output once buf overflowed; nil after finish closes it
+	spoolPath    string   // kept after the spool closes so the file stays discoverable
+	spoolBytes   int      // bytes written to spool, <= procSpoolCap
+	spoolFailed  bool     // spooling failed; output is in-memory only
+	spoolCapped  bool     // procSpoolCap reached; later output is not saved
 	cmd          *exec.Cmd
 	notifyOnExit bool
 	bgRequestCh  chan struct{}
@@ -87,16 +125,132 @@ func (p *Process) SupKey() string {
 	return p.supKey
 }
 
-// appendOutput appends process output, dropping oldest bytes past the cap.
+// appendOutput appends process output. Past procBufferCap the ring drops its
+// oldest bytes, so the spool takes the full stream from the first overflow on.
 func (p *Process) appendOutput(b []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Gate on spoolPath, not spool: finish closes spool but keeps spoolPath, so a
+	// late write cannot start a second file for the same process.
+	if p.spoolPath == "" && !p.spoolFailed && len(p.buf)+len(b) > procBufferCap {
+		// Nothing has been dropped yet, so buf is still the whole stream.
+		p.openSpoolLocked(p.buf)
+	}
+	p.spoolWriteLocked(b)
 	p.buf = append(p.buf, b...)
 	if len(p.buf) > procBufferCap {
 		over := len(p.buf) - procBufferCap
 		p.buf = p.buf[over:]
 		p.dropped += over
 	}
+}
+
+// openSpoolLocked creates the spool file and writes pre (the stream so far).
+// The file is named proc-<ownerpid>-<unixnano>-<name>.log, where ownerpid is
+// this ocode process's pid, so cleanup can keep a spool whose owner is still
+// running (see SpoolOwnerPID). Caller holds p.mu.
+func (p *Process) openSpoolLocked(pre []byte) {
+	dir := toolResultCacheDir()
+	name := p.SupKey()
+	if name == "" {
+		name = p.ID
+	}
+	path := filepath.Join(dir, fmt.Sprintf("proc-%d-%d-%s.log", os.Getpid(), time.Now().UnixNano(), spoolNameReplacer.Replace(name)))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		p.spoolFailLocked(path, err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		p.spoolFailLocked(path, err)
+		return
+	}
+	p.spool = f
+	p.spoolPath = path
+	openSpoolsMu.Lock()
+	openSpools[filepath.Base(path)] = true
+	openSpoolsMu.Unlock()
+	p.spoolWriteLocked(pre)
+}
+
+// SpoolOwnerPID parses a spool file's base name (see openSpoolLocked) and
+// returns the pid of the ocode process that wrote it. It returns 0, false for
+// any name that is not a spool name with a positive owner pid.
+func SpoolOwnerPID(fileName string) (int, bool) {
+	if !strings.HasPrefix(fileName, "proc-") || !strings.HasSuffix(fileName, ".log") {
+		return 0, false
+	}
+	field, _, _ := strings.Cut(strings.TrimPrefix(fileName, "proc-"), "-")
+	pid, err := strconv.Atoi(field)
+	// Above MaxInt32 is not a pid. Such a value is an old nanosecond-only stamp,
+	// and the int32 cast in spoolOwnerAlive would wrap it.
+	if err != nil || pid <= 0 || pid > math.MaxInt32 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// spoolWriteLocked writes b to the spool up to procSpoolCap, then one marker
+// line. A no-op when no spool is open. Caller holds p.mu.
+func (p *Process) spoolWriteLocked(b []byte) {
+	if p.spool == nil || p.spoolCapped {
+		return
+	}
+	capped := len(b) > procSpoolCap-p.spoolBytes
+	if capped {
+		b = b[:procSpoolCap-p.spoolBytes]
+	}
+	n, err := p.spool.Write(b)
+	p.spoolBytes += n
+	if err != nil {
+		p.spoolFailLocked(p.spoolPath, err)
+		return
+	}
+	if capped {
+		p.spoolCapped = true
+		if _, err := p.spool.WriteString("\n[…spool capped at 32 MiB; later output not saved]\n"); err != nil {
+			p.spoolFailLocked(p.spoolPath, err)
+		}
+	}
+}
+
+// spoolFailLocked abandons spooling. The process keeps running with in-memory
+// output only; it is never failed over a spool error. Caller holds p.mu.
+func (p *Process) spoolFailLocked(path string, err error) {
+	log.Printf("process %s: spooling output to %s failed: %v", p.ID, path, err)
+	p.closeSpoolLocked()
+	p.spoolFailed = true
+	p.spoolPath = ""
+}
+
+// closeSpoolLocked closes the spool handle but keeps spoolPath. Caller holds p.mu.
+func (p *Process) closeSpoolLocked() {
+	if p.spool == nil {
+		return
+	}
+	openSpoolsMu.Lock()
+	delete(openSpools, filepath.Base(p.spoolPath))
+	openSpoolsMu.Unlock()
+	if err := p.spool.Close(); err != nil {
+		log.Printf("process %s: closing spool %s failed: %v", p.ID, p.spoolPath, err)
+	}
+	p.spool = nil
+}
+
+// truncationMarkerLocked names n dropped bytes and where their full text lives.
+// Caller holds p.mu.
+func (p *Process) truncationMarkerLocked(n int) string {
+	if p.spoolPath != "" {
+		return fmt.Sprintf("[…truncated %d bytes; full output: %s (read it with the read tool, using offset/limit)]\n", n, p.spoolPath)
+	}
+	return fmt.Sprintf("[…truncated %d bytes; full output unavailable]\n", n)
+}
+
+// SpoolPath returns the file holding the full output, or "" when none was written.
+func (p *Process) SpoolPath() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.spoolPath
 }
 
 // readSince returns logical-stream bytes not yet returned, advancing the
@@ -108,7 +262,7 @@ func (p *Process) readSince() (string, ProcStatus) {
 	start := p.readCursor
 	var prefix string
 	if start < p.dropped {
-		prefix = fmt.Sprintf("[…truncated %d bytes]\n", p.dropped-start)
+		prefix = p.truncationMarkerLocked(p.dropped - start)
 		start = p.dropped
 	}
 	out := prefix + string(p.buf[start-p.dropped:])
@@ -493,6 +647,8 @@ func finishProcess(p *Process, code int, status ProcStatus, onDone func(*Process
 	}
 	p.ExitCode = code
 	p.EndedAt = time.Now()
+	// Every caller drains the output pumps before finishing, so no write can follow.
+	p.closeSpoolLocked()
 	notifyOnExit := p.notifyOnExit
 	p.mu.Unlock()
 	if notifyOnExit && onDone != nil {
@@ -512,6 +668,18 @@ func (r *ProcessRegistry) Output(id string) (text string, status ProcStatus, exi
 	out, _ := p.readSince()
 	st, code := r.viewState(p, id, sup)
 	return out, st, code, nil
+}
+
+// SpoolPath returns the spool file holding process id's full output, or "" when
+// the process is unknown or never overflowed its in-memory ring.
+func (r *ProcessRegistry) SpoolPath(id string) string {
+	r.mu.Lock()
+	p, ok := r.procs[id]
+	r.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return p.SpoolPath()
 }
 
 // Kill terminates a process group. Idempotent.
@@ -636,7 +804,7 @@ func (r *ProcessRegistry) Dump(id string) (string, ProcStatus, int, error) {
 	p.mu.Lock()
 	out := ""
 	if p.dropped > 0 {
-		out = fmt.Sprintf("[…truncated %d bytes]\n", p.dropped)
+		out = p.truncationMarkerLocked(p.dropped)
 	}
 	out += string(p.buf)
 	p.mu.Unlock()

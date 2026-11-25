@@ -51,7 +51,7 @@ describe("saveBlobAsFile", () => {
 
   it("streams the file to the desktop shell as start/chunk/end, never clicking an anchor", async () => {
     const { saveBlobAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
@@ -84,7 +84,7 @@ describe("saveBlobAsFile", () => {
 
   it("splits a file larger than one chunk into sequenced messages", async () => {
     const { saveBlobAsFile, SAVE_CHUNK_BYTES } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const bytes = new Uint8Array(SAVE_CHUNK_BYTES + 3).fill(65);
@@ -108,7 +108,7 @@ describe("saveBlobAsFile", () => {
 
   it("sends start then end for a zero-byte file, with no chunk", async () => {
     const { saveBlobAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     await saveBlobAsFile(new Blob([]), "empty.txt");
@@ -120,7 +120,7 @@ describe("saveBlobAsFile", () => {
 
   it("rejects on desktop when the page has no nonce, and sends nothing", async () => {
     const { saveBlobAsFile } = await loadWithClip(null);
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     await expect(saveBlobAsFile(blobOf(new Uint8Array([1])), "a.txt")).rejects.toThrow(/no desktop nonce/);
@@ -129,7 +129,7 @@ describe("saveBlobAsFile", () => {
 
   it("rejects on desktop when the file is over the save limit, and sends nothing", async () => {
     const { saveBlobAsFile, MAX_DESKTOP_SAVE_BYTES } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
     // A Blob whose size is overridden: allocating 2 GiB in jsdom is not
     // possible. slice/arrayBuffer are own spies so the test can prove the
@@ -185,7 +185,7 @@ describe("saveResponseAsFile", () => {
 
   it("streams a Response body through the bridge without materializing it", async () => {
     const { saveResponseAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7]);
@@ -202,7 +202,7 @@ describe("saveResponseAsFile", () => {
 
   it("coalesces many tiny reads into chunk-sized bridge messages", async () => {
     const { saveResponseAsFile, SAVE_CHUNK_BYTES } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const part = new Uint8Array(1024).fill(7);
@@ -230,7 +230,7 @@ describe("saveResponseAsFile", () => {
 
   it("falls back to a materialized blob when Content-Length is missing", async () => {
     const { saveResponseAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const bytes = new Uint8Array([9, 8, 7]);
@@ -244,7 +244,7 @@ describe("saveResponseAsFile", () => {
 
   it("falls back to a materialized blob when the body is not streamable", async () => {
     const { saveResponseAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const response = fakeResponse(new Uint8Array([1, 2]), { contentLength: "2", streamParts: null });
@@ -257,7 +257,7 @@ describe("saveResponseAsFile", () => {
 
   it("rejects when the stream ends early, and sends no end message", async () => {
     const { saveResponseAsFile } = await loadWithClip("abc");
-    const invoke = vi.fn();
+    const invoke = ackingBridge();
     (window as Window & { _wails?: unknown })._wails = { invoke };
 
     const response = fakeResponse(new Uint8Array([1, 2, 3]), { contentLength: "10", streamParts: [new Uint8Array([1, 2, 3])] });
@@ -272,5 +272,73 @@ describe("saveResponseAsFile", () => {
     const response = fakeResponse(new Uint8Array([1, 2]), { contentLength: "2", streamParts: [new Uint8Array([1, 2])] });
     await saveResponseAsFile(response, "a.bin");
     expect(click).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * A fake desktop bridge that acks each save message on the next tick, the way
+ * the shell does (cmd/ocode-desktop/save_file.go). `refuseStep` makes the shell
+ * refuse that step instead.
+ */
+function ackingBridge(refuseStep?: "start" | "chunk" | "end") {
+  return vi.fn((message: string) => {
+    const m = /^ocode:save-file-(start|chunk|end):[^:]*:(.*)$/s.exec(message);
+    if (!m) return;
+    const body = JSON.parse(m[2]) as { id: string; seq?: number };
+    const step = m[1] as "start" | "chunk" | "end";
+    const detail = { id: body.id, step, seq: step === "chunk" ? body.seq : 0, ok: step !== refuseStep };
+    setTimeout(() => window.dispatchEvent(new CustomEvent("ocode:save-ack", { detail })), 0);
+  });
+}
+
+function bodyOf(message: string): { id: string; seq?: number } {
+  const m = /^ocode:save-file-\w+:[^:]*:(.*)$/s.exec(message);
+  return JSON.parse(m?.[1] ?? "null") as { id: string; seq?: number };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("desktop save acknowledgements", () => {
+  beforeEach(() => {
+    delete (window as Window & { _wails?: unknown })._wails;
+  });
+  afterEach(() => {
+    delete (window as Window & { _wails?: unknown })._wails;
+  });
+
+  it("posts each message only after the shell acks the one before", async () => {
+    const { saveBlobAsFile } = await loadWithClip("abc");
+    const invoke = vi.fn();
+    (window as Window & { _wails?: unknown })._wails = { invoke };
+
+    const done = saveBlobAsFile(new Blob(["hi"]), "a.txt");
+    await flush();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const id = bodyOf(invoke.mock.calls[0][0] as string).id;
+
+    const ack = (step: string, seq: number) =>
+      window.dispatchEvent(new CustomEvent("ocode:save-ack", { detail: { id, step, seq, ok: true } }));
+    ack("start", 0);
+    await flush();
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect((invoke.mock.calls[1][0] as string).startsWith("ocode:save-file-chunk:abc:")).toBe(true);
+
+    ack("chunk", 0);
+    await flush();
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect((invoke.mock.calls[2][0] as string).startsWith("ocode:save-file-end:abc:")).toBe(true);
+
+    ack("end", 0);
+    await expect(done).resolves.toBeUndefined();
+  });
+
+  it("rejects when the shell refuses a chunk", async () => {
+    const { saveBlobAsFile } = await loadWithClip("abc");
+    const invoke = ackingBridge("chunk");
+    (window as Window & { _wails?: unknown })._wails = { invoke };
+
+    await expect(saveBlobAsFile(new Blob(["hi"]), "a.txt")).rejects.toThrow(/refused by the desktop shell at chunk/);
+    expect(invoke).toHaveBeenCalledTimes(2); // start and the refused chunk; no end
+    expect(bodyOf(invoke.mock.calls[1][0] as string).id).toBeTruthy();
   });
 });

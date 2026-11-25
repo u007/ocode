@@ -5408,7 +5408,13 @@ func (pm *PermissionManager) developmentToolArgsAllowed(name string, args []stri
 			positionalOnly = true
 			continue
 		}
+		if name == "pytest" && pytestBundleDenied(arg) {
+			return false
+		}
 		flag, value, hasValue := splitDevelopmentToolFlag(arg)
+		if strings.HasPrefix(name, "go ") {
+			flag = goFlagSpelling(flag)
+		}
 		if developmentToolFlagDenied(name, flag) {
 			return false
 		}
@@ -5478,19 +5484,70 @@ func splitDevelopmentToolFlag(arg string) (string, string, bool) {
 	return arg, "", false
 }
 
+// goFlagSpelling maps Go's accepted --flag spelling onto -flag, which is the
+// form goCodeFlags and formatterLinterPathFlags use. Go's flag package treats
+// both alike, so a lookup on the raw spelling would miss --exec and --modfile.
+func goFlagSpelling(flag string) string {
+	if strings.HasPrefix(flag, "--") {
+		return flag[1:]
+	}
+	return flag
+}
+
+// goCommandFlagsAllowed rejects the argv flags that make a go subcommand run an
+// arbitrary program (-exec, -toolexec, -vettool). Development tools reach the
+// same check through developmentToolFlagDenied; this covers the go subcommands
+// that are not development tools (go build, go run, go list, ...).
+func goCommandFlagsAllowed(cmdWords []string) bool {
+	if len(cmdWords) < 2 || cmdWords[0] != "go" {
+		return true
+	}
+	for _, word := range cmdWords[2:] {
+		flag, _, _ := splitDevelopmentToolFlag(word)
+		if goCodeFlags[goFlagSpelling(flag)] {
+			return false
+		}
+	}
+	return true
+}
+
+// pytestBundleDenied reports whether a single-dash pytest argument bundles
+// options the way argparse reads them left to right: -xp evil is -x then
+// -p evil, and -xc/etc/x or -xo addopts=... attach a config path or an
+// override-ini. It runs on the raw argument, before splitDevelopmentToolFlag,
+// because the "=" cut would hide the bundle. A bundle carrying p, or c/o after
+// another letter, falls through to the judge. Plain bundles such as -vvs and
+// -rA stay allowed. A lone -c or -o is left to the path/ini checks.
+func pytestBundleDenied(arg string) bool {
+	if len(arg) < 2 || arg[0] != '-' || arg[1] == '-' {
+		return false
+	}
+	end := 1
+	for end < len(arg) && (arg[end] >= 'a' && arg[end] <= 'z' || arg[end] >= 'A' && arg[end] <= 'Z') {
+		end++
+	}
+	run := arg[1:end]
+	if strings.ContainsRune(run, 'p') {
+		return true
+	}
+	return len(run) >= 2 && strings.ContainsAny(run, "co")
+}
+
 func developmentToolFlagDenied(name, flag string) bool {
 	if formatterLinterDeniedFlags[flag] {
 		return true
 	}
+	// Every go subcommand, development tool or not, runs what -exec,
+	// -toolexec or -vettool names. Callers pass the spelling goFlagSpelling
+	// normalized.
+	if strings.HasPrefix(name, "go ") {
+		return goCodeFlags[flag]
+	}
 	switch name {
-	case "go test":
-		return flag == "-exec" || flag == "-toolexec"
 	case "pytest":
 		return flag == "-p" || flag == "--plugin" ||
 			flag == "--import-plugin" || flag == "--import" ||
 			flag == "--pyargs"
-	case "go vet":
-		return flag == "-vettool"
 	default:
 		return flag == "--parser" || flag == "--transform" ||
 			flag == "--setupFiles" || flag == "--globalSetup" ||
@@ -5528,10 +5585,28 @@ func (pm *PermissionManager) developmentToolPathAllowed(raw string) bool {
 	return pm.IsPathWithinAllowedRoots(resolvePath(raw, pm.workDir))
 }
 
+// developmentToolEnvAllowed checks a command's environment assignments. NODE_OPTIONS
+// and GOFLAGS apply to every command, because the processes it starts inherit
+// them (npm run build may run go, and GOFLAGS reaches go build). GOFLAGS is
+// checked as go test arguments. The remaining keys apply only when name is a
+// development tool.
 func (pm *PermissionManager) developmentToolEnvAllowed(name string, envVars []string) bool {
 	for _, assignment := range envVars {
 		key, value, ok := strings.Cut(assignment, "=")
 		if !ok {
+			continue
+		}
+		switch key {
+		case "NODE_OPTIONS":
+			if !nodeOptionsAllowed(splitShellFields(value)) {
+				return false
+			}
+		case "GOFLAGS":
+			if !pm.developmentToolArgsAllowed("go test", splitShellFields(value)) {
+				return false
+			}
+		}
+		if name == "" {
 			continue
 		}
 		if developmentToolCodeEnv[key] && strings.TrimSpace(value) != "" {
@@ -5541,6 +5616,49 @@ func (pm *PermissionManager) developmentToolEnvAllowed(name string, envVars []st
 			continue
 		}
 		if !pm.developmentToolArgsAllowed(name, splitShellFields(value)) {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeOptionsBoolFlags, nodeOptionsSizeFlags and nodeUnhandledRejectionModes are
+// the NODE_OPTIONS flags that only tune Node or V8 behaviour and cannot load
+// code. Any other flag fails closed, including every code-loading flag: -r,
+// --require, --import, --loader and --experimental-loader.
+var nodeOptionsBoolFlags = map[string]bool{
+	"--enable-source-maps": true, "--no-warnings": true, "--no-deprecation": true,
+	"--trace-warnings": true, "--trace-deprecation": true,
+}
+
+var nodeOptionsSizeFlags = map[string]bool{
+	"--max-old-space-size": true, "--max-semi-space-size": true, "--stack-size": true,
+}
+
+var nodeUnhandledRejectionModes = map[string]bool{
+	"strict": true, "warn": true, "none": true, "throw": true, "warn-with-error-code": true,
+}
+
+// nodeOptionsAllowed reports whether every NODE_OPTIONS field is a known benign
+// flag. Value-taking flags must be written --flag=value, since a separate value
+// token is not a recognized flag and fails closed.
+func nodeOptionsAllowed(fields []string) bool {
+	for _, field := range fields {
+		flag, value, hasValue := strings.Cut(field, "=")
+		switch {
+		case nodeOptionsBoolFlags[flag]:
+			if hasValue {
+				return false
+			}
+		case nodeOptionsSizeFlags[flag]:
+			if !hasValue || !isAllDigits(value) {
+				return false
+			}
+		case flag == "--unhandled-rejections":
+			if !hasValue || !nodeUnhandledRejectionModes[value] {
+				return false
+			}
+		default:
 			return false
 		}
 	}
@@ -5680,12 +5798,19 @@ var testRunnerTools = map[string]bool{
 }
 
 // developmentToolFlagEnv are environment variables whose values are parsed as
-// extra tool flags. developmentToolCodeEnv always selects code or plugins.
+// extra tool flags of the development tool. GOFLAGS and NODE_OPTIONS are not
+// listed: they are checked for every command (see developmentToolEnvAllowed).
+// developmentToolCodeEnv always selects code or plugins.
 var developmentToolFlagEnv = map[string]bool{
 	"PYTEST_ADDOPTS": true,
-	"GOFLAGS":        true,
-	"NODE_OPTIONS":   true,
 	"RUSTFMT":        true,
+}
+
+// goCodeFlags are the go command flags that run an arbitrary program in place of
+// the compiler, test binary or vet tool. The spelling is -flag; callers normalize
+// a --flag spelling with goFlagSpelling first.
+var goCodeFlags = map[string]bool{
+	"-exec": true, "-toolexec": true, "-vettool": true,
 }
 
 var developmentToolCodeEnv = map[string]bool{
@@ -9441,10 +9566,13 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	}
 
 	// Formatter, linter, type-checker, and test-runner flags can load code or
-	// select outside-root paths. Check them before the temp-dir and subcommand
-	// shortcuts so a test-shaped escape hatch cannot inherit a static allow.
-	if name, toolArgs, ok := developmentToolInvocation(cmd.cmdWords, pm.workDir); ok && (!pm.developmentToolArgsAllowed(name, toolArgs) || !pm.developmentToolEnvAllowed(name, cmd.envVars)) {
-		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (development-tool flag): tool=%s command=%q", name, command))
+	// select outside-root paths. NODE_OPTIONS and GOFLAGS reach every process
+	// the command starts, so their check runs for any command. Check all of
+	// them before the temp-dir and subcommand shortcuts so a test-shaped
+	// escape hatch cannot inherit a static allow.
+	devName, devArgs, isDev := developmentToolInvocation(cmd.cmdWords, pm.workDir)
+	if (isDev && !pm.developmentToolArgsAllowed(devName, devArgs)) || !goCommandFlagsAllowed(cmd.cmdWords) || !pm.developmentToolEnvAllowed(devName, cmd.envVars) {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (development-tool flag): tool=%s command=%q", devName, command))
 		req := bashPermissionRequest(args, command, rulePrefix, candidates)
 		req.Summary = "Development-tool safety gate rejected a risky flag, environment override, unresolved variable, or outside-root path; saved prefix rules do not cover this shape."
 		return PermissionDecision{Level: PermissionAsk, Request: req}

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PDFDocument } from "pdf-lib";
-import { addHighlight, addTextNote, canvasToPdfRect } from "./pdfAnnotate";
+import { addHighlight, addHighlights, addTextNote, canvasToPdfRect, sha256Hex } from "./pdfAnnotate";
 
 async function makePdf(pages = 1): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -73,6 +73,41 @@ describe("pdfAnnotate", () => {
     expect(doc.getPageCount()).toBe(1);
     // content stream grew (drawing appended)
     expect(after.byteLength).toBeGreaterThan(before.byteLength);
+  });
+
+  it("adds one highlight per item across pages in a single save", async () => {
+    const before = await makePdf(2);
+    const one = await addHighlight(before, 0, { x: 10, y: 20, width: 100, height: 30 });
+    const two = await addHighlights(before, [
+      { pageIndex: 0, rect: { x: 10, y: 20, width: 100, height: 30 } },
+      { pageIndex: 1, rect: { x: 10, y: 50, width: 80, height: 12 } },
+    ]);
+    const doc = await PDFDocument.load(two);
+    expect(doc.getPageCount()).toBe(2);
+    // Two rectangles draw more content than one, and the result is not the
+    // same bytes as a single-rect highlight.
+    expect(two.byteLength).toBeGreaterThan(one.byteLength);
+  });
+
+  it("addHighlights with no items returns a valid document", async () => {
+    const before = await makePdf(1);
+    const after = await addHighlights(before, []);
+    expect((await PDFDocument.load(after)).getPageCount()).toBe(1);
+  });
+
+  it("addHighlights throws for an out-of-range page in any item", async () => {
+    const before = await makePdf(1);
+    await expect(
+      addHighlights(before, [
+        { pageIndex: 0, rect: { x: 0, y: 0, width: 1, height: 1 } },
+        { pageIndex: 3, rect: { x: 0, y: 0, width: 1, height: 1 } },
+      ]),
+    ).rejects.toThrow();
+  });
+
+  it("sha256Hex returns the lowercase hex digest", async () => {
+    const digest = await sha256Hex(new TextEncoder().encode("abc"));
+    expect(digest).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   });
 
   it("adds a text note", async () => {

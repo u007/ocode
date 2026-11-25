@@ -88,6 +88,9 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   const showPreviewToolbar = previewKind !== null && (isExcelPreview || isPrintableKind(previewKind));
   const [excelDirty, setExcelDirty] = useState(false);
   const excelSaveRef = useRef<(() => Promise<boolean>) | null>(null);
+  // PDFs open in the reader (PdfViewer); the page editor (PdfEditor) is opt-in
+  // through the "Edit pages" toggle, so highlighting happens in the reader.
+  const [pdfEditing, setPdfEditing] = useState(false);
 
   // Report viewer dirtiness (Excel, PDF, DOCX) to the parent (useEditorTabs) so
   // close-confirm and the quit guard see this tab as dirty. `excelDirty` is the
@@ -280,6 +283,18 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   }
 
   if (previewKind) {
+    const saveDocumentButton = (
+      <button
+        type="button"
+        onClick={() => void excelSaveRef.current?.()}
+        disabled={!excelDirty}
+        aria-label="Save document"
+        title={excelDirty ? "Save document" : "No unsaved edits"}
+        className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+      >
+        Save
+      </button>
+    );
     return (
       // PreviewSurface's root is `min-h-0 flex-1` and the viewers size
       // themselves with `h-full`, so they need a definite-height flex column
@@ -290,24 +305,40 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
           <div className="flex shrink-0 items-center gap-1 border-b border-border bg-muted/30 px-2 py-1 text-xs">
             <span className="truncate text-muted-foreground" title={props.path}>{fileName}</span>
             <div className="ml-auto flex items-center gap-1">
-              {(isExcelPreview || isPdfPreview || isDocxPreview) && (
-                <button
-                  type="button"
-                  onClick={() => void excelSaveRef.current?.()}
-                  disabled={!excelDirty}
-                  aria-label="Save document"
-                  title={excelDirty ? "Save document" : "No unsaved edits"}
-                  className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
-                >
-                  Save
-                </button>
-              )}
+              {(isExcelPreview || isPdfPreview || isDocxPreview) && saveDocumentButton}
               <PrintPreviewButton
                 kind={previewKind}
                 title={fileName}
                 source={{ origin: "disk", path: props.path, projectRoot: props.projectRoot, projectHost: props.projectHost }}
                 className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               />
+            </div>
+          </div>
+        )}
+        {/* The PDF toolbar is its own row: the shared header above is gated on
+            printable kinds, and PdfViewer owns print. Save appears only while
+            the page editor is open, since that is the only place edits happen. */}
+        {isPdfPreview && (
+          <div className="flex shrink-0 items-center gap-1 border-b border-border bg-muted/30 px-2 py-1 text-xs">
+            <span className="truncate text-muted-foreground" title={props.path}>{fileName}</span>
+            <div className="ml-auto flex items-center gap-1">
+              {pdfEditing && saveDocumentButton}
+              <button
+                type="button"
+                onClick={() => setPdfEditing((editing) => !editing)}
+                disabled={pdfEditing && excelDirty}
+                aria-label={pdfEditing ? "Done editing pages" : "Edit pages"}
+                title={
+                  pdfEditing && excelDirty
+                    ? "Save or discard changes first"
+                    : pdfEditing
+                      ? "Return to the reader"
+                      : "Rotate, delete, merge, or annotate pages"
+                }
+                className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+              >
+                {pdfEditing ? "Done" : "Edit pages"}
+              </button>
             </div>
           </div>
         )}
@@ -321,7 +352,8 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
           slide={slide}
           onSlideChange={setSlide}
           active={props.active}
-          editable={isPdfPreview || isDocxPreview}
+          editable={isDocxPreview || (isPdfPreview && pdfEditing)}
+          allowHighlight={isPdfPreview}
           onDirtyChange={setExcelDirty}
           onSaveRef={excelSaveRef}
         />

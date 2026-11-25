@@ -33,6 +33,8 @@ vi.mock("../Preview/PreviewSurface", () => ({
     slide,
     onDirtyChange,
     onSaveRef,
+    editable,
+    allowHighlight,
   }: {
     kind: string;
     content?: string;
@@ -40,6 +42,8 @@ vi.mock("../Preview/PreviewSurface", () => ({
     slide?: number;
     onDirtyChange?: (dirty: boolean) => void;
     onSaveRef?: { current: (() => Promise<void>) | null };
+    editable?: boolean;
+    allowHighlight?: boolean;
   }) => {
     useEffect(() => {
       if (kind === "excel" && onSaveRef) {
@@ -59,6 +63,8 @@ vi.mock("../Preview/PreviewSurface", () => ({
         data-content={content ?? ""}
         data-page={String(page ?? "")}
         data-slide={String(slide ?? "")}
+        data-editable={String(editable === true)}
+        data-allow-highlight={String(allowHighlight === true)}
         onClick={() => {
           if (kind === "excel" && onDirtyChange) {
             onDirtyChange(true);
@@ -68,6 +74,11 @@ vi.mock("../Preview/PreviewSurface", () => ({
         {kind === "excel" && (
           <button type="button" data-testid="excel-mark-dirty" onClick={() => onDirtyChange?.(true)}>
             mark dirty
+          </button>
+        )}
+        {kind === "pdf" && editable === true && (
+          <button type="button" data-testid="pdf-mark-dirty" onClick={() => onDirtyChange?.(true)}>
+            mark pdf dirty
           </button>
         )}
       </div>
@@ -607,6 +618,45 @@ describe("FileTabContent preview-only toolbar (t4)", () => {
     // PdfViewer owns its own print UI; FileTabContent does not add one.
     expect(screen.queryByRole("button", { name: /print/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /save document/i })).toBeNull();
+  });
+
+  it("hands allowHighlight to the Files-tab pdf reader only", async () => {
+    const pdf = render(<FileTabContent path="docs/report.pdf" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-allow-highlight")).toBe("true");
+    pdf.unmount();
+
+    render(<FileTabContent path="docs/budget.xlsx" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-excel")).toBeInTheDocument());
+    expect(screen.getByTestId("preview-excel").getAttribute("data-allow-highlight")).toBe("false");
+  });
+
+  it("opens a pdf in the reader and switches to the page editor on demand", async () => {
+    render(<FileTabContent path="docs/report.pdf" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    // Reader by default: PreviewSurface is not handed the editable flag.
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-editable")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit pages" }));
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-editable")).toBe("true");
+    // Save only exists while the page editor is open.
+    expect(screen.getByRole("button", { name: /save document/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done editing pages" }));
+    expect(screen.getByTestId("preview-pdf").getAttribute("data-editable")).toBe("false");
+    expect(screen.queryByRole("button", { name: /save document/i })).toBeNull();
+  });
+
+  it("disables Done while the page editor has unsaved changes", async () => {
+    render(<FileTabContent path="docs/report.pdf" content="" />);
+    await waitFor(() => expect(screen.getByTestId("preview-pdf")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Edit pages" }));
+    fireEvent.click(screen.getByTestId("pdf-mark-dirty"));
+
+    const done = screen.getByRole("button", { name: "Done editing pages" });
+    expect(done).toBeDisabled();
+    expect(done.getAttribute("title")).toBe("Save or discard changes first");
+    expect(screen.getByRole("button", { name: /save document/i })).not.toBeDisabled();
   });
 
   it("shows Print and disabled-until-dirty Save for .docx", async () => {

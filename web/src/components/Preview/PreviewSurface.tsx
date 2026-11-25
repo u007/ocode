@@ -88,6 +88,9 @@ export interface PreviewSurfaceProps {
   onSaveHandlerRegistered?: () => void;
   /** When true, render the editable variant of a viewer (e.g. PdfEditor). */
   editable?: boolean;
+  /** PDF reader only: show the Highlight toolbar button (rewrites the file on
+   *  disk). Passed by the Files tab alone. */
+  allowHighlight?: boolean;
 }
 
 export default function PreviewSurface({
@@ -109,6 +112,7 @@ export default function PreviewSurface({
   onSaveRef,
   onSaveHandlerRegistered,
   editable,
+  allowHighlight,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
@@ -117,7 +121,7 @@ export default function PreviewSurface({
     <div className={cn("min-h-0 flex-1", editorAppearanceClass(appearance), appearance && "bg-background text-foreground")}>
       <Suspense fallback={<ViewerLoading />}>
         {kind === "pdf" && editable && <PdfEditor path={path} projectRoot={projectRoot} projectHost={projectHost} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
-        {kind === "pdf" && !editable && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
+        {kind === "pdf" && !editable && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} allowHighlight={allowHighlight} />}
         {kind === "docx" && editable && <DocxEditor path={path} projectRoot={projectRoot} projectHost={projectHost} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "docx" && !editable && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}

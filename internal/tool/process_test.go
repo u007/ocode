@@ -1,9 +1,13 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -452,17 +456,210 @@ func TestBashToolForegroundDoesNotEmitCompletionWithoutPromotion(t *testing.T) {
 }
 
 func TestProcessRingBufferTruncates(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
 	// Write more than the cap.
 	big := strings.Repeat("a", procBufferCap+5000)
 	p.appendOutput([]byte(big))
 	text, _ := p.readSince()
-	if len(text) > procBufferCap+64 {
+	// The bound leaves room for the truncation marker, which names the spool path.
+	if len(text) > procBufferCap+512 {
 		t.Fatalf("buffer not capped: got %d bytes", len(text))
 	}
 	if !strings.Contains(text, "truncated") {
 		t.Fatalf("expected truncation marker, got prefix %q", text[:40])
 	}
+}
+
+// numberedOutput returns at least total bytes of distinct, ordered lines.
+func numberedOutput(total int) []byte {
+	var b []byte
+	for i := 0; len(b) < total; i++ {
+		b = append(b, fmt.Sprintf("line %07d %s\n", i, strings.Repeat("x", 100))...)
+	}
+	return b
+}
+
+// appendInChunks feeds data to p in fixed-size writes, like a pump would.
+func appendInChunks(p *Process, data []byte, chunk int) {
+	for off := 0; off < len(data); off += chunk {
+		p.appendOutput(data[off:min(off+chunk, len(data))])
+	}
+}
+
+func TestProcessSpoolsFullOutputPastCap(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	data := numberedOutput(procBufferCap + 5000)
+	appendInChunks(p, data, 3000)
+
+	path := p.SpoolPath()
+	if path == "" {
+		t.Fatal("expected a spool path after overflow")
+	}
+	assertSpoolOwnedByThisProcess(t, path)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read spool: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("spool holds %d bytes, want the %d written, in order", len(got), len(data))
+	}
+
+	text, _ := p.readSince()
+	if !strings.Contains(text, path) || !strings.Contains(text, "truncated") {
+		t.Fatalf("truncation marker missing spool path: %q", text[:min(len(text), 200)])
+	}
+
+	if !SpoolIsOpen(filepath.Base(path)) {
+		t.Fatal("running process's spool is not reported open")
+	}
+	finishProcess(p, 0, ProcExited, nil)
+	if SpoolIsOpen(filepath.Base(path)) {
+		t.Fatal("finished process's spool still reported open")
+	}
+	if p.spool != nil {
+		t.Fatal("spool handle still open after finishProcess")
+	}
+	if p.SpoolPath() != path {
+		t.Fatalf("SpoolPath after finish = %q, want %q", p.SpoolPath(), path)
+	}
+}
+
+func TestProcessSpoolPathsDifferForSameID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	b := &Process{ID: "proc-1", Command: "y", Status: ProcRunning}
+	a.appendOutput(numberedOutput(procBufferCap + 1))
+	b.appendOutput(numberedOutput(procBufferCap + 1))
+	if a.SpoolPath() == "" || b.SpoolPath() == "" {
+		t.Fatalf("both overflowing processes need a spool: a=%q b=%q", a.SpoolPath(), b.SpoolPath())
+	}
+	if a.SpoolPath() == b.SpoolPath() {
+		t.Fatalf("same-ID processes share spool path %q", a.SpoolPath())
+	}
+	assertSpoolOwnedByThisProcess(t, a.SpoolPath())
+	assertSpoolOwnedByThisProcess(t, b.SpoolPath())
+}
+
+// assertSpoolOwnedByThisProcess checks that a spool's base name records this
+// test process as the owner, so cleanup can tell a live owner's spool apart.
+func assertSpoolOwnedByThisProcess(t *testing.T, path string) {
+	t.Helper()
+	name := filepath.Base(path)
+	pid, ok := SpoolOwnerPID(name)
+	if !ok || pid != os.Getpid() {
+		t.Fatalf("spool %q: owner pid = %d (ok=%v), want %d", name, pid, ok, os.Getpid())
+	}
+}
+
+func TestSpoolOwnerPID(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		wantPID int
+		wantOK  bool
+	}{
+		{"valid", "proc-4242-1700000000000-proc-1.log", 4242, true},
+		{"no prefix", "x-4242-1-proc-1.log", 0, false},
+		{"wrong suffix", "proc-4242-1-proc-1.txt", 0, false},
+		{"non-numeric pid", "proc-abc-1-proc-1.log", 0, false},
+		{"pid zero", "proc-0-1-proc-1.log", 0, false},
+		{"plain call file", "call_abc.txt", 0, false},
+		{"old nanosecond-only name", "proc-1700000000000000000-proc-1.log", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pid, ok := SpoolOwnerPID(tt.file)
+			if pid != tt.wantPID || ok != tt.wantOK {
+				t.Fatalf("SpoolOwnerPID(%q) = (%d, %v), want (%d, %v)", tt.file, pid, ok, tt.wantPID, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestProcessUnderCapCreatesNoSpool(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	t.Setenv("XDG_STATE_HOME", dir)
+	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	p.appendOutput([]byte("small output\n"))
+
+	matches, err := filepath.Glob(filepath.Join(dir, "opencode", "tool-results", "proc-*.log"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("under-cap output wrote spool files: %v", matches)
+	}
+	if p.SpoolPath() != "" {
+		t.Fatalf("SpoolPath = %q, want empty", p.SpoolPath())
+	}
+}
+
+func TestProcessSpoolCapBoundsFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	saved := procSpoolCap
+	procSpoolCap = procBufferCap + 100
+	defer func() { procSpoolCap = saved }()
+
+	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	appendInChunks(p, numberedOutput(procBufferCap+5000), 3000)
+	assertSpoolOwnedByThisProcess(t, p.SpoolPath())
+
+	got, err := os.ReadFile(p.SpoolPath())
+	if err != nil {
+		t.Fatalf("read spool: %v", err)
+	}
+	const marker = "\n[…spool capped at 32 MiB; later output not saved]\n"
+	if want := procSpoolCap + len(marker); len(got) != want {
+		t.Fatalf("spool length = %d, want %d (cap + one marker)", len(got), want)
+	}
+	if !strings.HasSuffix(string(got), marker) {
+		t.Fatalf("spool does not end with the cap marker: %q", string(got[len(got)-80:]))
+	}
+}
+
+func TestProcessSpoolFailureKeepsRunningInMemory(t *testing.T) {
+	// A regular file where the state dir should be makes MkdirAll fail.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(blocker, "state"))
+
+	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	p.appendOutput(numberedOutput(procBufferCap + 5000))
+	if p.SpoolPath() != "" {
+		t.Fatalf("SpoolPath = %q, want empty after spool failure", p.SpoolPath())
+	}
+	text, _ := p.readSince()
+	if !strings.Contains(text, "full output unavailable") {
+		t.Fatalf("expected unavailable marker, got prefix %q", text[:min(len(text), 120)])
+	}
+	// The process keeps accepting output in memory.
+	p.appendOutput([]byte("still running"))
+	finishProcess(p, 0, ProcExited, nil)
+}
+
+func TestBashOutputToolReportsSpoolPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	r := NewProcessRegistry()
+	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
+	p.appendOutput(numberedOutput(procBufferCap + 5000))
+	r.mu.Lock()
+	r.procs[p.ID] = p
+	r.order = append(r.order, p.ID)
+	r.mu.Unlock()
+
+	out, err := BashOutputTool{Procs: r}.Execute(json.RawMessage(`{"id":"proc-1"}`))
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+	want := " log=" + p.SpoolPath() + "]"
+	if p.SpoolPath() == "" || !strings.Contains(out, want) {
+		t.Fatalf("header missing %q: %q", want, out[:min(len(out), 200)])
+	}
+	assertSpoolOwnedByThisProcess(t, p.SpoolPath())
 }
 
 func TestProcessReadSinceIsIncremental(t *testing.T) {

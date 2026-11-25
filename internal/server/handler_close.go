@@ -64,6 +64,11 @@ func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id 
 	// logged and never fails the close.
 	h.terminateSessionBox(id)
 
+	// Explanations for this session's asks end with it: an in-flight run is
+	// cancelled and its cached results dropped. The owner is read before the
+	// release, because the eviction hook removes the session's entry.
+	invalidateToolDigests(h.lookupAgentSession(id))
+
 	// 2. Release the resident agent now if possible. The agent must go away
 	// even when a turn is in flight or bootstrap is still registering it, so
 	// if this release cannot run, mark the session close-pending: the turn

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	gopsprocess "github.com/shirou/gopsutil/v4/process"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -157,6 +159,22 @@ func MaxToolResultContentBudget() int {
 	return maxToolResultChars + 2048
 }
 
+// spoolIsOpen reports whether a spool's process is still running in this
+// process. A variable so tests can stub it.
+var spoolIsOpen = tool.SpoolIsOpen
+
+// spoolOwnerAlive reports whether the ocode process with pid is still running.
+// A variable so tests can stub it. On a lookup error it reports true, because
+// deleting a live owner's spool is the unsafe direction.
+var spoolOwnerAlive = func(pid int) bool {
+	exists, err := gopsprocess.PidExists(int32(pid))
+	if err != nil {
+		log.Printf("tool-results cleanup: checking spool owner pid %d failed: %v", pid, err)
+		return true
+	}
+	return exists
+}
+
 // CleanupToolResults removes cached tool result files older than maxAge.
 // It is safe to call from any goroutine.
 func CleanupToolResults(maxAge time.Duration) error {
@@ -174,6 +192,15 @@ func CleanupToolResults(maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge)
 	var firstErr error
 	for _, e := range entries {
+		// A running process's spool is kept at any age. Another live ocode
+		// process's spool is kept too, since its running jobs are not visible here.
+		// This process's own finished spools age out like any other.
+		if spoolIsOpen(e.Name()) {
+			continue
+		}
+		if pid, ok := tool.SpoolOwnerPID(e.Name()); ok && pid != os.Getpid() && spoolOwnerAlive(pid) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
