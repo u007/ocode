@@ -10,7 +10,7 @@ tags:
   - spa
   - routing
   - tailscale
-timestamp: 2026-11-17T06:47:28Z
+timestamp: 2026-11-25T17:20:34Z
 status: active
 ---
 
@@ -145,7 +145,7 @@ share is running with its browse mount.
 
 - **Gate.** `tailnetTabOriginAvailable` (`internal/server/browse_tab_origin.go:527`) is
   true when the share is running and has a browse URL. It is the same predicate
-  `browseOriginFor` (`internal/server/server.go:1551`) uses to hand such a client the
+  `browseOriginFor` (`internal/server/server.go:1597`) uses to hand such a client the
   shared browse URL. Without it the endpoint answers the 409 prefix-mode refusal.
 - **Expose.** `tailscaleShare.exposeTab` (`internal/server/tailscale_share.go:565`) runs
   `tailscale serve --bg --https=<port> http://<bind host>:<port>` through
@@ -177,7 +177,7 @@ share is running with its browse mount.
 
 **Boot order.** The auto-share must start after the browse proxy exists. The share reads
 the browse-proxy port that `StartBrowse` records (`setBrowseProxyPort`,
-`internal/server/server.go:1474`). `internal/desktop/boot.go` used to call
+`internal/server/server.go:1520`). `internal/desktop/boot.go` used to call
 `startAutoShareIfEnabled` before `server.StartBrowse`. The auto-share goroutine could finish `start` while the port was still 0,
 so `browseExpose` returned no URL and the browse mount was never created. `start` is
 first-wins, so the mount was never created later either. The share then had no browse

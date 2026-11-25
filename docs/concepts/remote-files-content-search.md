@@ -11,7 +11,7 @@ tags:
   - grep
   - server
   - web
-timestamp: 2026-11-10T02:53:12Z
+timestamp: 2026-11-25T17:20:34Z
 ---
 # Remote (SSH/WSL) Files-tab content search: one grep invocation
 
@@ -27,7 +27,7 @@ dispatch on `hostParam(r)`:
 | `GET /api/files/search` | `HandleFileSearch` | `remoteFileSearch` (`handler_remote_files.go:823`) |
 | `GET /api/files/search/stream` | `HandleFileSearchStream` | `remoteFileSearchStream` (`handler_remote_files.go:883`) |
 
-Routes: `internal/server/server.go:452-453`; the `?host=` dispatch is at
+Routes: `internal/server/server.go:496-497`; the `?host=` dispatch is at
 `handler_files.go:711` and `handler_search_stream.go:36`. Both remote handlers call
 `remoteSearchFiles` (`handler_remote_files.go:43`), which builds and runs exactly one
 shell command via `remoteSearchCommand` (`handler_remote_files.go:79`) and parses its

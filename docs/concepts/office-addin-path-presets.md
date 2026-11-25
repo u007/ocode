@@ -12,7 +12,7 @@ tags:
   - tcc
   - server
   - web
-timestamp: 2026-11-09T09:41:30Z
+timestamp: 2026-11-25T17:20:34Z
 ---
 # Office Add-in Path Presets — Save-Time OS Access Request
 
@@ -64,7 +64,7 @@ exclude it from the free-text field without duplicating it
 ## Endpoints
 
 All three routes are registered behind `authMiddleware`
-(`internal/server/server.go:631-633`):
+(`internal/server/server.go:688-690`):
 
 | Route | Handler | Contract |
 |---|---|---|

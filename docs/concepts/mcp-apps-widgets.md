@@ -8,7 +8,7 @@ tags:
   - mcp-apps
   - plugins
   - web
-timestamp: 2026-11-24T16:11:42Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # MCP Apps widgets and plugin MCP servers
 
@@ -47,13 +47,13 @@ A tool whose visibility lacks `"model"` is not registered for the model at all
    a tool with a UI resource, `recordCallOutcome` stores the raw result under that
    call ID (`internal/mcp/client.go:1301`).
 3. **Attach to the tool message.** `handleToolCallWithContext` calls
-   `keepMCPAppRef` (`internal/agent/agent.go:4228`). `keepMCPAppRef` keeps a
+   `keepMCPAppRef` (`internal/agent/agent.go:4269`). `keepMCPAppRef` keeps a
    `MCPAppRef` only when the call ran (`internal/agent/mcp_app.go:17`).
    `takeMCPAppRef` then puts it on the tool message as `Message.MCPApp`, and gives
    none when the result is a pending ask (`internal/agent/mcp_app.go:54`). The
-   tool message takes the ref at `internal/agent/agent.go:2298`.
+   tool message takes the ref at `internal/agent/agent.go:2332`.
 4. **Stream.** The live path broadcasts a `tool_result` event carrying the ref
-   (`internal/server/handler.go:1267`). Stream replay sends the same
+   (`internal/server/handler.go:1269`). Stream replay sends the same
    `ToolResultEvent` (`internal/server/handler_sse.go:289`; the type is at
    `internal/server/handler_sse.go:40`).
 5. **Web card.** `ToolBlock` renders `McpAppView` under the block when the tool
@@ -112,9 +112,9 @@ An MCP tool result that contains an image block keeps its first decodable image
 under the call ID: `summarizeToolResult` decodes it (`internal/mcp/client.go:1270`) and
 `recordCallOutcome` stores it (`internal/mcp/client.go:1301`).
 `handleToolCallWithImages` consumes the per-call image on every path, so nothing
-is retained (`internal/agent/agent.go:4101`). It attaches the image to the tool
+is retained (`internal/agent/agent.go:4135`). It attaches the image to the tool
 message only when the current model supports vision
-(`internal/agent/agent.go:4108`). Otherwise the text result alone is returned.
+(`internal/agent/agent.go:4142`). Otherwise the text result alone is returned.
 
 Which provider builders carry the image, verified in `internal/agent/client.go`:
 
@@ -149,7 +149,7 @@ Other providers were not checked against this list.
 - **requiresAny.** Checked at merge time (`internal/plugins/mcp_servers.go:331`). A
   server whose requirement fails does not claim its name.
 - **Web and desktop server.** The process-wide config merges only shared plugins:
-  `internal/server/handler.go:793` at startup and `internal/server/handler.go:1049` on
+  `internal/server/handler.go:793` at startup and `internal/server/handler.go:1051` on
   reload. The MCP tool cache is built from that config (`internal/server/mcp_cache.go:34`).
   Each session merges its own project's plugins (`internal/server/agent_session.go:551`).
   When the merge adds a server the shared config lacks, the session enumerates its own

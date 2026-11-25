@@ -7,7 +7,7 @@ tags:
   - worktree
   - web
   - git-panel
-timestamp: 2026-11-18T04:24:07Z
+timestamp: 2026-11-25T17:20:34Z
 ---
 # Git worktrees: list, open, create, remove (web Git tab)
 
@@ -25,7 +25,7 @@ The Git tab (`web/src/components/Git/GitPanel.tsx`, shared by the web app and th
 
 ## Endpoints
 
-Registered in `internal/server/server.go:452-454` behind `s.authMiddleware`. Handlers live in `internal/server/handler_git_worktrees.go`.
+Registered in `internal/server/server.go:472-474` behind `s.authMiddleware`. Handlers live in `internal/server/handler_git_worktrees.go`.
 
 | Method and path | Handler | Body | Returns |
 |---|---|---|---|

@@ -8,7 +8,7 @@ tags:
   - commands
   - queue
   - web
-timestamp: 2026-10-07T12:40:26Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # TUI User Interaction: Slash Command Queuing
 
@@ -103,7 +103,7 @@ clear) queues while a turn runs, unlike the TUI.
   first, unconditional clause — so `/btw` does NOT bypass compaction on the web.
   The TUI does NOT withhold instant commands while compacting: its gate is
   `(m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd`
-  (`internal/tui/model.go:9087`), so an instant command dispatches immediately.
+  (`internal/tui/model.go:9118`), so an instant command dispatches immediately.
   The web is conservative because compaction persists through `applyCompactResult`
   (`internal/server/agent_session.go`), which calls `h.replaceSession`
   (`internal/server/agent_session.go`): it replaces the stored transcript

@@ -8,7 +8,7 @@ tags:
   - http
   - oauth
   - elevenlabs
-timestamp: 2026-11-15T15:09:56Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # Streamable HTTP MCP and the ElevenLabs preset
 
@@ -29,7 +29,7 @@ hosted server is the first preset shipped on it.
 - `decodeRemoteResponse` routes a `text/event-stream` body to
   `decodeSSEJSONRPC`, which matches the request id and skips notifications and
   non-JSON-RPC frames; anything else is plain JSON-RPC.
-- Both agent switches accept `"http"`: `internal/agent/agent.go:7311` and
+- Both agent switches accept `"http"`: `internal/agent/agent.go:7347` and
   `internal/agent/mcp_clients.go:210`.
 
 ## ElevenLabs CIMD

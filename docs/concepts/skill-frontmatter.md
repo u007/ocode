@@ -10,7 +10,7 @@ tags:
   - advisor
   - kaizen
   - agent-loop
-timestamp: 2026-11-17T06:36:58Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # SKILL.md Frontmatter Fields
 
@@ -40,7 +40,7 @@ The field is `Skill.SkipAdvisor` (`internal/skill/loader.go:45-49`), populated a
 
 ### Effect: all three advisor checkpoints stand down
 
-`skip_advisor` stands down the restored `"plan"` first-write design review as well as the two `"done"`-gated moments (completion review and before-commit hold). `Step` resolves the flag at two points. Before the round loop it scans a **pre-injection snapshot** of the transcript. `preInjectMessages` is copied before any tail injector runs (`internal/agent/agent.go:1676`), and `ckpt.skillSuppressed = a.turnDisablesAdvisor(ckpt, preInjectMessages)` (`internal/agent/agent.go:1737`) reads it. The injectors append user-role messages (todo re-anchor, notes, dir docs, LSP), and scanning after them would make the injected tail the "current turn" and hide the human's skill prompt. After each response, the response's own tool calls are checked before the batch is counted, before the commit gate and before the plan checkpoint: `ckpt.skillSuppressed = ckpt.skillSuppressed || a.toolCallsDisableAdvisor(ckpt, resp.ToolCalls)` (`internal/agent/agent.go:1954`) — the per-response half still applies to `plan`. A skill the model loads in one round therefore stands the checkpoints down for the writes in the next. The done checkpoint runs only on a response with no tool calls (the `advisorDoneCheckpoint` call at `internal/agent/agent.go:1936`), so for it the flag comes from earlier rounds; the plan checkpoint runs after the write batch is applied (`advisorPlanCheckpoint`, `internal/agent/agent.go:2397`). Once set, the flag is sticky for the rest of the `Step`.
+`skip_advisor` stands down the restored `"plan"` first-write design review as well as the two `"done"`-gated moments (completion review and before-commit hold). `Step` resolves the flag at two points. Before the round loop it scans a **pre-injection snapshot** of the transcript. `preInjectMessages` is copied before any tail injector runs (`internal/agent/agent.go:1710`), and `ckpt.skillSuppressed = a.turnDisablesAdvisor(ckpt, preInjectMessages)` (`internal/agent/agent.go:1771`) reads it. The injectors append user-role messages (todo re-anchor, notes, dir docs, LSP), and scanning after them would make the injected tail the "current turn" and hide the human's skill prompt. After each response, the response's own tool calls are checked before the batch is counted, before the commit gate and before the plan checkpoint: `ckpt.skillSuppressed = ckpt.skillSuppressed || a.toolCallsDisableAdvisor(ckpt, resp.ToolCalls)` (`internal/agent/agent.go:1988`) — the per-response half still applies to `plan`. A skill the model loads in one round therefore stands the checkpoints down for the writes in the next. The done checkpoint runs only on a response with no tool calls (the `advisorDoneCheckpoint` call at `internal/agent/agent.go:1970`), so for it the flag comes from earlier rounds; the plan checkpoint runs after the write batch is applied (`advisorPlanCheckpoint`, `internal/agent/agent.go:2431`). Once set, the flag is sticky for the rest of the `Step`.
 
 `advisorCheckpointState.skillSuppressed` (`internal/agent/advisor_checkpoint.go:77`) short-circuits all three consumers before any judge or advisor work:
 
@@ -60,7 +60,7 @@ The advisor **tool** itself is not removed or re-described. The field is the loo
 
 Each candidate name goes through `skillDisablesAdvisor` (`internal/agent/advisor_checkpoint.go:631-649`), which resolves it with `skill.LoadSkillForRoot(name, a.WorkDir())` and memoizes the verdict in `skipAdvisorByName` (`internal/agent/advisor_checkpoint.go:81`). Each name therefore costs one skill-directory scan per `Step`, however often it is mentioned. A name that does not resolve, or a skill without the field, is **not** suppressed (fail-open); the load error is logged via `emitDebug`. Three sources yield the name:
 
-1. **`skill` / `load_skill` tool calls** — `toolCallsDisableAdvisor` (`internal/agent/advisor_checkpoint.go:608-624`) reads the JSON `name` argument of any tool call named `skill` or `load_skill`. It runs from the pre-loop scan (`turnDisablesAdvisor`, `internal/agent/advisor_checkpoint.go:563`) and per response from `Step` (`internal/agent/agent.go:1954`).
+1. **`skill` / `load_skill` tool calls** — `toolCallsDisableAdvisor` (`internal/agent/advisor_checkpoint.go:608-624`) reads the JSON `name` argument of any tool call named `skill` or `load_skill`. It runs from the pre-loop scan (`turnDisablesAdvisor`, `internal/agent/advisor_checkpoint.go:563`) and per response from `Step` (`internal/agent/agent.go:1988`).
 2. **Auto-inject markers** — the discovery block beginning `auto-loaded skill "name"` (`autoInjectMarker = "auto-loaded skill"`, `internal/agent/discovery_autoinject.go:71`); the quoted name after the marker is checked in `turnDisablesAdvisor` (`internal/agent/advisor_checkpoint.go:566-579`).
 3. **Slash-command prompts** — the `Run the **name** skill.` prompt generated for a skill command (`internal/agent/advisor_checkpoint.go:580-599`).
 

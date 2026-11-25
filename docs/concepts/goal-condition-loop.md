@@ -3,7 +3,7 @@ type: Concept
 title: "Goal Condition Loop (/goal)"
 description: 'The /goal session condition: a judge checks after every turn whether the condition is met, impossible, or should pause the goal. Covers command syntax, the per-turn evaluation order, the verdict table, pause and resume rules, the sticky 50-turn cap, the persisted goal key, the session goal endpoints, and how it differs from /orchestrate.'
 tags: [goal, judge, agent-loop, server, tui, web, typesafe, auto-continue]
-timestamp: 2026-11-22T16:46:00Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # Goal Condition Loop (`/goal`)
 
@@ -117,12 +117,12 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   `/goal <text>` starts fresh state (`SetGoal`, `:164`).
 - **A pending ask never auto-resumes.** The server skips the goal judge while the tail is an
   unresolved permission or question ask (`agent_session.go:1632`). The TUI runs its post-turn
-  decisions only when `queueDrainBlocked()` is false (`model.go:5639`).
+  decisions only when `queueDrainBlocked()` is false (`model.go:5670`).
 - **A deferred resume waits for an idle session.** In the TUI, a `Resume` verdict that cannot fire
   right away (the session is streaming, compacting, or has a queue drain blocked) sets
   `goalResumePending`. `compactFinishedMsg` fires it once the session is idle (`goalResumeReady`,
   `model.go:305`, `:5844`). Any new turn clears the flag, because that turn's own judge decides the
-  goal (`askAgent`, `model.go:16543`).
+  goal (`askAgent`, `model.go:16574`).
 - **The resume message is user-role.** `GoalResumeMessage` (`goal.go:241`) produces a `[ocode:goal]`
   user message: the condition, the evaluator's last reason, and a continue instruction. It is never
   system-role, so the cached system prefix stays stable.
@@ -135,14 +135,14 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   rejected values are logged with the `GOAL` debug kind.
 - Written after every judged turn (`goalShouldResume`, `agent_session.go:1946`), by the server
   endpoints (`persistSessionGoal`, `internal/server/handler_session_goal.go:66`), and on TUI save
-  (`sessionSidebarMetadata`, `model.go:22124`).
+  (`sessionSidebarMetadata`, `model.go:22172`).
 - Restored when a server agent is built (`agent_session.go:797`) and when a TUI session loads
-  (`restoreSessionMetadata`, `model.go:22158`). The key is listed in `sessionOwnedMetadataKeys`
-  (`model.go:22096`), so the TUI's carry-forward copy never overwrites it.
+  (`restoreSessionMetadata`, `model.go:22206`). The key is listed in `sessionOwnedMetadataKeys`
+  (`model.go:22144`), so the TUI's carry-forward copy never overwrites it.
 
 ## Endpoints
 
-All three are behind `authMiddleware` (`internal/server/server.go:363-365`).
+All three are behind `authMiddleware` (`internal/server/server.go:412-414`).
 
 | Method and path | Request | Response |
 |---|---|---|

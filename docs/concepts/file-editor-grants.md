@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-11-16T02:34:00Z
+timestamp: 2026-11-25T17:20:34Z
 ---
 # File Editor Grants — Editor-Only Out-of-Project Access
 
@@ -52,7 +52,7 @@ question.
 
 ## Endpoints
 
-Registered in `Server.registerRoutes()` (`server.go:487-489`), all behind `authMiddleware`:
+Registered in `Server.registerRoutes()` (`server.go:508-510`), all behind `authMiddleware`:
 
 - `POST /api/files/grant` — body `{"path": "..."}` → `{"root","path","granted","roots"}`.
   `path` is the requested file spelled under the canonical `root` (symlinks resolved;
@@ -69,7 +69,7 @@ response returns), `HandleRevokeFilePath` (`:215`), `HandleListFileGrants` (`:23
 
 ### Access probe (`GET /api/files/access`)
 
-`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:479`;
+`GET /api/files/access?path=…&project_root=…&host=…` (route at `server.go:500`;
 `Server.handleFileAccess` calls `Handler.HandleFileAccess`, `handler_files.go:1333`)
 answers one question: would the editor serve this path? It is **containment
 only**. A local path runs the same resolver as the raw endpoint

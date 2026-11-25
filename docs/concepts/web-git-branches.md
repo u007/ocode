@@ -4,7 +4,7 @@ title: Web Git Branches sub-view
 description: 'The Git tab Branches sub-view: GET /api/git/branches, the six branch/tag ref actions, the extended /api/git/push contract, remote-transport quoting, and the client behaviour for switching, deleting and upstreams'
 resource: internal/server/handler_git_branches.go
 tags: [web, git, branches, tags, ref-action, push, remote]
-timestamp: 2026-11-18T04:24:07Z
+timestamp: 2026-11-25T17:20:34Z
 status: active
 ---
 # Web Git Branches sub-view
@@ -35,7 +35,7 @@ never shown under another (`BranchesPanel.tsx:211` onwards).
 
 ### GET /api/git/branches (`HandleGitBranches`)
 
-Registered at `internal/server/server.go:433` behind `authMiddleware`.
+Registered at `internal/server/server.go:453` behind `authMiddleware`.
 `handler_git_branches.go:67`.
 
 Returns `GitBranches{local, remote, tags}` (`handler_git_branches.go:43`). Every list is

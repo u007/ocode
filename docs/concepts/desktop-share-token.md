@@ -11,7 +11,7 @@ tags:
   - wails
   - persistence
   - security
-timestamp: 2026-10-06T12:26:58Z
+timestamp: 2026-11-25T17:20:34Z
 ---
 ---
 type: Concept
@@ -58,7 +58,7 @@ launch token, stale link. The fix persists the *credential* half too — but as 
 
 `Server.SetShareToken` (`internal/server/share_token.go:22`) installs an **optional
 second credential** that `checkAuth` accepts alongside the launch token;
-`server.go:113` documents the guard `shareTokenMu`. `tokenMatches`
+`server.go:121` documents the guard `shareTokenMu`. `tokenMatches`
 (`internal/server/share_token.go:62`) is the one comparison point: launch token by
 plain byte equality (unchanged behaviour), share token only when non-empty — so a
 server with no share token installed can never authenticate an empty string

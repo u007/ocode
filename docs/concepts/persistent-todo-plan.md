@@ -8,7 +8,7 @@ tags:
   - agent
   - concurrency
   - prompt-cache
-timestamp: 2026-10-28T12:00:00Z
+timestamp: 2026-11-25T16:29:04Z
 ---
 # Persistent Todo Plan (todowrite / todoread / todo_update)
 
@@ -64,7 +64,12 @@ across long runs and post-compaction turns. The store lives in
   status change back to pending.
 - **`todo_update` ops** beyond the originals: `set_deps` (`item_id` + `deps`;
   `[]` clears, an absent `deps` is an error) and `set_result` (`item_id` + one
-  line of `text`). `set_status` takes an optional `result`. All still cite the
+  line of `result`). `set_status` takes an optional `result` (one line, recorded
+  in the same update). It refuses a call that sends its value in `text`: when
+  `result` is empty and `text` is not blank, the call errors and names `result`
+  (`applyTodoOp`, `internal/tool/todo_store.go:839`). If both are sent, `text` is
+  ignored. `set_result` reads its value from `result` only, so an empty `result`
+  is an error, and the error says so when `text` was sent. All still cite the
   revision. A rewrite that echoes an item's id keeps its detail fields unless the
   rewrite sets them (`mergeTodoDetail`).
 - **`task` tool link (`todo_item`).** `task` takes an optional `todo_item` (a `tN`
@@ -198,7 +203,7 @@ across long runs and post-compaction turns. The store lives in
     "status": "in_progress"} (run todoread first only if the plan changed since
     this snapshot). The next ready item is tN: <text>. Never batch status
     updates.` The first item NOT in `TodoSnapshot.BlockedIDs`
-    (`internal/tool/todo_store.go:1084`, populated from the same `openTodoDeps`
+    (`internal/tool/todo_store.go:1156`, populated from the same `openTodoDeps`
     pass as the display strings) is recommended. Its text is collapsed to one
     line (`oneLineTodoText`, `internal/agent/todo_inject.go:117`, max 120 runes).
   - **An in-progress, unblocked item**: `Plan status: tN is in_progress. If you

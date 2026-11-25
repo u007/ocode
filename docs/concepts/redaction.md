@@ -11,7 +11,7 @@ tags:
   - vault
   - config
   - agent
-timestamp: 2026-11-24T16:52:24Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # Opt-in PII redaction
 
@@ -19,7 +19,7 @@ timestamp: 2026-11-24T16:52:24Z
 
 ocode already redacts **secrets** on their way to a model. PII redaction adds a second, opt-in detector beside it, supplied by `github.com/u007/dataprotect` (package `piiscrub`, MIT, pinned `v0.1.0`). Every shipped group detects offline (regex and checksums), so it adds no network call and no tier-2 model.
 
-A detected value is replaced by the same per-session `OCSEC` vault token secrets use. The model can still operate on it: `Registry.Resolve` (`internal/redact/registry.go:160`) restores tokens in tool arguments before execution (`internal/agent/agent.go:6234`), the registry renders them back for display (`Redactor.Render`, `internal/redact/redactor.go:133`), and the plaintext lives in the session's in-memory `Registry`. A vault-file persistence path exists (`Redactor.persistVault` → `SaveVault`/`LoadVault`, `internal/redact/redactor.go:141`) but is not wired in production: `persistVault` is reachable through `Redactor.Init` (`internal/redact/redactor.go:196`) as well as `Redactor.RedactChat`/`RedactFile`, and `agent.NewSessionRedactor` (`internal/agent/redaction.go:18`), the wrapper over `redact.NewSessionRedactor`, has no production caller. The TUI (`internal/tui/model.go:2714`) and the server (`internal/server/handler_config.go:2972`) each build a `redact.NewRegistry` and keep it in memory; a `/reset-id` rebuild on the server instead adopts the released agent's registry, so tokens already in the transcript keep resolving (see below).
+A detected value is replaced by the same per-session `OCSEC` vault token secrets use. The model can still operate on it: `Registry.Resolve` (`internal/redact/registry.go:160`) restores tokens in tool arguments before execution (`internal/agent/agent.go:6268`), the registry renders them back for display (`Redactor.Render`, `internal/redact/redactor.go:133`), and the plaintext lives in the session's in-memory `Registry`. A vault-file persistence path exists (`Redactor.persistVault` → `SaveVault`/`LoadVault`, `internal/redact/redactor.go:141`) but is not wired in production: `persistVault` is reachable through `Redactor.Init` (`internal/redact/redactor.go:196`) as well as `Redactor.RedactChat`/`RedactFile`, and `agent.NewSessionRedactor` (`internal/agent/redaction.go:18`), the wrapper over `redact.NewSessionRedactor`, has no production caller. The TUI (`internal/tui/model.go:2733`) and the server (`internal/server/handler_config.go:2972`) each build a `redact.NewRegistry` and keep it in memory; a `/reset-id` rebuild on the server instead adopts the released agent's registry, so tokens already in the transcript keep resolving (see below).
 
 The feature is **dormant** in two independent senses. A group that is not configured constructs no recognizer and no analyzer. A configured group still does nothing unless `security.redaction.enabled` is true: `GenericClient.applyRedactionSafetyNet` returns before scanning, and the group bus forces its category list to nil (`internal/agent/group_bus.go`).
 
@@ -36,7 +36,7 @@ The config key is `security.redaction.pii_categories`, an array of group names o
 
 A malformed `ocodeconfig.json` is not silent and does not stop ocode. `config.Load` returns the error and each host surfaces it while the app keeps running on defaults:
 
-- **TUI:** `newModel`'s `config.Load` error appends one transient `⚠ config: <err> (using defaults)` line to the transcript (`internal/tui/model.go:2953`). `transient` keeps it out of the prompt and the persisted transcript, so it is never a system-role message — that is the prompt-cache rule, not cosmetics.
+- **TUI:** `newModel`'s `config.Load` error appends one transient `⚠ config: <err> (using defaults)` line to the transcript (`internal/tui/model.go:2972`). `transient` keeps it out of the prompt and the persisted transcript, so it is never a system-role message — that is the prompt-cache rule, not cosmetics.
 - **Web/desktop server:** `NewHandler` records the message on `Handler.configLoadErr` (`internal/server/handler.go:784`, field documented at `internal/server/handler.go:107`), and the `GET /api/config/mask` payload returns it as `config_load_error` (`internal/server/handler_config.go:1005`). Only the error string travels, never config file contents; `TestHandleGetMaskConfigReportsConfigLoadError` (`internal/server/handler_config_test.go:1386`) pins both halves.
 
 ## The six groups
@@ -76,7 +76,7 @@ Merged spans are put in a **total order** — sort by `(Start, End, Kind)`. Ever
 | Surface | Site |
 |---|---|
 | TUI typed input, and re-scrub of existing user messages | `redactText` (`internal/tui/redaction.go:311`), `scrubExistingMessages` |
-| Tool results | `scanToolResult` (`internal/agent/agent.go:3973`) through `piiRedactForToolResult` |
+| Tool results | `scanToolResult` (`internal/agent/agent.go:4007`) through `piiRedactForToolResult` |
 | Egress safety net over every outgoing message | `applyRedactionSafetyNet` (`internal/agent/client.go:5454`); its caller propagates the error |
 | Advisor advice | `redactWithPII` (`internal/agent/advisor_checkpoint.go:232`) |
 | Note bus bodies | `RedactBodyWith` (`internal/notebus/redact.go:34`), installed in `internal/agent/group_bus.go` |
@@ -97,17 +97,17 @@ As built, the secrets-only helper keeps its name `redactText` and is not called 
 
 The carve-out is a **masking** rule: those payloads stay secrets-only, so they can still carry raw PII (the permission judge is meant to see the email it is judging while a secret in the same payload stays masked). It is enforced by signatures, not discipline — `DetectSecrets` has no category parameter.
 
-Categories ride on `GenericClient.PIICategories` (`internal/agent/client.go:281`), whose zero value is secrets-only. Only `applyPIIToClient` (`internal/agent/agent.go:3946`) writes it, and only onto a `*GenericClient`; `SetRedactionPIICategories` (`internal/agent/agent.go:3938`) is the entry point. `bindSideClient`/`attachRedactionHook` write only the tier-1 `NetHook`, so judgement, compaction, small-model and interpreter side clients never receive categories. `applySpecModel` re-applies them after it swaps the client, because that path goes through `bindSideClient`.
+Categories ride on `GenericClient.PIICategories` (`internal/agent/client.go:281`), whose zero value is secrets-only. Only `applyPIIToClient` (`internal/agent/agent.go:3980`) writes it, and only onto a `*GenericClient`; `SetRedactionPIICategories` (`internal/agent/agent.go:3972`) is the entry point. `bindSideClient`/`attachRedactionHook` write only the tier-1 `NetHook`, so judgement, compaction, small-model and interpreter side clients never receive categories. `applySpecModel` re-applies them after it swaps the client, because that path goes through `bindSideClient`.
 
 ## Vault and `/reset-id`
 
 Replacement reuses the `OCSEC` token vault; no second placeholder format exists. The registry resolves tokens back for display (`Redactor.Render`, `internal/redact/redactor.go:133`). The planned vault-file path is per project and session at `<data>/project/<slug>/secrets/<session-id>.vault.json` (`VaultPath`, `internal/redact/vault.go:55`), but it stays unwritten until the persistence path in the Overview is wired.
 
-`/reset-id` re-keys the conversation, so `redact.RekeyVault` (`internal/redact/vault.go:203`) renames the old vault file to the new session path; a missing source is not an error, so it is a no-op while persistence is unwired. The vault move is groundwork called by the TUI in `internal/tui/model.go:12554` and the server in `internal/server/handler_reset_id.go:140`.
+`/reset-id` re-keys the conversation, so `redact.RekeyVault` (`internal/redact/vault.go:203`) renames the old vault file to the new session path; a missing source is not an error, so it is a no-op while persistence is unwired. The vault move is groundwork called by the TUI in `internal/tui/model.go:12585` and the server in `internal/server/handler_reset_id.go:140`.
 
 Both surfaces keep existing tokens resolving across the reset, and neither starts with a fresh registry:
 
-- **TUI:** `m.redactionRegistry` is kept across the reset, so tokens already in the transcript still resolve (`internal/tui/model.go:12550`).
+- **TUI:** `m.redactionRegistry` is kept across the reset, so tokens already in the transcript still resolve (`internal/tui/model.go:12581`).
 - **Server:** `HandleResetSessionID` releases the resident agent (`h.sessions.ReleaseAgent`); once it has quiesced, the released agent's `*redact.Registry` (`Agent.RedactionRegistry`) is stored on the session entry with `SetCarriedRedactionRegistry` (`internal/server/handler_reset_id.go:96`). The next rebuild that has redaction enabled consumes it once and installs it on the new agent (`TakeCarriedRedactionRegistry` → `SetRedactionRegistry`, `internal/server/agent_session.go:734`), so tokens in the rekeyed transcript keep resolving under the same nonce. The carry is a field on the session entry (`internal/server/session_manager.go:66`), never a separate `Handler` map; it is cleared on session close (`internal/server/handler_close.go:54`) and on a failed rekey (`internal/server/handler_reset_id.go:101`), and a build with redaction disabled leaves it in place for a later enabled build.
 
 ## Invariants

@@ -8,7 +8,7 @@ tags:
   - server
   - api
   - prompt-cache
-timestamp: 2026-11-03T05:13:13Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # System prompt overrides — per-prompt enable switch and custom instructions
 
@@ -179,7 +179,7 @@ the catalog.
   (`internal/agent/speech_summary.go` line 357).
 - The tool digest returns an explicit error, "the tool digest prompt is disabled
   in Settings", because that call is an explicit user action
-  (`internal/agent/tool_digest.go` line 139).
+  (`internal/agent/tool_digest.go:115`).
 
 ### Compaction and advisor
 

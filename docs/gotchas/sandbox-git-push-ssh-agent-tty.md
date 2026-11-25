@@ -9,7 +9,7 @@ tags:
   - seatbelt
   - security
   - macOS
-timestamp: 2026-11-22T15:41:37Z
+timestamp: 2026-11-25T15:13:10Z
 ---
 # Sandbox git push — SSH agent inheritance and fail-closed TTY prompts
 
@@ -33,8 +33,8 @@ timestamp: 2026-11-22T15:41:37Z
   `profile.go:~47-61` comment: passphrase/password prompts fail closed), and the bash tool's captured pipes provide no TTY either → ssh cannot prompt → "Permission denied (publickey)" / "Load key ... error in libcrypto". This machine: `id_ed25519` passphrase-free (`ssh-keygen -y exit 0`), `id_rsa` encrypted (`exit 255`).
 
 - **(b) Launch context env**: desktop `.app` (launchd), RC bridge, or web server processes may be launched WITHOUT `SSH_AUTH_SOCK` in their environment. `buildBashCmd`
-  `internal/tool/bash_build.go:38` never scrubs env (foreground
-  `exec.go:228` and background `process.go:294` inherit `os.Environ()`), so if the PARENT lacks `SSH_AUTH_SOCK` the sandboxed ssh sees no agent. Diagnose by checking `SSH_AUTH_SOCK` inside the failing ocode process, not just the interactive terminal.
+  `internal/tool/bash_build.go:80` never scrubs env (the foreground call at
+  `exec.go:248` and the background call, `StartBackgroundDisplayDir` at `process.go:425`, leaves `cmd.Env` unset; only the background plugin-hook env merge over `os.Environ()` in `startBackground`, `process.go:470-474`, sets it), so if the PARENT lacks `SSH_AUTH_SOCK` the sandboxed ssh sees no agent. Diagnose by checking `SSH_AUTH_SOCK` inside the failing ocode process, not just the interactive terminal.
 
 **5. User-facing fixes**: `ssh-add --apple-use-keychain ~/.ssh/<key>` in the user's own terminal before the session (agent socket IS reachable from the sandbox — verified); use a passphrase-free default key; or run the push via the unsandboxed `!` shell path (interactive PTY terminal and web `!shell` run unsandboxed per
 `CLAUDE.md`).

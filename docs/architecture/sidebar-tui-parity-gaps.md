@@ -10,7 +10,7 @@ tags:
   - web
   - parity
   - gap-analysis
-timestamp: 2026-07-08T16:40:44Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # Sidebar TUI / Web Parity Gaps
 
@@ -26,7 +26,7 @@ The TUI sidebar and the web sidebar (`CoworkSidebar`) should present equivalent 
 
 ## TUI sidebar layout
 
-The TUI sidebar (`buildSidebarRenderData` in `internal/tui/model.go:21250`) has three zones:
+The TUI sidebar (`buildSidebarRenderData` in `internal/tui/model.go:22470`) has three zones:
 
 ### Pinned top (rendered in `topLines`)
 - Mode badge (`[CODE]`/`[PLAN]`) + model name

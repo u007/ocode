@@ -12,7 +12,7 @@ tags:
   - transient
   - model.go
   - commands.go
-timestamp: 2026-09-22T05:28:24Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions
 
@@ -42,9 +42,9 @@ if !hasRealContent { ...m.viewport.SetContent("") or pipboy/LCARS art...; return
 | Site | File:Line |
 |------|-----------|
 | `runFakeAgentCmd` replies | `internal/tui/commands.go:1123,1122,1126,1130,1133` |
-| Cron deliveries | `model.go:5053` |
-| LLM transport errors | `model.go:5247` |
-| User slash-echo (×2) | `model.go:8758,8779` |
+| Cron deliveries | `model.go:5075` |
+| LLM transport errors | `model.go:5278` |
+| User slash-echo (×2) | `model.go:8789,8779` |
 
 On a fresh session every message is either transient ("Started new session.") or the user's own `/x` echo, so the gate evaluated `hasRealContent = false`, blanked the viewport, and returned — hiding the assistant reply (and any other `skipLLM` assistant output). LLM errors escaped only because a preceding non-`skipLLM` user message happened to exist.
 

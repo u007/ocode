@@ -4,7 +4,7 @@ title: UML viewer (Go symbol index, two diagram views, open-at-line)
 description: "The web UI's `uml` session sub-tab: the internal/umlinfo Go AST index, its fingerprint cache and caps, the /api/uml contract including the remote-host proxy rule, package-map and class-diagram views with LOD, per-session view-state persistence, and the Monaco line-reveal race it shares with chat file links."
 resource: internal/umlinfo/umlinfo.go; internal/umlinfo/goanalyze.go; internal/server/handler_uml.go; web/src/components/UML/UmlPanel.tsx; web/src/components/UML/UmlDiagram.tsx; web/src/components/UML/umlViewState.ts
 tags: [web, uml, go-ast, index, diagram, remote, persistence]
-timestamp: 2026-11-18T13:24:41Z
+timestamp: 2026-11-25T17:20:34Z
 status: active
 ---
 # UML viewer
@@ -75,7 +75,7 @@ so forces a rebuild instead of a false hit.
 ## HTTP contract
 
 Routes sit in `Server.registerRoutes()` behind `authMiddleware`
-(`internal/server/server.go:428-429`). `HandleUml` (`handler_uml.go:37`) returns
+(`internal/server/server.go:445-446`). `HandleUml` (`handler_uml.go:37`) returns
 `200` + `{state:"ready", index}` on a fresh fingerprint, else `202` +
 `{state:"indexing"}` while starting the background build, and the client polls
 `/api/uml` again every 1 s; `400` when `project` is missing; `403` when it is

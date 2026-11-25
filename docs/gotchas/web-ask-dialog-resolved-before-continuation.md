@@ -13,7 +13,7 @@ tags:
   - async
   - concurrency
   - locks
-timestamp: 2026-11-22T16:46:00Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # Web ask dialogs: 202 + background continuation (broadcast `*_resolved` before Step)
 
@@ -47,8 +47,8 @@ via:
   `question_resolved`, runs `Step`, persists, broadcasts `messages` +
   `turn_done`, and calls `MaybeCompactAsync`.
 - `HandleResolvePermission` dispatches at
-  `internal/server/handler_permissions_resolve.go:337` and writes 202 at
-  `handler_permissions_resolve.go:481`. The approved-tool execution (the
+  `internal/server/handler_permissions_resolve.go:340` and writes 202 at
+  `handler_permissions_resolve.go:518`. The approved-tool execution (the
   `executeApprovedWithTempPath` call) AND the re-Step both run inside the
   dispatched callback — they previously ran inline before Step. The
   `permission_resolved` broadcast still happens synchronously BEFORE dispatch
@@ -57,7 +57,7 @@ via:
   `Step` (`handler_questions.go:351`, Step at `:353`).
 - Multi-ask branch: if another unresolved permission ask remains in the same
   trailing round, the callback saves the single resolution and broadcasts
-  `messages` without running Step (`handler_permissions_resolve.go:412-421`),
+  `messages` without running Step (`handler_permissions_resolve.go:415-421`),
   and the handler still returns 202.
 
 ### Lock-ownership handoff (the subtle part)
@@ -99,7 +99,7 @@ The continuation keeps the full `turnActive`/heartbeat contract from the
 original fix below: `setTurnActive(true)` + `startTurnHeartbeat` +
 `startAgentActivityBroadcast` with defers declared last so they run first,
 preserving the `drainPendingClose` → `setTurnActive(false)` order
-(`handler_questions.go:324-339`, `handler_permissions_resolve.go:434-443`).
+(`handler_questions.go:324-339`, `handler_permissions_resolve.go:465-477`).
 
 ## Web client: echo/dismiss BEFORE the await, re-hydrate on retryable failure
 

@@ -10,7 +10,7 @@ tags:
   - server
   - web
   - widget
-timestamp: 2026-11-22T18:18:58Z
+timestamp: 2026-11-25T17:20:34Z
 status: active
 ---
 # Config and credentials sync — Sync now and the status widget
@@ -23,7 +23,7 @@ that URL changes.
 ## Sync now: `POST /api/sync/sync`
 
 Registered at `internal/server/server.go:757`. The wrapper `handleSyncSync`
-(`internal/server/server.go:2223`) calls `Handler.HandleSyncNow`
+(`internal/server/server.go:2229`) calls `Handler.HandleSyncNow`
 (`internal/server/handler_sync.go:284`).
 
 | Case | Answer | Contacts the hub |

@@ -10,7 +10,7 @@ tags:
   - gateway
   - models-registry
   - auth
-timestamp: 2026-11-22T16:46:00Z
+timestamp: 2026-11-25T17:23:00Z
 ---
 # kakiit LLM Gateway Provider
 
@@ -89,8 +89,8 @@ merges the live `kakiit/` ids into the picker list
   TUI main loop only a still-fresh cache is consulted (`refresh=false`), so
   the picker never blocks on the gateway; `PreloadKakiitModels()`
   (`models_registry_kakiit.go:283-285`, via `crashguard.Go`) warms it at TUI
-  Init (`internal/tui/model.go:3127`) and server Serve
-  (`internal/server/server.go:2488`).
+  Init (`internal/tui/model.go:3146`) and server Serve
+  (`internal/server/server.go:2532`).
 - **Failure behaviour is split by cause:**
   - *Fetch failure / malformed body / empty list* → nil list + one debug line;
     the picker section is simply empty (`TestKakiitFetchFailureYieldsEmptyListAndDebugLineNotStaleFallback`).
@@ -212,8 +212,8 @@ The gateway returns HTTP 402 with an OpenAI-shaped envelope whose code is
   `client_kakiit.go:103`): *Insufficient kakiit credits — top up at
   hub.mercstudio.com (or ask your site admin)*. Surfaced through
   `UserFacingLLMError` (`client_kakiit.go:160-168`), consumed by the TUI
-  `streamDoneMsg` error line (`internal/tui/model.go:5618`), by
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6617-6625`), and by the
+  `streamDoneMsg` error line (`internal/tui/model.go:5649`), by
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6651-6625`), and by the
   web/desktop server's `publishTurnError`
   (`internal/server/agent_session.go:1184`), which publishes
   `agent.UserFacingLLMError(err)` as the `turn_error` payload's `error` field
@@ -245,8 +245,8 @@ The gateway answers `409` with an OpenAI-shaped envelope whose code is
   `client_kakiit.go:119`): *kakiit: this request already ran (or is still
   running) — send it again to start a new attempt*. It rides the same
   `UserFacingLLMError` (`client_kakiit.go:160-168`) path as the top-up line:
-  the TUI `streamDoneMsg` error line (`internal/tui/model.go:5618`),
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6617-6625`), and the
+  the TUI `streamDoneMsg` error line (`internal/tui/model.go:5649`),
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6651-6625`), and the
   web/desktop `publishTurnError` banner
   (`internal/server/agent_session.go:1184`, `agent.UserFacingLLMError(err)` at
   `:1200`).
@@ -275,8 +275,8 @@ commit `8ab8d978` touched, in the order that matters:
    provider mid-slice breaks that test.
 3. **`keyOptionalProviders` non-membership** (`client.go:4548-4553`): decide
    keyless-allowed vs typed refusal; kakiit is refused (see Setup).
-4. **Preload sites**: TUI `Init` (`internal/tui/model.go:3127`) and server
-   `Serve` (`internal/server/server.go:2488`) call `PreloadKakiitModels()`.
+4. **Preload sites**: TUI `Init` (`internal/tui/model.go:3146`) and server
+   `Serve` (`internal/server/server.go:2532`) call `PreloadKakiitModels()`.
 5. **Registry branches**: `providerModelsFromRegistry` /
    `allProviderModelsFromRegistry` (`internal/agent/models_registry.go:1412`,
    `:1267`) — live-only here, snapshot-fallback for models.dev providers.

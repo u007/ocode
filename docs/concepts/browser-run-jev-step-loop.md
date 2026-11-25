@@ -11,7 +11,7 @@ tags:
   - agent
   - tools
   - permissions
-timestamp: 2026-11-22T23:12:03+08:00
+timestamp: 2026-11-25T17:23:00Z
 status: active
 ---
 # browser_run step loop
@@ -33,7 +33,7 @@ slower per task).
 The browser tool sits in `internal/server` and cannot reach the agent's deciders or its
 permission layer. So `browser_run` is an agent tool (`browserRunTool`,
 `internal/agent/browser_run.go:255`). Each sub-step is a real call to
-`handleToolCallWithContext` (`internal/agent/agent.go:4190`) with the tool name
+`handleToolCallWithContext` (`internal/agent/agent.go:4224`) with the tool name
 `browser`. That keeps the refusals, static rules, judge, human asks, network guard and
 inbound content guard that a hand-written call gets. Sub-step results are consumed by the
 loop and never appended to the transcript. Only `browser_run`'s own result is.

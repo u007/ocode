@@ -17,7 +17,7 @@ tags:
   - drawing
   - overlay
   - quit-guard
-timestamp: 2026-11-17T04:09:55Z
+timestamp: 2026-11-25T17:20:34Z
 status: active
 ---
 # Excel preview and Save: Univer sheet over ExcelJS and SheetJS
@@ -127,7 +127,7 @@ Check all three when bumping `exceljs` (`^4.4.0` in `web/package.json`).
 
 ## Raw save endpoint (`PUT /api/files/raw`)
 
-The route is `PUT /api/files/raw` behind `authMiddleware` (`internal/server/server.go:483`). A local project uses `HandleSaveFileRaw` (`internal/server/handler_files.go:1737`). A remote project (`?host=`) uses `remoteSaveFileRaw` (`internal/server/handler_remote_files.go:647`). Both apply the same checks in the same order.
+The route is `PUT /api/files/raw` behind `authMiddleware` (`internal/server/server.go:504`). A local project uses `HandleSaveFileRaw` (`internal/server/handler_files.go:1737`). A remote project (`?host=`) uses `remoteSaveFileRaw` (`internal/server/handler_remote_files.go:647`). Both apply the same checks in the same order.
 
 **The client always calls this local route, never the proxy prefix.** `apiClient.saveFileRaw` (`web/src/api/client.ts:3843`) builds `PUT /api/files/raw?path=…&project_root=…&expected_hash=…[&force=1][&host=…]` on its own origin; a remote project's `host` rides in the query (`:3852`), so `HandleSaveFileRaw` dispatches to `remoteSaveFileRaw` on `hostParam(r)` (`handler_files.go:1739-1741`). It must not be routed through `/api/remote/{host}/api/files/raw`. That proxy's admission resolves the project identity from `?project=` or `?path=`, then the `X-Ocode-Project` header, then `?project_path=`, then a POST body `project_path` (`resolveProjectPath`, `internal/server/handler_remote_proxy.go:272`), and it never reads `?project_root=`. For a raw save `?path=` is the FILE and `?project_root=` is the project, so the proxied form resolved the file path as the project and always answered 403 `unknown host or unregistered project path` (`handler_remote_proxy.go:79`). **Rule:** a call routed through `/api/remote/{host}` must carry the project identity in `?project=`, `X-Ocode-Project` or `?project_path=`; an endpoint that already has a local `?host=` remote branch (file read, save and access checks) uses that branch instead of the proxy. `?path=` is ambiguous — it is the project path only on `/api/projects/sessions`.
 
