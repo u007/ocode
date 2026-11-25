@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Web model picker must open from the cached model list, not a live refresh
-description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter; 2026-11-19 dialog open state moved out of App, Radix menu only on removable rows, deferred row mount on reopen; 2026-11-23 model label lag was server time: stackdetect.Detect re-walked the project tree on every status snapshot, fixed with a per-call directory cache'
+description: 'Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter; 2026-11-19 dialog open state moved out of App, Radix menu only on removable rows, deferred row mount on reopen; 2026-11-23 model label lag was server time: stackdetect.Detect re-walked the project tree on every status snapshot, fixed with a per-call directory cache; 2026-11-25 advisor uses the shared web sections but never writes shared recent-model history'
 resource: ""
 tags:
   - gotcha
@@ -26,14 +26,17 @@ tags:
   - status-snapshot
   - profiling
   - label-lag
-timestamp: 2026-11-23T06:01:28Z
+  - advisor
+  - recent-models
+  - favorites
+timestamp: 2026-11-24T23:31:33Z
 ---
 # Web model picker must open from the cached model list, not a live refresh
 
 **Type:** Gotcha  
-**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer; on 2026-11-19 also the dialog's open state in the root App re-rendering the whole app, a Radix menu on every row, and the full row list mounting inside the click; on 2026-11-23 the sidebar model label lagged because `stackdetect.Detect` re-walked the project tree on every status snapshot (fixed with a per-call directory cache)  
-**Resource:** web/src/components/Layout/ModelDialog.tsx; web/src/components/Layout/ModelDialogHost.tsx; web/src/App.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go; internal/stackdetect/stackdetect.go; internal/server/model_context.go; internal/server/handler_session_state.go; internal/skill/loader.go  
-**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload, re-render, radix, context-menu, deferred-value, host-component, stack-detection, glob, status-snapshot, profiling, label-lag  
+**Description:** Web model picker slow: live refresh on open + per-model dir scan + no render cap + large uncompressed payload + full registry shipped to every consumer; on 2026-11-19 also the dialog's open state in the root App re-rendering the whole app, a Radix menu on every row, and the full row list mounting inside the click; on 2026-11-23 the sidebar model label lagged because `stackdetect.Detect` re-walked the project tree on every status snapshot (fixed with a per-call directory cache); on 2026-11-25 the advisor gained the shared web sections while shared recent-model history stayed read-only
+**Resource:** web/src/components/Layout/ModelDialog.tsx; web/src/components/Layout/ModelDialogHost.tsx; web/src/App.tsx; internal/agent/models_registry.go; internal/server/handler.go; internal/agent/context.go; web/src/components/Layout/modelSelection.ts; internal/server/gzip.go; internal/server/handler_models.go; internal/stackdetect/stackdetect.go; internal/server/model_context.go; internal/server/handler_session_state.go; internal/skill/loader.go; internal/server/handler_config.go; internal/server/handler_config_test.go
+**Tags:** gotcha, web, model-picker, performance, api, refresh, batch-scan, render-cap, models-registry, gzip, configured, payload, re-render, radix, context-menu, deferred-value, host-component, stack-detection, glob, status-snapshot, profiling, label-lag, advisor, recent-models, favorites
 
 ---
 
@@ -67,6 +70,7 @@ payload 1.2–1.3 MB / ~8,207 models / 223 providers.
 7. **Do not wrap every list row in a Radix menu root when only a few rows have a menu.** Wrap only the rows that have menu content (§7).
 8. **A helper documented as cheap, once per session, must be profiled on a real repo when it sits on a status or poll path.** `stackdetect.Detect` describes itself as a cheap, non-walking check, but its depth-limited `filepath.Glob` patterns each re-read the directories below the project root, and it ran several times per status snapshot (about 170 ms per call on the ocode repo). See §9.
 9. **Measure the server before blaming the dialog when a label updates late.** Time the PUT with curl and take a CPU profile from `/debug/pprof/profile` on a private `ocode serve`. A dialog that paints in under 100 ms can still leave the sidebar label stale for 0.6-0.9 s (§9).
+10. **Rendering shared history does not grant ownership of it.** The advisor picker shows Recently Used/Favorites and follows the normal web section order, but it has no favorite-star toggles or recent-removal controls, and advisor picks must not call `config.SaveRecentModel` (§10).
 
 ## 1. Dialog opened with `refresh: true` — live provider fetch on every open
 
@@ -171,7 +175,7 @@ Close-to-paint went from ~105 ms to ~60 ms. The profile shows no App-level compo
 ## 7. A Radix `ContextMenu` on every model row
 
 Every row was wrapped in a Radix `ContextMenu`, but only removable "Recently Used" rows have menu content.
-Now only `canRemove` rows (a recent whose id is `provider/model`) get the wrapper, in the row renderer of
+Now only `canRemove` rows (a canonical `provider/model` recent outside the read-only advisor picker) get the wrapper, in the row renderer of
 `ModelDialog.tsx`. Other rows keep `onContextMenu` preventDefault, so the native menu stays suppressed as
 before.
 
@@ -216,6 +220,20 @@ Measured with the fix on a private `ocode serve`, before → after:
 
 **Measurement gotcha.** There is no `DELETE /api/sessions/{id}` route. A probe session copied into the project's sessions dir must be removed by hand: the `.sqlite` file plus its row in `index.sqlite`. `PUT` model on a real session bumps its `updated_at` and writes the shared recent-models list, so never time it on a user's session.
 
+## 10. Advisor uses shared sections, but shared history stays read-only (2026-11-25)
+
+`ModelDialog.tsx` now includes `purpose="advisor"` in `supportsSections`. The advisor therefore renders **Recently Used → ★ Favorites → Claude Code (Read-Only CLI) → registry providers**. The synthetic Claude Code rows are prepended to the model list, so Claude Code is the first provider group; `partitionModelSections` still dedupes priority rows out of provider groups, and empty priority sections are omitted.
+
+This deliberately follows the normal web convention rather than the TUI order. The TUI's `openAdvisorPicker` still calls `prependClaudeCodeSection`, which puts Claude Code above Recently Used/Favorites (`internal/tui/picker.go`).
+
+Three ownership boundaries remain:
+
+- **No favorite-star toggles for advisor.** `supportsFavoriteToggle` is only `main`/`permission`. Advisor can display and select shared favorites, but cannot change them from this picker.
+- **No recent-removal controls for advisor.** `canRemove` is `isRecent && m.name.includes("/") && purpose !== "advisor"`. An advisor recent row therefore gets no Radix `Remove from recently used` menu, and the row still prevents the native context menu.
+- **No recent-model writes for advisor picks.** Per explicit user decision, advisor selections show shared history only and do not call `config.SaveRecentModel`. `HandleSetAdvisor` remains unchanged; `TestHandleSetAdvisorDoesNotChangeRecentModels` seeds a recent model, PUTs an advisor selection, and asserts the shared list is unchanged. Selection payload and session scoping are unchanged.
+
+**Regression coverage:** `web/src/components/Layout/ModelDialog.test.tsx` covers advisor section order, dedupe, empty history, absence of star toggles, and Claude Code as the first provider group. `keeps shared recents read-only` right-clicks an advisor recent row, asserts no `Remove from recently used` menu item appears, and asserts `removeModelRecent` is never called. See also [Advisor Claude Code CLI backend on web/desktop](../concepts/advisor-claude-code-backend.md).
+
 ## Open: duplicate Radix dismissable-layer versions (not fixed)
 
 `pnpm why @radix-ui/react-dismissable-layer` in `web/` shows two versions. The app's own Radix packages
@@ -226,7 +244,7 @@ resolve 1.1.19; 1.2.1 is pulled only through `@univerjs/design` (dropdown-menu a
 - `internal/agent/context_test.go` `TestModelContextKindsAt_AgreesWithPerModelLookup`
 - `internal/agent/context_bench_test.go` (new)
 - `web ModelDialog.test.tsx` ("opens from the cached list and never blocks on a live refresh",
-  "Refresh fetches live provider lists…", provider render cap)
+  "Refresh fetches live provider lists…", provider render cap, advisor priority-section order/dedupe/empty-history/no-stars/Claude-Code-first-provider cases, and "keeps shared recents read-only")
 - `web modelSelection.test.ts` capProviderGroups
 - `web ModelDialog.test.tsx` `ModelDialogHost` case: `open(purpose)` through the ref shows the dialog and
   the parent does not re-render
@@ -235,4 +253,5 @@ resolve 1.1.19; 1.2.1 is pulled only through `@univerjs/design` (dropdown-menu a
   exclusion, Flusher/Hijacker delegation, Unwrap, Vary header, small-body skip)
 - `internal/server/handler_models_configured_test.go` (configured filter: credential-based
   inclusion, recents/favorites preservation, current-model provider kept, default full registry)
+- `internal/server/handler_config_test.go` `TestHandleSetAdvisorDoesNotChangeRecentModels`
 - `internal/stackdetect/stackdetect_test.go` `TestDetect_depthMarkersFollowSymlinksAndMatchNames` (depth markers through a symlinked directory, and a directory named `x.pdf` matching by name), the `.hidden/a.xlsx` and `a/b/c/deep.docx` table cases, and `BenchmarkDetect` (synthetic 30x30 tree).

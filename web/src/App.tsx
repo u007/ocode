@@ -29,10 +29,10 @@ import { reportActionErrorMessage } from "./lib/actionErrors";
 import { looksLikeAbsolutePath } from "./lib/outOfProjectFiles";
 import OpenPathDialog from "./components/Files/OpenPathDialog";
 import { reportActionError } from "./lib/actionErrors";
-import { installQuitBlockedListener } from "./lib/editorDraftGuard";
+import { installQuitBlockedListener, reportDraftGuardState } from "./lib/editorDraftGuard";
 import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
 import RemoteReconnect from "./components/RemoteReconnect";
-import ChatPanel from "./components/Chat/ChatPanel";
+import OwnerChatPanel from "./components/Chat/OwnerChatPanel";
 import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
 import PlanPanel from "./components/Chat/PlanPanel";
@@ -64,7 +64,7 @@ import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
 import UnifiedTabBar from "./components/Layout/UnifiedTabBar";
 import SessionSubTabs from "./components/Layout/SessionSubTabs";
-import SessionTabSync from "./components/Layout/SessionTabSync";
+import AppBridge from "./components/Layout/AppBridge";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
@@ -825,10 +825,10 @@ function HomeApp() {
         // find it.
         if (fallbackQuickOpen && looksLikeAbsolutePath(path)) {
           requestOpenOutsideProject(path);
-          return;
+          return false;
         }
         if (fallbackQuickOpen) openFilePicker(basename(path));
-        return;
+        return false;
       }
       setActiveView("files");
       if ((query && query.trim()) || (line && line > 0)) {
@@ -849,10 +849,11 @@ function HomeApp() {
             setTimeout(retry, 150);
           }
         };
-        setTimeout(retry, 100);
-      }
-    },
-    [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
+       setTimeout(retry, 100);
+     }
+      return true;
+   },
+   [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
   );
 
   // FileTree open handler. On a phone the tree is an overlay drawer over the
@@ -907,6 +908,18 @@ function HomeApp() {
     setOpenPathSeed(seed);
     setOpenPathDialogOpen(true);
   }, []);
+
+  const openInterpreterScript = useCallback(
+    async (path: string) => {
+      const projectRoot = projectState.activeProject?.path;
+      const host = projectState.activeProject?.host;
+      const opened = await openFileAndShow(path, projectRoot, undefined, undefined, false, host);
+      if (!opened && looksLikeAbsolutePath(path)) {
+        await openOutsideProject(path, host, projectRoot);
+      }
+    },
+    [openFileAndShow, openOutsideProject, projectState.activeProject],
+  );
 
   // File links in chat (markdown + plain text) dispatch this event.
   // Also handles editor link clicks (which carry projectRoot).
@@ -1007,6 +1020,10 @@ function HomeApp() {
     const maxAttempts = 200; // Five seconds; enough for desktop navigation, bounded in browsers.
     const attemptHandshake = () => {
       if (notifyWailsRuntimeReady()) {
+        // An idle page may have armed nothing, so nothing else re-reports the
+        // quit guard after the bridge appears — and the shell may still hold a
+        // block left by the previous page life (a reload keeps its QuitGuard).
+        reportDraftGuardState();
         return;
       }
       attempts++;
@@ -1738,7 +1755,7 @@ function HomeApp() {
     // viewport pushed the StatusBar, the speech toolbar and the bottom of the
     // composer below the visible screen.
     <div className="app-viewport flex flex-col bg-background">
-      <SessionTabSync onNewTab={openBackgroundBrowserTab} />
+      <AppBridge onNewTab={openBackgroundBrowserTab} />
       <OfflineBanner isOffline={offlineStatus.isOffline || projectState.offline} lastSynced={offlineStatus.lastSynced} />
       <AttentionSoundBridge
         tabs={attentionTabs}
@@ -2283,7 +2300,7 @@ function HomeApp() {
                                 data-testid="chat-transcript-slot"
                                 className="relative flex-[1_1_10rem] min-h-0"
                               >
-                                <ChatPanel
+                                <OwnerChatPanel
                                   sessionId={tab.id}
                                   host={resolveSessionHost(projectState, tab.id)}
                                   onContinueInterrupted={stableHandleContinueInterrupted}
@@ -2732,6 +2749,7 @@ function HomeApp() {
           host={activeSessionHost}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
+          onOpenFile={openInterpreterScript}
           onHide={hidePermission}
         />
       )}

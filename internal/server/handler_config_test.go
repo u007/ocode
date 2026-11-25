@@ -947,6 +947,26 @@ func TestHandleSetAdvisorSetsProviderClaudeCode(t *testing.T) {
 	}
 }
 
+func TestHandleSetAdvisorDoesNotChangeRecentModels(t *testing.T) {
+	h := testConfigHandler(t)
+	const recent = "openai/gpt-4o"
+	if err := config.SaveRecentModel(recent); err != nil {
+		t.Fatalf("seed recent model: %v", err)
+	}
+
+	body := `{"provider":"anthropic","model":"claude-sonnet-4-6"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/advisor", strings.NewReader(body))
+	h.HandleSetAdvisor(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	if got := config.LoadRecentModels(); len(got) != 1 || got[0] != recent {
+		t.Fatalf("recent models = %v, want [%s]", got, recent)
+	}
+}
+
 func TestHandleGetMaskConfigIncludesAdvancedFields(t *testing.T) {
 	h := testConfigHandler(t)
 	h.mu.Lock()

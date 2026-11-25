@@ -140,22 +140,25 @@ Bash commands are parsed into constituent sub-commands (respecting pipes, semico
 ### 5d. Prefix-level rules
 
 Each sub-command is checked against:
-1. `bashSubcommandAllow` — built-in safe subcommands (git read-only, gh read-only, go/cargo/npm build+test, docker read-only, make, etc.)
-2. `bashAutoAllowPrefixes` — built-in safe single-word prefixes (cat, grep, ls, jq, diff, etc.)
-3. User-configured `permissions.bash.prefixes` in `ocodeconfig.json`
-4. User-configured `permissions.bash.auto_allow_prefixes` (extends the built-in set)
+1. `developmentToolArgsAllowed` — explicit formatter, linter, type-checker, and test-runner names reject code-loading flags, package overrides, unresolved variables, and outside-root config/output/cache paths before any static shortcut.
+2. `bashSubcommandAllow` — built-in safe subcommands (git read-only, gh read-only, go/cargo/npm build+test, docker read-only, make, etc.)
+3. `bashAutoAllowPrefixes` — built-in safe single-word prefixes (cat, grep, ls, jq, diff, etc.)
+4. User-configured `permissions.bash.prefixes` in `ocodeconfig.json`
+5. User-configured `permissions.bash.auto_allow_prefixes` (extends the built-in set)
 
 ### 5e. Path-scoping for auto-allow
 
-For auto-allowed bash prefixes, all detected path arguments must resolve inside the current working directory. If any path escapes the workdir, the command falls back to `ask`.
+For auto-allowed bash prefixes and development tools, all detected path arguments must resolve inside the shared allowed roots: the working directory, extra allowed paths, managed caches, and temp roots. If any path escapes those roots, the command falls back to `ask`.
 
 `find` and `fd` have additional unsafe-flag checks (`-exec`, `-execdir`, `-delete`, `-x`, etc.) that force `ask`.
+
+The formatter/linter static set includes `gofmt`, `goimports`, `gofumpt`, `go fmt`, `go vet`, `cargo fmt`, `cargo clippy`, `rustfmt`, `black`, `isort`, `ruff`, `mypy`, `basedpyright`, `tsc`, `tsgo`, `eslint`, `prettier`, `biome`, `stylelint`, `oxlint`, `golangci-lint`, `staticcheck`, `shellcheck`, `shfmt`, `clang-format`, and `terraform fmt`. Ordinary test commands keep their existing static allowances; escape hatches such as `go test -exec`/`-toolexec`, `go vet -vettool`, and `pytest -p` deliberately fall through to Jev or the human.
 
 ### 5f. Dependency-local binaries (project bin dirs)
 
 Dependency-local interpreters (`node_modules/.bin/tsc`, `.venv/bin/pytest`, `./bin/foo`, `~/go/bin/...`, `./gradlew`, `bundle exec`, …) get **two layers with different trust**:
 
-- **Code level (`matchSubcommandAllow` → `nodeModulesBinTool` + `runnerSafeTools`)**: only project-local `node_modules/.bin` shims whose basename is in the inert safe set (`tsc`, `tsgo`, `eslint`, `prettier`, `biome`, `vitest`, `jest`, `stylelint`) auto-allow, and only after canonical containment — the shim's resolved path must be under the session workDir (symlinked `node_modules` escaping the worktree fails closed; empty workDir fails closed). Everything else — an unknown bin, a familiar-looking name not in the safe set, `.venv/bin/*`, `./bin/*` — is **not** code-allowed and falls to the judge. This is deliberately fail-closed: a bin's path or basename proves nothing about what the script executes.
+- **Code level (`matchSubcommandAllow` → `nodeModulesBinTool` + `runnerSafeTools`)**: only project-local `node_modules/.bin` shims whose basename is in the inert safe set (`tsc`, `tsgo`, `eslint`, `prettier`, `biome`, `vitest`, `jest`, `stylelint`, `black`, `isort`, `gofumpt`, `rustfmt`, `golangci-lint`, `staticcheck`, `shellcheck`, `shfmt`, `clang-format`, `oxlint`) auto-allow, and only after canonical containment plus the development-tool argument gate — the shim's resolved path must be under the session workDir (symlinked `node_modules` escaping the worktree fails closed; empty workDir fails closed). Everything else — an unknown bin, a familiar-looking name not in the safe set, `.venv/bin/*`, `./bin/*` — is **not** code-allowed and falls to the judge. This is deliberately fail-closed: a bin's path or basename proves nothing about what the script executes.
 - **LLM judge (bundled addendum)**: the "judge the ACTION" paragraph tells the judge to allow a dependency-bin invocation when the action is permissible (build/test/lint/format/codegen/local file processing) regardless of the binary's directory, deny when the action itself is not, and **require human approval when the effects cannot be established from argv and the tool's known semantics** — opaque flags, an unreadable script, or an unfamiliar tool never get path-based safety. Package-manager subcommands (`npm/pnpm/bun install/run/exec/dlx`) never fall under this: they follow the package-manager rules (exec/run always human-approved).
 
 Pinned by `TestMatchSubcommandAllow_DependencyBinAction` (code level) and `TestBundledAutoPermissionPrompt_CoversLanguageToolBins` / `TestBundledAutoPermissionPrompt_GitConfigBoundary` (judge level) — keep the two layers in sync when editing either.
@@ -625,3 +628,13 @@ Unknown groups produce a diagnostic warning. Non-shorthand (object-valued) permi
 | `LoadFromConfig()` | `permissions.go:1829` | Load rules from opencode.json format |
 | `claudeIsAsk()` / `claudeIsAllowed()` | `claude_settings.go` | Match a command against Claude `.claude/settings.json` ask/allow patterns (deny is not read) |
 | `denyToolMessage()` | `agent.go` | Renders a static Deny into the tool error, including `DenyReason` |
+
+## 14. Whitelisted interpreter scripts (auto-grants)
+
+Durable interpreter-exact grants (whitelisted scripts) live in `permissions.auto.grants` in `ocodeconfig.json`. They are keyed by language, source mode, normalized command, resolved entrypoint path, cwd, and sha256 of the file, so path/flag/cwd/hash changes re-ask.
+
+- **Backend**: `GET /api/permissions/grants` lists them; `DELETE /api/permissions/grants?index=N` (or body `{index}`) revokes one and refreshes all live agents immediately.
+- **PermissionManager**: `AddAutoGrant`, `RemoveAutoGrant(index)`, `MatchInterpreterGrant` (short-circuits Jev on match).
+- **Config**: `SaveAutoGrant`, `RemoveAutoGrant`, `AutoGrantKeyEqual`.
+- **Hygiene**: `PersistInterpreterScriptGrant` refuses to persist grants whose entrypoint is under the OS temp dir (returns an error surfaced as "not saved" by callers). Move stable scripts into the repo (`scripts/`) before granting.
+- **Jev**: the `whitelisted_scripts` set (path + sha256 prefix) is injected into the Jev payload of non-granted interpreter commands for transparency; granted runs short-circuit before Jev and log `tier=auto_interp_grant_match ... whitelisted=true`.

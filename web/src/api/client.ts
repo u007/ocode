@@ -44,6 +44,8 @@ import type {
   PermissionsResponse,
   PermissionModeConfigResponse,
   PermissionRule,
+  AutoGrantsResponse,
+  RevokeAutoGrantResponse,
   BashRulesDelta,
   MemoryStatusResponse,
   UsageSummary,
@@ -2624,9 +2626,19 @@ export const api = {
       body: JSON.stringify({ index }),
     }),
 
-  /** Checkouts of the project's repository, main first. Local projects only. */
-  gitWorktrees: (project?: string) =>
-    fetchJSON<GitWorktree[]>(`/api/git/worktrees${projQuery(project)}`),
+  /** Checkouts of the project's repository, main first. Local projects only.
+   *  `limit`/`offset` page the list; omit both for the server's default page. */
+  gitWorktrees: (
+    project?: string,
+    opts: { limit?: number; offset?: number } = {},
+  ) => {
+    const extra: Record<string, string> = {};
+    if (opts.limit !== undefined) extra.limit = String(opts.limit);
+    if (opts.offset !== undefined) extra.offset = String(opts.offset);
+    return fetchJSON<GitWorktree[]>(
+      `/api/git/worktrees${projQuery(project, undefined, extra)}`,
+    );
+  },
 
   /** Check out `branch` into .worktrees/<branch>: an existing local branch is
    *  reused, otherwise a new branch is created from HEAD. Returns the list. */
@@ -4522,6 +4534,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(delta),
     }, host),
+  // ── Durable interpreter grants (whitelisted scripts) ──
+  // Settings forms are global (no host threading) per project convention.
+  listAutoGrants: () =>
+    fetchJSON<AutoGrantsResponse>("/api/permissions/grants"),
+  revokeAutoGrant: (index: number) =>
+    fetchJSON<RevokeAutoGrantResponse>(
+      `/api/permissions/grants?index=${encodeURIComponent(String(index))}`,
+      { method: "DELETE" },
+    ),
   getAutoContinue: (sessionId?: string, host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>(
       sessionId

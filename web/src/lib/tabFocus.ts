@@ -1,7 +1,7 @@
 import { Store, useSelector } from "@tanstack/react-store";
 
 /** Which half of the merged Sessions view a focus request reveals. */
-export type TabFocusKind = "chat" | "terminal";
+export type TabFocusKind = "chat" | "terminal" | "browser";
 
 /**
  * A request from outside App's tree to reveal and focus an already-opened

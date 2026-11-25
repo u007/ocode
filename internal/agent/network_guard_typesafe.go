@@ -382,6 +382,8 @@ func bashEgressTargets(command string) []egressTarget {
 		fragments = [][]string{fields}
 	}
 	var out []egressTarget
+	var loopVals map[string][]string
+	loopValsReady := false
 	for _, fragment := range fragments {
 		for _, words := range effectiveCommandWords(fragment) {
 			if len(words) == 0 {
@@ -392,6 +394,27 @@ func bashEgressTargets(command string) []egressTarget {
 			}
 			line := rebuildCommandLine(words)
 			host := bashEgressHost(words)
+			loopback := host != "" && (subprocessTargetsLocalhost(line) || subprocessTargetsLocalNetwork(line))
+			if !loopback {
+				// A $var bound only by literal for-loop values is judged by substituting each value and re-proving every variant.
+				if !loopValsReady {
+					loopVals = literalLoopVarValues(command)
+					loopValsReady = true
+				}
+				if variants := expandLoopVars(line, loopVals); len(variants) > 0 {
+					allLoopback := true
+					for _, v := range variants {
+						if !subprocessTargetsLocalhost(v) && !subprocessTargetsLocalNetwork(v) {
+							allLoopback = false
+							break
+						}
+					}
+					if allLoopback {
+						loopback = true
+						host = bashEgressHost(splitShellFields(variants[0]))
+					}
+				}
+			}
 			out = append(out, egressTarget{
 				Tool:  "bash",
 				Kind:  egressKindCommand,
@@ -405,7 +428,7 @@ func bashEgressTargets(command string) []egressTarget {
 				// Each proof requires no possible remote target and no
 				// connection-redirecting flag, so a proxied or --resolve'd "localhost"
 				// is correctly treated as remote.
-				Loopback: host != "" && (subprocessTargetsLocalhost(line) || subprocessTargetsLocalNetwork(line)),
+				Loopback: loopback,
 			})
 		}
 	}

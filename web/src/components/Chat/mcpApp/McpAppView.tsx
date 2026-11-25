@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { api, ApiError } from "../../../api/client";
 import type { McpAppRef, McpAppResource } from "../../../api/types";
 import { useAppearanceTheme } from "../../../lib/appearanceTheme";
-import { openExternalURL } from "../../../lib/externalLinks";
+import { requestURLOpen } from "../../../lib/externalLinks";
+import { useURLOpenOwner } from "../../../lib/urlOpenContext";
 import {
   buildMcpAppSrcDoc,
   createMcpAppHost,
@@ -136,6 +137,7 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
   const key = viewKey(sessionId, toolCallId);
   const cacheKey = `${host ?? ""}|${sessionId}|${mcpApp.server}|${mcpApp.resource_uri}`;
   const themeKind: ThemeKind = useAppearanceTheme().theme?.kind ?? "dark";
+  const owner = useURLOpenOwner();
 
   const [resource, setResource] = useState<McpAppResource | null>(() => resourceCache.get(cacheKey) ?? null);
   const [loadError, setLoadError] = useState<unknown>(null);
@@ -144,8 +146,6 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
   // The frame navigated itself away from its srcdoc document: its host is torn
   // down and the view stays closed until the user asks to reload it.
   const [navigated, setNavigated] = useState(false);
-  // A ui/open-link request awaiting the user's confirmation. Only one at a time.
-  const [pendingLink, setPendingLink] = useState<string | null>(null);
   const [height, setHeight] = useState(() => viewStates.get(key)?.height ?? DEFAULT_HEIGHT);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -232,9 +232,20 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
           throw toHostError(err);
         }
       },
-      // Never opens directly: the widget gets no user gesture, so the URL waits
-      // for an explicit Open click (see OpenLinkConfirm).
-      openLink: (url) => setPendingLink(url),
+      // The chooser is the confirmation boundary. Its external button supplies
+      // the user gesture that the sandboxed widget cannot provide.
+      openLink: (url) => {
+        try {
+          requestURLOpen(url, owner ?? undefined);
+        } catch (err) {
+          console.error("MCP app: URL chooser request failed", {
+            server: mcpApp.server,
+            tool: mcpApp.tool,
+            error: err,
+          });
+          throw err;
+        }
+      },
       requestDisplayMode: (mode) => {
         // The host posts the {mode} response right after this returns. The
         // switch happens on the next tick, so the response is never lost to
@@ -289,7 +300,6 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
       frameHost.teardown();
       setNavigated(true);
       setDisplayMode("inline");
-      setPendingLink(null);
     };
     frameEl.addEventListener("load", onLoad);
 
@@ -375,19 +385,6 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
     />
   );
 
-  const confirmLink =
-    pendingLink === null ? null : (
-      <OpenLinkConfirm
-        url={pendingLink}
-        className={fullscreen ? "absolute bottom-3 left-3 right-3 z-10" : "mt-1"}
-        onOpen={() => {
-          openExternalURL(pendingLink);
-          setPendingLink(null);
-        }}
-        onCancel={() => setPendingLink(null)}
-      />
-    );
-
   if (fullscreen) {
     // The fullscreen view is portaled to document.body: a fixed element under the
     // virtual row (which carries a transform) would be confined to that row. The
@@ -403,7 +400,6 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
         {createPortal(
           <div ref={wrapperRef} className="fixed inset-0 z-50 bg-background">
             {frame}
-            {confirmLink}
             <button
               type="button"
               autoFocus
@@ -422,46 +418,6 @@ function ActiveMcpApp({ sessionId, toolCallId, host, mcpApp, toolArguments, outp
   return (
     <div ref={wrapperRef} className="relative mt-1 w-full max-w-[880px] min-w-0">
       {frame}
-      {confirmLink}
-    </div>
-  );
-}
-
-function OpenLinkConfirm({
-  url,
-  className,
-  onOpen,
-  onCancel,
-}: {
-  url: string;
-  className: string;
-  onOpen: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div
-      role="group"
-      aria-label="Open link confirmation"
-      className={`flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-xs ${className}`}
-    >
-      <span className="shrink-0 text-muted-foreground">This view wants to open</span>
-      <span className="min-w-0 flex-1 truncate font-mono" title={url}>
-        {url}
-      </span>
-      <button
-        type="button"
-        onClick={onOpen}
-        className="shrink-0 rounded border border-border px-2 py-0.5 hover:text-foreground"
-      >
-        Open
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        className="shrink-0 rounded border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground"
-      >
-        Cancel
-      </button>
     </div>
   );
 }

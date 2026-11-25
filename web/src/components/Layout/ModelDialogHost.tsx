@@ -1,5 +1,6 @@
 import { useCallback, useImperativeHandle, useState, type Ref } from "react";
 import ModelDialog, { type ModelDialogTab } from "./ModelDialog";
+import { startUiTiming } from "../../lib/debug/uiTiming";
 
 export interface ModelDialogHostHandle {
   open: (purpose?: ModelDialogTab) => void;
@@ -17,7 +18,19 @@ export function ModelDialogHost({
   host?: string;
 }) {
   const [state, setState] = useState<{ open: boolean; purpose: ModelDialogTab }>({ open: false, purpose: "main" });
-  useImperativeHandle(ref, () => ({ open: (purpose = "main") => setState({ open: true, purpose }) }), []);
-  const close = useCallback(() => setState((s) => ({ ...s, open: false })), []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      open: (purpose = "main") => {
+        startUiTiming("model-dialog-open");
+        setState({ open: true, purpose });
+      },
+    }),
+    [],
+  );
+  const close = useCallback(() => {
+    startUiTiming("model-dialog-close");
+    setState((s) => ({ ...s, open: false }));
+  }, []);
   return <ModelDialog open={state.open} onClose={close} purpose={state.purpose} sessionId={sessionId} host={host} />;
 }

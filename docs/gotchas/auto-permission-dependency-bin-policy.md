@@ -1,21 +1,23 @@
 ---
 type: Gotcha
 title: Auto-Permission Dependency Binaries — Policy Decision
-description: Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
+description: Policy split for project/toolchain dependency binaries: the bundled chat-judge v1.9.5 action rule remains prose-only, while the TypeSafe/Jev rubric is category-based and the deterministic layer statically allows only named development tools behind an argument gate.
 tags:
   - auto-permission
   - gotcha
   - security
   - policy-decision
-timestamp: 2026-11-22T15:41:37Z
+timestamp: 2026-11-25T04:01:20Z
 ---
 ## 1. THE POLICY
 
-The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:91`) directs the LLM permission judge to **ALLOW** direct invocation of project/toolchain dependency binaries — `node_modules/.bin`, `node_modules/**/bin`, `.venv/bin|venv/bin|env/bin`, pyenv shims, `go run`/`go tool`/GOPATH/bin, project `./bin`, `cargo` + `~/.cargo/bin`, Rust `target/debug|release`, PHP `vendor/bin`, Ruby `bundle exec`, Java/Kotlin `gradlew`/`mvnw`, `.NET` local tools — judging the **ACTION** (build/test/lint/format/codegen/local file processing → ALLOW) not the binary's location. DENY if the action writes sensitive paths (`.git/`), exfiltrates, or is destructive.
+The bundled **chat-judge** addendum (`internal/config/auto_permission_prompt.go:91`, bundled v1.9.5 at `internal/config/auto_permission_prompt.go:30`) directs the chat LLM permission judge to **ALLOW** direct invocation of project/toolchain dependency binaries — `node_modules/.bin`, `node_modules/**/bin`, `.venv/bin|venv/bin|env/bin`, pyenv shims, `go run`/`go tool`/GOPATH/bin, project `./bin`, `cargo` + `~/.cargo/bin`, Rust `target/debug|release`, PHP `vendor/bin`, Ruby `bundle exec`, Java/Kotlin `gradlew`/`mvnw`, `.NET` local tools — judging the **ACTION** (build/test/lint/format/codegen/local file processing → ALLOW), not the binary's location. DENY if the action writes sensitive paths (`.git/`), exfiltrates, or is destructive.
+
+**This action rule does not reach Jev.** It lives in `BundledAutoPermissionPromptBody` for the bundled chat judge. TypeSafe/Jev receives `typesafeJudgeInstructions`, embedded from `internal/agent/prompts/permission_judge.txt` (`internal/agent/permission_typesafe.go:199`), whose development-tool rule is category-based (`internal/agent/prompts/permission_judge.txt:33`): named formatter/linter/type-checker/test invocations are ordinary work, but installs, package overrides, plugin/custom-code loading, unknown binaries, outside-root paths, secrets, and destructive/banned actions are not excused by a dependency-local path.
 
 ## 2. THREAT MODEL / RESIDUAL RISK (accepted)
 
-(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:249` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:5023`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
+(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:249` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:5103`, with a refusal at `internal/agent/agent.go:5181`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
 
 (b) Judge-ALLOW removes the human prompt but adds **no confinement** — the write-wall exists only in sandbox mode; network egress is always open (sandbox is write-integrity only — cite `architecture/shell-sandbox-integrity-only-mode.md`), so a judged-allowed binary can read global files and POST anywhere.
 
@@ -23,22 +25,27 @@ The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:91`) di
 
 ## 3. MITIGATIONS THAT MAKE IT DELIBERATE
 
-Package installs are human-gated (npm/pnpm/bun `install`/`ci`/`dlx`/`exec` require human approval in the same prose — `auto_permission_prompt.go:85-89`). The v1.9.1 fail-closed rule: *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* (version bump to `BundledAutoPermissionPromptVersion = "1.9.1"`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not the prose: `classifyInterpreterExecution` basename-matches in `internal/agent/permissions.go:5716`. The code layer stays **narrower** than the prose: auto-allow only for runnerSafeTools basenames `{tsc,tsgo,eslint,prettier,biome,vitest,jest,stylelint}` under canonical workDir containment — `runnerSafeTools` (list at `internal/agent/permissions.go:5434`) with `shimUnderWorkDir` at `internal/agent/permissions.go:5259` and `nodeModulesBinTool` at `internal/agent/permissions.go:5302` — the prose expansion is judge-mediated only.
+The bundled chat prose human-gates package installs and package-manager script/execution commands (`internal/config/auto_permission_prompt.go:85-89`). Its fail-closed sentence — *"If you cannot establish what the command does… require human approval; a familiar-looking name proves nothing"* — remains in bundled v1.9.5 (`internal/config/auto_permission_prompt.go:30`, sentence at `internal/config/auto_permission_prompt.go:96`). First-word interpreter forms (`.venv/bin/python script.py`) route through the structured effect-verification path, not this prose: `classifyInterpreterExecution` basename-matches at `internal/agent/permissions.go:5906`.
+
+The deterministic layer stays narrower than the chat prose's path-only trust, but it is no longer limited to eight `runnerSafeTools` names. Known formatter/linter/type-checker commands statically allow through `bashSubcommandAllow` / `runnerSafeTools` (`internal/agent/permissions.go:5559`) only after `developmentToolArgsAllowed` (`internal/agent/permissions.go:5394`) accepts their arguments. Project `node_modules/.bin` forms must also pass canonical containment through `shimUnderWorkDir` (`internal/agent/permissions.go:5273`) and `nodeModulesBinTool` (`internal/agent/permissions.go:5316`). Ordinary test runners keep their prior static allowances, but escape flags fall through to Jev or a human. Other dependency binaries remain judge-mediated. See [Auto-Permission Enforced Categories](../concepts/auto-permission-enforced-categories.md#hybrid-development-tool-auto-allow-user-decision-2026-11-25).
 
 ## 4. WHY ACCEPTED
 
-Everyday tooling (`tsc`/`eslint`/`pytest`/`go run`) must not ping the human on every invocation; the same trust model as the code layer's pre-existing `make`/`npm run`/`cargo run` auto-allows (project-trusted script runners). Installs are the trust boundary.
+Everyday tooling (`tsc`/`eslint`/`pytest`/`go run`) must not ping the human on every invocation. The deterministic layer already trusts project script/test runners such as `make`, `npm run`, and `cargo run`; the HYBRID policy extends that trust only to named development tools behind `developmentToolArgsAllowed`.
+
+The layers are deliberately not identical. The bundled chat prose human-gates package-manager `run`/`test`/`exec`/`dlx`, while the deterministic layer retains its pre-existing project script/test allowances and named-tool static allows. The trust boundary is explicit install/remove/link/publish behavior and package/plugin/custom-code selection, not the mere presence of a binary in a dependency directory.
 
 ## 5. GOTCHA / RULES for maintainers
 
-- Never auto-allow an unfamiliar binary by path alone in **CODE** (the code layer's basename+containment gate must stay narrow).
-- When tightening, tighten **prose and code in one changelist**; neither should outpace the other.
-- Judge-ALLOW ≠ confinement in any future prose edits — always pair prose changes with code-layer reviews.
+- Never auto-allow an unfamiliar binary by path alone in **CODE**. The deterministic allowlist stays name-based, with canonical containment for project `node_modules/.bin` forms and an argument gate for development tools.
+- Keep the layer attribution explicit: the dependency-binary **action** rule is bundled chat-judge prose; Jev's rule is category-based; the deterministic layer statically allows only named tools and ordinary test forms.
+- When policy changes, update each affected layer and its regression tests, but do not claim prose/code parity where the shipped policy is intentionally hybrid.
+- Judge-ALLOW ≠ confinement. Always pair prose changes with a code-layer security review; sandbox mode is write-integrity only, and network egress remains open.
 
 ## 6. PATH-QUALIFIED BINARIES AND USER ALLOW RULES (2026-09-28)
 
 Allow rules (`permissions.bash.prefixes`) match the command's first word **literally**, so a `vp` rule never covered `./node_modules/.bin/vp` or `~/.local/share/vite-plus/0.3.2/bin/vp`. Those calls fell through to the Jev judge, which scored them 0.75–0.83, below the confidence floor, and a human was asked every time. Deny rules already see through paths (`effectiveCommandWords`).
 
-- **Code:** `trustedToolBasename` (`internal/agent/permissions.go`) lets a path-qualified word inherit its **bare-name allow rule** only when it sits in a trusted location: `node_modules/.bin` inside the project (`nodeModulesBinTool`, canonical containment), or a `trustedToolDirPatterns` dir under `$HOME` (`.vite-plus/bin`, `.local/share/vite-plus/*/bin`). It runs after the harmful check and after the literal rule lookup, and it grants nothing without an existing user rule, so rule 5 above still holds. Test: `TestAllowRuleMatchesPathQualifiedTrustedTool`.
+- **Code:** `trustedToolBasename` (`internal/agent/permissions.go:5343`) lets a path-qualified word inherit its **bare-name allow rule** only when it sits in a trusted location: `node_modules/.bin` inside the project (`nodeModulesBinTool`, canonical containment), or a `trustedToolDirPatterns` dir under `$HOME` (`.vite-plus/bin`, `.local/share/vite-plus/*/bin`). It runs after the harmful check and the literal/granular rule lookups, but the development-tool argument gate runs earlier (`internal/agent/permissions.go:9354`), so a rejected escape flag still asks before a saved rule can be inherited. It grants nothing without an existing user rule, so rule 1 above still holds. Test: `TestAllowRuleMatchesPathQualifiedTrustedTool`.
 - **Jev:** the TypeSafe state now carries `allowed_command_prefixes` (the user's bash allow rules, `PermissionManager.BashAllowedPrefixes`), and `typesafeJudgeInstructions` tells Jev that a command invoking one of them **by exact name** is user-trusted, and that a same-named binary called by a path is not covered (trusted paths are already resolved in code before Jev runs, so only untrusted ones reach it). Deny rules stay in `banned_command_prefixes`. Test: `TestConsultPermissionModelTypesafeAllowedPrefixesInState`.
 - **`git branch`:** it both lists and mutates, so it is not in `bashSubcommandAllow`. `isReadOnlyGitBranchForm` auto-allows only listing forms: no args, listing flags (`-v/-vv/-a/-r/--show-current/--color/--column/--sort/--format`), or list mode (`-l/--list/--contains/--merged/--points-at`) with patterns. Unknown flags and a positional outside list mode (branch creation) fail closed. Test: `TestGitBranchListingFormsAutoAllow`.

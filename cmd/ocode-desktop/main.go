@@ -611,7 +611,10 @@ func main() {
 		}),
 		// Web inspector for debugging the frontend. Also available from the
 		// native menu bar (View → Open Developer Tools, ⌥⌘I) in non-production
-		// builds; the tray entry makes it discoverable.
+		// builds; the tray entry makes it discoverable. On macOS this only works
+		// when Wails' private-API bridge is compiled in — the desktop build
+		// targets pass -tags private_mac_apis (see DESKTOP_TAGS in the Makefile),
+		// otherwise OpenDevTools is a silent no-op.
 		application.NewMenuItem("Open DevTools").OnClick(func(ctx *application.Context) {
 			window.OpenDevTools()
 		}),
@@ -1002,7 +1005,8 @@ func spawnRelaunchHelper(timeout time.Duration) error {
 //     (and its in-process agent server) by accident.
 //
 // The standard Edit/View/Window menus are kept for text editing (Cmd+C/V),
-// reload/devtools, and window management.
+// reload/devtools, and window management. The View menu's developer-tools item
+// depends on the macOS build tag documented at DESKTOP_TAGS in the Makefile.
 func buildAppMenu(app *application.App, window *application.WebviewWindow, handle *desktop.Handle, quitGuard *desktop.QuitGuard) *application.Menu {
 	menu := application.NewMenu()
 	quitHandler := rapidQuitHandler(app, window, handle, quitGuard)
@@ -1072,7 +1076,10 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 	// Standard Edit menu (Cmd+C/V/X/A/Z for webview text fields).
 	menu.AddRole(application.EditMenu)
 
-	// View menu (reload, devtools, zoom, fullscreen).
+	// View menu (reload, devtools, zoom, fullscreen). Wails adds "Open Developer
+	// Tools" (⌥⌘I) here in non-production builds, but on macOS its handler is a
+	// no-op unless the binary was built with -tags private_mac_apis
+	// (DESKTOP_TAGS in the Makefile).
 	menu.AddRole(application.ViewMenu)
 
 	// Share menu — native entry points for remote-control / desktop sharing.

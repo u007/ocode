@@ -343,6 +343,9 @@ export default function GitPanel({
   const commitInputRef = useRef<HTMLTextAreaElement>(null);
   const [generatingMessage, setGeneratingMessage] = useState(false);
   const [busy, setBusy] = useState(false);
+  // React batches state updates, so busy alone cannot stop two mutations fired
+  // in one event turn. The ref closes that synchronous gap.
+  const mutationInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   // Whether the previous load reported an operation in progress. Used only to
   // detect the idle -> operation edge; a ref because the comparison drives a
@@ -585,6 +588,8 @@ export default function GitPanel({
       // The formatter may return `null` to suppress the notice (nothing changed).
       successMessage?: string | ((before: GitStatus | null, after: GitStatus | null) => string | null),
     ) => {
+      if (mutationInFlight.current) return;
+      mutationInFlight.current = true;
       setBusy(true);
       setError(null);
       // Snapshot the before-status so it stays stable even if the same object
@@ -604,6 +609,7 @@ export default function GitPanel({
       } catch (e) {
         setError(e instanceof Error ? e.message : "git action failed");
       } finally {
+        mutationInFlight.current = false;
         setBusy(false);
       }
     },
@@ -981,6 +987,7 @@ export default function GitPanel({
       setError("Commit message is required");
       return;
     }
+    if (!canCommit) return;
     runMutation(async () => {
       await api.gitCommit(commitMessage, [], projectPath, projectHost);
       setCommitMessage("");
@@ -1025,6 +1032,7 @@ export default function GitPanel({
       setError("Commit message is required");
       return;
     }
+    if (!canCommit) return;
     runMutation(async () => {
       await api.gitCommit(commitMessage, [], projectPath, projectHost);
       setCommitMessage("");
@@ -1172,6 +1180,9 @@ export default function GitPanel({
   // Resolution and the operation buttons themselves stay enabled — they are
   // the way OUT.
   const opInProgress = !!operation;
+  // Buttons and commit-box chords share one eligibility guard. In particular,
+  // a repeated chord while a mutation is in flight must not start a second one.
+  const canCommit = !busy && !opInProgress && status.has_changes && !!commitMessage.trim();
 
   // Wording for the discard/delete confirmation. A pure-untracked selection is
   // a real delete; anything containing tracked files is a revert to HEAD.
@@ -2028,10 +2039,17 @@ export default function GitPanel({
           value={commitMessage}
           onChange={(e) => setCommitMessage(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              commit();
+            if (
+              e.nativeEvent.isComposing ||
+              e.key !== "Enter" ||
+              (!e.metaKey && !e.ctrlKey) ||
+              e.altKey
+            ) {
+              return;
             }
+            e.preventDefault();
+            if (e.shiftKey) commitAndPush();
+            else commit();
           }}
           rows={1}
           placeholder="Commit message for staged changes…"
@@ -2058,16 +2076,26 @@ export default function GitPanel({
         </button>
         <button
           onClick={commit}
-          disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}
-          title={opInProgress ? "Finish or abort the in-progress git operation first" : undefined}
+          disabled={!canCommit}
+          aria-keyshortcuts="Control+Enter Meta+Enter"
+          title={
+            opInProgress
+              ? "Finish or abort the in-progress git operation first"
+              : "Commit staged changes (⌘/Ctrl+Enter)"
+          }
           className="h-9 px-4 shrink-0 whitespace-nowrap rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-40"
         >
           Commit
         </button>
         <button
           onClick={commitAndPush}
-          disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}
-          title={opInProgress ? "Finish or abort the in-progress git operation first" : "Commit staged changes, then push to the remote"}
+          disabled={!canCommit}
+          aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter"
+          title={
+            opInProgress
+              ? "Finish or abort the in-progress git operation first"
+              : "Commit staged changes, then push to the remote (⌘/Ctrl+Shift+Enter)"
+          }
           className="h-9 px-3 shrink-0 whitespace-nowrap rounded-md border border-border bg-muted/40 text-sm font-medium hover:bg-muted/60 disabled:opacity-40"
         >
           Commit &amp; Push

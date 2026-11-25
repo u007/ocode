@@ -3775,6 +3775,8 @@ func autoGrantKey(g AutoGrant) string {
 	}, "\x00")
 }
 
+
+
 // SaveAutoGrant appends one narrow auto-grant to permissions.auto.grants using
 // load-modify-write (no-op if an identical grant already exists), avoiding a
 // wholesale config write that would drop concurrent changes to other fields.
@@ -3793,6 +3795,29 @@ func SaveAutoGrant(grant AutoGrant) error {
 		return nil
 	})
 }
+
+// RemoveAutoGrant deletes every persisted grant whose identity matches the
+// given grant (kind, language, source mode, command, path, cwd, hashes). Used
+// by the settings revoke path so a deletion survives process restart.
+func RemoveAutoGrant(grant AutoGrant) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Auto == nil {
+			return nil
+		}
+		key := autoGrantKey(grant)
+		kept := make([]AutoGrant, 0, len(cfg.Permissions.Auto.Grants))
+		for _, existing := range cfg.Permissions.Auto.Grants {
+			if autoGrantKey(existing) == key {
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		cfg.Permissions.Auto.Grants = kept
+		return nil
+	})
+}
+
+
 
 func SaveEditor(editor string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {

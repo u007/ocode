@@ -247,3 +247,41 @@ func TestTypesafeRubric_FileChangesAreOrdinary(t *testing.T) {
 		}
 	}
 }
+
+func TestTypesafeRubric_FormatterLinterTestCommandsAreOrdinary(t *testing.T) {
+	if !strings.Contains(typesafeJudgeInstructions, "tests, linters, type-checkers, formatters") {
+		t.Fatal("rubric must name linters and type-checkers beside tests and formatters")
+	}
+	const marker = "Formatter, linter, type-checker, and test-runner invocations"
+	var rule string
+	for _, line := range strings.Split(typesafeJudgeInstructions, "\n") {
+		if strings.Contains(line, marker) {
+			rule = line
+			break
+		}
+	}
+	if rule == "" {
+		t.Fatalf("rubric has no line containing %q", marker)
+	}
+	for _, frag := range []string{
+		"ordinary development activity",
+		"package runners",
+		"in-place writes",
+		"test caches",
+		"dependency installation",
+		"package override",
+		"unknown scripts",
+		"PYTEST_ADDOPTS",
+		"PYTEST_PLUGINS",
+		"GOFLAGS",
+		"NODE_OPTIONS",
+		"-o addopts=",
+		"--override-ini addopts=",
+		"outside allowed_roots",
+		"must still be denied",
+	} {
+		if !strings.Contains(rule, frag) {
+			t.Errorf("formatter/linter/test rule lost fragment %q:\n%s", frag, rule)
+		}
+	}
+}

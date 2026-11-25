@@ -3,6 +3,7 @@ import { authedFetch } from "@/api/client";
 import { activeCompactionCount } from "@/lib/compactionState";
 import { isDesktopShell } from "@/lib/desktopShell";
 import { getWindowId } from "@/lib/windowId";
+import { describeLastUiAction } from "./uiTiming";
 
 const TICK_MS = 500;
 // A timer that fires this much later than scheduled means the main thread
@@ -43,6 +44,7 @@ export default function FrontendStallReporter() {
           stall_ms: Math.round(drift),
           dom_node_count: document.getElementsByTagName("*").length,
           active_compactions: activeCompactionCount(),
+          action: describeLastUiAction(),
         }),
       }).catch((err) => console.error("frontend stall reporter: post failed", err));
     }, TICK_MS);

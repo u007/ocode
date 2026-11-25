@@ -444,6 +444,13 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 			}
 		}
 
+		// Publish the resolved decision + execution result immediately, before
+		// the continuation runs, so the web/desktop transcript shows the
+		// allow/deny (and the approved tool's output) without waiting for the
+		// model's follow-up round.
+		as.messages = working
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+
 		h.wireHeadlessAgentCallbacks(sessID, as.agent)
 		h.wireLivePersist(sessID, as, working)
 		// Mirrors runTurn: turnActive true only while Step actually runs, so a
@@ -500,6 +507,9 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 
 		// Post-turn auto-compaction check (mirrors runTurn).
 		as.agent.MaybeCompactAsync(as.messages)
+		// Wake any queued-message drainer now that the session is idle again:
+		// a queued message could not drain while the ask was outstanding.
+		h.scheduleQueueDrain(sessID)
 	})
 
 	writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: sessID, Model: model})

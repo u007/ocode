@@ -817,6 +817,13 @@ func (h *Handler) fileTreeRootForEditor(root string) (string, bool) {
 // re-resolves against the same project/extra-dir root instead of drifting to
 // wherever the server's workDir happens to be.
 func (h *Handler) fileTreeRootFor(root string) (string, bool) {
+	// A linked worktree of a saved repository is its own browsable root, even
+	// inside the saved checkout (nested .worktrees/). It is checked first so a
+	// directory inside the worktree anchors to the worktree, not the main
+	// checkout. The resolver never holds h.mu across its git probe.
+	if worktree, savedRoot, ok := h.resolveWorkspaceRoot(root); ok && !samePath(worktree, savedRoot) {
+		return worktree, true
+	}
 	candidates := h.allowedProjectRoots()
 	h.mu.Lock()
 	if h.cfg != nil {
@@ -1979,6 +1986,12 @@ func (h *Handler) fileContentRootFor(root string) (string, bool) {
 		if err == nil && filepath.Clean(realCandidate) == filepath.Clean(realRoot) {
 			return absRoot, true
 		}
+	}
+	// A validated linked worktree of a saved repository is a root in its own
+	// right. Only an EXACT checkout root qualifies: a sub-path keeps the saved
+	// root as its anchor, as before.
+	if worktree, savedRoot, ok := h.resolveWorkspaceRoot(absRoot); ok && samePath(worktree, absRoot) && !samePath(worktree, savedRoot) {
+		return absRoot, true
 	}
 	return "", false
 }

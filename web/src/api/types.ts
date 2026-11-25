@@ -131,6 +131,9 @@ export interface SessionInfo {
   title: string;
   created_at: string;
   updated_at: string;
+  /** Checkout root this session belongs to, on a project session row. Absent
+   *  on an older server; a local row without it belongs to the project path. */
+  project_path?: string;
 }
 
 export interface SessionDetail extends SessionInfo {
@@ -1413,7 +1416,7 @@ export interface Project {
 
 /** One project's persisted open-session tabs (GET/PUT /api/tabs). */
 export interface ServerProjectTabs {
-  tabs: { id: string; title: string; sub_tab?: string }[];
+  tabs: { id: string; title: string; sub_tab?: string; worktree_path?: string }[];
   active: string;
 }
 
@@ -1472,6 +1475,27 @@ export interface ProjectGroup {
 export interface PermissionRule {
   tool: string;
   level: string;
+}
+
+export interface AutoGrant {
+  index: number;
+  kind: string;
+  language: string;
+  source_mode: string;
+  entrypoint_path: string;
+  entrypoint_sha256: string;
+  normalized_command: string;
+  cwd: string;
+  destructive: boolean;
+}
+
+export interface AutoGrantsResponse {
+  grants: AutoGrant[];
+}
+
+export interface RevokeAutoGrantResponse {
+  revoked: boolean;
+  index: number;
 }
 
 export interface PermissionsResponse {

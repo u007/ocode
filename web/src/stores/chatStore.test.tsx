@@ -1803,3 +1803,55 @@ describe("questionsFromToolCallArgs", () => {
     ).toBeNull();
   });
 });
+
+
+describe("PERMISSION_ANSWERED echo", () => {
+  it("rewrites a deny sentinel and is a no-op otherwise", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "bash", arguments: "{}" } }] },
+        { role: "tool", content: 'PERMISSION_ASK:' + JSON.stringify({ tool_name: "bash", command: "rm -rf build" }), tool_call_id: "call-1" },
+      ],
+    });
+
+    const allowState = chatReducer(state, {
+      type: "PERMISSION_ANSWERED",
+      sessionId: "a",
+      requestId: "call-1",
+      decision: "allow",
+    });
+    const allowTool = getSessionSlice(allowState, "a").messages.find(
+      (m) => m.role === "tool" && m.tool_call_id === "call-1",
+    );
+    expect(allowTool?.content).toContain("PERMISSION_ASK:");
+
+    const denyState = chatReducer(state, {
+      type: "PERMISSION_ANSWERED",
+      sessionId: "a",
+      requestId: "call-1",
+      decision: "deny",
+    });
+    const denyTool = getSessionSlice(denyState, "a").messages.find(
+      (m) => m.role === "tool" && m.tool_call_id === "call-1",
+    );
+    expect(denyTool?.content).toBe("denied: tool bash denied by user");
+
+    let noSentinel = initial();
+    noSentinel = chatReducer(noSentinel, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [{ role: "tool", content: "some other result", tool_call_id: "call-1" }],
+    });
+    const noChange = chatReducer(noSentinel, {
+      type: "PERMISSION_ANSWERED",
+      sessionId: "a",
+      requestId: "call-1",
+      decision: "deny",
+    });
+    expect(getSessionSlice(noChange, "a").messages[0].content).toBe("some other result");
+  });
+});

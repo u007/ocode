@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, Crosshair, RotateCw, X } from "lucide-react";
 import {
   isLocalRequestId,
@@ -53,6 +53,8 @@ const DEFAULT_HEIGHT = 240;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT_RATIO = 0.6;
 const COPY_FLASH_MS = 1500;
+/** Distance from the tail (CSS px) still counted as "at the bottom". */
+const STICK_THRESHOLD_PX = 8;
 
 type CopyState = "idle" | "copied" | "failed";
 
@@ -147,6 +149,10 @@ export function DevConsole(props: DevConsoleProps) {
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [domCopy, setDomCopy] = useState<{ which: "selector" | "html"; state: CopyState } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  // True while the output view follows the tail. Any real upward scroll clears
+  // it; returning to (or landing on) the bottom re-arms it.
+  const stickRef = useRef(true);
 
   const dom = props.dom;
   const domReady = dom?.status === "ready" && !!dom.root;
@@ -194,6 +200,47 @@ export function DevConsole(props: DevConsoleProps) {
     () => tabCopyLines(tab, consoleRows, netRows, perfRows),
     [tab, consoleRows, netRows, perfRows],
   );
+
+  const pinToBottom = useCallback(() => {
+    const el = contentRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const onContentScroll = useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD_PX;
+  }, []);
+
+  // An upward wheel is intent the `scroll` event reports a frame late. Reading
+  // it here keeps a burst of network rows from pinning the view back down in
+  // that gap (the same reason ChatPanel gates its pins on wheel intent).
+  const onContentWheel = useCallback((e: React.WheelEvent) => {
+    const el = contentRef.current;
+    if (!el || e.deltaY >= 0) return;
+    // Only a gesture that can actually move THIS scroller means "left the
+    // tail". A short list has no overflow, so no `scroll` event would follow to
+    // re-arm the follow once output grows — the reader never left the bottom.
+    if (el.scrollHeight > el.clientHeight) stickRef.current = false;
+  }, []);
+
+  // The DOM tab is a tree, not a log: it keeps its own scroll and its own
+  // scroll-into-view for the selected node. Only the output tabs follow.
+  const followsTail = tab !== "dom";
+
+  // A tab switch or a fresh open starts at the newest output. The DOM tree is
+  // the exception: it starts at its root (its selected node is scrolled into
+  // view by DomTree itself).
+  useLayoutEffect(() => {
+    stickRef.current = true;
+    const el = contentRef.current;
+    if (el) el.scrollTop = followsTail ? el.scrollHeight : 0;
+  }, [tab, open, followsTail]);
+
+  // Follow new output, but never yank a reader who scrolled away from the tail.
+  useLayoutEffect(() => {
+    if (followsTail && stickRef.current) pinToBottom();
+  }, [followsTail, props.consoleEvents, props.networkEvents, props.perfMetrics, height, pinToBottom]);
 
   useEffect(() => {
     if (copyState === "idle") return;
@@ -438,7 +485,13 @@ export function DevConsole(props: DevConsoleProps) {
       </div>
       {/* Content */}
       {open && (
-        <div className="flex-1 overflow-auto text-[11px] leading-relaxed select-text">
+        <div
+          ref={contentRef}
+          onScroll={onContentScroll}
+          onWheel={onContentWheel}
+          data-testid="devconsole-content"
+          className="flex-1 overflow-auto text-[11px] leading-relaxed select-text"
+        >
           {/* Console tab */}
           {tab === "console" && (
             <div className="px-2 py-1">

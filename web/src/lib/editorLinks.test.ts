@@ -13,15 +13,15 @@ import {
   __resetEditorLinksForTest,
 } from "./editorLinks";
 import { OPEN_FILE_EVENT, type OpenFileDetail } from "./fileLinks";
-import { openExternalURL } from "./externalLinks";
+import { requestURLOpen } from "./externalLinks";
 
-vi.mock("./externalLinks", () => ({ openExternalURL: vi.fn() }));
+vi.mock("./externalLinks", () => ({ requestURLOpen: vi.fn() }));
 
 describe("editorLinks", () => {
   beforeEach(() => {
     __resetEditorLinksForTest();
     vi.restoreAllMocks();
-    vi.mocked(openExternalURL).mockClear();
+    vi.mocked(requestURLOpen).mockClear();
   });
 
   describe("hasKnownExtension", () => {
@@ -303,7 +303,7 @@ describe("editorLinks", () => {
       }
     });
 
-    it("routes http(s) uris through openExternalURL", () => {
+    it("asks the chooser for http(s) uris", () => {
       const { monaco, getOpener } = fakeMonaco();
       ensureEditorLinks(monaco as never);
       // Monaco's Uri percent-encodes = and & unless toString(true) is used. The stub
@@ -318,14 +318,40 @@ describe("editorLinks", () => {
             : "https%3A%2F%2Fexample.com%2Fx%3Fa%3D1%26b%3D2",
       };
       expect(getOpener().open(uri)).toBe(true);
-      expect(openExternalURL).toHaveBeenCalledWith("https://example.com/x?a=1&b=2");
+      expect(requestURLOpen).toHaveBeenCalledWith("https://example.com/x?a=1&b=2", undefined);
+    });
+
+    it("carries the focused editor's owning project into the chooser request", () => {
+      const { monaco, getOpener } = fakeMonaco();
+      ensureEditorLinks(monaco as never);
+      const owner = document.createElement("div");
+      owner.dataset.urlProjectPath = "/remote";
+      owner.dataset.urlProjectHost = "dev@example.com";
+      owner.tabIndex = 0;
+      document.body.appendChild(owner);
+      owner.focus();
+      try {
+        const uri = {
+          scheme: "https",
+          query: "",
+          path: "/x",
+          toString: () => "https://example.com/x",
+        };
+        expect(getOpener().open(uri)).toBe(true);
+        expect(requestURLOpen).toHaveBeenCalledWith("https://example.com/x", {
+          projectPath: "/remote",
+          host: "dev@example.com",
+        });
+      } finally {
+        owner.remove();
+      }
     });
 
     it("ignores non ocode-file, non http(s) uris", () => {
       const { monaco, getOpener } = fakeMonaco();
       ensureEditorLinks(monaco as never);
       expect(getOpener().open({ scheme: "mailto", query: "", path: "x@y.z" })).toBe(false);
-      expect(openExternalURL).not.toHaveBeenCalled();
+      expect(requestURLOpen).not.toHaveBeenCalled();
     });
   });
 });

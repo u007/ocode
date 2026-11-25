@@ -93,6 +93,7 @@ interface Props {
   /** Remote project host, so the digest runs on the server that owns the ask
    *  instead of this machine (a remote session does not exist locally). */
   host?: string;
+  onOpenFile?: (path: string) => void | Promise<void>;
   requestId: string;
   /** Locally hide the pending ask without resolving it server-side. */
   onHide?: (requestId: string) => void;
@@ -156,6 +157,39 @@ function alwaysToolAvailable(tool: string, scope?: string): boolean {
   return tool !== "bash";
 }
 
+// Extract the script file path from an interpreter invocation command
+// (python/python3/node/bun/deno), so the permission dialog can offer a
+// clickable link to open it in the Files tab. Returns null when the command
+// is not an interpreter invocation or no file path can be found.
+export function extractInterpreterScript(command?: string): string | null {
+  if (!command) return null;
+  const tokens = command.trim().split(/\s+/);
+  const isInterpreter = (tok: string) => {
+    const base = tok.split(/[\\/]/).pop() ?? tok;
+    return /^(python3?|node|bun|deno)$/i.test(base);
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isInterpreter(tokens[i])) continue;
+    let j = i + 1;
+    if (tokens[j] === "run") j++;
+    while (j < tokens.length && tokens[j].startsWith("-")) {
+      const flag = tokens[j];
+      if (flag === "-c" || flag === "-e" || flag === "--eval" || flag === "-m") {
+        j += 2;
+      } else {
+        j += 1;
+      }
+    }
+    if (j >= tokens.length) return null;
+    const candidate = tokens[j].replace(/^['"]|['"]$/g, "");
+    if (!candidate || candidate.startsWith("-")) return null;
+    if (!/[\\/\.]/.test(candidate)) return null;
+    if (/[(){};]/.test(candidate)) return null;
+    return candidate;
+  }
+  return null;
+}
+
 export default function PermissionDialog({
   container,
   open,
@@ -181,6 +215,7 @@ export default function PermissionDialog({
   context,
   sessionId,
   host,
+  onOpenFile,
   requestId,
   onDecide,
   onHide,
@@ -196,6 +231,7 @@ export default function PermissionDialog({
     () => args === undefined ? undefined : JSON.stringify(args, null, 2),
     [args],
   );
+  const scriptPath = useMemo(() => extractInterpreterScript(command), [command]);
   // Which always-allow choice is pending confirmation ("a"/"t" step in the
   // TUI); empty when the main button row is shown.
   const [confirming, setConfirming] = useState<"always_rule" | "always_tool" | null>(null);
@@ -585,6 +621,27 @@ export default function PermissionDialog({
                   {command && (
                     <div className="mt-2 max-h-32 overflow-y-auto rounded bg-card p-2 font-mono text-xs whitespace-pre-wrap break-words text-muted-foreground [overflow-wrap:anywhere]">
                       {command}
+                    </div>
+                  )}
+                  {scriptPath && (
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        data-testid="interpreter-script-link"
+                        className="inline-flex items-center gap-1 font-mono text-xs text-blue-400 underline hover:text-blue-300"
+                        onClick={() => {
+                          if (onOpenFile) {
+                            void onOpenFile(scriptPath);
+                          } else {
+                            window.dispatchEvent(
+                              new CustomEvent("ocode:open-file", { detail: { path: scriptPath } }),
+                            );
+                          }
+                        }}
+                      >
+                        <FileCode className="h-3 w-3" />
+                        {scriptPath}
+                      </button>
                     </div>
                   )}
                 </div>

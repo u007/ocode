@@ -2,6 +2,12 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import MessageBubble, { AssistantText } from "./MessageBubble";
 
+const requestURL = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/externalLinks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/externalLinks")>();
+  return { ...actual, requestURLOpen: requestURL };
+});
+
 // Regression for the github-dark "blue on blue" mess: FileLink defaults to
 // text-link, a prose-safe color that is illegible on solid colored surfaces
 // (github-dark maps accent/primary to #58a6ff, and text-link derives from
@@ -65,7 +71,7 @@ describe("FileLink surface overrides", () => {
 });
 
 describe("external markdown links", () => {
-  it("opens an https link from the chat message", () => {
+  it("asks the chooser before opening an https link from the chat message", () => {
     const open = vi.spyOn(window, "open").mockReturnValue({} as Window);
     const { container } = render(
       <AssistantText content="Open [the device page](https://hub.mercstudio.com/device)." />,
@@ -75,11 +81,8 @@ describe("external markdown links", () => {
     expect(link).not.toBeNull();
     fireEvent.click(link!);
 
-    expect(open).toHaveBeenCalledWith(
-      "https://hub.mercstudio.com/device",
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(requestURL).toHaveBeenCalledWith("https://hub.mercstudio.com/device", undefined);
+    expect(open).not.toHaveBeenCalled();
     open.mockRestore();
   });
 });

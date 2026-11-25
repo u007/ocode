@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "./projectStore";
 import { resolveSessionHost } from "../hooks/useSessionHost";
+import { tabRoot } from "../lib/tabRoot";
 
 const projectApi = vi.hoisted(() => ({
   listProjects: vi.fn(),
@@ -1107,6 +1108,172 @@ describe("project session-list cache (snappy project switching)", () => {
     // revalidation of a warm cache is not a user-visible failure.
     expect(result.current.state.sessionsError).toBeNull();
     expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1"]);
+  });
+});
+
+describe("projectStore worktree checkout binding", () => {
+  const mkSession = (id: string, title: string) => ({ id, title, created_at: "", updated_at: "" });
+
+  it("restores a legacy tab with no worktree_path bound to its project path", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: { "/proj-a": { tabs: [{ id: "s1", title: "One" }], active: "s1" } },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    const tab = result.current.state.tabsByProject["/proj-a"][0];
+    // Nothing is invented on restore: tabRoot resolves the owner path.
+    expect(tab.worktreePath).toBeUndefined();
+    expect(tabRoot(tab)).toBe("/proj-a");
+  });
+
+  it("round-trips worktree_path between restore and persistence", async () => {
+    projectApi.getTabs.mockResolvedValue({
+      projects: {
+        "/proj-a": { tabs: [{ id: "s1", title: "One", worktree_path: "/proj-a-wt" }], active: "s1" },
+      },
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    expect(result.current.state.tabsByProject["/proj-a"][0].worktreePath).toBe("/proj-a-wt");
+
+    await act(async () => {
+      result.current.openSessionTab("s2", "Two", "/proj-a", undefined, "/proj-a-wt2");
+    });
+    await waitFor(() => {
+      const last = projectApi.setTabs.mock.calls[projectApi.setTabs.mock.calls.length - 1]?.[0];
+      expect(last?.["/proj-a"]?.tabs.map((t: { id: string }) => t.id)).toEqual(["s1", "s2"]);
+    });
+    const last = projectApi.setTabs.mock.calls[projectApi.setTabs.mock.calls.length - 1]?.[0];
+    expect(last).toEqual({
+      "/proj-a": {
+        tabs: [
+          { id: "s1", title: "One", sub_tab: "chat", worktree_path: "/proj-a-wt" },
+          { id: "s2", title: "Two", sub_tab: "chat", worktree_path: "/proj-a-wt2" },
+        ],
+        active: "s2",
+      },
+    });
+  });
+
+  it("opens a worktree session without switching the active project", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+    });
+    await act(async () => {
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt");
+    });
+
+    expect(result.current.state.activeProject?.path).toBe("/proj-a");
+    // The checkout is not a project: tabs stay keyed by the owner, and no
+    // phantom project entry appears under the checkout path.
+    const tabs = result.current.state.tabsByProject["/proj-a"];
+    expect(tabs.map((t) => t.id)).toEqual(["sess-w"]);
+    expect(tabs[0].worktreePath).toBe("/proj-a-wt");
+    expect(result.current.state.tabsByProject["/proj-a-wt"]).toBeUndefined();
+  });
+
+  it("new tabs inherit the checkout of the tab they open beside", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt");
+    });
+
+    let inherited: string | null = null;
+    await act(async () => {
+      inherited = result.current.openNewSessionTab();
+    });
+    expect(result.current.state.tabsByProject["/proj-a"].find((t) => t.id === inherited)?.worktreePath).toBe(
+      "/proj-a-wt",
+    );
+
+    // An explicit checkout wins over the inherited one.
+    let explicit: string | null = null;
+    await act(async () => {
+      explicit = result.current.openNewSessionTab(false, "/proj-a", "/proj-a-other");
+    });
+    expect(
+      result.current.state.tabsByProject["/proj-a"].find((t) => t.id === explicit)?.worktreePath,
+    ).toBe("/proj-a-other");
+  });
+
+  it("drops a superseded checkout session response", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    let resolveFirst!: (v: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((res) => { resolveFirst = res as (v: unknown) => void; }),
+    );
+    let first!: Promise<void>;
+    await act(async () => {
+      first = result.current.loadCheckoutSessions(testProjectA, "/proj-a-wt");
+    });
+    expect(result.current.state.checkoutSessions["/proj-a-wt"]?.loading).toBe(true);
+
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("fresh", "Fresh")]);
+    await act(async () => {
+      await result.current.loadCheckoutSessions(testProjectA, "/proj-a-wt", { force: true });
+    });
+    expect(result.current.state.checkoutSessions["/proj-a-wt"]?.sessions.map((s) => s.id)).toEqual([
+      "fresh",
+    ]);
+
+    await act(async () => {
+      resolveFirst([mkSession("stale", "Stale")]);
+      await first;
+    });
+    // The stale reply arrived last but must not overwrite the newer result.
+    expect(result.current.state.checkoutSessions["/proj-a-wt"]?.sessions.map((s) => s.id)).toEqual([
+      "fresh",
+    ]);
+    expect(result.current.state.checkoutSessions["/proj-a-wt"]?.loading).toBe(false);
+  });
+
+  it("carries a checkout load failure on its own entry", async () => {
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("checkout gone"));
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      await result.current.loadCheckoutSessions(testProjectA, "/proj-a-wt");
+    });
+    expect(result.current.state.checkoutSessions["/proj-a-wt"]).toMatchObject({
+      loading: false,
+      error: "checkout gone",
+    });
+    // The active project's own list state is untouched.
+    expect(result.current.state.sessionsError).toBeNull();
+  });
+
+  it("disables a tab whose named checkout is missing without retargeting it", async () => {
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({ type: "SET_PROJECTS", projects: [testProjectA] });
+      await result.current.selectProject(testProjectA);
+      result.current.openSessionTab("sess-w", "Worktree", "/proj-a", undefined, "/proj-a-wt");
+      result.current.openSessionTab("sess-main", "Main", "/proj-a");
+    });
+
+    await act(async () => {
+      result.current.applyWorktreeAvailability("/proj-a", ["/proj-a"]);
+    });
+    let tabs = result.current.state.tabsByProject["/proj-a"];
+    expect(tabs.find((t) => t.id === "sess-w")?.worktreeMissing).toBe(true);
+    // Never silently retargeted to the owner path.
+    expect(tabs.find((t) => t.id === "sess-w")?.worktreePath).toBe("/proj-a-wt");
+    // A legacy/main-checkout tab resolves through projectPath and is never disabled.
+    expect(tabs.find((t) => t.id === "sess-main")?.worktreeMissing).toBeFalsy();
+
+    await act(async () => {
+      result.current.applyWorktreeAvailability("/proj-a", ["/proj-a", "/proj-a-wt"]);
+    });
+    tabs = result.current.state.tabsByProject["/proj-a"];
+    expect(tabs.find((t) => t.id === "sess-w")?.worktreeMissing).toBeFalsy();
   });
 });
 

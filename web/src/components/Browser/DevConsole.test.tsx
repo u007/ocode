@@ -301,4 +301,142 @@ describe("DevConsole", () => {
       expect(screen.getByText("No headers available")).toBeInTheDocument();
     });
   });
+
+  describe("follows the tail", () => {
+    // jsdom has no layout: every element reports scrollHeight/clientHeight 0, so
+    // a pin is indistinguishable from a no-op. Give the whole prototype a
+    // content height taller than the viewport for the duration of each test.
+    const CONTENT_HEIGHT = 600;
+    const VIEWPORT_HEIGHT = 200;
+    const mountLayout = () => {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get: () => CONTENT_HEIGHT,
+        set: () => {},
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get: () => VIEWPORT_HEIGHT,
+        set: () => {},
+      });
+    };
+    const content = () => screen.getByTestId("devconsole-content");
+    const readerScrollsUp = () => {
+      content().scrollTop = 100;
+      fireEvent.scroll(content());
+    };
+
+    afterEach(() => {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight;
+    });
+
+    it("opens at the newest output", () => {
+      mountLayout();
+      render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+    });
+
+    it("follows new console rows while the reader is at the tail", () => {
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      content().scrollTop = 0;
+      rerender(
+        <DevConsole {...base} consoleEvents={[...consoleEvents, { level: "log", text: "later", ts: 3 }]} />,
+      );
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+    });
+
+    it("leaves a reader who scrolled up alone", () => {
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      readerScrollsUp();
+      rerender(
+        <DevConsole {...base} consoleEvents={[...consoleEvents, { level: "log", text: "later", ts: 3 }]} />,
+      );
+      expect(content().scrollTop).toBe(100);
+    });
+
+    it("honours an upward wheel before its scroll event lands", () => {
+      // A row burst can arrive between the gesture and the `scroll` event; the
+      // wheel alone must already stop the follow.
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      // The viewport has visibly moved but the `scroll` event has not run yet.
+      content().scrollTop = 100;
+      fireEvent.wheel(content(), { deltaY: -120 });
+      rerender(
+        <DevConsole {...base} consoleEvents={[...consoleEvents, { level: "log", text: "later", ts: 3 }]} />,
+      );
+      expect(content().scrollTop).toBe(100);
+    });
+
+    it("keeps following when an upward wheel cannot move a short list", () => {
+      // No overflow means no `scroll` event to re-arm on, so a wheel over a list
+      // that fits must not count as leaving the tail — output arriving later
+      // still has to be followed.
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      const el = content();
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => VIEWPORT_HEIGHT });
+      fireEvent.wheel(el, { deltaY: -120 });
+      rerender(
+        <DevConsole {...base} consoleEvents={[...consoleEvents, { level: "log", text: "later", ts: 3 }]} />,
+      );
+      expect(el.scrollTop).toBe(VIEWPORT_HEIGHT);
+    });
+
+    it("re-arms once the reader returns to the bottom", () => {
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      readerScrollsUp();
+      content().scrollTop = CONTENT_HEIGHT - VIEWPORT_HEIGHT;
+      fireEvent.scroll(content());
+      rerender(
+        <DevConsole {...base} consoleEvents={[...consoleEvents, { level: "log", text: "later", ts: 3 }]} />,
+      );
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+    });
+
+    it("starts every tab at the bottom, performance included", () => {
+      mountLayout();
+      const { rerender } = render(<DevConsole {...base} perfMetrics={{ Nodes: 42 }} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      readerScrollsUp();
+      fireEvent.click(screen.getByRole("tab", { name: /network/i }));
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+      readerScrollsUp();
+      fireEvent.click(screen.getByRole("tab", { name: /performance/i }));
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+      // A tab switch re-arms the follow for that tab's later output.
+      content().scrollTop = 0;
+      rerender(<DevConsole {...base} perfMetrics={{ Nodes: 43 }} />);
+      expect(content().scrollTop).toBe(CONTENT_HEIGHT);
+    });
+
+    it("leaves the DOM tab's own scroll alone", () => {
+      mountLayout();
+      const dom = {
+        mode: "chrome" as const,
+        status: "ready" as const,
+        error: null,
+        root: null,
+        truncated: false,
+        selectedId: null,
+        hoverId: null,
+        pick: false,
+        gen: 1,
+      };
+      render(<DevConsole {...base} dom={dom} />);
+      fireEvent.click(screen.getByLabelText("Expand console"));
+      fireEvent.click(screen.getByRole("tab", { name: /^dom$/i }));
+      expect(content().scrollTop).toBe(0);
+    });
+  });
 });

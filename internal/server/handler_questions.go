@@ -308,6 +308,12 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// this transcript (see rewriteAskResult).
 	h.rewriteAskResult(sessID, working, len(working)-1)
 
+	// Publish the answered transcript immediately, before the continuation
+	// runs, so the web/desktop transcript shows the Q&A even for hydrated
+	// asks where the client's optimistic echo is a no-op.
+	as.messages = working
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+
 	// The continuation runs off the request goroutine so the endpoint can
 	// acknowledge with 202 immediately. Step can run for minutes; holding the
 	// connection (and the browser's await) for its whole duration is what made
@@ -373,6 +379,8 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 
 		// Post-turn auto-compaction check (mirrors runTurn).
 		as.agent.MaybeCompactAsync(as.messages)
+		// Wake any queued-message drainer now that the session is idle again.
+		h.scheduleQueueDrain(sessID)
 	})
 
 	writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: sessID, Model: model})

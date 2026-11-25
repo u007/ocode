@@ -6,13 +6,21 @@ import type { SyncStatusResponse } from "../../api/types";
 const mockGetSyncStatus = vi.fn();
 const mockSyncNow = vi.fn();
 const mockSyncLogout = vi.fn();
+const mockSyncLoginStart = vi.fn();
+const mockSyncLoginPoll = vi.fn();
+const externalOpen = vi.hoisted(() => vi.fn());
+const requestURL = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/externalLinks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/externalLinks")>();
+  return { ...actual, openExternalURL: externalOpen, requestURLOpen: requestURL };
+});
 vi.mock("../../api/client", () => ({
   api: {
     getSyncStatus: (...a: unknown[]) => mockGetSyncStatus(...a),
     syncNow: (...a: unknown[]) => mockSyncNow(...a),
     syncLogout: (...a: unknown[]) => mockSyncLogout(...a),
-    syncLoginStart: vi.fn(),
-    syncLoginPoll: vi.fn(),
+    syncLoginStart: (...a: unknown[]) => mockSyncLoginStart(...a),
+    syncLoginPoll: (...a: unknown[]) => mockSyncLoginPoll(...a),
   },
 }));
 
@@ -37,6 +45,10 @@ beforeEach(() => {
   mockGetSyncStatus.mockReset();
   mockSyncNow.mockReset();
   mockSyncLogout.mockReset();
+  mockSyncLoginStart.mockReset();
+  mockSyncLoginPoll.mockReset();
+  externalOpen.mockReset();
+  requestURL.mockReset();
 });
 
 afterEach(() => {
@@ -80,5 +92,27 @@ describe("SyncStatusWidget", () => {
 
     await advance(30000);
     expect(mockGetSyncStatus.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
+  it("keeps automatic OAuth opening direct but asks before a verification-link click", async () => {
+    mockGetSyncStatus.mockResolvedValue({ ...status(false), loggedIn: false });
+    mockSyncLoginStart.mockResolvedValue({
+      userCode: "ABCD-1234",
+      verifyUrl: "https://example.com/verify",
+      deviceCode: "device-1",
+    });
+    vi.spyOn(window, "open").mockReturnValue(null);
+    render(<SyncStatusWidget />);
+    await advance(0);
+
+    fireEvent.click(screen.getByTitle("Sync not connected"));
+    fireEvent.click(screen.getByRole("button", { name: "Log In" }));
+    await advance(0);
+    expect(externalOpen).toHaveBeenCalledWith("https://example.com/verify");
+    expect(requestURL).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open verification page" }));
+    expect(requestURL).toHaveBeenCalledWith("https://example.com/verify");
+    expect(externalOpen).toHaveBeenCalledTimes(1);
   });
 });

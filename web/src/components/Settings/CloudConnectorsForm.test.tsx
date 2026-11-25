@@ -8,7 +8,14 @@ import {
   within,
 } from "@testing-library/react";
 import { api } from "../../api/client";
-import CloudConnectorsForm from "./CloudConnectorsForm";
+import { openExternalURL } from "../../lib/externalLinks";
+import CloudConnectorsForm, { hubCallbackOrigin } from "./CloudConnectorsForm";
+
+vi.mock("../../lib/externalLinks", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../lib/externalLinks")>();
+  return { ...actual, openExternalURL: vi.fn() };
+});
 
 /**
  * Settings → Cloud connectors is the only surface that starts the
@@ -90,6 +97,7 @@ beforeEach(() => {
     removeCloudConnector: removeLocal,
   });
   vi.spyOn(window, "open").mockImplementation(() => null);
+  vi.mocked(openExternalURL).mockClear();
 });
 
 afterEach(() => {
@@ -254,5 +262,80 @@ describe("CloudConnectorsForm — hub start wiring", () => {
     expect(register.mock.invocationCallOrder[0]).toBeLessThan(
       start.mock.invocationCallOrder[0],
     );
+  });
+});
+
+describe("CloudConnectorsForm — kakiit callback origin", () => {
+  // jsdom's window.location cannot be moved to https, so the desktop
+  // loopback conversion is pinned on the pure function directly.
+  it("serves a desktop https loopback origin as plain http", () => {
+    expect(hubCallbackOrigin("https://127.0.0.1:52341")).toBe(
+      "http://127.0.0.1:52341",
+    );
+    expect(hubCallbackOrigin("https://localhost:52341")).toBe(
+      "http://localhost:52341",
+    );
+    expect(hubCallbackOrigin("https://[::1]:52341")).toBe(
+      "http://[::1]:52341",
+    );
+  });
+
+  it("leaves http loopback and non-loopback origins unchanged", () => {
+    expect(hubCallbackOrigin("http://127.0.0.1:52341")).toBe(
+      "http://127.0.0.1:52341",
+    );
+    expect(hubCallbackOrigin("http://localhost:3000")).toBe(
+      "http://localhost:3000",
+    );
+    expect(hubCallbackOrigin("https://ocode.example.com")).toBe(
+      "https://ocode.example.com",
+    );
+  });
+});
+
+describe("CloudConnectorsForm — kakiit return flow", () => {
+  it("opens the kakiit auth page through openExternalURL, not window.open", async () => {
+    listHub.mockResolvedValueOnce([]);
+    listLocal.mockResolvedValueOnce([]);
+    render(<CloudConnectorsForm project={PROJECT} host={HOST} />);
+    await waitFor(() => expect(listHub).toHaveBeenCalled());
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect via kakiit/i }),
+    );
+    await waitFor(() =>
+      expect(openExternalURL).toHaveBeenCalledWith("https://example.test/auth"),
+    );
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it("reloads the connection list once when the window regains focus after a start", async () => {
+    listHub.mockResolvedValueOnce([]);
+    listLocal.mockResolvedValueOnce([]);
+    render(<CloudConnectorsForm project={PROJECT} host={HOST} />);
+    await waitFor(() => expect(listHub).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /connect via kakiit/i }),
+    );
+    await waitFor(() => expect(openExternalURL).toHaveBeenCalled());
+    expect(listHub).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(listHub).toHaveBeenCalledTimes(2));
+
+    // The listener removes itself after firing once.
+    window.dispatchEvent(new Event("focus"));
+    expect(listHub).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reload on focus when no kakiit start happened", async () => {
+    listHub.mockResolvedValueOnce([]);
+    listLocal.mockResolvedValueOnce([]);
+    render(<CloudConnectorsForm project={PROJECT} host={HOST} />);
+    await waitFor(() => expect(listHub).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new Event("focus"));
+    expect(listHub).toHaveBeenCalledTimes(1);
   });
 });

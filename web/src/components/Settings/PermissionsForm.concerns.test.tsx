@@ -23,6 +23,8 @@ vi.mock("../../api/client", () => ({
     getPermissionConcerns: vi.fn(),
     getAllowedHosts: vi.fn(),
     setAllowedHosts: vi.fn(),
+    listAutoGrants: vi.fn(),
+    revokeAutoGrant: vi.fn(),
   },
 }));
 

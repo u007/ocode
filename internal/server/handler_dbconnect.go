@@ -235,7 +235,7 @@ func (h *Handler) dbUnlockProjectRoot(projectPath, sessionID string) (string, er
 // check rejects every tilde-keyed remote project before a single .env is read.
 //
 // The fallback is the same trust decision the git, upload and session-list
-// endpoints already make (resolveRegisteredProjectRoot): only a saved root can
+// endpoints already make (resolveWorkspaceRoot): only a saved root can
 // match, and expansion narrows rather than widens the accepted set. A "~user"
 // form and every non-tilde path pass through projects.ExpandHome unchanged, so
 // they can never match a root this server was not already told to serve.

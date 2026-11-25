@@ -3,16 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../../api/client";
 import type { McpAppResource } from "../../../api/types";
 import { McpAppView, type McpAppViewProps } from "./McpAppView";
+import { URLOpenOwnerProvider } from "../../../lib/urlOpenContext";
 
 const hoisted = vi.hoisted(() => ({
   fetchMcpAppResource: vi.fn(),
   callMcpAppTool: vi.fn(),
-  openExternalURL: vi.fn(),
+  requestURLOpen: vi.fn(),
 }));
 
 vi.mock("../../../lib/externalLinks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../lib/externalLinks")>();
-  return { ...actual, openExternalURL: hoisted.openExternalURL };
+  return { ...actual, requestURLOpen: hoisted.requestURLOpen };
 });
 
 vi.mock("../../../api/client", async (importOriginal) => {
@@ -57,7 +58,7 @@ function props(overrides: Partial<McpAppViewProps> = {}): McpAppViewProps {
 beforeEach(() => {
   hoisted.fetchMcpAppResource.mockReset();
   hoisted.callMcpAppTool.mockReset();
-  hoisted.openExternalURL.mockReset();
+  hoisted.requestURLOpen.mockReset();
 });
 
 describe("McpAppView", () => {
@@ -362,8 +363,8 @@ describe("McpAppView navigation guard", () => {
   });
 });
 
-describe("McpAppView open-link confirmation", () => {
-  it("shows a confirmation row and does not open the URL", async () => {
+describe("McpAppView open-link chooser", () => {
+  it("requests the app chooser without opening or rendering a second confirmation", async () => {
     hoisted.fetchMcpAppResource.mockResolvedValue(RESOURCE);
     render(<McpAppView {...props()} />);
     const frame = (await screen.findByTitle("show_screen")) as HTMLIFrameElement;
@@ -373,32 +374,42 @@ describe("McpAppView open-link confirmation", () => {
 
     // The request is accepted for confirmation, not refused.
     expect(post).toHaveBeenCalledWith({ jsonrpc: "2.0", id: 4, result: {} }, "*");
-    expect(hoisted.openExternalURL).not.toHaveBeenCalled();
-    expect(screen.getByText("This view wants to open")).toBeInTheDocument();
-    expect(screen.getByText("https://example.com/docs")).toHaveAttribute("title", "https://example.com/docs");
-  });
-
-  it("Open calls openExternalURL once and removes the row", async () => {
-    hoisted.fetchMcpAppResource.mockResolvedValue(RESOURCE);
-    render(<McpAppView {...props()} />);
-    const frame = (await screen.findByTitle("show_screen")) as HTMLIFrameElement;
-    requestLink(frame, 4, "https://example.com/docs");
-
-    fireEvent.click(screen.getByRole("button", { name: "Open" }));
-    expect(hoisted.openExternalURL).toHaveBeenCalledTimes(1);
-    expect(hoisted.openExternalURL).toHaveBeenCalledWith("https://example.com/docs");
+    expect(hoisted.requestURLOpen).toHaveBeenCalledWith("https://example.com/docs", undefined);
     expect(screen.queryByText("This view wants to open")).toBeNull();
   });
 
-  it("Cancel removes the row without opening", async () => {
+  it("carries the owning project into the chooser request", async () => {
     hoisted.fetchMcpAppResource.mockResolvedValue(RESOURCE);
+    render(
+      <URLOpenOwnerProvider projectPath="/remote" host="dev@example.com">
+        <McpAppView {...props({ host: "dev@example.com" })} />
+      </URLOpenOwnerProvider>,
+    );
+    const frame = (await screen.findByTitle("show_screen")) as HTMLIFrameElement;
+
+    requestLink(frame, 4, "http://localhost:3000");
+
+    expect(hoisted.requestURLOpen).toHaveBeenCalledWith("http://localhost:3000", {
+      projectPath: "/remote",
+      host: "dev@example.com",
+    });
+  });
+
+  it("answers the widget with an error when no chooser is mounted", async () => {
+    hoisted.fetchMcpAppResource.mockResolvedValue(RESOURCE);
+    hoisted.requestURLOpen.mockImplementation(() => { throw new Error("no listener"); });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     render(<McpAppView {...props()} />);
     const frame = (await screen.findByTitle("show_screen")) as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow as Window, "postMessage");
+
     requestLink(frame, 4, "https://example.com/docs");
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(hoisted.openExternalURL).not.toHaveBeenCalled();
-    expect(screen.queryByText("This view wants to open")).toBeNull();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      id: 4,
+      error: expect.objectContaining({ code: -32000 }),
+    }), "*");
+    expect(error).toHaveBeenCalled();
   });
 
   it("a javascript: URL renders nothing and is refused", async () => {
@@ -411,6 +422,6 @@ describe("McpAppView open-link confirmation", () => {
 
     expect(post).toHaveBeenCalledWith(expect.objectContaining({ id: 5, error: expect.objectContaining({ code: -32602 }) }), "*");
     expect(screen.queryByText("This view wants to open")).toBeNull();
-    expect(hoisted.openExternalURL).not.toHaveBeenCalled();
+    expect(hoisted.requestURLOpen).not.toHaveBeenCalled();
   });
 });

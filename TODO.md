@@ -1,3 +1,21 @@
+## Resolved: web/desktop URL chooser (2026-11-25)
+
+- Every user-clicked HTTP(S) URL now asks between an owner-scoped embedded Browser tab and the external browser. Isolated Playwright QA against the rebuilt SPA passes Cancel (no tab), embedded render, external popup render, and no-page-error checks.
+- Live QA caught and fixed a first-restore browser-tab race: an empty initial GET could erase a newly opened tab's active pointer. The merge preserves it only for a kept unsynced local tab when the server supplied no active id; two regression tests pin the positive and negative cases.
+- The desktop binary and desktop package tests pass. WKWebView click-through remains unrun because the isolated Wails process exited before creating its debug handle and GUI automation lacked Accessibility permission; the native bridge is covered by focused tests.
+- Known limitation: `browserTabsStore` remains keyed by project path, not host, so a local project and a remote project with the same absolute path share browser-strip state. The chooser resolves the exact owner, but this change does not rework that identity model.
+- Docs wording decision: `docs/log.md` is append-only audit history. Earlier “desktop build blocked” entries remain as historical records; the final correction is appended as a new entry and `docs/index.md` is regenerated from the amended concept page.
+- `web/src/App.dbTab.test.tsx` is resolved: its mock now returns the server-guaranteed sync-status `config`/`auth` shape; the 4 tests pass in isolation and in the full suite.
+
+## Open: desktop external-URL bridge lacks frame authentication (2026-11-25)
+
+- `cmd/ocode-desktop/main.go` handles `ocode:open-external:<url>` in `RawMessageHandler` without the sender-origin and per-launch nonce checks used by clipboard writes. Any frame loaded in the desktop webview can therefore ask the shell to open an HTTP(S) URL in the OS browser. This is pre-existing and does not block the URL chooser, but it is a security follow-up: authenticate the sender as the top-level ocode page and bind the message to the launch nonce before calling `app.Browser.OpenURL`; add regression tests for cross-frame and stale-nonce refusal.
+
+## Verified: full Go-suite failure classification (2026-11-25)
+
+- `internal/version` `TestVersionMatchesChangelog` fails on pristine HEAD `90326824` and the working tree: `[Unreleased]` still says `0.9.40 → 0.9.41` while `version.Version` is `0.9.47`. No URL-chooser change touches that line; repair the version bump entry before treating `go test ./...` as green.
+- `internal/server` hit its 10-minute package timeout during the full concurrent suite, with `TestRunTurnGoalLoopResumesUntilMet` listed as running. That test passes 3/3 in isolation on both the working tree and pristine HEAD (~13s). No URL-chooser change touches `internal/server`; treat the full-package timeout as a suite/load issue and rerun the package alone before attributing it to this feature.
+
 ## Open: PII redaction follow-ups (2026-11-24)
 
 - **NLP entities (`PERSON`, `ORGANIZATION`, `LOCATION`) are deferred by design.** piiscrub's `recognizers/nlp` sends RAW pre-redaction text to an external sidecar URL — an egress channel that would defeat the feature — and a down sidecar would fail-closed every turn. The shipped groups are regex/checksum only. If it is ever built: a loopback-only URL, off by default, no new Go module, floor 0.80 with `>=`.
@@ -13,7 +31,6 @@
 
 ## Open: pre-existing suite failures seen on the 2026-11-23 full runs
 
-- `web/src/App.dbTab.test.tsx` — 4/4 fail both in isolation and in the full run (`ProjectSidebar.tsx:1346` "Cannot read properties of undefined (reading 'map')" while loading profiles, plus `appearanceTheme.ts:103` "appearance theme has no id"). Not from the browser work: commit `9eb55776` touches none of `ProjectSidebar`, `appearanceTheme`, `SyncStatusWidget` or `App.dbTab.test.tsx` (`git diff --name-only 9eb55776^ 9eb55776 -- <paths>` is empty), and a subagent reproduced it with the feature changes undone.
 - `internal/agent` `TestPermissions_TempDirAutoAllowed/read_tmp_tool` fails: `permissions.go` auto-allows temp dirs for EVERY path-scoped tool, while the test expects `read /tmp/test.txt` → deny. `internal/agent` has no diff in this tree (`git diff --stat HEAD -- internal/agent` empty), so it is pre-existing. Root cause: `isWithinAllowedScope` itself already includes `isTempDir`, so the "Temp directories are always allowed" branch is unreachable for temp paths and the flow reaches the plain "path in workdir" allow. The implementation says "temp is allowed for all tools" in two places; only the test says otherwise. Recommendation: if that policy is intended, change the case to `PermissionAllow` and say why; if only shell commands should get temp, narrow both predicates instead — do not silently relax a permission test.
 - `internal/browse` now HAS a live-Chrome harness (`internal/browse/live_zoom_test.go`, `OCODE_CHROME_PATH`-gated) modelled on `internal/server/browser_frames_live_test.go`; reuse it for future live browse checks instead of the app-plus-browser route.
 - Everything else in `internal/server` (458 s) and the web suite (6063 passed) is green.

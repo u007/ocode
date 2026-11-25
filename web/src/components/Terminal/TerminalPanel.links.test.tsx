@@ -11,9 +11,9 @@ import TerminalPanel from "./TerminalPanel";
 const urlProviderSpy = vi.fn((..._args: unknown[]) => ({ dispose: vi.fn() }));
 const fileProviderSpy = vi.fn((..._args: unknown[]) => ({ dispose: vi.fn() }));
 
-const openExternalSpy = vi.fn();
+const requestURLSpy = vi.fn();
 vi.mock("../../lib/externalLinks", () => ({
-  openExternalURL: (...args: unknown[]) => openExternalSpy(...args),
+  requestURLOpen: (...args: unknown[]) => requestURLSpy(...args),
 }));
 
 vi.mock("./terminalLinkProvider", () => ({
@@ -103,8 +103,8 @@ describe("TerminalPanel link wiring", () => {
     expect(urlDispose).toHaveBeenCalledTimes(1);
   });
 
-  it("opens only http(s) URLs externally", async () => {
-    openExternalSpy.mockClear();
+  it("asks the chooser only for http(s) URLs", async () => {
+    requestURLSpy.mockClear();
     const { unmount } = render(
       <TerminalPanel id="t3" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
     );
@@ -113,10 +113,10 @@ describe("TerminalPanel link wiring", () => {
     const url =
       "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=Lbv_ZqZchTvEz5Zyxdt";
     open(url);
-    expect(openExternalSpy).toHaveBeenCalledWith(url);
-    openExternalSpy.mockClear();
+    expect(requestURLSpy).toHaveBeenCalledWith(url, { projectPath: "/proj", host: undefined });
+    requestURLSpy.mockClear();
     open("ftp://example.com");
-    expect(openExternalSpy).not.toHaveBeenCalled();
+    expect(requestURLSpy).not.toHaveBeenCalled();
     unmount();
   });
 

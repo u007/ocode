@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ConnectFlow, type ConnectMethod, type ConnectProvider } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import MarkdownLink from "../common/MarkdownLink";
 
 /**
  * ConnectFlowPanel — the OAuth half of Settings → Connectors, the last mile of
@@ -267,16 +268,12 @@ export default function ConnectFlowPanel({
       )}
 
       {flow.state === "waiting_browser" && flow.url && (
-        <a
+        <MarkdownLink
           href={flow.url}
-          target="_blank"
-          rel="noreferrer"
           className="text-sm underline"
-          // The provider page is a normal outbound navigation, not an in-app
-          // URL click: the confirm-before-open dialog is for transcript links.
         >
           Open the sign-in page
-        </a>
+        </MarkdownLink>
       )}
 
       {flow.kind === "device-code" && flow.userCode && (
@@ -285,9 +282,12 @@ export default function ConnectFlowPanel({
           {flow.verificationUri && (
             <>
               {" at "}
-              <a href={flow.verificationUri} target="_blank" rel="noreferrer" className="underline">
+              <MarkdownLink
+                href={flow.verificationUri}
+                className="underline"
+              >
                 {flow.verificationUri}
-              </a>
+              </MarkdownLink>
             </>
           )}
         </p>

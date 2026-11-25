@@ -15,6 +15,7 @@ const fake = {
   projects: {} as Record<string, ServerProjectBrowsers>,
   puts: [] as Record<string, ServerProjectBrowsers>[],
   failNextPut: false,
+  getGate: null as Promise<void> | null,
 };
 
 const busHandlers = new Map<string, Set<() => void>>();
@@ -25,7 +26,12 @@ vi.mock("../../api/client", async () => {
     ...actual,
     api: {
       ...actual.api,
-      getBrowserTabs: () => Promise.resolve({ projects: structuredClone(fake.projects) }),
+      getBrowserTabs: async () => {
+        const gate = fake.getGate;
+        fake.getGate = null;
+        if (gate) await gate;
+        return { projects: structuredClone(fake.projects) };
+      },
       setBrowserTabs: (projects: Record<string, ServerProjectBrowsers>) => {
         fake.puts.push(structuredClone(projects));
         if (fake.failNextPut) {
@@ -129,6 +135,7 @@ beforeEach(() => {
   fake.projects = {};
   fake.puts = [];
   fake.failNextPut = false;
+  fake.getGate = null;
   busHandlers.clear();
   browserStore.setState(() => ({ byKey: {} }));
   revoke.mockClear();
@@ -149,6 +156,68 @@ describe("useBrowserPersistence sync with the server", () => {
 
     expect(result.current.browser.tabs.map((t) => t.id)).toEqual(["b1"]);
     expect(browserStore.state.byKey["tab:b1"]?.url).toBe("https://a.example/");
+    expect(fake.puts).toEqual([]);
+  });
+
+  it("keeps a local tab opened during the initial restore active", async () => {
+    let release!: () => void;
+    fake.getGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { result } = renderProject();
+    await microtasks();
+    expect(fake.getGate).toBeNull();
+
+    let id = "";
+    act(() => {
+      id = result.current.browser.openBrowserTab();
+      browserActions.open(`tab:${id}`, "https://local.example/");
+    });
+    await advance(1000);
+    expect(fake.puts).toEqual([]);
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.browser.tabs.map((t) => t.id)).toEqual([id]);
+    expect(result.current.browser.activeId).toBe(id);
+
+    await settle();
+    const lastPut = fake.puts[fake.puts.length - 1];
+    if (!lastPut) throw new Error("expected a browser-tab save");
+    const saved = lastPut[PROJ];
+    if (!saved) throw new Error("expected the project browser-tab save");
+    expect(saved.active_id).toBe(id);
+    expect(saved.surfaces[id].url).toBe("https://local.example/");
+  });
+
+  it("clears the active pointer when another client closes the synced active tab", async () => {
+    serverWrites({
+      tabs: [
+        { id: "b1", title: "One" },
+        { id: "b2", title: "Two" },
+      ],
+      active_id: "b2",
+      surfaces: {
+        b1: { url: "https://a.example/", history: ["https://a.example/"], history_index: 0 },
+        b2: { url: "https://b.example/", history: ["https://b.example/"], history_index: 0 },
+      },
+    });
+    const { result } = renderProject();
+    await settle();
+    expect(result.current.browser.activeId).toBe("b2");
+
+    serverWrites({
+      tabs: [{ id: "b1", title: "One" }],
+      surfaces: { b1: { url: "https://a.example/", history: ["https://a.example/"], history_index: 0 } },
+    });
+    act(() => fireBusEvent("browser_tabs_changed"));
+    await settle();
+
+    expect(result.current.browser.tabs.map((t) => t.id)).toEqual(["b1"]);
+    expect(result.current.browser.activeId).toBeNull();
     expect(fake.puts).toEqual([]);
   });
 

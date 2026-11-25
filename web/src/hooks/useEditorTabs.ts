@@ -8,6 +8,8 @@ import {
   saveEditorDraft,
   saveEditorTabs,
 } from "../components/Files/editorTabsPersistence";
+import { recordRecentFile } from "../components/Files/recentFilesPersistence";
+import { showHiddenFilesProjectKey } from "../components/Files/showHiddenFilesPersistence";
 import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
 import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "../lib/remoteHostGate";
 import { anchorForGrant } from "../lib/outOfProjectFiles";
@@ -439,6 +441,21 @@ export function useEditorTabs(): UseEditorTabsResult {
   useEffect(() => {
     editorTabsRef.current = editorTabs;
   }, [editorTabs]);
+
+  // Record the active tab in the quick-open picker's recent list. The effect is
+  // keyed on the tab's project and path as strings, so typing (which changes
+  // only `content`) does not re-record, while a tab that lands after its id is
+  // activated still records once it appears.
+  const activeTab = editorTabs.find((t) => t.id === activeEditorTabId);
+  const recentProjectKey =
+    activeTab?.projectRoot && !activeTab.path.startsWith("cloud://")
+      ? showHiddenFilesProjectKey(activeTab.projectRoot, activeTab.projectHost)
+      : null;
+  const recentPath = activeTab?.path ?? "";
+  useEffect(() => {
+    if (recentProjectKey === null) return;
+    recordRecentFile(recentProjectKey, recentPath);
+  }, [recentProjectKey, recentPath]);
 
   // Keep the quit guard in sync with which tabs are still dirty: closing,
   // discarding, reloading, or saving a tab clears its guard entry (and the

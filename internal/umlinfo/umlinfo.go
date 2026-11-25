@@ -102,6 +102,9 @@ func BuildIndex(ctx context.Context, root string) (*Index, error) {
 		Root:        abs,
 		GeneratedAt: time.Now().UTC(),
 		Monorepo:    detectMonorepo(abs),
+		Packages:    []Package{},
+		Symbols:     []Symbol{},
+		Edges:       []Edge{},
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

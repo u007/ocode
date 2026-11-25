@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import type { TTSEngine, TTSInstallState } from "@/api/types";
 import { useSpeech } from "../Speech/SpeechProvider";
-import { isHTTPURL, openExternalURL } from "../../lib/externalLinks";
+import MarkdownLink from "../common/MarkdownLink";
 import { speechSummaryDisplay } from "../../lib/speechSummaryConfig";
 import ModelDialog from "../Layout/ModelDialog";
 
@@ -185,19 +185,12 @@ export default function TTSForm() {
               {engine.license_url && (
                 <>
                   {" "}
-                  <a
+                  <MarkdownLink
                     className="underline"
                     href={engine.license_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => {
-                      if (!engine.license_url || !isHTTPURL(engine.license_url)) return;
-                      e.preventDefault();
-                      openExternalURL(engine.license_url);
-                    }}
                   >
                     view
-                  </a>
+                  </MarkdownLink>
                 </>
               )}
             </p>
@@ -231,19 +224,12 @@ export default function TTSForm() {
           {engine.license_url && (
             <>
               {" "}
-              <a
+              <MarkdownLink
                 className="underline"
                 href={engine.license_url}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(e) => {
-                  if (!engine.license_url || !isHTTPURL(engine.license_url)) return;
-                  e.preventDefault();
-                  openExternalURL(engine.license_url);
-                }}
               >
                 view
-              </a>
+              </MarkdownLink>
             </>
           )}
         </p>

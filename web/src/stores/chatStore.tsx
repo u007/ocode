@@ -609,6 +609,7 @@ export type ChatAction =
   | { type: "LIVE_NOTICE"; sessionId: string; text: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
+  | { type: "PERMISSION_ANSWERED"; sessionId: string; requestId: string; decision: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
   | { type: "QUESTION_HIDE"; sessionId: string; requestId: string }
   | { type: "QUESTION_SHOW"; sessionId: string; requestId: string }
@@ -1129,6 +1130,39 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           turnStalled: false,
         };
       });
+    case "PERMISSION_ANSWERED": {
+      // Optimistic echo of an allow/deny decision the browser just POSTed.
+      // For a deny, the result is a fixed string ("denied: tool X denied by
+      // user") so we can show it instantly; for an allow, the real execution
+      // output arrives via the server's `messages` broadcast (which now fires
+      // immediately after the approved tool runs), so we only rewrite on deny.
+      return updateSession(state, action.sessionId, (s) => {
+        if (!action.requestId) return s;
+        const decision = (action.decision || "").toLowerCase();
+        if (decision !== "deny") return s;
+        let replaced = false;
+        const messages = s.messages.map((m) => {
+          if (
+            replaced ||
+            m.role !== "tool" ||
+            m.tool_call_id !== action.requestId ||
+            !m.content.includes(SENTINEL_PERMISSION_ASK)
+          ) {
+            return m;
+          }
+          replaced = true;
+          let toolName = "";
+          try {
+            const req = JSON.parse(m.content.slice(SENTINEL_PERMISSION_ASK.length).trim()) as Record<string, unknown>;
+            toolName = (req["tool_name"] as string) || "";
+          } catch {
+            toolName = "";
+          }
+          return { ...m, content: `denied: tool ${toolName || "unknown"} denied by user` };
+        });
+        return { ...s, messages };
+      });
+    }
     case "QUESTION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,

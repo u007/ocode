@@ -176,6 +176,12 @@ func (h *Handler) enqueueQueuedMessage(id, content string) error {
 		h.sessions.RemovePendingLast(id, content)
 		return fmt.Errorf("persist queued message: %w", err)
 	}
+	// Broadcast the persisted transcript so connected clients (and the SSE
+	// mirror) learn about the queued message immediately, even while the
+	// session is paused on an ask and the drainer cannot yet dispatch it.
+	if msgs, _, lerr := session.PaginatedLoad(entry.ProjectRoot, entry.SessionID, 0, 0); lerr == nil {
+		h.broadcastEvent(SSEEvent{SessionID: id, Event: "messages", Data: msgs})
+	}
 	h.scheduleQueueDrain(id)
 	return nil
 }
@@ -240,8 +246,18 @@ func (h *Handler) runQueueDrainer(id string) {
 		}
 		backoff = queueDrainMinBackoff
 		if h.sessions.PendingCount(id) >= before {
-			if h.retireQueueDrainer(id) {
-				return
+			// No progress on the queue. Retire only when the session is idle
+			// (cancelled or failed turn); if it is paused on an ask, keep
+			// waiting for the ask to be resolved and the queued message to
+			// drain. Retiring here would strand the queued message forever.
+			if h.pulseSessionBusy(id) == nil {
+				if h.retireQueueDrainer(id) {
+					return
+				}
+			} else {
+				time.Sleep(backoff)
+				backoff = nextQueueBackoff(backoff)
+				continue
 			}
 		}
 	}

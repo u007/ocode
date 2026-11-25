@@ -324,9 +324,10 @@ var bashAlwaysAllow = buildBashAlwaysAllow(runtime.GOOS)
 // Use only for subcommands that are read-only OR project-trusted (operate on
 // the working tree but don't reach outside it without an explicit path arg).
 //
-// Entries here intentionally do NOT path-scope further — a subcommand listed
-// here is allowed regardless of args. Do not add subcommands that take an
-// arbitrary path and write to it (e.g. `git apply`, `git checkout --`).
+// Entries here intentionally do NOT path-scope further, except development
+// tools gated by developmentToolArgsAllowed before this map is consulted. Do
+// not add subcommands that take an arbitrary path and write to it (e.g. git
+// apply, git checkout --).
 var bashSubcommandAllow = map[string]bool{
 	// git — read-only subcommands only (no push/reset/checkout/clean/apply).
 	// NOTE: "git -c <key>=<value>" wrappers are NOT auto-allowed via the code
@@ -377,21 +378,24 @@ var bashSubcommandAllow = map[string]bool{
 	"gh search":   true,
 	"gh ruleset":  true,
 	// Go toolchain
-	"go build":    true,
-	"go test":     true,
-	"go run":      true,
-	"go vet":      true,
-	"go fmt":      true,
-	"go list":     true,
-	"go doc":      true,
-	"go env":      true,
-	"go version":  true,
-	"go mod":      true,
-	"go tool":     true,
-	"go generate": true,
-	"go work":     true,
-	"gofmt":       true,
-	"goimports":   true,
+	"go build":      true,
+	"go test":       true,
+	"go run":        true,
+	"go vet":        true,
+	"go fmt":        true,
+	"go list":       true,
+	"go doc":        true,
+	"go env":        true,
+	"go version":    true,
+	"go mod":        true,
+	"go tool":       true,
+	"go generate":   true,
+	"go work":       true,
+	"gofmt":         true,
+	"goimports":     true,
+	"gofumpt":       true,
+	"golangci-lint": true,
+	"staticcheck":   true,
 	// Rust toolchain
 	"cargo check":    true,
 	"cargo build":    true,
@@ -403,8 +407,11 @@ var bashSubcommandAllow = map[string]bool{
 	"cargo metadata": true,
 	"cargo version":  true,
 	"cargo run":      true,
+	"rustfmt":        true,
 	// Python / TS type-checkers / formatters (project-scoped tools)
 	"pytest":       true,
+	"black":        true,
+	"isort":        true,
 	"ruff":         true,
 	"mypy":         true,
 	"basedpyright": true,
@@ -414,6 +421,13 @@ var bashSubcommandAllow = map[string]bool{
 	"prettier":     true,
 	"biome":        true,
 	"vitest":       true,
+	"stylelint":    true,
+	"oxlint":       true,
+	// Cross-language formatters and linters.
+	"shellcheck":    true,
+	"shfmt":         true,
+	"clang-format":  true,
+	"terraform fmt": true,
 	// Docker — read-only inspection
 	"docker ps":             true,
 	"docker images":         true,
@@ -5346,6 +5360,193 @@ func trustedToolBasename(word, workDir string) string {
 	return ""
 }
 
+// developmentToolInvocation returns the tool name and arguments when fields
+// name an explicit formatter, linter, type-checker, or test runner, including
+// package-runner and project-local node_modules forms.
+func developmentToolInvocation(fields []string, workDir string) (string, []string, bool) {
+	if len(fields) == 0 {
+		return "", nil, false
+	}
+	if bin := nodeModulesBinTool(fields, workDir); bin != "" && isDevelopmentTool(bin) {
+		return bin, fields[1:], true
+	}
+	if name, args, ok := runnerToolAndArgs(fields); ok && isDevelopmentTool(name) {
+		return name, args, true
+	}
+	if len(fields) >= 2 {
+		name := fields[0] + " " + fields[1]
+		if isDevelopmentTool(name) {
+			return name, fields[2:], true
+		}
+	}
+	if isDevelopmentTool(fields[0]) {
+		return fields[0], fields[1:], true
+	}
+	return "", nil, false
+}
+
+func isDevelopmentTool(name string) bool {
+	return formatterLinterTools[name] || testRunnerTools[name]
+}
+
+// developmentToolArgsAllowed rejects code-loading flags and checks every
+// config, output, cache, and positional path against the shared allowed roots.
+func (pm *PermissionManager) developmentToolArgsAllowed(name string, args []string) bool {
+	positionalOnly := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.ContainsAny(arg, "$`%") {
+			return false
+		}
+		if positionalOnly {
+			if isLikelyPathArg(arg) && !pm.developmentToolPathAllowed(arg) {
+				return false
+			}
+			continue
+		}
+		if arg == "--" {
+			positionalOnly = true
+			continue
+		}
+		flag, value, hasValue := splitDevelopmentToolFlag(arg)
+		if developmentToolFlagDenied(name, flag) {
+			return false
+		}
+		if flag == "--style" || flag == "-style" {
+			if !hasValue {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+				value = args[i]
+			}
+			if strings.HasPrefix(value, "file:") && !pm.developmentToolPathAllowed(strings.TrimPrefix(value, "file:")) {
+				return false
+			}
+			continue
+		}
+		// pytest -o/--override-ini can inject code-loading options (addopts=-p plugin,
+		// plugins=evil). Check the value before the generic path-flag handler, which
+		// would otherwise treat addopts=-pevil_plugin as a benign in-root path.
+		if name == "pytest" && (flag == "-o" || flag == "--override-ini") {
+			if !hasValue {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+				value = args[i]
+			}
+			if pytestIniValueInjectsCode(value) {
+				return false
+			}
+			continue
+		}
+		if formatterLinterPathFlags[flag] {
+			if !hasValue {
+				if i+1 >= len(args) {
+					return false
+				}
+				i++
+				value = args[i]
+			}
+			if !pm.developmentToolPathAllowed(value) {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if isLikelyPathArg(arg) && !pm.developmentToolPathAllowed(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+// splitDevelopmentToolFlag normalizes both --flag=value and attached short
+// forms such as pytest -pplugin or clang-format -ooutput.c.
+func splitDevelopmentToolFlag(arg string) (string, string, bool) {
+	if flag, value, ok := strings.Cut(arg, "="); ok {
+		return flag, value, true
+	}
+	for _, short := range []string{"-p", "-c", "-o"} {
+		if strings.HasPrefix(arg, short) && len(arg) > len(short) {
+			return short, arg[len(short):], true
+		}
+	}
+	return arg, "", false
+}
+
+func developmentToolFlagDenied(name, flag string) bool {
+	if formatterLinterDeniedFlags[flag] {
+		return true
+	}
+	switch name {
+	case "go test":
+		return flag == "-exec" || flag == "-toolexec"
+	case "pytest":
+		return flag == "-p" || flag == "--plugin" ||
+			flag == "--import-plugin" || flag == "--import" ||
+			flag == "--pyargs"
+	case "go vet":
+		return flag == "-vettool"
+	default:
+		return flag == "--parser" || flag == "--transform" ||
+			flag == "--setupFiles" || flag == "--globalSetup" ||
+			flag == "--testRunner" || flag == "--reporters" ||
+			flag == "--preset"
+	}
+}
+
+// pytestIniValueInjectsCode reports whether the value of a pytest -o or
+// --override-ini flag injects code-loading options such as addopts=-p plugin
+// or plugins=evil. A plain value like addopts=-q is benign and allowed.
+func pytestIniValueInjectsCode(value string) bool {
+	// pytest addopts can be comma-separated; check each part.
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "addopts=") {
+			opts := strings.TrimPrefix(part, "addopts=")
+			for _, opt := range strings.Fields(opts) {
+				if strings.HasPrefix(opt, "-p") {
+					return true
+				}
+			}
+		}
+		if strings.Contains(part, "plugins=") {
+			return true
+		}
+	}
+	return false
+}
+
+func (pm *PermissionManager) developmentToolPathAllowed(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, "$`%") || isURLArg(raw) {
+		return false
+	}
+	return pm.IsPathWithinAllowedRoots(resolvePath(raw, pm.workDir))
+}
+
+func (pm *PermissionManager) developmentToolEnvAllowed(name string, envVars []string) bool {
+	for _, assignment := range envVars {
+		key, value, ok := strings.Cut(assignment, "=")
+		if !ok {
+			continue
+		}
+		if developmentToolCodeEnv[key] && strings.TrimSpace(value) != "" {
+			return false
+		}
+		if !developmentToolFlagEnv[key] {
+			continue
+		}
+		if !pm.developmentToolArgsAllowed(name, splitShellFields(value)) {
+			return false
+		}
+	}
+	return true
+}
+
 // matchSubcommandAllow returns true when the command matches an entry in
 // bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
 // For `git`, leading global wrappers like `-C`, `--no-pager`, etc. are
@@ -5432,14 +5633,87 @@ func matchSubcommandAllow(command, workDir string) bool {
 // the bare-command entries in bashSubcommandAllow — the binary itself has no
 // destructive effect; the runner only resolves/fetches the well-known package.
 var runnerSafeTools = map[string]bool{
-	"tsc":       true,
-	"tsgo":      true,
-	"eslint":    true,
-	"prettier":  true,
-	"biome":     true,
-	"vitest":    true,
-	"jest":      true,
-	"stylelint": true,
+	"tsc":           true,
+	"tsgo":          true,
+	"eslint":        true,
+	"prettier":      true,
+	"biome":         true,
+	"vitest":        true,
+	"jest":          true,
+	"stylelint":     true,
+	"black":         true,
+	"isort":         true,
+	"gofumpt":       true,
+	"rustfmt":       true,
+	"golangci-lint": true,
+	"staticcheck":   true,
+	"shellcheck":    true,
+	"shfmt":         true,
+	"clang-format":  true,
+	"oxlint":        true,
+}
+
+// formatterLinterTools are the explicit formatter, linter, and type-checker
+// names whose arguments need a deterministic safety gate before the static
+// allowlist can grant them. Test runners deliberately stay out of this set.
+var formatterLinterTools = map[string]bool{
+	"gofmt": true, "goimports": true, "gofumpt": true,
+	"go fmt": true, "go vet": true,
+	"cargo fmt": true, "cargo clippy": true, "rustfmt": true,
+	"black": true, "isort": true, "ruff": true,
+	"mypy": true, "basedpyright": true,
+	"tsc": true, "tsgo": true, "eslint": true, "prettier": true,
+	"biome": true, "stylelint": true, "oxlint": true,
+	"golangci-lint": true, "staticcheck": true,
+	"shellcheck": true, "shfmt": true, "clang-format": true,
+	"terraform fmt": true,
+}
+
+// testRunnerTools keep their existing ordinary static allowances, but their
+// escape hatches must fall through to the judge instead of executing an
+// arbitrary helper or plugin under a test-shaped command.
+var testRunnerTools = map[string]bool{
+	"go test": true, "cargo test": true, "pytest": true,
+	"vitest": true, "jest": true,
+	"npm test": true, "pnpm test": true, "yarn test": true,
+	"bun test": true, "vp test": true,
+}
+
+// developmentToolFlagEnv are environment variables whose values are parsed as
+// extra tool flags. developmentToolCodeEnv always selects code or plugins.
+var developmentToolFlagEnv = map[string]bool{
+	"PYTEST_ADDOPTS": true,
+	"GOFLAGS":        true,
+	"NODE_OPTIONS":   true,
+	"RUSTFMT":        true,
+}
+
+var developmentToolCodeEnv = map[string]bool{
+	"PYTEST_PLUGINS": true,
+}
+
+// formatterLinterDeniedFlags load or execute code, select an arbitrary package,
+// or mutate the installed environment. They always fall through to the judge.
+var formatterLinterDeniedFlags = map[string]bool{
+	"--plugin": true, "--import-plugin": true, "--js-plugin": true,
+	"--ts-plugin": true, "--custom-syntax": true, "--rulesdir": true,
+	"--resolve-plugins-relative-to": true, "--require": true,
+	"--loader": true, "--install-types": true, "-x": true,
+}
+
+// formatterLinterPathFlags name config, output, or cache paths. Their values
+// must resolve inside the shared allowed roots before static approval is safe.
+var formatterLinterPathFlags = map[string]bool{
+	"--config": true, "--config-file": true, "--config-path": true,
+	"--settings-path": true, "--settings-file": true, "--rcfile": true,
+	"--config-basedir": true, "--output-file": true, "--out-file": true,
+	"--outdir": true, "--out-dir": true, "--output-dir": true,
+	"--cache-dir": true, "--cache-location": true, "--rootdir": true,
+	"--junitxml": true, "--outputFile": true, "--coverageDirectory": true,
+	"--cacheDirectory": true, "--confcutdir": true,
+	"-c": true, "-o": true, "-C": true,
+	"-coverprofile": true, "-cpuprofile": true, "-memprofile": true,
+	"-modfile": true, "-overlay": true,
 }
 
 // runnerBooleanFlags are valueless flags that may appear between a package
@@ -5460,8 +5734,16 @@ var runnerBooleanFlags = map[string]bool{
 // flags between the runner and the tool fail closed (returns false) so a
 // `--package`-style override can never smuggle in an arbitrary package.
 func runnerInvokedSafeTool(fields []string) bool {
+	name, _, ok := runnerToolAndArgs(fields)
+	return ok && runnerSafeTools[name]
+}
+
+// runnerToolAndArgs resolves the tool name and remaining arguments after a
+// package runner. Unknown dashed flags fail closed so a --package-style
+// override cannot smuggle in an arbitrary package.
+func runnerToolAndArgs(fields []string) (string, []string, bool) {
 	if len(fields) == 0 {
-		return false
+		return "", nil, false
 	}
 	idx := 0
 	switch {
@@ -5475,7 +5757,7 @@ func runnerInvokedSafeTool(fields []string) bool {
 		}
 	}
 	if idx == 0 {
-		return false
+		return "", nil, false
 	}
 	for ; idx < len(fields); idx++ {
 		f := fields[idx]
@@ -5483,11 +5765,11 @@ func runnerInvokedSafeTool(fields []string) bool {
 			if runnerBooleanFlags[f] {
 				continue
 			}
-			return false // value-taking / unknown flag → fail closed
+			return "", nil, false // value-taking / unknown flag → fail closed
 		}
-		return runnerSafeTools[f]
+		return f, fields[idx+1:], true
 	}
-	return false
+	return "", nil, false
 }
 
 // isPathLikeScript reports whether a runner argument names a file path (rather
@@ -6293,6 +6575,25 @@ func (pm *PermissionManager) AddAutoGrant(g config.AutoGrant) {
 	pm.autoConfig.Store(&cp)
 }
 
+// RemoveAutoGrant drops the interpreter grant at the given index from the
+// in-memory matcher set. Out of range is a no-op returning false. Used by
+// the settings revoke path so a deletion takes effect immediately in live
+// agents.
+func (pm *PermissionManager) RemoveAutoGrant(index int) bool {
+	if pm == nil {
+		return false
+	}
+	cur := pm.autoConfig.Load()
+	if cur == nil || index < 0 || index >= len(cur.Grants) {
+		return false
+	}
+	cp := *cur
+	cp.Grants = append([]config.AutoGrant(nil), cur.Grants...)
+	cp.Grants = append(cp.Grants[:index], cp.Grants[index+1:]...)
+	pm.autoConfig.Store(&cp)
+	return true
+}
+
 // PersistInterpreterScriptGrant turns a user's "always allow" on a
 // bash.interpreter.<lang> ask into an exact grant keyed to the script that was
 // approved (language, normalized command, resolved path, cwd, sha256 of the
@@ -6311,6 +6612,9 @@ func (pm *PermissionManager) PersistInterpreterScriptGrant(command string, save 
 	}
 	cwd := pm.effectiveWorkDir()
 	resolved := resolvedInterpreterEntrypoint(ie, cwd)
+	if isUnderTempDir(resolved) {
+		return fmt.Errorf("script %q is under the temp dir; move it into the project before granting (temp grants evaporate)", resolved)
+	}
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return fmt.Errorf("read script %q: %w", resolved, err)
@@ -6362,15 +6666,24 @@ func resolvedInterpreterEntrypoint(ie *InterpreterExec, workDir string) string {
 	return filepath.Clean(full)
 }
 
+// isUnderTempDir reports whether path lives under the OS temp directory.
+func isUnderTempDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	tmp := filepath.Clean(os.TempDir())
+	p := filepath.Clean(path)
+	if p == tmp {
+		return true
+	}
+	rel, err := filepath.Rel(tmp, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // MatchInterpreterGrant reports whether a persisted exact grant authorizes this
-// interpreter execution. Exact grants are keyed by language, source mode,
-// normalized command, resolved entrypoint path, cwd, and source hash. sourceHash
-// is the sha256 of the entrypoint file (script_file / stdin_pipe).
-//
-// allowDestructive reflects the current policy: destructive grants are only
-// matched when the user has opted in to destructive auto-approval. This
-// prevents a grant created under allow_destructive=true from silently
-// bypassing a later allow_destructive=false policy.
 func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHash string, allowDestructive bool) bool {
 	if pm == nil || ie == nil || sourceHash == "" {
 		return false
@@ -9125,6 +9438,16 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if isLoopbackNetworkCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	// Formatter, linter, type-checker, and test-runner flags can load code or
+	// select outside-root paths. Check them before the temp-dir and subcommand
+	// shortcuts so a test-shaped escape hatch cannot inherit a static allow.
+	if name, toolArgs, ok := developmentToolInvocation(cmd.cmdWords, pm.workDir); ok && (!pm.developmentToolArgsAllowed(name, toolArgs) || !pm.developmentToolEnvAllowed(name, cmd.envVars)) {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (development-tool flag): tool=%s command=%q", name, command))
+		req := bashPermissionRequest(args, command, rulePrefix, candidates)
+		req.Summary = "Development-tool safety gate rejected a risky flag, environment override, unresolved variable, or outside-root path; saved prefix rules do not cover this shape."
+		return PermissionDecision{Level: PermissionAsk, Request: req}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)

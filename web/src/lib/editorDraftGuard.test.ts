@@ -10,6 +10,7 @@ import {
   noteDraftPersistPending,
   noteDraftPersistSuccess,
   reconcileDraftGuard,
+  reportDraftGuardState,
 } from "./editorDraftGuard";
 
 let invoke: Mock<(m: string) => void>;
@@ -69,10 +70,36 @@ describe("editorDraftGuard", () => {
     expect(invoke.mock.calls[invoke.mock.calls.length - 1]?.[0]).toBe("ocode:quit-guard:clear");
   });
 
-  it("does not touch native when nothing was blocked", () => {
+  // Regression: the shell's QuitGuard outlives this module. A reload (HMR, the
+  // second-instance SetURL) resets these maps while native stays blocked, so a
+  // page that armed nothing must still report `clear` once — otherwise quit is
+  // refused forever with no reason to show ("Unsaved changes couldn't be saved —
+  // ocode won't quit until they're saved." while nothing is open).
+  it("clears a block left by the previous page life on the first sync", () => {
+    reconcileDraftGuard([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls[0][0]).toBe("ocode:quit-guard:clear");
+
+    // ...and then stays quiet while the state does not change.
     reconcileDraftGuard([]);
     noteDraftPersistSuccess("never-failed");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  // The first sync can run before Wails injects the bridge, and an idle page
+  // triggers nothing else, so a dropped send must stay retryable.
+  it("retries the first report once the bridge is injected", () => {
+    delete (window as unknown as { _wails?: unknown })._wails;
+    noteDraftPersistFailure("t1", "/a/one.txt");
     expect(invoke).not.toHaveBeenCalled();
+
+    (window as unknown as { _wails?: { invoke: (m: string) => void } })._wails = { invoke };
+    reportDraftGuardState();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls[0][0]).toMatch(/^ocode:quit-guard:blocked:.*one\.txt/);
+
+    reportDraftGuardState();
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 
   it("still reports the toast in a plain browser (no bridge)", () => {

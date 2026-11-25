@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Advisor Claude Code CLI backend on web/desktop
-description: How the web/desktop advisor model picker exposes Claude Code CLI models via a sentinel provider, how claude_code is derived from the provider on PUT /api/advisor, and the picker parity with the TUI.
+description: How the web/desktop advisor picker follows the normal web section order, exposes Claude Code as its first provider group, keeps shared history read-only, and derives claude_code from the provider on PUT /api/advisor.
 tags:
   - advisor
   - claude-code
@@ -10,16 +10,29 @@ tags:
   - desktop
   - provider
   - backend
-timestamp: 2026-09-29T06:12:53Z
+  - recent-models
+  - favorites
+  - session-scoping
+timestamp: 2026-11-24T23:31:33Z
 resource: "web/src/components/Layout/ModelDialog.tsx; internal/tui/picker.go; web/src/components/Layout/modelSelection.ts; internal/server/handler_config.go; internal/agent/advisor_tool.go"
 ---
 ## Summary
 
-The web/desktop advisor model picker (`web/src/components/Layout/ModelDialog.tsx`, `purpose="advisor"`) now offers a "Claude Code (Read-Only CLI)" section, mirroring the TUI (`internal/tui/picker.go` `prependClaudeCodeSection`). Selection semantics are now TUI parity: `PUT /api/advisor` receives `{provider, model, claude_code: provider === "claude-code"}`, and "Clear (not set)" clears both provider and `claude_code`.
+The web/desktop advisor model picker (`web/src/components/Layout/ModelDialog.tsx`, `purpose="advisor"`) follows the normal web picker convention: **Recently Used → ★ Favorites → Claude Code (Read-Only CLI) → registry providers**. `advisor` is now included in `supportsSections`, so the shared priority sections and their dedupe apply. The synthetic Claude Code rows are prepended to the model list, making Claude Code the first provider group without moving it above the priority sections.
 
-## Picker section
+This is a deliberate web/TUI difference: the TUI (`internal/tui/picker.go`, `openAdvisorPicker` → `prependClaudeCodeSection`) still prepends Claude Code above Recently Used and Favorites. Selection semantics remain unchanged: `PUT /api/advisor` receives `{provider, model, claude_code: provider === "claude-code"}`, and "Clear (not set)" clears both provider and `claude_code`.
 
-`CLAUDE_CODE_SECTION_TITLE` and `CLAUDE_CODE_ADVISOR_MODELS` (`web/src/components/Layout/modelSelection.ts`) define the section label and the model list. The models are **synthetic** `ModelInfo` rows prepended only for the advisor purpose — they don't appear in the global model catalog.
+## Picker sections and controls
+
+`CLAUDE_CODE_SECTION_TITLE` and `CLAUDE_CODE_ADVISOR_MODELS` (`web/src/components/Layout/modelSelection.ts`) define the section label and the model list. The models are **synthetic** `ModelInfo` rows prepended only for the advisor purpose — they don't appear in the global model catalog. `partitionModelSections` removes recents/favorites from provider groups, so a model shown in a priority section is not repeated below; empty priority sections are omitted.
+
+Advisor has **no favorite-star toggles or recent-removal controls**. `supportsFavoriteToggle` is true only for `main` and `permission`; the advisor can display and select shared favorites, but only those two purposes own the star control. Likewise, `canRemove` requires `purpose !== "advisor"`, so an advisor recent row has neither the Radix `Remove from recently used` menu nor a native context menu.
+
+## Shared recent-model history is read-only for advisor
+
+Per explicit user decision, advisor selections show the shared Recently Used/Favorites history but **do not call `config.SaveRecentModel`**. `HandleSetAdvisor` (`internal/server/handler_config.go`) is unchanged and does not append the picked advisor model to shared recents. `TestHandleSetAdvisorDoesNotChangeRecentModels` pins this by seeding a recent model, issuing an advisor PUT, and asserting the list is unchanged.
+
+The selection payload and session scoping are unchanged: a real session still writes that chat's advisor pin through `api.setAdvisorFull(..., host, realSessionId)`, while a draft/no-session pick updates the default for new chats. Sharing history in the picker does not make advisor picks contribute to that history.
 
 **Current model list (keep in sync with TUI `CLAUDE_CODE_ADVISOR_MODELS`):**
 - `claude-sonnet-4-6`
@@ -48,5 +61,5 @@ When `claude_code=true`, the advisor executes via `executeClaudeCodeAdvisor` (`i
 
 ## Tests
 
-- Web: `web/src/components/Layout/modelSelection.test.ts`, `web/src/components/Layout/ModelDialog.test.tsx`
-- Go: `internal/agent/claude_cli_test.go`
+- Web: `web/src/components/Layout/modelSelection.test.ts`, `web/src/components/Layout/ModelDialog.test.tsx` — advisor section order, dedupe, empty history, no star toggles, read-only shared recents (`keeps shared recents read-only` asserts no removal menu and no `removeModelRecent` call), and Claude Code as the first provider group.
+- Go: `internal/server/handler_config_test.go` `TestHandleSetAdvisorDoesNotChangeRecentModels`; `internal/agent/claude_cli_test.go`.

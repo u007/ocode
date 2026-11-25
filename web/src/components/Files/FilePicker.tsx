@@ -15,6 +15,7 @@ import { parseKeywords, matchesKeywords, scoreMatch } from "../../lib/keywordFil
 import { compareByShortestPath } from "../../lib/filePathOrder";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
 import { isAbsoluteTreePath, isWindowsTreePath, normalizeTreePath } from "./fileTreeReveal";
+import { loadRecentFiles, rankByRecent } from "./recentFilesPersistence";
 
 interface FileNode {
   name: string;
@@ -155,6 +156,14 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, on
     setShowHiddenFiles(next);
   };
 
+  // Recently opened files, re-read each time the dialog opens so files opened
+  // since the last showing rank first. Derived, not stored: nothing else
+  // changes it while the dialog is open.
+  const recentFiles = useMemo(
+    () => (open ? loadRecentFiles(hiddenProjectKey) : []),
+    [open, hiddenProjectKey],
+  );
+
   useEffect(() => {
     if (!open) return;
     if (!projectPath) {
@@ -256,10 +265,14 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, on
     return set;
   }, [tree, listFolders, directHit]);
   const rankedFiles = useMemo(() => {
+    // Folders are never "recent", so they are excluded from the recent move.
+    const folders = new Set(tree.folders);
     // Unfiltered: shortest path first so root-level files surface above deep ones.
-    if (keywords.length === 0) return [...entries].sort(compareByShortestPath);
+    if (keywords.length === 0) {
+      return rankByRecent([...entries].sort(compareByShortestPath), recentFiles, projectPath, folders);
+    }
     // Filtered: relevance first, then shortest path as the tiebreaker.
-    return entries
+    const matches = entries
       .filter((p) => matchesKeywords(p, keywords))
       .sort((a, b) => {
         const scoreA = scoreMatch(a, keywords);
@@ -267,7 +280,8 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, on
         if (scoreA !== scoreB) return scoreB - scoreA;
         return compareByShortestPath(a, b);
       });
-  }, [entries, keywords]);
+    return rankByRecent(matches, recentFiles, projectPath, folders);
+  }, [tree, entries, keywords, recentFiles, projectPath]);
   // An exact path hit is listed first, folder or file, even when the tree
   // index is still loading, truncated, or lacks it.
   const filteredFiles = useMemo(() => {

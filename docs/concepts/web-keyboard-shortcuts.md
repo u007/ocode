@@ -1,8 +1,8 @@
 ---
 type: Concept
 title: Web UI Global Keyboard Shortcuts
-description: 'Canonical reference for the ocode web/desktop keyboard shortcuts: app-level bindings in useKeyboard, the local chat find bar, the per-surface preview find exception (PDF/Markdown/Word/HTML), and the browser/desktop caveats.'
-resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:1053-1132; web/src/components/Preview/findDom.ts"
+description: 'Canonical reference for the ocode web/desktop keyboard shortcuts: app-level bindings in useKeyboard, the local chat find bar, the per-surface preview find exception (PDF/Markdown/Word/HTML), the Git commit-box chords, and the browser/desktop caveats.'
+resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:1053-1132; web/src/components/Preview/findDom.ts; web/src/components/Git/GitPanel.tsx (commit textarea onKeyDown, commit, commitAndPush, canCommit)"
 tags:
   - web
   - keyboard
@@ -11,7 +11,8 @@ tags:
   - reference
   - find
   - preview
-timestamp: 2026-11-18T11:03:37Z
+  - git
+timestamp: 2026-11-25T03:00:46Z
 ---
 # Web UI Global Keyboard Shortcuts
 
@@ -22,6 +23,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 - **Dispatch:** `web/src/hooks/useKeyboard.ts` — a single `window` `keydown` listener created by `useKeyboard` (`useKeyboard.ts:33`) with one `useEffect` and an empty dep array; handlers are read through a ref so re-renders never rebind. This is the only place **app-level/global** shortcuts may be registered (the surface-local find listeners are the single documented exception, below).
 - **Wiring/semantics:** `web/src/App.tsx:1053-1132` — an `openNewChat` helper (`:1053-1059`) plus the top-level `useKeyboard({...})` call (`:1059-1132`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
 - **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1297-1306`, guarded to the visible chat tab (`offsetParent === null` → ignore). The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1321`).
+- **Commit-box-local (not global):** the Git commit textarea in `web/src/components/Git/GitPanel.tsx` owns `⌘/Ctrl+Enter` and `⌘/Ctrl+Shift+Enter` in its React `onKeyDown`; there is no window listener, API, desktop-native, or terminal binding.
 - **Surface-local (not global):** in-document find in the PDF / Markdown / Word / HTML previews is owned by each viewer (`FindBar` + a window keydown gated to that surface). See the exception caveat and [preview-find.md](preview-find.md).
 
 ## Bindings
@@ -36,12 +38,20 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 | `⌘W` / `Ctrl+W` | Close the frontmost thing (desktop shell only — see caveats) |
 | `Escape` | Close the CommandPalette / FilePicker (`onEscape`) |
 | `⌘F` / `Ctrl+F` | In-chat find bar (ChatPanel-local, not the global hook) |
+| `⌘Enter` / `Ctrl+Enter` (Git commit box) | Commit staged changes via the existing `commit()` action (textarea-local, not the global hook) |
+| `⌘⇧Enter` / `Ctrl+Shift+Enter` (Git commit box) | Commit, then push via the existing `commitAndPush()` action (textarea-local, not the global hook) |
 | `⌘F` / `Ctrl+F` (preview) | In-document find in the active PDF/Markdown/Word/HTML preview — the shared `FindBar` (surface-local, not the global hook). Claimed only by the surface the reader is in |
 | `F3` / `Shift+F3` | Next / previous match while a preview find bar is open (also walks PDF matches) |
 | `Escape` (preview) | Close the preview find bar when it is open |
 | `⌘⇧A` / `Ctrl+Shift+A` | Toggle the Pulse assistant window (`onToggleAssistant` → `toggleAssistantWindow`, `components/Pulse/pulseAssistantPrefs.ts`). Closed opens; a minimised window restores; otherwise closes. The same toggle is the top bar's "Toggle assistant" button |
 
 `e.preventDefault()` is called on every bound combo so the webview's own handling (e.g. browser find) does not also fire.
+
+## Git commit box (local exception)
+
+The commit-message textarea in `GitPanel` (`web/src/components/Git/GitPanel.tsx`) owns these chords through its React `onKeyDown`; it registers no global listener. A chord is considered only for `Enter` with Meta or Ctrl. Alt and `nativeEvent.isComposing` return without preventing the default behavior. An accepted chord calls `preventDefault()`, then invokes the existing `commitAndPush()` when Shift is held or `commit()` otherwise.
+
+Both actions and both buttons share `canCommit = !busy && !opInProgress && status.has_changes && !!commitMessage.trim()`. A blank message, a repository with no changes, an in-flight mutation (including a repeated chord), or an in-progress Git operation therefore cannot start another commit. The buttons advertise `Control+Enter Meta+Enter` and `Control+Shift+Enter Meta+Shift+Enter` through `aria-keyshortcuts`; their `title` text names the chord, or tells the user to finish or abort the in-progress Git operation first.
 
 ## Semantics of ⌘N, ⌘T and ⌘W
 
@@ -94,6 +104,7 @@ Tests: `web/src/components/Files/FilePicker.directHit.test.tsx`. Go: `TestFileSt
 - `web/src/App.editorTabScope.test.tsx` — "wires a Save handler and the dirty flag into each editor pane".
 - `web/src/components/Preview/findDom.test.ts` — index/match/range math plus the `previewWantsFindShortcut` gate (focus, hover, selection, hidden via `offsetParent`).
 - `web/src/components/Preview/{MarkdownViewer,DocxViewer,HtmlViewer,PdfViewer}.find.test.tsx` — the four viewers' FindBar wiring and their shortcut gating; `htmlFindAgent.test.ts` covers the serialised iframe agent.
+- `web/src/components/Git/GitPanel.test.tsx` — Meta/Ctrl+Enter commit-only and Meta/Ctrl+Shift+Enter commit-then-push chords, no changes, an in-flight repeat, an in-progress Git operation, and IME composition.
 
 ## Composer (chat input)
 

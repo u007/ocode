@@ -3,6 +3,12 @@ import { fireEvent, render, screen, waitFor, act } from "@testing-library/react"
 import { api } from "../../api/client";
 import ConnectFlowPanel from "./ConnectFlowPanel";
 
+const requestURL = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/externalLinks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/externalLinks")>();
+  return { ...actual, requestURLOpen: requestURL };
+});
+
 /**
  * The flow panel is the last mile of manual OAuth: the server and api client
  * both support it, but without this component the user can never start a flow
@@ -68,6 +74,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  requestURL.mockClear();
   api.startConnectFlow = vi.fn(async () => ({
     flowId: "f1",
     kind: "local-callback",
@@ -209,6 +216,8 @@ describe("ConnectFlowPanel", () => {
 
       const link = screen.getByRole("link", { name: /open the sign-in page/i });
       expect(link).toHaveAttribute("href", "https://auth.openai.com/oauth/authorize?x=1");
+      fireEvent.click(link);
+      expect(requestURL).toHaveBeenCalledWith("https://auth.openai.com/oauth/authorize?x=1", undefined);
 
       // The gate: NO completion can arrive without polling, because the server
       // holds the loopback listener and nothing pushes to this tab.
@@ -405,6 +414,8 @@ describe("ConnectFlowPanel", () => {
       "href",
       "https://github.com/login/device",
     );
+    fireEvent.click(screen.getByRole("link", { name: "https://github.com/login/device" }));
+    expect(requestURL).toHaveBeenCalledWith("https://github.com/login/device", undefined);
     // A device flow has no paste box and no sign-in URL of its own.
     expect(screen.queryByRole("textbox")).toBeNull();
   });

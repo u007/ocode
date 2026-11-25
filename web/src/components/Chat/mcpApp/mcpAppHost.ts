@@ -200,7 +200,12 @@ export function createMcpAppHost(opts: McpAppHostOptions): McpAppHost {
           respondError(id, ERR_INVALID_PARAMS, "ui/open-link requires an http or https url");
           return;
         }
-        opts.openLink(url);
+        try {
+          opts.openLink(url);
+        } catch (err) {
+          respondError(id, ERR_DEFAULT, errorMessage(err));
+          return;
+        }
         respond(id, { result: {} });
         return;
       }

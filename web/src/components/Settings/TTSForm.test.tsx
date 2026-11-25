@@ -5,10 +5,10 @@ import { SpeechProvider } from "../Speech/SpeechProvider";
 import { ChatProvider } from "../../stores/chatStore";
 import { api } from "../../api/client";
 
-const { openExternalSpy } = vi.hoisted(() => ({ openExternalSpy: vi.fn() }));
+const { requestURLSpy } = vi.hoisted(() => ({ requestURLSpy: vi.fn() }));
 vi.mock("../../lib/externalLinks", () => ({
   isHTTPURL: () => true,
-  openExternalURL: (...args: unknown[]) => openExternalSpy(...args),
+  requestURLOpen: (...args: unknown[]) => requestURLSpy(...args),
 }));
 
 const engines = [
@@ -91,14 +91,14 @@ describe("TTSForm licensing and selection", () => {
     expect(paradee.getByRole("button", { name: "Accept License" })).toBeDefined();
   });
 
-  it("opens the engine license in an external viewer when clicked", async () => {
+  it("asks the chooser for the engine license when clicked", async () => {
     renderTTSForm();
     const kyutai = within(await screen.findByTestId("tts-engine-kyutai"));
     expect(kyutai.getByText(/License: Pocket TTS by Kyutai: MIT/i)).toBeDefined();
     const view = kyutai.getByText("view");
     expect((view as HTMLAnchorElement).href).toContain("kyutai-license");
     fireEvent.click(view);
-    await waitFor(() => expect(openExternalSpy).toHaveBeenCalledWith("https://example.com/kyutai-license"));
+    await waitFor(() => expect(requestURLSpy).toHaveBeenCalledWith("https://example.com/kyutai-license", undefined));
   });
 
   it("offers the MeloTTS license, manifest and accent voices", async () => {

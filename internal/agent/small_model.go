@@ -64,13 +64,34 @@ var smallModelEligibleNames = map[string]bool{
 	// orchestrator-planner intentionally excluded: requires reliable JSON output
 	"orchestrator-explorer": true,
 	"doc-sync":              true,
+	"context-writer":         true,
+	"okf:context":           true,
+	"okf:context-writer":    true,
 	"scout":                 true,
 }
 
 // smallModelEligible reports whether the named agent is a candidate for the
 // small model. Empty name returns false.
+// agentBaseName returns the name without a plugin namespace prefix
+// (e.g. "okf:context" -> "context"). Plugin agents are namespaced as
+// "<plugin>:<name>"; the eligibility maps are keyed by the base name so a
+// plugin agent inherits the same small/context model treatment as the
+// built-in agent of the same kind.
+func agentBaseName(name string) string {
+	if i := strings.LastIndex(name, ":"); i >= 0 {
+		return strings.TrimSpace(name[i+1:])
+	}
+	return name
+}
+
 func smallModelEligible(name string) bool {
-	return name != "" && smallModelEligibleNames[name]
+	if name == "" {
+		return false
+	}
+	if smallModelEligibleNames[name] {
+		return true
+	}
+	return smallModelEligibleNames[agentBaseName(name)]
 }
 
 // injectSmallModelIfEligible sets spec.Model to the configured small model
@@ -100,7 +121,10 @@ var agentPurpose = map[string]string{
 	"explore":  "explorer",
 	"scout":    "explorer",
 	"context":  "context",
-	"doc-sync": "context",
+	"doc-sync":        "context",
+	"context-writer":   "context",
+	"okf:context":      "context",
+	"okf:context-writer":"context",
 }
 
 // injectPurposeModelIfEligible sets spec.Model following the fallback chain:
@@ -113,7 +137,11 @@ func injectPurposeModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config)
 		injectSmallModelIfEligible(a, spec, cfg)
 		return
 	}
-	switch agentPurpose[spec.Name] {
+	purposeName := spec.Name
+	if _, ok := agentPurpose[purposeName]; !ok {
+		purposeName = agentBaseName(purposeName)
+	}
+	switch agentPurpose[purposeName] {
 	case "explorer":
 		if cfg.Ocode.ExplorerModelEnabled && cfg.Ocode.ExplorerModel != "" {
 			spec.Model = cfg.Ocode.ExplorerModel

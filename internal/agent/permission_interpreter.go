@@ -270,23 +270,58 @@ const permissionInterpreterPromptTemplate = `You are a permission gatekeeper for
 // by Go-side verification of the model's structured effect summary; any failure
 // falls back to human Ask (allowed=false). consulted==false means no verdict was
 // obtained at all (no model, source unreadable, server down, transport failure) —
-// see askPermissionModel for why callers must not report those as denials.
-func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExec) (allowed bool, reason string, summary string, consulted bool) {
-	start := time.Now()
-	modelName := a.autoPermissionModelName()
-	modelLabel := a.autoPermissionModelDisplayName()
-	defer func() {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_elapsed lang=%s mode=%s model=%s allowed=%t consulted=%t elapsed=%s", ie.Language, ie.SourceMode, modelLabel, allowed, consulted, time.Since(start)))
-	}()
-	if modelName == "unavailable" {
-		return false, "no permission model configured", "", false
+// whitelistedScriptEntries returns a compact list of the durable interpreter
+// grants (whitelisted scripts) so Jev is aware which scripts are pre-approved
+// when judging a (non-granted) command. Audit/transparency only; a granted run
+// still short-circuits before Jev is consulted.
+func whitelistedScriptEntries(a *Agent) []map[string]string {
+	out := []map[string]string{}
+	if a == nil || a.permissions == nil {
+		return out
 	}
+	cfg := a.permissions.AutoPermissionConfig()
+	if cfg == nil {
+		return out
+	}
+	for _, g := range cfg.Grants {
+		if g.Kind != "interpreter_exact" {
+			continue
+		}
+		sha := g.EntrypointSHA256
+		if len(sha) > 12 {
+			sha = sha[:12]
+		}
+		out = append(out, map[string]string{
+			"language": g.Language,
+			"path":     g.EntrypointPath,
+			"sha256":   sha,
+		})
+	}
+	return out
+}
 
-	source, sha, truncated, ok := a.acquireInterpreterSource(ie)
+// askPermissionModelInterpreter consults the permission model for an interpreter
+// execution and returns (allowed, reason, summary, consulted). It is gated entirely
+// by Go-side verification of the model's structured effect summary; any failure
+// falls back to human Ask (allowed=false). consulted==false means no verdict was
+// obtained at all (no model, source unreadable, server down, transport failure) —
+	func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExec) (allowed bool, reason string, summary string, consulted bool) {
+		start := time.Now()
+		modelName := a.autoPermissionModelName()
+		modelLabel := a.autoPermissionModelDisplayName()
+		defer func() {
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_elapsed lang=%s mode=%s model=%s allowed=%t consulted=%t elapsed=%s", ie.Language, ie.SourceMode, modelLabel, allowed, consulted, time.Since(start)))
+		}()
+		if modelName == "unavailable" {
+			return false, "no permission model configured", "", false
+		}
+
+		source, sha, truncated, ok := a.acquireInterpreterSource(ie)
 	if !ok {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_no_source lang=%s mode=%s", ie.Language, ie.SourceMode))
 		return false, fmt.Sprintf("interpreter execution (%s %s): source unavailable for analysis", ie.Language, ie.SourceMode), "", false
 	}
+
+	// Exact-grant short-circuit: an identical source hash was already verified.
 
 	// Exact-grant short-circuit: an identical source hash was already verified.
 	// Destructive grants are only matched when the current policy permits
@@ -294,7 +329,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	// overriding a later allow_destructive=false policy change.
 	allowDestructive := a.autoPermissionAllowsDestructive()
 	if a.permissions.MatchInterpreterGrant(ie, sha, allowDestructive) {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_match lang=%s mode=%s", ie.Language, ie.SourceMode))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_match lang=%s mode=%s whitelisted=true", ie.Language, ie.SourceMode))
 		return true, "matched persisted interpreter grant", "", true
 	}
 
@@ -334,6 +369,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 			"truncated": truncated,
 			"text":      source,
 		},
+		"whitelisted_scripts": whitelistedScriptEntries(a),
 	}
 	if len(relaxedKeys) > 0 {
 		// Structured mirror of the prompt guidance below, so a model that reads

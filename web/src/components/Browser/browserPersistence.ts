@@ -452,7 +452,7 @@ export function useBrowserPersistence(projectPath: string, host?: string): void 
 
   const [restoredKey, setRestoredKey] = useState<string | null>(null);
   const known = useRef<{ key: string; json: string } | null>(null);
-  const latest = useRef({ tabs, json: sharedJson });
+  const latest = useRef({ tabs, activeId, json: sharedJson });
   const readSeq = useRef(0);
   const writeSeq = useRef(0);
   // Last server revision seen per project key. Sent with every save.
@@ -476,7 +476,7 @@ export function useBrowserPersistence(projectPath: string, host?: string): void 
   }, []);
 
   useEffect(() => {
-    latest.current = { tabs, json: sharedJson };
+    latest.current = { tabs, activeId, json: sharedJson };
   });
 
   const applyIncoming = useCallback(
@@ -493,10 +493,14 @@ export function useBrowserPersistence(projectPath: string, host?: string): void 
         if (synced.has(t.id)) browserActions.closeLocal(`tab:${t.id}`);
         else kept.push(t);
       }
-      restoreBrowserTabs(
-        [...incoming.tabs.map((t): BrowserTab => ({ id: t.id, title: t.title, manualTitle: t.manualTitle })), ...kept],
-        incoming.activeId,
-      );
+      const merged = [
+        ...incoming.tabs.map((t): BrowserTab => ({ id: t.id, title: t.title, manualTitle: t.manualTitle })),
+        ...kept,
+      ];
+      const localActiveId = latest.current.activeId;
+      const activeId = incoming.activeId ??
+        (localActiveId && kept.some((t) => t.id === localActiveId) ? localActiveId : null);
+      restoreBrowserTabs(merged, activeId);
       for (const t of incoming.tabs) {
         const key: StateKey = `tab:${t.id}`;
         const surface = incoming.surfaces[t.id];

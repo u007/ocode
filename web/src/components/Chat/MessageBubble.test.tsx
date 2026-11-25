@@ -85,6 +85,7 @@ describe("MessageBubble theme-surface classes", () => {
     const bubble = container.querySelector("div.bg-muted");
     expect(bubble).not.toBeNull();
     expect(bubble!.className).toContain("text-foreground");
+    expect(bubble!.className).toContain("w-full");
     expect(bubble!.textContent).toContain("hello world");
   });
 });

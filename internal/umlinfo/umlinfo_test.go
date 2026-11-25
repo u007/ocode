@@ -2,8 +2,10 @@ package umlinfo
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -289,5 +291,26 @@ func TestFailedBuildKeepsPreviousIndex(t *testing.T) {
 	}
 	if _, ok := idx.LastError(root); !ok {
 		t.Fatal("failure was not recorded")
+	}
+}
+
+func TestBuildIndexEmptyDirHasNonNilSlices(t *testing.T) {
+	root := t.TempDir()
+	idx, err := BuildIndex(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Packages == nil || idx.Symbols == nil || idx.Edges == nil {
+		t.Fatalf("nil slice: packages=%v symbols=%v edges=%v", idx.Packages, idx.Symbols, idx.Edges)
+	}
+	b, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{`"packages":[]`, `"symbols":[]`, `"edges":[]`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("marshalled index missing %s: %s", want, s)
+		}
 	}
 }

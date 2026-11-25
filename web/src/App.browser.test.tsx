@@ -13,6 +13,7 @@ const appApi = vi.hoisted(() => ({
   listGroups: vi.fn(),
   getSpending: vi.fn(),
 }));
+const externalOpen = vi.hoisted(() => vi.fn());
 
 beforeAll(() => {
   // jsdom ships no matchMedia; useIsMobile reads it on first render.
@@ -74,9 +75,14 @@ vi.mock("./lib/eventBus", () => ({
   },
 }));
 
+vi.mock("./lib/externalLinks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/externalLinks")>();
+  return { ...actual, openExternalURL: externalOpen };
+});
+
 vi.mock("./components/Browser/BrowserPanel", () => ({
-  BrowserPanel: ({ stateKey, mode, active }: { stateKey: string; mode: string; active?: boolean }) => (
-    <div data-testid="browser-panel" data-key={stateKey} data-mode={mode} data-active={String(active ?? true)} />
+  BrowserPanel: ({ stateKey, mode, active, host }: { stateKey: string; mode: string; active?: boolean; host?: string | null }) => (
+    <div data-testid="browser-panel" data-key={stateKey} data-mode={mode} data-active={String(active ?? true)} data-host={host ?? ""} />
   ),
 }));
 
@@ -119,6 +125,8 @@ vi.mock("./components/common/ErrorBoundary", () => ({
 }));
 
 import App, { getTrustedTerminalProject } from "./App";
+import { browserStore } from "./lib/browserStore";
+import { requestURLOpen } from "./lib/externalLinks";
 
 function renderApp() {
   return render(
@@ -130,6 +138,8 @@ function renderApp() {
 
 beforeEach(() => {
   window.localStorage.clear();
+  browserStore.setState(() => ({ byKey: {} }));
+  externalOpen.mockReset();
   appApi.listProjects.mockReset().mockResolvedValue([{ path: "/proj", name: "proj" }]);
   appApi.getCurrentProject.mockReset().mockResolvedValue({ project: { path: "/proj", name: "proj" } });
   appApi.listProjectSessions.mockReset().mockResolvedValue([]);
@@ -138,6 +148,68 @@ beforeEach(() => {
 });
 
 describe("App browser wiring", () => {
+  it("asks where to open a URL and creates an embedded tab when chosen", async () => {
+    renderApp();
+    await screen.findByRole("button", { name: /new browser tab/i });
+
+    act(() => requestURLOpen("https://example.com/docs"));
+    expect(screen.getByText("https://example.com/docs")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open in browser tab" }));
+
+    const panel = await screen.findByTestId("browser-panel");
+    const key = panel.getAttribute("data-key")!;
+    expect(key).toMatch(/^tab:/);
+    expect(browserStore.state.byKey[key].url).toBe("https://example.com/docs");
+    expect(externalOpen).not.toHaveBeenCalled();
+    expect(screen.queryByText("Choose where to open this URL.")).toBeNull();
+  });
+
+  it("opens the external destination synchronously and creates no embedded tab", async () => {
+    renderApp();
+    await screen.findByRole("button", { name: /new browser tab/i });
+
+    act(() => requestURLOpen("https://example.com/docs"));
+    fireEvent.click(screen.getByRole("button", { name: "Open in external browser" }));
+
+    expect(externalOpen).toHaveBeenCalledWith("https://example.com/docs");
+    expect(Object.keys(browserStore.state.byKey).filter((key) => key.startsWith("tab:"))).toHaveLength(0);
+    expect(screen.queryByText("Choose where to open this URL.")).toBeNull();
+  });
+
+  it("keeps the first pending URL when another link is requested", async () => {
+    renderApp();
+    await screen.findByRole("button", { name: /new browser tab/i });
+
+    act(() => requestURLOpen("https://example.com/first"));
+    expect(() => requestURLOpen("https://example.com/second")).toThrow(/already open/i);
+
+    expect(screen.getByText("https://example.com/first")).toBeInTheDocument();
+    expect(screen.queryByText("https://example.com/second")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(externalOpen).not.toHaveBeenCalled();
+  });
+
+  it("files an embedded tab under the link owner's remote project", async () => {
+    appApi.listProjects.mockResolvedValue([
+      { path: "/proj", name: "proj" },
+      { path: "/remote", name: "remote", host: "dev@example.com" },
+    ]);
+    renderApp();
+    await screen.findByRole("button", { name: /new browser tab/i });
+
+    act(() => requestURLOpen("http://localhost:3000", {
+      projectPath: "/remote",
+      host: "dev@example.com",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in browser tab" }));
+
+    const panel = await screen.findByTestId("browser-panel");
+    expect(panel).toHaveAttribute("data-host", "dev@example.com");
+    const key = panel.getAttribute("data-key")!;
+    expect(browserStore.state.byKey[key].url).toBe("http://localhost:3000");
+    expect(screen.getByRole("main")).toHaveAttribute("data-focused-kind", "browser");
+  });
+
   it("shows a full-width BrowserPanel when a browser tab is focused", async () => {
     renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /new browser tab/i }));

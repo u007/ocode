@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OPEN_EXTERNAL_MESSAGE_PREFIX, openExternalURL } from "./externalLinks";
+import {
+  OPEN_EXTERNAL_MESSAGE_PREFIX,
+  OPEN_URL_EVENT,
+  openExternalURL,
+  requestURLOpen,
+  type OpenURLDetail,
+} from "./externalLinks";
 
 type WailsWindow = Window & { _wails?: { invoke?: (message: string) => void } };
 
@@ -61,5 +67,73 @@ describe("openExternalURL", () => {
     openExternalURL("https://example.com");
 
     expect(open).toHaveBeenCalledWith("https://example.com", "_blank", "noopener,noreferrer");
+  });
+});
+
+describe("requestURLOpen", () => {
+  it("asks the app-level chooser to handle an http(s) URL", () => {
+    const seen: OpenURLDetail[] = [];
+    const listener = (event: Event) => {
+      seen.push((event as CustomEvent<OpenURLDetail>).detail);
+      event.preventDefault();
+    };
+    window.addEventListener(OPEN_URL_EVENT, listener);
+    try {
+      requestURLOpen("https://example.com/a?b=c#d");
+      expect(seen).toEqual([{ url: "https://example.com/a?b=c#d" }]);
+    } finally {
+      window.removeEventListener(OPEN_URL_EVENT, listener);
+    }
+  });
+
+  it("carries the owning project and host for embedded routing", () => {
+    const seen: OpenURLDetail[] = [];
+    const listener = (event: Event) => {
+      seen.push((event as CustomEvent<OpenURLDetail>).detail);
+      event.preventDefault();
+    };
+    window.addEventListener(OPEN_URL_EVENT, listener);
+    try {
+      requestURLOpen("http://localhost:3000", {
+        projectPath: "/remote",
+        host: "dev@example.com",
+      });
+      expect(seen).toEqual([{
+        url: "http://localhost:3000",
+        projectPath: "/remote",
+        host: "dev@example.com",
+      }]);
+    } finally {
+      window.removeEventListener(OPEN_URL_EVENT, listener);
+    }
+  });
+
+  it("fails loudly when the chooser refuses a second pending request", () => {
+    const listener = (event: Event) => {
+      (event as CustomEvent<OpenURLDetail>).detail.refused = true;
+      event.preventDefault();
+    };
+    window.addEventListener(OPEN_URL_EVENT, listener);
+    try {
+      expect(() => requestURLOpen("https://example.com/second")).toThrow(/already open/i);
+    } finally {
+      window.removeEventListener(OPEN_URL_EVENT, listener);
+    }
+  });
+
+  it("never sends a non-http(s) URL to the chooser", () => {
+    const listener = vi.fn((event: Event) => event.preventDefault());
+    window.addEventListener(OPEN_URL_EVENT, listener);
+    try {
+      requestURLOpen("javascript:alert(1)");
+      requestURLOpen("file:///etc/passwd");
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(OPEN_URL_EVENT, listener);
+    }
+  });
+
+  it("fails loudly when no chooser is mounted", () => {
+    expect(() => requestURLOpen("https://example.com")).toThrow(/no .*listener/i);
   });
 });

@@ -72,7 +72,7 @@ vi.mock("../../components/Speech/SpeechProvider", () => ({
 }));
 vi.mock("../../lib/externalLinks", () => ({
   isHTTPURL: () => false,
-  openExternalURL: () => {},
+  requestURLOpen: () => {},
 }));
 vi.mock("../../lib/eventBus", () => ({
   eventBus: { on: () => () => {}, onReconnect: () => () => {}, start: () => {}, stop: () => {} },

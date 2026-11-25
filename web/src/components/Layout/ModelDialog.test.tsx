@@ -225,15 +225,43 @@ describe("ModelDialog favorites/recents sections", () => {
     expect(gptCBtn).not.toContain("(gpt-c)");
   });
 
-  it("keeps the flat provider list for purposes the TUI does not offer favorites on", async () => {
+  it("renders shared priority sections before Claude Code and provider groups for advisor", async () => {
     render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
     await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
 
+    expect(await screen.findByText("Recently Used")).toBeInTheDocument();
+    expect(screen.getByText("★ Favorites")).toBeInTheDocument();
+
+    // Shared section dedupe still applies: the recent+favorite model appears once.
+    expect(screen.getAllByText("anthropic/claude-a")).toHaveLength(1);
+    expect(screen.getAllByText("openai/gpt-b")).toHaveLength(1);
+    expect(screen.getAllByText("gpt-c")).toHaveLength(1);
+
+    // The web picker keeps one convention: priority sections first, then the
+    // Claude Code provider group, then registry providers.
+    const html = document.body.innerHTML;
+    expect(html.indexOf("Recently Used")).toBeLessThan(html.indexOf("★ Favorites"));
+    expect(html.indexOf("★ Favorites")).toBeLessThan(
+      html.indexOf("Claude Code (Read-Only CLI)"),
+    );
+    expect(html.indexOf("Claude Code (Read-Only CLI)")).toBeLessThan(
+      html.indexOf(">openai<"),
+    );
+
+    // Advisor can use shared favorites, but only main/permission own the star.
+    expect(screen.queryByLabelText(/Favorite|Unfavorite/)).toBeNull();
+  });
+
+  it("omits empty priority sections in the advisor picker", async () => {
+    hoisted.api.listModels.mockResolvedValueOnce([
+      { name: "openai/gpt-c", model: "gpt-c", provider: "openai", active: false },
+    ]);
+    render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+
+    expect(await screen.findByText("gpt-c")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code (Read-Only CLI)")).toBeInTheDocument();
     expect(screen.queryByText("Recently Used")).toBeNull();
     expect(screen.queryByText("★ Favorites")).toBeNull();
-    // Provider grouping still renders.
-    expect(screen.getAllByText("gpt-c").length).toBeGreaterThan(0);
-    expect(screen.queryByLabelText(/Favorite|Unfavorite/)).toBeNull();
   });
 
   it("renders the priority sections without star toggles for small/recap/mask/autocontinue (TUI reuses openModelPicker, ctrl+f does not act)", async () => {
@@ -261,7 +289,7 @@ describe("ModelDialog favorites/recents sections", () => {
   });
 
   describe("advisor Claude Code (Read-Only CLI) section", () => {
-    it("offers the CLI section first in the advisor picker", async () => {
+    it("offers the CLI group before registry providers in the advisor picker", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
       await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
 
@@ -271,11 +299,27 @@ describe("ModelDialog favorites/recents sections", () => {
       expect(screen.getByText("claude-code/claude-opus-5")).toBeInTheDocument();
       expect(screen.getByText("claude-code/claude-opus-5-5")).toBeInTheDocument();
 
-      // The synthetic group renders before the first registry provider.
+      // The synthetic group renders before the first remaining registry provider.
       const html = document.body.innerHTML;
       expect(html.indexOf("Claude Code (Read-Only CLI)")).toBeLessThan(
-        html.indexOf(">anthropic<"),
+        html.indexOf(">openai<"),
       );
+    });
+
+    it("keeps shared recents read-only", async () => {
+      render(<ModelDialog open onClose={vi.fn()} purpose="advisor" />);
+      await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+      const row = document.querySelector<HTMLElement>(
+        '[data-list-nav-id="recents:anthropic/claude-a"]',
+      );
+      expect(row).not.toBeNull();
+      expect(fireEvent.contextMenu(row!)).toBe(false);
+
+      expect(
+        screen.queryByRole("menuitem", { name: "Remove from recently used" }),
+      ).toBeNull();
+      expect(hoisted.api.removeModelRecent).not.toHaveBeenCalled();
     });
 
     it("selecting a CLI model turns the Claude Code backend on", async () => {

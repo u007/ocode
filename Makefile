@@ -36,7 +36,8 @@ HTRTAGS := -tags htr
 # the runtime cache plus a live models.dev fetch, which is the same path a stale
 # snapshot already took.
 MODELS_TAGS := -tags models
-RELEASE_TAGS := -tags "htr models"
+RELEASE_TAG_NAMES := htr models
+RELEASE_TAGS := -tags "$(RELEASE_TAG_NAMES)"
 
 # ── Default: build for current platform ──────────────────────────────────────
 
@@ -77,8 +78,15 @@ version-up:
 #   Windows: WebView2 runtime
 # See https://wails.io/docs/guides/platform-installation
 
-DESKTOP_BUILD := go build $(RELEASE_TAGS) $(LDFLAGS) -o bin/ocode-desktop ./cmd/ocode-desktop
-DESKTOP_INSTALL := go install $(RELEASE_TAGS) $(LDFLAGS) ./cmd/ocode-desktop
+# Wails only implements OpenDevTools on macOS when its private-API bridge is
+# compiled in. Without this tag the View menu's "Open Developer Tools" item and
+# the tray's "Open DevTools" are silent no-ops
+# (wails/v3 pkg/application/mac_public_api_darwin.go). The tag selects no files
+# off macOS, so it is safe to pass on every platform.
+DESKTOP_TAGS := -tags "$(RELEASE_TAG_NAMES) private_mac_apis"
+
+DESKTOP_BUILD := go build $(DESKTOP_TAGS) $(LDFLAGS) -o bin/ocode-desktop ./cmd/ocode-desktop
+DESKTOP_INSTALL := go install $(DESKTOP_TAGS) $(LDFLAGS) ./cmd/ocode-desktop
 
 # macOS: Wails CGo objects may be compiled with a newer SDK; silence the
 # version-mismatch linker warnings by matching the min version.
@@ -471,9 +479,9 @@ docker-desktop-darwin:
 	@mkdir -p release
 	$(MAKE) web-build bundle-desktop-assets
 	CGO_ENABLED=1 CGO_LDFLAGS="-mmacosx-version-min=26.0" GOOS=darwin GOARCH=amd64 \
-	    go build $(LDFLAGS) -o release/ocode-desktop-darwin-amd64 ./cmd/ocode-desktop
+	    go build -tags private_mac_apis $(LDFLAGS) -o release/ocode-desktop-darwin-amd64 ./cmd/ocode-desktop
 	CGO_ENABLED=1 CGO_LDFLAGS="-mmacosx-version-min=26.0" GOOS=darwin GOARCH=arm64 \
-	    go build $(LDFLAGS) -o release/ocode-desktop-darwin-arm64 ./cmd/ocode-desktop
+	    go build -tags private_mac_apis $(LDFLAGS) -o release/ocode-desktop-darwin-arm64 ./cmd/ocode-desktop
 	@test -s release/ocode-desktop-darwin-amd64 || (echo "❌ macOS amd64 build failed" && exit 1)
 	@test -s release/ocode-desktop-darwin-arm64 || (echo "❌ macOS arm64 build failed" && exit 1)
 	@chmod +x release/ocode-desktop-darwin-*

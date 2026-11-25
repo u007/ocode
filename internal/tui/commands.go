@@ -998,6 +998,57 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		case "model":
 			return m.handlePermissionModelCmd(args[1:])
+		case "grants":
+			if m.agent == nil || m.agent.Permissions() == nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
+				return nil
+			}
+			pm := m.agent.Permissions()
+			cfg := pm.AutoPermissionConfig()
+			grants := []config.AutoGrant{}
+			if cfg != nil {
+				grants = cfg.Grants
+			}
+			if len(args) >= 2 && strings.ToLower(args[1]) == "remove" {
+				if len(args) < 3 {
+					m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions grants remove <N>"})
+					return nil
+				}
+				n, err := strconv.Atoi(strings.TrimSpace(args[2]))
+				if err != nil || n < 1 || n > len(grants) {
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid grant number. Use 1..%d.", len(grants))})
+					return nil
+				}
+				target := grants[n-1]
+				if err := config.RemoveAutoGrant(target); err != nil {
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to revoke grant: %v", err)})
+					return nil
+				}
+				pm.RemoveAutoGrant(n - 1)
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Revoked whitelisted script grant %d (%s).", n, target.EntrypointPath)})
+				return nil
+			}
+			if len(grants) == 0 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "No whitelisted interpreter scripts.\n\nUsage: /permissions grants remove <N>"})
+				return nil
+			}
+			var b strings.Builder
+			b.WriteString("Whitelisted interpreter scripts:\n")
+			for i, g := range grants {
+				sha := g.EntrypointSHA256
+				if len(sha) > 12 {
+					sha = sha[:12]
+				}
+				b.WriteString(fmt.Sprintf("  %d. %s  %s  %s%s\n", i+1, g.Language, g.EntrypointPath, sha, func() string {
+					if g.Destructive {
+						return "  [destructive]"
+					}
+					return ""
+				}()))
+			}
+			b.WriteString("\nRevoke with: /permissions grants remove <N>")
+			m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+			return nil
 		}
 	}
 	if len(args) >= 2 {

@@ -25,12 +25,33 @@ export interface Tab {
    *  remote) made resolveSessionHost reject the path as ambiguous and silently
    *  fall back to the LOCAL server. */
   host?: string;
+  /** Checkout root this tab's session is rooted at when it is a linked Git
+   *  worktree rather than the owning project's main checkout. `undefined`
+   *  resolves to `projectPath` (legacy/restored tabs). */
+  worktreePath?: string;
+  /** The named checkout no longer exists on disk. Render this tab disabled;
+   *  `worktreePath` is deliberately kept so a reappearing checkout recovers and
+   *  so the tab is never silently retargeted to `projectPath`. Not persisted. */
+  worktreeMissing?: boolean;
 }
 
 /** One project's cached session list, plus when it landed. */
 export interface ProjectSessionCache {
   sessions: SessionInfo[];
   fetchedAt: number;
+}
+
+/** One checkout's session list, with its own loading/error state and request
+ *  generation so the Sessions dialog can request any checkout of the active
+ *  project without one checkout's spinner or failure covering another's. */
+export interface CheckoutSessionCache {
+  sessions: SessionInfo[];
+  fetchedAt: number;
+  loading: boolean;
+  error: string | null;
+  /** Monotonic per-key request generation; a reply carrying an older one is
+   *  dropped rather than painted over a newer request's result. */
+  request: number;
 }
 
 /** Cache key for a project's session list. `host`-qualified so a remote
@@ -69,6 +90,10 @@ export interface ProjectState {
    *  Lets a project switch paint from the last-known list immediately and
    *  revalidate in the background, instead of blocking on a round-trip. */
   sessionsByProject: Record<string, ProjectSessionCache>;
+  /** Per-checkout session lists keyed by `projectSessionKey(checkoutPath, host)`.
+   *  Separate from `sessionsByProject` (the active project's list) so the
+   *  Sessions dialog can request a checkout without disturbing its consumers. */
+  checkoutSessions: Record<string, CheckoutSessionCache>;
   /** Open tabs per project path (canonical). Never contains `new-*` temp tabs
    *  after persistence; those live in memory only. */
   tabsByProject: Record<string, Tab[]>;
@@ -102,6 +127,10 @@ export type ProjectAction =
   | { type: "SET_PROJECT_SESSIONS_CACHE"; key: string; sessions: SessionInfo[]; fetchedAt: number }
   | { type: "SET_SESSIONS_LOADING"; loading: boolean }
   | { type: "SET_SESSIONS_ERROR"; error: string | null }
+  | { type: "START_CHECKOUT_SESSIONS"; key: string; request: number }
+  | { type: "SET_CHECKOUT_SESSIONS"; key: string; request: number; sessions: SessionInfo[]; fetchedAt: number }
+  | { type: "SET_CHECKOUT_SESSIONS_ERROR"; key: string; request: number; error: string }
+  | { type: "SET_WORKTREE_AVAILABILITY"; projectPath: string; available: string[] }
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
@@ -130,6 +159,7 @@ const initialState: ProjectState = {
   sessionsLoading: false,
   sessionsError: null,
   sessionsByProject: {},
+  checkoutSessions: {},
   tabsByProject: {},
   activeTabByProject: {},
   pendingTabDeletes: [],
@@ -337,6 +367,73 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       return { ...state, sessionsLoading: action.loading };
     case "SET_SESSIONS_ERROR":
       return { ...state, sessionsError: action.error };
+    case "START_CHECKOUT_SESSIONS": {
+      const prev = state.checkoutSessions[action.key];
+      return {
+        ...state,
+        checkoutSessions: {
+          ...state.checkoutSessions,
+          [action.key]: {
+            // Keep the last-known list paintable while the new request runs.
+            sessions: prev?.sessions ?? [],
+            fetchedAt: prev?.fetchedAt ?? 0,
+            loading: true,
+            error: null,
+            request: action.request,
+          },
+        },
+      };
+    }
+    case "SET_CHECKOUT_SESSIONS": {
+      const prev = state.checkoutSessions[action.key];
+      // A newer request for this checkout superseded this reply: drop it.
+      if (!prev || prev.request !== action.request) return state;
+      return {
+        ...state,
+        checkoutSessions: {
+          ...state.checkoutSessions,
+          [action.key]: {
+            sessions: action.sessions,
+            fetchedAt: action.fetchedAt,
+            loading: false,
+            error: null,
+            request: action.request,
+          },
+        },
+      };
+    }
+    case "SET_CHECKOUT_SESSIONS_ERROR": {
+      const prev = state.checkoutSessions[action.key];
+      if (!prev || prev.request !== action.request) return state;
+      return {
+        ...state,
+        checkoutSessions: {
+          ...state.checkoutSessions,
+          [action.key]: { ...prev, loading: false, error: action.error },
+        },
+      };
+    }
+    case "SET_WORKTREE_AVAILABILITY": {
+      const list = state.tabsByProject[action.projectPath];
+      if (!list) return state;
+      const available = new Set(action.available);
+      let changed = false;
+      const next = list.map((tab) => {
+        // A legacy or main-checkout tab resolves through `projectPath`, which is
+        // the saved root; only a named linked checkout can be missing.
+        if (!tab.worktreePath || tab.worktreePath === tab.projectPath) return tab;
+        const missing = !available.has(tab.worktreePath);
+        if (!!tab.worktreeMissing === missing) return tab;
+        changed = true;
+        if (missing) return { ...tab, worktreeMissing: true };
+        const recovered = { ...tab };
+        delete recovered.worktreeMissing;
+        return recovered;
+      });
+      return changed
+        ? { ...state, tabsByProject: { ...state.tabsByProject, [action.projectPath]: next } }
+        : state;
+    }
     case "ADD_TAB": {
       const key = action.tab.projectPath || path;
       // A session is open under at most ONE project. A second copy under
@@ -557,6 +654,11 @@ function fromServerTabs(projects: Record<string, ServerProjectTabs> | null | und
       .map((t) => ({
         id: t.id,
         projectPath: path,
+        // A legacy tab carries no worktree_path and resolves to `path` at read
+        // time (tabRoot); never invent a different checkout here.
+        ...(typeof t.worktree_path === "string" && t.worktree_path
+          ? { worktreePath: t.worktree_path }
+          : {}),
         title: typeof t.title === "string" ? truncateTitle(t.title, MAX_TITLE_TOOLTIP_CHARS) : t.id,
         activeSubTab: toSubTab(t.sub_tab),
       }));
@@ -577,7 +679,12 @@ function toServerTabs(state: ProjectState): Record<string, ServerProjectTabs> {
     // server would preserve the old entry (it merges), so closed tabs would
     // reappear on the next restore.
     projects[path] = {
-      tabs: real.map((t) => ({ id: t.id, title: t.title, sub_tab: t.activeSubTab })),
+      tabs: real.map((t) => ({
+        id: t.id,
+        title: t.title,
+        sub_tab: t.activeSubTab,
+        ...(t.worktreePath ? { worktree_path: t.worktreePath } : {}),
+      })),
       active: real.length > 0 ? state.activeTabByProject[path] ?? "" : "",
     };
   }
@@ -685,10 +792,25 @@ interface ProjectContextType {
   /** Warm a project's cached session list (hover preload). `force` revalidates
    *  even when the entry is still fresh. */
   prefetchProjectSessions: (project: Project, opts?: { force?: boolean }) => void;
+  /** Load one checkout's session list into `checkoutSessions`. The checkout is
+   *  rooted at `checkoutPath` (a worktree) and keyed with the project's host.
+   *  A newer request for the same checkout supersedes an older in-flight one. */
+  loadCheckoutSessions: (project: Project, checkoutPath: string, opts?: { force?: boolean }) => Promise<void>;
+  /** Mark tabs of `projectPath` whose named checkout is absent from `available`
+   *  as disabled, and clear the flag once it reappears. `worktreePath` itself is
+   *  never changed, so a missing checkout is never retargeted. */
+  applyWorktreeAvailability: (projectPath: string, available: string[]) => void;
   /** Open (or focus) a session tab, bound to `projectPath` when given (for a
    *  session picked from a non-active project's list) or to the active project
-   *  otherwise. */
-  openSessionTab: (sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => void;
+   *  otherwise. `worktreePath` names the checkout the session is rooted at
+   *  while `projectPath` stays the owning project. */
+  openSessionTab: (
+    sessionId: string,
+    sessionTitle: string,
+    projectPath?: string,
+    host?: string,
+    worktreePath?: string,
+  ) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   /** Register a local path as a project (idempotent on the server) and make it
@@ -729,8 +851,9 @@ interface ProjectContextType {
   /** Opens the project's "New session" tab — always adds a fresh tab (keeping
    *  the current running one), unless `reuseIfEmpty` is set and the active tab
    *  is an empty `new-*` tab (no draft, no session), in which case it just
-   *  activates it. */
-  openNewSessionTab: (reuseIfEmpty?: boolean, projectPath?: string) => string | null;
+   *  activates it. A new tab inherits the checkout of the tab it opens beside
+   *  unless `worktreePath` names one. */
+  openNewSessionTab: (reuseIfEmpty?: boolean, projectPath?: string, worktreePath?: string) => string | null;
   /** Opens a session tab for the active project. If no project is active yet
    *  (boot race), remembers it and applies once a project is selected. */
   openDeepLinkSession: (sessionId: string, sessionTitle?: string) => void;
@@ -798,6 +921,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
    *  hover prefetch against the fetch `selectProject` would otherwise start for
    *  the same project. */
   const sessionsInflightRef = useRef<Map<string, Promise<void>>>(new Map());
+  /** Per-checkout request generation, keyed like `checkoutSessions`. A reply
+   *  whose generation is no longer current was superseded and is dropped. */
+  const checkoutRequestRef = useRef<Map<string, number>>(new Map());
 
   // Server sync state shared by the persist, restore, and bus effects below.
   // `dirty` = a debounced write is scheduled, `writing` = a PUT is in flight,
@@ -1114,6 +1240,51 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     [refreshProjectSessions, store],
   );
 
+  /** Fetch one checkout's session list into `checkoutSessions`. Bare `await` is
+   *  deliberate: the entry carries its own loading/error state, so a failure is
+   *  recorded for that checkout instead of rejecting an unawaited caller. */
+  const loadCheckoutSessions = useCallback(
+    async (project: Project, checkoutPath: string, opts?: { force?: boolean }): Promise<void> => {
+      const key = projectSessionKey(checkoutPath, project.host);
+      if (!opts?.force) {
+        const cached = store.state.checkoutSessions[key];
+        if (cached && !cached.error && Date.now() - cached.fetchedAt < SESSION_LIST_TTL_MS) return;
+      }
+      const request = (checkoutRequestRef.current.get(key) ?? 0) + 1;
+      checkoutRequestRef.current.set(key, request);
+      dispatch({ type: "START_CHECKOUT_SESSIONS", key, request });
+      try {
+        const sessions = await api.listProjectSessions(checkoutPath, project.host);
+        // A newer request for this checkout superseded this reply.
+        if (checkoutRequestRef.current.get(key) !== request) return;
+        dispatch({
+          type: "SET_CHECKOUT_SESSIONS",
+          key,
+          request,
+          sessions,
+          fetchedAt: Date.now(),
+        });
+      } catch (err) {
+        if (checkoutRequestRef.current.get(key) !== request) return;
+        console.error("Failed to load checkout sessions:", err);
+        dispatch({
+          type: "SET_CHECKOUT_SESSIONS_ERROR",
+          key,
+          request,
+          error: sessionListErrorText(err),
+        });
+      }
+    },
+    [dispatch, store],
+  );
+
+  const applyWorktreeAvailability = useCallback(
+    (projectPath: string, available: string[]) => {
+      dispatch({ type: "SET_WORKTREE_AVAILABILITY", projectPath, available });
+    },
+    [dispatch],
+  );
+
   const selectProject = useCallback(async (project: Project) => {
     dispatch({ type: "SET_ACTIVE_PROJECT", project });
     // A cache hit (warm or stale) paints the last-known list immediately and
@@ -1167,9 +1338,13 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
    *  caller resuming a session from a non-active project's list must thread
    *  that project through — a tab bound to the local active project silently
    *  routes the resumed remote session locally. The owning project must
-   *  separately be made active for the tab to be visible. */
+   *  separately be made active for the tab to be visible.
+   *
+   *  `worktreePath` names the checkout the session is rooted at; `projectPath`
+   *  stays the owning project, so a worktree session is filed under (and keeps
+   *  active) the saved project rather than the checkout path. */
   const { tabsByProject, projects, activeProject } = state;
-  const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => {
+  const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string, host?: string, worktreePath?: string) => {
     const path = projectPath || activeProject?.path || "";
     // The session is already open under another project: show THAT tab (the
     // reducer refuses a second copy) and bring its project forward, so a deep
@@ -1191,6 +1366,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       title: sessionTitle || sessionId,
       activeSubTab: "chat",
       ...(host !== undefined ? { host } : {}),
+      // Only a linked checkout is carried; the owner path stays `projectPath`.
+      ...(worktreePath && worktreePath !== path ? { worktreePath } : {}),
     };
     dispatch({ type: "ADD_TAB", tab });
   }, [tabsByProject, projects, activeProject, selectProject]);
@@ -1423,17 +1600,28 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
   }, [state.sessionPickerOpen]);
 
-  const openNewSessionTab = useCallback((reuseIfEmpty = false, projectPath?: string): string | null => {
+  const openNewSessionTab = useCallback((reuseIfEmpty = false, projectPath?: string, worktreePath?: string): string | null => {
     const path = projectPath ?? state.activeProject?.path ?? "";
     const activeId = state.activeTabByProject[path] || null;
-    // Reuse the active tab when it is a completely empty new-session tab —
-    // no point stacking duplicate blank tabs. Otherwise always add a fresh tab
-    // and keep the current (running) tab in the bar.
-    if (reuseIfEmpty && activeId && activeId.startsWith("new-")) {
+    const activeTab = activeId ? state.tabsByProject[path]?.find((t) => t.id === activeId) : undefined;
+    // A new tab inherits the checkout of the tab it opens beside unless the
+    // caller names one; a legacy/owner tab contributes no checkout.
+    const checkout = worktreePath ?? activeTab?.worktreePath;
+    const activeCheckout = activeTab?.worktreePath || path;
+    // Reuse the active tab when it is a completely empty new-session tab for the
+    // SAME checkout — a tab bound to another checkout must not be retargeted.
+    if (
+      reuseIfEmpty &&
+      activeId &&
+      activeId.startsWith("new-") &&
+      (worktreePath === undefined || activeCheckout === worktreePath)
+    ) {
       dispatch({ type: "SET_ACTIVE_TAB", id: activeId });
       return activeId;
     }
-    const tempId = `new-${Date.now()}`;
+    // A per-millisecond suffix keeps two new tabs opened in the same tick from
+    // sharing an id; ADD_TAB would otherwise treat the second as a duplicate.
+    const tempId = `new-${Date.now()}-${crypto.randomUUID()}`;
     const activeHost = state.activeProject && state.activeProject.path === path ? state.activeProject.host : undefined;
     dispatch({
       type: "ADD_TAB",
@@ -1443,10 +1631,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         title: "New session",
         activeSubTab: "chat",
         ...(activeHost !== undefined ? { host: activeHost } : {}),
+        ...(checkout && checkout !== path ? { worktreePath: checkout } : {}),
       },
     });
     return tempId;
-  }, [state.activeProject, state.activeTabByProject]);
+  }, [state.activeProject, state.activeTabByProject, state.tabsByProject]);
 
   // Apply a stashed deep-link session once the first project is selected.
   const appliedPending = useRef(false);
@@ -1539,6 +1728,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       refreshGroups,
       selectProject,
       prefetchProjectSessions,
+      loadCheckoutSessions,
+      applyWorktreeAvailability,
       openSessionTab,
       closeSessionTab,
       addProject,
@@ -1566,6 +1757,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       refreshGroups,
       selectProject,
       prefetchProjectSessions,
+      loadCheckoutSessions,
+      applyWorktreeAvailability,
       openSessionTab,
       closeSessionTab,
       addProject,

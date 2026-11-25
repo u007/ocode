@@ -456,6 +456,194 @@ describe("GitPanel", () => {
     expect(button).toBeEnabled();
   });
 
+  it.each(["metaKey", "ctrlKey"] as const)(
+    "commits then pushes with %s+Shift+Enter from the commit message",
+    async (modifier) => {
+      const order: string[] = [];
+      mocks.gitCommit.mockImplementation(async () => {
+        order.push("commit");
+        return workspace.status;
+      });
+      mocks.gitPush.mockImplementation(async () => {
+        order.push("push");
+        return workspace.status;
+      });
+
+      render(<GitPanel projectPath="/proj" />);
+      await screen.findByText("src/unstaged.ts");
+      const field = screen.getByPlaceholderText(
+        "Commit message for staged changes…",
+      ) as HTMLTextAreaElement;
+      fireEvent.change(field, { target: { value: "ship it" } });
+      fireEvent.keyDown(field, { key: "Enter", [modifier]: true, shiftKey: true });
+
+      await waitFor(() => expect(mocks.gitPush).toHaveBeenCalledWith("/proj", false, undefined));
+      expect(mocks.gitCommit).toHaveBeenCalledWith("ship it", [], "/proj", undefined);
+      expect(order).toEqual(["commit", "push"]);
+      expect(field.value).toBe("");
+      expect(screen.getByTestId("git-notice").textContent).toBe("committed and pushed");
+    },
+  );
+
+  it.each(["metaKey", "ctrlKey"] as const)(
+    "keeps %s+Enter as commit-only from the commit message",
+    async (modifier) => {
+      render(<GitPanel projectPath="/proj" />);
+      await screen.findByText("src/unstaged.ts");
+      const field = screen.getByPlaceholderText(
+        "Commit message for staged changes…",
+      ) as HTMLTextAreaElement;
+      fireEvent.change(field, { target: { value: "save changes" } });
+      fireEvent.keyDown(field, { key: "Enter", [modifier]: true });
+
+      await waitFor(() =>
+        expect(mocks.gitCommit).toHaveBeenCalledWith("save changes", [], "/proj", undefined),
+      );
+      expect(mocks.gitPush).not.toHaveBeenCalled();
+      expect(screen.getByTestId("git-notice").textContent).toBe("committed");
+    },
+  );
+
+  it("ignores commit shortcuts when the repository has no changes", async () => {
+    mocks.getGitWorkspace.mockResolvedValue({
+      ...workspace,
+      status: { ...workspace.status, has_changes: false, staged_files: [], changed_files: [] },
+      staged: [],
+      unstaged: [],
+    });
+
+    render(<GitPanel projectPath="/proj" />);
+    const field = await screen.findByPlaceholderText("Commit message for staged changes…");
+    fireEvent.change(field, { target: { value: "ship it" } });
+    expect(screen.getByRole("button", { name: "Commit & Push" })).toBeDisabled();
+
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true, shiftKey: true });
+
+    expect(mocks.gitCommit).not.toHaveBeenCalled();
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+  });
+
+  it("ignores a repeated commit shortcut while the first commit is in flight", async () => {
+    let finishCommit!: (value: GitStatus) => void;
+    mocks.gitCommit.mockImplementation(
+      () =>
+        new Promise<GitStatus>((resolve) => {
+          finishCommit = resolve;
+        }),
+    );
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const field = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "ship it" } });
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true, shiftKey: true });
+    await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledTimes(1));
+
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true, shiftKey: true });
+    expect(mocks.gitCommit).toHaveBeenCalledTimes(1);
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishCommit(workspace.status);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(mocks.gitPush).toHaveBeenCalledTimes(1));
+  });
+
+  it("ignores commit shortcuts while a git operation is in progress", async () => {
+    mocks.getGitWorkspace.mockResolvedValue({
+      ...workspace,
+      status: {
+        ...workspace.status,
+        operation: { kind: "merge", label: "Merging branch", step: 1, total: 2 },
+      },
+    });
+
+    render(<GitPanel projectPath="/proj" />);
+    const field = await screen.findByPlaceholderText("Commit message for staged changes…");
+    fireEvent.change(field, { target: { value: "ship it" } });
+    expect(screen.getByRole("button", { name: "Commit & Push" })).toBeDisabled();
+
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true, shiftKey: true });
+
+    expect(mocks.gitCommit).not.toHaveBeenCalled();
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+  });
+
+  it("does not commit while an IME composition is active", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const field = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "ship it" } });
+
+    fireEvent.keyDown(field, {
+      key: "Enter",
+      metaKey: true,
+      shiftKey: true,
+      isComposing: true,
+    });
+
+    expect(mocks.gitCommit).not.toHaveBeenCalled();
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+  });
+
+  it("keeps the required-message error for an empty commit-box shortcut", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const field = screen.getByPlaceholderText("Commit message for staged changes…");
+
+    fireEvent.keyDown(field, { key: "Enter", metaKey: true });
+
+    expect(await screen.findByText("Commit message is required")).toBeTruthy();
+    expect(mocks.gitCommit).not.toHaveBeenCalled();
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+  });
+
+  it("ignores a second chord dispatched before busy state re-renders", async () => {
+    let finishCommit!: (value: GitStatus) => void;
+    mocks.gitCommit.mockImplementation(
+      () =>
+        new Promise<GitStatus>((resolve) => {
+          finishCommit = resolve;
+        }),
+    );
+
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const field = screen.getByPlaceholderText(
+      "Commit message for staged changes…",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "ship it" } });
+
+    act(() => {
+      for (let i = 0; i < 2; i++) {
+        field.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+          }),
+        );
+      }
+    });
+
+    await waitFor(() => expect(mocks.gitCommit).toHaveBeenCalledTimes(1));
+    expect(mocks.gitPush).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishCommit(workspace.status);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(mocks.gitPush).toHaveBeenCalledTimes(1));
+  });
+
   it("stages an unstaged file via the right-click context menu", async () => {
     render(<GitPanel projectPath="/proj" />);
     await screen.findByText("src/unstaged.ts");

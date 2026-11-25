@@ -1,6 +1,7 @@
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { openFile } from "../../lib/fileLinks";
-import { isHTTPURL, openExternalURL } from "../../lib/externalLinks";
+import { isHTTPURL, requestURLOpen } from "../../lib/externalLinks";
+import { useURLOpenOwner } from "../../lib/urlOpenContext";
 
 type MarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   children?: ReactNode;
@@ -49,8 +50,8 @@ function isHomeFileHref(href: string): boolean {
  * A plain `<a href="https://…">` inside the desktop webview is served by
  * ocode's own server, and Wails has no external-navigation delegate, so the
  * default action would replace the whole app with the target page. Intercept
- * http(s) clicks and hand them to `openExternalURL`, which opens the OS
- * browser on desktop and a new tab in a browser. A home-directory file link
+ * http(s) clicks and ask the app-level chooser between an embedded browser tab
+ * and the external browser. A home-directory file link
  * (`~/…`) opens in the Files tab. Every other href is still prevented (see
  * `keepsDefaultHandling`) — a chat bubble must never be able to navigate the
  * shell.
@@ -59,6 +60,7 @@ function isHomeFileHref(href: string): boolean {
  * `Cmd`/`Ctrl`-click still behave like a real link.
  */
 export default function MarkdownLink({ href, children, node: _node, ...props }: MarkdownLinkProps) {
+  const owner = useURLOpenOwner();
   return (
     <a
       href={href}
@@ -77,9 +79,16 @@ export default function MarkdownLink({ href, children, node: _node, ...props }: 
           openFile(href);
           return;
         }
-        // Only genuinely absolute http(s) is worth pushing at the OS browser;
-        // a relative path is not a link out of the app, it is a mistake.
-        if (isHTTPURL(href)) openExternalURL(href);
+        // Only genuinely absolute http(s) is worth offering as an external
+        // destination; a relative path is a mistake, not a link out of the app.
+        if (isHTTPURL(href)) requestURLOpen(href, owner ?? undefined);
+      }}
+      onAuxClick={(event) => {
+        props.onAuxClick?.(event);
+        if (event.button !== 1 || !href || event.defaultPrevented) return;
+        if (!isHTTPURL(href)) return;
+        event.preventDefault();
+        requestURLOpen(href, owner ?? undefined);
       }}
     >
       {children}

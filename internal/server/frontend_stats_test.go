@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -125,5 +127,54 @@ func TestFrontendStallLogged(t *testing.T) {
 	}
 	if got := post("1", map[string]any{"window_id": "main", "stall_ms": -1}); got != 400 {
 		t.Fatalf("negative stall status = %d, want 400", got)
+	}
+}
+
+func TestFrontendStallLogsActionAndDetail(t *testing.T) {
+	var logs bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+
+	s := New("localhost:0", "", "", nil)
+	b, _ := json.Marshal(map[string]any{
+		"window_id": "main", "stall_ms": 300, "dom_node_count": 10, "active_compactions": 0,
+		"action": "model-dialog-open", "detail": "commit=1 rows=2",
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/debug/frontend-stall", bytes.NewReader(b))
+	r.Header.Set("X-Ocode-Desktop", "1")
+	s.mux.ServeHTTP(w, r)
+	if w.Code != 204 {
+		t.Fatalf("status = %d, want 204, body=%s", w.Code, w.Body.String())
+	}
+	want := `action="model-dialog-open" detail="commit=1 rows=2"`
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("log missing %s; log=%q", want, logs.String())
+	}
+}
+
+func TestFrontendStallRejectsOverlongActionOrDetail(t *testing.T) {
+	s := New("localhost:0", "", "", nil)
+	post := func(body map[string]any) int {
+		b, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/api/debug/frontend-stall", bytes.NewReader(b))
+		r.Header.Set("X-Ocode-Desktop", "1")
+		s.mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	base := func() map[string]any {
+		return map[string]any{"window_id": "main", "stall_ms": 300}
+	}
+	longAction := base()
+	longAction["action"] = strings.Repeat("a", 201)
+	if got := post(longAction); got != 400 {
+		t.Fatalf("over-long action status = %d, want 400", got)
+	}
+	longDetail := base()
+	longDetail["detail"] = strings.Repeat("d", 501)
+	if got := post(longDetail); got != 400 {
+		t.Fatalf("over-long detail status = %d, want 400", got)
 	}
 }

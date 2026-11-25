@@ -789,7 +789,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
 	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
-	s.mux.HandleFunc("PUT /api/permissions/mode", s.authMiddleware(s.handleSetPermissionMode))
+	s.mux.HandleFunc("PUT /api/permissions/mode", s.authMiddleware(s.handleSetPermissionMode))  
+	// Whitelisted interpreter scripts (auto-permission grants).
+	s.mux.HandleFunc("GET /api/permissions/grants", s.authMiddleware(s.handleListAutoGrants))
+	s.mux.HandleFunc("DELETE /api/permissions/grants", s.authMiddleware(s.handleRevokeAutoGrant))
 	// Remote-control (external client, e.g. Telegram) permission/question
 	// resolution. These target the live TUI agent via the RC bridge.
 	s.mux.HandleFunc("POST /api/rc/permission/resolve", s.authMiddleware(s.handler.handleRCPermissionResolve))
@@ -3393,6 +3396,12 @@ func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetPermission(w, r)
 }
+func (s *Server) handleListAutoGrants(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListAutoGrants(w, r)
+}
+func (s *Server) handleRevokeAutoGrant(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRevokeAutoGrant(w, r)
+}
 func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetYolo(w, r) }
 func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetYolo(w, r) }
 func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request) {
@@ -3650,6 +3659,10 @@ type SessionInfo struct {
 	Title     string `json:"title"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	// ProjectPath is the checkout root a project session row was listed for
+	// (the saved root, or a validated linked worktree). Empty on rows from
+	// endpoints that are not project-scoped.
+	ProjectPath string `json:"project_path,omitempty"`
 }
 
 type SessionListResponse struct {

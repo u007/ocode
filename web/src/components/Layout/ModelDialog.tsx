@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
 import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import { reportActionError } from "../../lib/actionErrors";
+import { finishUiTimingAfterPaint, markUiTiming } from "../../lib/debug/uiTiming";
 import { setCompactConfig, summaryModelPatch } from "../../lib/compactConfig";
 import { setSpeechSummaryConfig } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
@@ -314,6 +315,16 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // The rows mount one render after the dialog shell, at deferred priority, so
   // a reopen paints the dialog at once instead of blocking on ~540 rows.
   const listReady = useDeferredValue(open);
+  // Debug timing for the open/close lag (lib/debug/uiTiming): commit, rows mounted, then painted.
+  useLayoutEffect(() => {
+    markUiTiming("commit");
+    if (!open) finishUiTimingAfterPaint();
+  }, [open]);
+  useLayoutEffect(() => {
+    if (!listReady) return;
+    markUiTiming("rows");
+    finishUiTimingAfterPaint();
+  }, [listReady]);
   const filteredModels = useMemo(() => {
     const query = deferredSearch.toLowerCase();
     if (query === "") return models;
@@ -326,25 +337,25 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     );
   }, [models, deferredSearch]);
 
-  // Mirror the TUI model picker in two capability layers, per verified TUI
-  // behavior (internal/tui/picker.go + the ctrl+f handler in
-  // internal/tui/model.go):
+  // Mirror the TUI model picker's section capability with one web convention:
+  // every purpose that can use the shared registry renders Recently Used →
+  // ★ Favorites → provider groups. The advisor deliberately keeps that web
+  // order even though the TUI prepends Claude Code above the sections; here
+  // Claude Code is the first provider group.
   //
-  // 1. Sections (Recently Used → ★ Favorites): openModelPicker renders them
-  //    and every picker kind that reuses it inherits them — "model",
-  //    "small-model", "recap-model", "permission-model", "redaction-model",
-  //    "autocontinue-model", "image-model". The advisor ("advisor", picker.go
-  //    l.21), OCR ("ocr-model") and embedding pickers build their own lists
-  //    and show NO sections. The dialog purposes mapping onto a
-  //    sections-bearing kind are main/small/recap/permission/mask (commit has
-  //    no TUI picker at all; summary and autocontinue are sidebar-owned and
-  //    group with the sections bearers — see supportsSections; image-model
-  //    lives in ImageGenForm).
+  // 1. Sections: "model", "small-model", "recap-model", "permission-model",
+  //    "redaction-model", "autocontinue-model", "image-model", and the advisor
+  //    reuse openModelPicker. The dialog purposes mapping onto a sections-bearing
+  //    kind are main/small/recap/permission/advisor/mask (commit has no TUI picker
+  //    at all; summary and autocontinue are sidebar-owned and group with the
+  //    sections bearers — see supportsSections; image-model lives in
+  //    ImageGenForm).
   // 2. The favorite TOGGLE (star): the ctrl+f handler only acts on
   //    "model" / "permission-model" / "image-model", so the star is offered
   //    on main + permission here.
   const supportsSections =
     purpose === "main" ||
+    purpose === "advisor" ||
     purpose === "small" ||
     purpose === "recap" ||
     purpose === "permission" ||
@@ -796,8 +807,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     const isRecent = section === "recents";
     // Only canonical "provider/model" ids can be removed from recents (the
     // server validates the same way); pseudo-rows like locally-added LM Studio
-    // entries never show the option.
-    const canRemove = isRecent && m.name.includes("/");
+    // entries never show the option. Advisor history is shared read-only.
+    const canRemove = isRecent && m.name.includes("/") && purpose !== "advisor";
 
     // Only a removable recents row gets a Radix ContextMenu. Wrapping all ~540
     // rows mounted a menu root per row and made open and close visibly slow.
@@ -928,9 +939,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           Clear (not set)
         </button>
 
-        {/* Model list — for favorites-capable purposes: Recently Used,
-            ★ Favorites, then provider groups, mirroring the TUI picker
-            (internal/tui/picker.go openModelPicker). Others: provider groups. */}
+        {/* Model list — for section-bearing purposes: Recently Used,
+            ★ Favorites, then provider groups, mirroring the web picker
+            convention. Others: provider groups. */}
         <div className="max-h-96 overflow-y-auto">
           {listReady && (<>
           {sections && sections.recents.length > 0 && (

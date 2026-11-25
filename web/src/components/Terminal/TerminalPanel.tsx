@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { FitAddon, Terminal, type Ghostty, type ITheme } from "ghostty-web";
 import { registerFileLinkProvider, registerUrlLinkProvider } from "./terminalLinkProvider";
-import { openExternalURL } from "../../lib/externalLinks";
+import { requestURLOpen } from "../../lib/externalLinks";
 import { buildTerminalOptions, DEFAULT_TERMINAL_THEME, serializeDefaultsFor } from "./terminalOptions";
 import { loadGhostty } from "./ghosttyRuntime";
 import { createTerminalStreamScanner, type TerminalStreamScanner } from "./terminalStream";
@@ -1227,7 +1227,7 @@ export default function TerminalPanel({
     try {
       // ghostty-web copies every mouse selection to the clipboard itself, registers
       // URL providers that window.open on ctrl/cmd-click, and reports the mouse itself.
-      // ocode owns all three (deduped copy, openExternalURL, terminalMouse.ts), so the
+      // ocode owns all three (deduped copy, requestURLOpen, terminalMouse.ts), so the
       // built-ins are removed.
       disableBuiltinSelectionCopy(term);
       clearBuiltinLinkProviders(term);
@@ -1251,13 +1251,13 @@ export default function TerminalPanel({
     // link) on any plain left click (ghostty-web's own only fire on ctrl/cmd+click);
     // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
     // and dispatches ocode:open-file to open the editor. A drag that moved is a
-    // selection, not a click (dragMovedRef). URLs route through openExternalURL
-    // so the desktop shell opens them in the OS browser instead of losing the
-    // webview to a navigation.
+    // selection, not a click (dragMovedRef). URLs route through the chooser so
+    // the desktop shell never loses the webview to a navigation, and the user
+    // explicitly picks an embedded tab or the external browser.
     const urlLinkProvider = registerUrlLinkProvider(
       term,
       (uri) => {
-        if (/^https?:\/\//.test(uri)) openExternalURL(uri);
+        if (/^https?:\/\//.test(uri)) requestURLOpen(uri, { projectPath, host });
       },
       () => dragMovedRef.current,
     );

@@ -1,10 +1,10 @@
 ---
 type: Gotcha
 title: Chat file links with relative or ~ hrefs silently did nothing
-description: Chat file links to ~/ files and relative paths were prevented and then dropped, so clicks looked broken with no error; authored ~/ hrefs now open in the Files tab, and the prose auto-linkifier keeps the ~ inside its token instead of matching only the root part after it.
+description: Chat file links to ~/ files and relative paths were prevented and then dropped, so clicks looked broken with no error; authored ~/ hrefs now open in the Files tab, HTTP(S) hrefs use the shared embedded-or-external chooser, and the prose auto-linkifier keeps the ~ inside its token instead of matching only the root part after it.
 resource: web/src/components/common/MarkdownLink.tsx, web/src/lib/fileLinks.tsx
 tags: [gotcha, web, chat, files, links]
-timestamp: 2026-11-18T13:19:56Z
+timestamp: 2026-11-24T14:13:35Z
 status: active
 ---
 # Chat file links with relative or ~ hrefs silently did nothing
@@ -17,20 +17,25 @@ no dialog, no tab.
 
 ## Cause
 
-`MarkdownLink` prevents the default navigation on every link. Only absolute
-http(s) hrefs go on to `openExternalURL`. Any other href was prevented and then
-dropped, so the failure was invisible to the user.
+At the time, `MarkdownLink` prevented the default navigation on every link.
+Only absolute http(s) hrefs went on to `openExternalURL`. Any other href was
+prevented and then dropped, so the failure was invisible to the user.
 
 ## Current behaviour
 
+- HTTP(S) hrefs call `requestURLOpen`, which opens the app-level
+  embedded-or-external chooser. They no longer go straight to the OS browser;
+  see [Clickable HTTP(S) URL chooser](../concepts/url-open-chooser.md).
 - `~` and `~/...` hrefs (`isHomeFileHref`,
-  `web/src/components/common/MarkdownLink.tsx:42`) call `openFile`
+  `web/src/components/common/MarkdownLink.tsx:43`) call `openFile`
   (`web/src/lib/fileLinks.tsx`), which dispatches `OPEN_FILE_EVENT`
   (`ocode:open-file`). `App.tsx` opens the file in the Files tab through the
   editor path. The server expands the `~`; see
   [File Editor Grants](../concepts/file-editor-grants.md).
 - Relative paths, root-relative (`/x`) and protocol-relative (`//host`) hrefs
   still do nothing. That is deliberate.
+- `mailto:`, `tel:`, `sms:` and in-page `#hash` hrefs keep their default
+  handlers; they are not sent to the HTTP(S) chooser.
 
 ## Prose auto-links vs markdown hrefs
 
@@ -46,8 +51,9 @@ other, and this asymmetry went undocumented long enough to be reported twice.
 `PATH_SOURCE` had no `~` branch and `GUARD` (`fileLinks.tsx:29`) did not include
 `~`, so the match started at the slash *after* the tilde. The tilde stayed as
 plain text, the trailing slash was dropped, and the click opened a ROOT path the
-server refuses — `fallbackQuickOpen` (`App.tsx:822`) then offered a grant dialog
-pre-filled with a `/Downloads/...` that does not exist.
+server refuses — `fallbackQuickOpen` in `openFileAndShow`
+(`web/src/App.tsx:879`) then offered a grant dialog pre-filled with a
+`/Downloads/...` path that does not exist.
 
 ### Token shapes now recognised
 
@@ -120,21 +126,25 @@ caller: [UML viewer](../concepts/uml-viewer.md).
 
 ## Rules for future edits
 
-- Every href shape handled by `MarkdownLink` must map explicitly to external,
-  file, or no-op. The fall-through is silent, so a new shape added without a
-  branch fails with no signal.
+- Every href shape handled by `MarkdownLink` must map explicitly to the HTTP(S)
+  chooser, a file, a default OS/in-page handler, or a deliberate no-op. The
+  fall-through is silent, so a new shape added without a branch fails with no
+  signal.
 - Auto-linkified prose and markdown hrefs are separate paths. A new `~` shape
   must be added to `HOME_SOURCE` *and* kept out of the generic branches by
   `GUARD`; never "fix" a link by dropping the tilde or the trailing slash, which
   turns it back into a root path the server refuses.
-- Never send a local path to `openExternalURL`. The desktop open-external bridge
-  is http(s)-only on purpose; a `~` path there would hand a local file to the OS
-  browser. The page-to-shell `ocode:open-external:` message carries the same
-  http(s)-only rule; see [desktop webview has no Wails events](desktop-shell-webview-no-wails-events.md).
+- Never send a local path to `requestURLOpen` or `openExternalURL`. Both validate
+  HTTP(S) on purpose; a `~` path would hand a local file to the OS browser. The
+  desktop open-external bridge is http(s)-only too. The page-to-shell
+  `ocode:open-external:` message carries the same rule; see
+  [desktop webview has no Wails events](desktop-shell-webview-no-wails-events.md).
 - The web client cannot expand `~` because it cannot read `$HOME`. Expansion
   stays server-side.
 
 ## Verification
 
 `web/src/components/common/MarkdownLink.test.tsx`: "opens a home-directory file
-link in the Files tab, not the OS browser".
+link in the Files tab, not the OS browser". The 2026-11-24 URL change also
+passes the focused `externalLinks`, `URLOpenDialog`, `App.browser` and
+`MessageBubble.links` suites; the full web suite/build was still pending.

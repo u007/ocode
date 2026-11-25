@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type AutoPermissionConfig, type RelaxableConcern } from "../../api/client";
 import type { PermissionLevelName } from "../../api/types";
+import type { AutoGrant } from "../../api/types";
 import {
   dedupeRows,
   diffBashRules,
@@ -52,6 +53,11 @@ const RULE_INPUT_CLASS =
 const RULE_SELECT_CLASS =
   "h-7 rounded-md bg-muted border border-border px-1 text-xs text-foreground";
 
+function isTmpPath(p: string): boolean {
+  const n = p.replace(/\/+$/, "");
+  return n === "/tmp" || n === "/var/tmp" || n.startsWith("/tmp/") || n.startsWith("/var/tmp/");
+}
+
 export default function PermissionsForm() {
   // This form is process-wide settings. The live permission mode is now PER
   // CHAT SESSION (toggled from the sidebar pill, /yolo, /sandbox), so it is
@@ -89,6 +95,42 @@ export default function PermissionsForm() {
   const [newPrefix, setNewPrefix] = useState("");
   const [newLevel, setNewLevel] = useState<PermissionLevelName>("deny");
   const [rulesError, setRulesError] = useState<string | null>(null);
+
+  // ── Whitelisted scripts (durable interpreter grants) ──
+  const [grants, setGrants] = useState<AutoGrant[]>([]);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [grantsError, setGrantsError] = useState<string | null>(null);
+  const [revokingIndex, setRevokingIndex] = useState<number | null>(null);
+
+  const loadGrants = useCallback(async () => {
+    setGrantsLoading(true);
+    setGrantsError(null);
+    try {
+      const res = await api.listAutoGrants();
+      setGrants(res?.grants ?? []);
+    } catch (err) {
+      setGrantsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGrantsLoading(false);
+    }
+  }, []);
+
+  const revokeGrant = useCallback(async (index: number) => {
+    setRevokingIndex(index);
+    setGrantsError(null);
+    try {
+      await api.revokeAutoGrant(index);
+      await loadGrants();
+    } catch (err) {
+      setGrantsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevokingIndex(null);
+    }
+  }, [loadGrants]);
+
+  useEffect(() => {
+    loadGrants();
+  }, [loadGrants]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -600,6 +642,91 @@ export default function PermissionsForm() {
             />
           </div>
         </div>
+      </div>
+
+      <div className="border-t border-border pt-4 space-y-2">
+        <div className="text-xs font-semibold text-foreground">Whitelisted scripts</div>
+        <p className="text-xs text-muted-foreground">
+          Durable interpreter grants (whitelisted scripts) the auto-approver has
+          remembered. Revoking one takes effect immediately.
+        </p>
+        {grantsError && (
+          <p className="text-xs text-red-400" role="alert">
+            {grantsError}
+          </p>
+        )}
+        {grantsLoading && grants.length === 0 ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Loading…
+          </div>
+        ) : grants.length === 0 ? (
+          <p className="text-xs text-muted-foreground/70">
+            No whitelisted scripts yet.
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {grants.map((g) => {
+              const tmp = isTmpPath(g.entrypoint_path) || isTmpPath(g.cwd);
+              return (
+                <div
+                  key={g.index}
+                  className="flex items-start gap-2 text-xs border border-border rounded-md p-2"
+                  data-testid={`grant-${g.index}`}
+                >
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-foreground">{g.language || g.kind}</span>
+                      {g.destructive && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">
+                          destructive
+                        </span>
+                      )}
+                      {tmp && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                          title="Path is under /tmp or /var/tmp — may be ephemeral"
+                          data-testid="tmp-warning"
+                        >
+                          /tmp path
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-mono text-muted-foreground break-all">{g.entrypoint_path}</div>
+                    {g.entrypoint_sha256 && (
+                      <div className="text-muted-foreground/70 font-mono">
+                        sha256 {g.entrypoint_sha256}…
+                      </div>
+                    )}
+                    {g.cwd && (
+                      <div className="text-muted-foreground/70 font-mono">cwd {g.cwd}</div>
+                    )}
+                    {g.normalized_command && (
+                      <div className="text-muted-foreground/70 font-mono break-all">
+                        {g.normalized_command}
+                      </div>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    type="button"
+                    disabled={revokingIndex === g.index}
+                    onClick={() => revokeGrant(g.index)}
+                    className="h-7 shrink-0 text-xs"
+                    aria-label={`Revoke grant ${g.index}`}
+                  >
+                    {revokingIndex === g.index ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      "Revoke"
+                    )}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <Button size="sm" onClick={save} disabled={saving} className="h-8 text-xs">

@@ -12,13 +12,13 @@ export const INLINE_PARALLEL_TOOL_CALLS_STORAGE_KEY = "ocode:inlineParallelToolC
 // notified via this custom event instead.
 const CHANGE_EVENT = "ocode:inlineParallelToolCallsChange";
 
-// Inline items shrink-wrap to their content, so each one is capped at the column
-// width (min-w-0 + max-w-full stops a long call from overflowing horizontally).
-// The card's own 80% cap is lifted with [&>*>*]:!max-w-full: inside a
-// shrink-wrapped item it would resolve to 80% of that item's content width and
-// truncate every title.
+// Inline items share the column width and wrap when their content cannot fit.
+// `min-w-0` + `max-w-full` prevents a long call from overflowing horizontally;
+// `grow` lets the last row fill the remaining space instead of hanging short.
+// The card's own 80% cap is lifted with [&>*>*]:!max-w-full: a grown item should
+// use its full share of the row rather than only 80% of that share.
 export const PARALLEL_TOOL_CALLS_INLINE_CLASS =
-  "flex flex-wrap items-start gap-2 [&>*]:min-w-0 [&>*]:max-w-full [&>*>*]:!max-w-full";
+  "flex w-full flex-wrap items-start gap-2 [&>*]:min-w-0 [&>*]:max-w-full [&>*]:grow [&>*>*]:!max-w-full";
 export const PARALLEL_TOOL_CALLS_STACKED_CLASS = "flex flex-col gap-2";
 
 // The choice the user made while storage refused the write (quota, blocked site

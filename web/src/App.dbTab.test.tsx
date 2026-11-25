@@ -39,6 +39,7 @@ const appApi = vi.hoisted(() => ({
   listProjectSessions: vi.fn(),
   listGroups: vi.fn(),
   getSpending: vi.fn(),
+  getSyncStatus: vi.fn(),
 }));
 
 vi.mock("./api/client", () => {
@@ -48,6 +49,7 @@ vi.mock("./api/client", () => {
     listProjectSessions: appApi.listProjectSessions,
     listGroups: appApi.listGroups,
     getSpending: appApi.getSpending,
+    getSyncStatus: appApi.getSyncStatus,
   };
   const api = new Proxy({} as Record<string, unknown>, {
     get: (target, prop: string) => {
@@ -143,6 +145,11 @@ beforeEach(() => {
   appApi.listProjectSessions.mockReset().mockResolvedValue([]);
   appApi.listGroups.mockReset().mockResolvedValue([]);
   appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
+  appApi.getSyncStatus.mockReset().mockResolvedValue({
+    loggedIn: false,
+    config: { version: 0, syncedAt: "2026-01-01T00:00:00Z", synced: false },
+    auth: { version: 0, syncedAt: "2026-01-01T00:00:00Z", synced: false },
+  });
 });
 
 function renderApp() {

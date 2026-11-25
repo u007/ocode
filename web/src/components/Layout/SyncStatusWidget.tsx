@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { isDesktopShell } from "../../lib/desktopShell";
-import { openExternalURL } from "../../lib/externalLinks";
+import { openExternalURL, requestURLOpen } from "../../lib/externalLinks";
 import MarkdownLink from "../common/MarkdownLink";
 
 const POLL_INTERVAL_MS = 2000;
@@ -257,7 +257,7 @@ export default function SyncStatusWidget() {
               </div>
               <div className="flex gap-2">
                 <Button
-                  onClick={() => openExternalURL(loginState.verifyUrl)}
+                  onClick={() => requestURLOpen(loginState.verifyUrl)}
                   className="flex-1"
                 >
                   Open verification page

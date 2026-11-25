@@ -381,6 +381,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         if (model) {
           dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
         }
+        // Echo the decision into the transcript only after the server
+        // confirmed it, so a failed resolve never leaves a false "denied" row.
+        dispatch({ type: "PERMISSION_ANSWERED", sessionId, requestId, decision });
         return { ok: true };
       } catch (err) {
         console.error("Failed to resolve permission:", err);

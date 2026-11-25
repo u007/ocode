@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Browser DevConsole network capture (local vs CDP)
-description: How the embedded browser's DevConsole Network panel is fed in Chrome/CDP mode versus local reverse-proxy iframe mode, including dedupe, redaction, body bounds and the UI expansion contract.
+description: How the embedded browser's DevConsole Network panel is fed in Chrome/CDP mode versus local reverse-proxy iframe mode, including dedupe, redaction, body bounds, the UI expansion contract and the tail-follow scrolling of the output tabs.
 resource: internal/browse/capture.js; web/src/components/Browser/DevConsole.tsx; web/src/components/Browser/useBrowserMessages.ts; web/src/lib/browserStore.ts
 tags:
   - concept
@@ -9,7 +9,7 @@ tags:
   - browser
   - devtools
   - network
-timestamp: 2026-11-24T09:20:00Z
+timestamp: 2026-11-24T05:02:06Z
 ---
 # Browser DevConsole network capture (local vs CDP)
 
@@ -39,7 +39,7 @@ display state pushed to `browserStore`; nothing is persisted.
 
 - **Bodies are on-demand in CDP, eager in local mode.** `DevConsole.toggleRow`
   calls `onRequestBody` ONLY for a truthy `requestId` that does not start with
-  `local-` (`web/src/components/Browser/DevConsole.tsx:247`); a local body is
+  `local-` (`web/src/components/Browser/DevConsole.tsx:295`); a local body is
   already in the store (fetch: posted just after its row; XHR: on its row), and a
   synthetic row id (`` `${ts}-${i}` `` when a row has no requestId) must never
   trigger a CDP request for an id the backend never saw.
@@ -73,7 +73,7 @@ display state pushed to `browserStore`; nothing is persisted.
 - **Every row must expand.** The old `hasDetails` gate suppressed expansion for
   local rows that had no requestId/headers, which is the reported "cannot expand
   to see request header and response header and body" bug. Expansion is now
-  unconditional (`DevConsole.tsx:468`); a row with nothing recorded renders
+  unconditional (`DevConsole.tsx:535`); a row with nothing recorded renders
   explicit `No headers available` / `Body not captured in local mode` sections
   rather than refusing the click. Resource Timing rows never carry headers or a
   body, so they show the same two sections.
@@ -151,7 +151,42 @@ display state pushed to `browserStore`; nothing is persisted.
   not secret-scanned".
 - **Tab clicks re-open, never collapse.** Clicking Console/Network/Performance
   calls `selectTab`, which sets the tab and forces the panel open
-  (`DevConsole.tsx:139`); clicking an already-selected tab must not toggle it shut.
+  (`DevConsole.tsx:141`); clicking an already-selected tab must not toggle it shut.
+
+## Tail-follow behaviour (console, network, performance)
+
+Console, Network and Performance are logs, so the one shared scroll container
+(`data-testid="devconsole-content"`, `flex-1 overflow-auto text-[11px] leading-relaxed select-text`)
+follows its tail: `pinToBottom` sets `scrollTop = scrollHeight` from a
+`useLayoutEffect` — deliberately not `useEffect`, so the very first paint already
+shows the newest row instead of flashing the old scroll position. `stickRef` is
+"the reader is at the tail": `onContentScroll` clears it once the container is
+more than `STICK_THRESHOLD_PX` (8 CSS px) from the bottom and re-arms it at the
+bottom, so output arriving while the reader is scrolled up is never pulled back
+down; it also clears on the wheel itself (`onContentWheel`, an upward
+`deltaY < 0`) — but only while the list actually overflows
+(`scrollHeight > clientHeight`), since a short list would never fire the `scroll`
+event that re-arms the follow — so a burst of rows landing between the gesture and
+its `scroll` event cannot pin the reader back down (`ChatPanel` uses the same
+gate). Two layout effects split the work: one re-arms the follow and lands on the
+newest row on every tab switch and every fresh open of the collapsed panel; the
+other pins only while `stickRef` is true, keyed on `props.consoleEvents`,
+`props.networkEvents`, `props.perfMetrics` and the panel `height` (a resize must
+not leave the tail out of view).
+
+**The DOM tab is exempt.** It is a tree, not a log: switching to it resets the
+scroll to 0, and `DomTree` scrolls the selected node into view itself — its
+passive effect runs after the parent layout effect, so it wins.
+
+Pinned by the `follows the tail` block in
+`web/src/components/Browser/DevConsole.test.tsx`: opens at the newest output,
+follows new console rows while at the tail, leaves a scrolled-up reader alone,
+honours an upward wheel before its `scroll` event lands, keeps following when an
+upward wheel cannot move a short list, re-arms once back at the bottom, starts
+Network and Performance at the bottom and re-arms their follow, and leaves the DOM
+tab at 0. jsdom has no layout, so that block installs
+`scrollHeight`/`clientHeight` getters on `HTMLElement.prototype` for each test and
+deletes them in `afterEach` — a test added there cannot assume real geometry.
 
 ## Tests worth knowing
 

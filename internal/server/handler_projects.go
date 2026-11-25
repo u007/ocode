@@ -172,10 +172,9 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 	// request proxied through /api/remote/{host}/ therefore arrives carrying the
 	// tilde form while the host's registry holds the expanded path, so a plain
 	// exact-match gate 404s every tilde-keyed remote project and its session
-	// list never loads. resolveRegisteredProjectRoot tries the verbatim form
-	// first and falls back to the home-expanded one — the same trust decision
-	// the git/fs endpoints already make, and one that narrows rather than
-	// widens the accepted set.
+	// list never loads. resolveWorkspaceRoot expands "~" before matching a saved
+	// LOCAL root — the same trust decision the git/fs endpoints already make,
+	// and one that narrows rather than widens the accepted set.
 	listPath := projectPath
 	if h.projects != nil {
 		if projectHost != "" {
@@ -193,12 +192,16 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		} else {
-			resolved, ok := h.resolveRegisteredProjectRoot(projectPath)
+			// Saved root, a path inside one, or a validated linked Git
+			// worktree whose main checkout is saved. A worktree resolves to its
+			// own checkout, so its sessions (keyed by that checkout's slug) are
+			// the ones returned.
+			root, _, ok := h.resolveWorkspaceRoot(projectPath)
 			if !ok {
 				writeError(w, http.StatusNotFound, "project not found in saved list")
 				return
 			}
-			listPath = resolved
+			listPath = root
 		}
 	}
 	// Remote sessions live on the remote ocode instance, not in this server's
@@ -218,10 +221,11 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 	result := make([]SessionInfo, 0, len(refs))
 	for _, ref := range refs {
 		result = append(result, SessionInfo{
-			ID:        ref.ID,
-			Title:     ref.Title,
-			CreatedAt: ref.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: ref.UpdatedAt.Format(time.RFC3339),
+			ID:          ref.ID,
+			Title:       ref.Title,
+			CreatedAt:   ref.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   ref.UpdatedAt.Format(time.RFC3339),
+			ProjectPath: listPath,
 		})
 	}
 

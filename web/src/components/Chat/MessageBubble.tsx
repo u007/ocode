@@ -208,7 +208,7 @@ export function AssistantText({
   const speechRef = useRef<HTMLDivElement>(null);
   return (
     <div className="flex justify-start mb-3">
-      <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-muted text-foreground">
+      <div className="w-full max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-muted text-foreground">
         <div
           ref={speechRef}
           data-speech-content=""

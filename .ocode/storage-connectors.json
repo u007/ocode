@@ -1,0 +1,9 @@
+{
+  "version": "v2",
+  "central": {
+    "connector_id": "kakiit",
+    "mode": "hub",
+    "connections": {}
+  },
+  "credentials_envelope": ""
+}

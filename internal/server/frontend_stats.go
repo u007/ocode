@@ -126,6 +126,8 @@ func (s *Server) handlePostFrontendStall(w http.ResponseWriter, r *http.Request)
 		StallMS           int    `json:"stall_ms"`
 		DOMNodeCount      int    `json:"dom_node_count"`
 		ActiveCompactions int    `json:"active_compactions"`
+		Action            string `json:"action"`
+		Detail            string `json:"detail"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		log.Printf("frontend-stall: decode request: %v", err)
@@ -133,11 +135,12 @@ func (s *Server) handlePostFrontendStall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if in.WindowID == "" || in.StallMS < 0 || in.DOMNodeCount < 0 ||
-		in.ActiveCompactions < 0 {
+		in.ActiveCompactions < 0 || len(in.Action) > 200 || len(in.Detail) > 500 {
 		http.Error(w, "invalid stall", http.StatusBadRequest)
 		return
 	}
-	log.Printf("frontend-stall: window=%s stall=%dms dom_nodes=%d active_compactions=%d",
-		in.WindowID, in.StallMS, in.DOMNodeCount, in.ActiveCompactions)
+	// %q keeps a hostile action or detail from injecting log lines.
+	log.Printf("frontend-stall: window=%s stall=%dms dom_nodes=%d active_compactions=%d action=%q detail=%q",
+		in.WindowID, in.StallMS, in.DOMNodeCount, in.ActiveCompactions, in.Action, in.Detail)
 	w.WriteHeader(http.StatusNoContent)
 }

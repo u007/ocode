@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Desktop quit guard for unsaved drafts (pending + failed) + sticky-port fallback no longer re-saves
-description: Desktop unsaved-draft quit guard (two-state pending/failed, bounded debounce) and sticky-port drift no longer re-saves — 2026-09-25 fixes, follow-up hardening.
+description: Desktop unsaved-draft quit guard (two-state pending/failed, bounded debounce) and sticky-port drift no longer re-saves — 2026-09-25 fixes, follow-up hardening, and the 2026-11-24 fix for a page reload stranding the native block.
 tags:
   - desktop
   - wails
@@ -10,7 +10,7 @@ tags:
   - debounce
   - port
   - editor-drafts
-timestamp: 2026-11-05T06:49:59Z
+timestamp: 2026-11-24T07:51:09Z
 ---
 # Desktop: unsaved-draft quit guard & sticky-port fallback no longer re-saves (2026-09-25)
 
@@ -40,7 +40,9 @@ Two related desktop-shell fixes, both about **not destroying state the webview o
 | `failed` | the localStorage write itself failed (`saveEditorDraft` returned false) | `noteDraftPersistFailure` from `flushDraft` | sticky `ActionErrorToast` via `reportActionErrorMessage` |
 
 - Either state blocks quit: `draftPersistenceBlocked()` is `failed.size > 0 || pending.size > 0`.
-- A single `syncNative()` helper sends `ocode:quit-guard:blocked:<reason>` / `ocode:quit-guard:clear` **only on transitions** (it latches on `nativeBlocked`), so per-keystroke arming never spams the bridge.
+- A single `syncNative()` helper sends `ocode:quit-guard:blocked:<reason>` / `ocode:quit-guard:clear` only when the blocked state **differs from what this page last sent**. The latch is `lastSent: boolean | null`, where `null` means "this page has told the shell nothing yet", so the **first** sync after a page load is unconditional. Per-keystroke arming still never spams the bridge: later syncs with an unchanged state return immediately.
+- **Why the first sync must be unconditional:** the native `QuitGuard` lives in the Go process and outlives the page, but the SPA's guard state is module-level. An HMR reload, or `cmd/ocode-desktop/main.go`'s second-instance `dw.window.SetURL(...)` deep-link navigation, resets `failed`/`pending` and the latch to empty while native stays blocked. A transition-only sync then never sent `clear`, so quit was refused forever with nothing to name. The toast fell through to `message()`'s generic fallback — *"Unsaved changes couldn't be saved — ocode won't quit until they're saved."* — which is reachable **only** when native is blocked and both web maps are empty, and that is what makes the ghost diagnosable.
+- **A dropped send stays retryable.** `lastSent = block` is recorded only when `invokeWails(...)` returned true; it returns false when `window._wails.invoke` is not injected yet (`web/src/lib/wails.ts`), and `syncNative()` then returns without latching. Exported `reportDraftGuardState()` re-runs `syncNative()` and is called from `web/src/App.tsx`'s runtime-ready handshake (the `notifyWailsRuntimeReady()` success branch), so an idle page re-reports once the bridge appears. `__resetDraftGuardForTests` resets `lastSent = null`.
 - `noteDraftPersistFailure` moves a tab from `pending` → `failed`; `noteDraftPersistSuccess` clears both; `reconcileDraftGuard(liveDirtyTabIds)` drops entries for tabs that are no longer dirty or were closed and syncs native (fires `ocode:quit-guard:clear` when the sets empty).
 - Message precedence: failure message (with file list) wins over pending; pending reads e.g. *"An unsaved edit hasn't been written to local storage yet: a.txt. ocode won't quit until it is — wait a moment, or use 'Quit anyway'."*
 
@@ -77,6 +79,7 @@ A `beforeunload` listener flushes every pending draft synchronously on the way o
 
 - `internal/desktop/quit_guard_test.go` — round-trip, raw-message handling, reason containing colons.
 - `web/src/lib/editorDraftGuard.test.ts` — 4 pending-state tests: blocks silently (no toast), clears on success, coexists with a recovered failure (`failed` + `pending` both tracked), `reconcileDraftGuard` drops pending, distinct pending message. Plus the original failure-state suite.
+- Two reload regressions replace the old "does not touch native when nothing was blocked" test: **"clears a block left by the previous page life on the first sync"** (the first sync sends `clear`, later no-op syncs stay silent) and **"retries the first report once the bridge is injected"**. Both are mutation-verified — `block === (lastSent ?? false)` fails the first, dropping the `!invokeWails` guard fails the second.
 - `web/src/hooks/useEditorTabs.test.ts`:
   - `describe("useEditorTabs draft-persistence guard")` — the write-failure case.
   - `describe("useEditorTabs in-memory draft guard")` — fake-timer tests: the guard arms while edits are in memory and clears once the write lands; continuous typing (an edit every 400ms for 2s) still produces a mid-stream write and the final write carries the newest content.
@@ -98,6 +101,6 @@ A `beforeunload` listener flushes every pending draft synchronously on the way o
 
 ## Where this is also documented
 
-- Design doc (outside the bundle): `docs/superpowers/specs/2026-09-25-desktop-quit-guard-design.md`.
-- Skill: `skills/ocode-desktop/SKILL.md` gotchas **5** (sticky port drift) and **16** (unsaved-draft quit guard), plus the embedded copy under `cmd/ocode-desktop/embedded-assets/skills/ocode-desktop/SKILL.md` — keep those in sync with this doc.
+- Design doc (outside the bundle): `docs/superpowers/specs/2026-09-25-desktop-quit-guard-design.md` — the as-designed record; its "only on transitions" native-sync rule is superseded by the `lastSent` fix above.
+- Skill: `skills/ocode-desktop/SKILL.md` gotchas **5** (sticky port drift) and **16** (unsaved-draft quit guard) — keep those in sync with this doc. The copy under `cmd/ocode-desktop/embedded-assets/skills/` is generated and gitignored (`make desktop` copies `skills/` there); never edit it by hand.
 - `CHANGES.md` (2026-09-25 entries).

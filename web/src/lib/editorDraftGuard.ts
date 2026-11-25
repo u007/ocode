@@ -25,8 +25,15 @@ import { invokeWails } from "./wails";
 const failed = new Map<string, string>();
 /** Tab id → file path, for edits still in memory with no draft written yet. */
 const pending = new Map<string, string>();
-/** Whether we last told native to block; avoids re-sending on every keystroke. */
-let nativeBlocked = false;
+/**
+ * The block state the shell last acknowledged, or null before this page has
+ * reported anything. Native outlives the page: a reload (HMR, the second-instance
+ * `SetURL`) keeps its QuitGuard blocked while these maps reset to empty, and a
+ * transition-only sync would then never send `clear` — leaving quit refused
+ * forever with no reason to show. So the first sync after load reports the
+ * absolute state. Null also means "not sent yet": no bridge, retry later.
+ */
+let lastSent: boolean | null = null;
 
 function baseName(path: string): string {
   const base = path.split("/").pop();
@@ -57,12 +64,23 @@ function message(): string {
   return "Unsaved changes couldn't be saved — ocode won't quit until they're saved.";
 }
 
-/** Report a transition to/from the blocked state to the desktop shell. */
+/** Report the current block state to the desktop shell. */
 function syncNative(): void {
   const block = failed.size > 0 || pending.size > 0;
-  if (block === nativeBlocked) return;
-  nativeBlocked = block;
-  invokeWails(block ? `ocode:quit-guard:blocked:${message()}` : "ocode:quit-guard:clear");
+  if (block === lastSent) return;
+  if (!invokeWails(block ? `ocode:quit-guard:blocked:${message()}` : "ocode:quit-guard:clear")) {
+    return; // no bridge yet; the next sync (or reportDraftGuardState) retries
+  }
+  lastSent = block;
+}
+
+/**
+ * Re-report the guard state once the desktop bridge is up. App's runtime-ready
+ * handshake calls this: the first sync can run before `window._wails.invoke`
+ * exists, and nothing else would retry it on an idle page.
+ */
+export function reportDraftGuardState(): void {
+  syncNative();
 }
 
 /**
@@ -137,5 +155,5 @@ export function installQuitBlockedListener(): () => void {
 export function __resetDraftGuardForTests(): void {
   failed.clear();
   pending.clear();
-  nativeBlocked = false;
+  lastSent = null;
 }

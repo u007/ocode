@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import FilePicker from "./FilePicker";
+import { RECENT_FILES_STORAGE_PREFIX } from "./recentFilesPersistence";
 
 // Layout shim for @tanstack/react-virtual in jsdom (no layout engine)
 class ResizeObserverMock {
@@ -307,6 +308,60 @@ describe("FilePicker folder results", () => {
     fireEvent.click(await screen.findByText("readme.md"));
     expect(onOpenFile).toHaveBeenCalledWith("readme.md", "/proj");
     expect(onOpenFolder).not.toHaveBeenCalled();
+  });
+});
+
+describe("FilePicker recently opened files", () => {
+  const RECENT_KEY = `${RECENT_FILES_STORAGE_PREFIX}/proj`;
+  const recentTree = [
+    { name: "readme.md", path: "readme.md", is_dir: false },
+    { name: "alpha.ts", path: "src/alpha.ts", is_dir: false },
+    { name: "alpha_test.go", path: "src/alpha_test.go", is_dir: false },
+    { name: "beta.ts", path: "src/beta.ts", is_dir: false },
+  ];
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.spyOn(globalThis as any, "fetch").mockImplementation(async () => mockTreeResponse(recentTree));
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("lists a recently opened file first when the query is empty", async () => {
+    // An absolute path, as a chat link would record it: the picker must strip the root.
+    window.localStorage.setItem(RECENT_KEY, JSON.stringify(["/proj/src/beta.ts"]));
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(4));
+    // Without recency the shortest path (readme.md) would lead.
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("src/beta.ts");
+  });
+
+  it("leaves the existing order when nothing is recent", async () => {
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+    const input = (await screen.findByPlaceholderText("Filter by keywords...")) as HTMLInputElement;
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(4));
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("readme.md");
+
+    fireEvent.change(input, { target: { value: "alpha" } });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("src/alpha.ts");
+  });
+
+  it("lists a recently opened match first among matches for a query", async () => {
+    window.localStorage.setItem(RECENT_KEY, JSON.stringify(["/proj/src/alpha_test.go", "/proj/src/beta.ts"]));
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+    const input = (await screen.findByPlaceholderText("Filter by keywords...")) as HTMLInputElement;
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(4));
+
+    fireEvent.change(input, { target: { value: "alpha" } });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveTextContent("src/alpha_test.go");
+    expect(options[1]).toHaveTextContent("src/alpha.ts");
   });
 });
 

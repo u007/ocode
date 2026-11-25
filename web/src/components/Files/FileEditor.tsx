@@ -1023,7 +1023,7 @@ function FileEditorImpl({
   }, [path, projectRoot]);
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden" data-url-project-path={projectRoot} data-url-project-host={projectHost}>
       {/* Editor header */}
       <div className="flex items-center justify-between gap-2 px-4 py-1.5 border-b border-border bg-muted/30 text-xs text-muted-foreground">
         <span className="font-mono truncate min-w-0">{path}</span>

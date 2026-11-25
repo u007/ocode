@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Bash Prefix Always-Allow Rules
-description: Bash command-word prefixes derived from a permission ask, how they are offered in the web dialog (radio choices) and TUI (numbered list), the synthetic-prefix closure that stops a blanket-bash allow, and where the persistence lives.
+description: Bash command-word prefixes derived from a permission ask, how they are offered in the web dialog and TUI, the synthetic-prefix closure, where persistence lives, and why static development-tool allows and their argument gate are separate from persisted prefix rules.
 resource: internal/agent/bash_prefix_candidates.go
 tags:
   - permissions
@@ -9,7 +9,7 @@ tags:
   - auto-permission
   - always-allow
   - prefix
-timestamp: 2026-10-21T20:03:00Z
+timestamp: 2026-11-25T04:01:20Z
 ---
 
 # Bash Prefix Always-Allow Rules
@@ -46,9 +46,16 @@ Examples: `npm run build` → `["npm run build", "npm run", "npm"]`; `go test ./
 - Always-rule gate: `AlwaysRuleChoiceAvailable` (`internal/agent/permissions.go`); confirmation UI: web `PermissionDialog.tsx`, TUI `model.go`.
 - Matching persisted rules: `matchBashPrefixRuleWords` honors broader rules (`permissions.bash.prefixes`) in addition to the exact key lookup, so a broader persisted prefix stops re-asking; `ValidateBashPrefixRule` is unchanged (`"git"` denied; `"rm"` / `"curl"` still persistable because destructive-rm and exfiltration gates run before prefix matching).
 
+## Static development-tool allows are not prefix rules
+
+The 2026-11-25 HYBRID policy statically allows known formatter/linter/type-checker tools and ordinary test commands through `bashSubcommandAllow` / `runnerSafeTools`, after `developmentToolArgsAllowed` accepts their arguments. Those calls never produce an ask, so no `permissions.bash.prefixes` rule is created.
+
+The argument gate runs **before** persisted prefix allows. A saved `go test`, `pytest`, or formatter prefix therefore cannot bypass a rejected escape flag such as `go test -exec`, `pytest -p`, a plugin/custom-code loader, an outside-root path, or an unresolved variable; the call still falls through to the auto-permission judge or a human. Hard bans/harmful checks and Claude ask/allow rules remain ahead of the gate. Full policy: [Auto-Permission Enforced Categories](auto-permission-enforced-categories.md#hybrid-development-tool-auto-allow-user-decision-2026-11-25).
+
 ## Invariants
 
 - A synthetic prefix (`sandbox.*`, `bash.interpreter.*`, `permission.*`, `""`) can never reach the always-rule branch; `IsSyntheticBashPrefix` is the gate.
 - A bare `"git"` allow is rejected by `ValidateBashPrefixRule`; only `git <subcommand>` is a valid persisted prefix.
 - The stored value never contains the `*` suffix; the `*` is UI-only.
 - A broader persisted prefix (e.g. `"npm"`) stops asking for narrower invocations (`"npm run build"`), because the word-prefix matcher checks broader rules too.
+- A persisted prefix cannot override `developmentToolArgsAllowed`; the development-tool argument gate runs before prefix-rule allows.

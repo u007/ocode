@@ -41,6 +41,10 @@ type Tab struct {
 	// SubTab is the session sub-tab (chat/agents/changes/...) the tab was
 	// last viewing, so a restore lands where the user left off.
 	SubTab string `json:"sub_tab,omitempty"`
+	// WorktreePath is the Git checkout this session runs on when it differs
+	// from the owning project's root (a linked worktree). Empty means the
+	// project root, so tabs written before this field existed keep working.
+	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // ProjectTabs is the tab state for a single project root.

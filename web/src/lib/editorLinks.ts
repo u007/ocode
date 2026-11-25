@@ -1,5 +1,5 @@
 import { OPEN_FILE_EVENT, type OpenFileDetail } from "./fileLinks";
-import { openExternalURL } from "./externalLinks";
+import { requestURLOpen } from "./externalLinks";
 import { apiPath, authHeaders } from "../api/client";
 
 // Known code extensions — same intent as fileLinks.EXT but used as a set
@@ -522,11 +522,17 @@ export function ensureEditorLinks(monaco: MonacoLike) {
         // scheme/query off the Uri — `link.url` does not exist here.
         open(resource) {
           // Claim http(s) here: Monaco's default opener calls window.open
-          // directly, which opens nothing in the desktop webview. Route through
-          // the shared helper so desktop uses the system browser.
+          // directly, bypassing the desktop bridge and the destination chooser.
           if (resource.scheme === "http" || resource.scheme === "https") {
+            const active = document.activeElement instanceof Element
+              ? document.activeElement.closest<HTMLElement>("[data-url-project-path]")
+              : null;
+            const projectPath = active?.dataset.urlProjectPath;
+            const host = active?.dataset.urlProjectHost;
             // skipEncoding keeps `=` and `&` intact, as Monaco's own opener does.
-            openExternalURL(resource.toString(true));
+            requestURLOpen(resource.toString(true), projectPath
+              ? { projectPath, ...(host ? { host } : {}) }
+              : undefined);
             return true;
           }
           if (resource.scheme !== "ocode-file") return false;

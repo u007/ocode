@@ -1,21 +1,24 @@
 import { render, fireEvent } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MarkdownLink from "./MarkdownLink";
-import { OPEN_EXTERNAL_MESSAGE_PREFIX } from "../../lib/externalLinks";
 import { OPEN_FILE_EVENT, type OpenFileDetail } from "../../lib/fileLinks";
+import { URLOpenOwnerProvider } from "../../lib/urlOpenContext";
 
-type WailsWindow = Window & { _wails?: { invoke?: (message: string) => void } };
+const requestURL = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/externalLinks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/externalLinks")>();
+  return { ...actual, requestURLOpen: requestURL };
+});
+
+beforeEach(() => requestURL.mockClear());
 
 afterEach(() => {
-  delete (window as WailsWindow)._wails;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("MarkdownLink", () => {
-  it("routes an http(s) click through the desktop bridge and prevents default", () => {
-    const invoke = vi.fn();
-    (window as WailsWindow)._wails = { invoke };
+  it("requests the chooser for an http(s) click and prevents default", () => {
     const { getByText } = render(<MarkdownLink href="https://example.com/x">link</MarkdownLink>);
     const anchor = getByText("link");
 
@@ -23,7 +26,27 @@ describe("MarkdownLink", () => {
     const notPrevented = fireEvent.click(anchor);
 
     expect(notPrevented).toBe(false);
-    expect(invoke).toHaveBeenCalledWith(OPEN_EXTERNAL_MESSAGE_PREFIX + "https://example.com/x");
+    expect(requestURL).toHaveBeenCalledWith("https://example.com/x", undefined);
+  });
+
+  it("carries the owning project into the chooser request", () => {
+    const { getByText } = render(
+      <URLOpenOwnerProvider projectPath="/remote" host="dev@example.com">
+        <MarkdownLink href="http://localhost:3000">link</MarkdownLink>
+      </URLOpenOwnerProvider>,
+    );
+    fireEvent.click(getByText("link"));
+    expect(requestURL).toHaveBeenCalledWith("http://localhost:3000", {
+      projectPath: "/remote",
+      host: "dev@example.com",
+    });
+  });
+
+  it("routes middle-click through the chooser instead of native navigation", () => {
+    const { getByText } = render(<MarkdownLink href="https://example.com/x">link</MarkdownLink>);
+    const event = new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true });
+    expect(fireEvent(getByText("link"), event)).toBe(false);
+    expect(requestURL).toHaveBeenCalledWith("https://example.com/x", undefined);
   });
 
   it("keeps href/target/rel so the link stays copyable and middle-clickable", () => {
@@ -35,12 +58,10 @@ describe("MarkdownLink", () => {
   });
 
   it("does not intercept non-http schemes that hand off to the OS", () => {
-    const invoke = vi.fn();
-    (window as WailsWindow)._wails = { invoke };
     const { getByText } = render(<MarkdownLink href="mailto:a@b.com">mail</MarkdownLink>);
     // Default not prevented (returns true) and the bridge untouched.
     expect(fireEvent.click(getByText("mail"))).toBe(true);
-    expect(invoke).not.toHaveBeenCalled();
+    expect(requestURL).not.toHaveBeenCalled();
   });
 
   it("keeps an in-page hash anchor on the default handler", () => {
@@ -53,18 +74,14 @@ describe("MarkdownLink", () => {
   // browser. In the desktop webview that resolves against ocode's own origin,
   // so the SPA fallback replaced the whole app with index.html.
   it("prevents default on a relative link so it cannot navigate the app away", () => {
-    const invoke = vi.fn();
-    (window as WailsWindow)._wails = { invoke };
     const { getByText } = render(<MarkdownLink href="internal/x/foo.go">foo.go</MarkdownLink>);
 
     expect(fireEvent.click(getByText("foo.go"))).toBe(false);
     // …and it is not pushed at the OS either: it is not a resolvable link.
-    expect(invoke).not.toHaveBeenCalled();
+    expect(requestURL).not.toHaveBeenCalled();
   });
 
   it("opens a home-directory file link in the Files tab, not the OS browser", () => {
-    const invoke = vi.fn();
-    (window as WailsWindow)._wails = { invoke };
     const opened: OpenFileDetail[] = [];
     const listener = (e: Event) => opened.push((e as CustomEvent<OpenFileDetail>).detail);
     window.addEventListener(OPEN_FILE_EVENT, listener);
@@ -74,7 +91,7 @@ describe("MarkdownLink", () => {
       );
       expect(fireEvent.click(getByText("diagram"))).toBe(false);
       expect(opened).toEqual([{ path: "~/.agent/diagrams/fastbrowse-for-ocode.src.html" }]);
-      expect(invoke).not.toHaveBeenCalled();
+      expect(requestURL).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener(OPEN_FILE_EVENT, listener);
     }
@@ -93,15 +110,13 @@ describe("MarkdownLink", () => {
   });
 
   it("still lets a caller's own onClick cancel the interception", () => {
-    const invoke = vi.fn();
-    (window as WailsWindow)._wails = { invoke };
     const { getByText } = render(
       <MarkdownLink href="https://example.com" onClick={(e) => e.preventDefault()}>
         link
       </MarkdownLink>,
     );
     expect(fireEvent.click(getByText("link"))).toBe(false);
-    expect(invoke).not.toHaveBeenCalled();
+    expect(requestURL).not.toHaveBeenCalled();
   });
 
   it("never leaks react-markdown's `node` prop onto the DOM", () => {

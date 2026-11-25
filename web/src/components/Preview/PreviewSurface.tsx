@@ -21,7 +21,7 @@ const DocxEditor = lazy(() => import("./DocxEditor"));
 const PptxViewer = lazy(() => import("./PptxViewer"));
 const ExcelViewer = lazy(() => import("./ExcelViewer"));
 const MmdViewer = lazy(() => import("./MmdViewer"));
-const MarkdownViewer = lazy(() => import("./MarkdownViewer"));
+const OwnerMarkdownViewer = lazy(() => import("./OwnerMarkdownViewer"));
 const HtmlViewer = lazy(() => import("./HtmlViewer"));
 const JsonViewer = lazy(() => import("./JsonViewer"));
 const TextViewer = lazy(() => import("./TextViewer"));
@@ -123,7 +123,7 @@ export default function PreviewSurface({
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} onDirtyChange={onDirtyChange} onSaveRef={onSaveRef} onSaveHandlerRegistered={onSaveHandlerRegistered} />}
         {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}
-        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
+        {kind === "markdown" && <OwnerMarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
         {/* `content` stays undefined for the sidebar/Preview-tab hosts: HtmlViewer
             then fetches the file itself (the Files tab always passes live text). */}
         {kind === "html" && <HtmlViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} revision={revision} />}

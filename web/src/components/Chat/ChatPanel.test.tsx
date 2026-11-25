@@ -1500,7 +1500,9 @@ describe("ChatPanel", () => {
       // Same DOM node: the toggle must update the open chat without remounting it.
       const after = container.querySelector('[data-testid="parallel-tool-calls"]');
       expect(after).toBe(wrapper);
+      expect(after!.classList.contains("w-full")).toBe(true);
       expect(after!.classList.contains("flex-wrap")).toBe(true);
+      expect(after!.classList.contains("[&>*]:grow")).toBe(true);
       expect(after!.classList.contains("[&>*]:max-w-full")).toBe(true);
     } finally {
       localStorage.removeItem(INLINE_PARALLEL_TOOL_CALLS_STORAGE_KEY);

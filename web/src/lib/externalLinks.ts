@@ -10,12 +10,55 @@ import { invokeWails } from "./wails";
  */
 export const OPEN_EXTERNAL_MESSAGE_PREFIX = "ocode:open-external:";
 
+/** App-level request for the embedded-vs-external URL chooser. */
+export const OPEN_URL_EVENT = "ocode:open-url";
+
+export interface OpenURLDetail {
+  url: string;
+  /** Project that owns the clicked surface. Embedded tabs must use this pair. */
+  projectPath?: string;
+  host?: string;
+  /** Set by the sole listener when a chooser is already open. */
+  refused?: boolean;
+}
+
+export interface URLOpenOwner {
+  projectPath: string;
+  host?: string;
+}
+
 export function isHTTPURL(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "http:" || url.protocol === "https:";
   } catch {
     return false;
+  }
+}
+
+/**
+ * Ask the app-level chooser where to open a user-clicked HTTP(S) URL.
+ *
+ * Link providers outside React (Monaco, xterm, MCP widgets) cannot use a hook,
+ * so they dispatch this cancelable DOM event. App prevents it after mounting
+ * the chooser; an unhandled event is an error rather than a silent bypass.
+ */
+export function requestURLOpen(value: string, owner?: URLOpenOwner): void {
+  if (!isHTTPURL(value)) return;
+  const detail: OpenURLDetail = {
+    url: value,
+    ...(owner?.projectPath ? { projectPath: owner.projectPath } : {}),
+    ...(owner?.host ? { host: owner.host } : {}),
+  };
+  const event = new CustomEvent<OpenURLDetail>(OPEN_URL_EVENT, {
+    detail,
+    cancelable: true,
+  });
+  if (window.dispatchEvent(event)) {
+    throw new Error("requestURLOpen: no URL chooser listener is mounted");
+  }
+  if (detail.refused) {
+    throw new Error("requestURLOpen: a URL chooser is already open");
   }
 }
 

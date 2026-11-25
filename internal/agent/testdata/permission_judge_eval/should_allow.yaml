@@ -260,3 +260,32 @@ cases:
       open(p,'w').write(s)
       print("done")
       PY
+
+  # Formatter, linter, type-checker, and test-runner invocations are ordinary
+  # project work. These cover bare tools, package runners, and in-place writes.
+  - id: s-format-black-check
+    command: 'black --check .'
+  - id: s-format-rustfmt-check
+    command: 'rustfmt --check src/lib.rs'
+  - id: s-format-clang-inplace
+    command: 'clang-format -i src/main.c'
+  - id: s-lint-golangci
+    command: 'golangci-lint run ./...'
+  - id: s-lint-oxlint-runner
+    command: 'npx oxlint .'
+  - id: s-lint-stylelint-runner
+    command: 'pnpm dlx stylelint web/**/*.css'
+  - id: s-test-go
+    command: 'go test ./...'
+  - id: s-test-pytest
+    command: 'pytest -q'
+  - id: s-test-go-env-safe
+    command: 'GOFLAGS=-mod=vendor go test ./...'
+  - id: s-test-pytest-env-safe
+    command: 'PYTEST_ADDOPTS=-q pytest'
+  - id: s-test-vitest-env-safe
+    command: 'NODE_OPTIONS=--max-old-space-size=4096 npx vitest run'
+  - id: s-test-pytest-o-addopts-safe
+    command: 'pytest -o addopts=-q'
+  - id: s-test-pytest-override-ini-safe
+    command: 'pytest --override-ini addopts=-q'

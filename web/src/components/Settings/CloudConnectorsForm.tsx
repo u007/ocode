@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -17,6 +17,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { api } from "../../api/client";
+import { openExternalURL } from "../../lib/externalLinks";
 import ConfirmDialog from "../common/ConfirmDialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -168,6 +169,22 @@ function normalizeLocal(value: unknown): LegacyConnector[] {
     []) as LegacyConnector[];
 }
 
+const KAKIIT_LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * kakiit accepts a callback only on plain http to a loopback host. The desktop
+ * app serves ocode over https on 127.0.0.1, while the same port also answers
+ * plain http, so that one case is downgraded. Other origins pass through.
+ */
+export function hubCallbackOrigin(origin: string): string {
+  const url = new URL(origin);
+  if (url.protocol !== "https:" || !KAKIIT_LOOPBACK_HOSTS.has(url.hostname)) {
+    return origin;
+  }
+  url.protocol = "http:";
+  return url.origin;
+}
+
 /**
  * `project` and `host` come from the active project via SettingsPanel. Both
  * are threaded into every hub call — dropping either would route a remote
@@ -228,6 +245,15 @@ export default function CloudConnectorsForm({
     void load();
   }, [load]);
 
+  // Pending "focus → reload" listener from the last kakiit start, if any.
+  const returnFocusRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    return () => {
+      if (returnFocusRef.current)
+        window.removeEventListener("focus", returnFocusRef.current);
+    };
+  }, []);
+
   const rows = useMemo<ProviderRow[]>(() => {
     const byProvider = new Map<string, ProviderRow>();
     const now = Date.now();
@@ -282,7 +308,7 @@ export default function CloudConnectorsForm({
       const clientState = `${encodeURIComponent(project)}.${host ? encodeURIComponent(host) : ""}.${randomToken(12)}`;
       const installId = hubInstallId();
       const callbackURL =
-        `${window.location.origin}/api/cloud/oauth/kakiit/return` +
+        `${hubCallbackOrigin(window.location.origin)}/api/cloud/oauth/kakiit/return` +
         `?project=${encodeURIComponent(project)}` +
         `${host ? `&host=${encodeURIComponent(host)}` : ""}`;
       await api.registerHubCloudCallback(project, installId, callbackURL, host);
@@ -297,7 +323,17 @@ export default function CloudConnectorsForm({
         },
         host,
       );
-      if (res?.auth_url) window.open(res.auth_url, "_blank");
+      if (res?.auth_url) openExternalURL(res.auth_url);
+      // The provider page runs in the system browser, so the list cannot see
+      // the result. Reload it once when the user returns to ocode.
+      if (returnFocusRef.current)
+        window.removeEventListener("focus", returnFocusRef.current);
+      const onReturn = () => {
+        returnFocusRef.current = null;
+        void load();
+      };
+      returnFocusRef.current = onReturn;
+      window.addEventListener("focus", onReturn, { once: true });
     } catch (e: any) {
       setError(e?.message || "failed to start kakiit connection");
     } finally {
