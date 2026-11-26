@@ -51,13 +51,14 @@ type Snapshot struct {
 // Store is a per-agent snapshot store. Each agent creates one via NewStore.
 // It is safe for concurrent use.
 type Store struct {
-	mu        sync.Mutex
-	snapshots []Snapshot
-	redoStack []Snapshot
-	step      int
-	agentID   string
-	baseDir   string // where backup files are written; empty => legacy ".opencode/snapshots"
-	sessionID string // "" => backups are not journaled (e.g. global store)
+	mu             sync.Mutex
+	snapshots      []Snapshot
+	redoStack      []Snapshot
+	externalWrites []externalWrite
+	step           int
+	agentID        string
+	baseDir        string // where backup files are written; empty => legacy ".opencode/snapshots"
+	sessionID      string // "" => backups are not journaled (e.g. global store)
 	// version is a monotonic mutation counter bumped on every change that
 	// affects the snapshot membership (Backup append, Undo/UndoByToolCallID
 	// removal, DiscardRecent, Reset, Rehydrate load). The changes registry
@@ -254,6 +255,15 @@ type fileWrite struct {
 	AgentID    string
 	Seq        uint64
 	ToolCallID string
+}
+
+// externalWrite records a write made outside ocode's file tools (e.g. by the
+// Claude Code CLI). It advances the advisor write watermark and blocks
+// cross-agent undo, but it creates no snapshot: there is no pre-image, so the
+// Changes tab must not offer undo for it.
+type externalWrite struct {
+	Path string
+	Seq  uint64
 }
 
 // UnregisterAgent removes all registry entries owned by agentID. Call when an
@@ -467,6 +477,37 @@ func (s *Store) RegisterWrite(path, toolCallID string) {
 	s.mu.Unlock()
 }
 
+// RecordExternalWrite records a write made outside ocode's write tools. It
+// advances LastWriteSeq/ChangedSince (the advisor watermark and the changes
+// view) and adds a cross-agent conflict entry, but deliberately appends no
+// Snapshot: without a pre-image the change is not undoable.
+func (s *Store) RecordExternalWrite(path string) {
+	if s == nil || path == "" {
+		return
+	}
+	seq := globalWriteSeq.Add(1)
+	s.mu.Lock()
+	if s.retired {
+		s.mu.Unlock()
+		return
+	}
+	s.externalWrites = append(s.externalWrites, externalWrite{Path: path, Seq: seq})
+	// Bounded like the other per-store histories. Older external entries only
+	// matter to the advisor watermark, which is already far behind by then.
+	const maxExternalWrites = 4096
+	if len(s.externalWrites) > maxExternalWrites {
+		s.externalWrites = s.externalWrites[len(s.externalWrites)-maxExternalWrites:]
+	}
+	fileWriteMu.Lock()
+	fileWrites[path] = append(fileWrites[path], fileWrite{
+		AgentID:    s.agentID,
+		Seq:        seq,
+		ToolCallID: "claude-code",
+	})
+	fileWriteMu.Unlock()
+	s.mu.Unlock()
+}
+
 // fingerprintAbsent marks a recorded post-write state where the file did not
 // exist (the write deleted it). A sha256 hex digest is always 64 hex chars, so
 // it can never collide with this sentinel.
@@ -528,6 +569,12 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 			if conflict := crossAgentWriteAfterSeq(snap.OriginalPath, s.agentID, snap.WriteSeq); conflict != nil {
 				return nil, fmt.Errorf("%w: cannot undo %s: modified by another agent (tool_call_id=%s) after this change",
 					ErrConflict, snap.OriginalPath, conflict.ToolCallID)
+			}
+		}
+		for _, ext := range s.externalWrites {
+			if ext.Path == snap.OriginalPath && ext.Seq > snap.WriteSeq {
+				return nil, fmt.Errorf("%w: cannot undo %s: modified outside ocode after this change",
+					ErrConflict, snap.OriginalPath)
 			}
 		}
 
@@ -724,6 +771,11 @@ func (s *Store) LastWriteSeq() uint64 {
 			max = snap.WriteSeq
 		}
 	}
+	for _, ext := range s.externalWrites {
+		if ext.Seq > max {
+			max = ext.Seq
+		}
+	}
 	return max
 }
 
@@ -746,6 +798,16 @@ func (s *Store) ChangedSince(seq uint64) []string {
 		seen[snap.OriginalPath] = struct{}{}
 		files = append(files, snap.OriginalPath)
 	}
+	for _, ext := range s.externalWrites {
+		if ext.Seq <= seq {
+			continue
+		}
+		if _, ok := seen[ext.Path]; ok {
+			continue
+		}
+		seen[ext.Path] = struct{}{}
+		files = append(files, ext.Path)
+	}
 	sort.Strings(files)
 	return files
 }
@@ -756,6 +818,7 @@ func (s *Store) Reset() {
 	s.mu.Lock()
 	s.snapshots = nil
 	s.clearRedoLocked()
+	s.externalWrites = nil
 	s.step = 0
 	s.version++
 	s.mu.Unlock()
@@ -786,6 +849,7 @@ func (s *Store) Retire() {
 	s.mu.Lock()
 	s.retired = true
 	s.snapshots = nil
+	s.externalWrites = nil
 	s.clearRedoLocked()
 	s.step = 0
 	s.version++

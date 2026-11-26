@@ -683,6 +683,37 @@ describe("ModelDialog model-list loading", () => {
   });
 });
 
+describe("ModelDialog Claude Code rows", () => {
+  const claudeRow: ModelInfo = {
+    name: "claude-code/claude-sonnet-4-6",
+    model: "claude-sonnet-4-6",
+    provider: "claude-code",
+    active: false,
+  };
+
+  it("offers the external harness on main and toggles it by model id", async () => {
+    hoisted.api.listModels.mockResolvedValueOnce([...hoisted.models, claudeRow]);
+    render(<ModelDialog open onClose={vi.fn()} />);
+
+    expect(await screen.findByText("claude-code/claude-sonnet-4-6")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Favorite claude-code/claude-sonnet-4-6"));
+    await waitFor(() =>
+      expect(hoisted.api.setModelFavorite).toHaveBeenCalledWith(
+        "claude-code/claude-sonnet-4-6",
+        true,
+      ),
+    );
+  });
+
+  it("hides the external harness from non-main pickers", async () => {
+    hoisted.api.listModels.mockResolvedValueOnce([...hoisted.models, claudeRow]);
+    render(<ModelDialog open onClose={vi.fn()} purpose="permission" />);
+
+    await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalled());
+    expect(screen.queryByText("claude-code/claude-sonnet-4-6")).toBeNull();
+  });
+});
+
 describe("ModelDialog provider render cap", () => {
   it("caps the unfiltered provider list and points at search", async () => {
     // 6 providers × 100 = 600 > MAX_VISIBLE_PROVIDER_MODELS (500), so the last

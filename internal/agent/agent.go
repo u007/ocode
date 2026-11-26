@@ -126,6 +126,7 @@ func (a *Agent) SetSessionID(sessionID string) {
 	}
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.setSessionID(sessionID)
+		gc.setClaudeSessionID("")
 	}
 	// Tag the snapshot store so backups are journaled under this session,
 	// then replay any journaled snapshots from a previous process into the
@@ -162,6 +163,7 @@ func (a *Agent) RekeySession(oldID, newID string) {
 	}
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.setSessionID(newID)
+		gc.setClaudeSessionID("")
 	}
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
@@ -185,6 +187,7 @@ func (a *Agent) RekeyOpenCodeSession(oldID, newID string) {
 	a.opencodeSessionMu.Unlock()
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.setOpencodeSessionID(newID)
+		gc.setClaudeSessionID("")
 	}
 	if a.snapshotStore != nil {
 		a.snapshotStore.RekeySession(oldID, newID)
@@ -290,6 +293,7 @@ func (a *Agent) SetOpenCodeSessionID(sessionID string) {
 	a.opencodeSessionMu.Unlock()
 	if gc, ok := client.(*GenericClient); ok {
 		gc.setOpencodeSessionID(sessionID)
+		gc.setClaudeSessionID("")
 	}
 }
 
@@ -1518,6 +1522,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// snapshot stores (main agent + sub-agents) and bash-detection hooks.
 	a.changes = changes.NewRegistry()
 	_ = a.changes.AttachSnapshotStore("main", a.snapshotStore)
+	if gc, ok := client.(*GenericClient); ok {
+		a.bindClaudeCodeClientHooks(gc)
+	}
 
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
@@ -3870,6 +3877,9 @@ func (a *Agent) SetProjectHost(host string) {
 	a.projectHost = host
 	a.clearEnvironmentPromptCacheLocked()
 	a.projectCtxMu.Unlock()
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.ProjectHost = host
+	}
 }
 
 // ProjectHost returns the remote host recorded by SetProjectHost ("" = local).
@@ -3877,6 +3887,51 @@ func (a *Agent) ProjectHost() string {
 	a.projectCtxMu.Lock()
 	defer a.projectCtxMu.Unlock()
 	return a.projectHost
+}
+
+// bindClaudeCodeClientHooks gives the client the live session context the
+// claude-code transport needs. It is called on construction and on every
+// client swap, so a background/side client can never fall through to a
+// permissive default.
+func (a *Agent) bindClaudeCodeClientHooks(gc *GenericClient) {
+	if a == nil || gc == nil {
+		return
+	}
+	gc.PermissionModeFn = func() PermissionMode {
+		if a.permissions == nil {
+			return PermissionModeLocked
+		}
+		return a.permissions.Mode()
+	}
+	gc.AutoPermissionEnabledFn = func() bool {
+		return a.permissions != nil && a.permissions.AutoPermissionEnabled()
+	}
+	gc.WorkDir = a.WorkDir()
+	gc.ProjectHost = a.ProjectHost()
+	gc.Changes = a.changes
+	gc.SnapshotStore = a.snapshotStore
+}
+
+// ClaudeCodeSessionID returns the Claude Code CLI session id held by the
+// active client ("" when the client is not a GenericClient or none is set).
+func (a *Agent) ClaudeCodeSessionID() string {
+	if a == nil {
+		return ""
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		return gc.claudeSessionIDValue()
+	}
+	return ""
+}
+
+// SetClaudeCodeSessionID restores the CLI session id from session metadata.
+func (a *Agent) SetClaudeCodeSessionID(id string) {
+	if a == nil {
+		return
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.setClaudeSessionID(id)
+	}
 }
 
 // SetWorkDir sets the working directory override for the environment prompt.
@@ -3909,6 +3964,9 @@ func (a *Agent) SetWorkDir(dir string) {
 	if at, ok := a.tools["advisor"].(AdvisorTool); ok {
 		at.workDir = dir
 		a.tools["advisor"] = at
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.WorkDir = dir
 	}
 	// Re-point the bash change recorder so Pre/Post walks the active project,
 	// not the process launch directory (desktop .app launches with cwd "/" and
@@ -6744,6 +6802,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			}
 			a.clientSnapshotMu.Lock()
 			a.client = client
+			if gc, ok := a.client.(*GenericClient); ok {
+				a.bindClaudeCodeClientHooks(gc)
+			}
 			a.clientSnapshotMu.Unlock()
 			// bindSideClient attaches only the tier-1 hook; the opt-in PII
 			// categories belong to the main client and must survive the swap.

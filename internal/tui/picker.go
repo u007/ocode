@@ -30,21 +30,10 @@ func (m *model) openAdvisorPicker() tea.Cmd {
 // section sits below all of them and is unreachable by scrolling. Called from
 // openAdvisorPicker (initial open) and refreshModelPickerItems (refresh).
 func (m *model) prependClaudeCodeSection() {
-	claudeCodeModels := []string{
-		"claude-sonnet-4-6",
-		"claude-sonnet-5",
-		"claude-sonnet-5-5",
-		"claude-opus-4-8",
-		"claude-opus-4-7",
-		"claude-opus-5",
-		"claude-opus-5-5",
-		"claude-haiku-4-5",
-		"claude-fable-5",
-	}
 	items := []string{"› Claude Code (Read-Only CLI)"}
 	values := []string{""}
 	isHeader := []bool{true}
-	for _, model := range claudeCodeModels {
+	for _, model := range agent.ClaudeCodeModelAliases {
 		value := "claude-code/" + model
 		items = append(items, "  › "+value)
 		values = append(values, value)
@@ -57,6 +46,47 @@ func (m *model) prependClaudeCodeSection() {
 	m.pickerItems = append(items, m.pickerItems...)
 	m.pickerValues = append(values, m.pickerValues...)
 	m.pickerIsHeader = append(isHeader, m.pickerIsHeader...)
+}
+
+// openMainModelPicker opens the general chat model picker and adds the Claude
+// Code CLI rows. The section is appended (not prepended) so a recent/favorite
+// row stays the default selection and the huge provider list follows it.
+func (m *model) openMainModelPicker() tea.Cmd {
+	cmd := m.openModelPicker()
+	m.appendClaudeCodeMainSection()
+	return cmd
+}
+
+func (m *model) appendClaudeCodeMainSection() {
+	if m.pickerKind != "model" || m.pickerImageOnly {
+		return
+	}
+	shown := make(map[string]bool, len(m.pickerValues))
+	for _, value := range m.pickerValues {
+		shown[value] = true
+	}
+	ids := agent.ClaudeCodeMainModelIDs()
+	missing := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !shown[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	hadItems := len(m.pickerItems) > 0
+	m.pickerItems = append(m.pickerItems, "Claude Code (external harness)")
+	m.pickerValues = append(m.pickerValues, "")
+	m.pickerIsHeader = append(m.pickerIsHeader, true)
+	for _, id := range missing {
+		m.pickerItems = append(m.pickerItems, "  › "+id)
+		m.pickerValues = append(m.pickerValues, id)
+		m.pickerIsHeader = append(m.pickerIsHeader, false)
+	}
+	if !hadItems {
+		m.pickerIndex = 1
+	}
 }
 
 func (m *model) openPermissionModelPicker() tea.Cmd {
@@ -187,6 +217,9 @@ func (m *model) refreshModelPickerItems() {
 	}
 	if kind == "advisor" {
 		m.prependClaudeCodeSection()
+	}
+	if kind == "model" {
+		m.appendClaudeCodeMainSection()
 	}
 }
 

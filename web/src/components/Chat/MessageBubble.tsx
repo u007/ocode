@@ -7,7 +7,7 @@ import {
   FileLinkFromNode,
   linkifyPlainText,
 } from "../../lib/fileLinks";
-import { ThinkingBlock, ToolBlock } from "./TurnParts";
+import { NoticeBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
 import CompactionNotice, { isCompactionSummary } from "./CompactionNotice";
 import { renderedSpeechText } from "../Speech/speechUtils";
 import { highlightMatches } from "./ChatSearchBar";
@@ -298,6 +298,7 @@ function MessageBubble({
   ) {
     return (
       <>
+        {message.notice ? <NoticeBlock text={message.notice} /> : null}
         {message.reasoning_content ? (
           <ThinkingBlock
             text={message.reasoning_content}
@@ -341,9 +342,16 @@ function MessageBubble({
     );
   }
 
-  if (!hasRenderableText(message.content)) return null;
+  if (!hasRenderableText(message.content) && !message.notice) return null;
 
-  return <AssistantText content={message.content} onSpeak={requestSpeech} />;
+  return (
+    <>
+      {message.notice ? <NoticeBlock text={message.notice} /> : null}
+      {hasRenderableText(message.content) ? (
+        <AssistantText content={message.content} onSpeak={requestSpeech} />
+      ) : null}
+    </>
+  );
 }
 
 function UserBubble({

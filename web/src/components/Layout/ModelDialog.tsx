@@ -198,7 +198,14 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         reportActionError(err, "Loading the model list");
         return;
       }
-      const next = await withLocalModels(base);
+      // Only the main and advisor pickers may offer the external harness.
+      // Filter it before grouping so permission/small/recap pickers cannot
+      // select a row they cannot run.
+      const claudeCodePurpose = purpose === "main" || purpose === "advisor";
+      const baseForPurpose = claudeCodePurpose
+        ? base
+        : base.filter((m) => m.provider !== CLAUDE_CODE_PROVIDER);
+      const next = await withLocalModels(baseForPurpose);
       // The advisor picker prepends the Claude Code CLI section, mirroring the
       // TUI (prependClaudeCodeSection in internal/tui/picker.go): Prepended —
       // not appended — so the group renders first and is never the tail the
@@ -206,7 +213,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       // offers a provider that only the advisor understands. The synthetic
       // rows are part of `models`, so search filters them like any other row.
       const rows =
-        purpose === "advisor" ? [...claudeCodeAdvisorModelInfos(), ...next] : next;
+        purpose === "advisor"
+          ? [
+              ...claudeCodeAdvisorModelInfos(),
+              ...next.filter((m) => m.provider !== CLAUDE_CODE_PROVIDER),
+            ]
+          : next;
       if (loadSeqRef.current === seq) setModels(rows);
     },
     // `purpose` is REQUIRED: the Claude Code rows are prepended only for the

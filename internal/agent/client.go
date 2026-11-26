@@ -24,12 +24,14 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/discovery"
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 const (
@@ -288,9 +290,34 @@ type GenericClient struct {
 	// OpenCode transport when the debug-log sessionID is intentionally empty
 	// (for example, in the TUI).
 	opencodeSessionIDOverride string
-	sessionMu                 sync.RWMutex
-	opencodeFallbackMu        sync.Mutex
-	opencodeFallback          func() string
+	// WorkDir is the project root claude-code runs in (set via Agent.SetWorkDir).
+	WorkDir string
+	// PermissionModeFn, when set, reports the session's current permission
+	// mode. Used by chatClaudeCode to refuse locked/sandbox sessions.
+	PermissionModeFn func() PermissionMode
+	// AutoPermissionEnabledFn reports whether ocode's auto-permission judge is
+	// active. chatClaudeCode uses it to decide between Claude Code's default
+	// mode and acceptEdits for a normal ocode session.
+	AutoPermissionEnabledFn func() bool
+	// ProjectHost is the saved remote host this client's project lives on
+	// (empty for local projects). chatClaudeCode refuses a remote project
+	// because WorkDir names a path on the host, not this machine.
+	ProjectHost string
+	// Changes and SnapshotStore let the claude-code transport feed its
+	// out-of-process writes back into ocode's change tracking.
+	Changes       *changes.Registry
+	SnapshotStore *snapshot.Store
+	// claudeCLIPathOverride is a test seam for the installed CLI path. Empty
+	// means resolve through claudeCLIPath() (login-shell PATH aware).
+	claudeCLIPathOverride string
+	// claudeSessionID is the claude CLI session id reused across turns when
+	// this client is backed by the "claude-code" provider. Empty on the first
+	// turn; chatClaudeCode populates it from the stream-json init event.
+	// Guarded by sessionMu.
+	claudeSessionID    string
+	sessionMu          sync.RWMutex
+	opencodeFallbackMu sync.Mutex
+	opencodeFallback   func() string
 }
 
 // emitDebug appends a debug-log entry tagged with the owning agent's
@@ -897,6 +924,8 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			msg, err = c.chatCopilot(callCtx, messages, tools)
 		} else if c.isGoogleProvider() {
 			msg, err = c.chatGoogle(callCtx, messages, tools)
+		} else if c.Provider == "claude-code" {
+			msg, err = c.chatClaudeCode(callCtx, messages, tools)
 		} else {
 			msg, err = c.chatOpenAI(callCtx, messages, tools)
 		}
@@ -4560,6 +4589,7 @@ var keyOptionalProviders = map[string]bool{
 	"opencode-go": true,
 	"lmstudio":    true, // local server, no key
 	"local":       true, // /localmodel-managed local server, no key
+	"claude-code": true, // shells out to the claude CLI, no API key
 }
 
 // KeyOptionalProvider reports whether a provider can serve requests without an
@@ -4631,6 +4661,7 @@ var providers = map[string]providerInfo{
 	// (each /localmodel instance runs on its own port, unlike every other
 	// provider here which shares one fixed endpoint).
 	"local":                 {"", ""},
+	"claude-code":           {"", "claude-code://local"},
 	"cloudflare-workers":    {"CLOUDFLARE_API_KEY", ""},
 	"cloudflare-gateway":    {"CLOUDFLARE_GATEWAY_KEY", ""},
 	"codex":                 {"OPENAI_API_KEY", "https://api.openai.com/v1"},

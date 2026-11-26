@@ -3031,10 +3031,41 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 // entry is unknown. The root is read from an immutable snapshot so a
 // concurrent rebinding cannot move persistence mid-call.
 func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, metadata map[string]any) error {
+	var err error
 	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
-		return session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
+		err = session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
+	} else {
+		err = session.Save(sessionID, title, msgs, metadata)
 	}
-	return session.Save(sessionID, title, msgs, metadata)
+	if err != nil {
+		return err
+	}
+	h.persistClaudeCodeSessionID(sessionID)
+	return nil
+}
+
+// persistClaudeCodeSessionID writes the live client's Claude Code session id
+// into the transcript's metadata. The client cannot import internal/session
+// (cycle), and the normal save paths pass nil metadata, so the merge happens
+// here after the transcript write succeeds.
+func (h *Handler) persistClaudeCodeSessionID(sessionID string) {
+	as := h.lookupAgentSession(sessionID)
+	if as == nil || as.agent == nil {
+		return
+	}
+	id := as.agent.ClaudeCodeSessionID()
+	if id == "" {
+		return
+	}
+	e, ok := h.sessions.SnapshotEntry(sessionID)
+	if !ok || e.ProjectRoot == "" {
+		return
+	}
+	if err := session.UpdateMetadataForDir(e.ProjectRoot, sessionID, func(md map[string]any) {
+		md[agent.ClaudeCodeSessionMetadataKey] = id
+	}); err != nil {
+		log.Printf("serve: persist Claude Code session id for %s: %v", sessionID, err)
+	}
 }
 
 // rewriteAskResult mirrors an in-memory ask resolution (the user answered a

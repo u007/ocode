@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 )
 
@@ -61,7 +62,9 @@ func TestListModelsConfiguredDropsUnconfiguredProviders(t *testing.T) {
 	// Every surviving provider must be reachable through a credential/config
 	// path the server understands. Providers of recents/favorites are exempt
 	// (they are added before the filter), and "other" is the no-slash fallback.
-	allowed := map[string]bool{"lmstudio": true, "local": true, "other": true}
+	// claude-code is keyless: it shells out to the installed CLI, which is the
+	// credential check itself (the rows are only present when it resolves).
+	allowed := map[string]bool{"lmstudio": true, "local": true, "other": true, "claude-code": true}
 	for _, p := range auth.Providers {
 		allowed[p.ID] = true
 	}
@@ -88,6 +91,29 @@ func TestListModelsDefaultKeepsUnconfiguredProviders(t *testing.T) {
 	configured := listModelsForTest(t, h, "/api/models?configured=true")
 	if len(full) <= len(configured) {
 		t.Fatalf("default list must include unconfigured providers: full=%d configured=%d", len(full), len(configured))
+	}
+}
+
+func TestListModelsIncludesClaudeCodeWhenCLIAvailable(t *testing.T) {
+	if !agent.ClaudeCodeAvailable() {
+		t.Skip("claude CLI is not installed")
+	}
+	isolateModelListEnv(t)
+	h := NewHandler()
+	models := listModelsForTest(t, h, "/api/models")
+	found := false
+	for _, m := range models {
+		if m.Provider == "claude-code" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("installed Claude Code CLI is missing from /api/models")
+	}
+	filtered := listModelsForTest(t, h, "/api/models?provider=claude-code")
+	if len(filtered) == 0 || filtered[0].Provider != "claude-code" {
+		t.Fatalf("provider filter = %#v", filtered)
 	}
 }
 

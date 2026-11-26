@@ -3189,6 +3189,27 @@ func TestModelPickerShowsFavoritesAndRecentsFirst(t *testing.T) {
 	}
 }
 
+func TestMainModelPickerAddsClaudeCodeWhenInstalled(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	if !agent.ClaudeCodeAvailable() {
+		t.Skip("claude CLI is not installed")
+	}
+	m := model{}
+	m.openMainModelPicker()
+	if !containsString(m.pickerValues, "claude-code/claude-sonnet-4-6") {
+		t.Fatalf("main picker omitted Claude Code rows: %#v", m.pickerValues)
+	}
+	if containsString(m.pickerValues, "claude-code/not-a-model") {
+		t.Fatalf("unexpected Claude Code row: %#v", m.pickerValues)
+	}
+	// A refresh must not duplicate the section.
+	before := len(m.pickerValues)
+	m.appendClaudeCodeMainSection()
+	if len(m.pickerValues) != before {
+		t.Fatalf("Claude Code section duplicated: %d -> %d", before, len(m.pickerValues))
+	}
+}
+
 func TestModelPickerToggleFavorite(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{showPicker: true, pickerKind: "model", pickerItems: []string{"openai/gpt-4o-mini"}, pickerValues: []string{"openai/gpt-4o-mini"}}

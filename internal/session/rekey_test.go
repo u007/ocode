@@ -9,8 +9,8 @@ import (
 )
 
 // TestRekeyForDirPreservesTranscriptAndCreatedAt pins the core /reset-id
-// contract: the conversation survives under a NEW id, created_at and metadata
-// are preserved verbatim, and the old id no longer resolves.
+// contract: the conversation survives under a NEW id, created_at and ordinary
+// metadata are preserved, and the old provider conversation id is dropped.
 func TestRekeyForDirPreservesTranscriptAndCreatedAt(t *testing.T) {
 	root := t.TempDir()
 	SetWorkDir(root)
@@ -18,7 +18,11 @@ func TestRekeyForDirPreservesTranscriptAndCreatedAt(t *testing.T) {
 
 	oldID := "ses_2026-01-02-030405-deadbeef"
 	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	meta := map[string]any{"spend": 0.25, "permission_mode": "sandbox"}
+	meta := map[string]any{
+		"spend":                            0.25,
+		"permission_mode":                  "sandbox",
+		agent.ClaudeCodeSessionMetadataKey: "claude-old",
+	}
 	msgs := []agent.Message{
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi there"},
@@ -74,6 +78,9 @@ func TestRekeyForDirPreservesTranscriptAndCreatedAt(t *testing.T) {
 	}
 	if moved.Metadata == nil || moved.Metadata["permission_mode"] != "sandbox" {
 		t.Fatalf("metadata not preserved: %#v", moved.Metadata)
+	}
+	if _, ok := moved.Metadata[agent.ClaudeCodeSessionMetadataKey]; ok {
+		t.Fatalf("provider conversation id survived reset-id: %#v", moved.Metadata)
 	}
 }
 

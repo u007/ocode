@@ -41,6 +41,8 @@ export interface Message {
   /** MCP Apps widget metadata for a tool result (see McpAppRef). */
   mcp_app?: McpAppRef;
   reasoning_content?: string;
+  /** Display-only notice persisted with the transcript. Never sent to a model. */
+  notice?: string;
   /** Durable per-session sequence stamped on user-role messages by the
    *  server, identical on the persisted copy and the `user_message` SSE echo.
    *  Dedup identity for the snapshot-before-SSE race; absent/0 on legacy

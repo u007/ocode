@@ -2080,7 +2080,9 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	// when requested). This is the direct API for clients that need a provider's live
 	// model list (e.g. GET /api/models?provider=groq&refresh=true).
 	if providerFilter != "" {
-		if refresh {
+		if providerFilter == "claude-code" {
+			registry = agent.ClaudeCodeMainModelIDs()
+		} else if refresh {
 			registry = agent.ProviderModels(providerFilter)
 		} else {
 			registry = agent.ProviderModelsCached(providerFilter)
@@ -2153,6 +2155,12 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	for _, f := range favorites {
 		favSet[f] = true
 		addModel(f)
+	}
+
+	// The installed Claude Code CLI is an external harness, not a registry
+	// provider. Offer its rows only when the binary resolves.
+	for _, id := range agent.ClaudeCodeMainModelIDs() {
+		addModel(id)
 	}
 
 	// 3. Remaining registry models, alphabetically by provider then model

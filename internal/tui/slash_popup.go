@@ -442,7 +442,7 @@ func (m *model) acceptPopupSuggestion(selected slashSuggestion) tea.Cmd {
 	}
 	m.input.SetValue(selected.name + " ")
 	if selected.name == "/models" {
-		return m.openModelPicker()
+		return m.openMainModelPicker()
 	} else if selected.name == "/session" {
 		return m.openSessionPicker()
 	} else if selected.name == "/themes" {

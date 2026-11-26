@@ -7134,7 +7134,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if strings.HasPrefix(current, "/") {
 			trimmed := strings.TrimSpace(current)
 			if trimmed == "/models" || strings.HasPrefix(trimmed, "/models ") || trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
-				m.openModelPicker()
+				m.openMainModelPicker()
 				return m, nil
 			}
 			if trimmed == "/themes" || strings.HasPrefix(trimmed, "/themes ") || trimmed == "/theme" || strings.HasPrefix(trimmed, "/theme ") {
@@ -10130,7 +10130,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 		return nil
 	}
 	if len(args) == 0 {
-		cmd := m.openModelPicker()
+		cmd := m.openMainModelPicker()
 		return cmd
 	}
 	if len(args) > 0 {
@@ -12004,6 +12004,12 @@ func displayTextForAgentMessage(msg agent.Message) string {
 			b.WriteString(formatToolCallHint(tc))
 		}
 		return b.String()
+	}
+	if msg.Notice != "" && msg.Role != "tool" {
+		if text != "" {
+			text += "\n\n"
+		}
+		text += "⚠ " + msg.Notice
 	}
 	return text
 }
@@ -22182,16 +22188,17 @@ func (t sidebarTelemetry) metadata() map[string]any {
 // The legacy token keys are owned too: telemetryFromSessionMetadata reads them
 // after the current keys, so a stale copy would win on the next load.
 var sessionOwnedMetadataKeys = map[string]bool{
-	"todo_text":           true,
-	agent.GoalMetadataKey: true,
-	"input_tokens":        true,
-	"output_tokens":       true,
-	"billed_tokens":       true,
-	"cached_tokens":       true,
-	"spend":               true,
-	"prompt_tokens":       true,
-	"completion_tokens":   true,
-	"total_tokens":        true,
+	"todo_text":                        true,
+	agent.GoalMetadataKey:              true,
+	"input_tokens":                     true,
+	"output_tokens":                    true,
+	"billed_tokens":                    true,
+	"cached_tokens":                    true,
+	"spend":                            true,
+	"prompt_tokens":                    true,
+	"completion_tokens":                true,
+	"total_tokens":                     true,
+	agent.ClaudeCodeSessionMetadataKey: true,
 }
 
 // sessionBaseFromLoaded copies a loaded session's metadata without the keys
@@ -22226,6 +22233,9 @@ func (m model) sessionSidebarMetadata() map[string]any {
 				meta[k] = v
 			}
 		}
+		if id := m.agent.ClaudeCodeSessionID(); id != "" {
+			meta[agent.ClaudeCodeSessionMetadataKey] = id
+		}
 	}
 	return meta
 }
@@ -22246,6 +22256,10 @@ func restoreTodoState(meta map[string]any) {
 func (m *model) restoreSessionMetadata(meta map[string]any) {
 	m.sessionBaseMetadata = sessionBaseFromLoaded(meta)
 	m.restoreGoalState(meta)
+	if m.agent != nil {
+		id, _ := meta[agent.ClaudeCodeSessionMetadataKey].(string)
+		m.agent.SetClaudeCodeSessionID(id)
+	}
 }
 
 // restoreGoalState reinstates a session's /goal from its metadata. A record

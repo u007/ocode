@@ -96,6 +96,13 @@ func WithSkipNotice(fn func(SkipNotice)) RecorderOption {
 	return func(r *StatBashRecorder) { r.onSkip = fn }
 }
 
+// WithWriteHook registers fn to receive the touches of every event the
+// recorder accepts. Used by the Claude Code transport to feed the same paths
+// into the snapshot store's external-write watermark.
+func WithWriteHook(fn func([]BashTouch)) RecorderOption {
+	return func(r *StatBashRecorder) { r.onWrite = fn }
+}
+
 // SkipNotice records one bash event the recorder refused to turn into change
 // rows, and why. Dropping an event is a deliberate loss of coverage, so it has
 // to leave a trace.
@@ -236,6 +243,8 @@ type StatBashRecorder struct {
 	maxTouches int
 	// onSkip, when set, receives every SkipNotice the recorder emits.
 	onSkip func(SkipNotice)
+	// onWrite, when set, receives the accepted touches after Post.
+	onWrite func([]BashTouch)
 }
 
 // skip records a notice with the registry and the optional callback. The
@@ -465,6 +474,9 @@ func (r *StatBashRecorder) Post(base BashBaseline, command string, exitCode int)
 		WorkDir:  r.workDir,
 		ExitCode: exitCode,
 		Touches:  touches,
+	}
+	if r.onWrite != nil {
+		r.onWrite(append([]BashTouch(nil), touches...))
 	}
 	r.reg.NotifyBashWrite(evt)
 }

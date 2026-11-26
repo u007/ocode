@@ -618,3 +618,26 @@ func TestChangedSinceReportsOnlyNewerWrites(t *testing.T) {
 		t.Fatalf("ChangedSince after an unsequenced backup = %v, want [c.txt]", got)
 	}
 }
+
+// RecordExternalWrite must advance the advisor watermark and surface the path,
+// but never create an undo entry: there is no pre-image to restore.
+func TestRecordExternalWriteAdvancesWatermarkWithoutSnapshot(t *testing.T) {
+	s, dir := newTempStore(t)
+	before := s.LastWriteSeq()
+	path := filepath.Join(dir, "external.txt")
+	if err := os.WriteFile(path, []byte("outside ocode\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s.RecordExternalWrite(path)
+
+	if s.LastWriteSeq() <= before {
+		t.Fatalf("LastWriteSeq did not advance: %d -> %d", before, s.LastWriteSeq())
+	}
+	changed := s.ChangedSince(before)
+	if len(changed) != 1 || changed[0] != path {
+		t.Fatalf("ChangedSince = %v, want [%s]", changed, path)
+	}
+	if len(s.Snapshots()) != 0 {
+		t.Fatalf("external write created an undo snapshot: %#v", s.Snapshots())
+	}
+}

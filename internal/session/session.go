@@ -1807,6 +1807,11 @@ func RekeyForDir(projectRoot, oldID string) (string, error) {
 	// timestamps move. A brand-new sqlite file is written directly (rather
 	// than through persistToDir) so created_at survives instead of being
 	// reset to now and the title is not re-derived from the first message.
+	// The Claude Code conversation id is the exception: /reset-id starts a new
+	// provider conversation, so the old CLI session must not be resumed.
+	if old.Metadata != nil {
+		delete(old.Metadata, agent.ClaudeCodeSessionMetadataKey)
+	}
 	moved := Session{
 		ID:             newID,
 		Title:          old.Title,
