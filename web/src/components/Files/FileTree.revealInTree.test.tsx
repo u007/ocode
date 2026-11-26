@@ -271,6 +271,37 @@ describe("FileTree reveal in file tree", () => {
     expect(mocks.revealInFileManager).toHaveBeenCalledWith("qa-screenshots/00-home.png", "/elsewhere");
   });
 
+  it("does not reveal the browsed root itself in the OS file manager", async () => {
+    // Picking the project root folder (cmd+P folder pick) must not hand the
+    // root to the OS file manager — it is already the folder the tree shows.
+    reveal({ request: { path: "/proj", root: "/proj", nonce: 1, isDir: true } });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mocks.revealInFileManager).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Opened in /)).toBeNull();
+    expect(screen.queryByText(/outside the folder this tree is browsing/)).toBeNull();
+  });
+
+  it("reveals an out-of-root path in the OS file manager exactly once per request", async () => {
+    mocks.revealInFileManager.mockResolvedValue({ path: "/elsewhere/deep.ts", status: "opened" });
+
+    const { rerender } = reveal({ request: { path: "/elsewhere/src/app/deep.ts", root: "/proj", nonce: 1 } });
+    await screen.findByText(/Opened in /);
+    expect(mocks.revealInFileManager).toHaveBeenCalledTimes(1);
+
+    // Re-render with a new object carrying the same nonce: a dependency change
+    // must not re-invoke the OS file manager for the same request.
+    rerender(
+      <FileTree
+        onOpenFile={vi.fn()}
+        projectPath="/proj"
+        revealRequest={{ path: "/elsewhere/src/app/deep.ts", root: "/proj", nonce: 1 }}
+      />,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mocks.revealInFileManager).toHaveBeenCalledTimes(1);
+  });
+
   it("still says why when the OS file manager refuses the path too", async () => {
     mocks.revealInFileManager.mockRejectedValue(new Error("path is outside the project root"));
 

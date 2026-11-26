@@ -15,7 +15,7 @@ tags:
   - linux
   - darwin
   - windows
-timestamp: 2026-11-15T15:35:50Z
+timestamp: 2026-11-26T13:09:45Z
 ---
 `POST /api/files/open` now accepts `mode: "reveal"` in addition to the existing `""`/`"editor"`/`"os"` modes. Request body: `{path, mode: "reveal", project_root?}`. Handler: `internal/server/handler_open.go`.
 
@@ -69,10 +69,19 @@ call `revealOutsideTree`:
 2. `treeRelativePath(req.path, root)` returns null — an absolute path that is
    not under the browsed root.
 
+The browsed root itself is excluded from this branch: it has no row to reveal and
+is already the folder the tree shows, so the reveal is cancelled (`cancelReveal`)
+instead of calling `revealOutsideTree`.
+
 `revealOutsideTree` calls `api.revealInFileManager(...)` →
 `POST /api/files/open {mode: "reveal"}` and reports
 `Opened in <file manager>`, using the same server-GOOS noun as the context menu
 (`fileManagerLabel(serverPlatform)`).
+
+The out-of-root fallback opens the file manager **exactly once per request**, even
+when the `revealRequest` effect re-runs because a dependency changed: the nonce
+guard (`if (revealNonceRef.current === req.nonce) return;`) sits above the
+fallback branch, so a re-run carrying the same nonce is skipped.
 
 ### Anchor by path shape: absolute unanchored, relative with its root
 
@@ -106,4 +115,4 @@ path against a `~`-rooted project reach the same branch.
 - `internal/server/reveal_test.go`: per-platform argv matrix, Linux FileManager1 URI percent-encoding, `TestHandleOpenFileRevealAllowsDirectory`, `TestHandleOpenFileRevealKeepsContainment`.
 - `internal/server/handler_config_test.go`: `TestHandleGetPathsConfigIncludesPlatform` (platform string exposed to frontend).
 - `web/src/components/Files/FileTree.reveal.test.tsx`: context menu label, hidden-for-remote guard.
-- `web/src/components/Files/FileTree.revealInTree.test.tsx` (17 tests): the four out-of-tree cases — an absolute path is handed over **unanchored** (`toHaveBeenCalledWith(path, undefined)`), a root-relative path keeps the tab's root, a rejected API call keeps the notice, and a remote project keeps the notice with `revealInFileManager` never called.
+- `web/src/components/Files/FileTree.revealInTree.test.tsx` (19 tests): the four out-of-tree cases — an absolute path is handed over **unanchored** (`toHaveBeenCalledWith(path, undefined)`), a root-relative path keeps the tab's root, a rejected API call keeps the notice, and a remote project keeps the notice with `revealInFileManager` never called; plus "does not reveal the browsed root itself in the OS file manager" and "reveals an out-of-root path in the OS file manager exactly once per request".

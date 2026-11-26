@@ -1960,11 +1960,9 @@ export default function FileTree({
       if (!rootsConfigLoaded) return;
       const target = rootOptions.find((o) => sameTreeRoot(o.path, req.root));
       if (!target) {
-        // intentional: this fallback is not one-shot. A later change to any of
-        // this effect's dependencies re-runs it, so "Show in file tree" can
-        // open the file manager twice. Accepted (an extra window beats a dead
-        // end); hoist the nonce check above this branch if it becomes a
-        // nuisance.
+        // One-shot: hand the path to the OS file manager exactly once per
+        // request, even if a dependency change re-runs this effect.
+        if (revealNonceRef.current === req.nonce) return;
         revealNonceRef.current = req.nonce;
         revealOutsideTree(req, root, `${req.path} is outside the folder this tree is browsing`);
         return;
@@ -1979,6 +1977,12 @@ export default function FileTree({
 
     const rel = treeRelativePath(req.path, root);
     if (!rel) {
+      // The browsed root itself has no row to reveal — it is already the
+      // folder the tree is showing, so do not hand it to the OS file manager.
+      if (sameTreeRoot(req.path, root)) {
+        cancelReveal();
+        return;
+      }
       revealOutsideTree(req, root, `${req.path} is outside the folder this tree is browsing`);
       return;
     }
