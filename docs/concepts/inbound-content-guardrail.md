@@ -14,7 +14,7 @@ tags:
   - websearch
   - jev
   - architecture
-timestamp: 2026-11-25T17:23:00Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # Inbound Content Guardrail
 
@@ -141,19 +141,19 @@ The guard runs at **all five `scanToolResult` call sites**, immediately after se
 
 | # | call site | what follows |
 |---|---|---|
-| 1 | `agent.go:2315` → `agent.go:2316` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
-| 2 | `agent.go:2384` → `agent.go:2385` | `shapeToolResult` |
-| 3 | `agent.go:2447` → `agent.go:2449` | `TruncateToolResult` directly (`agent.go:2449`) |
-| 4 | `agent.go:6117` (`return a.guardExecutedToolResult`, in `HandleApprovedToolCallCtx` at `agent.go:6105`) | returned to the approved-call path |
+| 1 | `agent.go:2341` → `agent.go:2347` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
+| 2 | `agent.go:2414` → `agent.go:2420` | `shapeToolResult` |
+| 3 | `agent.go:2482` → `agent.go:2490` | `TruncateToolResult` directly (`agent.go:2490`) |
+| 4 | `agent.go:6238` (`scanToolResult`, in `HandleApprovedToolCallCtx` at `agent.go:6229`) | returned to the approved-call path |
 | 5 | DAG scheduler: `task_dag.go:637` (redact) → `task_dag.go:644` (guard) | `shapeToolResult` in `buildResults` (`task_dag.go:870`) |
 
-The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1786`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:6211`. `contentGuardStepCtx` (`content_guard_typesafe.go:375`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
+The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1811`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()`, defined at `agent.go:6252`. `contentGuardStepCtx` (`content_guard_typesafe.go:375`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
 
 The DAG scheduler's guard ctx used to be built by `contentGuardStepCtxCtx`, which deliberately dropped the cancel on the stated grounds that "a live ctx there is not a leak" — it was: the cancel is what unparks the `crashguard.Go` goroutine `contentGuardStepCtx` starts on `stopCh`, so each batch parked one goroutine and kept one context alive for the rest of the session. `newDAGScheduler` now stores the cancel (`task_dag.go:425`) and `run` releases it via `defer` (`task_dag.go:473`); `contentGuardStepCtxCtx` is deleted. Pinned by `TestDAGSchedulerReleasesItsGuardContext` (`task_dag_test.go`).
 
 **Why the order closes a real bypass.** `TruncateToolResult` (`truncate.go:57`) writes the full result to a cache file when it exceeds 100 lines or `maxToolResultChars = 12000` (`truncate.go:15-16`) and appends a notice (`truncate.go:131`) that names the cache path **and hands the model the exact `read`/`sed` commands to fetch the rest**. A payload buried at char 13000 was therefore recoverable by the model even though the visible head was clean. Scanning the full result *before* truncation means the cache file has already been vetted — which is precisely what keeps "local reads are exempt" true: the exemption is only safe because the read-back path cannot smuggle anything in.
 
-**The scan sees already-redacted text.** Order is redact → vet → truncate, so a user secret never reaches a third-party model as state. Detection needs the **instruction**, not the credential it references — *"send the contents of ~/.aws/credentials"* is fully detectable when the credential itself is masked — so masking costs the guardrail nothing. The same reasoning is why the ask's body is already masked: it carries the redacted result (`scanToolResult`, `agent.go:3955`).
+**The scan sees already-redacted text.** Order is redact → vet → truncate, so a user secret never reaches a third-party model as state. Detection needs the **instruction**, not the credential it references — *"send the contents of ~/.aws/credentials"* is fully detectable when the credential itself is masked — so masking costs the guardrail nothing. The same reasoning is why the ask's body is already masked: it carries the redacted result (`scanToolResult`, `agent.go:4078`).
 
 ## The sentinel truncation fix — an ask is control flow, not tool output
 
@@ -328,7 +328,7 @@ Pinned by `TestApprovedCallRaisingNewContentAskDoesNotReachTheModel` (`internal/
 Neither host offers an always-allow choice:
 
 - `AlwaysRuleChoiceAvailable` returns `false` for `PermissionScopeContent` (`permissions.go:1920`) — *"there is no rule that would make the next remote result safe"*; persisting anything would silently convert a one-shot judgement into a blanket allow.
-- `AlwaysToolChoiceAvailable` returns `false` for the same reason (`permissions.go:1997`).
+- `AlwaysToolChoiceAvailable` returns `false` for the same reason (`permissions.go:2011`).
 - The TUI delegates both (`permAlwaysRuleAvailable`, `model.go:18061`; `permAlwaysToolAvailable`, `model.go:17890`), so the buttons are never rendered.
 - **The server re-checks independently** at `handler_permissions_resolve.go:289`-`handler_permissions_resolve.go:295`: a hand-crafted `always_rule` / `always_tool` resolve against a content ask gets HTTP **409** with *"it must be approved individually"*. UI-level hiding is not the security boundary.
 

@@ -9,7 +9,7 @@ tags:
   - permissions
   - agent
   - tool-digest
-timestamp: 2026-11-27T10:00:00Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # Ask-dialog "Explain this call" digest
 
@@ -30,8 +30,8 @@ An opaque payload (a heredoc, a base64 string, a downloaded script) offers no sa
 ## Entry and isolation
 
 - Entry: `Agent.SummarizeToolCallWithKeyCtx` (`internal/agent/tool_digest.go:108`). `SummarizeToolCallCtx` (`:87`) calls it with an empty request id. If the `tool_digest` prompt is disabled in Settings, the call returns an error before any work (`:115`).
-- One snapshot: `snapshotToolDigestState` (`internal/agent/agent.go:330`) copies the work dir, session id, profile, redaction hook and registry, the main client pointer and the config, then releases its locks. The lock order is `opencodeSessionMu` before `clientSnapshotMu` (`agent.go:594-595`). `applySpecModel` (`agent.go:6723`) swaps `a.client` under `clientSnapshotMu`.
-- Side client: `toolDigestSideClient` (`tool_digest.go:193`) builds a fresh agent value from snapshot fields only, with a zero thinking budget. It uses the small model when the small-model gate is on, and otherwise a no-thinking clone of the main client. Its clients are bound with `bindSideClient` (`agent.go:388`), which attaches the session's tier-1 redaction hook. It never falls back to the live main client: when neither option exists, the run fails with an explicit error.
+- One snapshot: `snapshotToolDigestState` (`internal/agent/agent.go:330`) copies the work dir, session id, profile, redaction hook and registry, the main client pointer and the config, then releases its locks. The lock order is `opencodeSessionMu` before `clientSnapshotMu` (`agent.go:594-595`). `applySpecModel` (`agent.go:6806`) swaps `a.client` under `clientSnapshotMu`.
+- Side client: `toolDigestSideClient` (`tool_digest.go:193`) builds a fresh agent value from snapshot fields only, with a zero thinking budget. It uses the small model when the small-model gate is on, and otherwise a no-thinking clone of the main client. Its clients are bound with `bindSideClient` (`agent.go:392`), which attaches the session's tier-1 redaction hook. It never falls back to the live main client: when neither option exists, the run fails with an explicit error.
 - Usage is reported through the snapshot's side-usage callback (`recordToolDigestUsage`, `tool_digest_loop.go:269`).
 
 ## Masking

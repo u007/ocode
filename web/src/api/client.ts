@@ -1009,12 +1009,15 @@ export interface DBConnectConnection {
   /** True when the connection's URL comes from an environment template
    *  ("${DATABASE_URL}") rather than a stored secret. */
   fromEnv: boolean;
+  /** The dotenv file this connection reads, when one was selected. */
+  envFile?: string;
 }
 
 /** The wire shape of a saved connection. The server spells the env flag
  *  `from_env`; `dbConnectList` maps it to `fromEnv` exactly once, here. */
-type DBConnectConnectionWire = Omit<DBConnectConnection, "fromEnv"> & {
+type DBConnectConnectionWire = Omit<DBConnectConnection, "fromEnv" | "envFile"> & {
   from_env?: boolean;
+  env_file?: string;
 };
 
 /** One connection that could not be unlocked. The message names a variable or
@@ -1087,9 +1090,13 @@ export interface DBConnectTarget {
 export interface DBConnectTunnel {
   host: string;
   port?: number;
+  /** A "${VAR}" reference for the ssh port; the server resolves it at unlock. */
+  port_env?: string;
   local_port?: number;
   remote_host: string;
-  remote_port: number;
+  remote_port?: number;
+  /** A "${VAR}" reference for the remote DB port. */
+  remote_port_env?: string;
   identity_file?: string;
   auth_method?: "key" | "password" | "auto";
   password?: string;
@@ -5024,6 +5031,7 @@ export const api = {
         // was silently undefined, which disabled the whole no-password flow and
         // made an env connection demand a master password.
         fromEnv: c.from_env === true,
+        ...(c.env_file ? { envFile: c.env_file } : {}),
       })),
     })),
   /** `password` is required only for a literal (sealed) URL. An environment
@@ -5032,7 +5040,7 @@ export const api = {
    *  the project's .ocode/db.json and refuses a literal URL there. A literal URL on
    *  a remote project still routes to that host (fetchJSON below) and is saved to
    *  the host's global config. */
-  dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget, tunnel?: DBConnectTunnel) =>
+  dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget, tunnel?: DBConnectTunnel, envFile?: string) =>
     fetchJSON<{ name: string }>(
       "/api/dbconnect/connections",
       {
@@ -5042,6 +5050,7 @@ export const api = {
           url,
           password,
           project_path: isEnvTemplateURL(url) ? target?.projectPath : undefined,
+          env_file: envFile,
           tunnel,
         }),
       },

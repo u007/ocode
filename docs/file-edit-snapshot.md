@@ -8,7 +8,7 @@ tags:
   - undo
   - file-edit
   - safety
-timestamp: 2026-11-16T00:45:12Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # File-Edit Snapshot & Undo Mechanism
 
@@ -21,7 +21,7 @@ ocode takes a **snapshot/backup of a file immediately before any modifying tool 
 
 ## What triggers a snapshot
 Every modifying tool backs up *before* mutating:
-- Write/edit/multi_edit/multi_file_edit/replace_lines/delete — `internal/tool/file.go` reads `prev` then calls `store.Backup(safe, tcID)` before `os.WriteFile`, and `store.RegisterWrite` after success (see `file.go:996-1030`, `:1135-1145`; RegisterWrite call sites at lines 1039, 1154, 1218, 1304, 1433, 1589).
+- Write/edit/multi_edit/multi_file_edit/replace_lines/delete — `internal/tool/file.go` reads `prev` then calls `store.Backup(safe, tcID)` before `os.WriteFile`, and `store.RegisterWrite` after success (see `file.go:997-1040`, `:1145-1155`; RegisterWrite call sites at lines 1040, 1155, 1219, 1305, 1434, 1590).
 - Patch tool — `internal/tool/patch.go:464` calls `snapshot.Backup` before applying.
 - Formatter — `internal/tool/formatter.go:149` backs up before formatting.
 - Config write-back — `internal/config/ocodeconfig.go:3470`.

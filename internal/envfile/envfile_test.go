@@ -1,6 +1,8 @@
 package envfile
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,5 +232,76 @@ func TestParseAcceptsEmptyQuotedValue(t *testing.T) {
 	}
 	if got["A"] != "" || got["B"] != "" {
 		t.Fatalf("got %v, want A and B empty", got)
+	}
+}
+
+func TestNormalizeName(t *testing.T) {
+	tests := []struct {
+		in, want string
+		wantErr  bool
+	}{
+		{"", "", false},
+		{"staging", ".env.staging", false},
+		{".staging", ".env.staging", false},
+		{".env.staging", ".env.staging", false},
+		{".env", ".env", false},
+		{"  production  ", ".env.production", false},
+		{"../.env", "", true},
+		{"/etc/passwd", "", true},
+		{".env.a/b", "", true},
+		{"a b", "", true},
+		{".env.", "", true},
+		{".env.a..b", "", true},
+		{".env..", "", true},
+		{"..env", "", true},
+		{".env.a\\b", "", true},
+	}
+	for _, tt := range tests {
+		got, err := NormalizeName(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("NormalizeName(%q) = %q, want an error", tt.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("NormalizeName(%q): %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("NormalizeName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestLoadNamedReadsOnlyTheNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(FileName, "DATABASE_URL=from-base\nBASE_ONLY=yes\n")
+	write(LocalFileName, "DATABASE_URL=from-local\n")
+	write(".env.staging", "DATABASE_URL=postgres://u:p@staging:5432/db\nSTAGING_ONLY=yes\n")
+
+	got, err := LoadNamed(dir, ".staging")
+	if err != nil {
+		t.Fatalf("LoadNamed: %v", err)
+	}
+	if got["DATABASE_URL"] != "postgres://u:p@staging:5432/db" || got["STAGING_ONLY"] != "yes" {
+		t.Fatalf("LoadNamed values = %v, want only the staging file", got)
+	}
+	if _, ok := got["BASE_ONLY"]; ok {
+		t.Fatalf("LoadNamed leaked a key from .env: %v", got)
+	}
+}
+
+func TestLoadNamedMissingFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	_, err := LoadNamed(dir, ".env.production")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("LoadNamed with a missing named file: want fs.ErrNotExist, got %v", err)
 	}
 }

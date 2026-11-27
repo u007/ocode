@@ -88,8 +88,8 @@ func (h *Handler) dbRoots() []string {
 // path, so a variable that points outside the project roots is refused just
 // like a literal path would be. The expanded value is never trusted, only
 // checked.
-func (h *Handler) resolveDBPath(projectRoot, path string) (string, string) {
-	expanded, errMsg := h.dbExpandPath(path, projectRoot)
+func (h *Handler) resolveDBPath(projectRoot, path, envFile string) (string, string) {
+	expanded, errMsg := h.dbExpandPath(path, projectRoot, envFile)
 	if errMsg != "" {
 		return "", errMsg
 	}
@@ -166,7 +166,7 @@ func (h *Handler) resolveDBRequest(w http.ResponseWriter, r *http.Request) (stri
 		writeError(w, http.StatusBadRequest, "path is required")
 		return "", false
 	}
-	resolved, errMsg := h.resolveDBPath(r.URL.Query().Get("project_root"), path)
+	resolved, errMsg := h.resolveDBPath(r.URL.Query().Get("project_root"), path, r.URL.Query().Get("env_file"))
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return "", false
@@ -188,11 +188,11 @@ func (h *Handler) resolveDBRequest(w http.ResponseWriter, r *http.Request) (stri
 //
 // projectRoot is the project whose .env files are consulted. An empty
 // projectRoot means only the process environment is used.
-func (h *Handler) dbExpandPath(path, projectRoot string) (string, string) {
+func (h *Handler) dbExpandPath(path, projectRoot, envFile string) (string, string) {
 	if !dbconnect.IsTemplate(path) {
 		return path, ""
 	}
-	lookup, envErr := dbEnvLookup(projectRoot)
+	lookup, envErr := dbEnvLookup(projectRoot, envFile)
 	expanded, err := dbconnect.ExpandEnv(path, lookup)
 	if err != nil {
 		// As in dbResolveTemplate: an unreadable dotenv file makes every
@@ -402,6 +402,7 @@ func (h *Handler) HandleDBMaintenance(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path        string `json:"path"`
 		ProjectRoot string `json:"project_root"`
+		EnvFile     string `json:"env_file,omitempty"`
 		Op          string `json:"op"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -412,7 +413,7 @@ func (h *Handler) HandleDBMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path and op are required")
 		return
 	}
-	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path)
+	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path, req.EnvFile)
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return
@@ -464,6 +465,7 @@ func (h *Handler) HandleDBQuery(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path        string `json:"path"`
 		ProjectRoot string `json:"project_root"`
+		EnvFile     string `json:"env_file,omitempty"`
 		SQL         string `json:"sql"`
 		Limit       int    `json:"limit"`
 		Confirm     bool   `json:"confirm"`
@@ -476,7 +478,7 @@ func (h *Handler) HandleDBQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path and sql are required")
 		return
 	}
-	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path)
+	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path, req.EnvFile)
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return
@@ -537,6 +539,7 @@ func (h *Handler) HandleDBRow(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path        string         `json:"path"`
 		ProjectRoot string         `json:"project_root"`
+		EnvFile     string         `json:"env_file,omitempty"`
 		Op          string         `json:"op"`
 		Table       string         `json:"table"`
 		Key         map[string]any `json:"key"`
@@ -558,7 +561,7 @@ func (h *Handler) HandleDBRow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path and table are required")
 		return
 	}
-	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path)
+	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path, req.EnvFile)
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return
@@ -632,6 +635,7 @@ func (h *Handler) HandleDBSchema(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path         string               `json:"path"`
 		ProjectRoot  string               `json:"project_root"`
+		EnvFile      string               `json:"env_file,omitempty"`
 		Op           string               `json:"op"`
 		Table        string               `json:"table"`
 		Index        string               `json:"index"`
@@ -648,7 +652,7 @@ func (h *Handler) HandleDBSchema(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path)
+	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path, req.EnvFile)
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return

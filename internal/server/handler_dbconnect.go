@@ -15,6 +15,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/dbconnect"
+	"github.com/u007/ocode/internal/envfile"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
 )
@@ -445,6 +446,9 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 		// itself is NOT returned: it names variables, but the resolved URL
 		// is a credential and stays on the server.
 		FromEnv bool `json:"from_env"`
+		// EnvFile names the dotenv file this connection reads. It is a
+		// filename, not a secret, so the panel can show it.
+		EnvFile string `json:"env_file,omitempty"`
 	}
 	conns := cfg.DB.Connections
 	if pp := r.URL.Query().Get("project_path"); pp != "" {
@@ -463,6 +467,7 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 			Driver:   c.Driver,
 			Unlocked: unlocked,
 			FromEnv:  c.EnvTemplate != "",
+			EnvFile:  c.EnvFile,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connections": out})
@@ -484,6 +489,7 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		ProjectPath string           `json:"project_path"`
 		Driver      string           `json:"driver"`
 		Tunnel      *config.DBTunnel `json:"tunnel"`
+		EnvFile     string           `json:"env_file"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		log.Printf("dbconnect: add: decode request: %v", err)
@@ -494,6 +500,11 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name and url are required")
 		return
 	}
+	envFile, err := envfile.NormalizeName(req.EnvFile)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if req.Driver != "" && req.Driver != config.DBDriverPostgres && req.Driver != config.DBDriverMySQL {
 		writeError(w, http.StatusBadRequest, "unsupported db driver "+req.Driver)
 		return
@@ -502,6 +513,21 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	// nothing to encrypt and no master password is involved. A literal URL is a
 	// secret and still requires the password that seals it.
 	isTemplate := dbconnect.IsTemplate(req.URL)
+	tunnelEnv := dbTunnelHasEnv(req.Tunnel)
+	// A tunnel's env references resolve through the env file of a template
+	// connection only: a literal URL has no project to read them from.
+	if !isTemplate && tunnelEnv {
+		writeError(w, http.StatusBadRequest,
+			"SSH tunnel fields that use ${VAR} need a template URL (with an env file); use literal tunnel values with a literal URL")
+		return
+	}
+	// env_file is read only by a template URL or an env-referencing tunnel. On
+	// a literal connection it would be silently ignored, so refuse it.
+	if envFile != "" && !isTemplate && !tunnelEnv {
+		writeError(w, http.StatusBadRequest,
+			"env_file only applies to a template URL or a tunnel that uses ${VAR}; leave it empty for a literal URL")
+		return
+	}
 	if isTemplate && dbconnect.TemplateHasLiteralSecret(req.URL) {
 		// A template is stored in the clear. One that also carries a literal
 		// password would write that password to ocodeconfig.json unencrypted.
@@ -552,18 +578,37 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate + normalize the optional tunnel descriptor.
 	if req.Tunnel != nil {
-		if err := remote.ValidateTunnelDescriptor(req.Tunnel); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
+		if tunnelEnv {
+			root, ok := h.dbProjectRootFor(req.ProjectPath)
+			if envFile == "" || !ok {
+				writeError(w, http.StatusBadRequest,
+					"a tunnel with environment references needs an env file and an allowed project")
+				return
+			}
+			lookup, envErr := dbEnvLookup(root, envFile)
+			if _, err := dbResolveTunnel(req.Tunnel, lookup, envErr); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		} else {
+			// A literal tunnel has no env reference, but its companion port
+			// fields may still hold a literal number. Resolving it here reads
+			// that number before the descriptor check; no lookup is consulted.
+			noEnv := func(string) (string, bool) { return "", false }
+			if _, err := dbResolveTunnel(req.Tunnel, noEnv, func() error { return nil }); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		if req.Tunnel.AuthMethod == "" {
 			req.Tunnel.AuthMethod = "key"
 		}
 	}
 	conn := config.DBConnection{
-		Name:   req.Name,
-		Driver: driver,
-		Tunnel: req.Tunnel,
+		Name:    req.Name,
+		Driver:  driver,
+		Tunnel:  req.Tunnel,
+		EnvFile: envFile,
 	}
 	// Seal the tunnel password (if password auth) under the master password.
 	if storesTunnelPassword {
@@ -788,7 +833,7 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 	// user last opened it — it reads no files.
 	hasTemplate := false
 	for _, c := range cfg.DB.Connections {
-		if c.EnvTemplate != "" {
+		if dbConnectionNeedsProject(c) {
 			hasTemplate = true
 			break
 		}
@@ -831,6 +876,19 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		// The URL is resolved (and a sealed one opened) BEFORE the tunnel
 		// password, so a wrong master password still aborts the whole unlock.
 		var connURL string
+		// One lookup serves the URL and the tunnel of this connection, so
+		// both read the same env file with the same precedence.
+		lookup, envErr := dbEnvLookup(projectRoot, c.EnvFile)
+		if c.EnvFile != "" {
+			// A selected file that vanished must fail this connection even
+			// when its URL is sealed and needs no template expansion.
+			if err := envErr(); err != nil {
+				log.Printf("dbconnect: unlock %q: env file: %v", c.Name, err)
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: err.Error()})
+				staleNames = append(staleNames, c.Name)
+				continue
+			}
+		}
 		if c.EnvTemplate != "" {
 			if projectRoot == "" {
 				// Never fall back to the process environment: this panel
@@ -842,7 +900,7 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: msg})
 				continue
 			}
-			resolved, err := dbResolveTemplate(c.EnvTemplate, projectRoot)
+			resolved, err := dbResolveTemplateWithLookup(c.EnvTemplate, lookup, envErr)
 			if err != nil {
 				// The error names the missing variable or the invalid URL
 				// shape, never a value, so it is safe to show the user.
@@ -878,6 +936,13 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				staleNames = append(staleNames, c.Name)
 				continue
 			}
+			resolvedTunnel, terr := dbResolveTunnel(c.Tunnel, lookup, envErr)
+			if terr != nil {
+				log.Printf("dbconnect: unlock %q: tunnel env: %v", c.Name, terr)
+				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: terr.Error()})
+				staleNames = append(staleNames, c.Name)
+				continue
+			}
 			// Reject a URL the tunnel cannot route now, not at the first query.
 			if _, rerr := rewriteURLForTunnel(connURL, 1); rerr != nil {
 				log.Printf("dbconnect: unlock %q: tunnel: %v", c.Name, rerr)
@@ -886,7 +951,7 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			entry.hasTunnel = true
-			entry.tunnel = *c.Tunnel
+			entry.tunnel = *resolvedTunnel
 			entry.tunnelPassword = tunnelPassword
 		}
 		grant[c.Name] = entry

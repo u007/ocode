@@ -73,6 +73,40 @@ exit 1`)
 	}
 }
 
+// Resolved env values (including a templated ssh port) must reach the ssh
+// argv. This is the last hop of the .env.staging -> tunnel flow.
+func TestDBTunnelResolvedValuesReachSSHArgv(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "argv.txt")
+	stub := writeStub(t, `printf '%s\n' "$@" > "`+logFile+`"
+exit 1`)
+	old := sshBinary
+	sshBinary = stub
+	defer func() { sshBinary = old }()
+
+	m := NewDBTunnelManager()
+	defer m.StopAll()
+	tun := &config.DBTunnel{
+		Host: "bastion.example", Port: 2222,
+		RemoteHost: "db.internal", RemotePort: 5432,
+		IdentityFile: "/keys/id_ed25519",
+	}
+	_, _ = m.Ensure(t.Context(), "conn", tun, "")
+
+	argv, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(argv)
+	for _, want := range []string{
+		"-p\n2222", "-i\n/keys/id_ed25519",
+		"127.0.0.1:", ":db.internal:5432", "bastion.example",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("ssh argv %q does not contain %q", text, want)
+		}
+	}
+}
+
 func TestDBTunnelDeadProcessNoHang(t *testing.T) {
 	stub := writeStub(t, "exit 1")
 	old := sshBinary

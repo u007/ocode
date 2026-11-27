@@ -8,11 +8,11 @@ tags:
   - git
   - auto-permission
   - gotcha
-timestamp: 2026-11-22T15:41:37Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 ## The Problem
 
-The transparent stripping of `git -c <k>=<v>` config overrides in `IsHarmfulBashCommand` / `matchSubcommandAllow` (permissions.go:1586, :5356) allows an allow-listed read-only git subcommand (e.g. `git ls-remote`) to execute arbitrary shell commands via the `ext::` transport when paired with a crafted command string.
+The transparent stripping of `git -c <k>=<v>` config overrides in `IsHarmfulBashCommand` / `matchSubcommandAllow` (permissions.go:1586, :5682) allows an allow-listed read-only git subcommand (e.g. `git ls-remote`) to execute arbitrary shell commands via the `ext::` transport when paired with a crafted command string.
 
 The auto-permission guard sees `git ls-remote` → ALLOW, while git actually shells out to the `ext::` transport to execute arbitrary commands.
 
@@ -46,6 +46,6 @@ Permissions.go strips `-c <k>=<v>` to normalize the command for allowlist matchi
 
 ## References
 
-- `internal/agent/permissions.go:1586` (`IsHarmfulBashCommand`), `:5356` (`matchSubcommandAllow`)
+- `internal/agent/permissions.go:1586` (`IsHarmfulBashCommand`), `:5682` (`matchSubcommandAllow`)
 - Git documentation on `ext::` transport and `protocol.ext.allow`
 - `docs/gotchas/plugin-auto-permission-security.md` — related auto-permission security gotcha

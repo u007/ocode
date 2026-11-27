@@ -10,7 +10,7 @@ tags:
   - sidebar
   - tui-status
   - derived-field
-timestamp: 2026-11-25T17:23:00Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # Session-tagged snapshot: override base fields but recompute ALL derived fields
 
@@ -26,7 +26,7 @@ Affected builders:
 
 The web main-model pick is a per-session override: `ModelDialog.tsx:520` → `setSessionModel` (`web/src/api/client.ts`, `PUT /api/sessions/{id}/model`) → `HandleSetSessionModel` → `pushSessionStatusSnapshot`.
 
-**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1772` → `reconcileProfileAgent` defined at `agent_session.go:869`, called at `handler.go:1787`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6715`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:332`, `discoveryModelRoot`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6634/3825`). The TUI-bridged path was already correct (`internal/tui/model.go:17301` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
+**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1772` → `reconcileProfileAgent` defined at `agent_session.go:869`, called at `handler.go:1787`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:6895`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:332`, `discoveryModelRoot`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:6838/3961`). The TUI-bridged path was already correct (`internal/tui/model.go:17301` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
 
 ## Durable rule
 

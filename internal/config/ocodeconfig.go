@@ -2710,6 +2710,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		log.Printf("config: ignoring malformed db connection templates on disk, keeping the raw value: %v", err)
 	}
 	reconcileDBEnvTemplates(cfg.DB.Connections, templates)
+	envFiles, err := dbEnvFiles(cfg.Extra)
+	if err != nil {
+		log.Printf("config: ignoring malformed db connection env files on disk, keeping the raw value: %v", err)
+	}
+	reconcileDBEnvFiles(cfg.DB.Connections, envFiles)
 
 	return nil
 }
@@ -3320,6 +3325,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	// This assignment happens AFTER the Extra loop below, so the canonical
 	// value always wins over a stale copy in Extra.
 	dbEnvTemplatesCanonical := dbConnectionTemplates(cfg.DB.Connections)
+	// Same forward-compatibility story for a connection's selected dotenv
+	// file: a binary that predates env_file cannot see it in the db section.
+	dbEnvFilesCanonical := dbConnectionEnvFiles(cfg.DB.Connections)
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
 		deduped := cfg.ExtraAllowedPaths[:0:0]
@@ -3485,6 +3493,19 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// No template connections left: drop the key so a stale map cannot
 		// resurrect one.
 		delete(payload, DBEnvTemplatesKey)
+	}
+	// Written after the Extra loop so the canonical map wins over a stale
+	// copy preserved from disk.
+	if len(dbEnvFilesCanonical) > 0 {
+		raw, err := json.Marshal(dbEnvFilesCanonical)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", DBEnvFilesKey, err)
+		}
+		payload[DBEnvFilesKey] = json.RawMessage(raw)
+	} else if _, err := dbEnvFiles(cfg.Extra); err != nil {
+		log.Printf("config: keeping unreadable db connection env files on save: %v", err)
+	} else {
+		delete(payload, DBEnvFilesKey)
 	}
 	// Canonical backend_url/sync_url setters run AFTER the Extra loop so a
 	// valid normalized value always wins over a preserved raw value from
@@ -3775,8 +3796,6 @@ func autoGrantKey(g AutoGrant) string {
 	}, "\x00")
 }
 
-
-
 // SaveAutoGrant appends one narrow auto-grant to permissions.auto.grants using
 // load-modify-write (no-op if an identical grant already exists), avoiding a
 // wholesale config write that would drop concurrent changes to other fields.
@@ -3816,8 +3835,6 @@ func RemoveAutoGrant(grant AutoGrant) error {
 		return nil
 	})
 }
-
-
 
 func SaveEditor(editor string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {

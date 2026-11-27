@@ -179,6 +179,68 @@ func unescapeDouble(s string) string {
 	return b.String()
 }
 
+// NormalizeName turns a user-supplied env-file name into a basename of the form
+// .env or .env.<suffix>. ".staging" and "staging" both become ".env.staging".
+// An empty input means no file was selected. Paths and suffixes outside
+// [A-Za-z0-9_-] are rejected: a connection must never be able to read a file
+// outside the project root.
+func NormalizeName(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	name := s
+	switch {
+	case name == ".env":
+		return name, nil
+	case strings.HasPrefix(name, ".env."):
+	case strings.HasPrefix(name, "."):
+		name = ".env" + name
+	default:
+		name = ".env." + name
+	}
+	suffix := strings.TrimPrefix(name, ".env.")
+	if suffix == "" || !validSuffix(suffix) {
+		return "", fmt.Errorf("invalid env file name %q: use .env or .env.<name>", s)
+	}
+	return name, nil
+}
+
+func validSuffix(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// LoadNamed reads exactly one named dotenv file from dir. A missing file is an
+// error: selecting .env.staging when it does not exist must not silently fall
+// back to .env and connect to the wrong database. Use Load when no name was
+// selected.
+func LoadNamed(dir, name string) (map[string]string, error) {
+	normalized, err := NormalizeName(name)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == "" {
+		return nil, fmt.Errorf("env file name is required")
+	}
+	path := filepath.Join(dir, normalized)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer f.Close()
+	values, err := Parse(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return values, nil
+}
+
 // Load reads .env and .env.local from dir and returns their combined values.
 //
 // .env is read first and .env.local second, so a key in .env.local overrides

@@ -10,7 +10,7 @@ tags:
   - gateway
   - models-registry
   - auth
-timestamp: 2026-11-25T17:23:00Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # kakiit LLM Gateway Provider
 
@@ -213,7 +213,7 @@ The gateway returns HTTP 402 with an OpenAI-shaped envelope whose code is
   hub.mercstudio.com (or ask your site admin)*. Surfaced through
   `UserFacingLLMError` (`client_kakiit.go:160-168`), consumed by the TUI
   `streamDoneMsg` error line (`internal/tui/model.go:5649`), by
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6651-6625`), and by the
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6788`), and by the
   web/desktop server's `publishTurnError`
   (`internal/server/agent_session.go:1184`), which publishes
   `agent.UserFacingLLMError(err)` as the `turn_error` payload's `error` field
@@ -246,7 +246,7 @@ The gateway answers `409` with an OpenAI-shaped envelope whose code is
   running) — send it again to start a new attempt*. It rides the same
   `UserFacingLLMError` (`client_kakiit.go:160-168`) path as the top-up line:
   the TUI `streamDoneMsg` error line (`internal/tui/model.go:5649`),
-  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6651-6625`), and the
+  `Agent.StepLimitHitDetail` (`internal/agent/agent.go:6788`), and the
   web/desktop `publishTurnError` banner
   (`internal/server/agent_session.go:1184`, `agent.UserFacingLLMError(err)` at
   `:1200`).

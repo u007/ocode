@@ -57,6 +57,46 @@ function newDbPanelSurfaceID(): string {
   return `${dbPanelDocumentTag}-${dbPanelSurfaceSeq}`;
 }
 
+// The server refuses a tunnel that carries ${VAR} references under a literal URL,
+// and a template tunnel with no env file. The same text is shown inline in the
+// form, and Save is disabled meanwhile.
+const TUNNEL_ENV_LITERAL_URL_MESSAGE =
+  "SSH tunnel fields that use ${VAR} need a template URL (with an env file); use literal tunnel values with a literal URL";
+const TUNNEL_ENV_NEEDS_ENV_FILE_MESSAGE = "SSH tunnel fields that use ${VAR} need an env file";
+
+interface TunnelFormFields {
+  enabled: boolean;
+  host: string;
+  port: string;
+  remoteHost: string;
+  remotePort: string;
+  identity: string;
+}
+
+// Whether an enabled tunnel carries a ${VAR} reference the server expands. Mirrors
+// dbTunnelHasEnv on the server: the SSH host, remote host, identity file and both
+// ports. The SSH password is never expanded and the auth method is a fixed select,
+// so neither counts.
+function tunnelUsesEnvRef(tunnel: TunnelFormFields): boolean {
+  if (!tunnel.enabled) return false;
+  return [tunnel.host, tunnel.port, tunnel.remoteHost, tunnel.remotePort, tunnel.identity].some((v) =>
+    isEnvTemplate(v.trim()),
+  );
+}
+
+// A ${VAR} tunnel field under a literal URL. An empty URL is not literal, and Save
+// is already disabled for it.
+function tunnelEnvWithLiteralURL(url: string, tunnel: TunnelFormFields): boolean {
+  const trimmed = url.trim();
+  return trimmed !== "" && !isEnvTemplate(trimmed) && tunnelUsesEnvRef(tunnel);
+}
+
+// A ${VAR} tunnel field under a template URL with no env file typed. The server
+// needs the file to resolve those references.
+function tunnelEnvWithoutEnvFile(url: string, envFile: string, tunnel: TunnelFormFields): boolean {
+  return isEnvTemplate(url.trim()) && envFile.trim() === "" && tunnelUsesEnvRef(tunnel);
+}
+
 export default function DBPanel({ projectPath, projectHost }: { projectPath?: string; projectHost?: string }) {
   // A remote project's calls carry its path as X-Ocode-Project. Without it the host
   // would act on its own default project, so refuse to render rather than misroute.
@@ -129,6 +169,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   const [addName, setAddName] = useState("");
   const [addUrl, setAddUrl] = useState("");
   const [addPassword, setAddPassword] = useState("");
+  const [addEnvFile, setAddEnvFile] = useState("");
   // Only read on first setup, where the typed master password must be confirmed.
   const [addConfirm, setAddConfirm] = useState("");
   const [addTunnelEnabled, setAddTunnelEnabled] = useState(false);
@@ -331,20 +372,29 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
       // A template URL is saved in the clear and needs no password; a literal
       // URL is sealed under it. The server enforces the same rule.
       const literal = !addIsTemplate;
+      const sshPort = addTunnelPort.trim();
+      const dbPort = addTunnelRemotePort.trim();
       const tunnel = addTunnelEnabled
         ? {
             host: addTunnelHost.trim(),
-            port: addTunnelPort ? Number(addTunnelPort) : undefined,
+            port: sshPort && !isEnvTemplate(sshPort) ? Number(sshPort) : undefined,
+            port_env: isEnvTemplate(sshPort) ? sshPort : undefined,
             remote_host: addTunnelRemoteHost.trim(),
-            remote_port: Number(addTunnelRemotePort),
+            remote_port: dbPort && !isEnvTemplate(dbPort) ? Number(dbPort) : undefined,
+            remote_port_env: isEnvTemplate(dbPort) ? dbPort : undefined,
             identity_file: addTunnelIdentity.trim() || undefined,
             auth_method: addTunnelAuthMethod,
             password: addTunnelAuthMethod === "password" ? addTunnelPassword : undefined,
           }
         : undefined;
-      await api.dbConnectAdd(name, addUrl.trim(), password, target, tunnel);
+      // The env file field is shown only for a template URL. Its state survives a
+      // switch to a literal URL, so it is gated here too: a literal save must not
+      // carry a file the user can no longer see.
+      const envFile = addIsTemplate ? addEnvFile.trim() || undefined : undefined;
+      await api.dbConnectAdd(name, addUrl.trim(), password, target, tunnel, envFile);
       setAddUrl("");
       setAddPassword("");
+      setAddEnvFile("");
       setAddConfirm("");
       setAddName("");
       setAddTunnelEnabled(false);
@@ -424,8 +474,23 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   // password, so its confirmation must match; later saves are checked by the server.
   const firstSetup = connections.length === 0;
   const addPasswordMismatch = firstSetup && !addIsTemplate && addPassword !== addConfirm;
+  const addTunnelFields: TunnelFormFields = {
+    enabled: addTunnelEnabled,
+    host: addTunnelHost,
+    port: addTunnelPort,
+    remoteHost: addTunnelRemoteHost,
+    remotePort: addTunnelRemotePort,
+    identity: addTunnelIdentity,
+  };
+  const addTunnelEnvConflict =
+    tunnelEnvWithLiteralURL(addUrl, addTunnelFields) || tunnelEnvWithoutEnvFile(addUrl, addEnvFile, addTunnelFields);
   const addSaveDisabled =
-    busy !== null || !addName || !addUrl || (!addIsTemplate && !addPassword) || addPasswordMismatch;
+    busy !== null ||
+    !addName ||
+    !addUrl ||
+    (!addIsTemplate && !addPassword) ||
+    addPasswordMismatch ||
+    addTunnelEnvConflict;
 
   return (
     <div
@@ -492,11 +557,13 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             url={addUrl}
             password={addPassword}
             confirmPassword={addConfirm}
+            envFile={addEnvFile}
             firstSetup={true}
             onName={setAddName}
             onUrl={setAddUrl}
             onPassword={setAddPassword}
             onConfirmPassword={setAddConfirm}
+            onEnvFile={setAddEnvFile}
             tunnelEnabled={addTunnelEnabled}
             tunnelHost={addTunnelHost}
             tunnelPort={addTunnelPort}
@@ -561,7 +628,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             <>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Database className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} reads its URL from the
-                project&apos;s <code className="font-mono">.env</code>
+                project&apos;s <code className="font-mono">{current.envFile ?? ".env"}</code>
               </div>
               <form
                 className="flex items-end gap-2"
@@ -637,11 +704,13 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 url={addUrl}
                 password={addPassword}
                 confirmPassword={addConfirm}
+                envFile={addEnvFile}
                 firstSetup={false}
                 onName={setAddName}
                 onUrl={setAddUrl}
                 onPassword={setAddPassword}
                 onConfirmPassword={setAddConfirm}
+                onEnvFile={setAddEnvFile}
                 tunnelEnabled={addTunnelEnabled}
                 tunnelHost={addTunnelHost}
                 tunnelPort={addTunnelPort}
@@ -842,6 +911,7 @@ function AddFields({
   url,
   password,
   confirmPassword,
+  envFile,
   firstSetup,
   tunnelEnabled,
   tunnelHost,
@@ -855,6 +925,7 @@ function AddFields({
   onUrl,
   onPassword,
   onConfirmPassword,
+  onEnvFile,
   onTunnelEnabled,
   onTunnelHost,
   onTunnelPort,
@@ -868,6 +939,7 @@ function AddFields({
   url: string;
   password: string;
   confirmPassword: string;
+  envFile: string;
   firstSetup: boolean;
   tunnelEnabled: boolean;
   tunnelHost: string;
@@ -881,6 +953,7 @@ function AddFields({
   onUrl: (v: string) => void;
   onPassword: (v: string) => void;
   onConfirmPassword: (v: string) => void;
+  onEnvFile: (v: string) => void;
   onTunnelEnabled: (v: boolean) => void;
   onTunnelHost: (v: string) => void;
   onTunnelPort: (v: string) => void;
@@ -895,6 +968,16 @@ function AddFields({
   const template = isEnvTemplate(url.trim());
   // The first literal save creates the master password, so it is typed twice.
   const creating = firstSetup && !template;
+  const tunnelFields: TunnelFormFields = {
+    enabled: tunnelEnabled,
+    host: tunnelHost,
+    port: tunnelPort,
+    remoteHost: tunnelRemoteHost,
+    remotePort: tunnelRemotePort,
+    identity: tunnelIdentity,
+  };
+  const tunnelEnvConflict = tunnelEnvWithLiteralURL(url, tunnelFields);
+  const tunnelNeedsEnvFile = tunnelEnvWithoutEnvFile(url, envFile, tunnelFields);
   return (
     <div className="space-y-2">
       <label className="block space-y-1 text-xs font-medium text-muted-foreground">
@@ -921,12 +1004,34 @@ function AddFields({
         <p className="text-[11px] text-muted-foreground">
           Use <code className="font-mono">{"${DATABASE_URL}"}</code> to read the URL from the
           project&apos;s <code className="font-mono">.env</code> /{" "}
-          <code className="font-mono">.env.local</code> (a value exported in the server environment
-          wins). No password is needed for that, and the password must itself be a{" "}
+          <code className="font-mono">.env.local</code>. A value exported in the server environment
+          wins unless an env file is selected. No password is needed for that, and the password must
+          itself be a{" "}
           <code className="font-mono">{"${VAR}"}</code> reference — a literal password is refused
           because a template is stored unencrypted.
         </p>
       </div>
+      {template && (
+        <label className="block space-y-1 text-xs font-medium text-muted-foreground">
+          Env file (optional)
+          <Input
+            value={envFile}
+            onChange={(e) => onEnvFile(e.target.value)}
+            placeholder=".staging or .env.production"
+            className="h-8 font-mono text-xs"
+          />
+        </label>
+      )}
+      {template && tunnelNeedsEnvFile && (
+        <p className="text-[11px] text-destructive">{TUNNEL_ENV_NEEDS_ENV_FILE_MESSAGE}</p>
+      )}
+      {template && (
+        <p className="text-[11px] text-muted-foreground">
+          Select one file instead of the defaults, for example <code className="font-mono">.staging</code>{" "}
+          to read <code className="font-mono">.env.staging</code>. That file is authoritative: its values
+          win over the server environment, and a missing key stays unset.
+        </p>
+      )}
       <div className="space-y-1">
         <label className="block text-xs font-medium text-muted-foreground">
           {template
@@ -1003,6 +1108,9 @@ function AddFields({
                 SSH password
                 <Input type="password" value={tunnelPassword} onChange={(e) => onTunnelPassword(e.target.value)} className="h-8 text-xs" />
               </label>
+            )}
+            {tunnelEnvConflict && (
+              <p className="text-[11px] text-destructive">{TUNNEL_ENV_LITERAL_URL_MESSAGE}</p>
             )}
           </div>
         )}

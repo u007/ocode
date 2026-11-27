@@ -10,7 +10,7 @@ tags:
   - editor
   - agent-scope
   - grants
-timestamp: 2026-11-25T17:20:34Z
+timestamp: 2026-11-27T16:04:13Z
 ---
 # File Editor Grants — Editor-Only Out-of-Project Access
 
@@ -33,8 +33,12 @@ store; `handler_file_grants.go:151` lazily creates it.
 ### Why grants are NOT `extra_allowed_paths`
 
 `extra_allowed_paths` is written through
-`applyExtraAllowedPathsToRuntime` → `tool.SetPersistentExtraAllowedPaths` →
-`tool.ExtraAllowedRoots()` → `PermissionManager.AllowedRoots()`. Adding a path
+`applyExtraAllowedPathsToRuntime` (`internal/server/handler_slash_parity.go:564`) →
+`tool.SetPersistentExtraAllowedPaths` (`internal/tool/file.go:117`) →
+`tool.PersistentExtraAllowedRoots()` (`internal/tool/file.go:1609`) →
+`PermissionManager.AllowedRoots()`. Temporary path-confinement leases are not on
+this chain: `AllowedRoots()` never sees them, only the tool layer's
+`tool.ExtraAllowedRoots()` does. Adding a path
 there so the **editor** can open a file would also stop the **agent** from
 asking permission for that path — a silent widening of the agent's read/write
 scope. A grant never reaches `internal/agent` or `internal/tool`.
