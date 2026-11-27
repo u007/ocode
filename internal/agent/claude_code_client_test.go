@@ -65,8 +65,8 @@ func TestChatClaudeCodePermissionModes(t *testing.T) {
 		want string
 	}{
 		{"normal auto off stays manual", PermissionModeNormal, false, "manual"},
-		{"normal auto on accepts edits", PermissionModeNormal, true, "acceptEdits"},
-		{"yolo accepts edits", PermissionModeYOLO, false, "acceptEdits"},
+		{"normal auto on uses auto", PermissionModeNormal, true, "auto"},
+		{"yolo bypasses permissions", PermissionModeYOLO, false, "bypassPermissions"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,6 +250,20 @@ func TestChatClaudeCodeRefusesMissingSessionMidConversation(t *testing.T) {
 	}
 }
 
+func TestHasPriorClaudeConversationIgnoresSyntheticTailBlocks(t *testing.T) {
+	fresh := []Message{
+		{Role: "user", Content: "haiku 5.5 missing"},
+		{Role: "user", Content: "[ocode:todo] open items"},
+		{Role: "user", Content: "[ocode:discovery] tools"},
+	}
+	if hasPriorClaudeConversation(fresh) {
+		t.Fatal("a first turn with synthetic tail blocks must not count as a prior conversation")
+	}
+	if !hasPriorClaudeConversation([]Message{{Role: "user", Content: "first"}, {Role: "user", Content: "second"}}) {
+		t.Fatal("two human prompts are a prior conversation")
+	}
+}
+
 func TestChatClaudeCodeRecordsExternalWrites(t *testing.T) {
 	work := t.TempDir()
 	path := fakeClaude(t, strings.Join([]string{
@@ -294,10 +308,10 @@ func TestClaudeCodePermissionModeTable(t *testing.T) {
 	if got, err := claudeCodePermissionMode(PermissionModeNormal, false); err != nil || got != "manual" {
 		t.Fatalf("normal/off = %q, %v", got, err)
 	}
-	if got, err := claudeCodePermissionMode(PermissionModeNormal, true); err != nil || got != "acceptEdits" {
+	if got, err := claudeCodePermissionMode(PermissionModeNormal, true); err != nil || got != "auto" {
 		t.Fatalf("normal/on = %q, %v", got, err)
 	}
-	if got, err := claudeCodePermissionMode(PermissionModeYOLO, false); err != nil || got != "acceptEdits" {
+	if got, err := claudeCodePermissionMode(PermissionModeYOLO, false); err != nil || got != "bypassPermissions" {
 		t.Fatalf("yolo = %q, %v", got, err)
 	}
 	for _, mode := range []PermissionMode{PermissionModeLocked, PermissionModeSandbox} {
@@ -310,5 +324,5 @@ func TestClaudeCodePermissionModeTable(t *testing.T) {
 func Example_claudeCodePermissionMode() {
 	mode, _ := claudeCodePermissionMode(PermissionModeNormal, true)
 	fmt.Println(mode)
-	// Output: acceptEdits
+	// Output: auto
 }

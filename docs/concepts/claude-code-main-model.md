@@ -7,7 +7,7 @@ tags:
   - provider
   - streaming
   - pty
-timestamp: 2026-11-25T00:00:00Z
+timestamp: 2026-11-27T12:12:20Z
 ---
 
 # Claude Code as a main LLM model and agent backend
@@ -24,12 +24,10 @@ Claude Code keeps its own history under the captured session id.
 Pros: typed deltas, token usage, clean cancellation via exec.CommandContext,
 no PTY/websocket terminal plumbing, works in TUI and web identically.
 Cons: Claude Code runs its own tool loop internally; ocode's tools/permissions do
-not apply. Permission mode: `normal` + auto-permission off → Claude `manual`
-with `--permission-prompts none`; `normal` + auto-permission on → `acceptEdits`;
-`yolo` → `acceptEdits`; `locked` and `sandbox` refuse; a nil permission callback
-also refuses. The CLI has no `default` mode; `--permission-prompts none` denies
-anything that would otherwise block on a prompt inside `-p`. `/ban` deny rules are
-a hard Deny, never re-considered by the judge. Session id is persisted in session metadata under
+not apply. Permission mode: `yolo` → `bypassPermissions`; `normal` + auto-permission
+on → `auto`; `normal` + auto-permission off → `manual`; `locked` and `sandbox` refuse;
+a nil permission callback also refuses (details below). `/ban` deny rules are
+not forwarded, so they do not apply. Session id is persisted in session metadata under
 `agent.ClaudeCodeSessionMetadataKey` = `claude_code_session_id`, via
 `internal/session/claude_code_bridge.go` and the TUI/server save paths. The
 field is unexported `claudeSessionID`, guarded by `sessionMu`; it is restored on
@@ -78,7 +76,10 @@ turns via `--resume`. It is persisted in session metadata under
 `agent.ClaudeCodeSessionMetadataKey` (`claude_code_session_id`) through
 `internal/session/claude_code_bridge.go` and the TUI/server save paths, then
 restored on the next turn. `/new` and `/reset-id` clear it. A missing id with
-prior conversation is refused rather than silently dropping history.
+prior conversation is refused rather than silently dropping history. Only human
+prompts count as prior conversation (`hasPriorClaudeConversation` checks
+`isHumanPromptMessage`); synthetic user-role `[ocode:…]` tail blocks do not, so
+a new chat's first turn is not mistaken for a resumed one.
 
 ## Tool and usage reporting
 
@@ -131,12 +132,17 @@ work in terminal mode (shape B).
 ## Permission mode
 
 `chatClaudeCode` refuses to run under `locked` or `sandbox` permission modes and
-refuses when the permission callback is nil. `normal` plus auto-permission off
-maps to Claude `manual` with `--permission-prompts none`; `normal` plus
-auto-permission on maps to `acceptEdits`; `yolo` maps to `acceptEdits`. The CLI
-has no `default` mode, and `--permission-prompts none` denies anything that would
-otherwise block on a prompt inside `-p`. ocode's `/ban` deny rules are NOT
+refuses when the permission callback is nil. `yolo` maps to `bypassPermissions`;
+`normal` plus auto-permission on maps to `auto`, where Claude Code's own classifier
+approves safe edits and commands; `normal` plus auto-permission off maps to
+`manual`. `--permission-prompts none` is passed in every mode, so anything that
+would otherwise need a prompt inside `-p` is denied (there is no approval surface).
+`acceptEdits` is not used: it never approved Bash, so commands were denied in every
+mode. The CLI has no `default` mode. ocode's `/ban` deny rules are NOT
 forwarded to Claude Code; treat claude-code sessions as at least `normal` mode.
+In `yolo` (`bypassPermissions`) Claude Code also skips its own protections: it
+does not prompt for writes to protected paths such as `.git` and `.claude`
+(settings and tool config). Use `yolo` only in trusted projects.
 
 ## System prompt
 

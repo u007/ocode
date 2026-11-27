@@ -32,6 +32,7 @@ var ClaudeCodeModelAliases = []string{
 	"claude-opus-5",
 	"claude-opus-5-5",
 	"claude-haiku-4-5",
+	"claude-haiku-5-5",
 	"claude-fable-5",
 }
 
@@ -382,18 +383,19 @@ func claudeCodeUsage(raw any) *TokenUsage {
 }
 
 // claudeCodePermissionMode maps ocode's permission mode to the CLI's mode.
-// acceptEdits is used only for yolo or normal-with-auto-permission; plain
-// normal stays at manual, and --permission-prompts none denies anything that
-// would otherwise block on a prompt inside -p.
+// yolo lets Claude Code edit and run any command; normal with auto-permission
+// uses the CLI's own auto classifier for edits and commands; plain normal stays
+// manual. --permission-prompts none denies anything that would otherwise block
+// on a prompt inside -p.
 func claudeCodePermissionMode(mode PermissionMode, autoPermission bool) (string, error) {
 	switch mode {
 	case PermissionModeLocked, PermissionModeSandbox:
 		return "", fmt.Errorf("claude-code: refused in %s permission mode", mode)
 	case PermissionModeYOLO:
-		return "acceptEdits", nil
+		return "bypassPermissions", nil
 	case PermissionModeNormal:
 		if autoPermission {
-			return "acceptEdits", nil
+			return "auto", nil
 		}
 		return "manual", nil
 	default:
@@ -401,8 +403,11 @@ func claudeCodePermissionMode(mode PermissionMode, autoPermission bool) (string,
 	}
 }
 
+// hasPriorClaudeConversation reports whether earlier turns exist. Synthetic
+// user-role tail blocks ([ocode:todo], [ocode:discovery], ...) are not human
+// turns: counting them made a brand-new chat look like a resumed one.
 func hasPriorClaudeConversation(messages []Message) bool {
-	userCount := 0
+	humanCount := 0
 	for _, m := range messages {
 		switch m.Role {
 		case "assistant":
@@ -410,11 +415,11 @@ func hasPriorClaudeConversation(messages []Message) bool {
 				return true
 			}
 		case "user":
-			if strings.TrimSpace(m.Content) == "" {
+			if strings.TrimSpace(m.Content) == "" || !isHumanPromptMessage(m) {
 				continue
 			}
-			userCount++
-			if userCount > 1 {
+			humanCount++
+			if humanCount > 1 {
 				return true
 			}
 		}

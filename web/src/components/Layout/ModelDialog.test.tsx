@@ -386,6 +386,16 @@ describe("ModelDialog favorites/recents sections", () => {
       expect(screen.queryByText("Claude Code (Read-Only CLI)")).toBeNull();
       expect(screen.queryByText("claude-code/claude-sonnet-4-6")).toBeNull();
     });
+
+    it("labels the main picker's server-listed Claude Code group without Read-Only", async () => {
+      hoisted.api.listModels.mockResolvedValueOnce([
+        { name: "claude-code/claude-haiku-5-5", model: "claude-haiku-5-5", provider: "claude-code", active: false },
+      ]);
+      render(<ModelDialog open onClose={vi.fn()} purpose="main" />);
+
+      expect(await screen.findByText("Claude Code (external harness)")).toBeInTheDocument();
+      expect(screen.queryByText("Claude Code (Read-Only CLI)")).toBeNull();
+    });
   });
 
   describe("main model scoping (per-chat-session model)", () => {

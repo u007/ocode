@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useDeferred
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
-import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
+import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_MAIN_SECTION_TITLE, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import { reportActionError } from "../../lib/actionErrors";
 import { finishUiTimingAfterPaint, markUiTiming } from "../../lib/debug/uiTiming";
 import { setCompactConfig, summaryModelPatch } from "../../lib/compactConfig";
@@ -975,7 +975,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           {Object.entries(cappedProviders.groups).map(([provider, providerModels]) => (
             <div key={provider} className="mb-4">
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                {provider === CLAUDE_CODE_PROVIDER ? CLAUDE_CODE_SECTION_TITLE : provider}
+                {provider === CLAUDE_CODE_PROVIDER
+                  ? purpose === "advisor" ? CLAUDE_CODE_SECTION_TITLE : CLAUDE_CODE_MAIN_SECTION_TITLE
+                  : provider}
               </div>
               {providerModels.map((m) =>
                 // The Claude Code rows show the full "claude-code/<model>" id,

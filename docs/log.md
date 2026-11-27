@@ -2,6 +2,10 @@
 
 ## 2026-11-27
 
+* **Update**: Replaced the /ban Cons sentence with 'not forwarded, so they do not apply'; noted that yolo (bypassPermissions) also skips Claude Code's prompts for protected paths such as .git and .claude, so use it only in trusted projects. ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
+* **Update**: Permission mode mapping corrected: yolo now maps to bypassPermissions and normal with auto-permission to auto (was acceptEdits for both), since acceptEdits never approved Bash; manual and refusals unchanged. ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
+* **Update**: Documented that hasPriorClaudeConversation counts only human prompts (isHumanPromptMessage), so synthetic [ocode:*] tail blocks no longer make a new chat's first turn look resumed ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
+* **Update**: Added claude-haiku-5-5 to the advisor alias list; purpose-aware Claude Code section title (advisor Read-Only CLI vs main external harness); advisor run restricted to read-only --allowedTools; list-sync reference corrected to ClaudeCodeModelAliases ([concepts/advisor-claude-code-backend.md](/concepts/advisor-claude-code-backend.md))
 * **Update**: Model-step cap raised 6->10; final-step and failure entries updated ([superpowers/specs/2026-11-25-permission-command-explainer-design.md](/superpowers/specs/2026-11-25-permission-command-explainer-design.md))
 * **Update**: Model-step cap raised 6->10; anchors re-derived; final-step answer nudge noted ([concepts/ask-dialog-tool-call-digest.md](/concepts/ask-dialog-tool-call-digest.md))
 * **Update**: Correct Explain digest anchor :283 to :256 (DetectSecrets call site) ([superpowers/specs/2026-11-24-pii-redaction-design.md](/superpowers/specs/2026-11-24-pii-redaction-design.md))

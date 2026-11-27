@@ -36,6 +36,10 @@ export const CLAUDE_CODE_PROVIDER = "claude-code";
  *  TUI's "› Claude Code (Read-Only CLI)" section title (internal/tui/picker.go). */
 export const CLAUDE_CODE_SECTION_TITLE = "Claude Code (Read-Only CLI)";
 
+/** Header for the Claude Code group in the main-model picker. The main path can
+ *  edit files, so it must not say "Read-Only". Mirrors the TUI's main section. */
+export const CLAUDE_CODE_MAIN_SECTION_TITLE = "Claude Code (external harness)";
+
 /**
  * Claude model aliases offered under the Claude Code CLI section. MUST stay in
  * sync with the `claudeCodeModels` list in `prependClaudeCodeSection`
@@ -50,6 +54,7 @@ export const CLAUDE_CODE_ADVISOR_MODELS: readonly string[] = [
   "claude-opus-5",
   "claude-opus-5-5",
   "claude-haiku-4-5",
+  "claude-haiku-5-5",
   "claude-fable-5",
 ];
 

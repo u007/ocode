@@ -13,7 +13,7 @@ tags:
   - recent-models
   - favorites
   - session-scoping
-timestamp: 2026-11-24T23:31:33Z
+timestamp: 2026-11-27T11:54:36Z
 resource: "web/src/components/Layout/ModelDialog.tsx; internal/tui/picker.go; web/src/components/Layout/modelSelection.ts; internal/server/handler_config.go; internal/agent/advisor_tool.go"
 ---
 ## Summary
@@ -24,7 +24,7 @@ This is a deliberate web/TUI difference: the TUI (`internal/tui/picker.go`, `ope
 
 ## Picker sections and controls
 
-`CLAUDE_CODE_SECTION_TITLE` and `CLAUDE_CODE_ADVISOR_MODELS` (`web/src/components/Layout/modelSelection.ts`) define the section label and the model list. The models are **synthetic** `ModelInfo` rows prepended only for the advisor purpose — they don't appear in the global model catalog. `partitionModelSections` removes recents/favorites from provider groups, so a model shown in a priority section is not repeated below; empty priority sections are omitted.
+`CLAUDE_CODE_SECTION_TITLE` (`Claude Code (Read-Only CLI)`) and `CLAUDE_CODE_ADVISOR_MODELS` (`web/src/components/Layout/modelSelection.ts`) define the advisor section's label and model list. The label is purpose-aware: the main-model picker uses `CLAUDE_CODE_MAIN_SECTION_TITLE` (`Claude Code (external harness)`) instead, because the main path can write files (see `concepts/claude-code-main-model.md`). The models are **synthetic** `ModelInfo` rows prepended only for the advisor purpose — they don't appear in the global model catalog. `partitionModelSections` removes recents/favorites from provider groups, so a model shown in a priority section is not repeated below; empty priority sections are omitted.
 
 Advisor has **no favorite-star toggles or recent-removal controls**. `supportsFavoriteToggle` is true only for `main` and `permission`; the advisor can display and select shared favorites, but only those two purposes own the star control. Likewise, `canRemove` requires `purpose !== "advisor"`, so an advisor recent row has neither the Radix `Remove from recently used` menu nor a native context menu.
 
@@ -34,7 +34,7 @@ Per explicit user decision, advisor selections show the shared Recently Used/Fav
 
 The selection payload and session scoping are unchanged: a real session still writes that chat's advisor pin through `api.setAdvisorFull(..., host, realSessionId)`, while a draft/no-session pick updates the default for new chats. Sharing history in the picker does not make advisor picks contribute to that history.
 
-**Current model list (keep in sync with TUI `CLAUDE_CODE_ADVISOR_MODELS`):**
+**Current model list (keep in sync with Go `ClaudeCodeModelAliases` in `internal/agent/claude_code_client.go` and web `CLAUDE_CODE_ADVISOR_MODELS`):**
 - `claude-sonnet-4-6`
 - `claude-sonnet-5`
 - `claude-sonnet-5-5`
@@ -43,6 +43,7 @@ The selection payload and session scoping are unchanged: a real session still wr
 - `claude-opus-5`
 - `claude-opus-5-5`
 - `claude-haiku-4-5`
+- `claude-haiku-5-5`
 - `claude-fable-5`
 
 The sentinel provider is `"claude-code"` (`CLAUDE_CODE_PROVIDER`). When the user picks any model in this section, the picker records `provider: "claude-code"`.
@@ -58,6 +59,8 @@ The sentinel provider is `"claude-code"` (`CLAUDE_CODE_PROVIDER`). When the user
 ## Backend execution
 
 When `claude_code=true`, the advisor executes via `executeClaudeCodeAdvisor` (`internal/agent/advisor_tool.go`), which uses `claudeCLIPath()` + `withLoginShellPath()` to resolve and pass the user's login-shell `PATH` (see `gotchas/desktop-subprocess-path-trap.md`). TUI and shell-launched server paths use bare `"claude"` with the existing process PATH.
+
+The advisor run passes `--allowedTools Read,Glob,Grep,LS,WebFetch,WebSearch`, so no write tool is available to it. That is why this section is labelled read-only.
 
 ## Tests
 
