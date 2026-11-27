@@ -7,7 +7,10 @@ const mocks = vi.hoisted(() => ({ gitWorktrees: vi.fn() }));
 
 vi.mock("@/api/client", () => ({ api: mocks }));
 
-function worktree(path: string, overrides: Partial<GitWorktree> = {}): GitWorktree {
+function worktree(
+  path: string,
+  overrides: Partial<GitWorktree> = {},
+): GitWorktree {
   return {
     path,
     head: "aaaaaaa1111",
@@ -95,8 +98,10 @@ describe("useProjectWorktrees", () => {
     expect(mocks.gitWorktrees).toHaveBeenCalledTimes(1);
 
     act(() => cached.result.current.reload());
-    await waitFor(() => expect(mocks.gitWorktrees).toHaveBeenCalledTimes(2));
-    expect(cached.result.current.worktrees).toHaveLength(1);
+    await waitFor(() =>
+      expect(cached.result.current.worktrees).toHaveLength(1),
+    );
+    expect(mocks.gitWorktrees).toHaveBeenCalledTimes(2);
   });
 
   it("drops a stale response after the project changes", async () => {

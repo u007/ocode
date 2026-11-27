@@ -24,7 +24,9 @@ const bus = vi.hoisted(() => {
 });
 
 beforeAll(() => {
-  (window as unknown as { matchMedia: unknown }).matchMedia = ((media: string) => ({
+  (window as unknown as { matchMedia: unknown }).matchMedia = ((
+    media: string,
+  ) => ({
     matches: false,
     media,
     onchange: null,
@@ -40,7 +42,8 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   }
-  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver =
+    ResizeObserverStub;
 });
 
 vi.mock("./api/client", () => {
@@ -54,14 +57,23 @@ vi.mock("./api/client", () => {
     listGroups: async () => [],
     getSpending: async () => ({ spending_usd: 0 }),
     listModels: async () => [
-      { name: "anthropic/claude-a", model: "claude-a", provider: "anthropic", active: false },
+      {
+        name: "anthropic/claude-a",
+        model: "claude-a",
+        provider: "anthropic",
+        active: false,
+      },
     ],
     getConfigModel: async () => ({ model: "" }),
     getSmallModel: async () => ({ model: "" }),
     getAdvisor: async () => ({ model: "" }),
     getAdvisorFull: async () => ({ claude_code: false }),
     getSessionStatus: async () => ({}),
-    getSessionState: async () => ({ bootstrap_stage: "", turn_active: false, last_seq: 0 }),
+    getSessionState: async () => ({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 0,
+    }),
     getSession: async () => ({ messages: [], total: 0, title: "" }),
     listSessions: async () => ({ sessions: [] }),
     listCustomCommands: async () => [],
@@ -110,7 +122,9 @@ vi.mock("./lib/eventBus", () => ({
     start: () => {},
     stop: () => {},
     setProjects: () => {},
-    onHostsChange: () => () => {}, currentHosts: () => [], setHosts: () => {},
+    onHostsChange: () => () => {},
+    currentHosts: () => [],
+    setHosts: () => {},
   },
 }));
 
@@ -147,9 +161,11 @@ import { __resetLastAppliedSeqForTests } from "./lib/sessionEvents";
 // The mocked eventBus (see vi.mock above): emit() drives the real router.
 // Cast: the real EventBus type has no public emit — the mock adds it.
 import { eventBus } from "./lib/eventBus";
-const emitEnvelope = (eventBus as unknown as {
-  emit: (event: string, env: BusEnvelope) => void;
-}).emit;
+const emitEnvelope = (
+  eventBus as unknown as {
+    emit: (event: string, env: BusEnvelope) => void;
+  }
+).emit;
 
 function renderApp() {
   return render(
@@ -169,22 +185,32 @@ describe("dialogs stay open while chat is streaming", () => {
   it("keeps the ModelDialog open across a full streaming burst", async () => {
     renderApp();
 
-    // Open a chat session tab. The temp tab id is `new-${Date.now()}` —
-    // pin Date.now for exactly that call so we know the id for the rekey.
+    // Open a chat session tab. The temp tab id is `new-${Date.now()}-${crypto.randomUUID()}` —
+    // pin both for exactly that call so we know the id for the rekey.
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
-    fireEvent.click(await screen.findByRole("button", { name: /new chat session/i }));
+    const uuidSpy = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValue("00000000-0000-4000-8000-000000000000");
+    fireEvent.click(
+      await screen.findByRole("button", { name: /new chat session/i }),
+    );
     nowSpy.mockRestore();
-    const tempId = "new-1700000000000";
+    uuidSpy.mockRestore();
+    const tempId = "new-1700000000000-00000000-0000-4000-8000-000000000000";
     await screen.findByRole("button", { name: /toggle browser panel/i });
 
     // Open the real model dialog via the real cowork sidebar's Model row.
     // (The settings tab also has a "Model Defaults & Recap" nav button — match
     // the exact "Model" label inside a button instead of a text prefix.)
-    const modelRow = await screen.findAllByRole("button").then((buttons) =>
-      buttons.find((b) =>
-        Array.from(b.querySelectorAll("div, span")).some((el) => el.textContent === "Model"),
-      ),
-    );
+    const modelRow = await screen
+      .findAllByRole("button")
+      .then((buttons) =>
+        buttons.find((b) =>
+          Array.from(b.querySelectorAll("div, span")).some(
+            (el) => el.textContent === "Model",
+          ),
+        ),
+      );
     expect(modelRow).toBeTruthy();
     fireEvent.click(modelRow!);
     await screen.findByRole("dialog");
@@ -196,7 +222,10 @@ describe("dialogs stay open while chat is streaming", () => {
     // listModels without a host and fail here. The open path is the cached
     // list (live refresh is the dialog's explicit Refresh button).
     await waitFor(() =>
-      expect(api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"),
+      expect(api.listModels).toHaveBeenCalledWith(
+        { configured: true },
+        "devbox",
+      ),
     );
 
     // Streaming burst through the real router. Start with session_started so
@@ -208,7 +237,10 @@ describe("dialogs stay open while chat is streaming", () => {
       data,
       session_id: sessionId,
     });
-    emitEnvelope("session_started", env("session_started", 1, { session_id: sessionId, request_id: tempId }));
+    emitEnvelope(
+      "session_started",
+      env("session_started", 1, { session_id: sessionId, request_id: tempId }),
+    );
     emitEnvelope("user_message", env("user_message", 2, { content: "hello" }));
     emitEnvelope("turn_started", env("turn_started", 3, {}));
     for (let i = 0; i < 30; i++) {
