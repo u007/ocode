@@ -293,6 +293,19 @@ describe("registerUrlLinkProvider", () => {
     expect(linksAt(m, 0)![0].text).toBe("https://x.io/y");
   });
 
+  it("does not absorb a space trimmed at a wrap boundary", () => {
+    // Row 0 ends with a printed space; translateToString(true) trims it, so a
+    // plain join would turn "road-bearing (102ms)" into "road-bearing(102ms)".
+    const m = makeMockTerminal(
+      ["200 POST https://localhost:3510/api/admin/site-facing-playground/road-bearing ", "(102ms)"],
+      [false, true],
+    );
+    registerUrlLinkProvider(m.term, vi.fn());
+    expect(linksAt(m, 0)![0].text).toBe(
+      "https://localhost:3510/api/admin/site-facing-playground/road-bearing",
+    );
+  });
+
   it("joins a url wrapped across rows into one link", () => {
     const m = makeMockTerminal(["see https://exa", "mple.com/long done"], [false, true]);
     registerUrlLinkProvider(m.term, vi.fn());
@@ -300,6 +313,17 @@ describe("registerUrlLinkProvider", () => {
     expect(link.text).toBe("https://example.com/long");
     expect(link.range.start).toEqual({ x: 4, y: 0 });
     expect(link.range.end).toEqual({ x: 12, y: 1 });
+  });
+
+  it("keeps every trailing space of a wrapped row so the range starts on the url's first cell", () => {
+    // Row 0 ends with three printed spaces before the soft wrap. translateToString(true) trims all
+    // three; the old join added back only one, so the mapped start landed on the wrong cell.
+    const m = makeMockTerminal(["see   ", "https://x.io"], [false, true]);
+    registerUrlLinkProvider(m.term, vi.fn());
+    const link = linksAt(m, 0)![0];
+    expect(link.text).toBe("https://x.io");
+    expect(link.range.start).toEqual({ x: 0, y: 1 });
+    expect(link.range.end).toEqual({ x: 11, y: 1 });
   });
 
   it("finds several urls on one row and none when absent", () => {

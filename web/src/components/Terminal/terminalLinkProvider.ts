@@ -10,6 +10,15 @@ type BufferLine = NonNullable<ReturnType<Terminal["buffer"]["active"]["getLine"]
 // ghostty-web's buffer API: rows are 0-based absolute, getCell(x) returns the cell (or
 // undefined past the line) instead of filling one in.
 
+// translateToString(true) trims every trailing blank of a row, but mapStrIdx still counts each of
+// those printed cells. Re-append the whole trimmed tail (not just one space) so the joined string
+// has one unit per cell and string offsets land on the right cell. Keeping the blank also stops a
+// printed space at a wrap boundary from gluing the next row onto a URL (e.g. "url (102ms)").
+function trimmedTail(line: BufferLine): string {
+  const full = line.translateToString(false);
+  return full.slice(line.translateToString(true).length);
+}
+
 function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[], number] {
   let line: BufferLine | undefined;
   let topIdx = lineIndex;
@@ -19,7 +28,8 @@ function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[
   const lines: string[] = [];
 
   if ((line = terminal.buffer.active.getLine(lineIndex))) {
-    const currentContent = line.translateToString(true);
+    const currentLine = line;
+    const currentContent = currentLine.translateToString(true);
 
     // expand top, stop on whitespaces or length > 2048
     if (line.isWrapped && currentContent[0] !== " ") {
@@ -27,7 +37,7 @@ function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[
       while ((line = terminal.buffer.active.getLine(--topIdx)) && length < 2048) {
         content = line.translateToString(true);
         length += content.length;
-        lines.push(content);
+        lines.push(content + trimmedTail(line));
         if (!line.isWrapped || content.indexOf(" ") !== -1) {
           break;
         }
@@ -36,14 +46,14 @@ function getWindowedLineStrings(lineIndex: number, terminal: Terminal): [string[
     }
 
     // append current line
-    lines.push(currentContent);
+    lines.push(currentContent + trimmedTail(currentLine));
 
     // expand bottom, stop on whitespaces or length > 2048
     length = 0;
     while ((line = terminal.buffer.active.getLine(++bottomIdx)) && line.isWrapped && length < 2048) {
       content = line.translateToString(true);
       length += content.length;
-      lines.push(content);
+      lines.push(content + trimmedTail(line));
       if (content.indexOf(" ") !== -1) {
         break;
       }
