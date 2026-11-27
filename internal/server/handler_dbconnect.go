@@ -585,7 +585,7 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 					"a tunnel with environment references needs an env file and an allowed project")
 				return
 			}
-			lookup, envErr := dbEnvLookup(root, envFile)
+			lookup, envErr := dbTunnelEnvLookup(root, envFile)
 			if _, err := dbResolveTunnel(req.Tunnel, lookup, envErr); err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return
@@ -873,11 +873,22 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 			// not unlocking the sealed set.
 			continue
 		}
+		if dbTunnelHasEnv(c.Tunnel) && strings.TrimSpace(c.EnvFile) == "" {
+			// A ${VAR} tunnel field has no env file to read from. Refuse this
+			// connection rather than resolving it from the process environment
+			// (a repo-shipped db.json or an older binary can reach unlock this
+			// way). Per connection, like the other failures below.
+			log.Printf("dbconnect: unlock %q: %s", c.Name, dbTunnelNeedsEnvFileMsg)
+			failures = append(failures, dbUnlockFailure{Name: c.Name, Error: dbTunnelNeedsEnvFileMsg})
+			staleNames = append(staleNames, c.Name)
+			continue
+		}
 		// The URL is resolved (and a sealed one opened) BEFORE the tunnel
 		// password, so a wrong master password still aborts the whole unlock.
 		var connURL string
-		// One lookup serves the URL and the tunnel of this connection, so
-		// both read the same env file with the same precedence.
+		// The URL keeps the env lookup (process env first unless a file is
+		// selected). The tunnel gets its own lookup built from the named file
+		// only, so a tunnel reference can never read the process environment.
 		lookup, envErr := dbEnvLookup(projectRoot, c.EnvFile)
 		if c.EnvFile != "" {
 			// A selected file that vanished must fail this connection even
@@ -936,7 +947,8 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 				staleNames = append(staleNames, c.Name)
 				continue
 			}
-			resolvedTunnel, terr := dbResolveTunnel(c.Tunnel, lookup, envErr)
+			tunnelLookup, tunnelEnvErr := dbTunnelEnvLookup(projectRoot, c.EnvFile)
+			resolvedTunnel, terr := dbResolveTunnel(c.Tunnel, tunnelLookup, tunnelEnvErr)
 			if terr != nil {
 				log.Printf("dbconnect: unlock %q: tunnel env: %v", c.Name, terr)
 				failures = append(failures, dbUnlockFailure{Name: c.Name, Error: terr.Error()})

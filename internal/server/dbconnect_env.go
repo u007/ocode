@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -99,6 +100,28 @@ func dbEnvLookup(projectRoot, envFile string) (func(string) (string, bool), func
 		load()
 		return loadError
 	}
+}
+
+// dbTunnelNeedsEnvFileMsg is shown when a tunnel uses ${VAR} but the connection
+// names no env file. It never reaches the process environment instead.
+const dbTunnelNeedsEnvFileMsg = "SSH tunnel fields that use ${VAR} need an env file; select one for this connection"
+
+// dbTunnelEnvLookup builds the lookup for a tunnel's ${VAR} references.
+//
+// Tunnel references read the named env file ONLY. The process environment is
+// never consulted: a tunnel host of "${SOME_SECRET}" would otherwise send a
+// server-side secret out as an SSH hostname. The URL template keeps
+// dbEnvLookup's precedence; this helper does not change it.
+//
+// The named-file branch IS dbEnvLookup's (it already never falls back to the
+// process environment when a file is selected), so the file is read by the same
+// code. An empty envFile resolves nothing and reports dbTunnelNeedsEnvFileMsg.
+func dbTunnelEnvLookup(projectRoot, envFile string) (func(string) (string, bool), func() error) {
+	if strings.TrimSpace(envFile) == "" {
+		return func(string) (string, bool) { return "", false },
+			func() error { return errors.New(dbTunnelNeedsEnvFileMsg) }
+	}
+	return dbEnvLookup(projectRoot, envFile)
 }
 
 // dbResolveTemplate resolves a connection's environment template into a
