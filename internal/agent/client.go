@@ -295,10 +295,10 @@ type GenericClient struct {
 	// PermissionModeFn, when set, reports the session's current permission
 	// mode. Used by chatClaudeCode to refuse locked/sandbox sessions.
 	PermissionModeFn func() PermissionMode
-	// AutoPermissionEnabledFn reports whether ocode's auto-permission judge is
-	// active. chatClaudeCode uses it to decide between Claude Code's default
-	// mode and acceptEdits for a normal ocode session.
-	AutoPermissionEnabledFn func() bool
+	// ClaudeCodeApproveFn decides each tool call the Claude Code CLI asks about
+	// through the approval bridge. chatClaudeCode requires it in normal mode;
+	// it is bound per session by Agent.bindClaudeCodeClientHooks.
+	ClaudeCodeApproveFn ClaudeCodeApproveFunc
 	// ProjectHost is the saved remote host this client's project lives on
 	// (empty for local projects). chatClaudeCode refuses a remote project
 	// because WorkDir names a path on the host, not this machine.

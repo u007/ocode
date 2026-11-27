@@ -140,6 +140,18 @@ func (h *Handler) HandleDismissQuestion(w http.ResponseWriter, r *http.Request) 
 	slog.Info("question dismiss", "session", req.SessionID, "request_id", req.RequestID,
 		"pulse", isPulseOrigin(r), "remote", r.RemoteAddr)
 
+	// A question parked by a live agent turn (the Claude Code bridge) is
+	// answered here WITHOUT as.mu: the turn holds that lock while it waits.
+	owner, parkedAs, parked, stale := h.parkedQuestionFor(req.SessionID, req.RequestID)
+	if parked != nil {
+		h.resolveParkedQuestion(w, owner, parkedAs, req.RequestID, childQuestionOutcome{dismissed: true})
+		return
+	}
+	if stale {
+		writeError(w, http.StatusNotFound, "no pending question found for request_id")
+		return
+	}
+
 	if rc := h.RCBridge(); rc != nil {
 		// The TUI owns the agent and its question dialog; forward the dismissal
 		// so it clears its own dialog and rewrites its transcript. No
@@ -236,18 +248,24 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A question parked by a live agent turn (the Claude Code bridge) is
+	// answered here WITHOUT as.mu: the turn holds that lock while it waits, so
+	// the fall-through below would pin this request for the whole park.
+	owner, parkedAs, parked, stale := h.parkedQuestionFor(req.SessionID, req.RequestID)
+	if parked != nil {
+		h.resolveParkedQuestion(w, owner, parkedAs, req.RequestID, childQuestionOutcome{answers: questionAnswerSetsFromPayload(req.Answers)})
+		return
+	}
+	if stale {
+		writeError(w, http.StatusNotFound, "no pending question found for request_id")
+		return
+	}
+
 	if rc := h.RCBridge(); rc != nil {
 		// TUI session bridged: forward the answers to the TUI's RC bridge, which
 		// owns the agent and its question dialog. Preserve every selected answer
 		// (multi-select questions) instead of collapsing to the first.
-		answers := make([]tool.QuestionAnswerSet, 0, len(req.Answers))
-		for _, a := range req.Answers {
-			set := tool.QuestionAnswerSet{Header: a.Header, Question: a.Question}
-			for _, v := range a.Answers {
-				set.Answers = append(set.Answers, tool.QuestionAnswer{Label: v.Label, Text: v.Text, Custom: v.Custom})
-			}
-			answers = append(answers, set)
-		}
+		answers := questionAnswerSetsFromPayload(req.Answers)
 		if !rc.SendResolution(RCResolution{RequestID: req.RequestID, Answers: answers}) {
 			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
 			return

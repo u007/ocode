@@ -125,7 +125,8 @@ type PendingAsks struct {
 //
 // TWO SOURCES, because they are visible under OPPOSITE lock conditions:
 //
-//   - Sub-agent asks come from as.childAsks, which has its own mutex and NEVER
+//   - Sub-agent asks come from as.childAsks, and parked agent questions from
+//     as.childQuestions. Both have their own mutex and NEVER
 //     takes as.mu. They must be read unconditionally: runTurn holds as.mu for the
 //     whole turn, and a synchronous sub-agent dispatch parks INSIDE that turn, so
 //     a locked-out read would hide the ask for exactly as long as the ask exists.
@@ -147,29 +148,33 @@ func (h *Handler) livePendingAsks(id string) *PendingAsks {
 	// Registry first, and without as.mu — this is the only source that is
 	// readable while the turn lock is held.
 	childEvents := as.childAsks.list()
+	// Parked agent questions (the Claude Code AskUserQuestion bridge) live in
+	// as.childQuestions for the same reason: readable while the turn holds as.mu.
+	childQuestions := as.childQuestions.list()
 	if !as.mu.TryLock() {
-		if len(childEvents) == 0 {
+		if len(childEvents) == 0 && len(childQuestions) == 0 {
 			return nil
 		}
-		return &PendingAsks{Permissions: childEvents}
+		return &PendingAsks{Permissions: childEvents, Questions: childQuestions}
 	}
 	defer as.mu.Unlock()
 
 	msgs := pendingAsksFromMessages(as.messages)
-	if msgs == nil && len(childEvents) == 0 {
+	if msgs == nil && len(childEvents) == 0 && len(childQuestions) == 0 {
 		return nil
 	}
 	if msgs == nil {
-		return &PendingAsks{Permissions: childEvents}
+		return &PendingAsks{Permissions: childEvents, Questions: childQuestions}
 	}
-	if len(childEvents) == 0 {
+	if len(childEvents) == 0 && len(childQuestions) == 0 {
 		return msgs
 	}
 	// Merge, main agent first: that is the order the transcript scan already
 	// established and the newest ask is what the client shows. Dedup is
-	// unnecessary — a main-agent ask lives in the transcript and a sub-agent ask
-	// only in the registry, never both.
+	// unnecessary — a main-agent ask lives in the transcript and a parked ask
+	// only in a registry, never both.
 	msgs.Permissions = append(msgs.Permissions, childEvents...)
+	msgs.Questions = append(msgs.Questions, childQuestions...)
 	return msgs
 }
 

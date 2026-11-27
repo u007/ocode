@@ -2,6 +2,7 @@
 
 ## 2026-11-27
 
+* **Update**: Permission mapping rewritten: yolo to bypassPermissions with no bridge, normal to manual with the mcp__ocode__approve approval bridge (per-run loopback MCP server, 0600 config, 1200000 ms tool timeout); documented tool decisions, AskUserQuestion routing to the question judge or host dialog, parked-question hosts, is_error surfacing, subscription-login env stripping, live test, and known gaps ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
 * **Update**: Replaced the /ban Cons sentence with 'not forwarded, so they do not apply'; noted that yolo (bypassPermissions) also skips Claude Code's prompts for protected paths such as .git and .claude, so use it only in trusted projects. ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
 * **Update**: Permission mode mapping corrected: yolo now maps to bypassPermissions and normal with auto-permission to auto (was acceptEdits for both), since acceptEdits never approved Bash; manual and refusals unchanged. ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))
 * **Update**: Documented that hasPriorClaudeConversation counts only human prompts (isHumanPromptMessage), so synthetic [ocode:*] tail blocks no longer make a new chat's first turn look resumed ([concepts/claude-code-main-model.md](/concepts/claude-code-main-model.md))

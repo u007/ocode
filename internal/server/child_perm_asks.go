@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -295,58 +296,101 @@ func newChildPermRequestID() string {
 // shutdownTransient.
 func (h *Handler) newServerSubAgentAsker(sessionID string, as *agentSession) func(agent.PermissionRequest) agent.PermissionResponse {
 	return func(req agent.PermissionRequest) agent.PermissionResponse {
-		// Capture the registry once: a nil registry makes add fail, and the
-		// timeout read below must not dereference it.
-		reg := as.childAsks
-		id := newChildPermRequestID()
-		// Buffered(1): the delivery must never block. The TUI does the same, and
-		// an unbuffered channel deadlocks whenever the answer arrives after this
-		// goroutine gave up on the park (timeout/cancel already returned).
-		respCh := make(chan agent.PermissionResponse, 1)
-		ask := &childPermAsk{
-			req:    req,
-			event:  newPermissionEvent(id, req),
-			respCh: respCh,
-		}
-		if !reg.add(id, ask) {
-			// No registry (or a duplicate id): deny rather than park, so the
-			// child is never left waiting on a channel nobody will answer.
-			log.Printf("serve: sub-agent permission ask not registrable (session=%s tool=%s); denying", sessionID, req.ToolName)
-			return agent.PermissionResponse{Level: agent.PermissionDeny}
-		}
+		return h.parkPermissionAsk(context.Background(), sessionID, as, req)
+	}
+}
 
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessionID,
-			Event:     "permission",
-			Data:      ask.event,
-		})
+// newServerBridgePermAsker is the ctx-aware twin of newServerSubAgentAsker for
+// the claude-code approval bridge (agent.SetBridgePermAsker). The bridge's ctx
+// ends when the Claude Code CLI request ends (CLI crash, its own timeout, or run
+// teardown), so the parked dialog is removed the moment nobody can use the
+// answer. Everything else (registration, the permission frame, the timeout and
+// the parent-stop arm) is shared with the sub-agent asker.
+func (h *Handler) newServerBridgePermAsker(sessionID string, as *agentSession) agent.BridgePermAsker {
+	return func(ctx context.Context, req agent.PermissionRequest) agent.PermissionResponse {
+		return h.parkPermissionAsk(ctx, sessionID, as, req)
+	}
+}
 
-		// The parent's CURRENT stop channel, read per ask: Cancel closes it and
-		// ResetCancellation/RearmMaintenance replace it, so capturing it once at
-		// install time would watch a channel that is no longer the live one.
-		// Watching it covers Stop AND idle eviction AND a rebuild that shuts the
-		// old agent down (Agent.Shutdown calls Cancel).
-		var parentStop <-chan struct{}
-		if as.agent != nil {
-			parentStop = as.agent.StopCh()
-		}
-		timeout := reg.timeout
-		if timeout <= 0 {
-			timeout = childPermAskTimeout
-		}
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
+// parkPermissionAsk is the shared permission park behind both server askers. It
+// is the server's answer to a blocking permission ask raised from inside a turn:
+// it registers the ask, surfaces it over SSE, and blocks until one of four things
+// happens.
+//
+// The flow, and why each step is where it is:
+//
+//  1. register {request, respCh} — BEFORE the broadcast, so a resolve that
+//     races the frame's arrival already finds the entry.
+//  2. emit the `permission` SSE frame. Nothing else emits one for a child: the
+//     server never wires Agent.OnSubAgentMessage, and a child ask never reaches
+//     the parent's OnMessage mirror (see attachRunTranscript in subagent.go), so
+//     this is the only thing that can surface the ask at all.
+//  3. block on the answer, the parent's stop channel, the caller's ctx, or the
+//     park timeout. Every non-answer arm auto-denies through autoDenyChildPerm.
+//
+// Blocking is the point: the caller's goroutine is the one that needs the answer,
+// so it delivers it directly with no re-Step protocol that would have to survive
+// shutdownTransient.
+func (h *Handler) parkPermissionAsk(ctx context.Context, sessionID string, as *agentSession, req agent.PermissionRequest) agent.PermissionResponse {
+	// A caller whose ctx is already gone must not surface a dialog nobody can
+	// answer usefully.
+	if ctx.Err() != nil {
+		return agent.PermissionResponse{Level: agent.PermissionDeny}
+	}
+	// Capture the registry once: a nil registry makes add fail, and the
+	// timeout read below must not dereference it.
+	reg := as.childAsks
+	id := newChildPermRequestID()
+	// Buffered(1): the delivery must never block. The TUI does the same, and
+	// an unbuffered channel deadlocks whenever the answer arrives after this
+	// goroutine gave up on the park (timeout/cancel already returned).
+	respCh := make(chan agent.PermissionResponse, 1)
+	ask := &childPermAsk{
+		req:    req,
+		event:  newPermissionEvent(id, req),
+		respCh: respCh,
+	}
+	if !reg.add(id, ask) {
+		// No registry (or a duplicate id): deny rather than park, so the
+		// child is never left waiting on a channel nobody will answer.
+		log.Printf("serve: sub-agent permission ask not registrable (session=%s tool=%s); denying", sessionID, req.ToolName)
+		return agent.PermissionResponse{Level: agent.PermissionDeny}
+	}
 
-		select {
-		case resp := <-respCh:
-			return resp
-		case <-parentStop:
-			h.autoDenyChildPerm(sessionID, id, "parent session cancelled")
-			return agent.PermissionResponse{Level: agent.PermissionDeny}
-		case <-timer.C:
-			h.autoDenyChildPerm(sessionID, id, "no answer within "+timeout.String())
-			return agent.PermissionResponse{Level: agent.PermissionDeny}
-		}
+	h.broadcastEvent(SSEEvent{
+		SessionID: sessionID,
+		Event:     "permission",
+		Data:      ask.event,
+	})
+
+	// The parent's CURRENT stop channel, read per ask: Cancel closes it and
+	// ResetCancellation/RearmMaintenance replace it, so capturing it once at
+	// install time would watch a channel that is no longer the live one.
+	// Watching it covers Stop AND idle eviction AND a rebuild that shuts the
+	// old agent down (Agent.Shutdown calls Cancel).
+	var parentStop <-chan struct{}
+	if as.agent != nil {
+		parentStop = as.agent.StopCh()
+	}
+	timeout := reg.timeout
+	if timeout <= 0 {
+		timeout = childPermAskTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case resp := <-respCh:
+		return resp
+	case <-parentStop:
+		h.autoDenyChildPerm(sessionID, id, "parent session cancelled")
+		return agent.PermissionResponse{Level: agent.PermissionDeny}
+	case <-ctx.Done():
+		h.autoDenyChildPerm(sessionID, id, "request context ended")
+		return agent.PermissionResponse{Level: agent.PermissionDeny}
+	case <-timer.C:
+		h.autoDenyChildPerm(sessionID, id, "no answer within "+timeout.String())
+		return agent.PermissionResponse{Level: agent.PermissionDeny}
 	}
 }
 

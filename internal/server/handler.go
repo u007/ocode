@@ -750,6 +750,10 @@ type agentSession struct {
 	// reported to — or answered by — an HTTP caller. nil is a valid empty
 	// registry (see childPermAsks).
 	childAsks *childPermAsks
+	// childQuestions is the registry of agent questions parked on this session
+	// (the Claude Code AskUserQuestion bridge). Same locking contract as
+	// childAsks: its own mutex, never as.mu. nil is a valid empty registry.
+	childQuestions *childQuestionAsks
 	// spentMicros is this session's accumulated LLM spend in USD micros
 	// (1e-6 USD), summed from each turn's Step messages' Spend plus side-path
 	// calls (advisor/compact) via OnSideUsage. Atomic: written by the turn
@@ -954,6 +958,7 @@ func NewHandler() *Handler {
 			// watches — but it does so asynchronously behind a bounded wait, and
 			// the asker's own auto-deny is what guarantees the registry empties.
 			as.childAsks.denyAll()
+			as.childQuestions.denyAll()
 			if as.agent != nil {
 				as.agent.Shutdown()
 			}

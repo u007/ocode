@@ -781,7 +781,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if h.RCBridge() == nil {
 		h.wireJobEventCallbacks(sessionID, ag)
 	}
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), mcpCache: mcpCache, suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled()), communicationStyle: boolPtr(ag.CommunicationStyleEnabled())}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), childQuestions: newChildQuestionAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), mcpCache: mcpCache, suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled()), communicationStyle: boolPtr(ag.CommunicationStyleEnabled())}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
 	// server never wires OnSubAgentMessage and a child's messages never reach
@@ -793,6 +793,14 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// buildAgentSession for status/state reads, but its AGENT is owned and
 	// stepped by the TUI, so this asker is never invoked on it.
 	ag.SetSubAgentPermAsker(h.newServerSubAgentAsker(sessionID, as))
+	// The claude-code approval bridge's blocking ask. Same park and registry as
+	// the sub-agent asker, but its ctx ends with the CLI request, which removes
+	// the dialog (see newServerBridgePermAsker).
+	ag.SetBridgePermAsker(h.newServerBridgePermAsker(sessionID, as))
+	// The same session owns the blocking question callback the Claude Code
+	// AskUserQuestion bridge calls. Parked questions live in as.childQuestions
+	// (outside as.mu) so the web dialog can answer them while the turn runs.
+	ag.SetQuestionAsker(h.newServerQuestionAsker(sessionID, as))
 	// Restore this session's spend and token history before anything reads the
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
@@ -988,6 +996,9 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	if ok && old != as && old.childAsks != nil {
 		as.childAsks = old.childAsks
 	}
+	if ok && old != as && old.childQuestions != nil {
+		as.childQuestions = old.childQuestions
+	}
 	h.agents[agentKey(id)] = as
 	h.mu.Unlock()
 	if ok && old != as {
@@ -1002,6 +1013,7 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 			// permission ask must be denied before its agent goes away, so the
 			// rebuild cannot strand a goroutine waiting on a dead session.
 			old.childAsks.denyAll()
+			old.childQuestions.denyAll()
 			old.agent.Shutdown()
 		}
 	}
@@ -1749,7 +1761,8 @@ const autoContinueChainCap = agent.AutoContinueChainCap
 //
 //   - The transcript tail (tailIsPermissionAsk / tailIsQuestionAsk): the MAIN
 //     agent's own ask, whose sentinel lives in as.messages.
-//   - The child-ask registry (as.childAsks): a SUB-AGENT's ask. It never
+//   - The child-ask registries (as.childAsks, as.childQuestions): a SUB-AGENT's
+//     permission ask, or a question parked by the Claude Code bridge. Neither
 //     reaches as.messages — the child's ask is registered in the session and
 //     the CHILD is blocked on it — so the tail scan alone cannot see it.
 //
@@ -1764,7 +1777,8 @@ func (h *Handler) sessionHasOutstandingAsk(as *agentSession) bool {
 	if tailIsPermissionAsk(as.messages) || tailIsQuestionAsk(as.messages) {
 		return true
 	}
-	return as.childAsks != nil && len(as.childAsks.list()) > 0
+	return (as.childAsks != nil && len(as.childAsks.list()) > 0) ||
+		len(as.childQuestions.list()) > 0
 }
 
 // autoContinueShouldResume decides whether the just-finished Step should be
@@ -1844,6 +1858,9 @@ func (h *Handler) autoContinueAnswerQuestion(sessionID string, as *agentSession,
 		return autoContinueFire{}, "", false
 	}
 	if as.childAsks != nil && len(as.childAsks.list()) > 0 {
+		return autoContinueFire{}, "", false
+	}
+	if len(as.childQuestions.list()) > 0 {
 		return autoContinueFire{}, "", false
 	}
 	if tailIsPermissionAsk(as.messages) {

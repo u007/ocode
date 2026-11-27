@@ -4,15 +4,32 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/snapshot"
 )
+
+// allowAllClaudeApprove is the approve callback for fake-CLI tests that run in
+// normal mode but do not exercise the approval path itself.
+func allowAllClaudeApprove(context.Context, string, json.RawMessage, string) (bool, json.RawMessage, string) {
+	return true, nil, ""
+}
+
+// copyMCPConfigBody is the fake-CLI script fragment that copies the file given
+// to --mcp-config into $FAKE_CLAUDE_MCP, so the test can read it after the run
+// has removed the temp file.
+const copyMCPConfigBody = `while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then cp "$2" "$FAKE_CLAUDE_MCP"; fi
+  shift
+done
+`
 
 func fakeClaude(t *testing.T, body string) string {
 	t.Helper()
@@ -59,20 +76,21 @@ func hasArg(args []string, flag string) bool {
 
 func TestChatClaudeCodePermissionModes(t *testing.T) {
 	cases := []struct {
-		name string
-		mode PermissionMode
-		auto bool
-		want string
+		name       string
+		mode       PermissionMode
+		want       string
+		wantPrompt string
 	}{
-		{"normal auto off stays manual", PermissionModeNormal, false, "manual"},
-		{"normal auto on uses auto", PermissionModeNormal, true, "auto"},
-		{"yolo bypasses permissions", PermissionModeYOLO, false, "bypassPermissions"},
+		{"normal is manual", PermissionModeNormal, "manual", "host"},
+		{"yolo bypasses permissions", PermissionModeYOLO, "bypassPermissions", "none"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			argsFile := filepath.Join(t.TempDir(), "args")
 			t.Setenv("FAKE_CLAUDE_ARGS", argsFile)
-			path := fakeClaude(t, "printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n")
+			mcpCopy := filepath.Join(t.TempDir(), "mcp.json")
+			t.Setenv("FAKE_CLAUDE_MCP", mcpCopy)
+			path := fakeClaude(t, copyMCPConfigBody+"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n")
 			mode := tc.mode
 			c := &GenericClient{
 				Provider:              "claude-code",
@@ -80,9 +98,7 @@ func TestChatClaudeCodePermissionModes(t *testing.T) {
 				WorkDir:               t.TempDir(),
 				claudeCLIPathOverride: path,
 				PermissionModeFn:      func() PermissionMode { return mode },
-				AutoPermissionEnabledFn: func() bool {
-					return tc.auto
-				},
+				ClaudeCodeApproveFn:   allowAllClaudeApprove,
 			}
 			if _, err := runFakeClaude(t, c, []Message{{Role: "system", Content: "ocode tool rules"}, {Role: "user", Content: "do it"}}); err != nil {
 				t.Fatal(err)
@@ -94,13 +110,119 @@ func TestChatClaudeCodePermissionModes(t *testing.T) {
 			if hasArg(args, "--append-system-prompt") {
 				t.Fatalf("system prompt forwarded: %v", args)
 			}
-			if got := argValue(args, "--permission-prompts"); got != "none" {
-				t.Fatalf("permission-prompts = %q, want none", got)
+			if got := argValue(args, "--permission-prompts"); got != tc.wantPrompt {
+				t.Fatalf("permission-prompts = %q, want %q", got, tc.wantPrompt)
 			}
 			if got := argValue(args, "--model"); got != "sonnet" {
 				t.Fatalf("model = %q", got)
 			}
+			if tc.want == "manual" {
+				if got := argValue(args, "--permission-prompt-tool"); got != "mcp__ocode__approve" {
+					t.Fatalf("permission-prompt-tool = %q, want mcp__ocode__approve", got)
+				}
+				if got := argValue(args, "--mcp-config"); got == "" {
+					t.Fatalf("manual mode missing --mcp-config: %v", args)
+				}
+				// The model must not see the prompt tool as a callable tool.
+				if got := argValue(args, "--disallowedTools"); got != "mcp__ocode__approve" {
+					t.Fatalf("disallowedTools = %q, want mcp__ocode__approve (args=%v)", got, args)
+				}
+			} else {
+				if hasArg(args, "--mcp-config") || hasArg(args, "--permission-prompt-tool") || hasArg(args, "--disallowedTools") {
+					t.Fatalf("bypass mode must not start the approval bridge: %v", args)
+				}
+			}
 		})
+	}
+}
+
+// TestChatClaudeCodeManualModeWiresApprovalBridge checks the MCP config the CLI
+// receives in normal mode: the loopback URL, a bearer token and the request
+// timeout that keeps a human approval from being aborted after 60 seconds.
+func TestChatClaudeCodeManualModeWiresApprovalBridge(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_CLAUDE_ARGS", argsFile)
+	mcpCopy := filepath.Join(t.TempDir(), "mcp.json")
+	t.Setenv("FAKE_CLAUDE_MCP", mcpCopy)
+	path := fakeClaude(t, copyMCPConfigBody+"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n")
+	c := &GenericClient{
+		Provider:              "claude-code",
+		Model:                 "sonnet",
+		WorkDir:               t.TempDir(),
+		claudeCLIPathOverride: path,
+		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
+	}
+	if _, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	args := readFakeArgs(t)
+	if got := argValue(args, "--permission-prompts"); got != "host" {
+		t.Fatalf("permission-prompts = %q, want host", got)
+	}
+	if got := argValue(args, "--permission-prompt-tool"); got != "mcp__ocode__approve" {
+		t.Fatalf("permission-prompt-tool = %q", got)
+	}
+	if got := argValue(args, "--disallowedTools"); got != "mcp__ocode__approve" {
+		t.Fatalf("disallowedTools = %q, want mcp__ocode__approve", got)
+	}
+	data, err := os.ReadFile(mcpCopy)
+	if err != nil {
+		t.Fatalf("mcp config was not handed to the CLI: %v", err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+			Timeout int               `json:"timeout"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("mcp config is not JSON: %v\n%s", err, data)
+	}
+	server, ok := cfg.MCPServers["ocode"]
+	if !ok {
+		t.Fatalf("mcp config has no ocode server: %s", data)
+	}
+	if server.Type != "http" || !strings.HasPrefix(server.URL, "http://127.0.0.1:") || !strings.HasSuffix(server.URL, "/mcp") {
+		t.Fatalf("server = %+v, want loopback http /mcp url", server)
+	}
+	if !regexp.MustCompile(`^Bearer [0-9a-f]{64}$`).MatchString(server.Headers["Authorization"]) {
+		t.Fatalf("Authorization header = %q, want Bearer + 64 hex", server.Headers["Authorization"])
+	}
+	if server.Timeout != 1200000 {
+		t.Fatalf("timeout = %d, want 1200000", server.Timeout)
+	}
+	mcpPath := argValue(args, "--mcp-config")
+	if mcpPath == "" {
+		t.Fatalf("manual mode missing --mcp-config: %v", args)
+	}
+	if _, err := os.Stat(mcpPath); !os.IsNotExist(err) {
+		t.Fatalf("mcp config temp file %s was not removed after the run (stat err=%v)", mcpPath, err)
+	}
+}
+
+// TestChatClaudeCodeNormalModeRequiresApproveFn checks normal mode refuses to
+// start the CLI when no approval bridge is bound, rather than falling back to
+// --permission-prompts none.
+func TestChatClaudeCodeNormalModeRequiresApproveFn(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_CLAUDE_ARGS", argsFile)
+	path := fakeClaude(t, "printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n")
+	c := &GenericClient{
+		Provider:              "claude-code",
+		Model:                 "sonnet",
+		WorkDir:               t.TempDir(),
+		claudeCLIPathOverride: path,
+		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+	}
+	_, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "x"}})
+	if err == nil || !strings.Contains(err.Error(), "no approval bridge") {
+		t.Fatalf("error = %v, want missing approval bridge refusal", err)
+	}
+	if _, statErr := os.Stat(argsFile); statErr == nil {
+		t.Fatal("the CLI must not start when no approval bridge is bound")
 	}
 }
 
@@ -152,6 +274,7 @@ func TestChatClaudeCodeAuthError(t *testing.T) {
 		Model:                 "sonnet",
 		claudeCLIPathOverride: path,
 		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
 	}
 	if _, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "x"}}); err == nil || !strings.Contains(err.Error(), "not authenticated") {
 		t.Fatalf("auth error = %v", err)
@@ -184,6 +307,7 @@ func TestChatClaudeCodeStreamsOnceAndPersistsSessionID(t *testing.T) {
 		WorkDir:               t.TempDir(),
 		claudeCLIPathOverride: path,
 		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
 	}
 	c.setSessionID("ses_test")
 	c.SetOnDelta(func(kind, text string) { deltas = append(deltas, kind+":"+text) })
@@ -224,6 +348,25 @@ func TestChatClaudeCodeStreamsOnceAndPersistsSessionID(t *testing.T) {
 	args := readFakeArgs(t)
 	if got := argValue(args, "--resume"); got != "stored-id" {
 		t.Fatalf("resume = %q, want stored-id", got)
+	}
+}
+
+func TestChatClaudeCodeSurfacesErrorResult(t *testing.T) {
+	t.Setenv("FAKE_CLAUDE_ARGS", filepath.Join(t.TempDir(), "args"))
+	path := fakeClaude(t, `printf '%s\n' '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'
+exit 1
+`)
+	c := &GenericClient{
+		Provider:              "claude-code",
+		Model:                 "sonnet",
+		WorkDir:               t.TempDir(),
+		claudeCLIPathOverride: path,
+		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
+	}
+	_, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "not authenticated") || !strings.Contains(err.Error(), "Not logged in") {
+		t.Fatalf("error = %v, want the CLI's not-logged-in result surfaced", err)
 	}
 }
 
@@ -283,6 +426,7 @@ func TestChatClaudeCodeRecordsExternalWrites(t *testing.T) {
 		SnapshotStore:         store,
 		claudeCLIPathOverride: path,
 		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
 	}
 	if _, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "x"}}); err != nil {
 		t.Fatal(err)
@@ -305,24 +449,21 @@ func TestChatClaudeCodeRecordsExternalWrites(t *testing.T) {
 }
 
 func TestClaudeCodePermissionModeTable(t *testing.T) {
-	if got, err := claudeCodePermissionMode(PermissionModeNormal, false); err != nil || got != "manual" {
-		t.Fatalf("normal/off = %q, %v", got, err)
+	if got, err := claudeCodePermissionMode(PermissionModeNormal); err != nil || got != "manual" {
+		t.Fatalf("normal = %q, %v", got, err)
 	}
-	if got, err := claudeCodePermissionMode(PermissionModeNormal, true); err != nil || got != "auto" {
-		t.Fatalf("normal/on = %q, %v", got, err)
-	}
-	if got, err := claudeCodePermissionMode(PermissionModeYOLO, false); err != nil || got != "bypassPermissions" {
+	if got, err := claudeCodePermissionMode(PermissionModeYOLO); err != nil || got != "bypassPermissions" {
 		t.Fatalf("yolo = %q, %v", got, err)
 	}
 	for _, mode := range []PermissionMode{PermissionModeLocked, PermissionModeSandbox} {
-		if _, err := claudeCodePermissionMode(mode, true); err == nil {
+		if _, err := claudeCodePermissionMode(mode); err == nil {
 			t.Fatalf("mode %q: expected error", mode)
 		}
 	}
 }
 
 func Example_claudeCodePermissionMode() {
-	mode, _ := claudeCodePermissionMode(PermissionModeNormal, true)
+	mode, _ := claudeCodePermissionMode(PermissionModeNormal)
 	fmt.Println(mode)
-	// Output: auto
+	// Output: manual
 }

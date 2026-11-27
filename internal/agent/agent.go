@@ -883,6 +883,15 @@ type Agent struct {
 	// main agent. It is not used by the main agent itself; it is copied onto
 	// each sub-agent's OnPermissionAsk so sub-agent asks reach the TUI.
 	subAgentPermAsker func(PermissionRequest) PermissionResponse
+	// questionAsker is the blocking question callback the TUI and the server
+	// install. It shows the host's normal question dialog and waits for the
+	// answer. Its only consumer is the claude-code approval bridge (Claude
+	// Code's AskUserQuestion); ocode's own question tool keeps its sentinel.
+	questionAsker QuestionAsker
+	// bridgePermAsker is the blocking, context-aware permission callback the
+	// TUI and the server install for the claude-code approval bridge. ctx ends
+	// with the bridge request, so a crashed or timed-out CLI closes the dialog.
+	bridgePermAsker BridgePermAsker
 	// maxSteps limits the number of agentic iterations. 0 = unlimited.
 	// atomic so a concurrent SetMaxSteps (from TUI command or server
 	// HandleSetLimitsConfig) does not race Step's loop read. Step checks
@@ -3903,8 +3912,12 @@ func (a *Agent) bindClaudeCodeClientHooks(gc *GenericClient) {
 		}
 		return a.permissions.Mode()
 	}
-	gc.AutoPermissionEnabledFn = func() bool {
-		return a.permissions != nil && a.permissions.AutoPermissionEnabled()
+	gc.ClaudeCodeApproveFn = func(ctx context.Context, toolName string, input json.RawMessage, toolUseID string) (bool, json.RawMessage, string) {
+		if toolName == "AskUserQuestion" {
+			return a.answerClaudeCodeQuestion(ctx, input)
+		}
+		allowed, message := a.decideClaudeCodeToolUse(ctx, toolName, input, toolUseID)
+		return allowed, nil, message
 	}
 	gc.WorkDir = a.WorkDir()
 	gc.ProjectHost = a.ProjectHost()
@@ -6279,6 +6292,13 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
 	}
+	// Decide-only (claude-code approval bridge): the Claude Code CLI executes
+	// the tool itself, so ocode records that its pipeline would allow the call
+	// and stops here. See decideClaudeCodeToolUse.
+	if decided := decideOnlyFromContext(ctx); decided != nil {
+		*decided = true
+		return "", nil
+	}
 	if name == "advisor" && !a.AdvisorEnabled() {
 		// Execution-time gate (not advertise-time) keeps the tools block
 		// stable across toggles so the provider prompt cache survives.
@@ -7306,6 +7326,27 @@ func (a *Agent) autoPermissionConfig() *config.AutoPermissionConfig {
 // PERMISSION_ASK: sentinel handled by the TUI's message pipeline.
 func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionResponse) {
 	a.subAgentPermAsker = f
+}
+
+// QuestionAsker shows prompts in the host's question dialog and blocks until the
+// user answers (dismissed=false) or dismisses them (dismissed=true). ctx ends the
+// wait early; the asker then returns dismissed=true.
+type QuestionAsker func(ctx context.Context, prompts []tool.QuestionPrompt) (answers []tool.QuestionAnswerSet, dismissed bool)
+
+// SetQuestionAsker installs the blocking question callback (see questionAsker).
+func (a *Agent) SetQuestionAsker(f QuestionAsker) {
+	a.questionAsker = f
+}
+
+// BridgePermAsker shows a permission request in the host's normal dialog and
+// blocks until the user answers. When ctx ends first it removes the dialog and
+// returns PermissionDeny.
+type BridgePermAsker func(ctx context.Context, req PermissionRequest) PermissionResponse
+
+// SetBridgePermAsker installs the blocking permission callback the claude-code
+// approval bridge uses (see bridgePermAsker).
+func (a *Agent) SetBridgePermAsker(f BridgePermAsker) {
+	a.bridgePermAsker = f
 }
 
 // SetNoInteractivePasswordPrompt marks the agent as running in a headless entry

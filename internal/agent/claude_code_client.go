@@ -93,8 +93,7 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	if c.PermissionModeFn == nil {
 		return nil, fmt.Errorf("claude-code: permission mode is unavailable; refusing to run")
 	}
-	autoPermission := c.AutoPermissionEnabledFn != nil && c.AutoPermissionEnabledFn()
-	claudeMode, err := claudeCodePermissionMode(c.PermissionModeFn(), autoPermission)
+	claudeMode, err := claudeCodePermissionMode(c.PermissionModeFn())
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +120,58 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 		return nil, fmt.Errorf("claude-code: no user message to send")
 	}
 
+	claudePath := c.claudeCLIPathOverride
+	if claudePath == "" {
+		claudePath = claudeCLIPath()
+	}
+	if _, err := exec.LookPath(claudePath); err != nil {
+		return nil, fmt.Errorf("claude-code: `claude` was not found on PATH; install Claude Code and run `claude` to sign in: %w", err)
+	}
+
+	// The permission flags depend on the mode. Manual mode sends every prompt
+	// to ocode through the approval bridge for the life of this run. Bypass
+	// mode has no prompts to answer, so inside -p they are denied outright.
+	// One run state per chat call: the approval bridge reads the transcript and
+	// the judge-answer cap from it, and its notice lines join the tool rows below.
+	turn := newClaudeCodeTurn(messages)
+	var permissionArgs []string
+	switch claudeMode {
+	case "manual":
+		if c.ClaudeCodeApproveFn == nil {
+			return nil, fmt.Errorf("claude-code: no approval bridge is bound to this client; refusing to run in normal mode")
+		}
+		bridge, err := startClaudeCodeBridge(claudeCodeApproveForTurn(c.ClaudeCodeApproveFn, turn))
+		if err != nil {
+			return nil, fmt.Errorf("claude-code: start approval bridge: %w", err)
+		}
+		defer func() {
+			if err := bridge.Close(); err != nil {
+				emitDebug("CLAUDE-CODE", fmt.Sprintf("close approval bridge: %v", err))
+			}
+		}()
+		mcpConfig, err := writeClaudeCodeMCPConfig(bridge.URL, bridge.Token)
+		if err != nil {
+			return nil, fmt.Errorf("claude-code: %w", err)
+		}
+		defer func() {
+			if err := os.Remove(mcpConfig); err != nil {
+				emitDebug("CLAUDE-CODE", fmt.Sprintf("remove mcp config: %v", err))
+			}
+		}()
+		permissionArgs = []string{
+			"--permission-prompts", "host",
+			"--mcp-config", mcpConfig,
+			"--permission-prompt-tool", claudeCodeApprovalTool,
+			// The model must not call the prompt tool itself; the CLI still uses it
+			// as --permission-prompt-tool.
+			"--disallowedTools", claudeCodeApprovalTool,
+		}
+	case "bypassPermissions":
+		permissionArgs = []string{"--permission-prompts", "none"}
+	default:
+		return nil, fmt.Errorf("claude-code: unsupported CLI permission mode %q", claudeMode)
+	}
+
 	args := []string{
 		"-p",
 		"--verbose",
@@ -128,10 +179,8 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 		"--input-format", "text",
 		"--model", c.Model,
 		"--permission-mode", claudeMode,
-		// There is no interactive host inside -p; deny anything that would
-		// otherwise block on a permission prompt.
-		"--permission-prompts", "none",
 	}
+	args = append(args, permissionArgs...)
 	if sid := c.claudeSessionIDValue(); sid != "" {
 		args = append(args, "--resume", sid)
 	}
@@ -140,14 +189,6 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	// already loads from cmd.Dir. ocode's tool definitions are omitted on
 	// purpose — Claude Code owns its own tool set.
 	args = append(args, "--", lastUser)
-
-	claudePath := c.claudeCLIPathOverride
-	if claudePath == "" {
-		claudePath = claudeCLIPath()
-	}
-	if _, err := exec.LookPath(claudePath); err != nil {
-		return nil, fmt.Errorf("claude-code: `claude` was not found on PATH; install Claude Code and run `claude` to sign in: %w", err)
-	}
 
 	// Reuse the bash pre/post stat hook: Claude Code writes files inside its own
 	// process, so this is the only place its changes can enter ocode's change
@@ -211,6 +252,7 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	})
 
 	var resultText string
+	var resultIsError bool
 	var sessionID string
 	var usage *TokenUsage
 	var toolNotices []string
@@ -227,6 +269,9 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 			emitDebug("CLAUDE-CODE", fmt.Sprintf("json parse error: %v (line=%s)", err, truncateCC(line, 200)))
 			continue
 		}
+		// A judge answer lands between its tool_use row and its tool_result row,
+		// so moving the queued lines here keeps the transcript in stream order.
+		toolNotices = c.appendClaudeJudgeNotices(toolNotices, turn)
 		typ, _ := ev["type"].(string)
 		switch typ {
 		case "system":
@@ -287,6 +332,7 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 			if r, ok := ev["result"].(string); ok {
 				resultText = r
 			}
+			resultIsError, _ = ev["is_error"].(bool)
 			usage = claudeCodeUsage(ev["usage"])
 			if sid, ok := ev["session_id"].(string); ok && sessionID == "" {
 				sessionID = sid
@@ -300,13 +346,18 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	waitErr := cmd.Wait()
 	close(done)
 	devNull.Close()
-	if waitErr != nil {
+	if waitErr != nil || resultIsError {
 		exitCode = 1
-		stderrText := strings.TrimSpace(stderrBuf.String())
-		if claudeCodeAuthError(stderrText) {
-			return nil, fmt.Errorf("claude-code: not authenticated; run `claude` and sign in again: %s", stderrText)
+		// The CLI reports most failures (e.g. "Not logged in") as an is_error
+		// result on stdout with an empty stderr, so both are surfaced.
+		detail := strings.TrimSpace(strings.TrimSpace(stderrBuf.String()) + "\n" + strings.TrimSpace(resultText))
+		if claudeCodeAuthError(detail) {
+			return nil, fmt.Errorf("claude-code: not authenticated; run `claude` and sign in again: %s", detail)
 		}
-		return nil, fmt.Errorf("claude-code: %w\n%s", waitErr, stderrText)
+		if waitErr != nil {
+			return nil, fmt.Errorf("claude-code: %w\n%s", waitErr, detail)
+		}
+		return nil, fmt.Errorf("claude-code: %s", detail)
 	}
 	if strings.TrimSpace(resultText) == "" {
 		exitCode = 1
@@ -318,6 +369,7 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	if usage != nil {
 		usage.DebugLog(modelID, c.emitDebug)
 	}
+	toolNotices = c.appendClaudeJudgeNotices(toolNotices, turn)
 	msg := &Message{Role: "assistant", Content: resultText, Model: modelID, Usage: usage}
 	if len(toolNotices) > 0 {
 		// Notice is UI-only, persisted with the transcript, and never sent to a
@@ -336,6 +388,18 @@ func appendClaudeToolNotice(list []string, line string) []string {
 		return list
 	}
 	return append(list, truncateCC(strings.TrimSpace(line), 400))
+}
+
+// appendClaudeJudgeNotices moves the auto-continue judge's answer lines for this
+// run into the tool-activity rows. Each line is redacted like the tool rows.
+func (c *GenericClient) appendClaudeJudgeNotices(list []string, turn *claudeCodeTurn) []string {
+	if turn == nil {
+		return list
+	}
+	for _, line := range turn.takeJudgeNotices() {
+		list = appendClaudeToolNotice(list, c.redactClaudeNotice(line))
+	}
+	return list
 }
 
 // redactClaudeNotice keeps tool input summaries (commands, URLs, paths) from
@@ -383,20 +447,18 @@ func claudeCodeUsage(raw any) *TokenUsage {
 }
 
 // claudeCodePermissionMode maps ocode's permission mode to the CLI's mode.
-// yolo lets Claude Code edit and run any command; normal with auto-permission
-// uses the CLI's own auto classifier for edits and commands; plain normal stays
-// manual. --permission-prompts none denies anything that would otherwise block
-// on a prompt inside -p.
-func claudeCodePermissionMode(mode PermissionMode, autoPermission bool) (string, error) {
+// yolo lets Claude Code edit and run any command (bypassPermissions, with
+// --permission-prompts none). Normal mode is always "manual": every tool call
+// is asked through the approval bridge, where ocode's own permission pipeline
+// and auto-permission judge decide. Claude's own "auto" classifier is never
+// used.
+func claudeCodePermissionMode(mode PermissionMode) (string, error) {
 	switch mode {
 	case PermissionModeLocked, PermissionModeSandbox:
 		return "", fmt.Errorf("claude-code: refused in %s permission mode", mode)
 	case PermissionModeYOLO:
 		return "bypassPermissions", nil
 	case PermissionModeNormal:
-		if autoPermission {
-			return "auto", nil
-		}
 		return "manual", nil
 	default:
 		return "", fmt.Errorf("claude-code: unsupported permission mode %q", mode)

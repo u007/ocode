@@ -90,6 +90,7 @@ func (m *model) questionAskSlotBusy() bool {
 // showQuestionAsk loads one prompt into the dialog slot and opens the dialog.
 func (m *model) showQuestionAsk(q queuedQuestionAsk) {
 	m.startQuestionPrompt(q.toolCallID, q.prompts)
+	m.parkedQuestion = q.parked
 	if q.rc != nil {
 		m.rcPendingQuestion = q.rc
 	}
@@ -138,6 +139,11 @@ func (m *model) promoteNextQuestionAsk() bool {
 // startQuestionPrompt has run; tearing down a slot that was never opened nil-derefs
 // on a model that never started one (`/new` on a fresh session).
 func (m *model) clearQuestionAskState() {
+	for _, q := range m.questionAskQueue {
+		if q.parked != nil {
+			q.parked.deliver(parkedQuestionResult{dismissed: true})
+		}
+	}
 	m.questionAskQueue = nil
 	m.rcPendingQuestion = nil
 	if m.showQuestionDialog || len(m.questionPrompts) > 0 || m.questionToolCallID != "" {
@@ -465,6 +471,9 @@ type questionAnswerValue struct {
 }
 
 func (m model) submitQuestionAnswers() (tea.Model, tea.Cmd) {
+	if p := m.parkedQuestion; p != nil {
+		return m.submitParkedQuestion(p)
+	}
 	payload, _ := json.Marshal(m.buildQuestionAnswerPayload())
 	toolMsg := agent.Message{Role: "tool", ToolID: m.questionToolCallID, Content: string(payload)}
 	m.messages = append(m.messages, message{
@@ -492,25 +501,67 @@ func (m model) submitQuestionAnswers() (tea.Model, tea.Cmd) {
 func (m model) buildQuestionAnswerPayload() []questionAnswerPayload {
 	out := make([]questionAnswerPayload, 0, len(m.questionPrompts))
 	for i, q := range m.questionPrompts {
-		answers := []questionAnswerValue{}
-		for optionIdx := 0; optionIdx < questionOptionCount(q); optionIdx++ {
-			if !m.questionSelected[i][optionIdx] {
-				continue
-			}
-			label, _, custom := questionOption(q, optionIdx)
-			value := questionAnswerValue{Label: label}
-			if custom {
-				value.Text = strings.TrimSpace(m.questionCustom[i])
-				value.Custom = true
-			}
-			answers = append(answers, value)
-		}
-		out = append(out, questionAnswerPayload{Header: q.Header, Question: q.Question, Answers: answers})
+		out = append(out, questionAnswerPayload{Header: q.Header, Question: q.Question, Answers: m.questionAnswerValues(i)})
 	}
 	return out
 }
 
+// questionAnswerValues lists the picked options of prompt i in option order. A
+// picked custom option carries its typed text. Shared by the model-question
+// payload and the parked-question answer sets so both read the dialog one way.
+func (m model) questionAnswerValues(i int) []questionAnswerValue {
+	q := m.questionPrompts[i]
+	answers := []questionAnswerValue{}
+	for optionIdx := 0; optionIdx < questionOptionCount(q); optionIdx++ {
+		if !m.questionSelected[i][optionIdx] {
+			continue
+		}
+		label, _, custom := questionOption(q, optionIdx)
+		value := questionAnswerValue{Label: label}
+		if custom {
+			value.Text = strings.TrimSpace(m.questionCustom[i])
+			value.Custom = true
+		}
+		answers = append(answers, value)
+	}
+	return answers
+}
+
+// buildQuestionAnswerSets is the parked-question twin of buildQuestionAnswerPayload:
+// one tool.QuestionAnswerSet per prompt, in prompt order.
+func (m model) buildQuestionAnswerSets() []tool.QuestionAnswerSet {
+	out := make([]tool.QuestionAnswerSet, 0, len(m.questionPrompts))
+	for i, q := range m.questionPrompts {
+		values := m.questionAnswerValues(i)
+		answers := make([]tool.QuestionAnswer, 0, len(values))
+		for _, v := range values {
+			answers = append(answers, tool.QuestionAnswer{Label: v.Label, Text: v.Text, Custom: v.Custom})
+		}
+		out = append(out, tool.QuestionAnswerSet{Header: q.Header, Question: q.Question, Answers: answers})
+	}
+	return out
+}
+
+// submitParkedQuestion answers a parked ask. The answers go straight to the
+// waiting asker. No transcript row is written and the agent is not re-stepped:
+// the host (the Claude Code turn) owns the continuation.
+func (m model) submitParkedQuestion(p *parkedQuestion) (tea.Model, tea.Cmd) {
+	answers := m.buildQuestionAnswerSets()
+	m.parkedQuestion = nil
+	p.deliver(parkedQuestionResult{answers: answers})
+	m.clearQuestionPrompt()
+	m.promoteNextQueuedAsk()
+	return m, nil
+}
+
 func (m *model) clearQuestionPrompt() {
+	// Closing a parked dialog without an answer (Esc, a turn cancel, a session
+	// switch) releases the waiting asker as dismissed. Submit clears parkedQuestion
+	// first, so an answered ask is never delivered twice.
+	if p := m.parkedQuestion; p != nil {
+		m.parkedQuestion = nil
+		p.deliver(parkedQuestionResult{dismissed: true})
+	}
 	m.showQuestionDialog = false
 	m.questionToolCallID = ""
 	m.questionPrompts = nil

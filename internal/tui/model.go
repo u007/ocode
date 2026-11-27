@@ -141,6 +141,9 @@ type queuedQuestionAsk struct {
 	// rc is non-nil when this prompt is owned by the /rc bridge (a web/Telegram
 	// remote answer), and must be restored alongside the dialog slot.
 	rc *rcPendingQuestion
+	// parked is non-nil when this prompt is a host-side blocking ask (the
+	// Claude Code bridge) answered through the same dialog. See question_parked.go.
+	parked *parkedQuestion
 }
 
 type scrollbarDragTarget int
@@ -1842,6 +1845,10 @@ type model struct {
 	subAgentPermCancel   context.CancelFunc            // cancels the active listenSubAgentPerm goroutine so re-arming doesn't multiply goroutines / leak on cancel
 	subAgentPermMu       *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp  chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
+	parkedQuestionCh     chan *parkedQuestion          // host-side blocking questions (question_parked.go)
+	parkedQuestionCancel context.CancelFunc            // cancels the active listenParkedQuestion goroutine on re-arm
+	parkedQuestionMu     *sync.Mutex                   // serialises parked questions: one dialog at a time
+	parkedQuestion       *parkedQuestion               // non-nil while the open question dialog is a parked ask
 	permConfirm          string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
 	permChosenPrefix     string                        // bash prefix picked in the always-rule confirmation ("" = the ask's narrowest candidate)
 	permPassword         textinput.Model               // masked password field for an elevation ask; value lives only here until an explicit approval stores it
@@ -1987,6 +1994,12 @@ const subAgentPermListenTimeout = 15 * time.Second
 type subAgentPermRequest struct {
 	req    agent.PermissionRequest
 	respCh chan agent.PermissionResponse
+	// ctx, agentDone and settled are set only on a bridge ask (see
+	// askPermissionDialog). They let the TUI close the dialog when the ask ends
+	// unanswered. A sub-agent ask leaves them zero, and waitPermAskEnd skips it.
+	ctx       context.Context
+	agentDone <-chan struct{}
+	settled   chan struct{}
 }
 
 // permissionGrantRequest carries a durable auto-grant from the agent layer to
@@ -2930,6 +2943,8 @@ func newModel(opts ...RunOptions) model {
 		permissionGrantCh:           make(chan permissionGrantRequest),
 		subAgentPermCh:              make(chan subAgentPermRequest),
 		subAgentPermMu:              &sync.Mutex{},
+		parkedQuestionCh:            make(chan *parkedQuestion),
+		parkedQuestionMu:            &sync.Mutex{},
 		cleanupState:                newModelCleanupState(),
 		hoverPickerIdx:              -1,
 		hoverSlashIdx:               -1,
@@ -3124,6 +3139,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.subAgentPermCh != nil {
 		cmds = append(cmds, m.armSubAgentPermListener())
+	}
+	if m.parkedQuestionCh != nil {
+		cmds = append(cmds, m.armParkedQuestionListener())
 	}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
@@ -6159,7 +6177,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.enqueuePermAsk(queuedPermAsk{req: req, subResp: msg.respCh})
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
+		// A bridge ask gets an end watcher; a sub-agent ask gets nil (no change).
+		return m, waitPermAskEnd(subAgentPermRequest(msg))
+	case permAskEndedMsg:
+		m.releasePermAsk(msg.respCh)
 		return m, nil
+	case parkedQuestionAskMsg:
+		// A host-side blocking question (Claude Code AskUserQuestion). It opens the
+		// normal question dialog, or queues behind one that is already open. The
+		// end watcher closes it if the ask is cancelled or the agent stops first.
+		p := msg.q
+		m.enqueueQuestionAsk(queuedQuestionAsk{prompts: p.prompts, parked: p})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, tea.Batch(m.armParkedQuestionListener(), waitParkedQuestionEnd(p))
+	case parkedQuestionEndedMsg:
+		m.releaseParkedQuestion(msg.q)
+		return m, nil
+	case parkedQuestionKeepAliveMsg:
+		return m, m.armParkedQuestionListener()
 	case subAgentPermKeepAliveMsg:
 		// Re-arm the listener. The previous listenSubAgentPerm goroutine
 		// timed out (no sub-agent ask arrived, e.g. a cancelled sub-agent)
@@ -20031,12 +20066,17 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	// Every stop-channel read below goes through ag.Done() per ask, never a
+	// channel captured here: Agent.ResetCancellation replaces the closed stop
+	// channel at the start of each turn after an Esc, so a captured channel
+	// stays closed and denies or dismisses every later ask in the session.
+	ag := m.agent
 	grantCh := m.permissionGrantCh
-	done := m.agent.Done()
 	m.agent.OnPermissionGrant = func(grant config.AutoGrant) error {
 		if grantCh == nil {
 			return m.persistAutoGrant(grant)
 		}
+		done := ag.Done()
 		respCh := make(chan error, 1)
 		select {
 		case grantCh <- permissionGrantRequest{grant: grant, respCh: respCh}:
@@ -20061,24 +20101,122 @@ func (m *model) wireCompactCallbacks() {
 	}
 	permCh := m.subAgentPermCh
 	permMu := m.subAgentPermMu
-	m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse {
-		permMu.Lock()
-		defer permMu.Unlock()
-		respCh := make(chan agent.PermissionResponse, 1)
-		// Select on the agent's Done channel so a Shutdown while this sub-agent
-		// is waiting unblocks cleanly (deny) instead of leaking the goroutine.
-		select {
-		case permCh <- subAgentPermRequest{req: req, respCh: respCh}:
-		case <-done:
-			return agent.PermissionResponse{Level: agent.PermissionDeny}
+	m.agent.SetSubAgentPermAsker(newSubAgentPermAsker(ag, permCh, permMu))
+	// Claude Code bridge permission asks: the same dialog, but the wait also
+	// ends when the bridge request's ctx does (see askPermissionDialog).
+	m.agent.SetBridgePermAsker(newBridgePermAsker(ag, permCh, permMu))
+	// Host-side blocking questions (Claude Code AskUserQuestion). Installed here
+	// with the other callbacks so every agent (re)bind gets it: installAgent,
+	// the connect path and newModel all go through wireCompactCallbacks.
+	if m.parkedQuestionMu == nil {
+		m.parkedQuestionMu = &sync.Mutex{}
+	}
+	m.agent.SetQuestionAsker(newParkedQuestionAsker(m.parkedQuestionCh, m.parkedQuestionMu, ag.Done))
+}
+
+// newSubAgentPermAsker returns the callback a sub-agent's permission ask runs
+// through. The stop channel is read per ask (see wireCompactCallbacks).
+func newSubAgentPermAsker(ag *agent.Agent, permCh chan subAgentPermRequest, permMu *sync.Mutex) func(agent.PermissionRequest) agent.PermissionResponse {
+	return func(req agent.PermissionRequest) agent.PermissionResponse {
+		return askPermissionDialog(context.Background(), ag.Done(), permCh, permMu, req, false)
+	}
+}
+
+// newBridgePermAsker returns the agent.BridgePermAsker the Claude Code approval
+// bridge installs. It shares the sub-agent dialog machinery; a cancelled ctx
+// denies the ask and closes its dialog.
+func newBridgePermAsker(ag *agent.Agent, permCh chan subAgentPermRequest, permMu *sync.Mutex) agent.BridgePermAsker {
+	return func(ctx context.Context, req agent.PermissionRequest) agent.PermissionResponse {
+		if ctx == nil {
+			ctx = context.Background()
 		}
+		return askPermissionDialog(ctx, ag.Done(), permCh, permMu, req, true)
+	}
+}
+
+// askPermissionDialog is the body shared by the sub-agent and bridge permission
+// askers. It hands req to the Update loop over permCh and blocks for the answer,
+// holding permMu so only one permission dialog is live. The ask is denied when
+// ctx or done ends first. Only a bridge ask (bridge == true) carries ctx, done
+// and a settled channel to the TUI, so the TUI can close its dialog when the ask
+// ends without an answer (see waitPermAskEnd). The sub-agent path passes
+// context.Background() and keeps its prior behaviour.
+func askPermissionDialog(ctx context.Context, done <-chan struct{}, permCh chan subAgentPermRequest, permMu *sync.Mutex, req agent.PermissionRequest, bridge bool) agent.PermissionResponse {
+	deny := agent.PermissionResponse{Level: agent.PermissionDeny}
+	permMu.Lock()
+	defer permMu.Unlock()
+	if ctx.Err() != nil {
+		return deny
+	}
+	respCh := make(chan agent.PermissionResponse, 1)
+	ask := subAgentPermRequest{req: req, respCh: respCh}
+	if bridge {
+		ask.ctx = ctx
+		ask.agentDone = done
+		ask.settled = make(chan struct{})
+		defer close(ask.settled)
+	}
+	// Select on done so a Shutdown while this ask is waiting unblocks cleanly
+	// (deny) instead of leaking the goroutine.
+	select {
+	case permCh <- ask:
+	case <-ctx.Done():
+		return deny
+	case <-done:
+		return deny
+	}
+	select {
+	case resp := <-respCh:
+		return resp
+	case <-ctx.Done():
+		return deny
+	case <-done:
+		return deny
+	}
+}
+
+// permAskEndedMsg reports that a bridge permission ask's wait ended, answered or
+// not. It carries the ask's identity (its response channel). Handling it is
+// idempotent: it acts only when that ask still holds the dialog or a queue slot.
+type permAskEndedMsg struct{ respCh chan agent.PermissionResponse }
+
+// waitPermAskEnd returns when a bridge permission ask's wait is over (its ctx or
+// the agent stopped, or the asker returned) and reports it, so the dialog closes.
+// Sub-agent asks have no settled channel and get no watcher, so their behaviour
+// is unchanged.
+func waitPermAskEnd(req subAgentPermRequest) tea.Cmd {
+	if req.settled == nil {
+		return nil
+	}
+	return func() tea.Msg {
 		select {
-		case resp := <-respCh:
-			return resp
-		case <-done:
-			return agent.PermissionResponse{Level: agent.PermissionDeny}
+		case <-req.ctx.Done():
+		case <-req.agentDone:
+		case <-req.settled:
 		}
-	})
+		return permAskEndedMsg{respCh: req.respCh}
+	}
+}
+
+// releasePermAsk closes a bridge permission ask that ended without an answer. If
+// its dialog holds the slot, the dialog closes and the next ask is promoted. If
+// it is still queued, its entry is dropped. Anything else is a no-op.
+func (m *model) releasePermAsk(respCh chan agent.PermissionResponse) {
+	if respCh == nil {
+		return
+	}
+	if m.pendingSubAgentResp == respCh {
+		m.clearPendingPermAskSlot()
+		m.promoteNextQueuedAsk()
+		return
+	}
+	for i, q := range m.permAskQueue {
+		if q.subResp == respCh {
+			m.permAskQueue = slices.Delete(m.permAskQueue, i, i+1)
+			m.syncPendingAskFlag()
+			return
+		}
+	}
 }
 
 // listenSubAgentPerm blocks on the sub-agent permission channel and re-arms the
