@@ -20,7 +20,7 @@ import (
 //
 //   - `extra_allowed_paths` is GLOBAL, PERSISTENT, and SHARED WITH THE AGENT.
 //     `applyExtraAllowedPathsToRuntime` → `tool.SetPersistentExtraAllowedPaths`
-//     → `tool.ExtraAllowedRoots()` → `PermissionManager.AllowedRoots()`. Adding
+//     → `tool.PersistentExtraAllowedRoots()` → `PermissionManager.AllowedRoots()`. Adding
 //     a path there to let the editor open a file would ALSO stop the agent from
 //     asking permission for that path — a silent widening of the agent's
 //     read/write scope, which is exactly what this feature must not do.

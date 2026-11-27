@@ -2312,18 +2312,14 @@ func TestHandleToolCallAutoPermissionConsultsModelOnDeny(t *testing.T) {
 // PermissionAsk → OnPermissionAsk-allow) called executeToolCall without
 // the lease; confinedPath would then reject the path with "outside the
 // working directory" even though the model or human had just approved it.
-// With the fix, the lease is acquired at the top of handleToolCall so the
-// path is in-scope by the time Decide and executeToolCall run.
-//
-// Note: with the fix in place, the lease also widens the scope that Decide
-// sees, so the test's path actually returns PermissionAllow from Decide
-// directly (the "allowed scope, read-only" branch) rather than going
-// through the PermissionAsk → model-allow route the test name implies.
-// That is correct: the whole point of the fix is to make the in-scope
-// path succeed without bothering the model or the user. The test still
-// fails without the fix, because Decide then returns PermissionAsk, the
-// model approves, executeToolCall is called, and confinedPath rejects
-// the path — the call returns the rejection error instead of "ok".
+// The lease is granted only after an allow decision (executeToolCallWithContext),
+// never before Decide, and Decide never sees it. So an outside-root path is
+// NOT in scope for the judge: verifyAutoGrant vetoes a judge ALLOW for a
+// path outside the allowed roots, and the call falls through to the human ask.
+// An earlier version of this test expected the judge's ALLOW to run the read
+// unprompted, which only held because the lease leaked into Decide and the
+// judge's root check. That behaviour was the bug, so this test now pins the
+// human fallback.
 //
 // The test needs a writable absolute path that is OUTSIDE both the working
 // directory and the system temp roots (otherwise confinedPath accepts the
@@ -2351,12 +2347,9 @@ func TestHandleToolCallAutoPermissionBridgesConfinedPathOnAskModelAllow(t *testi
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWD) })
 
-	// tool.read: ask documents the intent: a read targeting a path that
-	// is outside workDir should be ask, not allow. With the fix, the
-	// temp-allow widens scope so Decide returns Allow from the scope
-	// branch — exactly the bug-bridge we want. Without the fix, Decide
-	// returns Ask here, the model is consulted, and the call fails
-	// downstream in confinedPath.
+	// tool.read targeting a path outside workDir and the allowed roots: Decide
+	// returns Ask, the judge's ALLOW is vetoed for an outside-root path, and
+	// the human asker decides.
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
 	a := NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, cfg, nil)
@@ -2382,14 +2375,14 @@ func TestHandleToolCallAutoPermissionBridgesConfinedPathOnAskModelAllow(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called {
-		t.Fatal("OnPermissionAsk should not run when the path is in allowed scope")
+	if !called {
+		t.Fatal("a judge ALLOW for an outside-root read must fall back to the human ask, not run unprompted")
 	}
-	if strings.HasPrefix(res, tool.SentinelPermissionAsk) {
-		t.Fatalf("permission ask sentinel should not be emitted on an in-scope call, got %q", res)
+	if !strings.HasPrefix(res, "denied") {
+		t.Fatalf("human denied the read, want a denied result, got %q", res)
 	}
-	if !strings.Contains(res, "ok") {
-		t.Fatalf("expected read output to include file contents, got %q", res)
+	if strings.Contains(res, "ok\n") {
+		t.Fatalf("outside-root read content returned without a human allow: %q", res)
 	}
 	// The temp-allow lease must be released by the time handleToolCall
 	// returns — a leaked lease would silently widen the confinement root

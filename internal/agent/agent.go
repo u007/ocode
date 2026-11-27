@@ -4382,32 +4382,8 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 		return deny, nil
 	}
 
-	// For path-confined tools, temporarily register the target path's parent
-	// root with the tool confinement layer so confinedPath agrees with the
-	// permission grant. The static permission decider (Decide) matches
-	// patterns like "/Users/james/www/**:allow" and returns PermissionAllow
-	// or PermissionAsk for a path under that pattern, but the tool layer's
-	// confinedPath only allows paths inside the configured extra_allowed_paths
-	// (or an in-process temp lease). Without the lease, an approved path
-	// pattern still produces a hard "path is outside the working directory"
-	// error from the tool handler.
-	//
-	// The lease is acquired *before* the permission decision so it also covers
-	// the model-allow / human-callback-allow paths inside the PermissionAsk
-	// block, which call executeToolCall directly and would otherwise bypass
-	// the lease. The defer releases it on every return — including the
-	// Deny / Ask-falls-through-to-human-Deny early returns, where no tool
-	// call is made and the lease simply expires unused. We only register
-	// when the path is absolute, since relative paths resolve against
-	// workDir which confinedPath already handles.
-	if pathConfinedAutoTools[name] {
-		if p := extractPathFromArgs(name, args); filepath.IsAbs(p) {
-			root := filepath.Dir(filepath.Clean(p))
-			if tool.AcquireTemporaryAllowedPath(root) {
-				defer tool.ReleaseTemporaryAllowedPath(root)
-			}
-		}
-	}
+	// The path-confinement lease is NOT taken here. It is granted in
+	// executeToolCallWithContext, and only on an allow path. See the comment there.
 
 	if a.permissions != nil {
 		autoEnabled := a.permissions.AutoPermissionEnabled()
@@ -4650,12 +4626,6 @@ func (a *Agent) runToolCallWithContext(ctx context.Context, name string, args js
 			return tool.SentinelPermissionAsk + string(payload), nil
 		}
 	}
-
-	// (The path-temp-allow lease for path-confined tools is acquired at
-	// the top of handleToolCall so it covers every allow path — direct
-	// Decide-Allow, PermissionDeny → model-allow, PermissionAsk →
-	// model-allow, and PermissionAsk → OnPermissionAsk-allow. See the
-	// comment at the top of this function for the rationale.)
 
 	return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
 }
@@ -6291,6 +6261,28 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	a.emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
+	}
+
+	// Path-confinement lease for path-confined tools with an absolute target.
+	// Invariant: the lease is granted only after an allow decision, never before
+	// Decide. The tool layer's confinedPath consults the lease through
+	// tool.ExtraAllowedRoots(). PermissionManager.AllowedRoots() reads only
+	// tool.PersistentExtraAllowedRoots(), so a lease, its own or another call's,
+	// never reaches Decide. Were it visible, Decide would treat the target as
+	// in-scope and auto-allow an outside path with no prompt (the earlier bug).
+	//
+	// This function is reached only on allow paths: Decide-Allow, the
+	// auto-judge allow, the human Allow, HandleApprovedToolCall (TUI, server
+	// resolve), and the Claude Code decide-only bridge. Placing the acquire here
+	// means the lease covers the decide-only ConfinedPath check and the real
+	// execution, and is released on every return. It is never seen by Decide.
+	if pathConfinedAutoTools[name] {
+		if p := extractPathFromArgs(name, args); filepath.IsAbs(p) {
+			root := filepath.Dir(filepath.Clean(p))
+			if tool.AcquireTemporaryAllowedPath(root) {
+				defer tool.ReleaseTemporaryAllowedPath(root)
+			}
+		}
 	}
 	if name == "advisor" && !a.AdvisorEnabled() {
 		// Execution-time gate (not advertise-time) keeps the tools block

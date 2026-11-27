@@ -2878,7 +2878,10 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if pm != nil {
 		add(pm.workDir)
 	}
-	for _, r := range tool.ExtraAllowedRoots() {
+	// Persistent extra roots only. Temporary path-confinement leases are NOT
+	// permission scope: a lease held by another in-flight call would otherwise
+	// make every Decide treat that folder as allowed. See tool.PersistentExtraAllowedRoots.
+	for _, r := range tool.PersistentExtraAllowedRoots() {
 		add(r)
 	}
 	// Managed cache dirs (truncated tool-results, cloned-repo cache). These are
@@ -3001,6 +3004,10 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 	if pm != nil {
 		add(pm.workDir, true)
 	}
+	// Leases are included here, unlike AllowedRoots: this set is only the OS
+	// sandbox's writable roots at execution time (agent.go SandboxState), never
+	// a permission decision, and a human "allow once" for an out-of-scope bash
+	// write relies on its lease being writable while the approved command runs.
 	for _, r := range tool.ExtraAllowedRoots() {
 		add(r, true)
 	}

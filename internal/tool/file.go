@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -1596,6 +1597,24 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 
 func ExtraAllowedRoots() []string {
 	return getExtraAllowedRoots()
+}
+
+// PersistentExtraAllowedRoots returns only the persistent extra roots
+// (extra_allowed_paths and the runtime allowlist), sorted. Temporary
+// path-confinement leases are excluded on purpose. The permission layer
+// (PermissionManager.AllowedRoots and AllowedRootsClassified) reads this, so a
+// lease held by one in-flight call, in any session, must never make Decide in
+// another call treat its folder as in scope. Leases stay visible to tool
+// confinement (confinedPath, search) through getExtraAllowedRoots.
+func PersistentExtraAllowedRoots() []string {
+	extraAllowedRootsMu.RLock()
+	defer extraAllowedRootsMu.RUnlock()
+	out := make([]string, 0, len(persistentAllowedRoots))
+	for root := range persistentAllowedRoots {
+		out = append(out, root)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // NormalizeRootPath exposes the permission/confinement root normalization
