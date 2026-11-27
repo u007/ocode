@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Artifact IDE on ocode via kakiit — proposal</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.55 system-ui, sans-serif; }
+  body { max-width: 860px; margin: 2.5rem auto; padding: 0 1.2rem; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #8885; padding-bottom: .3rem; }
+  code, pre { font-family: ui-monospace, monospace; font-size: .92em; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 6px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  .draft { display: inline-block; background: #c80; color: #000; padding: .15rem .5rem; border-radius: 4px; font-weight: 700; }
+  .note { opacity: .8; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>Artifact IDE on ocode via kakiit</h1>
+<p><span class="draft">DRAFT PROPOSAL — NOT APPROVED</span> &nbsp; 2026-11-27</p>
+
+<h2>1. Understanding</h2>
+<p>Give ocode an <strong>artifact IDE</strong>: build a small interactive app in chat, preview it live in the ocode desktop app, and give it working <strong>shared storage</strong> like Claude Artifacts. kakiit already hosts published artifacts as a hub; the new work is a live runtime with storage on that hub. ocode stays the authoring surface.</p>
+<p class="note">Assumptions to correct if wrong: (a) kakiit remains the hub, not ocode; (b) "isolated service" means a separate artifact runtime origin, not a separate kakiit deployment; (c) "public" means a link usable with no account. Success = build in ocode, preview in desktop, persist data, share privately / to an org / publicly under one permission model.</p>
+
+<h2>2. Delta: what exists, what is new</h2>
+<table>
+<tr><th>Already there</th><th>New work</th></tr>
+<tr><td>Mode B publish: ocode uploads blobs to kakiit S3 and finalises immutable versions; a stored local public token keeps re-publish on the same link. Hub failure → 502, no local fallback; a failed first publish is undone.</td><td>Runtime that serves the hub version as a live app, not just static files.</td></tr>
+<tr><td>Hub owner API <code>/api/ocode/artifacts</code> behind sync Bearer; tables <code>ocode_artifact{,version,file,token,allowlist}</code>; public serve at <code>/p</code> with opaque capability tokens, password gate, invite cookies, uniform 404 and rate limiting.</td><td>Storage API with personal + shared pools; an organization visibility mode.</td></tr>
+<tr><td>Sidebar <code>PreviewHost</code> with Browser / Preview tabs, driven by <code>preview_open</code> and <code>ocode:open-preview</code> (verified in <code>web/src/App.tsx</code>).</td><td>Third artifact surface plus author controls: publish, version picker, data, sharing.</td></tr>
+</table>
+<p>No migration question: publishing already targets kakiit. New work starts at the hub.</p>
+
+<h2>3. Storage (new)</h2>
+<table>
+<tr><th>Pool</th><th>Semantics</th><th>Key rule</th></tr>
+<tr><td>Personal</td><td>One private dataset per signed-in viewer</td><td>Isolated from shared</td></tr>
+<tr><td>Shared</td><td>One dataset all viewers read and write</td><td>Server records the writer; the page never sees it</td></tr>
+<tr><td>Files</td><td>Blobs behind the service, not in the page</td><td>Owner / org editors only</td></tr>
+</table>
+<p>Documents (JSON), not SQL tables exposed to the app. Start at 100 MB / 25,000 records, 20 MB per file; enforce server-side. Authorisation and auditing stay server-side — the page cannot enforce visibility.</p>
+
+<h2>4. Access: reuse, then gap</h2>
+<p>Reuse the existing <code>public | password | allowlist</code> modes, hashed capability tokens, signed cookies bound to mode, invite expiry and uniform 404. Add <code>org</code> mode for signed-in kakiit members; public links keep working without an account. Public serving stays under <code>/p</code> only, built through <code>newArtifactTailscaleShare()</code>; a public funnel requires <code>authConfigured()</code>. Serve from an opaque origin (<code>sandbox allow-scripts</code>, no <code>allow-same-origin</code>).</p>
+<p><strong>Gap:</strong> an opaque-origin iframe cannot send cookies or hold a bearer token. Storage calls need a postMessage bridge through the host frame, which authorises the viewer and proxies the call. The bridge is the core design problem, not a detail. A public link opened in a plain browser has no ocode host frame, so kakiit must serve a wrapper page around the artifact iframe to host it.</p>
+
+<h2>5. Desktop preview + UI</h2>
+<ul>
+<li>Add an artifact tab to the existing <code>PreviewHost</code>; keep <code>preview_open</code> and <code>ocode:open-preview</code> as the entry points. Live refresh follows the session SSE bus as file previews do today.</li>
+<li>The artifact iframe carries the <code>sandbox allow-scripts</code> CSP header and never gets the ocode app origin.</li>
+<li>Author UI: code + preview side by side, publish, version picker, personal/shared data tab, sharing dialog.</li>
+<li>kakiit UI: artifact list, versions, storage inspection, visibility, invite/revoke, audit.</li>
+<li>Remote projects route via <code>?host=</code>; hub-down shows the existing hub error, never a local copy.</li>
+</ul>
+
+<h2>6. Out of scope for v1</h2>
+<p>SSR, multi-route apps, per-app backends or containers, per-row author/permissions in the shared pool, public catalog, and build execution (<code>buildCmd</code> is stored but never run today).</p>
+
+<h2>7. Constraints</h2>
+<ul>
+<li>Mode B hub publish uploads blobs and finalises immutable, content-hashed versions; no build execution or SSR in that path.</li>
+<li>Hub failure surfaces an error; no local fallback. Fresh-publish undo stays.</li>
+<li>Append-only Drizzle migrations; secret scan before publish.</li>
+</ul>
+
+<h2>8. Blocks the spike</h2>
+<ol>
+<li>postMessage bridge: how the kakiit wrapper authenticates a viewer to the opaque-origin page without cookies or bearer tokens.</li>
+<li><code>connect-src</code> policy for generated code — bridge only, or an allowlist.</li>
+<li>Draft vs live: unpublished desktop preview needs its own dataset so it never pollutes live shared data.</li>
+</ol>
+
+<h2>9. Decisions for build</h2>
+<ul>
+<li>Anonymous viewers have no identity — what a "personal pool" means for a public link.</li>
+<li>Rate limits and abuse controls on public shared writes; validate schema and size; state who may publish code that reads them.</li>
+<li>Versioning of stored data: does a new app version carry records forward, and how?</li>
+<li>Hub-down/offline behaviour for the desktop preview.</li>
+<li>Public links when an organization disables external sharing.</li>
+<li>Storage API contract: methods, pagination, conflict handling. Can the agent read/write data, and through which redaction path?</li>
+<li>Identity and lifecycle: sync-token → kakiit user/org mapping; delete, member-leave, export, retention and quota owner.</li>
+<li>Two public paths: keep or retire the Tailscale funnel <code>/p</code>; add a per-artifact kill switch and phased rollout.</li>
+</ul>
+
+<h2>10. Decision requested</h2>
+<p>Approve the <strong>direction</strong>: kakiit stays the hub, the runtime gets its own opaque origin, and storage follows §3.</p>
+<p>Approve the <strong>first slice</strong>: one artifact tab in <code>PreviewHost</code>, shared pool only, access for the owner and allowlisted viewers only.</p>
+<p>Approve the <strong>gate</strong>: this buys the §8 postMessage spike, not the full build. Return for a second decision once the bridge is proven.</p>
+</body>
+</html>
