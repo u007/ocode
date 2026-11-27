@@ -339,3 +339,30 @@ func TestCleanEnvForTerminal(t *testing.T) {
 		t.Error("missing SHELL in clean env")
 	}
 }
+
+func TestCleanEnvForTerminalDropsAnthropicCredentials(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test-placeholder")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "token-test-placeholder")
+	t.Setenv("OCODE_TEST_KEEP", "1")
+
+	env := cleanEnvForTerminal()
+
+	for _, e := range env {
+		for _, prefix := range []string{"CLAUDECODE=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN="} {
+			if strings.HasPrefix(e, prefix) {
+				t.Errorf("%s was not stripped from clean env", prefix)
+			}
+		}
+	}
+
+	kept := false
+	for _, e := range env {
+		if e == "OCODE_TEST_KEEP=1" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Error("unrelated OCODE_TEST_KEEP was dropped from clean env")
+	}
+}

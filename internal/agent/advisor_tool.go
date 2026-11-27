@@ -429,12 +429,18 @@ func withNotice(notice, content string) string {
 
 // cleanEnvForTerminal optimizes the environment for the sub-process wrapper.
 // It removes any conflicting CLAUDECODE variable to ensure standard execution
-// flow, and provides standard terminal compatibility properties.
+// flow, and provides standard terminal compatibility properties. It also drops
+// ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, because the CLI must use its own
+// subscription login and a key in the env would switch billing to the API.
 func cleanEnvForTerminal() []string {
 	var clean []string
 	for _, env := range os.Environ() {
 		// Strip CLAUDECODE to prevent nesting guards from triggering
 		if strings.HasPrefix(env, "CLAUDECODE=") {
+			continue
+		}
+		// Strip Anthropic credentials so -p mode uses the subscription login
+		if strings.HasPrefix(env, "ANTHROPIC_API_KEY=") || strings.HasPrefix(env, "ANTHROPIC_AUTH_TOKEN=") {
 			continue
 		}
 		clean = append(clean, env)
