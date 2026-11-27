@@ -21,7 +21,20 @@ import {
 import { setViewerDoc, ViewerReportContext } from "../../lib/viewerContext";
 import { useViewerSync } from "../../hooks/useViewerSync";
 
-type Surface = "browser" | "preview";
+type Surface = "browser" | "preview" | "artifact";
+
+/** The spike's artifact wrapper URL comes from the host page query string. */
+function artifactUrlFromLocation(): string {
+  const raw = new URLSearchParams(window.location.search).get("artifact") ?? "";
+  try {
+    const u = new URL(raw, window.location.origin);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    u.searchParams.set("embedOrigin", window.location.origin);
+    return u.href;
+  } catch {
+    return "";
+  }
+}
 
 interface Doc {
   path: string;
@@ -98,7 +111,12 @@ export default function PreviewHost({
   }
   const initial = initialRef.current;
 
-  const [surface, setSurface] = useState<Surface>(initial?.surface === "preview" ? "preview" : "browser");
+  const [surface, setSurface] = useState<Surface>(
+    initial?.surface === "preview" || initial?.surface === "artifact" ? initial.surface : "browser",
+  );
+  // Spike proof surface: the kakiit wrapper URL is supplied by the host page.
+  // Only absolute http(s) URLs are accepted; no token is synthesized here.
+  const [artifactUrl] = useState(() => artifactUrlFromLocation());
   const restoredKind = restoredPreviewKind(initial);
   const restoringDoc = restoredKind !== null;
   const [doc, setDoc] = useState<Doc | null>(() =>
@@ -412,9 +430,33 @@ export default function PreviewHost({
         >
           Preview{doc ? ` · ${doc.path.split("/").pop()}` : ""}
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={surface === "artifact"}
+          onClick={() => setSurface("artifact")}
+          className={`rounded px-2 py-0.5 text-xs ${surface === "artifact" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          Artifact
+        </button>
       </div>
 
-      {surface === "browser" ? (
+      {surface === "artifact" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          {artifactUrl ? (
+            <iframe
+              title="Artifact preview"
+              src={artifactUrl}
+              sandbox="allow-scripts"
+              className="h-full w-full border-0"
+            />
+          ) : (
+            <div className="p-3 text-xs text-muted-foreground">
+              No artifact URL. Open with ?artifact=&lt;wrapper URL&gt;.
+            </div>
+          )}
+        </div>
+      ) : surface === "browser" ? (
         <div className="flex min-h-0 flex-1 flex-col">
           {/* App passes the ACTIVE project's own host here (never a lookup by
               path), and Project.host is omitted for local projects, so an

@@ -82,6 +82,8 @@
 <li>Storage API contract: methods, pagination, conflict handling. Can the agent read/write data, and through which redaction path?</li>
 <li>Identity and lifecycle: sync-token → kakiit user/org mapping; delete, member-leave, export, retention and quota owner.</li>
 <li>Two public paths: keep or retire the Tailscale funnel <code>/p</code>; add a per-artifact kill switch and phased rollout.</li>
+<li>Wrapper framing: allows <code>'self'</code>, loopback over http/https on any port, and the <code>embedOrigin</code> supplied by the host SPA, so remote/LAN/Tailscale-hosted UI works. Any local process can still frame it; narrow the loopback list when preview origins are fully known.</li>
+<li>Private artifact embeds use the 7-day signed access grant from password unlock or invite redemption, passed as <code>access</code> in the wrapper URL and storage requests. The cookie remains HttpOnly for normal browsing; the wrapper sends <code>Referrer-Policy: no-referrer</code> and is not cached.</li>
 </ul>
 
 <h2>10. Decision requested</h2>

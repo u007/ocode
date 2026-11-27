@@ -17,7 +17,7 @@ import type { PreviewKind } from "../../lib/previewKind";
 // stateKey (per session surface). Old v1 entries are intentionally orphaned.
 const STORAGE_KEY = "ocode.ui.sidebarPreview.v2";
 
-export type SidebarSurface = "browser" | "preview";
+export type SidebarSurface = "browser" | "preview" | "artifact";
 
 export interface SidebarPreviewState {
   surface: SidebarSurface;
@@ -45,7 +45,7 @@ export function sidebarPreviewKey(stateKey?: string | null): string | null {
 }
 
 function isSurface(v: unknown): v is SidebarSurface {
-  return v === "browser" || v === "preview";
+  return v === "browser" || v === "preview" || v === "artifact";
 }
 
 function loadStore(): Store {
