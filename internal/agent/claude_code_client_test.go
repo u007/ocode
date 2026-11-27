@@ -467,3 +467,42 @@ func Example_claudeCodePermissionMode() {
 	fmt.Println(mode)
 	// Output: manual
 }
+
+// TestChatClaudeCodeSetsMaintainProjectWorkingDir checks that the CLI child is
+// told to return Bash to the project dir after every command. Without it a `cd`
+// drifts the cwd that ocode judges commands against.
+func TestChatClaudeCodeSetsMaintainProjectWorkingDir(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	argsFile := filepath.Join(t.TempDir(), "args")
+	envFile := filepath.Join(t.TempDir(), "env")
+	t.Setenv("FAKE_CLAUDE_ARGS", argsFile)
+	t.Setenv("FAKE_CLAUDE_ENV", envFile)
+	path := fakeClaude(t, "env > \"$FAKE_CLAUDE_ENV\"\n"+
+		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"new-id\"}'\n")
+
+	c := &GenericClient{
+		Provider:              "claude-code",
+		Model:                 "sonnet",
+		WorkDir:               t.TempDir(),
+		claudeCLIPathOverride: path,
+		PermissionModeFn:      func() PermissionMode { return PermissionModeNormal },
+		ClaudeCodeApproveFn:   allowAllClaudeApprove,
+	}
+	c.setSessionID("ses_env")
+	if _, err := runFakeClaude(t, c, []Message{{Role: "user", Content: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1 missing from the CLI environment")
+	}
+}

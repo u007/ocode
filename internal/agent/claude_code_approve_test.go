@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -360,4 +361,77 @@ func TestClaudeCodeMalformedInputIsDenied(t *testing.T) {
 			}
 		})
 	}
+}
+
+// claudeCodeWriteTestAgent builds an agent with the real write tool, a private
+// HOME and its own work dir, and a permissive Allow rule for write. Only the
+// path confinement and the pre-hooks can stop a Claude Code Write.
+func claudeCodeWriteTestAgent(t *testing.T) *Agent {
+	t.Helper()
+	setHomeTree(t, t.TempDir())
+	a := newTestAgent(&scriptedSideQueryClient{}, []tool.Tool{tool.WriteTool{}}, nil, nil)
+	a.SetWorkDir(t.TempDir())
+	a.permissions.SetRule("write", PermissionAllow)
+	return a
+}
+
+func writeInput(t *testing.T, filePath, content string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"file_path": filePath, "content": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// TestClaudeCodeWriteRelativeEscapeIsDenied checks that the decide-only path
+// refuses a write whose relative path escapes the work dir, even under an Allow
+// rule. Absolute paths are not covered here: runToolCallWithContext takes a
+// temporary allowed-root lease for every absolute write before the decision, so
+// the confinement check cannot see them (see the report on that lease).
+func TestClaudeCodeWriteRelativeEscapeIsDenied(t *testing.T) {
+	a := claudeCodeWriteTestAgent(t)
+	escape := "../../../../../../../../../../etc/ocode-test-nope.txt"
+
+	allowed, msg := a.decideClaudeCodeToolUse(context.Background(), "Write", writeInput(t, escape, "x"), "toolu_w1")
+	if allowed {
+		t.Fatalf("allowed = true for a relative write escaping the work dir (message %q)", msg)
+	}
+	if msg == "" {
+		t.Fatal("deny message is empty")
+	}
+	assertNotExists(t, "/etc/ocode-test-nope.txt")
+}
+
+// TestClaudeCodeWriteInsideWorkDirIsAllowed is the counterpart: a write inside
+// the work dir with an Allow rule is approved, and still not executed.
+func TestClaudeCodeWriteInsideWorkDirIsAllowed(t *testing.T) {
+	a := claudeCodeWriteTestAgent(t)
+	target := filepath.Join(a.WorkDir(), "ok.txt")
+
+	allowed, msg := a.decideClaudeCodeToolUse(context.Background(), "Write", writeInput(t, target, "x"), "toolu_w2")
+	if !allowed {
+		t.Fatalf("allowed = false for a write inside the work dir, message %q", msg)
+	}
+	assertNotExists(t, target)
+}
+
+// TestClaudeCodePreHookBlocksDecision checks that a configured pre-hook runs
+// for a Claude Code tool call and its block reaches the bridge as a denial,
+// even under an Allow rule.
+func TestClaudeCodePreHookBlocksDecision(t *testing.T) {
+	a, target := claudeCodeTestAgent(t)
+	a.permissions.SetRule("bash", PermissionAllow)
+	a.config = &config.Config{Hooks: map[string]config.HookConfig{
+		"bash": {Pre: []string{"echo policy-says-no >&2; exit 1"}},
+	}}
+
+	allowed, msg := a.decideClaudeCodeToolUse(context.Background(), "Bash", bashInput(t, "touch "+target), "toolu_h1")
+	if allowed {
+		t.Fatalf("allowed = true although a pre-hook blocked the call (message %q)", msg)
+	}
+	if !strings.Contains(msg, "pre-hook blocked") || !strings.Contains(msg, "policy-says-no") {
+		t.Fatalf("message = %q, want the pre-hook block text", msg)
+	}
+	assertNotExists(t, target)
 }

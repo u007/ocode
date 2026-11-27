@@ -220,7 +220,10 @@ func (c *GenericClient) chatClaudeCode(ctx context.Context, messages []Message, 
 	if c.WorkDir != "" {
 		cmd.Dir = c.WorkDir
 	}
-	cmd.Env = withLoginShellPath(cleanEnvForTerminal())
+	// CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR makes the CLI return Bash to the
+	// project dir after every command, so a `cd` cannot drift the cwd that ocode
+	// judges commands against.
+	cmd.Env = append(withLoginShellPath(cleanEnvForTerminal()), "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1")
 	// Start in its own process group where the platform supports it so Stop can
 	// kill the whole tree.
 	configureClaudeCodeCommand(cmd)

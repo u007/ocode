@@ -6292,13 +6292,6 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
 	}
-	// Decide-only (claude-code approval bridge): the Claude Code CLI executes
-	// the tool itself, so ocode records that its pipeline would allow the call
-	// and stops here. See decideClaudeCodeToolUse.
-	if decided := decideOnlyFromContext(ctx); decided != nil {
-		*decided = true
-		return "", nil
-	}
 	if name == "advisor" && !a.AdvisorEnabled() {
 		// Execution-time gate (not advertise-time) keeps the tools block
 		// stable across toggles so the provider prompt cache survives.
@@ -6338,6 +6331,26 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	argsStr := string(args)
 	if err := hooks.RunPreHook(name, argsStr, hooksCfg); err != nil {
 		return fmt.Sprintf("pre-hook blocked: %v", err), nil
+	}
+
+	// Decide-only (claude-code approval bridge): the Claude Code CLI executes
+	// the tool itself, so ocode records that its pipeline would allow the call
+	// and stops here. It sits after the tool lookup and the user's pre-hooks, so
+	// a blocking hook denies the call (its "pre-hook blocked" text reaches the
+	// bridge) and the tool-level path confinement that a real execution applies
+	// is applied here too. The args are the raw CLI args on purpose: Claude Code
+	// runs the tool with them, so no OCSEC resolve or pipeline rewrite applies.
+	// See decideClaudeCodeToolUse.
+	if decided := decideOnlyFromContext(ctx); decided != nil {
+		if pathConfinedAutoTools[name] {
+			if p := extractPathFromArgs(name, args); p != "" {
+				if _, err := tool.ConfinedPath(tool.WithWorkDir(ctx, a.WorkDir()), p); err != nil {
+					return fmt.Sprintf("denied: path %q is outside the allowed roots: %v", p, err), nil
+				}
+			}
+		}
+		*decided = true
+		return "", nil
 	}
 
 	// Resolve any OCSEC tokens in tool arguments back to original values
