@@ -552,3 +552,4 @@ okf_version: 0.1
 - [2026-11-08-offline-capable-web-client-design.md](superpowers/specs/2026-11-08-offline-capable-web-client-design.md)
 - [2026-11-16-ocode-mobile-companion-design.md](superpowers/specs/2026-11-16-ocode-mobile-companion-design.md)
 - [telegram-bot.md](telegram-bot.md)
+

@@ -134,7 +134,7 @@ The split is the enforcement mechanism: a call site that must stay secrets-only 
 | Permission shell vars | `internal/agent/permission_shellvars.go:109`, `:112` |
 | Permission judge log | `internal/agent/permission_judge_log.go:302`, `:324` |
 | Network guard values | `internal/agent/network_guard_typesafe.go:1048` |
-| Explain digest | `internal/agent/tool_digest.go:150`, `:283` |
+| Explain digest | `internal/agent/tool_digest.go:150`, `:256` |
 | Git commit-message error | `internal/server/handler_git_message.go:96` |
 
 All sites in the second table switch to `DetectSecrets` / `redactSecrets` / `redactFileText`. `redactFileText` stays secrets-only.

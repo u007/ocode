@@ -391,12 +391,48 @@ func TestRunToolDigestLoop_ToolErrorsRecovered(t *testing.T) {
 	}
 }
 
-// TestRunToolDigestLoop_StepAndInspectionExhaustion: six model steps without a
+// TestRunToolDigestLoop_FinalStepNudge: a model that inspects up to the
+// second-to-last step is told to answer on the last one, and the run succeeds.
+func TestRunToolDigestLoop_FinalStepNudge(t *testing.T) {
+	payload := digestLoopPayload(t, `{"command":"ls"}`)
+	guard := digestLoopGuard()
+	box := digestLoopToolbox(t, payload, guard, &digestFakeTool{name: "read"})
+
+	steps := make([]digestLoopStep, 0, toolDigestModelSteps)
+	for i := 0; i < toolDigestModelSteps-1; i++ {
+		steps = append(steps, digestCalls(digestCall("n"+string(rune('a'+i)), "read", `{}`)))
+	}
+	steps = append(steps, digestFinal("## What it does\n\nAnswered after the nudge."))
+	client := &digestLoopClient{steps: steps}
+	usage, _ := digestUsageRecorder()
+	got, err := runToolDigestLoop(context.Background(), client, box, "SYSTEM", []Message{{Role: "user", Content: "m"}}, guard, usage, ToolCallDigestInput{Tool: "bash"})
+	if err != nil {
+		t.Fatalf("final-step nudge must let the model answer: %v", err)
+	}
+	if !strings.Contains(got.Summary, "Answered after the nudge") {
+		t.Fatalf("summary = %q", got.Summary)
+	}
+	if n := client.requestCount(); n != toolDigestModelSteps {
+		t.Fatalf("requests = %d, want %d", n, toolDigestModelSteps)
+	}
+	for i, req := range client.requests {
+		last := req.messages[len(req.messages)-1]
+		hasNudge := last.Role == "user" && strings.Contains(last.Content, "No more inspections")
+		if i == toolDigestModelSteps-1 && !hasNudge {
+			t.Fatalf("final request must end with the answer-only nudge; last = %+v", last)
+		}
+		if i < toolDigestModelSteps-1 && hasNudge {
+			t.Fatalf("request %d must not carry the nudge", i+1)
+		}
+	}
+}
+
+// TestRunToolDigestLoop_StepAndInspectionExhaustion: all model steps without a
 // final answer, and twelve inspection calls without one, are distinct errors.
 func TestRunToolDigestLoop_StepAndInspectionExhaustion(t *testing.T) {
 	guard := digestLoopGuard()
 
-	t.Run("six steps", func(t *testing.T) {
+	t.Run("all steps", func(t *testing.T) {
 		payload := digestLoopPayload(t, `{"command":"ls"}`)
 		read := &digestFakeTool{name: "read"}
 		box := digestLoopToolbox(t, payload, guard, read)

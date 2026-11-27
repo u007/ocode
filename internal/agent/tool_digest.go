@@ -42,6 +42,7 @@ Rules:
 - "args" is authoritative. The displayed command can omit environment assignments, so rely on the parameters rather than assuming the command is complete.
 - Track byte offsets. Pages come from call_parameters with offset_bytes and max_bytes (1 to 8192). Never treat a range you have not seen as absent. Say which ranges you inspected and which you could not, and why.
 - You may inspect project files with the read-only tools you are offered. Never execute the pending call.
+- The run has a small step budget: stop inspecting once the evidence is enough and answer. The last step is answer-only.
 - Claims must be supported by the pending call or by evidence you inspected. Name uncertainty, opaque payloads, inaccessible paths, rejected inspections and uninspected parameter ranges instead of inventing behavior.
 - Never claim the call is safe to approve. This is an explanation, not a verdict.
 

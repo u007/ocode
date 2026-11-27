@@ -14,7 +14,7 @@ tags:
   - read-only
   - tui
   - web-ui
-timestamp: 2026-11-25T06:22:41Z
+timestamp: 2026-11-27T10:00:00Z
 status: approved
 ---
 # Permission command explainer — isolated read-only investigation loop
@@ -50,7 +50,7 @@ The existing concept page documents the old one-shot/no-tools/plain-prose/409 be
 3. **Investigate project context.** The explainer may read project files, search/list them, and perform narrowly allowlisted read-only shell inspection.
 4. **Keep Git metadata-only.** Admit only hardened `status`, metadata-only `diff`, `rev-parse`, and `ls-files` forms. Never admit patches, history, object content, or content-rendering options.
 5. **Remain isolated.** The run uses local messages and a fresh side client. It never joins `Agent.Step`, the permission manager, hooks, discovery, todo/note injection, advisors, or the main chat stream.
-6. **Be bounded.** One run has an 80-second overall cap that includes every model call, every tool, and semaphore admission, a 25-second model-call cap, six model steps, twelve project/shell inspection calls, and strict evidence budgets. Parameter pages have an 8 KiB page cap and share the run's model-context-window budget; there is no cumulative parameter-byte cap.
+6. **Be bounded.** One run has an 80-second overall cap that includes every model call, every tool, and semaphore admission, a 25-second model-call cap, ten model steps, twelve project/shell inspection calls, and strict evidence budgets. Parameter pages have an 8 KiB page cap and share the run's model-context-window budget; there is no cumulative parameter-byte cap.
 7. **Coordinate by ask, not by session.** Different asks in one session run independently. The same owner/ask key cancels and replaces its predecessor. A process-wide semaphore admits at most three explainers.
 8. **Snapshot state safely.** Capture all mutable agent inputs before the loop under a narrow client snapshot lock, and never read mutable `Agent` fields during the run.
 9. **Return useful Markdown.** The full answer is rendered with headings, lists, emphasis, and code formatting in a scroller; it is never truncated.
@@ -122,7 +122,7 @@ The coordinator is deliberately not a full singleflight:
 3. Only after input resolution does the coordinator start a run-scoped context with the 80-second deadline, derive the owner/ask key, cancel only an active run with the same key, check the success cache, and then wait for one semaphore slot if needed.
 4. The runner takes one immutable agent snapshot, resolves a fresh side client from that snapshot, and rejects a decision-only model. It snapshots the side model's provider-qualified id, chars-per-token ratio, context window, and response reserve. It copies the complete input struct, validates the original `Args` JSON before any masking, applies secrets-only masking to structured field values, and deterministically marshals the masked canonical object.
 5. The runner creates local messages: a stable system prompt, a parameter manifest, paging instructions, and the six restricted tool definitions. It includes the first exact parameter page only when the pre-request context-window budget guard admits it; otherwise the initial message explicitly says no page was loaded and the model must request a smaller window. It does not copy session history, notes, todo state, discovery context, or advisor material.
-6. Before every outbound model request, the runner estimates the candidate local messages with `CurrentContextEstimate` and the snapshotted side model's chars-per-token ratio, then checks the estimate plus the response reserve against the snapshotted context window. For up to six model steps, it calls the side client directly with a 25-second per-call deadline only after that check passes. Each assistant response's usage is recorded through the snapshotted side-usage callback only.
+6. Before every outbound model request, the runner estimates the candidate local messages with `CurrentContextEstimate` and the snapshotted side model's chars-per-token ratio, then checks the estimate plus the response reserve against the snapshotted context window. For up to ten model steps, it calls the side client directly with a 25-second per-call deadline only after that check passes. Each assistant response's usage is recorded through the snapshotted side-usage callback only.
 7. If the model requests an allowed tool, the runner validates and executes it with the run context. File tools pass through project/secret wrappers. `inspect_shell` passes through fixed-binary resolution, argv validation, canonical path checks, sanitized environment construction, mandatory sandbox wrapping, and supervised execution. Multiple `call_parameters` calls in one assistant response execute sequentially in call order; each returns an exact window of the run-local masked payload and updates coverage before the next call is considered.
 8. Every outbound evidence result is secret-masked and capped before it is appended as local tool-result data, and it is never passed to the content guard. Evidence results keep the 8 KiB/40 KiB caps. Parameter pages are exact slices of the already-masked canonical payload; they too never reach the content guard and are admitted only by the 8 KiB page cap and the context-window budget guard. The runner has no privileged tools, so instruction-like content stays untrusted data governed by the system prompt, masking, and the strict local tool allowlist. A rejected or failed tool call returns a tool error to the model so it can choose another inspection or state an unknown; ordinary tool errors do not abort the whole run.
 9. When the model returns final content, the runner validates that it is non-empty, preserves Markdown, and returns `ToolDigest{Summary, Model}`. An exhausted step/tool budget, timeout, provider failure, context-window budget refusal, or empty answer is an explicit error. The old one-shot path is never used as a fallback.
@@ -361,11 +361,15 @@ The `-race` invariant is scoped to explainer snapshot reads versus `applySpecMod
 
 The old 6,000-command / 6,000-args / 12,000-assembled input caps do not exist on this path.
 
+### Final step (answer-only)
+
+At the start of the final (10th) model step, the runner appends one user-role message with the exact text `No more inspections. Answer now in Markdown from the evidence above; name any unknown or uninspected bytes instead of calling another tool.` Tool definitions are still sent on that step because Anthropic rejects a `tool_use`/`tool_result` transcript with no tools defined. The model may still call a tool on that step; the 10-step cap remains the backstop and a run that still does not produce a final answer returns the ten-step exhaustion error.
+
 Failure behavior:
 
 - **Overall timeout:** explicit `explain timed out after 80s` error.
 - **Model-call timeout:** explicit error naming the 25-second model deadline; if the overall deadline also expired, report the overall timeout.
-- **Step exhaustion:** explicit error stating the six-step limit was reached without a final answer.
+- **Step exhaustion:** explicit error stating the ten-step limit was reached without a final answer.
 - **Inspection-call exhaustion:** explicit error stating the twelve-call project/shell limit was reached without a final answer.
 - **Context-window budget refusal:** a parameter page returns an explicit tool error naming `remaining_context_tokens`, the requested byte range, and the uninspected ranges; the model must disclose the limit. If the next model request itself cannot fit, the run returns an explicit context-window error and sends no over-budget provider request.
 - **Provider failure:** explicit provider error; no old one-shot fallback and no alternate-backend retry.
@@ -456,7 +460,7 @@ Add focused coverage in `internal/agent/tool_digest_loop_test.go`, `internal/age
 - The context-window budget guard uses the snapshotted side model, exercises both registry-known and unknown-window fallbacks, reserves response room, and returns a refusal naming remaining context and uninspected ranges.
 - The runner never calls `scanContentGuard` for evidence results or parameter pages: instruction-like bytes stay visible as data, no content-guard refusal or permission ask is emitted, and no content-guard state is snapshotted.
 - Final Markdown retains headings, lists, emphasis, and fenced code; no 1,200-character clamp or paragraph collapse occurs.
-- Overall/per-call deadlines, six-step exhaustion, twelve-inspection exhaustion, provider failure, empty output, context-window budget refusal, and cancellation return distinct errors.
+- Overall/per-call deadlines, ten-step exhaustion, twelve-inspection exhaustion, provider failure, empty output, context-window budget refusal, and cancellation return distinct errors.
 - Every model response records usage through the snapshotted `OnSideUsage` callback; no main-agent usage path is touched.
 - Local-only state: session transcript, `OnMessage`, `OnDelta`, permission asks, hooks, discovery, todo, notes, and advisors remain untouched.
 - Decision-only models are rejected before a request is sent.
@@ -548,7 +552,7 @@ There is no configuration or API migration. Coordinator state, parameter payload
 - **The sandbox is not a confidentiality boundary.** Reads and execution remain broadly available at the OS layer. Secret-path checks, project containment, fixed binaries, sanitized environment, metadata-only Git forms, and result masking carry the confidentiality burden.
 - **Network isolation is not portable.** The existing Linux sandbox shares networking. The design excludes network tools and shell construction, but a compromised allowlisted binary remains a residual risk; no network guarantee is claimed.
 - **Repository configuration is untrusted.** The canonical sensitive-key list, fixed Git prefix, forced no-external-diff/no-textconv flags, and metadata-only forms are all required. A future Git behavior change must fail the malicious-repository tests; it must not be handled by silently weakening the allowlist or adding a version exception.
-- **Large parameters can exceed one run's model context window.** Every byte remains locally pageable and there is no cumulative parameter-byte cap, but the context-window budget and six model steps mean the model may inspect only part of a very large payload. It must disclose uninspected ranges rather than imply complete review.
+- **Large parameters can exceed one run's model context window.** Every byte remains locally pageable and there is no cumulative parameter-byte cap, but the context-window budget and ten model steps mean the model may inspect only part of a very large payload. It must disclose uninspected ranges rather than imply complete review.
 - **The fallback HTTP cap is deliberately finite.** A stale or sub-agent ask whose posted full struct exceeds 1 MiB receives `413`. The live `request_id` path is unaffected because the server reads the authoritative transcript payload without duplicating it in the POST.
 - **Allowlists will omit useful commands.** The model receives a tool error and must answer from other evidence or state an unknown. New commands require an explicit security review and tests, not a generic fallback.
 - **Repository metadata may live outside the project.** Linked worktrees and submodules can point Git metadata outside the canonical project root. Strict containment may reject those inspections; the explanation must say so rather than widening the boundary silently.

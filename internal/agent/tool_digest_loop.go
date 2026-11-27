@@ -25,7 +25,7 @@ var (
 	// toolDigestModelCallTimeout bounds one direct side-client request.
 	toolDigestModelCallTimeout = 25 * time.Second
 	// toolDigestModelSteps bounds model round trips, call_parameters included.
-	toolDigestModelSteps = 6
+	toolDigestModelSteps = 10
 	// toolDigestInspectionCalls bounds read/glob/grep/list/inspect_shell calls.
 	toolDigestInspectionCalls = 12
 	// toolDigestParameterPageBytes is the window of the first page in the
@@ -45,6 +45,11 @@ var (
 
 // toolDigestEvidenceMarker is appended to an evidence result that was cut.
 const toolDigestEvidenceMarker = "\n[evidence truncated]"
+
+// toolDigestFinalStepMessage closes inspection before the last model request.
+// Without it, a model that keeps calling tools burns the final step and loses
+// all the evidence it gathered to the step-cap error.
+const toolDigestFinalStepMessage = "No more inspections. Answer now in Markdown from the evidence above; name any unknown or uninspected bytes instead of calling another tool."
 
 // toolDigestEvidenceScanBytes bounds how much of one raw result is masked. The
 // masker costs roughly a microsecond per byte, so an unbounded megabyte result
@@ -114,6 +119,9 @@ func runToolDigestLoop(ctx context.Context, client LLMClient, toolbox *toolDiges
 	defs := toolbox.Definitions()
 
 	for step := 1; step <= toolDigestModelSteps; step++ {
+		if step == toolDigestModelSteps {
+			messages = append(messages, Message{Role: "user", Content: toolDigestFinalStepMessage})
+		}
 		if err := guard.admit(messages); err != nil {
 			return ToolDigest{}, fmt.Errorf("%w; the next model request was not sent", err)
 		}

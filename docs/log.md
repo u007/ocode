@@ -1,5 +1,13 @@
 # Directory Update Log
 
+## 2026-11-27
+
+* **Update**: Model-step cap raised 6->10; final-step and failure entries updated ([superpowers/specs/2026-11-25-permission-command-explainer-design.md](/superpowers/specs/2026-11-25-permission-command-explainer-design.md))
+* **Update**: Model-step cap raised 6->10; anchors re-derived; final-step answer nudge noted ([concepts/ask-dialog-tool-call-digest.md](/concepts/ask-dialog-tool-call-digest.md))
+* **Update**: Correct Explain digest anchor :283 to :256 (DetectSecrets call site) ([superpowers/specs/2026-11-24-pii-redaction-design.md](/superpowers/specs/2026-11-24-pii-redaction-design.md))
+* **Update**: Re-derive file.go:NNN anchors after 1-line insert in tool_digest.go and 8-line insert in tool_digest_loop.go ([concepts/ask-dialog-tool-call-digest.md](/concepts/ask-dialog-tool-call-digest.md))
+* **Update**: Noted that the final (6th) model step is answer-only via the injected nudge; the 6-step cap remains the backstop. ([superpowers/specs/2026-11-25-permission-command-explainer-design.md](/superpowers/specs/2026-11-25-permission-command-explainer-design.md))
+
 ## 2026-11-26
 
 * **Update**: Corrected On-screen keyboard pad subsection: arrows are lucide icons, ^C/Esc are text labels; items are plain labelled buttons with no menu roles. ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
