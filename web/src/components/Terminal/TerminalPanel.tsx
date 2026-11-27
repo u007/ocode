@@ -44,6 +44,7 @@ import { attachImeHygiene } from "./terminalImeHygiene";
 import { createTerminalInputGuard, isTerminalGeneratedReply } from "./terminalInputGuard";
 import { softKeyboardBackspace, softKeyboardNavigationSequence } from "./terminalSoftKeyboard";
 import TerminalFindBar from "./TerminalFindBar";
+import { TerminalKeyboardPad } from "./TerminalKeyboardPad";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { noteRemoteHostReachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
 import { apiPath, apiWsPath, remoteApiBase, authHeaders, authToken, isRemoteSession } from "@/api/client";
@@ -2617,6 +2618,11 @@ export default function TerminalPanel({
             <MicOff aria-hidden="true" className="h-5 w-5" />
           )}
         </button>
+        <TerminalKeyboardPad
+          getTerm={() => termRef.current}
+          enabled={shellReady}
+          inputGuard={inputGuard}
+        />
       </div>
     </div>
     {/* Outside the container on purpose: React bubbles a portal's events up

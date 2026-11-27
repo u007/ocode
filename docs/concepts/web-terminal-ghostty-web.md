@@ -12,7 +12,7 @@ tags:
   - desktop
   - pulse
   - performance
-timestamp: 2026-11-24T04:28:24Z
+timestamp: 2026-11-26T13:37:58Z
 ---
 # Web/Desktop Terminal on ghostty-web
 
@@ -58,6 +58,20 @@ Rules:
 - `ghosttyWebMock.ts:105` mirrors the real `input(data, true)` by firing `_data` when `wasUserInput`, so the typed-input path is exercised in tests.
 
 Regression suite: `web/src/components/Terminal/TerminalPanel.mobileKeys.test.tsx` (15 cases: 10 navigation, which were mutation-verified when written, and 5 Backspace) and `web/src/components/Terminal/terminalSoftKeyboard.test.ts` (8 unit cases for the pure functions).
+
+### On-screen keyboard pad
+
+A floating `Keyboard`-icon button in the terminal's chrome bar (bottom-right, next to the voice mic) opens a Radix Popover above it, Android FAB speed-dial style, exposing shortcut items for keys a phone soft keyboard can't easily send: the four arrows (rendered as lucide icons ArrowUp/Down/Left/Right) plus `^C` (interrupt, `\x03`) and `Esc` (`\x1b`), the latter two rendered as visible text labels rather than icons. Tapping an item feeds its byte sequence to the PTY through `term.input(..., true)` — the same typed-input path as a hardware key — so the shell sees exactly what a real keyboard would send, and `inputGuard.noteInput()` is called first so the IME re-commit guard does not drop the following frame.
+
+- Only the four arrow items use lucide icons (ArrowUp/Down/Left/Right); `^C` and `Esc` are rendered as visible text (`^C`, `Esc`), not icons — the `Keyboard` icon is reserved for the trigger button.
+- Arrow items use `softKeySequence(keyName, term.getMode(1, false))` (`terminalSoftKeyboard.ts`) to pick normal (`\x1b[A`) vs application-cursor (`\x1bOA`) form by DECCKM mode, so arrows behave under vim, less and tmux. `^C` and `Esc` send their literal bytes.
+- The popover items are plain labelled buttons (`aria-label`), with no `role="menu"`, `role="menuitem"` or `aria-haspopup="menu"`, because they have no arrow-key navigation — screen readers should not expect a traversable menu widget.
+- Pointer/mousedown is cancelled (`preventDefault`) on both the trigger and each item, so tapping keeps focus in the terminal and the mobile keyboard stays open.
+- The Popover uses `onOpenAutoFocus`/`onCloseAutoFocus` to prevent Radix from moving focus into the popover, which would dismiss the phone keyboard.
+- The button is disabled until `shellReady` (the terminal shell is attached); `send` also no-ops when `!enabled` or the terminal is null.
+- Wired in `TerminalPanel.tsx` next to the voice mic as `<TerminalKeyboardPad getTerm={() => termRef.current} enabled={shellReady} inputGuard={inputGuard} />`, and shown on all screen sizes.
+- Tests: `web/src/components/Terminal/TerminalKeyboardPad.test.tsx` (7 cases: disabled when shell not attached; up arrow sends `\x1b[A` in normal mode; up arrow sends `\x1bOA` in app-cursor mode via `getMode(1)`; `^C` sends `\x03`; `Esc` sends `\x1b`; menu closes after send; no send when disabled).
+- Changelog entry: `CHANGES.md` under `[Unreleased]`.
 
 ### Phone soft-keyboard Backspace is dropped by ghostty-web (fix uncommitted, unverified on device)
 

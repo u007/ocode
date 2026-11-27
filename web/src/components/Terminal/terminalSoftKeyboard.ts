@@ -83,6 +83,18 @@ function looksLikeSoftKeyboard(ev: SoftKeyboardEventShape): boolean {
 }
 
 /**
+ * Returns the byte sequence for a named navigation key, picking normal (`dec`)
+ * or application-cursor (`app`) form by `applicationCursor`
+ * (`term.getMode(1, false)` — DECCKM). Used by the on-screen keyboard pad so
+ * arrows behave correctly under vim, less and tmux.
+ */
+export function softKeySequence(keyName: string, applicationCursor: boolean): string | null {
+  const seq = SEQUENCES[keyName];
+  if (!seq) return null;
+  return applicationCursor ? seq.app : seq.dec;
+}
+
+/**
  * Returns the bytes to send for a soft-keyboard navigation key, or null when
  * the event should be left to ghostty-web (or to the browser).
  *

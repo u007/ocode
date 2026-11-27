@@ -2,6 +2,9 @@
 
 ## 2026-11-26
 
+* **Update**: Corrected On-screen keyboard pad subsection: arrows are lucide icons, ^C/Esc are text labels; items are plain labelled buttons with no menu roles. ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
+* **Update**: reflect FileTree reveal nonce hoist, root-self cancel, and two new tests (19 total) ([gotchas/files-tab-os-native-reveal.md](/gotchas/files-tab-os-native-reveal.md))
+* **Update**: Added on-screen keyboard pad subsection (shortcut set, mode-aware arrows, disabled-until-attached gating) ([concepts/web-terminal-ghostty-web.md](/concepts/web-terminal-ghostty-web.md))
 * **Update**: Re-derived moved anchors in internal/agent/permissions.go and internal/tui/model.go. ([scheduled-jobs.md](/scheduled-jobs.md))
 * **Update**: Re-derived the moved 202 response anchor and defer-block anchor in internal/server/handler_permissions_resolve.go. ([gotchas/web-ask-dialog-resolved-before-continuation.md](/gotchas/web-ask-dialog-resolved-before-continuation.md))
 * **Update**: Re-derived moved internal/tui/model.go anchors for the retry activity row, the paused RC turn comment and the permission button regions. ([gotchas/tui-skipllm-is-not-a-render-gate.md](/gotchas/tui-skipllm-is-not-a-render-gate.md))
