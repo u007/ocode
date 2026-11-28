@@ -24,6 +24,7 @@ vi.mock("../../api/client", () => {
       dbConnectQuery: vi.fn(),
       dbConnectRows: vi.fn(),
       dbConnectRow: vi.fn(),
+      dbConnectEnvFiles: vi.fn(),
     },
   };
 });
@@ -68,6 +69,8 @@ function resizePanel(width: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The env file picker loads the project's files whenever a template URL is typed.
+  vi.mocked(api.dbConnectEnvFiles).mockResolvedValue([".env", ".env.local"]);
   // The table list's collapsed state and width persist in localStorage between tests.
   localStorage.clear();
   mockLock.mockResolvedValue(undefined);

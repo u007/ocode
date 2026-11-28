@@ -24,6 +24,7 @@ vi.mock("../../api/client", () => {
       dbConnectQuery: vi.fn(),
       dbConnectRows: vi.fn(),
       dbConnectRow: vi.fn(),
+      dbConnectEnvFiles: vi.fn(),
     },
   };
 });
@@ -33,6 +34,24 @@ const mockAdd = vi.mocked(api.dbConnectAdd);
 const mockUnlock = vi.mocked(api.dbConnectUnlock);
 const mockLock = vi.mocked(api.dbConnectLock);
 const mockTables = vi.mocked(api.dbConnectTables);
+const mockEnvFiles = vi.mocked(api.dbConnectEnvFiles);
+
+const PROJECT_ENV_FILES = [".env", ".env.local", ".env.production", ".env.staging"];
+const DEFAULT_OPTION = "Default (.env + .env.local)";
+
+// Opens the env file picker and chooses one option. Radix opens on Enter; the
+// pointer path needs hasPointerCapture, which jsdom does not provide.
+async function pickEnvFile(option: string) {
+  fireEvent.keyDown(screen.getByLabelText("Env file (optional)"), { key: "Enter" });
+  fireEvent.click(await screen.findByRole("option", { name: option }));
+}
+
+// Fills the add form with a template URL and a name, ready to save.
+async function fillTemplateForm(name: string) {
+  await screen.findByText("Add a PostgreSQL connection");
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: name } });
+  fireEvent.change(screen.getByLabelText("Connection URL"), { target: { value: "${DATABASE_URL}" } });
+}
 
 const SURFACE_RE = /^db-panel::\/proj:[a-z0-9]+-\d+$/;
 
@@ -41,6 +60,7 @@ beforeEach(() => {
   localStorage.clear();
   mockLock.mockResolvedValue(undefined);
   mockTables.mockResolvedValue({ tables: [], hasMore: false });
+  mockEnvFiles.mockResolvedValue(PROJECT_ENV_FILES);
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -134,14 +154,8 @@ describe("DBPanel environment-backed connections", () => {
     mockAdd.mockResolvedValue({ name: "staging" });
     render(<DBPanel projectPath="/proj" />);
 
-    await screen.findByText("Add a PostgreSQL connection");
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "staging" } });
-    fireEvent.change(screen.getByLabelText("Connection URL"), {
-      target: { value: "${DATABASE_URL}" },
-    });
-    fireEvent.change(screen.getByLabelText("Env file (optional)"), {
-      target: { value: ".staging" },
-    });
+    await fillTemplateForm("staging");
+    await pickEnvFile(".env.staging");
     fireEvent.click(screen.getByLabelText("Use SSH tunnel"));
     fireEvent.change(screen.getByLabelText("SSH host"), { target: { value: "${SSH_HOST}" } });
     fireEvent.change(screen.getByLabelText("SSH port (optional)"), {
@@ -168,7 +182,7 @@ describe("DBPanel environment-backed connections", () => {
           port: undefined,
           remote_port: undefined,
         }),
-        ".staging",
+        ".env.staging",
       );
     });
   });
@@ -191,7 +205,9 @@ describe("DBPanel environment-backed connections", () => {
     await screen.findByText("Add a PostgreSQL connection");
     const hint = screen.getByText(/read the URL from the/);
     expect(hint.textContent).toContain(".env");
-    expect(hint.textContent).toContain("A value exported in the server environment wins unless an env file is selected.");
+    expect(hint.textContent).toContain(
+      "Connections saved to the project read only the project's env files, never the server environment. Global connections read the server environment first unless an env file is selected.",
+    );
   });
 
   it("does not send an env file typed under a template URL once the URL is literal", async () => {
@@ -200,10 +216,8 @@ describe("DBPanel environment-backed connections", () => {
     mockUnlock.mockResolvedValue({ unlocked: [], failed: [] });
     render(<DBPanel projectPath="/proj" />);
 
-    await screen.findByText("Add a PostgreSQL connection");
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "stage" } });
-    fireEvent.change(screen.getByLabelText("Connection URL"), { target: { value: "${DATABASE_URL}" } });
-    fireEvent.change(screen.getByLabelText("Env file (optional)"), { target: { value: ".staging" } });
+    await fillTemplateForm("stage");
+    await pickEnvFile(".env.staging");
     // Switching to a literal URL hides the env file field; its typed value must not ride along.
     fireEvent.change(screen.getByLabelText("Connection URL"), { target: { value: "postgres://app:pw@db/app" } });
     expect(screen.queryByLabelText("Env file (optional)")).toBeNull();
@@ -260,7 +274,7 @@ describe("DBPanel environment-backed connections", () => {
     expect(screen.getByText(needsFile)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save connection" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.change(screen.getByLabelText("Env file (optional)"), { target: { value: ".staging" } });
+    await pickEnvFile(".env.staging");
     expect(screen.queryByText(needsFile)).toBeNull();
     expect((screen.getByRole("button", { name: "Save connection" }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -295,5 +309,71 @@ describe("DBPanel environment-backed connections", () => {
 
     expect(screen.getByText(/SSH tunnel fields that use \$\{VAR\} need a template URL/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save connection" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("DBPanel env file picker", () => {
+  it("lists the project's env files, with the default option first", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    render(<DBPanel projectPath="/proj" />);
+
+    await fillTemplateForm("env");
+    fireEvent.keyDown(screen.getByLabelText("Env file (optional)"), { key: "Enter" });
+
+    const options = await screen.findAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual([DEFAULT_OPTION, ...PROJECT_ENV_FILES]);
+    expect(mockEnvFiles).toHaveBeenCalledWith({ host: undefined, projectPath: "/proj" });
+  });
+
+  it("sends the chosen env file on add", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    mockAdd.mockResolvedValue({ name: "prod" });
+    render(<DBPanel projectPath="/proj" />);
+
+    await fillTemplateForm("prod");
+    await pickEnvFile(".env.production");
+    fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+
+    await waitFor(() => {
+      expect(mockAdd).toHaveBeenCalledWith("prod", "${DATABASE_URL}", "", undefined, undefined, ".env.production");
+    });
+  });
+
+  it("sends no env file when the default option is chosen", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    mockAdd.mockResolvedValue({ name: "env" });
+    render(<DBPanel projectPath="/proj" />);
+
+    await fillTemplateForm("env");
+    await pickEnvFile(".env.local");
+    await pickEnvFile(DEFAULT_OPTION);
+    expect(screen.getByLabelText("Env file (optional)").textContent).toBe(DEFAULT_OPTION);
+    fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+
+    await waitFor(() => {
+      expect(mockAdd).toHaveBeenCalledWith("env", "${DATABASE_URL}", "", undefined, undefined, undefined);
+    });
+  });
+
+  it("shows a load failure inline and offers no free-text fallback", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    mockEnvFiles.mockRejectedValue(new Error("project has no readable env files"));
+    render(<DBPanel projectPath="/proj" />);
+
+    await fillTemplateForm("env");
+    const error = await screen.findByText(/Could not load env files: project has no readable env files/);
+    expect(error.className).toContain("text-destructive");
+    expect(screen.getByLabelText("Env file (optional)").tagName).toBe("BUTTON");
+    expect(screen.queryByPlaceholderText(/\.env\.production/)).toBeNull();
+  });
+
+  it("asks for a project and does not query the server when there is none", async () => {
+    mockList.mockResolvedValue({ connections: [] });
+    render(<DBPanel />);
+
+    await fillTemplateForm("env");
+    expect(await screen.findByText("Open a project to pick an env file")).toBeTruthy();
+    expect((screen.getByLabelText("Env file (optional)") as HTMLButtonElement).disabled).toBe(true);
+    expect(mockEnvFiles).not.toHaveBeenCalled();
   });
 });

@@ -305,3 +305,81 @@ func TestLoadNamedMissingFileIsAnError(t *testing.T) {
 		t.Fatalf("LoadNamed with a missing named file: want fs.ErrNotExist, got %v", err)
 	}
 }
+
+func TestListSelectsEnvFileNames(t *testing.T) {
+	cases := []struct {
+		name    string
+		listed  bool
+		comment string
+	}{
+		{".env", true, "the committed file"},
+		{".env.local", true, "the local override"},
+		{".env.production", true, "a named environment"},
+		{".env.staging", true, "a named environment"},
+		{".env.", false, "empty suffix"},
+		{".env.a.b", false, "a dot is not a suffix character"},
+		{".env.a b", false, "space is not a suffix character"},
+		{"env", false, "no leading dot"},
+		{".envrc", false, "a different dotfile"},
+		{"README.md", false, "unrelated file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, tc.name, "K=v\n")
+			got, err := List(dir)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if tc.listed && (len(got) != 1 || got[0] != tc.name) {
+				t.Fatalf("List = %v, want [%s] (%s)", got, tc.name, tc.comment)
+			}
+			if !tc.listed && len(got) != 0 {
+				t.Fatalf("List = %v, want none (%s)", got, tc.comment)
+			}
+		})
+	}
+}
+
+func TestListExcludesDirectoriesAndSortsOutput(t *testing.T) {
+	dir := t.TempDir()
+	// Written out of order: List must sort, not rely on creation order.
+	for _, name := range []string{".env.staging", ".env", ".env.production", ".env.local"} {
+		writeFile(t, dir, name, "K=v\n")
+	}
+	// A directory named like an env file is not a file to list.
+	if err := os.Mkdir(filepath.Join(dir, ".env.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := List(dir)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{".env", ".env.local", ".env.production", ".env.staging"}
+	if len(got) != len(want) {
+		t.Fatalf("List = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("List = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestListEmptyDirReturnsEmptySlice(t *testing.T) {
+	got, err := List(t.TempDir())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("List = %#v, want a non-nil empty slice", got)
+	}
+}
+
+func TestListMissingDirIsAnError(t *testing.T) {
+	_, err := List(filepath.Join(t.TempDir(), "absent"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("List on a missing dir: want fs.ErrNotExist, got %v", err)
+	}
+}

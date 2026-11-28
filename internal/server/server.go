@@ -527,6 +527,7 @@ func (s *Server) registerRoutes() {
 	// master-password unlock per surface, then read-only tables and queries.
 	s.mux.HandleFunc("GET /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectList))
 	s.mux.HandleFunc("POST /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectAdd))
+	s.mux.HandleFunc("GET /api/dbconnect/env-files", s.authMiddleware(s.handler.HandleDBConnectEnvFiles))
 	s.mux.HandleFunc("DELETE /api/dbconnect/connections/{name}", s.authMiddleware(s.handler.HandleDBConnectRemove))
 	s.mux.HandleFunc("POST /api/dbconnect/unlock", s.authMiddleware(s.handler.HandleDBConnectUnlock))
 	s.mux.HandleFunc("POST /api/dbconnect/lock", s.authMiddleware(s.handler.HandleDBConnectLock))

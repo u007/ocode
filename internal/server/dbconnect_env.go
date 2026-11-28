@@ -34,6 +34,30 @@ import (
 // variable X is not set", or one malformed line elsewhere in the file sends the
 // user hunting for a variable that is right there.
 func dbEnvLookup(projectRoot, envFile string) (func(string) (string, bool), func() error) {
+	return dbLookup(projectRoot, envFile, true)
+}
+
+// dbFileEnvLookup is dbEnvLookup with the process environment removed.
+//
+// A named envFile is read exactly as dbEnvLookup reads it: the file is
+// authoritative and the process environment was never consulted. With no
+// envFile, values come from .env and .env.local in projectRoot ONLY. A key
+// they do not define is unset, even when the server process exports it.
+//
+// It exists for a connection a project's .ocode/db.json ships. The repo chooses
+// the URL template, so it must not be able to name a server secret such as
+// "${SECRET}" and have it dialled out to an attacker-chosen host. Global
+// connections, which the user saved on this machine, keep dbEnvLookup.
+//
+// A load failure is reported by the second return, as in dbEnvLookup.
+func dbFileEnvLookup(projectRoot, envFile string) (func(string) (string, bool), func() error) {
+	return dbLookup(projectRoot, envFile, false)
+}
+
+// dbLookup is the shared body of dbEnvLookup and dbFileEnvLookup.
+// useProcessEnv selects whether the process environment is a fallback for an
+// unnamed envFile. Every other rule is the same for both.
+func dbLookup(projectRoot, envFile string, useProcessEnv bool) (func(string) (string, bool), func() error) {
 	var (
 		once      sync.Once
 		fileVals  map[string]string
@@ -82,15 +106,17 @@ func dbEnvLookup(projectRoot, envFile string) (func(string) (string, bool), func
 		if loadError != nil {
 			// A named file that could not be read must NOT fall back to the
 			// process environment: that would connect to the wrong database.
-			if named {
+			// A file-only lookup never falls back either.
+			if named || !useProcessEnv {
 				return "", false
 			}
 			return envfile.Lookup(name, nil)
 		}
-		if named {
+		if named || !useProcessEnv {
 			// The named file is authoritative. A key it does not define is
 			// unset even if the shell exports it: falling back would connect
-			// a staging connection to the local database.
+			// a staging connection to the local database. The same holds for
+			// a file-only lookup, which has no named file but no fallback.
 			v, ok := fileVals[name]
 			return v, ok
 		}

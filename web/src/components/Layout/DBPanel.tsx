@@ -117,6 +117,12 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
     () => (projectHost ? { host: projectHost, projectPath } : undefined),
     [projectHost, projectPath],
   );
+  // Where the env file picker reads the project's env files. A local project has
+  // no host, so this carries only the path; the picker is inert without one.
+  const envFilesTarget = useMemo<DBConnectTarget | undefined>(
+    () => (projectPath ? { host: projectHost, projectPath } : undefined),
+    [projectHost, projectPath],
+  );
   // The unlock's project scope: a remote project's path travels with its host.
   const unlockScope = useMemo<DBUnlockScope>(() => {
     if (projectHost && projectPath) return [projectPath, { host: projectHost, projectPath }];
@@ -558,6 +564,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             password={addPassword}
             confirmPassword={addConfirm}
             envFile={addEnvFile}
+            envFilesTarget={envFilesTarget}
             firstSetup={true}
             onName={setAddName}
             onUrl={setAddUrl}
@@ -628,7 +635,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
             <>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Database className="h-3.5 w-3.5" aria-hidden="true" /> {current.name} reads its URL from the
-                project&apos;s <code className="font-mono">{current.envFile ?? ".env"}</code>
+                project&apos;s <code className="font-mono">{current.envFile ?? ".env + .env.local"}</code>
               </div>
               <form
                 className="flex items-end gap-2"
@@ -705,6 +712,7 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
                 password={addPassword}
                 confirmPassword={addConfirm}
                 envFile={addEnvFile}
+                envFilesTarget={envFilesTarget}
                 firstSetup={false}
                 onName={setAddName}
                 onUrl={setAddUrl}
@@ -906,12 +914,97 @@ export default function DBPanel({ projectPath, projectHost }: { projectPath?: st
   );
 }
 
+// Radix Select rejects an empty item value, so the default option carries a
+// sentinel that maps back to "" (the server's default: .env + .env.local).
+const DEFAULT_ENV_FILE_VALUE = "__default_env_files__";
+const DEFAULT_ENV_FILE_LABEL = "Default (.env + .env.local)";
+
+// The env file picker for a template URL. It lists the project's env files from
+// the server on mount. A failed load is shown inline; there is deliberately no
+// fallback to a free-text field, because a typed name the server does not have
+// would be saved as-is.
+function EnvFileSelect({
+  value,
+  onChange,
+  target,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  target: DBConnectTarget | undefined;
+}) {
+  const host = target?.host;
+  const projectPath = target?.projectPath;
+  const hasProject = Boolean(projectPath);
+  const [files, setFiles] = useState<string[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectPath) {
+      setFiles([]);
+      setLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadError(null);
+    api
+      .dbConnectEnvFiles({ host, projectPath })
+      .then((list) => {
+        if (!cancelled) setFiles(list);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setFiles([]);
+          setLoadError(dbCallErrorText(err, { host, projectPath }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [host, projectPath]);
+
+  // A stored name the project no longer lists stays visible, so the picker never
+  // shows a blank value for a selection the user made earlier.
+  const options = value && !files.includes(value) ? [...files, value] : files;
+
+  return (
+    <div className="space-y-1">
+      <span className="block text-xs font-medium text-muted-foreground">Env file (optional)</span>
+      <Select
+        value={value === "" ? DEFAULT_ENV_FILE_VALUE : value}
+        onValueChange={(v) => onChange(v === DEFAULT_ENV_FILE_VALUE ? "" : v)}
+        disabled={!hasProject}
+      >
+        <SelectTrigger aria-label="Env file (optional)" className="h-8 font-mono text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={DEFAULT_ENV_FILE_VALUE} className="text-xs">
+            {DEFAULT_ENV_FILE_LABEL}
+          </SelectItem>
+          {options.map((file) => (
+            <SelectItem key={file} value={file} className="font-mono text-xs">
+              {file}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {!hasProject && (
+        <p className="text-[11px] text-muted-foreground">Open a project to pick an env file</p>
+      )}
+      {loadError && (
+        <p className="text-[11px] text-destructive">Could not load env files: {loadError}</p>
+      )}
+    </div>
+  );
+}
+
 function AddFields({
   name,
   url,
   password,
   confirmPassword,
   envFile,
+  envFilesTarget,
   firstSetup,
   tunnelEnabled,
   tunnelHost,
@@ -940,6 +1033,8 @@ function AddFields({
   password: string;
   confirmPassword: string;
   envFile: string;
+  /** Where the env file list is read from: the project, and its host if remote. */
+  envFilesTarget: DBConnectTarget | undefined;
   firstSetup: boolean;
   tunnelEnabled: boolean;
   tunnelHost: string;
@@ -1004,31 +1099,24 @@ function AddFields({
         <p className="text-[11px] text-muted-foreground">
           Use <code className="font-mono">{"${DATABASE_URL}"}</code> to read the URL from the
           project&apos;s <code className="font-mono">.env</code> /{" "}
-          <code className="font-mono">.env.local</code>. A value exported in the server environment
-          wins unless an env file is selected. No password is needed for that, and the password must
+          <code className="font-mono">.env.local</code>. Connections saved to the project read only the
+          project&apos;s env files, never the server environment. Global connections read the server
+          environment first unless an env file is selected. No password is needed for that, and the password must
           itself be a{" "}
           <code className="font-mono">{"${VAR}"}</code> reference — a literal password is refused
           because a template is stored unencrypted.
         </p>
       </div>
       {template && (
-        <label className="block space-y-1 text-xs font-medium text-muted-foreground">
-          Env file (optional)
-          <Input
-            value={envFile}
-            onChange={(e) => onEnvFile(e.target.value)}
-            placeholder=".staging or .env.production"
-            className="h-8 font-mono text-xs"
-          />
-        </label>
+        <EnvFileSelect value={envFile} onChange={onEnvFile} target={envFilesTarget} />
       )}
       {template && tunnelNeedsEnvFile && (
         <p className="text-[11px] text-destructive">{TUNNEL_ENV_NEEDS_ENV_FILE_MESSAGE}</p>
       )}
       {template && (
         <p className="text-[11px] text-muted-foreground">
-          Select one file instead of the defaults, for example <code className="font-mono">.staging</code>{" "}
-          to read <code className="font-mono">.env.staging</code>. That file is authoritative: its values
+          Select one file instead of the defaults, for example <code className="font-mono">.env.staging</code>.
+          That file is authoritative: its values
           win over the server environment, and a missing key stays unset.
         </p>
       )}

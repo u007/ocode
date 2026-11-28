@@ -473,6 +473,31 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"connections": out})
 }
 
+// HandleDBConnectEnvFiles lists the dotenv files in a project root, so the
+// connection panel can offer them as an env file. Only file names are returned,
+// never their contents.
+//
+// not paginated: a project root holds a handful of env files
+func (h *Handler) HandleDBConnectEnvFiles(w http.ResponseWriter, r *http.Request) {
+	pp := r.URL.Query().Get("project_path")
+	if pp == "" {
+		writeError(w, http.StatusBadRequest, "project_path is required")
+		return
+	}
+	root, ok := h.dbProjectRootFor(pp)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "project_path is not an allowed project root")
+		return
+	}
+	files, err := envfile.List(root)
+	if err != nil {
+		log.Printf("dbconnect: list env files for project %s: %v", root, err)
+		writeError(w, http.StatusInternalServerError, "could not list the project's env files")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+}
+
 // HandleDBConnectAdd saves a connection. A literal URL is sealed under the
 // master password; the URL and password are never logged or echoed back.
 //
@@ -816,9 +841,17 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Merge per-project connections (.ocode/db.json) when a project is given.
+	// projectNames records which names the repo defines. MergeDBConnections
+	// lets a project entry win by name, so a name here is a project connection
+	// whatever the global list also holds under it. Its ${VAR} references read
+	// the project's .env files only (see dbFileEnvLookup).
+	projectNames := map[string]bool{}
 	if req.ProjectPath != "" {
 		if root, ok := h.dbProjectRootFor(req.ProjectPath); ok {
 			if pc, err := config.LoadProjectDBConnections(root); err == nil {
+				for _, c := range pc {
+					projectNames[c.Name] = true
+				}
 				cfg.DB.Connections = config.MergeDBConnections(cfg.DB.Connections, pc)
 			}
 		}
@@ -887,9 +920,20 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		// password, so a wrong master password still aborts the whole unlock.
 		var connURL string
 		// The URL keeps the env lookup (process env first unless a file is
-		// selected). The tunnel gets its own lookup built from the named file
-		// only, so a tunnel reference can never read the process environment.
-		lookup, envErr := dbEnvLookup(projectRoot, c.EnvFile)
+		// selected). A repo-defined connection gets the file-only lookup
+		// instead: the repo chooses its template, so it must never resolve a
+		// server secret. The tunnel gets its own lookup built from the named
+		// file only, so a tunnel reference can never read the process
+		// environment.
+		var (
+			lookup func(string) (string, bool)
+			envErr func() error
+		)
+		if projectNames[c.Name] {
+			lookup, envErr = dbFileEnvLookup(projectRoot, c.EnvFile)
+		} else {
+			lookup, envErr = dbEnvLookup(projectRoot, c.EnvFile)
+		}
 		if c.EnvFile != "" {
 			// A selected file that vanished must fail this connection even
 			// when its URL is sealed and needs no template expansion.

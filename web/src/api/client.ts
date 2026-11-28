@@ -5040,6 +5040,18 @@ export const api = {
    *  the project's .ocode/db.json and refuses a literal URL there. A literal URL on
    *  a remote project still routes to that host (fetchJSON below) and is saved to
    *  the host's global config. */
+  /** Env files in the project that a `${VAR}` connection can read, sorted (for
+   *  example [".env", ".env.local", ".env.production"]). The server needs a project
+   *  path and refuses the call without one, so callers skip it when there is none. */
+  dbConnectEnvFiles: (target?: DBConnectTarget) =>
+    fetchJSON<{ files: string[] | null }>(
+      `/api/dbconnect/env-files${
+        target?.projectPath ? `?project_path=${encodeURIComponent(target.projectPath)}` : ""
+      }`,
+      undefined,
+      target?.host,
+      target?.projectPath,
+    ).then((r) => r.files ?? []),
   dbConnectAdd: (name: string, url: string, password: string, target?: DBConnectTarget, tunnel?: DBConnectTunnel, envFile?: string) =>
     fetchJSON<{ name: string }>(
       "/api/dbconnect/connections",

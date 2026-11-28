@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -239,6 +240,35 @@ func LoadNamed(dir, name string) (map[string]string, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return values, nil
+}
+
+// List returns the sorted basenames of the dotenv files in dir: the
+// non-directory entries whose name is exactly what NormalizeName accepts, so
+// ".env" and ".env.<suffix>" with a valid suffix. Anything else in dir (".envrc",
+// "env", a directory named ".env.d", ".env.", or a suffix with a dot or a space) is not an env file and
+// is left out.
+//
+// Only names are returned, never contents. A missing or unreadable dir is an
+// error.
+func List(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list env files in %s: %w", dir, err)
+	}
+	out := []string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		normalized, err := NormalizeName(name)
+		if err != nil || normalized != name {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Load reads .env and .env.local from dir and returns their combined values.
